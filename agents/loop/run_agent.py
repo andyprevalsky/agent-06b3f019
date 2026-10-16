@@ -227,6 +227,7 @@ async def run_agent(
     response_schema: Optional[Dict[str, Any]] = None,
     # Dynamic schema getter - called at verification time (handles race condition with async schema generation)
     get_response_schema: Optional[Callable[[], Awaitable[Optional[Dict[str, Any]]]]] = None,
+    get_requirement_revision: Optional[Callable[[], int]] = None,
     # Claude OAuth token for direct Anthropic calls via Rose endpoint
     claude_token: Optional[str] = None,
     # Dynamic token getter - called before each LLM call to get latest token
@@ -792,40 +793,6 @@ async def run_agent(
         if poll_messages:
             last_checked = await poll_and_update_context(poll_messages, context, last_checked)
 
-        # A browser/code child has already run its own verifier before emitting
-        # a terminal structured_response. When that response covers every
-        # parent output field, the parent verifier has a deterministic fast
-        # path for accepting it. Synthesize attempt_completion below so the
-        # normal verifier and completion persistence still run without paying
-        # for (or depending on) an LLM to repeat an action we already know.
-        completed_child_output = None
-        completed_child_tool_call_id = ""
-        if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
-            completed_child_handoff = _completed_child_task_structured_handoff(context, response_schema)
-            if completed_child_handoff:
-                completed_child_output, completed_child_tool_call_id = completed_child_handoff
-        completion_instruction = None
-        # Keep the provider-visible tool schema stable across turns. The
-        # completion instruction tells the model what to do and required_tool
-        # enforces it at the activity boundary; narrowing this list would move
-        # the native tool/schema block at the front of the provider prompt and
-        # invalidate the growing-conversation cache prefix.
-        turn_tools = tools
-        required_turn_tool = None
-        if completed_child_output is not None:
-            required_turn_tool = "attempt_completion"
-            completion_instruction = (
-                "A previously delegated browser or code task already completed and returned verified structured "
-                "output covering every required parent response field. Do not repeat that work or spawn another "
-                "agent. Call attempt_completion now so the parent verifier can accept the completed child result."
-            )
-            logger.info(
-                "run_agent.completed_child_forces_completion",
-                agent_id=agent_id,
-                iteration=iteration,
-                output_fields=sorted(completed_child_output),
-            )
-
         # 3. Query blueprints after first iteration (only in PLAN phase, not EXECUTE)
         if False:
             # Check if we have any user messages
@@ -1027,103 +994,142 @@ async def run_agent(
                     limit=MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
                 )
 
-        # 6. Build system prompt (calls API for fresh shared memory each iteration)
-        async with span(
-            "run_loop.system_prompt",
-            agent_id=agent_id,
-            iteration=iteration,
-            agent_type="explore" if cache_call_site == "explore_agent" else None,
-        ):
-            current_system_prompt = await system_prompt()
-
-        # 7. Build messages for LLM
-        # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
-        async with span(
-            "run_loop.prepare_llm_context",
-            agent_id=agent_id,
-            iteration=iteration,
-            context_messages=len(context),
-            agent_type="explore" if cache_call_site == "explore_agent" else None,
-        ):
-            llm_context = _context_with_plan_fsm_labels(context)
-
-        # A slot left on another worker by an earlier turn (this workflow migrated
-        # away mid-run) never carries this token, so call_llm_activity cannot build
-        # this turn's prompt from that stale conversation.
-        pending_context_seq += 1
-        pending_context_token = f"{stream_id}:{pending_context_seq}"
-
-        if build_messages:
-            async with span(
-                "run_loop.build_messages_custom",
-                agent_id=agent_id,
-                iteration=iteration,
-                context_messages=len(llm_context),
-                agent_type="explore" if cache_call_site == "explore_agent" else None,
-            ):
-                messages = build_messages(llm_context, current_system_prompt)
-        elif not is_inside_temporal_activity:
-            # Workflow context: pre-download files, then defer message building to call_llm_activity
-            # so that base64 content never crosses Temporal's 2MB payload boundary.
-            # The resolve activity populates _file_cache (shared in-process memory).
-            # call_llm_activity reads from _pending_llm_context + _file_cache.
-            pre_resolved_ids = None
-            file_pointer_dicts = extract_file_pointer_dicts(llm_context)
-            if file_pointer_dicts:
-                try:
-                    resolved_list = await execute_activity(
-                        resolve_attachments_activity,
-                        args=[file_pointer_dicts],
-                        start_to_close_timeout=timedelta(seconds=60),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                    pre_resolved_ids = set(resolved_list) if resolved_list else None
-                except Exception as e:
-                    logger.warning(f"File resolution failed (continuing without pre-resolved files): {e}")
-            # Store context in shared memory — call_llm_activity will build messages inside
-            _pending_llm_context[agent_id] = (
-                llm_context,
-                current_system_prompt,
-                pre_resolved_ids,
-                user_id,
-                pending_context_token,
-            )
-            messages = None  # Signals to use shared state path below
-        else:
-            async with span(
-                "run_loop.build_llm_messages",
-                agent_id=agent_id,
-                iteration=iteration,
-                context_messages=len(llm_context),
-                agent_type="explore" if cache_call_site == "explore_agent" else None,
-            ):
-                messages = await build_llm_messages(
-                    llm_context,
-                    current_system_prompt,
-                    user_id=user_id,
-                )
-        if is_inside_temporal_activity and completion_instruction and messages is not None:
-            messages.append({"role": "user", "content": completion_instruction})
-
-        # Resolve direct compute tokens dynamically when the workflow provides
-        # getters; otherwise use this loop's remembered successful token state.
-        (
-            current_claude_token,
-            current_claude_token_source,
-            current_claude_token_pool_id,
-            current_gpt_token,
-            current_gpt_account_id,
-            current_gpt_token_source,
-            current_gpt_token_pool_id,
-        ) = _resolve_current_compute_credentials()
-
-        # 7. Call LLM with structured streaming
-        # Only a failure BEFORE a usable response is a retry of this iteration.
-        # Once the provider returns and we accept the response, the turn has
-        # really been spent (tokens are charged in _account_llm_usage below), so
-        # a later failure in accounting/broadcast must NOT refund the iteration.
+        # Schema and message preparation share the existing pre-acceptance
+        # retry owner; no provider response or productive turn exists yet.
         llm_response_accepted = False
         try:
+            if get_response_schema:
+                response_schema = await get_response_schema()
+
+            # A browser/code child has already run its own verifier before emitting
+            # a terminal structured_response. When that response covers every
+            # parent output field, the parent verifier has a deterministic fast
+            # path for accepting it. Synthesize attempt_completion below so the
+            # normal verifier and completion persistence still run without paying
+            # for (or depending on) an LLM to repeat an action we already know.
+            completed_child_output = None
+            completed_child_tool_call_id = ""
+            if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
+                completed_child_handoff = _completed_child_task_structured_handoff(context, response_schema)
+                if completed_child_handoff:
+                    completed_child_output, completed_child_tool_call_id = completed_child_handoff
+            completion_instruction = None
+            # Keep the provider-visible tool schema stable across turns. The
+            # completion instruction tells the model what to do and required_tool
+            # enforces it at the activity boundary; narrowing this list would move
+            # the native tool/schema block at the front of the provider prompt and
+            # invalidate the growing-conversation cache prefix.
+            turn_tools = tools
+            required_turn_tool = None
+            if completed_child_output is not None:
+                required_turn_tool = "attempt_completion"
+                completion_instruction = (
+                    "A previously delegated browser or code task already completed and returned verified structured "
+                    "output covering every required parent response field. Do not repeat that work or spawn another "
+                    "agent. Call attempt_completion now so the parent verifier can accept the completed child result."
+                )
+                logger.info(
+                    "run_agent.completed_child_forces_completion",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    output_fields=sorted(completed_child_output),
+                )
+
+            # 6. Build system prompt (calls API for fresh shared memory each iteration)
+            async with span(
+                "run_loop.system_prompt",
+                agent_id=agent_id,
+                iteration=iteration,
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                current_system_prompt = await system_prompt()
+
+            # 7. Build messages for LLM
+            # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
+            async with span(
+                "run_loop.prepare_llm_context",
+                agent_id=agent_id,
+                iteration=iteration,
+                context_messages=len(context),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                llm_context = _context_with_plan_fsm_labels(context)
+
+            # A slot left on another worker by an earlier turn (this workflow migrated
+            # away mid-run) never carries this token, so call_llm_activity cannot build
+            # this turn's prompt from that stale conversation.
+            pending_context_seq += 1
+            pending_context_token = f"{stream_id}:{pending_context_seq}"
+
+            if build_messages:
+                async with span(
+                    "run_loop.build_messages_custom",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    context_messages=len(llm_context),
+                    agent_type="explore" if cache_call_site == "explore_agent" else None,
+                ):
+                    messages = build_messages(llm_context, current_system_prompt)
+            elif not is_inside_temporal_activity:
+                # Workflow context: pre-download files, then defer message building to call_llm_activity
+                # so that base64 content never crosses Temporal's 2MB payload boundary.
+                # The resolve activity populates _file_cache (shared in-process memory).
+                # call_llm_activity reads from _pending_llm_context + _file_cache.
+                pre_resolved_ids = None
+                file_pointer_dicts = extract_file_pointer_dicts(llm_context)
+                if file_pointer_dicts:
+                    try:
+                        resolved_list = await execute_activity(
+                            resolve_attachments_activity,
+                            args=[file_pointer_dicts],
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=RetryPolicy(maximum_attempts=2),
+                        )
+                        pre_resolved_ids = set(resolved_list) if resolved_list else None
+                    except Exception as e:
+                        logger.warning(f"File resolution failed (continuing without pre-resolved files): {e}")
+                # Store context in shared memory — call_llm_activity will build messages inside
+                _pending_llm_context[agent_id] = (
+                    llm_context,
+                    current_system_prompt,
+                    pre_resolved_ids,
+                    user_id,
+                    pending_context_token,
+                )
+                messages = None  # Signals to use shared state path below
+            else:
+                async with span(
+                    "run_loop.build_llm_messages",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    context_messages=len(llm_context),
+                    agent_type="explore" if cache_call_site == "explore_agent" else None,
+                ):
+                    messages = await build_llm_messages(
+                        llm_context,
+                        current_system_prompt,
+                        user_id=user_id,
+                    )
+            if is_inside_temporal_activity and completion_instruction and messages is not None:
+                messages.append({"role": "user", "content": completion_instruction})
+
+            # Resolve direct compute tokens dynamically when the workflow provides
+            # getters; otherwise use this loop's remembered successful token state.
+            (
+                current_claude_token,
+                current_claude_token_source,
+                current_claude_token_pool_id,
+                current_gpt_token,
+                current_gpt_account_id,
+                current_gpt_token_source,
+                current_gpt_token_pool_id,
+            ) = _resolve_current_compute_credentials()
+
+            # 7. Call LLM with structured streaming
+            # Only a failure BEFORE a usable response is a retry of this iteration.
+            # Once the provider returns and we accept the response, the turn has
+            # really been spent (tokens are charged in _account_llm_usage below), so
+            # a later failure in accounting/broadcast must NOT refund the iteration.
             if completed_child_output is not None:
                 child_identity = _completed_child_handoff_identity(completed_child_tool_call_id)
                 identity_segment = f"{child_identity}-" if child_identity else ""
@@ -1592,6 +1598,11 @@ async def run_agent(
                 "cache_creation_input_tokens": cache_write_total,
             }
         except Exception as e:
+            if any(error_chain_has_type(e, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                _pending_llm_context.pop(agent_id, None)
+                raise
             consecutive_llm_failures += 1
             error_message = extract_error_message(e)
             logger.error(f"LLM call failed (consecutive={consecutive_llm_failures}): {error_message}")
@@ -2194,76 +2205,87 @@ async def run_agent(
                 verifier_gpt_token_source = get_gpt_token_source() if get_gpt_token_source else None
                 verifier_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
 
-                verifier_result = await _run_verifier(
-                    execute_activity=execute_activity,
-                    context=context,
-                    verifier_prompt_generator=verifier_prompt_generator,
-                    model=model,
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    post_message=post_message,
-                    response_schema=response_schema,
-                    get_response_schema=get_response_schema,
-                    claude_token=verifier_claude_token,
-                    claude_token_source=verifier_claude_token_source,
-                    claude_token_pool_id=verifier_claude_token_pool_id,
-                    claude_token_user_id=user_id,
-                    gpt_token=verifier_gpt_token,
-                    gpt_account_id=verifier_gpt_account_id,
-                    gpt_token_source=verifier_gpt_token_source,
-                    gpt_token_pool_id=verifier_gpt_token_pool_id,
-                    gpt_token_user_id=user_id,
-                    compute_token_lineage_key=compute_token_lineage_key,
-                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
-                    is_plan_loop=is_plan_loop,
-                    tool_call_id=tool_call_id,
-                    fast_mode_cache_enabled=fast_mode_cache_enabled,
-                    fast_mode_goal=goal_text,
-                    fast_mode_step=fast_cache_step,
-                )
+                verifier_error = None
+                try:
+                    verifier_result = await _run_verifier(
+                        execute_activity=execute_activity,
+                        context=context,
+                        verifier_prompt_generator=verifier_prompt_generator,
+                        model=model,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        post_message=post_message,
+                        response_schema=response_schema,
+                        get_response_schema=get_response_schema,
+                        poll_messages=poll_messages,
+                        get_requirement_revision=get_requirement_revision,
+                        claude_token=verifier_claude_token,
+                        claude_token_source=verifier_claude_token_source,
+                        claude_token_pool_id=verifier_claude_token_pool_id,
+                        claude_token_user_id=user_id,
+                        gpt_token=verifier_gpt_token,
+                        gpt_account_id=verifier_gpt_account_id,
+                        gpt_token_source=verifier_gpt_token_source,
+                        gpt_token_pool_id=verifier_gpt_token_pool_id,
+                        gpt_token_user_id=user_id,
+                        compute_token_lineage_key=compute_token_lineage_key,
+                        compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                        is_plan_loop=is_plan_loop,
+                        tool_call_id=tool_call_id,
+                        fast_mode_cache_enabled=fast_mode_cache_enabled,
+                        fast_mode_goal=goal_text,
+                        fast_mode_step=fast_cache_step,
+                    )
+                except Exception as error:
+                    if any(error_chain_has_type(error, kind) for kind in (
+                        "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                    )):
+                        raise
+                    verifier_error = error
+                else:
+                    # Track verifier tokens
+                    v_usage = verifier_result.get("usage", {})
+                    v_tokens_in = v_usage.get("prompt_tokens", 0)
+                    v_tokens_out = v_usage.get("completion_tokens", 0)
+                    tokens_in += v_tokens_in
+                    tokens_out += v_tokens_out
+                    token_count += v_usage.get("total_tokens", 0)
 
-                # Track verifier tokens
-                v_usage = verifier_result.get("usage", {})
-                v_tokens_in = v_usage.get("prompt_tokens", 0)
-                v_tokens_out = v_usage.get("completion_tokens", 0)
-                tokens_in += v_tokens_in
-                tokens_out += v_tokens_out
-                token_count += v_usage.get("total_tokens", 0)
+                    # Route verifier cost through on_tokens for proper cost tracking
+                    if on_tokens and (v_tokens_in > 0 or v_tokens_out > 0):
+                        try:
+                            await on_tokens(
+                                v_tokens_in,
+                                v_tokens_out,
+                                v_usage.get("actual_model"),
+                                cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
+                                cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
+                                call_site="verifier_plan" if is_plan_loop else "verifier_execute",
+                                claude_token_error=v_usage.get("claude_token_error"),
+                                gpt_token_error=v_usage.get("gpt_token_error"),
+                                claude_token_rotated=v_usage.get("claude_token_rotated", False),
+                                gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
+                                compute_token_used=v_usage.get("compute_token_used"),
+                                from_fast_cache=v_usage.get("from_fast_cache", False),
+                                # Do not label a one-shot verifier as the execute
+                                # conversation unless that exact namespace reached
+                                # the provider. The benchmark repeatability metric
+                                # groups by this identity.
+                                cache_sequence_id=v_usage.get("cache_sequence_id"),
+                            )
+                        except Exception as e:
+                            logger.warning(f"on_tokens callback failed for verifier: {e}")
 
-                # Route verifier cost through on_tokens for proper cost tracking
-                if on_tokens and (v_tokens_in > 0 or v_tokens_out > 0):
-                    try:
-                        await on_tokens(
-                            v_tokens_in,
-                            v_tokens_out,
-                            v_usage.get("actual_model"),
-                            cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
-                            cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
-                            call_site="verifier_plan" if is_plan_loop else "verifier_execute",
-                            claude_token_error=v_usage.get("claude_token_error"),
-                            gpt_token_error=v_usage.get("gpt_token_error"),
-                            claude_token_rotated=v_usage.get("claude_token_rotated", False),
-                            gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
-                            compute_token_used=v_usage.get("compute_token_used"),
-                            from_fast_cache=v_usage.get("from_fast_cache", False),
-                            # Do not label a one-shot verifier as the execute
-                            # conversation unless that exact namespace reached
-                            # the provider. The benchmark repeatability metric
-                            # groups by this identity.
-                            cache_sequence_id=v_usage.get("cache_sequence_id"),
-                        )
-                    except Exception as e:
-                        logger.warning(f"on_tokens callback failed for verifier: {e}")
+                    score = verifier_result.get("score", 0.0)
+                    v_reasoning = verifier_result.get("reasoning", "")
+                    structured_response = verifier_result.get("structured_response")
 
-                score = verifier_result.get("score", 0.0)
-                v_reasoning = verifier_result.get("reasoning", "")
-                structured_response = verifier_result.get("structured_response")
-
-                # Track consecutive verifier errors (score=0.5 with "Progress check failed" reasoning)
-                if v_reasoning.startswith("Progress check failed"):
+                # Track raised verifier errors and existing "Progress check failed" results.
+                if verifier_error is not None or v_reasoning.startswith("Progress check failed"):
+                    verifier_failure_reason = extract_error_message(verifier_error) if verifier_error is not None else v_reasoning
                     consecutive_verifier_errors += 1
                     logger.warning(
-                        f"[run_agent] Verifier failed (consecutive={consecutive_verifier_errors}): {v_reasoning[:100]}"
+                        f"[run_agent] Verifier failed (consecutive={consecutive_verifier_errors}): {verifier_failure_reason[:100]}"
                     )
                     if consecutive_verifier_errors >= 3:
                         return {
@@ -2275,10 +2297,14 @@ async def run_agent(
                             "context_size": context_size,
                             "cache_read_input_tokens": cache_read_total,
                             "cache_creation_input_tokens": cache_write_total,
-                            "message": f"Verifier unavailable after {consecutive_verifier_errors} consecutive failures: {v_reasoning}",
+                            "message": f"Verifier unavailable after {consecutive_verifier_errors} consecutive failures: {verifier_failure_reason}",
                         }
                 else:
                     consecutive_verifier_errors = 0
+
+                if verifier_error is not None:
+                    no_tool_count = 0
+                    continue
 
                 # Track score history for trend feedback (keep last 5)
                 recent_verifier_scores.append(score)
@@ -2317,6 +2343,12 @@ async def run_agent(
                         }
                     )
 
+                if _verifier_superseded_by_user_feedback(
+                    verifier_result, context, get_requirement_revision() if get_requirement_revision else None,
+                ):
+                    recent_verifier_scores.pop()
+                    continue
+
                 # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:
                     _log_cache_summary("completed-verified")
@@ -2332,6 +2364,8 @@ async def run_agent(
                         "message": v_reasoning,
                         "score": score,
                         "structured_response": structured_response,
+                        "_verified_user_requirement_keys": verifier_result.get("_verified_user_requirement_keys"),
+                        "_verified_requirement_revision": verifier_result.get("_verified_requirement_revision"),
                     }
 
                 # Not complete - add feedback to context, including score trend
@@ -2432,6 +2466,9 @@ async def run_agent(
     final_verifier_progress = 0.0
     final_verifier_reasoning = ""
     final_partial_structured_response = None
+    final_verifier_superseded = False
+    final_verifier_requirement_keys = None
+    final_verifier_requirement_revision = None
 
     if verifier_prompt_generator and not skip_verification:
         try:
@@ -2456,6 +2493,8 @@ async def run_agent(
                 post_message=post_message,
                 response_schema=response_schema,
                 get_response_schema=get_response_schema,
+                poll_messages=poll_messages,
+                get_requirement_revision=get_requirement_revision,
                 claude_token=final_verifier_claude_token,
                 claude_token_source=final_verifier_claude_token_source,
                 claude_token_pool_id=final_verifier_claude_token_pool_id,
@@ -2504,12 +2543,25 @@ async def run_agent(
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")
 
-            final_verifier_progress = final_verifier_result.get("score", 0.0)
-            final_verifier_reasoning = final_verifier_result.get("reasoning", "")
-            final_partial_structured_response = final_verifier_result.get("structured_response")
-
-            logger.info(f"Final verifier: {final_verifier_progress * 100:.0f}% - {final_verifier_reasoning[:100]}...")
+            if poll_messages:
+                last_checked = await poll_and_update_context(poll_messages, context, last_checked)
+            final_verifier_superseded = _verifier_superseded_by_user_feedback(
+                final_verifier_result, context, get_requirement_revision() if get_requirement_revision else None,
+            )
+            final_verifier_requirement_keys = final_verifier_result.get("_verified_user_requirement_keys")
+            final_verifier_requirement_revision = final_verifier_result.get("_verified_requirement_revision")
+            if final_verifier_superseded:
+                final_verifier_progress = None
+            else:
+                final_verifier_progress = final_verifier_result.get("score", 0.0)
+                final_verifier_reasoning = final_verifier_result.get("reasoning", "")
+                final_partial_structured_response = final_verifier_result.get("structured_response")
+                logger.info(f"Final verifier: {final_verifier_progress * 100:.0f}% - {final_verifier_reasoning[:100]}...")
         except Exception as e:
+            if any(error_chain_has_type(e, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
             logger.error(f"Final verifier call failed: {e}")
 
     # Best-effort answer: the model's last synthesized assistant text, so a runaway
@@ -2539,6 +2591,9 @@ async def run_agent(
         "verifier_progress": final_verifier_progress,
         "verifier_reasoning": final_verifier_reasoning,
         "partial_structured_response": final_partial_structured_response,
+        "_verified_user_requirement_keys": final_verifier_requirement_keys,
+        "_verified_requirement_revision": final_verifier_requirement_revision,
+        **({"verifier_superseded_by_user_feedback": True} if final_verifier_superseded else {}),
     }
 
 
@@ -2668,6 +2723,33 @@ async def _compress_context(
     return new_context, True
 
 
+def _real_user_requirement_keys(context: List[Dict]) -> set:
+    keys = set()
+    for message in context:
+        if (message.get("role") or "").upper() != "USER" or (message.get("metadata") or {}).get("hidden"):
+            continue
+        metadata = message.get("metadata") or {}
+        request_id = metadata.get("attentionRequestId")
+        if metadata.get("source") == "attention_response" and isinstance(request_id, str) and request_id:
+            keys.add(("attention_response", request_id))
+            continue
+        message_id = message.get("message_id") or message.get("id")
+        keys.add(("id", str(message_id)) if message_id else
+                 ("legacy", str(message.get("timestamp") or ""), str(message.get("text") or "")))
+    return keys
+
+
+def _verifier_superseded_by_user_feedback(result: Dict, context: List[Dict], requirement_revision: Optional[int] = None) -> bool:
+    """Version the verdict without rewriting the provider's judgment or usage."""
+    judged_keys = result.get("_verified_user_requirement_keys")
+    if judged_keys is not None and (_real_user_requirement_keys(context) - set(map(tuple, judged_keys))):
+        result["superseded_by_user_feedback"] = True
+    judged_revision = result.get("_verified_requirement_revision")
+    if judged_revision is not None and requirement_revision is not None and judged_revision != requirement_revision:
+        result["superseded_by_user_feedback"] = True
+    return result.get("superseded_by_user_feedback") is True
+
+
 async def _run_verifier(
     execute_activity,
     context: List[Dict],
@@ -2694,6 +2776,8 @@ async def _run_verifier(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: int = 0,
+    poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,
+    get_requirement_revision: Optional[Callable[[], int]] = None,
 ) -> Dict:
     """Run verifier to check completion."""
     verifier_call_id = tool_call_id or str(_safe_uuid4())
@@ -2715,13 +2799,57 @@ async def _run_verifier(
             },
         )
 
-    # Generate verifier prompt at verification time (allows schema polling)
-    verifier_prompt = await verifier_prompt_generator()
-
-    # Get response schema dynamically if getter provided (handles race condition with async schema generation)
-    current_response_schema = response_schema
-    if get_response_schema:
-        current_response_schema = await get_response_schema()
+    try:
+        # Resolve the prompt and schema under the same accepted requirement revision.
+        while True:
+            judged_revision = get_requirement_revision() if get_requirement_revision else None
+            verifier_prompt = await verifier_prompt_generator()
+            current_response_schema = await get_response_schema() if get_response_schema else response_schema
+            if not get_requirement_revision or judged_revision == get_requirement_revision():
+                break
+    except Exception as error:
+        if any(error_chain_has_type(error, kind) for kind in (
+            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+        )):
+            raise
+        if post_message:
+            try:
+                await post_message(
+                    str(error),
+                    "TOOL",
+                    {
+                        "toolCallId": verifier_call_id,
+                        "toolName": "attempt_completion",
+                        "toolStatus": "ERROR",
+                        "title": "⚖️ Verification error",
+                        "subAgentId": task_id,
+                        "error": True,
+                        "excludeFromModel": True,
+                    },
+                )
+            except Exception as post_error:
+                if any(error_chain_has_type(post_error, kind) for kind in (
+                    "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                )):
+                    raise
+                logger.warning(
+                    "Failed to close verifier attempt after prerequisite error",
+                    agent_id=agent_id,
+                    tool_call_id=verifier_call_id,
+                    error=extract_error_message(post_error),
+                )
+        raise
+    judged_user_keys = _real_user_requirement_keys(context)
+    verification_cursor = datetime.fromtimestamp(0, tz=timezone.utc)
+    for message in context:
+        try:
+            timestamp = datetime.fromisoformat(str(message.get("timestamp") or "").replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            verification_cursor = max(verification_cursor, timestamp)
+        except ValueError:
+            continue
+    verification_cursor = max(datetime.fromtimestamp(0, tz=timezone.utc), verification_cursor - timedelta(milliseconds=1))
 
     # C7: dead `phase` positional arg has been removed from check_progress;
     # callers no longer pass it. `model` is kept as a positional but ignored
@@ -2760,6 +2888,11 @@ async def _run_verifier(
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
 
+    result["_verified_user_requirement_keys"] = sorted(judged_user_keys)
+    result["_verified_requirement_revision"] = judged_revision
+    if poll_messages:
+        await poll_and_update_context(poll_messages, context, verification_cursor)
+    _verifier_superseded_by_user_feedback(result, context, get_requirement_revision() if get_requirement_revision else None)
     score = result.get("score", 0.0)
     reasoning = result.get("reasoning", "")
     structured_response = result.get("structured_response")
@@ -2827,10 +2960,14 @@ async def _run_verifier(
                 ),
                 "subAgentId": task_id,
                 "verifierMessage": True,
+                **({"supersededByUserFeedback": True} if result.get("superseded_by_user_feedback") else {}),
             },
         )
 
     logger.info(f"Verifier score: {score * 100:.1f}%")
+    if poll_messages:
+        await poll_and_update_context(poll_messages, context, verification_cursor)
+    _verifier_superseded_by_user_feedback(result, context, get_requirement_revision() if get_requirement_revision else None)
     # Surface the schema the verifier actually judged against so soft-accept
     # does not re-validate against a stale static response_schema when
     # get_response_schema resolved a different field set (CodeRabbit #1260).

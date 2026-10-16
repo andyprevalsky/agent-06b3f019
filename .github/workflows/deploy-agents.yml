@@ -1,6 +1,12 @@
 name: Deploy Agents to Fly.io
 
 on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact main commit to deploy
+        required: true
+        type: string
   push:
     branches: [main]
     paths:
@@ -29,6 +35,14 @@ jobs:
     name: Deploy to Fly.io
     runs-on: ubuntu-latest
     steps:
+      - name: Verify manual deployment source
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2

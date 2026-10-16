@@ -55,6 +55,7 @@ export type CreateAttentionRequestInput = z.infer<typeof createAttentionRequestS
 
 export const respondSchema = z.object({
   response: z.string().min(1),
+  user_message: z.string().optional(),
   tools: z.array(z.string()).optional(),
   model: z.string().optional(),
 });

@@ -261,11 +261,11 @@ function buildMergedMessages(
     };
     const idsKey = group.ids.join(',');
 
-    const merged: Message & { content?: string } = {
+    const merged: Message = {
       ...msg,
       metadata: { ...msg.metadata, subAgentIds: group.ids },
     };
-    const cached: (Message & { content?: string }) | undefined = prevCache.get(key);
+    const cached = prevCache.get(key);
     const cacheMatchesCurrentMessage =
       cached &&
       cached.text === merged.text &&

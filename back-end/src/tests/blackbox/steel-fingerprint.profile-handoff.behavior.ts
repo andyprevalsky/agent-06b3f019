@@ -80,6 +80,7 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
       return { count: 1 };
     }) as typeof updateMany;
     const dependencies = {
+      retrieveProfile: async () => ({ status: 'READY' }),
       releaseSession: async (sessionId: string) => {
         if (sessionId !== sourceId) {
           assert(sessionId.startsWith('steel-profile-handoff-new-'), 'released unrelated session');

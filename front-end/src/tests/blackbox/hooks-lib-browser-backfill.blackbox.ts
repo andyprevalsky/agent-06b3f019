@@ -179,7 +179,7 @@ describe('browser completion recovery ownership', () => {
             release = resolve;
           });
         }
-        const terminals = starts.map((message) => ({
+        const terminals = starts.map((message): Message => ({
           ...message,
           message_id: `${message.message_id}-terminal`,
           timestamp: '2026-10-13T00:00:03Z',

@@ -12,8 +12,16 @@
 
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
+import { execFile } from 'node:child_process';
+import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { appendGateWaiter, findPendingByGateKey } from '../../domains/attention-requests/repo';
+import { resolveAndSignal } from '../../providers/gateResolution';
+import { getTemporalClient } from '../../providers/temporal';
+import { blackboxTemporalSignals } from '../../providers/temporalBlackboxFake';
+import { AttentionWorkflowTargetOwnershipError } from '../../providers/attentionWorkflowTargets';
 
 config();
 
@@ -38,6 +46,7 @@ if (!Number.isInteger(CASE_CONCURRENCY) || CASE_CONCURRENCY <= 0) {
 const trackedRealAgentIds = new Set<string>();
 const trackedRequestAgentIds = new Set<string>();
 const trackedUserIds = new Set<string>();
+const execFileAsync = promisify(execFile);
 
 const ErrorResponse = z.object({
   error: z.string(),
@@ -185,7 +194,8 @@ function apiKeyHeaders(): Record<string, string> {
   return { 'X-API-Key': API_KEY };
 }
 
-function makeWorkflowId(label: string): string {
+function makeWorkflowId(label: string, agentId?: string): string {
+  if (agentId !== undefined) return `${agentId}:replacement:${randomUUID()}`;
   return `attention-${sanitizeLabel(label)}-${RUN_ID}-${randomUUID().slice(0, 8)}`;
 }
 
@@ -197,6 +207,13 @@ async function request(
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      // Creation fixtures represent internal worker calls; adversarial callers
+      // supply explicit headers so they never inherit this credential.
+      ...(url === `${BASE_URL}/api/attention-requests` &&
+      options.method === 'POST' &&
+      options.headers === undefined
+        ? { 'X-API-Key': API_KEY }
+        : {}),
       ...options.headers,
     },
   });
@@ -367,12 +384,42 @@ async function createAttentionRequest(
   fixture: Fixture,
   overrides: CreateRequestOverrides = {}
 ): Promise<CreateAttentionRequestBody> {
+  let agentId = overrides.agentId || fixture.realAgentId;
+  if (
+    overrides.userId !== undefined &&
+    overrides.userId !== fixture.ownerUserId &&
+    overrides.agentId === undefined
+  ) {
+    const otherAgent = await prisma.agent.create({
+      data: {
+        userId: overrides.userId,
+        goal: 'Attention owner isolation fixture',
+        status: 'ACTIVE',
+      },
+    });
+    trackedRealAgentIds.add(otherAgent.id);
+    agentId = otherAgent.id;
+  }
+  // Missing-agent cases exercise historical corrupt rows, which authenticated
+  // creation now rejects before they can enter the database.
+  if (overrides.agentId === fixture.missingAgentId) {
+    const row = await prisma.agentAttentionRequest.create({
+      data: {
+        userId: overrides.userId || fixture.ownerUserId,
+        agentId: fixture.missingAgentId,
+        workflowId: fixture.missingAgentId,
+        question: overrides.question || 'Legacy missing agent',
+        metadata: overrides.metadata,
+      },
+    });
+    return { id: row.id, created_at: row.createdAt, metadata: row.metadata };
+  }
   const res = await request(`${BASE_URL}/api/attention-requests`, {
     method: 'POST',
     body: JSON.stringify({
       userId: overrides.userId || fixture.ownerUserId,
-      agentId: overrides.agentId || fixture.realAgentId,
-      workflowId: overrides.workflowId || makeWorkflowId(`${fixture.label}-request`),
+      agentId,
+      workflowId: overrides.workflowId || agentId,
       question: overrides.question || `Question ${randomUUID().slice(0, 8)}`,
       imageUrl: overrides.imageUrl,
       metadata: overrides.metadata,
@@ -535,6 +582,307 @@ async function testCreate_happyRoundTrip() {
   );
 }
 
+async function testCreate_externalCallerCannotWriteAuthoredInputToForeignAgent() {
+  const fixture = await createFixture('foreign-attention-attack');
+  const created = await request(`${BASE_URL}/api/attention-requests`, {
+    method: 'POST',
+    headers: authHeaders(fixture.otherToken),
+    body: JSON.stringify({
+      userId: fixture.otherUserId,
+      agentId: fixture.realAgentId,
+      workflowId: makeWorkflowId('foreign-attack'),
+      question: 'Foreign authored reply attack',
+    }),
+  });
+  let responseStatus: number | undefined;
+  let foreignWrites = 0;
+  if (created.status === 200) {
+    const id = String((created.data as { id: string }).id);
+    const answered = await request(`${BASE_URL}/api/attention-requests/${id}/respond`, {
+      method: 'POST',
+      headers: authHeaders(fixture.otherToken),
+      body: JSON.stringify({ response: 'Approved', user_message: 'Unauthorized authored input' }),
+    });
+    responseStatus = answered.status;
+    foreignWrites = await prisma.message.count({
+      where: {
+        agentId: fixture.realAgentId,
+        role: 'USER',
+        metadata: { path: ['attentionRequestId'], equals: id },
+      },
+    });
+  }
+  assert(
+    created.status === 403 && foreignWrites === 0,
+    `Own-JWT foreign-agent attack must be denied: create=${created.status}, respond=${responseStatus}, foreign_USER_writes=${foreignWrites}`
+  );
+}
+
+async function testRespond_legacyForeignPrimaryAndWaiterCannotReceiveAuthoredInput(
+  foreignPrimary: boolean
+) {
+  const fixture = await createFixture('legacy-foreign-attention');
+  const ownAgent = await prisma.agent.create({
+    data: { userId: fixture.otherUserId, goal: 'Owned attention agent', status: 'ACTIVE' },
+  });
+  trackedRealAgentIds.add(ownAgent.id);
+  const row = await prisma.agentAttentionRequest.create({
+    data: {
+      userId: fixture.otherUserId,
+      agentId: foreignPrimary ? fixture.realAgentId : ownAgent.id,
+      workflowId: makeWorkflowId('legacy-foreign'),
+      question: 'Legacy crafted row',
+      metadata: foreignPrimary
+        ? {}
+        : {
+            gateWaiters: [
+              { agentId: fixture.realAgentId, workflowId: makeWorkflowId('foreign-waiter') },
+            ],
+          },
+    },
+  });
+  const answered = await request(`${BASE_URL}/api/attention-requests/${row.id}/respond`, {
+    method: 'POST',
+    headers: authHeaders(fixture.otherToken),
+    body: JSON.stringify({ response: 'Approved', user_message: 'Unauthorized legacy input' }),
+  });
+  const persisted = await prisma.agentAttentionRequest.findUniqueOrThrow({ where: { id: row.id } });
+  const writes = await prisma.message.count({
+    where: { role: 'USER', metadata: { path: ['attentionRequestId'], equals: row.id } },
+  });
+  assert(
+    answered.status === 403 && persisted.userResponse === null && writes === 0,
+    `Legacy foreign ${foreignPrimary ? 'primary' : 'waiter'} must fail atomically: status=${answered.status}, response=${persisted.userResponse}, USER_writes=${writes}`
+  );
+}
+
+async function testCreate_requiresAuthentication() {
+  const fixture = await createFixture('create-auth-required');
+  const result = await request(`${BASE_URL}/api/attention-requests`, {
+    method: 'POST',
+    headers: {},
+    body: JSON.stringify({
+      userId: fixture.ownerUserId,
+      agentId: fixture.realAgentId,
+      workflowId: makeWorkflowId('no-auth'),
+      question: 'Unauthenticated',
+    }),
+  });
+  assertStatus(result.status, 401, result.data);
+}
+
+async function testCreate_ownedAgentCannotTargetForeignWorkflow(asWaiter: boolean) {
+  const fixture = await createFixture('foreign-workflow-attack');
+  const foreign = await prisma.agent.create({
+    data: { userId: fixture.otherUserId, goal: 'Foreign workflow target', status: 'ACTIVE' },
+  });
+  trackedRealAgentIds.add(foreign.id);
+  await prisma.agent.update({
+    where: { id: foreign.id },
+    data: { temporalWorkflowId: foreign.id },
+  });
+  const temporal = await getTemporalClient();
+  await temporal.workflow.start('AgentWorkflow', {
+    workflowId: foreign.id,
+    taskQueue: 'blackbox',
+    args: [foreign.id, fixture.otherUserId],
+  });
+  await temporal.workflow.start('AgentWorkflow', {
+    workflowId: fixture.realAgentId,
+    taskQueue: 'blackbox',
+    args: [fixture.realAgentId, fixture.ownerUserId],
+  });
+  const created = await request(`${BASE_URL}/api/attention-requests`, {
+    method: 'POST',
+    headers: authHeaders(fixture.ownerToken),
+    body: JSON.stringify({
+      userId: fixture.ownerUserId,
+      agentId: fixture.realAgentId,
+      workflowId: asWaiter ? fixture.realAgentId : foreign.id,
+      question: 'Foreign workflow target',
+      metadata: asWaiter
+        ? { gateWaiters: [{ agentId: fixture.realAgentId, workflowId: foreign.id }] }
+        : {},
+    }),
+  });
+  let providerError: unknown;
+  if (created.status === 200) {
+    const id = String((created.data as { id: string }).id);
+    const row = await prisma.agentAttentionRequest.findUniqueOrThrow({ where: { id } });
+    try {
+      await resolveAndSignal(row, 'Approved', 'Unauthorized workflow instruction');
+    } catch (error) {
+      providerError = error;
+    }
+  }
+  const legacy = await prisma.agentAttentionRequest.create({
+    data: {
+      userId: fixture.ownerUserId,
+      agentId: fixture.realAgentId,
+      workflowId: asWaiter ? fixture.realAgentId : foreign.id,
+      question: 'Legacy foreign workflow',
+      metadata: asWaiter
+        ? { gateWaiters: [{ agentId: fixture.realAgentId, workflowId: foreign.id }] }
+        : {},
+    },
+  });
+  let legacyError: unknown;
+  try {
+    await resolveAndSignal(legacy, 'Approved', 'Unauthorized legacy workflow instruction');
+  } catch (error) {
+    legacyError = error;
+  }
+  const legacyAfter = await prisma.agentAttentionRequest.findUniqueOrThrow({
+    where: { id: legacy.id },
+  });
+  const legacyWrites = await prisma.message.count({
+    where: { metadata: { path: ['attentionRequestId'], equals: legacy.id } },
+  });
+  const foreignSignals = blackboxTemporalSignals(temporal, foreign.id).filter(
+    (signal) => signal.name === 'receive_user_response'
+  );
+  assert(
+    created.status === 403 && foreignSignals.length === 0,
+    `Own-agent foreign ${asWaiter ? 'waiter' : 'primary'} workflow must be denied: create=${created.status}, foreign_signals=${foreignSignals.length}, provider_error=${providerError instanceof Error ? providerError.message : 'none'}`
+  );
+  assert(
+    legacyError instanceof AttentionWorkflowTargetOwnershipError &&
+      legacyAfter.userResponse === null &&
+      legacyWrites === 0,
+    'Legacy foreign workflow must reject before any USER write, control commit, or signal'
+  );
+}
+
+async function testCreate_preservesLegitimateWorkerAndExternalWorkflowBindings() {
+  const fixture = await createFixture('owned-workflow-bindings');
+  const current = `legacy-current-${randomUUID()}`;
+  const stale = `legacy-stale-${randomUUID()}`;
+  const agent = await prisma.agent.create({
+    data: {
+      userId: fixture.ownerUserId,
+      goal: 'Owned workflow bindings',
+      temporalWorkflowId: current,
+      staleTemporalWorkflowId: stale,
+    },
+  });
+  trackedRealAgentIds.add(agent.id);
+  for (const headers of [authHeaders(fixture.ownerToken), apiKeyHeaders()]) {
+    for (const workflowId of [
+      agent.id,
+      current,
+      stale,
+      makeWorkflowId('native-replacement', agent.id),
+    ]) {
+      const result = await request(`${BASE_URL}/api/attention-requests`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: fixture.ownerUserId,
+          agentId: agent.id,
+          workflowId,
+          question: 'Legitimate bound workflow',
+        }),
+      });
+      assertStatus(result.status, 200, result.data);
+    }
+  }
+}
+
+async function testCreate_actualWorkerProducerAuthenticates(
+  producer: 'gate' | 'approval',
+  caller: 'owned' | 'foreign' | 'missing-key'
+) {
+  const fixture = await createFixture(`worker-${producer}-${caller}`);
+  const agentsDir = resolve(__dirname, '../../../../agents');
+  const userId = caller === 'foreign' ? fixture.otherUserId : fixture.ownerUserId;
+  const { stdout } = await execFileAsync(
+    resolve(agentsDir, 'venv/bin/python'),
+    [
+      resolve(agentsDir, 'tests/blackbox/attention_request_http_fixture.py'),
+      producer,
+      userId,
+      fixture.realAgentId,
+      fixture.realAgentId,
+    ],
+    {
+      cwd: agentsDir,
+      env: {
+        ...process.env,
+        PYTHONPATH: agentsDir,
+        BACKEND_API_URL: BASE_URL,
+        BACKEND_API_KEY: caller === 'missing-key' ? '' : API_KEY,
+      },
+    }
+  );
+  const result = JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as {
+    request_id?: string;
+    status: number;
+  };
+  assertStatus(result.status, caller === 'owned' ? 200 : caller === 'foreign' ? 403 : 401, result);
+  const rows = await prisma.agentAttentionRequest.findMany({
+    where: { agentId: fixture.realAgentId },
+  });
+  if (caller !== 'owned') {
+    assert(rows.length === 0, 'Rejected worker request must not create attention state');
+    return;
+  }
+  assert(
+    rows.length === 1 &&
+      rows[0]?.id === result.request_id &&
+      rows[0]?.userId === userId &&
+      rows[0]?.workflowId === fixture.realAgentId &&
+      rows[0]?.userResponse === null,
+    'Actual worker producer must preserve its owned pending request'
+  );
+  if (producer === 'gate') assert(rows[0]?.gateKey === 'subscription', 'Credit gate identity lost');
+}
+
+async function testAuthCompletion_legacyForeignAgentIsForbiddenAtomically(
+  mismatchedParentUser = false
+) {
+  const fixture = await createFixture('legacy-foreign-auth');
+  const attention = await prisma.agentAttentionRequest.create({
+    data: {
+      userId: mismatchedParentUser ? fixture.ownerUserId : fixture.otherUserId,
+      agentId: fixture.realAgentId,
+      workflowId: fixture.realAgentId,
+      question: 'Legacy foreign auth request',
+    },
+  });
+  await prisma.userAuthAssistanceRequest.create({
+    data: {
+      id: attention.id,
+      userId: fixture.otherUserId,
+      agentId: fixture.realAgentId,
+      authRealm: 'example.com',
+      mode: 'manual_step',
+      steelSessionId: '',
+    },
+  });
+  const completed = await request(`${BASE_URL}/api/auth-assistance/${attention.id}/complete`, {
+    method: 'POST',
+    headers: authHeaders(fixture.otherToken),
+  });
+  assertStatus(completed.status, 403, completed.data);
+  const row = await prisma.agentAttentionRequest.findUniqueOrThrow({ where: { id: attention.id } });
+  const auth = await prisma.userAuthAssistanceRequest.findUniqueOrThrow({
+    where: { id: attention.id },
+  });
+  assert(
+    row.userResponse === null && auth.completedAt === null,
+    'Foreign auth completion must roll back its protocol and completion claims'
+  );
+  assert(
+    (await prisma.message.count({
+      where: {
+        role: 'USER',
+        metadata: { path: ['attentionRequestId'], equals: attention.id },
+      },
+    })) === 0,
+    'Foreign auth completion must not create a USER message'
+  );
+}
+
 async function testCreate_missingQuestion() {
   const fixture = await createFixture('create-missing-question');
   const res = await request(`${BASE_URL}/api/attention-requests`, {
@@ -637,7 +985,7 @@ async function testCreate_gateDedupCollapsesToOnePendingRequest() {
       body: JSON.stringify({
         userId: fixture.ownerUserId,
         agentId: fixture.realAgentId,
-        workflowId: makeWorkflowId(`${fixture.label}-${workflowLabel}`),
+        workflowId: makeWorkflowId(`${fixture.label}-${workflowLabel}`, fixture.realAgentId),
         question: 'Subscribe to continue',
         gateKey: key,
         metadata: {
@@ -705,8 +1053,8 @@ async function testCreate_gateDedupCollapsesToOnePendingRequest() {
 async function testCreate_gateResolveSignalsAllWaiters() {
   const fixture = await createFixture('gate-waiters');
   const gateKey = `subscription:${RUN_ID}:${randomUUID().slice(0, 8)}`;
-  const wfA = makeWorkflowId(`${fixture.label}-wf-a`);
-  const wfB = makeWorkflowId(`${fixture.label}-wf-b`);
+  const wfA = makeWorkflowId(`${fixture.label}-wf-a`, fixture.realAgentId);
+  const wfB = makeWorkflowId(`${fixture.label}-wf-b`, fixture.realAgentId);
 
   async function postGate(workflowId: string): Promise<{ id: string; deduped?: boolean }> {
     const res = await request(`${BASE_URL}/api/attention-requests`, {
@@ -780,7 +1128,7 @@ async function testCreate_gateSmsRendersOneMinimalAction() {
       body: JSON.stringify({
         userId,
         agentId: agent.id,
-        workflowId: makeWorkflowId('gate-sms'),
+        workflowId: makeWorkflowId('gate-sms', agent.id),
         question: 'Subscribe to continue',
         gateKey: `subscription:${RUN_ID}:${randomUUID().slice(0, 8)}`,
         metadata: {
@@ -982,7 +1330,7 @@ async function testRespond_happyPersistsStateAndDecrementsCount() {
   const countBefore = await getCount(fixture.ownerToken);
   const created = await createAttentionRequest(fixture, {
     question: 'respond-happy',
-    workflowId: makeWorkflowId('respond-happy'),
+    workflowId: makeWorkflowId('respond-happy', fixture.realAgentId),
   });
   const approvalMessageId = await createPendingApprovalMessage(fixture.realAgentId, created.id);
 
@@ -1036,6 +1384,311 @@ async function testRespond_authLookingMetadataWithoutAuthRowIsGeneric() {
     requestAfter.userResponse === 'metadata is not the model',
     'Auth-looking metadata without a child row should be treated as a generic attention request'
   );
+}
+
+async function testRespond_authoredMessagePersistsExactlyOnceWithOriginalBytes() {
+  const fixture = await createFixture('respond-authored');
+  const created = await createAttentionRequest(fixture);
+  const beforeMessages = await prisma.message.findMany({
+    where: { agentId: fixture.realAgentId, role: 'USER' },
+    select: { id: true },
+  });
+  const text = '  Return only venue_prices\nKeep these exact bytes.  ';
+  const send = (userMessage: string) =>
+    request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+      method: 'POST',
+      headers: authHeaders(fixture.ownerToken),
+      body: JSON.stringify({ response: text, user_message: userMessage }),
+    });
+  const responses = await Promise.all([send(text), send(text)]);
+  for (const response of responses) assertStatus(response.status, 200, response.data);
+  const retried = await send(text);
+  assertStatus(retried.status, 200, retried.data);
+  const messages = await prisma.message.findMany({
+    where: {
+      agentId: fixture.realAgentId,
+      role: 'USER',
+      id: { notIn: beforeMessages.map(({ id }) => id) },
+    },
+  });
+  assert(
+    messages.length === 1,
+    `Expected one authored USER row after concurrent/repeated replies, got ${messages.length}`
+  );
+  assert(
+    messages[0].text === text,
+    'Authored attention response must preserve every original byte'
+  );
+}
+
+async function testRespond_authoredInputAfterControlIsPreservedAndConflictsAreExplicit() {
+  const fixture = await createFixture('respond-authored-after-control');
+  const initialCount = await countAgentMessages(fixture.realAgentId);
+  const created = await createAttentionRequest(fixture);
+  const send = (body: object) =>
+    request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+      method: 'POST',
+      headers: authHeaders(fixture.ownerToken),
+      body: JSON.stringify(body),
+    });
+  const control = await send({ response: 'Approved' });
+  assertStatus(control.status, 200, control.data);
+  const text = '  Return only venue_prices after the button approval.  ';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await send({ response: text.trim(), user_message: text });
+    assertStatus(result.status, 200, result.data);
+  }
+  const rows = await prisma.message.findMany({
+    where: {
+      agentId: fixture.realAgentId,
+      role: 'USER',
+      metadata: { path: ['attentionRequestId'], equals: created.id },
+    },
+  });
+  assert(
+    rows.length === 1 && rows[0].text === text,
+    'A control-first race must preserve the first authored reply once'
+  );
+  const conflict = await send({
+    response: 'A distinct later message',
+    user_message: 'A distinct later message',
+  });
+  assertStatus(conflict.status, 409, conflict.data);
+  assert(
+    (await countAgentMessages(fixture.realAgentId)) === initialCount + 1,
+    'Conflicting reply must not add USER input'
+  );
+  const persisted = await getRequestById(created.id, authHeaders(fixture.ownerToken));
+  assert(
+    persisted.userResponse === 'Approved',
+    'Authored input must not overwrite the accepted protocol decision'
+  );
+}
+
+async function testRespond_controlsAndNarrativesDoNotBecomeUserMessages() {
+  const fixture = await createFixture('respond-controls');
+  const beforeMessages = await countAgentMessages(fixture.realAgentId);
+  for (const response of ['Approved', 'Message sent via Mac app ✅', 'Authentication complete']) {
+    const created = await createAttentionRequest(fixture);
+    const result = await request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+      method: 'POST',
+      headers: authHeaders(fixture.ownerToken),
+      body: JSON.stringify({ response }),
+    });
+    assertStatus(result.status, 200, result.data);
+  }
+  const messages = await prisma.message.count({
+    where: { agentId: fixture.realAgentId, role: 'USER' },
+  });
+  assert(
+    messages === beforeMessages,
+    'Controls and completion narratives must not manufacture USER messages'
+  );
+}
+
+async function testRespond_controlThenLateJoinReceivesFirstAuthoredReply() {
+  const fixture = await createFixture('respond-control-late-join-authored');
+  const created = await createAttentionRequest(fixture);
+  const late = await prisma.agent.create({
+    data: { userId: fixture.ownerUserId, goal: 'Control-first late gate waiter', status: 'ACTIVE' },
+  });
+  trackedRealAgentIds.add(late.id);
+  const send = (body: object) =>
+    request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+      method: 'POST',
+      headers: authHeaders(fixture.ownerToken),
+      body: JSON.stringify(body),
+    });
+  const control = await send({ response: 'Approved' });
+  assertStatus(control.status, 200, control.data);
+  const joined = await appendGateWaiter(
+    created.id,
+    makeWorkflowId('control-first-late', late.id),
+    late.id
+  );
+  assert(
+    joined.pending === false && joined.response === 'Approved',
+    'Late waiter must observe the accepted control'
+  );
+  const text = '  Read the existing order details before doing anything else.  ';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const reply = await send({ response: 'Approved', user_message: text });
+    assertStatus(reply.status, 200, reply.data);
+  }
+  const rows = await prisma.message.findMany({
+    where: {
+      agentId: late.id,
+      role: 'USER',
+      metadata: { path: ['attentionRequestId'], equals: created.id },
+    },
+  });
+  assert(
+    rows.length === 1 && rows[0].text === text,
+    'Control-first late waiter lost or duplicated the first authored input'
+  );
+}
+
+async function testRespond_authoredFallbackReadsWaitersAfterAcquiringRowLock() {
+  const fixture = await createFixture('respond-locked-late-join');
+  const created = await createAttentionRequest(fixture);
+  const late = await prisma.agent.create({
+    data: { userId: fixture.ownerUserId, goal: 'Concurrent late gate waiter', status: 'ACTIVE' },
+  });
+  trackedRealAgentIds.add(late.id);
+  const send = (body: object) =>
+    request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+      method: 'POST',
+      headers: authHeaders(fixture.ownerToken),
+      body: JSON.stringify(body),
+    });
+  const control = await send({ response: 'Approved' });
+  assertStatus(control.status, 200, control.data);
+  let release!: () => void;
+  let announce!: (pid: number) => void;
+  let rejectLock!: (error: unknown) => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const locked = new Promise<number>((resolve, reject) => {
+    announce = resolve;
+    rejectLock = reject;
+  });
+  // Reproduce a late append holding the attention lock before registering itself.
+  const joining = prisma.$transaction(
+    async (tx) => {
+      const [session] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+      await tx.$queryRaw`SELECT id FROM "AgentAttentionRequest" WHERE id = ${created.id} FOR UPDATE`;
+      announce(session.pid);
+      await released;
+      await tx.agentAttentionRequest.update({
+        where: { id: created.id },
+        data: {
+          metadata: {
+            gateWaiters: [{ workflowId: makeWorkflowId('locked-late', late.id), agentId: late.id }],
+          },
+        },
+      });
+    },
+    { timeout: 15_000 }
+  );
+  void joining.catch(rejectLock);
+  const pid = await locked;
+  const text = '  Preserve the current order and report its details.  ';
+  const replying = send({ response: 'Approved', user_message: text });
+  try {
+    let blocked = false;
+    const deadline = Date.now() + 10_000;
+    while (!blocked && Date.now() < deadline) {
+      const [result] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`
+        SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))) AS blocked`;
+      blocked = result.blocked;
+      if (!blocked) await sleep(10);
+    }
+    assert(blocked, 'Authored fallback never reached the concurrent attention row lock');
+  } finally {
+    release();
+    await joining;
+  }
+  const result = await replying;
+  assertStatus(result.status, 200, result.data);
+  const rows = await prisma.message.findMany({
+    where: {
+      agentId: late.id,
+      role: 'USER',
+      metadata: { path: ['attentionRequestId'], equals: created.id },
+    },
+  });
+  assert(
+    rows.length === 1 && rows[0].text === text,
+    'Authored fallback used waiter metadata read before its row lock'
+  );
+}
+
+async function testRespond_authoredMessageFailureLeavesGatePending() {
+  const fixture = await createFixture('respond-authored-missing-agent');
+  const created = await createAttentionRequest(fixture, { agentId: fixture.missingAgentId });
+  const result = await request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+    method: 'POST',
+    headers: authHeaders(fixture.ownerToken),
+    body: JSON.stringify({
+      response: 'Return only venue_prices',
+      user_message: 'Return only venue_prices',
+    }),
+  });
+  assertStatus(result.status, 403, result.data);
+  const row = await getRequestById(created.id, authHeaders(fixture.ownerToken));
+  assert(
+    row.userResponse === null,
+    'Failed authored-message persistence must roll back gate resolution'
+  );
+}
+
+async function testRespond_authoredReplyFansOutOnceAndReachesLateWaiters() {
+  const fixture = await createFixture('respond-authored-fanout');
+  const waiter = await prisma.agent.create({
+    data: { userId: fixture.ownerUserId, goal: 'Authored gate waiter', status: 'ACTIVE' },
+  });
+  const lateWaiter = await prisma.agent.create({
+    data: { userId: fixture.ownerUserId, goal: 'Late authored gate waiter', status: 'ACTIVE' },
+  });
+  for (const agent of [waiter, lateWaiter]) trackedRealAgentIds.add(agent.id);
+  const gateKey = `authored:${RUN_ID}:${randomUUID()}`;
+  const created = await createAttentionRequest(fixture, {
+    metadata: {
+      gateWaiters: [
+        {
+          agentId: fixture.realAgentId,
+          workflowId: makeWorkflowId('same-agent-waiter', fixture.realAgentId),
+        },
+        { agentId: waiter.id, workflowId: makeWorkflowId('first-waiter', waiter.id) },
+        { agentId: waiter.id, workflowId: makeWorkflowId('duplicate-agent-waiter', waiter.id) },
+      ],
+    },
+  });
+  await prisma.agentAttentionRequest.update({ where: { id: created.id }, data: { gateKey } });
+  // Capture the pending lookup, then let resolution win before append takes its row lock.
+  const pending = await findPendingByGateKey(fixture.ownerUserId, gateKey);
+  assert(pending?.id === created.id, 'Late join must start from a pending gate lookup');
+  const text = '  Approved\nKeep these authored bytes.  ';
+  const result = await request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+    method: 'POST',
+    headers: authHeaders(fixture.ownerToken),
+    body: JSON.stringify({ response: 'RESOLVED', user_message: text }),
+  });
+  assertStatus(result.status, 200, result.data);
+  for (const agentId of [fixture.realAgentId, waiter.id]) {
+    const rows = await prisma.message.findMany({
+      where: {
+        agentId,
+        role: 'USER',
+        metadata: { path: ['attentionRequestId'], equals: created.id },
+      },
+    });
+    assert(
+      rows.length === 1 && rows[0].text === text,
+      'Each notified agent must receive one exact authored USER row'
+    );
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const joined = await appendGateWaiter(
+      pending.id,
+      makeWorkflowId('late-waiter', lateWaiter.id),
+      lateWaiter.id
+    );
+    assert(
+      joined.pending === false && joined.response === 'RESOLVED',
+      'Late waiter must retain the protocol response'
+    );
+    assert(
+      joined.userMessage === text,
+      'Late waiter signal must carry the same authored provenance'
+    );
+    const rows = await prisma.message.findMany({ where: { agentId: lateWaiter.id, role: 'USER' } });
+    assert(
+      rows.length === 1 && rows[0].text === text,
+      'Late join must commit authored input once before returning for signal'
+    );
+  }
 }
 
 async function testRespond_noAuth() {
@@ -1237,7 +1890,17 @@ async function testReject_withMessageCreatesTrimmedUserMessage() {
     afterMessages === beforeMessages + 1,
     `Expected one new agent message, got count ${afterMessages}`
   );
-  await expectLatestMessage(fixture.realAgentId, 'Do not proceed with this');
+  await expectLatestMessage(fixture.realAgentId, '  Do not proceed with this  ');
+  const retry = await request(`${BASE_URL}/api/attention-requests/${created.id}/reject`, {
+    method: 'POST',
+    headers: authHeaders(fixture.ownerToken),
+    body: JSON.stringify({ message: '  Do not proceed with this  ' }),
+  });
+  assertStatus(retry.status, 200, retry.data);
+  assert(
+    (await countAgentMessages(fixture.realAgentId)) === afterMessages,
+    'Repeated rejection must not duplicate authored input'
+  );
 
   const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
   assert(
@@ -1296,8 +1959,8 @@ async function testReject_missingAgentWithMessageCharacterizesFailure() {
     headers: authHeaders(fixture.ownerToken),
     body: JSON.stringify({ message: 'This will fail because the agent is missing' }),
   });
-  assertStatus(res.status, 500, res.data);
-  assertSchema(ErrorResponse, res.data, 'POST /:id/reject (500 missing agent)');
+  assertStatus(res.status, 403, res.data);
+  assertSchema(ErrorResponse, res.data, 'POST /:id/reject (403 unowned missing agent)');
 
   const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
   assert(
@@ -1356,6 +2019,23 @@ async function runAll() {
     {
       name: 'POST / (create)',
       tests: [
+        {
+          name: 'worker and external callers retain legitimate current stale and native workflow bindings',
+          fn: testCreate_preservesLegitimateWorkerAndExternalWorkflowBindings,
+        },
+        {
+          name: 'own agent cannot target a foreign primary workflow',
+          fn: () => testCreate_ownedAgentCannotTargetForeignWorkflow(false),
+        },
+        {
+          name: 'own agent cannot pair a foreign waiter workflow with its own agent ID',
+          fn: () => testCreate_ownedAgentCannotTargetForeignWorkflow(true),
+        },
+        {
+          name: 'own JWT cannot create an attention reply targeting a foreign agent',
+          fn: testCreate_externalCallerCannotWriteAuthoredInputToForeignAgent,
+        },
+        { name: 'create requires authentication', fn: testCreate_requiresAuthentication },
         { name: 'happy path + round-trip', fn: testCreate_happyRoundTrip },
         { name: 'missing question', fn: testCreate_missingQuestion },
         { name: 'empty body', fn: testCreate_emptyBody },
@@ -1416,6 +2096,56 @@ async function runAll() {
     {
       name: 'POST /:id/respond',
       tests: [
+        ...(['gate', 'approval'] as const).flatMap((producer) =>
+          (['owned', 'foreign', 'missing-key'] as const).map((caller) => ({
+            name: `actual ${producer} worker create preserves ${caller} authority`,
+            fn: () => testCreate_actualWorkerProducerAuthenticates(producer, caller),
+          }))
+        ),
+        {
+          name: 'legacy foreign auth completion is forbidden atomically',
+          fn: () => testAuthCompletion_legacyForeignAgentIsForbiddenAtomically(),
+        },
+        {
+          name: 'legacy auth child cannot complete a different users parent request',
+          fn: () => testAuthCompletion_legacyForeignAgentIsForbiddenAtomically(true),
+        },
+        {
+          name: 'legacy foreign primary rejects authored writes atomically',
+          fn: () => testRespond_legacyForeignPrimaryAndWaiterCannotReceiveAuthoredInput(true),
+        },
+        {
+          name: 'legacy foreign waiter rejects authored writes atomically',
+          fn: () => testRespond_legacyForeignPrimaryAndWaiterCannotReceiveAuthoredInput(false),
+        },
+        {
+          name: 'control-first authored input persists once and later conflict is explicit',
+          fn: testRespond_authoredInputAfterControlIsPreservedAndConflictsAreExplicit,
+        },
+        {
+          name: 'authored replies reach immediate and late waiters exactly once',
+          fn: testRespond_authoredReplyFansOutOnceAndReachesLateWaiters,
+        },
+        {
+          name: 'control-first late waiter receives the first authored reply once',
+          fn: testRespond_controlThenLateJoinReceivesFirstAuthoredReply,
+        },
+        {
+          name: 'authored fallback reads waiter metadata after acquiring its row lock',
+          fn: testRespond_authoredFallbackReadsWaitersAfterAcquiringRowLock,
+        },
+        {
+          name: 'authored input persists once with original bytes',
+          fn: testRespond_authoredMessagePersistsExactlyOnceWithOriginalBytes,
+        },
+        {
+          name: 'controls and completion narratives do not become USER input',
+          fn: testRespond_controlsAndNarrativesDoNotBecomeUserMessages,
+        },
+        {
+          name: 'authored input failure rolls back gate resolution',
+          fn: testRespond_authoredMessageFailureLeavesGatePending,
+        },
         {
           name: 'happy path persists state and decrements count',
           fn: testRespond_happyPersistsStateAndDecrementsCount,
@@ -1451,7 +2181,7 @@ async function runAll() {
       tests: [
         { name: 'happy path persists rejected state', fn: testReject_happyPersistsRejectedState },
         {
-          name: 'with message creates one trimmed USER message',
+          name: 'with message preserves authored bytes once',
           fn: testReject_withMessageCreatesTrimmedUserMessage,
         },
         {
@@ -1459,7 +2189,7 @@ async function runAll() {
           fn: testReject_blankMessageDoesNotCreateSideEffect,
         },
         {
-          name: 'missing agent + message returns 500 and keeps request pending',
+          name: 'unowned missing agent + message returns 403 and keeps request pending',
           fn: testReject_missingAgentWithMessageCharacterizesFailure,
         },
         { name: 'no auth -> 401', fn: testReject_noAuth },

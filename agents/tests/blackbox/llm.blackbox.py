@@ -74,6 +74,52 @@ def test_generated_response_schema_preserves_constraints():
     assert field["properties"][1]["required"] is False
 
 
+async def test_schema_generation_preserves_field_contract_metadata():
+    """An unchanged generated contract retains descriptions and nullable values."""
+    from helpers.llm import _generate_response_schema_with_rose, _structured_response_satisfies_schema
+    from providers.rose.types import RoseResponse
+    from utils.tool_schemas import ResponseSchemaConfig
+
+    legacy_schema = {"fields": [
+        {"name": "signed_in_account", "type": "str", "required": True, "nullable": False,
+         "description": "Authenticated account used for calendar access.", "minLength": 1},
+        {"name": "events", "type": "list[object]", "required": True, "nullable": False,
+         "description": "Verified calendar events, including an empty day.", "minItems": 0, "maxItems": 40,
+         "properties": [
+             {"name": "title", "type": "str", "required": True, "nullable": False,
+              "description": "Full calendar title.", "minLength": 1, "maxLength": 120},
+             {"name": "notes", "type": "str", "required": True, "nullable": True, "description": "Calendar notes when present."},
+         ]},
+        {"name": "confirmation_message", "type": "str", "required": True, "nullable": True, "description": ""},
+    ]}
+    output = {"signed_in_account": "shared-calendar-user", "events": [{"title": "Calendar event", "notes": None}], "confirmation_message": None}
+    canonical_schema = ResponseSchemaConfig.model_validate(legacy_schema).model_dump()
+    for original_schema in (legacy_schema, canonical_schema):
+        response = RoseResponse(content=json.dumps({"reasoning": "The required calendar outputs are unchanged.", **original_schema}))
+        with patch("helpers.llm.RoseClient.collect", AsyncMock(return_value=response)):
+            generated, _, _ = await _generate_response_schema_with_rose("List calendar events using shared access", agent_id="schema-metadata")
+        assert generated == original_schema, "typed schema generation dropped field contract metadata"
+        assert _structured_response_satisfies_schema(output, original_schema)
+        assert _structured_response_satisfies_schema(output, generated), "schema parsing removed nullable output support"
+
+
+async def test_schema_generation_preserves_peer_compute_usage():
+    """Metadata preservation keeps the generator's existing accounting result."""
+    from helpers.llm import _generate_response_schema_with_rose
+    from providers.rose.types import RoseResponse
+
+    usage = {
+        "prompt_tokens": 50, "completion_tokens": 10, "actual_model": "schema-model",
+        "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20,
+        "cache_sequence_id": "schema-sequence", "from_fast_cache": True,
+    }
+    response = RoseResponse(content=json.dumps({"reasoning": "Report the account.", "fields": [{"name": "account", "type": "str"}]}), usage=usage)
+    with patch("helpers.llm.RoseClient.collect", AsyncMock(return_value=response)):
+        schema, _, actual_usage = await _generate_response_schema_with_rose("Report the account", agent_id="schema-usage")
+    assert schema == {"fields": [{"name": "account", "type": "str", "required": True}]}
+    assert actual_usage == {**usage, "total_tokens": 60}
+
+
 def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
     from pydantic import ValidationError
     from helpers.llm import (
@@ -2415,6 +2461,122 @@ async def test_set_response_schema_activity_cache_lookup_error_falls_through_to_
     assert result["schema"]["fields"][0]["name"] == "summary"
 
 
+async def test_schema_refresh_reuses_native_activity_retry_after_initial_generation_succeeds():
+    """A real refresh timeout reaches the same retry owner as initial generation."""
+    from datetime import timedelta
+    import httpx
+    from temporalio.common import RetryPolicy
+    from helpers.llm import set_response_schema_activity
+    from loop.activity_helper import call_temporal_activity_from_activity
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
+    correction = "  Use Andy's account instead.\n"
+    calls = []
+    failures_left = 3
+
+    class SchemaClient:
+        async def collect(self, **kwargs):
+            nonlocal failures_left
+            calls.append(kwargs)
+            refresh = correction in kwargs["messages"][1]["content"]
+            if refresh and failures_left:
+                failures_left -= 1
+                raise httpx.ReadTimeout("schema provider timed out")
+            return SimpleNamespace(
+                content=json.dumps({"reasoning": "Return the account actually used.", "title": "Calendar events",
+                                    "fields": [{"name": "signed_in_account", "type": "str", "required": True,
+                                                "description": "Andy account" if refresh else "Tamara account"}]}),
+                tool_calls=[], usage={"prompt_tokens": 10, "completion_tokens": 4},
+            )
+
+    resolve = AsyncMock(return_value=(False, "", False, "", "", False))
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://schema-fixture.test", api_key="fixture-key"))
+    try:
+        with patch("helpers.llm.load_config", return_value=config), patch("helpers.llm.RoseClient", SchemaClient), \
+             patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve), patch("temporalio.activity.heartbeat"):
+            initial = await call_temporal_activity_from_activity(
+                set_response_schema_activity, args=["schema-retry", ["Read calendar events"], None, False, True],
+                start_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(milliseconds=1)),
+            )
+            refreshed = await call_temporal_activity_from_activity(
+                set_response_schema_activity,
+                args=["schema-retry", ["Read calendar events", correction], None, False, False, False],
+                start_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(milliseconds=1)),
+            )
+        assert initial["schema"]["fields"][0]["description"] == "Tamara account"
+        assert refreshed is not None, "generation failure was swallowed as an activity success, bypassing native retries"
+        assert refreshed["schema"]["fields"][0]["description"] == "Andy account"
+        assert len(calls) == 5 and resolve.await_count == 3, "refresh did not reuse the existing activity retry owner"
+        assert all(correction in call["messages"][1]["content"] for call in calls[1:]), "retry lost authored message bytes"
+        saves = [request for request in get_captured_requests() if request["method"] == "PATCH"]
+        assert len(saves) == 1, "unaccepted refresh candidates were persisted by generation"
+    finally:
+        teardown_mock()
+
+
+async def test_schema_generation_exhaustion_propagates_through_native_retry_budget():
+    """Exhausted generation remains a failed call rather than a successful None."""
+    from datetime import timedelta
+    import httpx
+    from temporalio.common import RetryPolicy
+    from helpers.llm import set_response_schema_activity
+    from loop.activity_helper import call_temporal_activity_from_activity
+
+    calls = []
+    failure = httpx.ReadTimeout("schema provider still unavailable")
+
+    class SchemaClient:
+        async def collect(self, **kwargs):
+            calls.append(kwargs)
+            raise failure
+
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://schema-fixture.test", api_key="fixture-key"))
+    with patch("helpers.llm.load_config", return_value=config), patch("helpers.llm.RoseClient", SchemaClient), \
+         patch("providers.fast_cache.client.resolve_agent_fast_mode", AsyncMock(return_value=(False, "", False, "", "", False))), \
+         patch("temporalio.activity.heartbeat"):
+        try:
+            await call_temporal_activity_from_activity(
+                set_response_schema_activity, args=["schema-retry-exhausted", ["Read calendar events"], None, False, False, False],
+                start_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(milliseconds=1)),
+            )
+        except httpx.ReadTimeout as error:
+            assert error is failure
+        else:
+            raise AssertionError("native retry budget was bypassed by a successful None result")
+    assert len(calls) == 9, "schema generation changed the existing three-by-three retry budgets"
+
+
+async def test_schema_generation_does_not_retry_or_swallow_lifecycle_stops():
+    from temporalio.exceptions import CancelledError
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from helpers.llm import set_response_schema_activity
+
+    for failure in (asyncio.CancelledError(), CancelledError("cancelled"),
+                    WorkflowGenerationSealed("generation replaced"), GenerationHandoffRequested("new-queue")):
+        calls = []
+
+        class SchemaClient:
+            async def collect(self, **kwargs):
+                calls.append(kwargs)
+                raise failure
+
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="https://schema-fixture.test", api_key="fixture-key"))
+        with patch("helpers.llm.load_config", return_value=config), patch("helpers.llm.RoseClient", SchemaClient), \
+             patch("providers.fast_cache.client.resolve_agent_fast_mode", AsyncMock(return_value=(False, "", False, "", "", False))), \
+             patch("temporalio.activity.heartbeat"):
+            try:
+                await set_response_schema_activity("schema-control-stop", ["Read calendar events"], persist=False)
+            except BaseException as error:
+                assert error is failure, "schema generation changed lifecycle exception identity"
+            else:
+                raise AssertionError("schema generation swallowed a lifecycle stop")
+        assert len(calls) == 1, "schema helper retried a lifecycle stop as an LLM error"
+
+
 async def test_set_response_schema_activity_mass_agent_title_when_generation_fails():
     """Mass-agent root still PATCHes Creator Brand Strategy if schema generation throws."""
     from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX, OAI_DEMO_ROOT_TITLE
@@ -2441,13 +2603,12 @@ async def test_set_response_schema_activity_mass_agent_title_when_generation_fai
     ):
         from helpers.llm import set_response_schema_activity
 
-        result = await set_response_schema_activity(
-            "agent-mass-title-fail",
-            [goal],
-            include_title=True,
-        )
-
-    assert result is None
+        try:
+            await set_response_schema_activity("agent-mass-title-fail", [goal], include_title=True)
+        except RuntimeError as error:
+            assert "Strict read-only benchmark cache miss" in str(error)
+        else:
+            raise AssertionError("schema failure must reach the native activity retry owner")
     schema_save = next(
         request
         for request in get_captured_requests()
@@ -2585,7 +2746,7 @@ async def test_set_response_schema_activity_empty_goal():
 
 
 async def test_set_response_schema_activity_no_schema_returned():
-    """Returns None when Rose returns no schema content."""
+    """Invalid model output remains retryable rather than returning successful None."""
 
     class FakeRoseClient:
         async def collect(self, **kwargs):
@@ -2594,13 +2755,16 @@ async def test_set_response_schema_activity_no_schema_returned():
     with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
         from helpers.llm import set_response_schema_activity
 
-        result = await set_response_schema_activity("agent-b", ["goal"])
-
-    assert result is None
+        try:
+            await set_response_schema_activity("agent-b", ["goal"])
+        except ValueError as error:
+            assert "no response schema content" in str(error)
+        else:
+            raise AssertionError("empty generation bypassed native retries")
 
 
 async def test_set_response_schema_activity_http_error():
-    """Returns None on schema generation error."""
+    """Generation errors propagate to the native activity retry policy."""
 
     class FakeRoseClient:
         async def collect(self, **kwargs):
@@ -2609,9 +2773,12 @@ async def test_set_response_schema_activity_http_error():
     with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
         from helpers.llm import set_response_schema_activity
 
-        result = await set_response_schema_activity("agent-c", ["goal"])
-
-    assert result is None
+        try:
+            await set_response_schema_activity("agent-c", ["goal"])
+        except RuntimeError as error:
+            assert str(error) == "boom"
+        else:
+            raise AssertionError("generation error bypassed native retries")
 
 
 async def test_set_response_schema_activity_save_error_raises():
@@ -5793,6 +5960,30 @@ async def test_build_verifier_json_schema_strict_true_when_no_open_objects():
     assert result["json_schema"]["strict"] is True
 
 
+def test_build_verifier_context_messages_preserves_model_exclusions():
+    from copy import deepcopy
+    from helpers.llm import build_verifier_context_messages
+
+    actual = [
+        {"role": "USER", "text": "Use Andy's account instead", "timestamp": "2026-10-15T17:00:00Z"},
+        {"role": "TOOL", "text": "actual browser evidence", "timestamp": "2026-10-15T17:00:01Z",
+         "metadata": {"toolName": "browser", "toolStatus": "FINISHED"}},
+    ]
+    hidden = [
+        {"role": "TOOL", "text": "schema route timed out", "timestamp": "2026-10-15T17:00:02Z",
+         "metadata": {"toolCallId": "actual-completion", "toolName": "attempt_completion",
+                      "toolStatus": "ERROR", "error": True, "excludeFromModel": True}},
+        {"role": "ASSISTANT", "text": "UI-only reasoning", "timestamp": "2026-10-15T17:00:03Z",
+         "metadata": {"plannedToolName": "reasoning", "excludeFromModel": True}},
+    ]
+    context = deepcopy(actual + hidden)
+    assert build_verifier_context_messages(context, "existing verifier") == build_verifier_context_messages(actual, "existing verifier")
+    assert context == actual + hidden, "projection must retain the durable rows for UI/audit"
+    visible_error = deepcopy(hidden[0])
+    visible_error["metadata"]["excludeFromModel"] = False
+    assert "schema route timed out" in str(build_verifier_context_messages(actual + [visible_error], "existing verifier"))
+
+
 def test_build_verifier_context_messages_screenshot_emits_multimodal():
     """TOOL message with `metadata.screenshot_b64` becomes a multimodal user message."""
     from helpers.llm import build_verifier_context_messages
@@ -8941,6 +9132,8 @@ async def run_all_tests():
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
     r.record("generated_agent_title_normalization", test_generated_agent_title_normalization)
     r.record("generated_response_schema_preserves_constraints", test_generated_response_schema_preserves_constraints)
+    await r.record_async("schema_generation_preserves_field_contract_metadata", test_schema_generation_preserves_field_contract_metadata)
+    await r.record_async("schema_generation_preserves_peer_compute_usage", test_schema_generation_preserves_peer_compute_usage)
     r.record("optional_output_keys_can_be_omitted_but_present_values_are_typed", test_optional_output_keys_can_be_omitted_but_present_values_are_typed)
     r.record("verifier_enforces_size_bounds_and_nullable_nested_fields", test_verifier_enforces_size_bounds_and_nullable_nested_fields)
     r.record("structured_output_schema_respects_constraints", test_structured_output_schema_respects_constraints)
@@ -9005,6 +9198,9 @@ async def run_all_tests():
     )
     await r.record_async("mark_claude_token_rate_limited_failure", test_mark_claude_token_rate_limited_failure)
     await r.record_async("set_response_schema_activity_success", test_set_response_schema_activity_success)
+    await r.record_async("schema_refresh_native_retry_after_initial_success", test_schema_refresh_reuses_native_activity_retry_after_initial_generation_succeeds)
+    await r.record_async("schema_generation_native_retry_exhaustion", test_schema_generation_exhaustion_propagates_through_native_retry_budget)
+    await r.record_async("schema_generation_lifecycle_stops", test_schema_generation_does_not_retry_or_swallow_lifecycle_stops)
     await r.record_async(
         "set_response_schema_activity_replaces_cached_task_output_title",
         test_set_response_schema_activity_replaces_cached_task_output_title,
@@ -9480,6 +9676,7 @@ async def run_all_tests():
     await r.record_async("set_response_schema_activity_cache_lookup_error_falls_through_to_live", test_set_response_schema_activity_cache_lookup_error_falls_through_to_live)
     r.record("verifier_file_evidence_caps_nondeliverable_shortlist_small", test_verifier_file_evidence_caps_nondeliverable_shortlist_small)
     r.record("verifier_file_evidence_keeps_full_top100_deliverable_json", test_verifier_file_evidence_keeps_full_top100_deliverable_json)
+    r.record("build_verifier_context_messages_preserves_model_exclusions", test_build_verifier_context_messages_preserves_model_exclusions)
     r.record("build_verifier_context_messages_skips_budget_for_declared_evaluator", test_build_verifier_context_messages_skips_budget_for_declared_evaluator)
 
     return r.summary()

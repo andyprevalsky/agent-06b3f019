@@ -272,6 +272,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
   const contextUpdate = prisma.browserContext.update;
   const create = steel.sessions.create;
   const release = steel.sessions.release;
+  const get = steel.get;
   const connect = chromium.connectOverCDP;
   const transaction = prisma.$transaction;
   const leaseUpdate = prisma.toolSideEffect.updateMany;
@@ -292,6 +293,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     context: { userId: 'offline-user' },
   };
   let ready = false;
+  let profileReads = 0;
   let releases = 0;
   let failCreate = retryReleased;
   let leaseRow: {
@@ -352,6 +354,13 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     ready = true;
     return {};
   }) as typeof release;
+  steel.get = (async (path: string) => {
+    nodeAssert.strictEqual(path, '/v1/profiles/offline-profile');
+    nodeAssert(ready, 'profile readiness must follow acknowledged source release');
+    nodeAssert.strictEqual(row.status, 'PAUSED', 'readiness must retain recovery custody');
+    profileReads++;
+    return { status: 'READY' };
+  }) as typeof get;
   steel.sessions.create = (async (input: { profileId?: string }) => {
     if (!ready) {
       throw Object.assign(
@@ -361,6 +370,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
         { status: 409 }
       );
     }
+    nodeAssert(profileReads > 0, 'replacement create requires native profile readiness');
     nodeAssert.strictEqual(row.status, 'PAUSED');
     nodeAssert.strictEqual(row.closedAt, null);
     nodeAssert.strictEqual(input.profileId, 'offline-profile');
@@ -413,6 +423,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     prisma.browserContext.update = contextUpdate;
     steel.sessions.create = create;
     steel.sessions.release = release;
+    steel.get = get;
     chromium.connectOverCDP = connect;
     prisma.$transaction = transaction;
     prisma.toolSideEffect.updateMany = leaseUpdate;

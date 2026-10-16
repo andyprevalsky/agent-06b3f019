@@ -53,17 +53,22 @@ function currentSession(session: SessionOverride | null, taskId: string): Sessio
   return session?.taskId === taskId ? session : null;
 }
 
-export function interactiveBrowserUrl(browserUrl: string): string {
+function browserUrlForInteraction(browserUrl: string, interactive: boolean): string {
   try {
     const url = new URL(browserUrl);
-    url.searchParams.delete('readOnly');
-    url.searchParams.set('interactive', 'true');
-    url.searchParams.set('showControls', 'true');
+    if (interactive) url.searchParams.delete('readOnly');
+    else url.searchParams.set('readOnly', 'true');
+    url.searchParams.set('interactive', String(interactive));
+    url.searchParams.set('showControls', String(interactive));
     return url.toString();
   } catch {
     const separator = browserUrl.includes('?') ? '&' : '?';
-    return `${browserUrl}${separator}interactive=true&showControls=true`;
+    return `${browserUrl}${separator}interactive=${interactive}&showControls=${interactive}`;
   }
+}
+
+export function interactiveBrowserUrl(browserUrl: string): string {
+  return browserUrlForInteraction(browserUrl, true);
 }
 
 async function requestUserControl(
@@ -117,12 +122,15 @@ function useBrowserControlRecovery(
   activeUserControl: SessionOverride | null,
   setResumedSession: (session: SessionOverride) => void,
   setUserControl: (session: SessionOverride | null) => void,
+  readOnly: boolean,
 ): void {
   useEffect(() => {
+    if (readOnly) return;
     let cancelled = false;
     const reconcile = async () => {
       try {
         let snapshot = await readBrowserControlState(taskId);
+        if (cancelled) return;
         if (snapshot.state === 'requested') snapshot = await takeBrowserControl(taskId);
         if (!cancelled && snapshot.state === 'user') {
           if (snapshot.debugUrl === null || snapshot.debugUrl === '') return;
@@ -139,10 +147,10 @@ function useBrowserControlRecovery(
     return () => {
       cancelled = true;
     };
-  }, [setResumedSession, setUserControl, taskId]);
+  }, [readOnly, setResumedSession, setUserControl, taskId]);
 
   useEffect(() => {
-    if (activeUserControl === null) return undefined;
+    if (readOnly || activeUserControl === null) return undefined;
     const timer = window.setInterval(() => {
       void takeBrowserControl(taskId).catch((error) => {
         console.error('Failed to renew browser control lease:', error);
@@ -150,7 +158,7 @@ function useBrowserControlRecovery(
       });
     }, 30_000);
     return () => window.clearInterval(timer);
-  }, [activeUserControl, setUserControl, taskId]);
+  }, [activeUserControl, readOnly, setUserControl, taskId]);
 }
 
 /**
@@ -164,7 +172,9 @@ function presentedBrowserUrl(
   handoffUrl: string | null,
   isUserControlling: boolean,
   hasReconnected: boolean,
+  readOnly: boolean,
 ): string {
+  if (readOnly) return browserUrlForInteraction(binding.browserUrl, false);
   if (isUserControlling) return interactiveBrowserUrl(binding.browserUrl);
   if (hasReconnected || handoffUrl === null) return binding.browserUrl;
   return binding.isBound ? interactiveBrowserUrl(binding.browserUrl) : handoffUrl;
@@ -175,6 +185,7 @@ function useBrowserSessionControl(
   agentId: string | null,
   transcriptBrowserUrl: string,
   handoffBrowserUrl: string | null,
+  readOnly: boolean,
 ): Pick<
   BrowserStatusBarUi,
   | 'isResuming'
@@ -194,7 +205,7 @@ function useBrowserSessionControl(
   const refreshBinding = binding.refresh;
   const activeResumedSession = currentSession(resumedSession, taskId);
   const activeUserControl = currentSession(userControl, taskId);
-  useBrowserControlRecovery(taskId, activeUserControl, setResumedSession, setUserControl);
+  useBrowserControlRecovery(taskId, activeUserControl, setResumedSession, setUserControl, readOnly);
   const hasReconnected = activeResumedSession !== null;
   const handleTakeControl = useCallback(
     (isDisconnected: boolean) =>
@@ -230,13 +241,14 @@ function useBrowserSessionControl(
 
   return {
     isResuming,
-    isUserControlling: activeUserControl !== null,
+    isUserControlling: !readOnly && activeUserControl !== null,
     hasReconnected,
     browserUrl: presentedBrowserUrl(
       binding,
       handoffBrowserUrl,
       activeUserControl !== null,
       hasReconnected,
+      readOnly,
     ),
     isLive: binding.isLive,
     onTakeControl,
@@ -315,6 +327,7 @@ export function useBrowserStatusBarUi(
   agentId: string | null,
   transcriptBrowserUrl: string,
   handoffBrowserUrl: string | null = null,
+  readOnly = false,
 ): BrowserStatusBarUi {
   const visibility = useBrowserPanelVisibility(taskId, forceMinimized);
   const control = useBrowserSessionControl(
@@ -322,6 +335,7 @@ export function useBrowserStatusBarUi(
     agentId,
     transcriptBrowserUrl,
     handoffBrowserUrl,
+    readOnly,
   );
   return {
     ...visibility,
