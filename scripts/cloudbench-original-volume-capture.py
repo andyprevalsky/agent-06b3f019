@@ -261,9 +261,13 @@ def exact_directory(path: Path, label: str) -> Path:
 
 def bash_lib(library: str, call: list[str], *, cwd: Path | None = None, timeout: int = 30) -> str:
     """Call an existing scripts/lib primitive instead of reimplementing it."""
-    script = Path(__file__).resolve().parent / "lib" / library
+    root = Path(__file__).resolve().parent
+    script = root / "lib" / library
+    if not lexists(script):
+        script = root / library  # The canonical fleet snapshot flattens scripts/lib.
+    regular_bytes(script)
     result = subprocess.run(
-        ["bash", "-c", 'source "$1" >/dev/null; shift; "$@"', "cloudbench-capture", str(script), *call],
+        ["bash", "-c", 'source "$1" >/dev/null || exit; shift; "$@"', "cloudbench-capture", str(script), *call],
         capture_output=True,
         text=True,
         timeout=timeout,

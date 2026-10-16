@@ -702,9 +702,9 @@ class PreconfigSnapshotLayout(unittest.TestCase):
         for path in SCRIPT.parent.glob('*.py'):shutil.copy2(path,self.flat/path.name)
         shutil.copy2(SCRIPT.parent/'lib/cloudbench-env.sh',self.flat/'cloudbench-env.sh')
         self.helper=self.flat/'cloudbench-explicit-idle-preconfig.py'
-    def test_original_wrapper_reproduces_flat_snapshot_exit127(self):
-        old=runpy.run_path(str(self.flat/'cloudbench-original-volume-capture.py'))
-        with self.assertRaisesRegex(old['Refusal'],'exit 127'):old['pid_birth_state']('99999999','dead-fixture')
+    def test_original_wrapper_supports_flat_snapshot_pid(self):
+        helper=runpy.run_path(str(self.flat/'cloudbench-original-volume-capture.py'))
+        self.assertEqual(helper['pid_birth_state']('99999999','dead-fixture'),'absent')
     def test_actual_flat_snapshot_plan_runs_canonical_dead_owner_predicate(self):
         code='import runpy,sys; h=runpy.run_path(sys.argv[1]); p=h["plan"](*sys.argv[2:]); print(len(p["rows"]))'
         result=subprocess.run(['python3','-c',code,str(self.helper),str(self.f.registry),str(self.f.f.common),self.f.source],text=True,capture_output=True,timeout=20,cwd='/')
@@ -1207,5 +1207,47 @@ invoke
         with self.assertRaises(ValueError):self.recover(dict(self.f.f.native,state='started'))
         with self.assertRaises(FileExistsError):self.recover()
         self.assertTrue(self.f.f.claim.exists())
+
+
+@unittest.skipUnless(os.geteuid()==0, 'canonical worker publication fixture requires root')
+class WorkerStageSnapshotToken(unittest.TestCase):
+    def setUp(self):
+        self.f=Worker();self.f.setUp();self.addCleanup(self.f.doCleanups);self.f.prepare()
+        self.flat=self.f.root/'canonical-flat-snapshot';self.flat.mkdir()
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+        start=fleet.index('|| ! cp "$ROOT_DIR/scripts/run-bench-fleet"')
+        end=fleet.index('"$CLOUDBENCH_SCRIPT_SNAPSHOT/"',start)
+        paths=re.findall(r'"\$ROOT_DIR/([^"\n]+)"',fleet[start:end])
+        self.assertIn('scripts/lib/cloudbench-inventory.sh',paths)
+        for relative in paths:shutil.copy2(SCRIPT.parents[1]/relative,self.flat/Path(relative).name)
+        self.assertFalse((self.flat/'lib').exists())
+    def stage(self,folder):
+        helper=runpy.run_path(str(folder/'cloudbench-staged-boot-return.py'));h=helper['H'];base=h['sibling']('cloudbench-original-volume-capture.py');seen=[];f=self.f
+        class Fly:
+            def __init__(self,app,token):seen.append((app,token))
+            def api(self,*args,**kwargs):return f.api(*args,**kwargs)
+        base['Fly']=Fly;original=h['sibling']
+        def sibling(name):return base if name=='cloudbench-original-volume-capture.py'else original(name)
+        argv=['staged','worker-stage','--assignment',str(f.assignment),'--source',f.request['consumer']['source_ref'],'--node',f.dep['node'],'--python',f.dep['python'],'--size','shared-cpu-4x','--memory','8192','--app','app']
+        with mock.patch.dict(h['main'].__globals__,sibling=sibling),mock.patch.object(__import__('sys'),'argv',argv),mock.patch.dict(os.environ,FLY_BENCH_API_TOKEN='offline-worker-token-123456789',CLOUDBENCH_BOOT_TRANSPORT='staged'),mock.patch('sys.stdout',new_callable=__import__('io').StringIO)as output:
+            helper['main']()
+        self.assertEqual(seen,[('app','offline-worker-token-123456789')]);self.assertEqual(json.loads(output.getvalue())['status'],'STOPPED_STAGED');self.assertTrue(f.calls);self.assertTrue(all(c[0]=='GET'for c in f.calls))
+    def test_actual_flat_snapshot_worker_stage(self):self.stage(self.flat)
+    def test_repository_worker_stage(self):self.stage(SCRIPT.parent)
+    def test_missing_flat_library_refuses(self):
+        (self.flat/'cloudbench-inventory.sh').unlink();helper=runpy.run_path(str(self.flat/'cloudbench-original-volume-capture.py'))
+        with self.assertRaises(helper['Refusal']):helper['resolve_token']({'workspace':str(self.f.repo)})
+    def test_linked_flat_library_refuses(self):
+        path=self.flat/'cloudbench-inventory.sh';path.unlink();path.symlink_to(SCRIPT.parent/'lib/cloudbench-inventory.sh');helper=runpy.run_path(str(self.flat/'cloudbench-original-volume-capture.py'))
+        with self.assertRaises(helper['Refusal']):helper['resolve_token']({'workspace':str(self.f.repo)})
+    def test_shell_source_failure_refuses(self):
+        (self.flat/'cloudbench-inventory.sh').write_text('resolve_fly_token(){ echo should-not-run; }; return 42\n');helper=runpy.run_path(str(self.flat/'cloudbench-original-volume-capture.py'))
+        with self.assertRaises(helper['Refusal']):helper['resolve_token']({'workspace':str(self.f.repo)})
+    def test_repository_library_precedes_flat_name(self):
+        scripts=self.f.root/'repository-scripts';(scripts/'lib').mkdir(parents=True)
+        shutil.copy2(SCRIPT.with_name('cloudbench-original-volume-capture.py'),scripts/'cloudbench-original-volume-capture.py')
+        (scripts/'lib/cloudbench-inventory.sh').write_text('resolve_fly_token(){ echo nested-canonical; }\n')
+        (scripts/'cloudbench-inventory.sh').write_text('resolve_fly_token(){ echo wrong-layout; }\n')
+        helper=runpy.run_path(str(scripts/'cloudbench-original-volume-capture.py'));self.assertEqual(helper['resolve_token']({'workspace':str(self.f.repo)}),'nested-canonical')
 
 if __name__=='__main__':unittest.main()
