@@ -32,7 +32,7 @@ def fold(summary):
             flag = attempt.get('infra_failure')
             if flag is not None and type(flag) is not bool:
                 raise ValueError('invalid infrastructure flag')
-            row = dict(attempt, job_id=jid)
+            row = dict(attempt, job_id=jid, task=job['task'])
             records.append(row)
             if attempt['status'] == 'cancelled':
                 cancelled.add(jid)

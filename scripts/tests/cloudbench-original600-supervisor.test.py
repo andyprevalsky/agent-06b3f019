@@ -13,7 +13,8 @@ def summary(n=0):
    jobs.append(dict(job_id=f'j{number}',task=f't{i}',run=r,attempts=[dict(attempt=1,status='failed',finished_at=1,infra_failure=True)] if number<n else []))
  return dict(campaign_id='campaign',e2e_started_at_epoch=1,total_jobs=600,concurrency=600,jobs=jobs)
 class Threshold(unittest.TestCase):
- def test_one_of_600_continues(self):self.assertFalse(S['fold'](summary(1))['trigger'])
+ def test_one_of_600_continues(self):
+  r=S['fold'](summary(1));self.assertFalse(r['trigger']);self.assertEqual(r['records'][0]['task'],'t0')
  def test_29_of_600_continues(self):self.assertFalse(S['fold'](summary(29))['trigger'])
  def test_30_of_600_stops(self):self.assertTrue(S['fold'](summary(30))['trigger'])
  def test_retry_same_job_counts_once(self):
