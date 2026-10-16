@@ -31,10 +31,13 @@ def birth(pid):
     return subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],text=True,timeout=5).strip()
 
 @contextmanager
-def bounded(seconds):
+def bounded(seconds,reconcile_timeout=False):
     old=signal.getitimer(signal.ITIMER_REAL);handler=signal.getsignal(signal.SIGALRM);start=time.monotonic()
     need(not old[1],'periodic alarm refused');seconds=min(seconds,old[0])if old[0]else seconds
-    def expired(*unused):raise Deadline('controller action deadline')
+    def expired(*unused):
+        error=Deadline('controller action deadline')
+        error.reconcile_timeout=reconcile_timeout and (not old[0] or time.monotonic()-start<old[0])
+        raise error
     signal.signal(signal.SIGALRM,expired);signal.setitimer(signal.ITIMER_REAL,seconds)
     try:yield;need(time.monotonic()-start<seconds,'late controller action')
     finally:
@@ -133,7 +136,8 @@ def cleanup(a,auth_sha,path,directory,api):
         for key in ('id','instance_id','name','region','config'):need(current.get(key)==record['machine'].get(key),'controller native changed: '+key)
         if current.get('state')!='destroyed' and once('machine',mid):
             try:api('DELETE','/machines/'+mid+'?kill=true')
-            except Deadline:raise
+            except Deadline as error:
+                if not getattr(error,'reconcile_timeout',False):raise
             except Exception:pass
     for unused in range(40):
         current=api('GET','/machines/'+mid)
@@ -148,7 +152,8 @@ def cleanup(a,auth_sha,path,directory,api):
     v,native=volume(a,path,api);need(native.get('attached_machine_id')is None,'workspace detach pending')
     if once('volume',vid):
         try:api('DELETE','/volumes/'+vid)
-        except Deadline:raise
+        except Deadline as error:
+            if not getattr(error,'reconcile_timeout',False):raise
         except Exception:pass
     for unused in range(40):
         native=api('GET','/volumes/'+vid)
@@ -172,7 +177,8 @@ def cleanup_workspace(a,auth_sha,path,directory,api):
     else:
         save(marker,value)
         try:api('DELETE','/volumes/'+v['volume_id'])
-        except Deadline:raise
+        except Deadline as error:
+            if not getattr(error,'reconcile_timeout',False):raise
         except Exception:pass
     after=api('GET','/volumes/'+v['volume_id'])
     need(after is None or after.get('state')in('pending_destroy','destroyed'),'workspace deletion pending; GET-only reconciliation required')
@@ -198,7 +204,7 @@ def main():
         scope={'__file__':str(source),'__name__':'disposable_controller_transport'};exec(compile(expected,str(source),'exec'),scope)
         client=scope['Fly'](a['app'],os.environ.get('FLY_API_TOKEN')or scope['resolve_token']({'workspace':str(args.root)}))
         def api(method,path,body=None):
-            with bounded(20):
+            with bounded(20,reconcile_timeout=True):
                 try:return client.api(method,path,body,timeout=20)
                 except scope['NotFound']:
                     if method=='GET':return None

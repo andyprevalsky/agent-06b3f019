@@ -284,6 +284,45 @@ def resolve_token(request): raise AssertionError("no credential fallback in fixt
         self.entry('cleanup')
         self.assertEqual(len([c for c in self.api.calls if c[0] == 'DELETE']), 2)
 
+    def test_actual_delete_deadline_reconciles_get_without_redelete(self):
+        self.seal()
+        self.export()
+        original_api = self.api.__class__.__call__
+        original_bounded = S['bounded']
+        def delayed(api, method, path, body=None):
+            result = original_api(api, method, path, body)
+            if method == 'DELETE':
+                time.sleep(.05)
+            return result
+        def short_calls(seconds, **kwargs):
+            return original_bounded(.01 if seconds == 20 else seconds, **kwargs)
+        with patch.object(FakeAPI, '__call__', delayed), patch.dict(S['main'].__globals__, bounded=short_calls):
+            self.entry('cleanup')
+        self.assertTrue((self.out / 'disposable-controller.release.json').exists())
+        self.assertEqual(len([c for c in self.api.calls if c[0] == 'DELETE']), 2)
+        (self.out / 'disposable-controller.release.json').unlink()
+        self.entry('cleanup')
+        self.assertEqual(len([c for c in self.api.calls if c[0] == 'DELETE']), 2)
+
+    def test_whole_deadline_never_becomes_recoverable_delete_timeout(self):
+        self.seal()
+        self.export()
+        original_api = self.api.__class__.__call__
+        original_bounded = S['bounded']
+        def delayed(api, method, path, body=None):
+            result = original_api(api, method, path, body)
+            if method == 'DELETE':
+                time.sleep(.5)
+            return result
+        def short_whole(seconds, **kwargs):
+            return original_bounded(.2 if seconds == 180 else seconds, **kwargs)
+        with patch.object(FakeAPI, '__call__', delayed), patch.dict(S['main'].__globals__, bounded=short_whole):
+            with self.assertRaises(S['Deadline']):
+                self.entry('cleanup')
+        self.assertFalse((self.out / 'disposable-controller.release.json').exists())
+        self.assertEqual(len([c for c in self.api.calls if c[0] == 'DELETE']), 1)
+        self.assertEqual(self.api.calls[-1][0], 'DELETE')
+
     def test_late_export_and_cleanup_do_not_reapply_creation_ttl(self):
         self.entry('backup-off')
         with patch.object(S['authority'].__globals__['time'], 'time', return_value=self.auth['verified_epoch'] + 600):
