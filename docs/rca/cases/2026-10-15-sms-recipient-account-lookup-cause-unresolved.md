@@ -27,6 +27,7 @@ sources:
   - commit b5475e5be1f98e48e709298c0afcd2ea2e550ce7
   - agent 52009298-8865-406e-b5a9-8ff7ea129f3c
   - fleet run 574dc22f-ad9b-4df1-818c-33b496d5841b
+  - commit f27a20070f7f74f343959760bd54bb1c0119c3ff
 repro: original native dumps and sanitized retained-file extractor; no proven causal owning fail-pass correction
 status: open
 ---
@@ -128,6 +129,12 @@ booleans, all19native browser calls and sanitized site/controller facts. No curr
 raw inbox, phone or code is queried. Read-only peer review confirmed boundaries
 and required the incomplete climb/evidence-gap qualification. No reference-driven
 fix was selected and no approval-ready correction is claimed.
+
+### Bounded native correction observed on October16
+
+Preserve every original failure above. Later598 SMS root3c2cf2a6-5d71-4ae4-b3c1-0b8e8dcb3c78 genuinely FAILED615.4s, while paired signup passed222.3s. Exact unchanged SMS onf27a20070f7f74f343959760bd54bb1c0119c3ff then PASSED360.8s, root8946aed5-52f0-4bc9-ab43-fdbad862e671. Initial input still differed from the rendered supplied phone, so this is not proof that initial identity-selection causality is resolved. The new independent handoff judge actually returned0.5 on Sol Foundry, rejecting an unsupported conditional-page handoff; ordinary planner continuation selected the supplied phone, used a code matching an injected SMS USER message, and reached completion1.0/nativePASS. No hidden membership lookup or automatic identity switch was added.
+
+See 2026-10-16-auth-handoff-preconditions-not-independently-verified for owning before/after controls, unchanged catalog hash, exact native receipts, cleanup and durable publication. Its bounded semantic transfer correction does not retroactively prove a single deepest cause for all historic recipient-selection behavior. Full30 auth regression was not run at the f27 pair checkpoint and is now root-reported RUNNING/result PENDING; this original cause investigation remains OPEN without waiver, universal identity grading, model-upgrade claim or deployment approval. Prior source diagnostics and pending snapshots remain retained.
 
 ## Human feedback
 

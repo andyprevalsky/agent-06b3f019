@@ -20,6 +20,7 @@ tags:
 sources:
   - commit d03c0eed52c696e03ed34eb09d7461f789a1dfa1
   - agent ece33014-be48-405c-8409-f49125857148
+  - commit f27a20070f7f74f343959760bd54bb1c0119c3ff
 repro: agents/tests/blackbox/browser_credentials.blackbox.py test_supplied_identity_inventory_separates_ownership_registration_and_reader
 status: open
 ---
@@ -60,6 +61,12 @@ Step5b: the general class of claim/source conflation still admits a coherent sou
 Golden-reference search: searched Claude Code tools, OpenClaw agents, Codex core and Hermes for provenance/untrusted. Hermes hermes_state_messages.py527 preserves producer metadata rather than classifying content at render time; Codex core/context/guardian_sender_messages.rs49 labels partial history as context, not authorization; OpenClaw agents/transport-message-transform.ts66 preserves result provenance for later pairing. No direct reference implementation of site-registration truth was found or claimed. This candidate follows producer-derived metadata separation, not an invented account verifier.
 
 Native unchanged outcome verification belongs to the parent. The active d03 worktree/run was neither edited, signalled nor duplicated. No API, DB, inbox, provider, site or model calls were made. This RCA remains open until causal semantic and unchanged native outcome proof exist; no deployment or production-review action occurred.
+
+### Subsequent native evidence does not isolate the factual projection
+
+The source-factual metadata projection was included in598, whose SMS still FAILED615.4s while signup PASSED222.3s. A laterf27 run combining that same projection and receipt repair with independent handoff-precondition verification recorded SMS PASS360.8s and signup PASS125.7s, controller0 and canonical clean ownership receipts. The SMS trace shows an actual Sol Foundry judge rejection0.5, ordinary planner continuation, supplied-phone entry, actual injected USER OTP correspondence, completion1.0 and nativePASS. This supports the combined handoff mechanism in that run; it does not establish that this factual projection changed model behavior or that supplied ownership implies site registration.
+
+See 2026-10-16-auth-handoff-preconditions-not-independently-verified for actual native/owning evidence and publication receipts. The planner automatic-OTP contract is not explicitly carried in the handoff verifier packet, but the observed judge correctly rejected the premature handoff; no capability patch is justified from that representational difference alone. The earlier negative extra-SMS-wording factors are not promoted to repairs. This representation-causality case remains OPEN, with full30 regression initially not run, now root-reported RUNNING/result PENDING, and no deployment approval. Historical pending fields remain valid capture-time records; later terminal receipts are additive rather than overwritten.
 
 ## Human feedback
 

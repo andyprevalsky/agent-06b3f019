@@ -9399,6 +9399,8 @@ async def _spawn_browser_agent_activity_v3_real(
                     (unified_action.get("params") or {}).get("auth_assessment"),
                     auth_options=auth_options, auth_realm=auth_realm, current_url=current_url,
                     action_history=action_history.get_entries(),
+                    model_visible_value=dom_service.model_visible_value,
+                    secret_redaction_refs=action_history.secret_redaction_state().get("secret_redaction_refs"),
                 )
                 if assessment_result is None:
                     from .handoff_verification import AUTH_HANDOFF_VERIFICATION_GOAL, build_auth_handoff_verifier_context
@@ -9408,13 +9410,17 @@ async def _spawn_browser_agent_activity_v3_real(
                             timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                         )
                         observed_url = observed_state.get("url") or observed_state.get("current_url")
-                        if observed_url != current_url:
+                        observed_native_url = _private_browser_runtime_url(dom_service, observed_url)
+                        if (observed_native_url != current_url
+                                or observed_url != dom_service.model_visible_value(current_url)):
                             assessment_result = {
                                 "success": False, "error": "authentication_handoff_page_changed",
                                 "reason": "Fresh browser observation does not match the assessed page; reassess its current inventory and blocker.",
                                 "observed_url": observed_url,
                             }
                         else:
+                            await sync_user_instructions(require_current_schema=True)
+                            handoff_instruction_count = len(user_instruction_messages)
                             review_context = await build_browser_verifier_context(
                                 goal=goal, current_url=current_url, browser_state=observed_state,
                                 user_instruction_messages=user_instruction_messages,
@@ -9467,7 +9473,27 @@ async def _spawn_browser_agent_activity_v3_real(
                                     or review_usage.get("actual_model") == "fast-mode-soft-complete"):
                                 assessment_result = {"success": False, "error": "authentication_handoff_unverified",
                                                      "reason": review.get("reasoning") or "Independent verification did not establish the handoff preconditions."}
-                    except WorkflowGenerationSealed:
+                            else:
+                                # Reuse the bounded inbox owner after the independent await.
+                                otp_poll_task = asyncio.create_task(
+                                    _fetch_and_append_recent_otp_user_messages(
+                                        user_id=user_id, api_url=config.backend.api_url,
+                                        api_key=config.backend.api_key, seen_otp_codes=seen_otp_codes,
+                                        otp_user_messages=otp_user_messages,
+                                        credential_refs_by_secret_ref=otp_credential_refs,
+                                        pending_otp_ref_messages=pending_otp_ref_messages,
+                                        agent_id=agent_id, task_id=task_id,
+                                        task_elapsed_seconds=time.monotonic() - otp_task_started_monotonic,
+                                    )
+                                )
+                                await _drain_otp_poll(otp_poll_task)
+                                otp_poll_task = None
+                                await sync_user_instructions(require_current_schema=True)
+                                if (handoff_instruction_count != len(user_instruction_messages)
+                                        or int(instruction_state.get("schema_user_instruction_count") or 0) < len(user_instruction_messages)
+                                        or len(otp_user_messages) > otp_history_count):
+                                    assessment_result = {"success": False, "error": "authentication_handoff_input_changed"}
+                    except (BrowserInstructionUnavailableError, WorkflowGenerationSealed):
                         raise
                     except Exception:
                         assessment_result = {"success": False, "error": "authentication_handoff_unverified",
@@ -11854,7 +11880,6 @@ Based on this feedback, I need to continue working on the task and address the i
                     visited_urls,
                     reasoning_messages,
                     action_summary,
-                    resume_user_messages,
                     session_passwords,
                     session_passkeys,
                     available_file_paths,

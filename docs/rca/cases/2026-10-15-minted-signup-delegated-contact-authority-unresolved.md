@@ -22,6 +22,7 @@ sources:
   - agent 4cbb2429-ce20-45ab-8e96-6c541f720eb7
   - task 40985ea3-7113-523d-af60-f7a574748106
   - fleet run 574dc22f-ad9b-4df1-818c-33b496d5841b
+  - commit f27a20070f7f74f343959760bd54bb1c0119c3ff
 repro: retained native root and child dumps plus offline root reconstruction; no causal baseline-fail candidate-pass proof
 status: open
 ---
@@ -125,6 +126,12 @@ AuthRuntimeState. No failed next-deeper coherence proved: Step5b INCOMPLETE,
 no prompt/controller selected. Parent's separate SMS product clarification is
 PENDING,not an approved signup identity rule. Negative SMS factor outcomes cannot
 prove this distinct boundary. No model-intelligence/registration/provider claim.
+
+### Bounded native outcome follow-through on October16
+
+The original signup FAIL948.2s and its retained source/authority chain are not erased. Later598 signup root7004eba8-307c-4d72-b988-082badc8ceb0 PASSED222.3s before the semantic handoff guard, and exact unchanged signup onf27a20070f7f74f343959760bd54bb1c0119c3ff PASSED125.7s, rootc328777e-fa1d-4fd7-b633-5afed577f965. The paired SMS changed598FAIL615.4s to f27PASS360.8s. Final controller0, canonical exact-owned cleanup and fresh durable FE/HTTPS publication were retained. These observed signup passes are not proof that the new handoff guard caused a signup change, because signup already passed on598, nor proof of historical contact authority.
+
+See 2026-10-16-auth-handoff-preconditions-not-independently-verified for unchanged-task hashes and bounded semantic/native evidence. Original immediate-parent context factor912 was not adopted: its route-fixed four-call decision comparison showed no category improvement and supplied no native repair proof. All retained factors/failures remain available under repair-call-comparison and native attempt directories. Full30 regression was not run at the f27 pair checkpoint and is now root-reported RUNNING/result PENDING; this historical delegated-contact cause case remains OPEN without a gate waiver or deployment approval.
 
 ## Human feedback
 

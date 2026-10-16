@@ -332,23 +332,24 @@ async function recreateSessionWithinClaim(
       let committed = false;
       let attemptCdpTimedOut = false;
       try {
-        if (handoffLease !== null && boundProfile !== undefined) {
-          const profile = await (
+        if (writerReleased && steelRecordedProfileId !== null) {
+          await dependencies.verifyLifecycleOwnership?.();
+          const persistedProfile = await (
             dependencies.retrieveProfile ??
             ((id: string) =>
               steel.get<unknown, { status: string }>(`/v1/profiles/${encodeURIComponent(id)}`))
-          )(boundProfile.profileId);
-          if (profile.status === 'FAILED') {
+          )(steelRecordedProfileId);
+          await dependencies.verifyLifecycleOwnership?.();
+          if (persistedProfile.status === 'FAILED') {
             throw new SteelProfileFailedError(
-              `Steel profile ${boundProfile.profileId} failed to persist`
+              `Steel profile ${steelRecordedProfileId} failed to persist`
             );
           }
-          if (profile.status !== 'READY') {
+          if (persistedProfile.status !== 'READY') {
             throw new Error(
-              `Steel profile ${boundProfile.profileId} is not ready (${profile.status})`
+              `Steel profile ${steelRecordedProfileId} is not ready (${persistedProfile.status})`
             );
           }
-          await handoffLease.assertOwned();
         }
         const proxySettings = buildSteelProxySettings(
           proxyGeo,

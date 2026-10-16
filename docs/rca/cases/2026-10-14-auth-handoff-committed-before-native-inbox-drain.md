@@ -19,7 +19,7 @@ sources:
   - agent 3caf15c9-92a8-4590-8bbb-93b4875f91fc
   - commit e576489611da771499791db3980d78a1db8c5c02
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -176,6 +176,47 @@ receiving native OTP). Both retained ordinary empty/stale/no-OTP assistance.
 Across all earlier canonical attempts:3email attempts and1app attempt; reported
 billable agent cost0dollars,427224input/3137outputtokens. Infrastructure,
 subscription opportunity cost and evidence-publication/storage cost unmeasured.
+
+## 2026-10-16 recurrence at the independent handoff await
+
+Archive searches `authentication handoff new user instruction verifier await`
+and `OTP arrives during judge pending assistance` identify this case as the
+same input-admission boundary and the active-browser requirement case as a
+related owner. The independent handoff judge introduced a new awaited boundary
+after the original pre-action drain. Input arriving during that await could
+therefore supersede the decision before assistance committed. This is an
+owning-boundary reproduction, not an established cause of the retained native
+code-never-arrives failure.
+
+The permanent auth-handoff-verification activity controls use the real browser
+activity with deterministic inbox, instruction and judge edges. The identical
+eleven-control invocation records six passes/five failures before the late-input
+repair and eleven passes/zero failures afterward, with zero attempted Python
+socket connections in both runs. The five failing controls cover an OTP during
+the judge, a USER instruction during the judge, a USER instruction during the
+final inbox poll, a durable instruction-read outage and a typed generation seal.
+Logs are retained as `late-input-final-before.log` and
+`late-input-final-after.log` under the private OTP contract consumer review.
+Their source receipt pins patch
+`86c018d45991d80857f69cdef86220dd811da9fcadd09a303e561564adb1801d`
+after the separately measured OTP-context and retired-buffer prerequisites.
+
+The repair synchronizes the existing scoped USER/schema owner before judging,
+then reuses the existing bounded OTP fetch/append/acknowledgement path and strict
+USER/schema synchronization after an accepted judge result. Newly admitted
+input returns to ordinary planning. Instruction-read outages and typed seals
+propagate; the repair does not select an identity, submit a code, increase a
+timeout or manufacture a provider failure. The existing two-second drain cannot
+exclude slow or cancellation-resistant producers, and arrival after the final
+synchronization remains possible. These controls prove the measured checkpoints,
+not an atomic exclusion of every concurrent arrival.
+
+Full combined-source coverage and unchanged native after-repair outcomes remain
+pending. Private full-domain attempts exposed additional merge and test-owner
+mismatches; those attempts are retained and are not replaced by the eleven
+passing controls. The user requires approval only at deployment. This recurrence
+reopens the case while final proof is outstanding and leaves its earlier native
+results and publication history intact.
 
 
 ## 2026-10-15 review-only action-accounting follow-up

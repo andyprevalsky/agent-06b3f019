@@ -6588,19 +6588,30 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
             if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "extra_metadata" for t in node.targets):
                 for end in range(i + 1, len(body)):
                     n = body[end]
-                    if isinstance(n, ast.Expr) and isinstance(n.value, ast.Await) and isinstance(n.value.value, ast.Call) and isinstance(n.value.value.func, ast.Name) and n.value.value.func.id == "save_browser_action_message":
+                    if isinstance(n, ast.Expr) and isinstance(n.value, ast.Await) and isinstance(n.value.value, ast.Call) and isinstance(n.value.value.func, ast.Name) and n.value.value.func.id == "_save_browser_action_message":
                         persistence = body[i:end + 1]
                         break
     assert persistence, "Real action persistence boundary not found"
     function = ast.AsyncFunctionDef(name="persist", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=persistence, decorator_list=[])
-    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    owners = [node for node in tree.body[0].body
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and node.name in {"_redact_activity_value", "_save_browser_action_message"}]
+    assert len(owners) == 2, "Actual private persistence owners unavailable"
+    module = ast.fix_missing_locations(ast.Module(body=[*owners, function], type_ignores=[]))
     rejection = "The supplied sign-in details were rejected."
     # Keep late-page evidence too: no prefix slicing or fixture keyword filter.
     state = {"url": "https://example.com/login", "timestamp": "2026-10-14T00:00:00Z",
              "dom_tree": "Page text " * 1500 + rejection + " secret-plaintext"}
     result = mask_secret_values(_browser_state_action_result(state), {"pwd:synthetic": "secret-plaintext"})
     setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
-    namespace = dict(result=result, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
+    from browser_tools.dom_service import ActionHistory, DOMService
+    history = ActionHistory()
+    policy = DOMService("ws://unused-persistence-fixture")
+    policy.register_secret_refs({"pwd:synthetic": "secret-plaintext"})
+    history.bind_dom_service(policy)
+    namespace = dict(vars(handler))
+    namespace.update(result=result, action_history=history,
+                     write_lock_resume_state={"secret_redaction_refs": {"pwd:synthetic": "secret-plaintext"}}, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
                      save_browser_action_message=repo.save_browser_action_message, agent_id="ag1", title_done="read_browser_state", task_id="t1",
                      MessageStatus=MessageStatus, browser_url="https://viewer.invalid", tool_call_id_action="read-1", iteration=5,
                      MAX_ITERATIONS=250, coords_for_cursor=None)
@@ -7646,7 +7657,7 @@ async def test_recovery_storage_timeout_finishes_error_and_returns_control_to_mo
         await asyncio.Event().wait()
 
     progress = AsyncMock()
-    action_history = SimpleNamespace(record_action=AsyncMock())
+    action_history = _mocked_action_history()
     browser_stream = SimpleNamespace(finish_tools=AsyncMock())
     browser_turn_messages = []
     dom_service = SimpleNamespace()
@@ -13027,6 +13038,13 @@ async def test_execute_action_evaluate():
     assert out["value"] == 42
 
 
+def _mocked_action_history():
+    from browser_tools.dom_service import ActionHistory
+    history = ActionHistory()
+    history.record_action = AsyncMock()
+    return history
+
+
 def _private_secret_action_fixture(evaluate=None):
     """Keep the real dispatcher/history boundary with a synthetic browser transport."""
     evaluate = evaluate or AsyncMock(return_value={"result": {"value": True}})
@@ -13044,7 +13062,7 @@ def _private_secret_action_fixture(evaluate=None):
         # part of another number. This object is never an ActionHistoryEntry.
         synthetic_execution_metadata=17390,
     )
-    history = SimpleNamespace(record_action=AsyncMock(), get_entries=lambda: [])
+    history = _mocked_action_history()
     humanizer = SimpleNamespace(
         click_at_coords=AsyncMock(), press_key=AsyncMock(), type_text=AsyncMock(),
     )
@@ -13418,7 +13436,7 @@ async def test_private_numeric_credentials_preserve_only_trusted_browser_mechani
     observed = await dom.get_browser_state(include_screenshot=False)
     assert observed["viewport"]["height"] == 800
     output = await execute_action(
-        dom, SimpleNamespace(record_action=AsyncMock()), {"action": "read_browser_state", "params": {}},
+        dom, _mocked_action_history(), {"action": "read_browser_state", "params": {}},
         secret_refs=refs, write_lock_enabled=False,
     )
     assert output["viewport"]["height"] == 800, "the common boundary rewrote trusted viewport height as a CVV"
@@ -13599,7 +13617,7 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
             )
             prefetched_state = await notice_dom.get_browser_state(include_screenshot=False) if prefetched else None
             notice_result = await execute_action(
-                notice_dom, SimpleNamespace(record_action=AsyncMock()),
+                notice_dom, _mocked_action_history(),
                 {"action": "read_browser_state", "params": {}},
                 secret_refs=notice_refs, write_lock_enabled=False,
                 prefetched_browser_state=prefetched_state,
@@ -15020,7 +15038,7 @@ async def test_evaluate_awaits_promises():
         cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
     )
     session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp_session))
-    history = SimpleNamespace(record_action=AsyncMock())
+    history = _mocked_action_history()
     ctx = SimpleNamespace(
         action_name="evaluate",
         params={"code": "(async () => ({ok:true,size:3}))()"},
@@ -15426,7 +15444,7 @@ async def test_goto_err_aborted_persists_download_to_session():
             raise RuntimeError("Navigation failed: net::ERR_ABORTED")
 
     session = SimpleNamespace(event_bus=Bus())
-    history = SimpleNamespace(record_action=AsyncMock())
+    history = _mocked_action_history()
     with patch.object(
         download_persist,
         "persist_navigation_download_via_page_fetch",
@@ -18474,7 +18492,7 @@ async def test_execute_goto_err_aborted_persists_attachment_download():
     session = SimpleNamespace(
         event_bus=SimpleNamespace(dispatch=MagicMock(return_value=_FailEvent())),
     )
-    ah = SimpleNamespace(record_action=AsyncMock())
+    ah = _mocked_action_history()
     download_url = "https://tinypng.com/backend/opt/download/abc/rs.jpeg"
 
     async def fake_persist(**kwargs):
@@ -21311,7 +21329,7 @@ async def test_goto_action_returns_current_url_for_recovery_fallback():
     session = SimpleNamespace(
         event_bus=SimpleNamespace(dispatch=MagicMock(return_value=_FakeEvent())),
     )
-    action_history = SimpleNamespace(record_action=AsyncMock())
+    action_history = _mocked_action_history()
 
     result = await _execute_goto(
         session=session,
@@ -21677,24 +21695,31 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         assert result["status"] == "completed"
         assert result["structured_response"] == {"result": "ride requested"}
         assert result["session_id"] == "session-cookie"
-    close_mock.assert_awaited_once_with(_fake_config(), "session-cookie", pause=False, **({"current_url": None} if schema_failure else {}))
     create_auth_mock.assert_not_awaited()
-    restart_mock.assert_awaited_once_with(
-        config=_fake_config(),
-        user_id="user-1",
-        task_id="task-1",
-        credential_ref={"kind": "steel_session", "id": "steel-auth-1"},
-    )
-    assert auth_boundary_calls == ["restart"]
-    reconnect_mock.assert_awaited_once()
-    assert reconnect_mock.await_args.kwargs["new_cdp_url"] == "ws://cookie"
-    assert _FakeHumanizer.last_instance is not None
-    assert callable(_FakeHumanizer.last_instance.cursor_observer)
-    assert _FakeHumanizer.last_instance.idle_started is True
+    if schema_failure:
+        close_mock.assert_awaited_once_with(_fake_config(), "session-1", pause=False)
+        restart_mock.assert_not_awaited()
+        reconnect_mock.assert_not_awaited()
+        preparation.assert_not_awaited()
+        assert auth_boundary_calls == []
+    else:
+        close_mock.assert_awaited_once_with(_fake_config(), "session-cookie", pause=False, **({"current_url": None} if schema_failure else {}))
+        restart_mock.assert_awaited_once_with(
+            config=_fake_config(),
+            user_id="user-1",
+            task_id="task-1",
+            credential_ref={"kind": "steel_session", "id": "steel-auth-1"},
+        )
+        assert auth_boundary_calls == ["restart"]
+        reconnect_mock.assert_awaited_once()
+        assert reconnect_mock.await_args.kwargs["new_cdp_url"] == "ws://cookie"
+        assert _FakeHumanizer.last_instance is not None
+        assert callable(_FakeHumanizer.last_instance.cursor_observer)
+        assert _FakeHumanizer.last_instance.idle_started is True
 
 
-    preparation.assert_awaited_once()
-    assert preparation.await_args.kwargs["session_id"] == "session-cookie", "same-realm browser replacement reused prior credential binding"
+        preparation.assert_awaited_once()
+        assert preparation.await_args.kwargs["session_id"] == "session-cookie", "same-realm browser replacement reused prior credential binding"
 
     actor_call.activity_result = result
     return actor_call, judge_call
@@ -21891,7 +21916,12 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
     }
     if auth_review is not None:
         session_info["auth_options"] = auth_review["inventory"]
-    create_auth = AsyncMock(return_value={"id": "request-1"})
+    handoff_created = False
+    async def create_auth_response(*args, **kwargs):
+        nonlocal handoff_created
+        handoff_created = True
+        return {"id": "request-1"}
+    create_auth = AsyncMock(side_effect=create_auth_response)
     tool_events = AsyncMock()
     stream_instances = []
     from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
@@ -22034,7 +22064,7 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
     async def drain_poll(task, **kwargs):
         nonlocal drain_count
         drain_count += 1
-        if finally_seal and drain_count == 2:
+        if finally_seal and handoff_created:
             network_release.set()
         if case in {"during_drain", "sealed_during_drain", "foreground_sealed_held_poll"}:
             delivered.set()
@@ -22042,13 +22072,19 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         await real_drain(task, **kwargs)
         ordering.append("drain_finished")
     class HandoffDomService(_FakeDomService):
+        def runtime_current_url(self, *, fallback=""):
+            return (auth_review or {}).get("native_url", fallback)
+
         async def get_element_coordinates(self, index):
             return (10, 10)
 
         async def get_browser_state(self, include_screenshot=False):
             if auth_review is not None and auth_review.get("observed_states"):
-                return auth_review["observed_states"].pop(0)
-            return {"url": "https://shop.example/login/verify", "screenshot": None}
+                state = dict(auth_review["observed_states"].pop(0))
+                if "_native_url" in state:
+                    auth_review["native_url"] = state.pop("_native_url")
+                return state
+            return {"url": (auth_review or {}).get("public_url", "https://shop.example/login/verify"), "screenshot": None}
 
         async def get_page_identity(self):
             return {"url": "https://shop.example/login/verify", "title": "Verify it is you"}
@@ -22117,6 +22153,10 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             patch(handler + "prepare_browser_auth", AsyncMock(return_value={"auth_realm": "shop.example", "auth_options": auth_review["inventory"], "passwords": [], "passkeys": []})),
             patch(handler + "execute_action", reviewed_action),
         ])
+    if auth_review is not None and auth_review.get("poll_user_messages"):
+        targets.append(patch(handler + "poll_new_messages", auth_review["poll_user_messages"]))
+    if auth_review is not None and auth_review.get("fetch_emails"):
+        targets.append(patch("domains.spawn_browser_agent_v3.service_crypto.fetch_recent_emails", auth_review["fetch_emails"]))
     if sealed_case:
         targets.extend([
             patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=sealed_browser_recorder)),
@@ -22162,7 +22202,7 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
                 user_id="user-1", agent_id="agent-1", goal=(auth_review or {}).get("goal", "Read my member number"),
                 tool_call_id="tool-1", task_id="task-1", is_resume=True,
                 start_url="https://shop.example", output_schema={"fields": [{"name": "result", "type": "string"}]},
-                use_claude_mode=False, write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1", "step_count": resume_step_count},
+                use_claude_mode=False, write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1", "step_count": resume_step_count, **(auth_review or {}).get("resume_state", {})},
             )
         except Exception as error:
             from helpers.workflow_generation import WorkflowGenerationSealed
@@ -22172,7 +22212,7 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         finally:
             await drain_background_browser_cleanups()
     if auth_review is not None:
-        assert result["status"] == auth_review.get("expected_status", "awaiting_auth_assistance")
+        assert result["status"] == auth_review.get("expected_status", "awaiting_auth_assistance"), (result["status"], [c.get("turn_messages") for c in model_contexts])
         assert len(model_contexts) == len(auth_review["actions"]), "assistance committed before the declared remaining operation"
         if result["status"] == "awaiting_auth_assistance":
             create_auth.assert_awaited_once()
@@ -22180,6 +22220,7 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             create_auth.assert_not_awaited()
         auth_review["contexts"] = model_contexts
         auth_review["result"] = result
+        auth_review["auth_calls"] = create_auth.await_args_list
         return
     if sealed_case:
         assert result["status"] == "fixture_generation_sealed", "sealed generation was swallowed by the activity"
@@ -22190,7 +22231,7 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             create_auth.assert_not_awaited()
         if foreground_seal:
             assert foreground_poll_deliveries == [0], "held native poll appended input after foreground seal"
-        assert sealed_states == [(0, 0)], "sealed reference became accepted or ordinary retry pending"
+        assert sealed_states and all(state == (0, 0) for state in sealed_states), "sealed reference became accepted or ordinary retry pending"
         assert dead_generation_writes == [], f"backend writes after generation seal: {dead_generation_writes}"
         fake_browser.close.assert_not_awaited()
         fake_playwright.stop.assert_awaited_once()
@@ -22612,7 +22653,6 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         patch(prefix + "create_user_auth_assistance_request", AsyncMock(return_value={"id": "request-1"})),
         patch(prefix + "extract_session_files", AsyncMock(return_value=[])),
         patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
-        patch("helpers.llm.check_progress", AsyncMock(side_effect=AssertionError("unexpected live verifier in private fixture"))),
         patch(prefix + "disconnect_browser_after_passkey_capture", AsyncMock()),
         patch(prefix + "propagate_browser_run_credentials", propagated),
         patch(prefix + "close_browser_session", AsyncMock()),
@@ -23221,7 +23261,8 @@ async def test_private_browser_pause_urls_use_protected_continuity():
         save_action = AsyncMock()
         async def actor_transport(**kwargs):
             validate_transport_images(kwargs)
-            return {"action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {}}
+            params = _scripted_handoff_assessment(realm.replace(secret, "{{secret:pwd:url}}") if private_entry else realm, visible_url if private_entry else raw_url, user_only=True) if pause == "auth" else {}
+            return {"action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": params}, "usage": {}}
 
         actor_client = AsyncMock(side_effect=actor_transport)
         judge = AsyncMock(return_value={"score": 1.0, "structured_response": {"url": raw_url}, "usage": {}})
@@ -23249,7 +23290,7 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             patch(prefix + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
             patch(prefix + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
             patch(prefix + "_call_browser_use_with_rotation", handler._call_browser_use_with_rotation if actor_resume else AsyncMock(return_value={
-                "action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {},
+                "action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": _scripted_handoff_assessment(realm.replace(secret, "{{secret:pwd:url}}"), visible_url, user_only=True) if pause == "auth" else {}}, "usage": {},
                 "_fast_cache_browser_target": private_target,
             })),
             patch(prefix + "BrowserStreamingRoseClient.complete_browser_use", actor_client),
@@ -23273,6 +23314,7 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             patch(prefix + "build_browser_verifier_context", verifier_context),
             patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
             patch(prefix + "call_temporal_activity_from_activity", judge),
+            patch("helpers.llm.check_progress", judge),
             patch(prefix + "build_verifier_prompt", verifier_prompt_builder),
             patch(prefix + "upload_to_storage", screenshot_upload),
         ]

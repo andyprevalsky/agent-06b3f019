@@ -30,6 +30,7 @@ from tools.prompts import attempt_completion_prompt
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
+from utils.browser_auth_contract import OTP_DELIVERY_CONTRACT
 
 logger = structlog.get_logger()
 
@@ -860,7 +861,7 @@ action envelope in text; use the provided tool call.
 - For saved passwords, use the listed private placeholder in your chosen browser tool and target. The runtime resolves it privately in input_text, evaluate, and other browser tools, and redacts credential values from observations. Enter each field explicitly.
 - For multi-account sites, prefer the task-specific user context when present, then the freshest enabled cookie bundle.
 - When a site offers OTP delivery options, prefer email over SMS.
-- OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
+- {OTP_DELIVERY_CONTRACT}
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 6 first.
 - If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.
 - When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.

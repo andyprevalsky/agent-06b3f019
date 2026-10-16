@@ -63,6 +63,10 @@ async function testReadableInboxProjection() {
     'utf8'
   );
   const store = fs.readFileSync(path.join(backendDir, 'src/providers/authOptionsStore.ts'), 'utf8');
+  const lanternService = fs.readFileSync(
+    path.join(backendDir, 'src/domains/integrations/service.lantern.ts'),
+    'utf8'
+  );
   function extract(source: string, name: string) {
     const start = source.indexOf(`function ${name}`);
     assert(start >= 0);
@@ -110,6 +114,9 @@ async function testReadableInboxProjection() {
     'isEmailProviderSlug',
     `return (${extract(service, 'withDerivedConnectedEmails')});`
   )((name: string) => name === 'gmail');
+  const redactLanternIntegration = Function(
+    `return (${extract(lanternService, 'redactLanternIntegration')});`
+  )();
   const integrationQueries: IntegrationQuery[] = [];
   let healthCalls = 0;
   const list = Function(
@@ -126,6 +133,12 @@ async function testReadableInboxProjection() {
             { name: 'gmail', status: 'CONNECTED', config: {}, emailCredentials: [] },
             { name: 'whatsapp', status: 'CONNECTED', config: {}, emailCredentials: [] },
             { name: 'gmail', status: 'CONNECTED', config: {}, emailCredentials: [] },
+            {
+              name: 'lantern_people',
+              status: 'CONNECTED',
+              config: { encryptedCredentials: 'secret-lantern-envelope' },
+              emailCredentials: [],
+            },
           ];
         },
       },
@@ -146,8 +159,9 @@ async function testReadableInboxProjection() {
     'log',
     'withDerivedConnectedEmails',
     'findReadableInboxEmails',
+    'redactLanternIntegration',
     `return (${extract(service, 'getIntegrations')});`
-  )(repo, { info() {} }, derive, readable);
+  )(repo, { info() {} }, derive, readable, redactLanternIntegration);
   const one = await get('one');
   assert.deepEqual(
     one.integrations[0].readableInboxEmails,
@@ -166,6 +180,8 @@ async function testReadableInboxProjection() {
   );
   assert(!JSON.stringify(one).includes('secret-access'));
   assert(!JSON.stringify(one).includes('secret-refresh'));
+  assert.deepEqual(one.integrations[3].config, {}, 'actual Lantern redactor remains applied');
+  assert(!JSON.stringify(one).includes('secret-lantern-envelope'));
   const empty = await get('empty');
   assert.deepEqual(empty.integrations[0].readableInboxEmails, []);
   const foreign = await get('foreign');

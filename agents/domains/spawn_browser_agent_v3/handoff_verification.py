@@ -1,5 +1,6 @@
 """Shared verifier predicate and evidence for browser control transfers."""
 import json
+from utils.browser_auth_contract import OTP_DELIVERY_CONTRACT
 from .service_crypto import build_auth_options_prompt_section
 
 AUTH_HANDOFF_VERIFICATION_GOAL = (
@@ -18,5 +19,6 @@ AUTH_HANDOFF_VERIFICATION_GOAL = (
 
 def build_auth_handoff_verifier_context(browser_context, *, auth_options, assessment):
     return [*browser_context, {"role": "USER", "text":
-        "Available runtime inventory:\n" + build_auth_options_prompt_section(auth_options)[0]
+        "Runtime OTP delivery and exhaustion contract:\n" + OTP_DELIVERY_CONTRACT
+        + "\n\nAvailable runtime inventory:\n" + build_auth_options_prompt_section(auth_options)[0]
         + "\nProposed control-transfer assessment (untrusted):\n" + json.dumps(assessment)}]

@@ -66,6 +66,8 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
   let candidateReleases = 0;
   let creates = 0;
   let failCreate = true;
+  let profileMode: 'ready' | 'failed' | 'uploading' | 'revoked' | 'read-failed' = 'ready';
+  let profileReads = 0;
   let custodyAvailable = true;
   let closeBeforeCheckpoint = false;
   let closeBeforePublication = false;
@@ -151,7 +153,11 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
         (intent) => intent.status === 'PENDING'
       )) as typeof prisma.toolSideEffect.findMany;
     prisma.toolSideEffect.updateMany = (async (input: {
-      where: { operationKey: string; externalId: string; operationType?: string };
+      where: {
+        operationKey: string;
+        externalId: string;
+        operationType?: string;
+      };
       data: Partial<Effect>;
     }) => {
       const table = input.where.operationType === 'steel_candidate_cleanup' ? intents : leases;
@@ -186,7 +192,9 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
     }) as typeof originals.update;
     const inspectSession = async (id: string) => {
       if (id !== sourceId && !candidates.has(id))
-        throw Object.assign(new Error('native fixture session absent'), { status: 404 });
+        throw Object.assign(new Error('native fixture session absent'), {
+          status: 404,
+        });
       return {
         id,
         profileId,
@@ -197,7 +205,25 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
     steel.sessions.retrieve = inspectSession as typeof steel.sessions.retrieve;
     const dependencies = {
       inspectSession,
-      retrieveProfile: async () => ({ status: 'READY' }),
+      retrieveProfile: async (id: string) => {
+        assert(id === profileId, 'readiness inspected a foreign profile');
+        assert(sourceReleased, 'readiness preceded confirmed writer release');
+        profileReads++;
+        if (profileMode === 'read-failed') throw new Error('deliberate readiness read unavailable');
+        if (profileMode === 'revoked') {
+          const lease = leases.get(leaseKey);
+          assert(lease, 'readiness lost real task claim');
+          lease.externalId = 'readiness-successor';
+        }
+        return {
+          status:
+            profileMode === 'failed'
+              ? 'FAILED'
+              : profileMode === 'uploading' && profileReads === 1
+                ? 'UPLOADING'
+                : 'READY',
+        };
+      },
       releaseSession: async (sessionId: string) => {
         if (sessionId !== sourceId) {
           assert(candidates.has(sessionId), 'released unrelated session');
@@ -234,7 +260,11 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
           });
         }
         candidates.set(input.sessionId, 'live');
-        return { id: input.sessionId, debugUrl: 'https://steel.example/debug', profileId };
+        return {
+          id: input.sessionId,
+          debugUrl: 'https://steel.example/debug',
+          profileId,
+        };
       },
       validateConnection: async () => {
         if (publicationChange) {
@@ -255,6 +285,41 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
         return null;
       },
     };
+    for (const mode of ['failed', 'uploading', 'revoked', 'read-failed'] as const) {
+      resetSource();
+      profileMode = mode;
+      profileReads = 0;
+      const beforeCreates = creates;
+      const result = await attempt(dependencies);
+      assert(result instanceof Error, 'deliberate readiness/create control unexpectedly succeeded');
+      if (mode === 'failed') {
+        assert(result.message.includes('failed to persist'), 'FAILED profile was not terminal');
+        assert(
+          profileReads === 1 && creates === beforeCreates,
+          'FAILED profile allocated or retried'
+        );
+      } else if (mode === 'uploading') {
+        assert(profileReads === 5, 'profile readiness lost existing bounded retry');
+        assert(creates === beforeCreates + 4, 'UPLOADING profile allocated a replacement');
+      } else if (mode === 'read-failed') {
+        assert(
+          profileReads === 5 && creates === beforeCreates,
+          'unavailable readiness allocated or lost bounded retry'
+        );
+      } else {
+        assert(creates === beforeCreates, 'revoked readiness owner allocated a replacement');
+        assert(
+          leases.get(leaseKey)?.externalId === 'readiness-successor',
+          'stale owner cleared successor'
+        );
+        leases.delete(leaseKey); // Fixture owns successor; isolate subsequent controls.
+      }
+    }
+    resetSource();
+    profileMode = 'ready';
+    profileReads = 0;
+    releases = 0;
+    creates = 0;
     const failure = await attempt(dependencies);
     assert(releases === 1, 'writable profile was retried while its source session remained live');
     assert(failure instanceof Error && failure.message.includes('503'), 'expected create failure');

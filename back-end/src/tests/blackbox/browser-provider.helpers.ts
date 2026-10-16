@@ -448,7 +448,8 @@ async function assertSteelSameProfileReplacementState(
     steel.sessions.release = (async (id: string) => {
       nodeAssert.strictEqual(id, 'offline-source', 'released unallocated/foreign candidate');
       nodeAssert.strictEqual(row.status, 'PAUSED', 'source release must retain recovery custody');
-      if (inspectReleased) nodeAssert(!ready, 'exact released proof forbids a duplicate native release');
+      if (inspectReleased)
+        nodeAssert(!ready, 'exact released proof forbids a duplicate native release');
       releases++;
       if (ready) throw Object.assign(new Error('already released'), { status: 404 });
       ready = true;

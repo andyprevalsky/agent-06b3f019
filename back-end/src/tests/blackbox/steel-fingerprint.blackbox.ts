@@ -16,7 +16,8 @@ import {
   isInvalidSteelProxyConfiguration,
 } from '../../providers/steel/session';
 import { STEEL_CDP_TIMEOUT_MESSAGE } from '../../providers/steel/sessionConnection';
-import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
+import { recreateSession } from '../../providers/steel/sessionResume';
+import { testSavedUrlNavigationAlwaysClosesBrowser } from './steel-fingerprint.saved-url.behavior';
 import type { FingerprintData } from '../../providers/steel/types';
 import {
   testConnectionErrorRetriesOnReplacement,
@@ -534,36 +535,6 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     if (previousProxyEnabled === undefined) delete process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
     else process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED = previousProxyEnabled;
   }
-}
-
-async function testSavedUrlNavigationAlwaysClosesBrowser(): Promise<void> {
-  let closeCount = 0;
-  const browser = {
-    contexts: () => [
-      {
-        pages: () => [
-          {
-            goto: async () => {
-              throw new Error('navigation timeout');
-            },
-          },
-        ],
-        newPage: async () => {
-          throw new Error('unexpected new page');
-        },
-      },
-    ],
-    close: async () => {
-      closeCount += 1;
-    },
-  };
-
-  await navigateToSavedUrl(
-    'wss://connect.steel.dev?sessionId=session-1',
-    'https://example.com/saved',
-    async () => browser as unknown as import('playwright').Browser
-  );
-  assert(closeCount === 1, `failed saved-URL navigation closed browser ${closeCount} times`);
 }
 
 async function main(): Promise<void> {

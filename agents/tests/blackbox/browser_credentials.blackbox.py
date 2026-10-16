@@ -447,7 +447,7 @@ async def test_navigation_and_state_results_bind_auth_to_observed_destination() 
             "success": True, "url": public_url, "formatted_state": "Sign-in",
         })):
             result = await execute_action(
-                dom, SimpleNamespace(record_action=AsyncMock()),
+                dom, ActionHistory(),
                 {"action": "read_browser_state", "params": {}},
                 auth_context_for_url=auth, secret_refs=refs,
             )

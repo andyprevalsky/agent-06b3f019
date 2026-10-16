@@ -3,7 +3,7 @@
 This validates the model's per-recipient accounting, not site registration or
 semantic truth. It never selects an identity, submits a form, or reads an inbox.
 """
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 import re
 
 
@@ -61,17 +61,47 @@ def _recipient_receipts_bound(recipient: str, steps: list[int], entries: Dict[in
 
 def auth_assistance_assessment_result(
     assessment: Any, *, auth_options: Dict[str, Any], auth_realm: str, current_url: str, action_history: list[dict[str, Any]],
+    model_visible_value: Optional[Callable[[Any], Any]] = None,
+    secret_redaction_refs: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """None permits normal handoff; a tool result returns control to the planner.
 
     The model remains responsible for applicability using the actual task and
     page. Missing metadata is not an assertion that an identity is eligible.
     """
+    # Historical redaction aliases are not execution authority. Stored public
+    # receipts cannot prove which generation of a reused alias they describe.
+    rebound_aliases = set()
+    refs = secret_redaction_refs or {}
+    for ref, prior in refs.items():
+        base = ref
+        while base.endswith(":previous"):
+            base = base[:-len(":previous")]
+        if base != ref and base in refs and refs[base] != prior:
+            rebound_aliases.add("{{secret:" + base + "}}")
     options = auth_recipient_options(auth_options)
+    if model_visible_value is not None:
+        # Match the consumer's public view, retaining native routing privately.
+        raw_bindings = [auth_realm, current_url, *[row["recipient"] for row in options]]
+        public_bindings = [model_visible_value(value) for value in raw_bindings]
+        aliases: Dict[str, str] = {}
+        for raw, public in zip(raw_bindings, public_bindings):
+            if (not isinstance(public, str) or (raw and not public)
+                    or (public in aliases and aliases[public] != raw)):
+                return {"success": False, "error": "authentication_assessment_incomplete",
+                        "reason": "The model-visible authentication bindings are unavailable or ambiguous."}
+            aliases[public] = raw
+        auth_realm, current_url = public_bindings[:2]
+        options = [{"method": row["method"], "recipient": public}
+                   for row, public in zip(options, public_bindings[2:])]
+        # ActionHistory.get_entries() already applies the identical public policy
+        # while preserving trusted protocol fields; do not redact it twice.
     def incomplete(reason: str) -> Dict[str, Any]:
         return {"success": False, "error": "authentication_assessment_incomplete",
                 "reason": reason, "auth_realm": auth_realm, "current_url": current_url,
                 "supplied_recipient_options": options}
+    if any(alias in auth_realm or alias in current_url for alias in rebound_aliases):
+        return incomplete("The current public realm or page binding has ambiguous historical alias provenance.")
     if not isinstance(assessment, dict):
         return incomplete("The assistance call did not include a per-recipient assessment.")
     if assessment.get("auth_realm") != auth_realm or assessment.get("page_url") != current_url:
@@ -89,6 +119,8 @@ def auth_assistance_assessment_result(
         steps = attempt.get("evidence_steps") or []
         if not isinstance(steps, list) or not steps or any(type(step) is not int or step not in entries_by_step for step in steps):
             return incomplete("A past attempt has no valid action receipts.")
+        if isinstance(attempt.get("recipient"), str) and any(alias in attempt["recipient"] for alias in rebound_aliases):
+            return incomplete("A past recipient attempt uses a rebound public alias whose original identity cannot be established.")
         if not _recipient_receipts_bound(attempt.get("recipient"), steps, entries_by_step, method=attempt["method"]):
             return incomplete("A past recipient lacks its cited input and later observation receipts.")
     blocker = assessment.get("blocker")
@@ -116,6 +148,8 @@ def auth_assistance_assessment_result(
         evidence_steps = row.get("evidence_steps") or []
         if not isinstance(evidence_steps, list) or any(type(step) is not int or step not in observed_steps for step in evidence_steps):
             return incomplete("An outcome cites an action receipt that is absent from this browser history.")
+        if row["status"] == "exhausted" and any(alias in row["recipient"] for alias in rebound_aliases):
+            return incomplete("The recipient receipts use a rebound public alias whose original identity cannot be established.")
         if row["status"] == "exhausted" and not _recipient_receipts_bound(row["recipient"], evidence_steps, entries_by_step, method=row["method"]):
             return incomplete("An exhausted recipient option lacks its own input and later observation receipts.")
         if row["status"] == "remaining":
