@@ -11458,8 +11458,17 @@ for path in (registry / 'clones', audit / 'fresh', audit / 'expected-fresh', aud
 for name in ('owned-clones.ids', 'owned-clones.names'):
     assert plain(audit / name) == ''
 pool = audit / 'pool'
-assert pool.resolve(strict=True) == pool and pool.is_dir()
-for path in pool.iterdir():
+if not os.path.lexists(pool):
+    # An aborted preflight may never have created either pool ledger.
+    assert sys.argv[4] and not os.path.lexists(Path(sys.argv[4]))
+    run = Path(meta['runs_root']) / meta['run_id']
+    assert run.resolve(strict=True) == run and run.is_dir()
+    assert all(not os.path.lexists(path / '.cid') for path in run.iterdir())
+    pool_records = ()
+else:
+    assert pool.resolve(strict=True) == pool and pool.is_dir()
+    pool_records = pool.iterdir()
+for path in pool_records:
     row = fields(path); mid = row.get('machine_id', '')
     assert set(row) == {'version', 'fleet_owner_token', 'run_id', 'app', 'source', 'machine_id', 'volume_id', 'pool_ledger_file', 'pool_meta_file', 'pool_meta_sha256', 'disposition'}
     assert row['version'] == '1' and re.fullmatch('vol_[A-Za-z0-9_-]+', row['volume_id'])

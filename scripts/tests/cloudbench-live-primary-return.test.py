@@ -212,6 +212,26 @@ pool_source_image_digest(){ echo image >> "$CASE_DIR/events";return 1; }
     def test_aborted_parent_without_any_claim_or_task_is_noop(self):
         (self.audit/'pool/abcd').unlink();(self.run/'task/.cid').unlink();(self.run/'claimed-pool.ids').unlink()
         r=self.invoke('FLEET_EXECUTION_COMPLETED=0');self.assertEqual(r.returncode,0,r.stderr)
+    def absent_pool_parent(self):
+        (self.audit/'pool/abcd').unlink();(self.audit/'pool').rmdir()
+        (self.run/'task/.cid').unlink();(self.run/'claimed-pool.ids').unlink()
+    def test_actual_aborted_parent_absent_pool_and_claim_ledger_is_noop(self):
+        self.absent_pool_parent();r=self.invoke('FLEET_EXECUTION_COMPLETED=0');self.assertEqual(r.returncode,0,r.stderr)
+    def test_absent_pool_with_claim_ledger_refuses(self):
+        self.absent_pool_parent();(self.run/'claimed-pool.ids').write_text('')
+        self.assertNotEqual(self.invoke().returncode,0)
+    def test_absent_pool_with_task_cid_refuses(self):
+        self.absent_pool_parent();(self.run/'task/.cid').write_text('pool abcd\n')
+        self.assertNotEqual(self.invoke().returncode,0)
+    def test_pool_symlink_is_not_typed_absence(self):
+        self.absent_pool_parent();(self.audit/'pool').symlink_to(self.root/'missing')
+        self.assertNotEqual(self.invoke().returncode,0)
+    def test_pool_regular_file_is_not_typed_absence(self):
+        self.absent_pool_parent();(self.audit/'pool').write_text('')
+        self.assertNotEqual(self.invoke().returncode,0)
+    def test_absent_other_fresh_directory_still_refuses(self):
+        self.absent_pool_parent();(self.audit/'fresh').rmdir()
+        self.assertNotEqual(self.invoke().returncode,0)
     def test_unfinished_borrowed_audit_refuses(self):
         p=self.audit/'pool/abcd';p.write_text(p.read_text().replace('returned-stopped-claim-released','claimed'))
         self.assertNotEqual(self.invoke().returncode,0)

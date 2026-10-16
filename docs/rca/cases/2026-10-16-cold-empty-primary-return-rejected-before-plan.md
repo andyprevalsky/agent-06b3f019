@@ -42,3 +42,11 @@ The user requires existing Machine reuse and idle teardown while preserving all 
 ## Reusable lesson
 
 Prove that a resource cohort is empty before applying an operation-specific prohibition to its no-op cleanup path.
+
+## Aborted-parent typed absence follow-up
+
+Run 51 exposed a second assumption in the empty-cohort guard: it resolved the audit pool directory with strict existence before deciding whether the parent had ever claimed a resource. The captured parent had empty clones, fresh, expected-fresh and by-machine-id directories and empty owned ledgers, but neither an audit pool directory nor a claimed-pool ledger. Its task outputs had no `.cid`. Strict resolution raised FileNotFoundError and incorrectly added a cleanup failure to the preserved preflight failure.
+
+The guard now accepts only that paired absence, checks the physical run directory and absence of child `.cid` records, and continues through the unchanged provenance planner. A present claim ledger, task `.cid`, symlink, regular-file pool path, or missing required fresh directory still refuses. No directories or records are created and no provider operation is introduced. The original child failure and parent outcome remain unchanged. The owning old-source test reproduces the missing-directory exception; the corrected actual plan/STOP/return chain passes without a native call.
+
+Evidence: private `v41-command-eed7836df29c1558`, `v41-command-da325af09dc63281` and `v41-command-76145d057d5de652` packets. Live validation of this follow-up remains pending.
