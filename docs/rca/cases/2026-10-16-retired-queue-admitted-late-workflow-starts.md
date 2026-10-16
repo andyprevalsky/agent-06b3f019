@@ -235,3 +235,34 @@ Final unchanged owning fixtures, with only the two actual runtime owner files so
 Commands run from back-end with DATABASE_URL and DIRECT_URL deliberately disabled at localhost9: `node --import tsx src/tests/unit/{workflow-queue-admission,worker-process-envelope,worker-process-deployment,workflow-replacement-orchestration}.test.ts` (each actual named file separately). No real SQL proof. Actual PostgreSQL fixture requires root-owned DB verification; attempted replacement-state setup against disabled DB is preserved as a noncausal setup failure and not counted.
 
 Root owns final combined qualification, formal review and deployment. Source proposal only; 8940 cleanup decision remains independent.
+
+
+### Composed-source qualification — e62c44b75c229a129dd0316a12731642c318c361
+
+The root integrated the preparation-order and backend/artifact revision repairs
+with the max-steps privacy and recording-capture repairs, preserving main55f.
+The fresh full Test Loop on this exact source passed: 281 backend unit files,
+199 API domains, full backend types/static checks, actual PostgreSQL admission
+and process-recovery fixtures, 110 agent blackbox domains, 184 cache tests,
+134 agent units, 2793 frontend tests (three native skips), 46 deployment gates,
+and five cold seeds with maximum159MB within the unchanged228MB limit. All
+twelve canonical Linux controller commands passed, including505 selected cases.
+Credential health, Amplitude and router failover passed afterward.
+
+Current-source native smoke10/10 and AgentCard4/4 passed, as did semantic UI8/8,
+real E2B and all twenty isolated latency samples. Every native owner joined;
+the exact semantic stack was then retired and its processes, listeners and
+isolated database positively verified absent, with system Postgres preserved.
+This supersedes the proposal-only qualification limit, not the production
+limit: the actual nine-host old-generation pool still denies admission, the
+separate stopped-peer deletion decision is unanswered, and no candidate intent,
+activation marker, queue-pointer change or production cutover is claimed.
+The stopped367 review ledger remains closed with findings; this fresh deploy
+uses its separate bounded ledger.
+
+Strict current-source evidence publication then verified all14 native roots in
+fresh browsers, including correctly attached recordings for every browser part
+and the numerically latest recorded LLM call across each complete sealed tree.
+All three native run bundles remained byte-identical; no recovered supplement
+or benchmark rerun was needed for this source. Recorded task telemetry totals
+36c; provider, browser and infrastructure invoices are not established by it.

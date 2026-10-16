@@ -643,3 +643,26 @@ Earlier privacy reproductions were functionally causal but their offline/isolati
 A subsequent bounded read-only single-page search returned no matches; exact remote object ownership remains unresolved. No object deletion or absence claim is made.
 
 The 26 E701/E702 diagnostics surfaced in the benchmark owning file were repaired by splitting statements; full-file AST equivalence was checked and raw Ruff is rerun on the complete integration batch.
+
+
+### Composed native task verification after both repairs
+
+Exact combined source e62c44b75c229a129dd0316a12731642c318c361 passed the full
+registered agent blackbox/coverage suites, including the corrected upload-isolated
+privacy fixture and recording-episode readiness cases. Current unchanged native
+smoke10/10 and all four AgentCard tasks passed; no prior-source task result is
+credited to this revision. Semantic UI8/8, real E2B and twenty isolated latency
+samples also passed. All exact owned test processes, listeners and isolated
+databases were positively retired afterward. The earlier fixture-upload scope
+erratum and unresolved remote-object attribution remain in force.
+
+The original merchant purchase/auth continuation, credential rotation, actual
+worker activation and production semantic/card verification remain open; these
+local passes do not close that original production outcome.
+
+Strict current-source evidence publication then verified all14 native roots in
+fresh browsers, including correctly attached recordings for every browser part
+and the numerically latest recorded LLM call across each complete sealed tree.
+All three native run bundles remained byte-identical; no recovered supplement
+or benchmark rerun was needed for this source. Recorded task telemetry totals
+36c; provider, browser and infrastructure invoices are not established by it.

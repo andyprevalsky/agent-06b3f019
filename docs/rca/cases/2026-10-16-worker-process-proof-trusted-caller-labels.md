@@ -125,3 +125,15 @@ Final unchanged owning fixtures, with only the two actual runtime owner files so
 Commands run from back-end with DATABASE_URL and DIRECT_URL deliberately disabled at localhost9: `node --import tsx src/tests/unit/{workflow-queue-admission,worker-process-envelope,worker-process-deployment,workflow-replacement-orchestration}.test.ts` (each actual named file separately). No real SQL proof. Actual PostgreSQL fixture requires root-owned DB verification; attempted replacement-state setup against disabled DB is preserved as a noncausal setup failure and not counted.
 
 Root owns final combined qualification, formal review and deployment. Source proposal only; 8940 cleanup decision remains independent.
+
+
+### Composed verification of backend revision independence
+
+The complete e62c44b75c229a129dd0316a12731642c318c361 Test Loop passed the normal
+backend unit/blackbox and actual PostgreSQL recovery owners after the d34 fixes.
+The retained immutable worker artifact remains independent of a later valid
+backend revision; source/service/database/custody checks and native execution
+identity requirements remain enforced. This is actual local integration proof,
+not an independent production backend recovery certificate or eight-process
+activation result. Production qualification and the explicit stopped-peer
+disposition remain open.
