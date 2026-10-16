@@ -56,6 +56,21 @@ teardown defect is established by these fixture errors.
 
 ## Solution
 
+### 2026-10-16: worker claim fixtures omitted the new explicit-idle helper
+
+The existing worker terminal family passed 27 cases and failed three after the
+new claim dispatcher was added. Its extracted shell omitted
+`claim_explicit_idle_worker`, yielding `command not found`; the minimal empty
+inventory fixture also lacked the current owner/dependency context. The real
+CLI supplies both before reaching this boundary.
+
+Include the actual new helper in both extracted call graphs and bind the
+existing caller's owner and dependency fields in the minimal fixture. Preserve
+the no-create, exclusive claim, return and interrupted-release assertions. The
+same three cases failed with the original fixture, then passed five unchanged
+runs; the full 30-case family passed. Production files were unchanged by this
+fixture repair. Logs are retained in `.context/worker-fixture-closure`.
+
 Publish explicit started, CMD-only source Machine JSON through the actual
 `cloudbench-machine-readiness.py --publish-index` helper. Extract the production
 inventory health, record-path and field readers alongside the real cloner.

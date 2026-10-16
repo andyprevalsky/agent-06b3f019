@@ -216,8 +216,12 @@ def test_worker_absent_inventory_never_creates(tmp_path):
     from benchmarks.cloudbench_dependency_sync_test import FLEET_SCRIPT, _extract_fleet_function
     source = FLEET_SCRIPT.read_text()
     functions = '\n'.join(_extract_fleet_function(source, n + '() {') for n in
-                          ('claim_reusable_worker', 'machine_creation_admission', 'provision_worker'))
-    script = 'set -uo pipefail\nROOT_DIR="$1"\n' + functions + '\nprovision_worker task workspace deadbeef000002 fdaa::2 0 "$1" new-owner-0\n'
+                          ('claim_explicit_idle_worker', 'claim_reusable_worker', 'machine_creation_admission', 'provision_worker'))
+    script = ('set -uo pipefail\nROOT_DIR="$1"\n'
+              'FLEET_OWNER_TOKEN=11111111111111111111111111111111\n'
+              'CURRENT_NODE_FP=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
+              'CURRENT_PY_FP=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n'
+              + functions + '\nprovision_worker task workspace deadbeef000002 fdaa::2 0 "$1" new-owner-0\n')
     result = subprocess.run(['bash', '-c', script, 'missing', str(tmp_path)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 1
     assert 'No eligible existing worker path' in (tmp_path / 'autoscaler.failed').read_text()
@@ -238,7 +242,7 @@ def test_worker_claim_executes_shared_exclusive_claim_fsm(tmp_path, monkeypatch,
     source = FLEET_SCRIPT.read_text()
     functions = '\n'.join(_extract_fleet_function(source, n + '() {') for n in
         ('pool_claim_fs_transaction', 'write_pool_claim', 'worker_ledger_lock_acquire',
-         'worker_ledger_lock_release', 'claim_reusable_worker', 'cloudbench_record_worker_evidence_owner',
+         'worker_ledger_lock_release', 'claim_explicit_idle_worker', 'claim_reusable_worker', 'cloudbench_record_worker_evidence_owner',
              'cloudbench_preserve_unlaunched_worker', 'return_reusable_worker', 'pool_claim_release_exact',
              'cloudbench_fsync_directory', 'cloudbench_validate_worker_evidence_coverage'))
     script = '''set -uo pipefail
