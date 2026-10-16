@@ -16052,6 +16052,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         }
     fi
     [ -z "$wid" ] || borrowed_worker=1
+    if [ "$borrowed_worker" = 0 ] && [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
+        # A known empty/busy pool is capacity backpressure. The autoscaler's
+        # existing 75 path retries on its normal poll within the child deadline.
+        # Ambiguous claims returned above and remain failures with their holds.
+        return 75
+    fi
     if [ "$borrowed_worker" = 0 ] && ! machine_creation_admission "$out/worker-clones.ids"; then
         printf '%s\n' "No eligible existing worker path; new Machine allocation withheld" > "$out/autoscaler.failed"
         return 1

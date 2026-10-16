@@ -85,6 +85,26 @@ newly invented admission authority.
 
 ## Human feedback
 
+### Later current-custody reuse and bounded pool waits
+
+Explicit current-user admission now has its own origin, immutable preservation
+snapshot and exclusive shared primary/worker claim. It does not manufacture an
+old worker allocation. Worker staging changes only the requested Machine's
+shape in one version-fenced update, then verifies a stopped native pair before
+the existing launch. Current runtime capture, strict idle verification and a
+stopped pair precede exact claim release.
+
+The empty-pool boundary initially still failed immediately under reuse-only.
+An owning reproduction returned 1 and wrote `autoscaler.failed`; the same test
+now returns the autoscaler's existing capacity-wait status 75 without creating
+a Machine or a failure marker. Only an unambiguous pool miss takes this path.
+Claim/proof failures still retain their original errors and holds. The existing
+normal poll and original child deadline bound waiting; neither changes.
+
+The new pool-miss case passed five unchanged runs, and the complete 31-case
+worker terminal family passed. These controls establish local behavior only;
+live worker reuse and the original REAL600 outcome remain separate gates.
+
 Reuse Machines; never create blindly or increase quotas. Preserve all data,
 original evidence, warm resources and Freedom. Unknown state stays quarantined.
 Do not deploy; the parent owns real observations and final qualification.
