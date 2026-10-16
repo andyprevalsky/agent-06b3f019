@@ -91,6 +91,7 @@ export interface RuntimeHostFacts {
   primary?: { pid: number; birthTicks: string; buildId: string; healthy: boolean; phase: string };
 }
 export interface WorkerProcessTransport {
+  listMachines(app: string): Promise<unknown[]>;
   getMachine(app: string, id: string): Promise<NativeWorkerHost>;
   readFacts(app: string, id: string): Promise<RuntimeHostFacts>;
   execBootstrap(
@@ -337,7 +338,72 @@ function validateReceipt(
   }
 }
 
-/** Native calls are limited to GET exact IDs and authenticated process status/ensure. */
+/** Match OLD6ef's full-app surface selector, including stopped/created peers. */
+function requireSafeOldAutoscalerPool(plan: WorkerProcessPlan, machines: unknown[]): void {
+  const prefix = `${plan.artifact.baseTaskQueue}@`;
+  requireValue(plan.previousQueue.startsWith(prefix), 'Original worker surface is unknown');
+  const surface = plan.previousQueue.slice(prefix.length);
+  requireValue(
+    surface.length > 0 && surface === surface.trim(),
+    'Original worker surface is unknown'
+  );
+  requireValue(Array.isArray(machines), 'Original worker pool is not a complete native list');
+  const expected = new Set(plan.hosts.map((host) => host.id));
+  const seen = new Set<string>();
+  const cohort = new Set<string>();
+  for (const item of machines) {
+    requireValue(
+      item !== null && typeof item === 'object' && !Array.isArray(item),
+      'Original worker pool contains an unknown entry'
+    );
+    const machine = item as { id?: unknown; state?: unknown; config?: { env?: unknown } };
+    requireValue(
+      typeof machine.id === 'string' && /^[a-f0-9]{14}$/.test(machine.id) && !seen.has(machine.id),
+      'Original worker pool has missing or duplicate identities'
+    );
+    seen.add(machine.id);
+    requireValue(
+      machine.config !== null &&
+        typeof machine.config === 'object' &&
+        !Array.isArray(machine.config),
+      'Original worker native config is unknown'
+    );
+    const env = machine.config.env ?? {};
+    requireValue(
+      typeof env === 'object' && env !== null && !Array.isArray(env),
+      'Original worker native environment is unknown'
+    );
+    const values = env as Record<string, unknown>;
+    const hash = values.TEMPORAL_WORKER_SURFACE_HASH ?? '';
+    requireValue(typeof hash === 'string', 'Original worker native surface is unknown');
+    if (hash.trim() !== surface) continue;
+    requireValue(
+      expected.has(machine.id),
+      'Original autoscaler pool includes an unplanned Machine'
+    );
+    requireValue(
+      workerSHA256(canonicalWorkerJSON(machine.config)) ===
+        plan.hosts.find((host) => host.id === machine.id)!.configSHA256,
+      'Original autoscaler config differs from retained host custody'
+    );
+    requireValue(machine.state === 'started', 'Original autoscaler host is not running');
+    const floor = values.MIN_MACHINES;
+    requireValue(
+      typeof floor === 'string' &&
+        /^\+?\d+$/.test(floor.trim()) &&
+        Number.isSafeInteger(Number(floor)) &&
+        Number(floor) >= 8,
+      'Original autoscaler minimum does not protect all eight shared hosts'
+    );
+    cohort.add(machine.id);
+  }
+  requireValue(
+    cohort.size === expected.size,
+    'Original autoscaler pool does not match all eight planned hosts'
+  );
+}
+
+/** Only native GET observations and authenticated process status/ensure are allowed. */
 export async function reconcileWorkerProcesses(
   plan: WorkerProcessPlan,
   transport: WorkerProcessTransport,
@@ -345,6 +411,18 @@ export async function reconcileWorkerProcesses(
   assertOwned: () => Promise<void>
 ): Promise<HostProcessObservation[]> {
   validateWorkerProcessPlan(plan);
+  try {
+    await assertOwned();
+    requireSafeOldAutoscalerPool(plan, await transport.listMachines(plan.app));
+    await assertOwned();
+  } catch (error) {
+    return plan.hosts.map((host) => ({
+      id: host.id,
+      observedAt: Date.now(),
+      phase: 'UNKNOWN',
+      reason: error instanceof Error ? error.message : 'Original autoscaler pool is unknown',
+    }));
+  }
   const rows: HostProcessObservation[] = [];
   for (const expected of plan.hosts) {
     try {

@@ -97,6 +97,14 @@ export function createWorkerProcessTransport(
     }
   };
   return {
+    async listMachines(app) {
+      if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(app))
+        throw new Error('Invalid exact existing Machine app');
+      const machines = await request(`https://api.machines.dev/v1/apps/${app}/machines`);
+      if (!Array.isArray(machines))
+        throw new Error('Existing Machine pool is not a complete native list');
+      return machines;
+    },
     async getMachine(app, id) {
       const raw = (await request(exactURL(app, id))) as NativeWorkerHost & {
         instance_id?: unknown;

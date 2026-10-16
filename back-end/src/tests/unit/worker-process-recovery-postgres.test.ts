@@ -42,7 +42,14 @@ async function main() {
   const originalEnvironment = Object.fromEntries(guardedKeys.map((key) => [key, process.env[key]]));
   const source = 'a'.repeat(40),
     digest = 'b'.repeat(64);
-  const config = { image: 'old', env: { TEMPORAL_WORKER_BUILD_ID: 'old' } };
+  const config = {
+    image: 'old',
+    env: {
+      TEMPORAL_WORKER_BUILD_ID: 'old',
+      TEMPORAL_WORKER_SURFACE_HASH: 'old',
+      MIN_MACHINES: '8',
+    },
+  };
   const plan: WorkerProcessPlan = {
     version: 1,
     app: 'owned-production-app',
@@ -103,6 +110,14 @@ async function main() {
     nativeCalls = 0;
   const bootId = randomUUID();
   const transport: WorkerProcessTransport = {
+    async listMachines() {
+      return plan.hosts.map((host) => ({
+        id: host.id,
+        instance_id: 'old-version',
+        state: 'started',
+        config,
+      }));
+    },
     async getMachine(_app, id) {
       nativeCalls++;
       return {

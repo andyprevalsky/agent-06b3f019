@@ -25,11 +25,13 @@ import {
 import { createWorkerProcessTransport } from '../../providers/workerProcessTransport';
 import { setCurrentAgentQueue } from '../../providers/agentQueuePointer';
 import { prisma } from '../../providers/database';
-import { fixture, config } from './worker-process-test-fixtures';
+import { fixture, config, registerOldPoolCohortTests } from './worker-process-test-fixtures';
 import { requireCandidateRuntimeValidation } from '../../../scripts/deploy-existing-worker-processes';
 
 const { test, finish } = createTestHarness('existing worker process deployment');
+
 async function main() {
+  await registerOldPoolCohortTests(test);
   await test('eight exact standby runtimes are distinct from unchanged native image identity', async () => {
     const f = fixture();
     const before = structuredClone(config);
@@ -220,7 +222,7 @@ async function main() {
     assert.equal(releases, 1);
     assert.equal(f.calls.length, 0);
   });
-  await test('native transport exposes only exact-ID GET and bounded exec, never allocation or Machine controls', async () => {
+  await test('native exact-ID observations and bounded exec never allocate or control Machines', async () => {
     const calls: { url: string; method: string; body: unknown }[] = [];
     const transport = createWorkerProcessTransport(
       'private-test-key',
@@ -269,6 +271,8 @@ async function main() {
     const transport = createWorkerProcessTransport(
       'private-test-key',
       (async (url, options) => {
+        if (String(url).endsWith('/machines'))
+          return new Response(JSON.stringify(await f.transport.listMachines(f.plan.app)));
         const id = String(url).split('/machines/')[1].split('/')[0];
         if (options?.method === 'GET') {
           const { version, ...machine } = await f.transport.getMachine(f.plan.app, id);
