@@ -521,3 +521,5 @@ require_file "$ROOT/back-end/src/domains/agent-queue-pointer/routes.ts" \
 # fresh provisioning, transient Machines API update failures).
 bash "$ROOT/scripts/tests/deploy-agent-clone-recovery.test.sh" ||
   fail "cooperative cutover must recover clones and retry transient Fly machine-update failures"
+python3 "$ROOT/scripts/tests/retained-agent-machine.test.py" ||
+  fail "retained worker reuse must preserve native ownership, custody, config and leases"
