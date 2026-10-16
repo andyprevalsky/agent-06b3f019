@@ -5,7 +5,7 @@ title: Exact older platform hallpass digest blocked idle STOP probe
 surface: infra
 component: cloudbench-billing-stop
 classification: our-bug
-problem_class: incomplete-authenticated-platform-version-set
+problem_class: fixture-environment-data-mismatch
 first_bad_boundary: hallpass_identity rejected the exact measured platform binary digest
 symptoms:
   - assert not unknown and allowed_sleep
