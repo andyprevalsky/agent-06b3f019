@@ -297,6 +297,34 @@ def stress_default_environment(requirements: dict[str, object], environment: dic
     return result
 
 
+def cleanup_ticket_module(root: Path) -> ModuleType:
+    """Bind and execute the exact immutable helper once in the campaign parent."""
+    cached = getattr(cleanup_ticket_module, "_checked", None)
+    if cached is not None:
+        if cached[0] != root:
+            raise ValueError("cleanup ticket control root changed")
+        return cached[1]
+    helper = root / "scripts/cloudbench-cleanup-tickets.py"
+    ref = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    checked = subprocess.check_output(["git", "-C", str(root), "show", ref + ":scripts/cloudbench-cleanup-tickets.py"])
+    if helper.read_bytes() != checked:
+        raise ValueError("cleanup ticket interpreter differs from immutable controller source")
+    module = ModuleType("cleanup_parent_identity")
+    module.__file__ = str(helper)
+    exec(compile(checked, str(helper), "exec"), module.__dict__)
+    cleanup_ticket_module._checked = (root, module)
+    return module
+
+
+def cleanup_ticket_command(root: Path, action: str, cohort: dict[str, object],
+                           *arguments: str) -> object:
+    """Cohort-wide work runs once; assigning one selected job is constant-size."""
+    module = cleanup_ticket_module(root)
+    args = module.parse([action, "--cohort", str(cohort["_directory"]),
+                         "--cohort-id", str(cohort["cohort_id"]), *map(str, arguments)])
+    return getattr(module, action)(args)
+
+
 def stress_inventory_baseline(root: Path, authority: str) -> tuple[int, list[dict[str, object]] | None]:
     """Borrow the exact parent feed with existing checks; temporary absence never fans out."""
     expected = json.loads(authority)
@@ -486,7 +514,7 @@ def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -
     source_ref = subprocess.check_output(["git", "-C", str(source_root), "rev-parse", "HEAD"], text=True).strip()
     hashes = {}
     checked = {}
-    for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "run-bench-campaign.py", "cloudbench-port-lease.py", "lib/cloudbench-env.sh"):
+    for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "run-bench-campaign.py", "cloudbench-port-lease.py", "cloudbench-cleanup-tickets.py", "lib/cloudbench-env.sh"):
         bound = subprocess.check_output(["git", "-C", str(source_root), "show", source_ref + ":scripts/" + name])
         if (source_root / "scripts" / name).read_bytes() != bound:
             raise ValueError("mutation authority differs from immutable controller source")
@@ -716,6 +744,8 @@ def main() -> int:
         "--strict-barrier" in args.forward_arg
         or os.environ.get("CLOUDBENCH_STRICT_BARRIER") == "1"
     )
+    cleanup_identity_module = cleanup_ticket_module(root) if strict_start else None
+    cleanup_parent_birth = cleanup_identity_module.birth(os.getpid()) if strict_start else ""
     cohorts: list[dict[str, object]] = []
     parent_lock = None
     if strict_start:
@@ -1017,9 +1047,31 @@ def main() -> int:
                     first_failure = first_failure or 1
                     state["stress_defaults_failed"] = True
                     write_json_atomic(summary_path, state)
+            if strict_start and not active and current_cohort and current_cohort.get("_cleanup_tickets_prepared") and not current_cohort.get("_cleanup_tickets_retired") and all(member["status"] not in {"queued", "running"} for member in current_cohort["_jobs"]):
+                try:
+                    cleanup_ticket_command(root, "retire", current_cohort)
+                    current_cohort["_cleanup_tickets_retired"] = True
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    first_failure = first_failure or 1
+                    current_cohort["cleanup_budget_retirement_pending"] = True
             if strict_start and not active and not barrier_failure and not (pending and pending[0].get("_independent_retry")):
                 current_cohort = pending[0]["_cohort"] if pending else None
                 if current_cohort:
+                    if not current_cohort.get("_cleanup_tickets_prepared"):
+                        common = subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()
+                        reserve_root = Path(common) / "cloudbench-fleet-ownership"
+                        reserve_root.mkdir(mode=0o700, exist_ok=True)
+                        policy = stress_environment if stress_environment is not None else os.environ
+                        cleanup_ticket_command(root, "prepare", current_cohort,
+                            "--manifest", str(current_cohort["_directory"] / "manifest.json"),
+                            "--reserve-root", str(reserve_root),
+                            "--parent-pid", str(os.getpid()), "--parent-start", cleanup_parent_birth,
+                            "--preferred", policy.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512"),
+                            "--minimum", policy.get("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "32"),
+                            "--headroom", policy.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256"),
+                            "--canary-script", str(root / "scripts/cloudbench-infra-canary-preflight.py"),
+                            "--canary-lock", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock"))
+                        current_cohort["_cleanup_tickets_prepared"] = True
                     current_cohort["status"] = "waiting"
                     if inventory_directory is not None:
                         try:
@@ -1084,6 +1136,7 @@ def main() -> int:
                                 "Campaign canonical fixture preflight failed; no cohort controller admitted"
                             )
                         write_json_atomic(summary_path, state)
+            launched_this_round = False
             while (
                 pending
                 and len(active) < args.concurrency
@@ -1093,6 +1146,7 @@ def main() -> int:
                 and (not strict_start or pending[0].get("_independent_retry") or pending[0]["_cohort"] is current_cohort)
             ):
                 job = pending.popleft()
+                launched_this_round = True
                 environment = dict(stress_environment) if stress_environment is not None else os.environ.copy()
                 # Group membership is distinct from publication ownership. Each
                 # child still registers, publishes and acknowledges its own run;
@@ -1149,6 +1203,11 @@ def main() -> int:
                     environment.pop("RUN_BENCH_CAMPAIGN_BARRIER_DIR", None)
                     environment.pop("RUN_BENCH_CAMPAIGN_COHORT", None)
                     environment.pop("RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC", None)
+                if strict_start:
+                    environment["RUN_BENCH_CLEANUP_COHORT_DIR"] = str(job["_cohort"]["_directory"])
+                    environment["RUN_BENCH_CLEANUP_COHORT_ID"] = str(job["_cohort"]["cohort_id"])
+                    environment["RUN_BENCH_CLEANUP_JOB"] = str(job["job_id"])
+                    environment["RUN_BENCH_CLEANUP_GENERATION"] = str(job.get("attempt", 1))
                 command = [
                     "bash",
                     str(root / "scripts" / "run-bench"),
@@ -1172,20 +1231,30 @@ def main() -> int:
                 job["started_at"] = utc_now()
                 job["status"] = "running"
                 active[process.pid] = job
+                if strict_start:
+                    cleanup_ticket_command(root, "assign", job["_cohort"],
+                        "--job", str(job["job_id"]), "--owner-pid", str(process.pid),
+                        "--owner-start", cleanup_identity_module.birth(process.pid),
+                        "--generation", str(job.get("attempt", 1)))
                 if strict_start and not job.get("_independent_retry"):
                     current_cohort["_manifest"]["jobs"][str(job["job_id"])] = (
                         process.pid
                     )
-                    write_json_atomic(
-                        current_cohort["_directory"] / "manifest.json",
-                        current_cohort["_manifest"],
-                    )
+                    # Keyed owner tickets authorize children immediately. Seal
+                    # the complete barrier PID projection once after dispatch,
+                    # rather than rewrite N-member JSON for every new child.
                 state["peak_concurrency"] = max(
                     int(state["peak_concurrency"]), len(active)
                 )
                 print(
                     f"▶ {job['job_id']} task={job['task']} run={job['run']} pid={process.pid}"
                 )
+                # Dispatch does not wait for admission/allocation. Publish the
+                # aggregate projection once after this natural launch loop.
+
+            if launched_this_round:
+                if strict_start and current_cohort and current_cohort.get("_cleanup_tickets_prepared"):
+                    write_json_atomic(current_cohort["_directory"] / "manifest.json", current_cohort["_manifest"])
                 write_json_atomic(summary_path, state)
 
             if stop_signal and not termination_requested:
@@ -1313,6 +1382,14 @@ def main() -> int:
             ):
                 first_failure = first_failure or 1
                 state["shared_inventory_failed"] = True
+        for cohort in cohorts:
+            if cohort.get("_cleanup_tickets_prepared") and not cohort.get("_cleanup_tickets_retired"):
+                try:
+                    cleanup_ticket_command(root, "retire", cohort)
+                    cohort["_cleanup_tickets_retired"] = True
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    first_failure = first_failure or 1
+                    cohort["cleanup_budget_retirement_pending"] = True
         if parent_lock is not None:
             parent_lock.close()
 

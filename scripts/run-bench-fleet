@@ -757,6 +757,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-retained-controller-endpoint.py" \
        "$ROOT_DIR/scripts/cloudbench-original-volume-capture.py" \
        "$ROOT_DIR/scripts/cloudbench-disposable-volume.py" \
+       "$ROOT_DIR/scripts/cloudbench-cleanup-tickets.py" \
        "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
@@ -6158,6 +6159,19 @@ release_registry_recovery_lock() {
 }
 
 reserve_cleanup_disk_space() {
+    if [ -n "${RUN_BENCH_CLEANUP_COHORT_DIR:-}" ]; then
+        local ticket_amount ticket_job="${RUN_BENCH_CLEANUP_JOB:-${RUN_BENCH_CAMPAIGN_JOB_ID:-}}"
+        local -a ticket_nested=() ticket_deadline=()
+        [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" != 1 ] || ticket_nested=(--nested)
+        [ -z "${RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC:-}" ] || ticket_deadline=(--deadline "$RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC")
+        ticket_amount="$(python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-cleanup-tickets.py" claim \
+            --cohort "$RUN_BENCH_CLEANUP_COHORT_DIR" --cohort-id "$RUN_BENCH_CLEANUP_COHORT_ID" \
+            --job "$ticket_job" --generation "${RUN_BENCH_CLEANUP_GENERATION:-1}" \
+            --reserve "$CLEANUP_DISK_RESERVE_FILE" --owner-pid "$$" --owner-start "$FLEET_OWNER_PID_START" \
+            "${ticket_nested[@]}" "${ticket_deadline[@]}")" || return 1
+        case "$ticket_amount" in ''|*[!0-9]*|0) return 1 ;; esac
+        return 0
+    fi
     # Short filesystem transactions debit and commit the sealed cohort budget;
     # physical allocation runs concurrently outside the accounting lock. Defaults
     # and storage floors stay unchanged; the finalizer releases exact owner files.
@@ -6178,7 +6192,8 @@ reserve_cleanup_disk_space() {
         "${RUN_BENCH_CAMPAIGN_JOB_ID:-}" \
         "${RUN_BENCH_CAMPAIGN_COHORT:-}" "$$" \
         "${INFRA_CANARY_PREFLIGHT_SCRIPT:-}" \
-        "${FLEET_INFRA_CANARY_LOCK:-${ROOT_DIR:-}/.context/fleet-infra-canary-preflight.transaction.lock}" <<'PY'
+        "${FLEET_INFRA_CANARY_LOCK:-${ROOT_DIR:-}/.context/fleet-infra-canary-preflight.transaction.lock}" \
+        "${CLOUDBENCH_SCRIPT_SNAPSHOT:-${ROOT_DIR:-}/scripts}/cloudbench-cleanup-tickets.py" <<'PY'
 import errno
 import fcntl
 import hashlib
@@ -6197,7 +6212,8 @@ import time
 path = Path(sys.argv[1]).absolute()
 preferred, headroom, minimum = map(int, sys.argv[2:5])
 cohort_path, job, cohort_id, owner_pid = sys.argv[5:9]
-canary_script, canary_lock = (sys.argv[9:11] if len(sys.argv) == 11 else ("", ""))
+canary_script, canary_lock = (sys.argv[9:11] if len(sys.argv) >= 11 else ("", ""))
+ticket_helper = sys.argv[11] if len(sys.argv) >= 12 else ""
 owner_pid = int(owner_pid)
 MB = 1048576
 opened_reserve = None
@@ -6775,7 +6791,16 @@ try:
             # Credit only blocks already observed on exact pending inodes, then
             # sample free space. No artificial wave waits for ledger commits.
             outstanding = remaining_debit_mb(inflight)
-            physical_available = free_mb() - floor
+            ticket_bytes = 0
+            if (root / "ticket-grants").exists():
+                import types
+                ticket_path = Path(ticket_helper)
+                regular(ticket_path)
+                ticket_module = types.ModuleType("cleanup_ticket_cold_accounting")
+                ticket_module.__file__ = str(ticket_path)
+                exec(compile(ticket_path.read_bytes(), str(ticket_path), "exec"), ticket_module.__dict__)
+                ticket_bytes = ticket_module.cold_grant_liability(root)
+            physical_available = free_mb() - floor - (ticket_bytes + MB - 1) // MB
             available = physical_available - outstanding
             if available < needed or pending < 1:
                 if inflight and pending >= 1 and physical_available >= needed:
@@ -6882,6 +6907,10 @@ PY
 release_cleanup_disk_reserve() {  # [exact reserve path for a proven-dead registry]
     local reserve_file="${1:-${CLEANUP_DISK_RESERVE_FILE:-}}"
     [ -n "$reserve_file" ] || return 0
+    if [ -e "$reserve_file.ticket.json" ] || [ -L "$reserve_file.ticket.json" ]; then
+        python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-cleanup-tickets.py" release --reserve "$reserve_file"
+        return $?
+    fi
     rm -f "$reserve_file" 2>/dev/null || return 1
 }
 
