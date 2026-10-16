@@ -102,6 +102,22 @@ The same registered Postgres owner failed before and passed after the setup
 correction, using an explicitly bound isolated local database. Full integration
 and the native bootstrap qualifications above remain required.
 
+The subsequent complete agent run at
+`db99e0f616848a0a65fe5aedc3a62264158c9af2` passed all 110 blackbox domains and
+184 cache tests, then reported 132 passing and two failing unit tests. The
+pointer activity's old unit fixtures supplied HTTP and configuration doubles
+but no Temporal activity context. The SDK correctly raised
+`Not in activity context` at `activity.info()` before the expected payload
+assertions. Production still requires that native workflow/run identity.
+
+Only the two fixtures were corrected to supply the activity identity and check
+both outbound identity headers. Their original successful-payload, missing-key,
+and missing-queue assertions remain intact. The same two registered tests then
+passed, followed by all 134 agent unit tests in 48.81 seconds. The retained
+artifact is `.context/lantern-pointer-fixture-db99/.context/pointer-fixture-rca/`.
+These focused results do not turn either earlier full coverage command green;
+complete coverage on the final composed source remains required.
+
 ## Reusable lesson
 
 Qualify every way work can enter a new queue before allowing that queue to retire,
