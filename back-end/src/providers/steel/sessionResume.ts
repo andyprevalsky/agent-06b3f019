@@ -82,6 +82,8 @@ class ConcurrentSessionReplacementError extends Error {
   }
 }
 
+class SteelProfileFailedError extends Error {}
+
 async function proxyLocationForAgent(agentId: string | null): Promise<ProxyGeoLocation> {
   if (!hasValue(agentId)) return DEFAULT_GEOLOCATION;
 
@@ -159,6 +161,7 @@ export interface SteelSessionReplacementDependencies {
   /** Resolves null when the session accepts CDP, otherwise the failure reason. */
   validateConnection: (wsUrl: string, sessionId: string) => Promise<string | null>;
   releaseSession?: (sessionId: string) => Promise<void>;
+  retrieveProfile?: (profileId: string) => Promise<{ status: string }>;
 }
 
 const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
@@ -240,6 +243,24 @@ export async function recreateSession(
       let committed = false;
       let attemptCdpTimedOut = false;
       try {
+        if (handoffLease !== null && boundProfile !== undefined) {
+          const profile = await (
+            dependencies.retrieveProfile ??
+            ((id: string) =>
+              steel.get<unknown, { status: string }>(`/v1/profiles/${encodeURIComponent(id)}`))
+          )(boundProfile.profileId);
+          if (profile.status === 'FAILED') {
+            throw new SteelProfileFailedError(
+              `Steel profile ${boundProfile.profileId} failed to persist`
+            );
+          }
+          if (profile.status !== 'READY') {
+            throw new Error(
+              `Steel profile ${boundProfile.profileId} is not ready (${profile.status})`
+            );
+          }
+          await handoffLease.assertOwned();
+        }
         const proxySettings = buildSteelProxySettings(
           proxyGeo,
           dropProxyCity,
@@ -367,6 +388,7 @@ export async function recreateSession(
         }
         await handoffLease?.assertOwned();
         if (error instanceof ConcurrentSessionReplacementError) throw error;
+        if (error instanceof SteelProfileFailedError) throw error;
 
         const status =
           (error as Record<string, unknown>)?.status ??

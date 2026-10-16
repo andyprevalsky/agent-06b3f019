@@ -161,6 +161,7 @@ export async function getBenchmarkArchivedTree(busId: string) {
 interface AgentDetailOptions {
   userId?: string;
   since?: Date;
+  browserToolCallId?: string;
   allowBenchmarkArchive?: boolean;
   inspectionViewerUserId?: string;
 }
@@ -199,7 +200,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
   }
 
   const [messages, parentGoal, toolUsages, inspectionContext] = await Promise.all([
-    repo.findMessages(agentId, options.since),
+    repo.findMessages(agentId, options.since, options.browserToolCallId),
     agent.parentAgentId === null ? Promise.resolve(null) : repo.findParentGoal(agent.parentAgentId),
     repo.findToolUsages(agentId),
     getInspectionContext(agent.userId, options.inspectionViewerUserId),

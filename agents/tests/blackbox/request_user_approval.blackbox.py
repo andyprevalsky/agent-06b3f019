@@ -66,6 +66,9 @@ async def test_create_approval_boundary():
     assert body["question"] == "Approve this action?"
     assert body["imageUrl"] == "https://example.com/screenshot.png"
     assert body["metadata"]["writePermission"] is True
+    headers = {key.lower(): value for key, value in call["requestHeaders"].items()}
+    assert headers.get("x-api-key")
+    assert headers.get("x-user-id") == body["userId"]
 
 
 async def test_create_approval_minimal_params():

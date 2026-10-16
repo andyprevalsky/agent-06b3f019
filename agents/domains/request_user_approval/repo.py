@@ -63,6 +63,10 @@ async def create_approval_request_activity(
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{backend_url}/api/attention-requests",
+                headers={
+                    "X-API-Key": config.backend.api_key or "",
+                    "X-User-Id": user_id,
+                },
                 json=payload,
                 timeout=CREATE_REQUEST_TIMEOUT_SECONDS,
             )

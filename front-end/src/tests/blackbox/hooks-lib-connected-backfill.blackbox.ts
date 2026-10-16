@@ -43,13 +43,13 @@ describe('connected completion backfill', () => {
   ])(
     'recovers a missed browser terminal after completed chat: $startDelayMs ms, transient failure=$failFirstRead',
     async ({ startDelayMs, failFirstRead }) => {
-      const user = {
+      const user: Message = {
         message_id: 'user',
         timestamp: '2026-10-13T00:00:00Z',
         text: 'hello',
         role: 'USER',
       };
-      const answer = {
+      const answer: Message = {
         message_id: 'answer',
         timestamp: '2026-10-13T00:00:01Z',
         text: 'done',
@@ -155,7 +155,7 @@ describe('connected completion backfill', () => {
     server.use(
       http.get(`${API_BASE}/agents/agent-1`, () => {
         calls += 1;
-        const messages: Array<Record<string, unknown>> = [
+        const messages: Message[] = [
           { message_id: 'user', timestamp: '1', text: 'search', role: 'USER' },
           {
             message_id: 'search',
@@ -204,7 +204,7 @@ describe('connected completion backfill', () => {
     server.use(
       http.get(`${API_BASE}/agents/agent-1`, () => {
         calls += 1;
-        const messages: Array<Record<string, unknown>> = [
+        const messages: Message[] = [
           { message_id: 'user', timestamp: '1', text: 'search', role: 'USER' },
         ];
         if (calls >= 10) {
@@ -251,7 +251,7 @@ describe('connected completion backfill', () => {
     server.use(
       http.get(`${API_BASE}/agents/agent-1`, () => {
         calls += 1;
-        const messages: Array<Record<string, unknown>> = [
+        const messages: Message[] = [
           { message_id: 'old-user', timestamp: '1', text: 'old', role: 'USER' },
           {
             message_id: 'old-error',
@@ -392,7 +392,7 @@ describe('connected completion backfill', () => {
       server.use(
         http.get(`${API_BASE}/agents/agent-1`, async () => {
           if (phase === 'pending') await new Promise((resolve) => setTimeout(resolve, 65));
-          const messages: Array<Record<string, unknown>> = [
+          const messages: Message[] = [
             { message_id: 'old-user', timestamp: '1', text: 'old', role: 'USER' },
             {
               message_id: 'old-answer',

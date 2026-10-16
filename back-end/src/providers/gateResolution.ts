@@ -15,6 +15,10 @@ import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
 import { findDeploymentFencedToolMessage } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
+import {
+  broadcastAttentionUserMessages,
+  persistAttentionUserMessages,
+} from './attentionUserMessages';
 
 const log = createLogger('GateResolution');
 const errMsg = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -52,14 +56,15 @@ export async function signalWorkflow(
   workflowId: string,
   agentId: string,
   requestId: string,
-  response: string
+  response: string,
+  userMessage: string | null = null
 ): Promise<void> {
   try {
     const client = await getTemporalClient();
     const handle = client.workflow.getHandle(workflowId);
     await handle.signal(
       'receive_user_response',
-      JSON.stringify({ request_id: requestId, response })
+      JSON.stringify({ request_id: requestId, response, user_message: userMessage })
     );
   } catch (error) {
     log.error('Failed to signal workflow', {
@@ -71,14 +76,22 @@ export async function signalWorkflow(
 }
 
 /** Signal the primary workflow AND every deduped waiter that the gate resolved. */
-async function signalAllWaiters(request: ResolvableGateRequest, response: string): Promise<void> {
+function workflowTargets(request: ResolvableGateRequest): Map<string, string> {
   const targets = new Map<string, string>();
   targets.set(request.workflowId, request.agentId);
   for (const w of readWaiters(request.metadata)) {
     if (!targets.has(w.workflowId)) targets.set(w.workflowId, w.agentId);
   }
-  for (const [workflowId, agentId] of targets) {
-    await signalWorkflow(workflowId, agentId, request.id, response);
+  return targets;
+}
+
+async function signalAllWaiters(
+  request: ResolvableGateRequest,
+  response: string,
+  userMessage: string | null
+): Promise<void> {
+  for (const [workflowId, agentId] of workflowTargets(request)) {
+    await signalWorkflow(workflowId, agentId, request.id, response, userMessage);
   }
 }
 
@@ -161,7 +174,8 @@ export async function finishAttentionMessages(
  */
 export async function resolveAndSignal(
   request: ResolvableGateRequest,
-  response: string
+  response: string,
+  userMessage?: string
 ): Promise<{ resolved: boolean }> {
   // Resolving an approval also serializes against workflow replacement and the
   // tool lifecycle, and it now takes the generation lock FIRST so a response can
@@ -172,7 +186,14 @@ export async function resolveAndSignal(
   // transaction, but give the bounded critical section a 30s budget. The
   // transient-start retry wrapper (rather than a bare `prisma.$transaction`) then
   // keeps a contended pool surfacing as a retry rather than a hard gate failure.
-  const { fresh, finishedMessageCount, resolved } = await runTransactionWithRetry(
+  const {
+    fresh,
+    finishedMessageCount,
+    resolved,
+    userMessages,
+    userMessage: authoredMessage,
+    signalResponse,
+  } = await runTransactionWithRetry(
     async (tx) => {
       // Deployment cleanup takes this lock before terminalizing attention rows.
       // Keep the same order here so a response can never hold the row while
@@ -187,10 +208,57 @@ export async function resolveAndSignal(
         RETURNING id, "workflowId", "agentId", metadata
       `;
       if (current === undefined) {
-        return { fresh: null, finishedMessageCount: 0, resolved: false };
+        if (!userMessage?.trim()) {
+          return {
+            fresh: null,
+            finishedMessageCount: 0,
+            resolved: false,
+            userMessages: [],
+            userMessage: null,
+            signalResponse: response,
+          };
+        }
+        // A late waiter can be registering while this answered-row CAS misses.
+        // Read its fan-out only after owning the same attention row lock.
+        await tx.$queryRaw`SELECT id FROM "AgentAttentionRequest" WHERE id = ${request.id} FOR UPDATE`;
+        const answered = await tx.agentAttentionRequest.findUnique({ where: { id: request.id } });
+        if (answered === null)
+          return {
+            fresh: null,
+            finishedMessageCount: 0,
+            resolved: false,
+            userMessages: [],
+            userMessage: null,
+            signalResponse: response,
+          };
+        const authored = await persistAttentionUserMessages(tx, {
+          requestId: answered.id,
+          agentId: answered.agentId,
+          targetAgentIds: workflowTargets(answered).values(),
+          userMessage,
+        });
+        return {
+          fresh: answered,
+          finishedMessageCount: 0,
+          resolved: true,
+          ...authored,
+          signalResponse: answered.userResponse ?? response,
+        };
       }
       const finishedCount = await finishAttentionMessages(tx, current, true);
-      return { fresh: current, finishedMessageCount: finishedCount, resolved: true };
+      const authored = await persistAttentionUserMessages(tx, {
+        requestId: current.id,
+        agentId: current.agentId,
+        targetAgentIds: workflowTargets(current).values(),
+        userMessage,
+      });
+      return {
+        fresh: current,
+        finishedMessageCount: finishedCount,
+        resolved: true,
+        ...authored,
+        signalResponse: response,
+      };
     },
     { maxWait: 10_000, timeout: 30_000 }
   );
@@ -201,7 +269,8 @@ export async function resolveAndSignal(
     resolved,
   });
   if (!resolved || fresh === null) return { resolved: false };
-  await signalAllWaiters(fresh, response);
+  broadcastAttentionUserMessages(userMessages);
+  await signalAllWaiters(fresh, signalResponse, authoredMessage);
   return { resolved: true };
 }
 

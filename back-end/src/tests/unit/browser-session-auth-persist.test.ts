@@ -85,11 +85,22 @@ async function withUser<T>(fn: (userId: string) => Promise<T>): Promise<T> {
     await prisma.localStorageOrigin.deleteMany({ where: { userId } });
     await prisma.cookie.deleteMany({ where: { userId } });
     await prisma.cookieBundle.deleteMany({ where: { userId } });
+    await prisma.agent.deleteMany({ where: { userId } });
     await prisma.user.deleteMany({ where: { userId } });
   }
 }
 
 async function createKernelSession(userId: string) {
+  const agentId = randomUUID();
+  await prisma.agent.create({
+    data: {
+      id: agentId,
+      userId,
+      goal: 'Capture signed-in browser state',
+      status: 'ACTIVE',
+      temporalWorkflowId: agentId,
+    },
+  });
   const context = await prisma.browserContext.upsert({
     where: { userId },
     create: { userId },
@@ -98,7 +109,7 @@ async function createKernelSession(userId: string) {
   return prisma.browserSession.create({
     data: {
       contextId: context.id,
-      agentId: randomUUID(),
+      agentId,
       sessionId: `kernel-${randomUUID()}`,
       wsUrl: 'ws://example/not-a-provider',
       provider: 'kernel',

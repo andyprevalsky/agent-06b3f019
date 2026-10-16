@@ -235,6 +235,16 @@ scans, which is acceptable at its frequency. The waiter check is evaluated on th
 already read for that generation — no extra query, and no cross-agent fan-in row with a
 live foreign waiter is ever written.
 
+An October 14 review found a retry variant in the same completion owner.
+The already-completed branch read the attention response before waiting for
+the generation lock, so a fence committed during that wait could be missed.
+A real database generation-lock barrier reproduced a completion signal to the
+old generation. The retry now re-reads workflowId and userResponse after the
+generation and attention locks, preserving the canonical authored input while
+skipping the fenced signal. The unchanged regression fails before the repair;
+the serialized owning auth domain passes in 1.992 seconds afterward, asserting
+zero completion signals and one resume. Private artifacts retain both runs.
+
 ## Human feedback
 
 The user asked "does a deploy-interrupted browser agent maintain its state, like an

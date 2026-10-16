@@ -986,9 +986,80 @@ async def test_broadcast_to_bus_logs_non_success():
     await _flush_broadcasts()
 
 
+
+async def test_browser_instruction_poll_retains_only_user_sources_and_exact_task_start():
+    from unittest.mock import AsyncMock, patch
+    from helpers.messages import poll_new_messages
+    from datetime import datetime, timezone
+
+    from _test_utils import native_browser_start_source
+    user = {"id": "user", "role": "USER", "text": "Actual authored correction", "metadata": None}
+    start = await native_browser_start_source("2026-10-14T00:00:00+00:00", tool_call_id="tool-1")
+    other = {"id": "other", "role": "TOOL", "text": "Other task", "metadata": {"task_id": "task-2", "subAgentId": "task-2", "action_type": "task_started"}}
+    internal = {"id": "internal", "role": "TOOL", "text": "Large browser state", "metadata": {"task_id": "task-1", "subAgentId": "task-1", "action_type": "read_browser_state"}}
+    # Execute the actual OTP credential writer. Its USER role is internal
+    # machine context, distinguished by native subAgentId provenance.
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3.repo import save_browser_credential_ref_message
+    post = AsyncMock(return_value=SimpleNamespace(status_code=200, is_error=False))
+    with (
+        patch("config.load_config", return_value=SimpleNamespace(backend=SimpleNamespace(api_url="http://fixture", api_key="fixture"))),
+        patch("domains.spawn_browser_agent_v3.repo.get_http_client", return_value=SimpleNamespace(post=post)),
+    ):
+        assert await save_browser_credential_ref_message(agent_id="agent-1", task_id="other-browser", message="OTP fixture context", role="USER", credential_ref={"kind": "otp", "id": "fixture"})
+    payload = post.await_args.kwargs["json"]
+    otp = {"id": "otp", "role": payload["role"], "text": payload["message"], "metadata": payload["metadata"]}
+    with (
+        patch("helpers.messages._fetch_agent_data_impl", AsyncMock(return_value={"messages": [user, start, other, internal, otp]})) as fetch,
+        patch("helpers.messages.activity.heartbeat"),
+    ):
+        rows = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool-1")
+    assert rows == [user, start], "native start was filtered or unrelated internal work became user input"
+    fetch.assert_awaited_once_with("agent-1", since="2026-10-14T00:00:00+00:00", browser_tool_call_id="tool-1")
+
+
+async def test_browser_instruction_poll_projects_at_http_boundary():
+    """The existing GET carries the role projection before any large response."""
+    observed = []
+    def respond(request):
+        observed.append(request)
+        return httpx.Response(200, json={"messages": []})
+    setup_mock_fn(respond)
+    try:
+        from helpers.messages import poll_new_messages
+        with patch("helpers.messages.activity.heartbeat"):
+            await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool/&1")
+            await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc))
+        assert len(observed) == 2
+        assert observed[0].url.params.get("browserToolCallId") == "tool/&1", "browser read still downloads the full root transcript"
+        assert observed[0].url.params.get("since") == "2026-10-14T00:00:00+00:00"
+        assert "browserToolCallId" not in observed[1].url.params, "ordinary root replay was narrowed"
+    finally:
+        teardown_mock()
+
+
+async def test_browser_attention_feedback_is_task_scoped_and_root_input_is_global():
+    from unittest.mock import AsyncMock
+    from helpers.messages import poll_new_messages
+    rows = [
+        {"id": "global", "role": "USER", "text": "  Global correction\n", "metadata": None},
+        {"id": "a", "role": "USER", "text": "  Only browser A\n", "metadata": {"source": "attention_response", "attentionRequestId": "req-a", "browserTaskId": "task-a"}},
+        {"id": "b", "role": "USER", "text": "  Only browser B\n", "metadata": {"source": "attention_response", "attentionRequestId": "req-b", "browserTaskId": "task-b"}},
+    ]
+    with patch("helpers.messages._fetch_agent_data_impl", AsyncMock(return_value={"messages": rows})), patch("helpers.messages.activity.heartbeat"):
+        a = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool-a", browser_task_id="task-a")
+        b = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool-b", browser_task_id="task-b")
+        root = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc))
+    assert a == rows[:2], "browser A consumed a sibling's authored reply"
+    assert b == [rows[0], rows[2]], "browser B consumed a sibling's authored reply"
+    assert root == rows, "parent lost actual authored feedback"
+
 async def run_all_tests():
     print("messages blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("browser_instruction_poll_projects_at_http_boundary", test_browser_instruction_poll_projects_at_http_boundary)
+    await r.record_async("browser_attention_feedback_is_task_scoped_and_root_input_is_global", test_browser_attention_feedback_is_task_scoped_and_root_input_is_global)
+    await r.record_async("browser_instruction_poll_retains_only_user_sources_and_exact_task_start", test_browser_instruction_poll_retains_only_user_sources_and_exact_task_start)
     await r.record_async("post_message_happy_path", test_post_message_happy_path)
     await r.record_async("post_message_boundary", test_post_message_boundary)
     await r.record_async("post_message_stamps_workflow_generation", test_post_message_stamps_workflow_generation)

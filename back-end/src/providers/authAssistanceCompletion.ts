@@ -1,6 +1,10 @@
 import { runTransactionWithRetry } from './database';
 import { resumeAgentWorkflow } from './agentResume';
 import { createMessage } from './messages';
+import {
+  broadcastAttentionUserMessages,
+  persistAttentionUserMessages,
+} from './attentionUserMessages';
 import { createLogger } from './logger';
 import { getTemporalClient } from './temporal';
 import { DEPLOY_INTERRUPTED_TOOL_MESSAGE, lockAgentWorkflowGeneration } from './workflowGeneration';
@@ -24,7 +28,8 @@ type AuthAssistanceRequestRecord = {
 async function signalAuthAssistanceCompleted(
   workflowId: string,
   agentId: string,
-  requestId: string
+  requestId: string,
+  userMessage: string | null = null
 ): Promise<void> {
   try {
     const client = await getTemporalClient();
@@ -34,6 +39,7 @@ async function signalAuthAssistanceCompleted(
       JSON.stringify({
         request_id: requestId,
         response: AUTH_ASSISTANCE_COMPLETED_RESPONSE,
+        user_message: userMessage,
       })
     );
   } catch (error) {
@@ -92,7 +98,8 @@ export async function completeAuthAssistanceForUser(
   id: string,
   userId: string,
   now = new Date(),
-  overrides: Partial<AuthAssistanceCompletionDependencies> = {}
+  overrides: Partial<AuthAssistanceCompletionDependencies> = {},
+  userMessage?: string
 ): Promise<AuthAssistanceCompletionResult> {
   const deps: AuthAssistanceCompletionDependencies = {
     signalCompleted: signalAuthAssistanceCompleted,
@@ -105,7 +112,7 @@ export async function completeAuthAssistanceForUser(
       where: { id },
       include: {
         attentionRequest: {
-          select: { workflowId: true, userResponse: true },
+          select: { workflowId: true, userResponse: true, userId: true, agentId: true },
         },
       },
     });
@@ -113,16 +120,31 @@ export async function completeAuthAssistanceForUser(
     if (request === null) {
       return { status: 'not_found' as const };
     }
-    if (request.userId !== userId) {
+    if (
+      request.userId !== userId ||
+      request.attentionRequest.userId !== userId ||
+      request.attentionRequest.agentId !== request.agentId
+    ) {
       return { status: 'forbidden' as const };
     }
     if (request.completedAt !== null) {
+      await lockAgentWorkflowGeneration(tx, request.agentId);
+      const authored = await persistAttentionUserMessages(tx, {
+        requestId: id,
+        agentId: request.agentId,
+        userMessage,
+      });
+      const attention = await tx.agentAttentionRequest.findUniqueOrThrow({
+        where: { id },
+        select: { workflowId: true, userResponse: true },
+      });
       return {
         status: 'already_completed' as const,
         request,
-        interrupted: request.attentionRequest.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        interrupted: attention.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
         retrySideEffects: true,
-        workflowId: request.attentionRequest.workflowId,
+        workflowId: attention.workflowId,
+        ...authored,
       };
     }
 
@@ -196,12 +218,18 @@ export async function completeAuthAssistanceForUser(
         },
       });
       if (persisted === null) return { status: 'not_found' as const };
+      const authored = await persistAttentionUserMessages(tx, {
+        requestId: id,
+        agentId: persisted.agentId,
+        userMessage,
+      });
       return {
         status: 'already_completed' as const,
         request: persisted,
         interrupted: persisted.attentionRequest.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
-        retrySideEffects: false,
+        retrySideEffects: userMessage !== undefined && userMessage.trim().length > 0,
         workflowId: persisted.attentionRequest.workflowId,
+        ...authored,
       };
     }
 
@@ -290,6 +318,11 @@ export async function completeAuthAssistanceForUser(
             select: { userResponse: true },
           })
         : null;
+    const authored = await persistAttentionUserMessages(tx, {
+      requestId: id,
+      agentId: request.agentId,
+      userMessage,
+    });
 
     return {
       status: 'completed' as const,
@@ -299,9 +332,12 @@ export async function completeAuthAssistanceForUser(
         answered.count === 0 &&
         persistedAttention?.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
       workflowId: request.attentionRequest.workflowId,
+      ...authored,
     };
   });
 
+  if ('userMessages' in result && result.userMessages !== undefined)
+    broadcastAttentionUserMessages(result.userMessages);
   if (result.status === 'completed') {
     if (result.steelSessionAuthId !== null) {
       try {
@@ -334,7 +370,12 @@ export async function completeAuthAssistanceForUser(
         workflow_id: result.workflowId,
       });
     } else {
-      await deps.signalCompleted(result.workflowId, result.request.agentId, result.request.id);
+      await deps.signalCompleted(
+        result.workflowId,
+        result.request.agentId,
+        result.request.id,
+        result.userMessage
+      );
     }
     try {
       await deps.resumeAgent(result.request.agentId);
@@ -359,7 +400,12 @@ export async function completeAuthAssistanceForUser(
           workflow_id: result.workflowId,
         });
       } else {
-        await deps.signalCompleted(result.workflowId, result.request.agentId, result.request.id);
+        await deps.signalCompleted(
+          result.workflowId,
+          result.request.agentId,
+          result.request.id,
+          result.userMessage
+        );
       }
       try {
         await deps.resumeAgent(result.request.agentId);
