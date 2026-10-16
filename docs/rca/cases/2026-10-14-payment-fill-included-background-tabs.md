@@ -499,6 +499,34 @@ protected worker reuse, object deletion or quota change was inferred. The
 specific auth-decline override and unresolved original merchant/authentication
 observations remain open.
 
+## Final reuse-only source qualification
+
+The subsequent complete campaign on
+`23d273bb9e4819a7b84d67f1365303d8ed0480a7` passed all 14 unchanged selected
+tasks, including the [new-user journey](https://www.roselabs.ai/?agent-id=0f8f8587-c78b-4d5c-9a44-7a0342f05be6#benchmark-share=683cfb43-de77-46d5-b243-b36ce0752c58.1794717804.ed47d0e3510ac3564596e50cb972121a051ea0d5558b25c9e30bfb74866f8c05)
+and [test-shop card task](https://www.roselabs.ai/?agent-id=0261b18d-721c-44b9-b1d9-5684390e9cc6#benchmark-share=6c501d5d-4c20-4faf-b9be-e1f5cd7d8490.1794717757.668dc98d1754f8f84d066903dcb667085d80d8c2e750780252a393c2230d24ea). The canonical publisher
+verified all 14 fresh-browser FE transcripts/attached recordings and each
+latest recorded whole-tree LLM call over HTTPS. All three sealed native bundles
+remained byte-identical. Native model telemetry totals 52 cents; provider,
+browser and infrastructure invoices remain unverified.
+
+This checkpoint additionally includes the stopped-worker current-build/token
+start-admission fix and a default reuse-only cutover guard. Full agent,
+TypeScript, structural, seed, live, semantic UI, real E2B and isolated latency
+qualification passed; the [worker provenance case](2026-10-16-stopped-worker-rollout-provenance.md)
+records exact counts and the current deployment constraint. All exact owned
+test/publication processes joined, owned listeners/databases retired, and all
+five payment lifecycles settled. Auth-decline remains specifically Overridden,
+with its original FAIL retained.
+
+At 04:27:59 UTC the production app had exactly eight started old-generation
+Machines and no stopped/certified same-app spare pool. No new Machine, quota
+change, protected benchmark resource use, workflow interruption, production
+configuration write or pointer flip was performed. The unsupported existing-ID
+activation route is not an executable approval option. The separate admission
+prototype remains frozen and excluded; final review, merge and production
+verification remain distinct from these successful local results.
+
 ## Reusable lesson
 
 Keep private credential resolution independent of the agent's tool and target choice. A credential reference must never trigger unrequested field selection, additional writes, or fabricated progress. Redact every downstream model boundary, including observations and fatal failures.

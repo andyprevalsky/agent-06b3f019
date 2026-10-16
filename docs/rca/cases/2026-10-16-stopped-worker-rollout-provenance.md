@@ -98,6 +98,46 @@ Production admission remains held for the required initial worker overlap;
 this repair does not supply additional Machine objects or authorize reuse of
 protected resources.
 
+## Final release qualification and reuse constraint
+
+The complete shipping runtime was frozen at
+`23d273bb9e4819a7b84d67f1365303d8ed0480a7`, surface `5a946237d3f7`.
+It includes the stopped-start repair plus the reviewed default reuse-only guard
+`4506414f051301be4e239df5df1e1789834a0042`. The guard measures retained
+same-app candidates and refuses a positive shortfall before any clone; builds
+are local-only. Identical owning fixtures fail on the earlier source's eight
+clone requests and pass for no-spare, partial-four-spare and second-update-failure
+cases with zero creates, unchanged IDs/data and no pointer flip. Legacy
+fresh-provision fixture lanes opt in explicitly; production defaults to reuse.
+
+The final full qualification passed 110 agent blackbox domains, 184 cache tests,
+134 unit tests at 83% coverage, mandatory TypeScript and structural checks,
+46 deployment structural gates, five cold seeds (159MB maximum against 228MB),
+all three live probes, all 14 unchanged selected benchmark tasks, eight semantic
+UI cases, the real E2B smoke and five isolated latency tests with 20 samples.
+The four path p50s were 924/2403/795/639ms, smoothness 1.000 throughout.
+All five payment lifecycles settled. Exact owned test processes, listeners and
+isolated databases were retired, preserving shared Postgres. The original
+specific auth-decline failure remains Overridden for PR1518, never PASS.
+
+Qualification is not production activation. One app-only read at
+2026-10-16T04:27:59Z positively found eight started production Machines and
+zero stopped/certified retained candidates, all on source
+`6ef22cc55811444f1524fb9faf22f6e97600410e`, surface `f5734e638fc8`.
+The earlier 03:30 source-queue observation found one real parent and two real
+children; those time-stamped observations are not a continuous liveness claim.
+No additional IDs, quota change or interruption of these workloads is authorized.
+
+Source-only inspection of that exact old worker rejects general application
+pause as a noninterrupting drain: its pause signal cancels active browser work
+and closes pending auth continuation. The old shutdown also has a five-minute
+cutoff. These are source feasibility limits, not a locally reproduced new
+production incident or a claim that every live activity would fail. No workflow
+control was sent. A separate durable-root-intent/caller proposal remains frozen
+and unintegrated; its staged admission, topology bootstrap and original-eight
+activation controller are not implemented or qualified. The required safe
+existing-ID cutover remains open; no merge or production success is claimed.
+
 ## Human feedback
 
 None recorded for this finding. The existing request is to finish the
