@@ -684,6 +684,10 @@ class BorrowedPreconfigDeadlines(unittest.TestCase):
             try:time.sleep(.05)
             except OSError:return 'swallowed'
         with self.assertRaises(h['RecoveryDeadline']):h['bounded_read'](legacy_api,time.monotonic()+.01)
+    def test_late_per_read_return_is_refused_before_whole_deadline(self):
+        h=runpy.run_path(str(SCRIPT.with_name('cloudbench-explicit-idle-preconfig.py')))
+        with mock.patch.object(h['time'],'monotonic',side_effect=[0,21]):
+            with self.assertRaises(h['RecoveryDeadline']):h['bounded_read'](lambda:'late',180)
     def test_late_return_is_refused(self):
         h=runpy.run_path(str(SCRIPT.with_name('cloudbench-explicit-idle-preconfig.py')))
         with mock.patch.object(h['time'],'monotonic',side_effect=[0,2]):

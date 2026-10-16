@@ -150,7 +150,7 @@ def bounded_read(fn,deadline):
     signal.signal(signal.SIGALRM,expired);signal.setitimer(signal.ITIMER_REAL,remaining)
     try:
         value=fn()
-        if time.monotonic()>=deadline:raise RecoveryDeadline('late recovery read')
+        if time.monotonic()>=start+remaining:raise RecoveryDeadline('late recovery read')
         return value
     finally:
         signal.setitimer(signal.ITIMER_REAL,0);signal.signal(signal.SIGALRM,handler)
