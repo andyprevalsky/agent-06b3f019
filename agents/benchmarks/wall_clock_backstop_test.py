@@ -189,7 +189,7 @@ def test_backstop_covers_real_task_preparation_and_checkpoint(monkeypatch, tmp_p
 
     async def create(*args, **kwargs):
         events.append("created")
-        return "fixture-root"
+        return "00000000-0000-4000-8000-000000000031"
 
     async def hang(*args, **kwargs):
         try:
