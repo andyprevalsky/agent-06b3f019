@@ -164,6 +164,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-prestack-recovery.test.py"),
     ),
     Gate(
+        "cloudbench-explicit-idle-admission",
+        ("python3", "scripts/tests/cloudbench-explicit-idle-admission.test.py"),
+    ),
+    Gate(
         "cloudbench-pool-run-token",
         ("python3", "scripts/tests/cloudbench-pool-run-token.test.py"),
     ),

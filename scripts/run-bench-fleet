@@ -738,6 +738,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-worker.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-worker-reuse.py" \
+       "$ROOT_DIR/scripts/cloudbench-explicit-idle-admission.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
        "$ROOT_DIR/scripts/cloudbench-controller-export.py" \
@@ -1027,6 +1028,7 @@ SKIP_AUTOSCALER="${CLOUDBENCH_SKIP_AUTOSCALER:-0}"
 STRICT_BARRIER="${CLOUDBENCH_STRICT_BARRIER:-0}"
 COLD_HANDOFF_REQUEST=""
 COLD_HANDOFF_REQUEST_SHA=""
+EXPLICIT_IDLE_ARGS=()
 RECOVER_STALE_ONLY="0"
 RECOVER_PRIMARY_TO_POOL="0"
 RECOVER_OWNER_TOKEN=""
@@ -1203,6 +1205,10 @@ while [ $# -gt 0 ]; do
         --detach)         DETACH="1"; shift ;;
         --wait)           DETACH="1"; WAIT_FOR_DETACHED="1"; shift ;;
         --foreground)     DETACH="0"; WAIT_FOR_DETACHED="0"; shift ;;
+        --admit-existing-idle)
+            [ "$#" -ge 6 ] || exit 2
+            EXPLICIT_IDLE_ARGS=("$2" "$3" "$4" "$5" "$6")
+            RECOVER_STALE_ONLY=1; POOL_COLD_BOOTSTRAP=1; DETACH=0; shift 6 ;;
         --cold-handoff-request)
             [ "$#" -ge 3 ] || { echo "❌ --cold-handoff-request requires REQUEST SHA256" >&2; exit 2; }
             COLD_HANDOFF_REQUEST="${2:-}"; COLD_HANDOFF_REQUEST_SHA="${3:-}"; RECOVER_STALE_ONLY=1; DETACH=0; shift 3 ;;
@@ -11159,7 +11165,8 @@ import json, os, re, stat, sys
 from pathlib import Path
 path = Path(sys.argv[1]); machine = sys.argv[2]; proof = json.loads(sys.argv[3])
 assert proof['machine_id'] == machine and re.fullmatch('[0-9a-f]+', machine)
-assert set(proof) - {'cold_bootstrap', 'imported_cold'} == {'version','app','machine_id','name','volume_id','instance_id','config_sha256','image_digest'}
+assert len(set(proof) & {'cold_bootstrap','imported_cold','explicit_idle'}) <= 1
+assert set(proof) - {'cold_bootstrap', 'imported_cold', 'explicit_idle'} == {'version','app','machine_id','name','volume_id','instance_id','config_sha256','image_digest'}
 if 'cold_bootstrap' in proof: assert proof['cold_bootstrap']['policy'] == 'real-empty-bootstrap-v1'
 assert re.fullmatch('[0-9a-f]{64}', proof['config_sha256'])
 assert re.fullmatch('sha256:[0-9a-f]{64}', proof['image_digest'])
@@ -11183,6 +11190,22 @@ PYWRITE
 pool_verify_reuse_proof() {  # <machine> <volume> [refresh after canonical return]
     local id="$1" volume="$2" mode="${3:-verify}" path fields name image prior current cold imported_attempt
     path="$(pool_reuse_proof_file "$id")" || return 1
+    if [ "$mode" != refresh ] && [ -f "$path" ] && python3 - "$path" <<'PYEXPLICIT'
+import json,sys
+raise SystemExit(0 if 'explicit_idle' in json.load(open(sys.argv[1])) else 1)
+PYEXPLICIT
+    then
+        [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] || return 1
+        imported_attempt="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-explicit-proof.XXXXXX")" || return 1
+        fleet_preconfig_native_read "$id" "$imported_attempt/before.json" \
+            && fleet_preconfig_native_read "$id" "$imported_attempt/after.json" || return 1
+        fleet_cold_handoff_volume_read "$volume" "$imported_attempt/volume.json" || return 1
+        python3 - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-explicit-idle-admission.py" "$path" "$GIT_COMMON_DIR" "$imported_attempt/before.json" "$imported_attempt/after.json" "$BENCH_REF" "$imported_attempt/volume.json" <<'PYVERIFYEXPLICIT'
+import json,runpy,sys
+helper=runpy.run_path(sys.argv[1]);helper['verify_pool'](sys.argv[2],sys.argv[3],helper['descriptor'](sys.argv[4]),helper['descriptor'](sys.argv[5]),sys.argv[6],json.load(open(sys.argv[7])))
+PYVERIFYEXPLICIT
+        return $?
+    fi
     if [ "$mode" != refresh ] && [ -f "$path" ] && python3 - "$path" <<'PYIMPORTED'
 import json,sys
 raise SystemExit(0 if 'imported_cold' in json.load(open(sys.argv[1])) else 1)
@@ -13038,11 +13061,11 @@ raw = read(proof_path); proof = json.loads(raw)
 tasks = json.loads(read(matrix))['tasks']
 ordinal = next(i for i, task in enumerate(tasks) if task['name'] == out.name)
 assert tasks[ordinal]['world_model_mode'] == 'real' and re.fullmatch('[0-9a-f]{40}', ref)
-expected = {'version': 1, 'policy': 'real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm',
+expected = {'version': 1, 'policy': proof['explicit_idle']['workspace_policy'] if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
             'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
             'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
 assert json.loads(read(out / 'cold-primary-bootstrap')) == expected
-print(1 if 'cold_bootstrap' in proof or 'imported_cold' in proof else 0)
+print(1 if proof.get('explicit_idle',{}).get('workspace_policy')=='real-empty-bootstrap-v1' or 'cold_bootstrap' in proof or 'imported_cold' in proof else 0)
 PYINTENT
 }
 
@@ -13076,7 +13099,7 @@ tasks = json.loads(Path(matrix).read_text())['tasks']
 ordinal = next(i for i, task in enumerate(tasks) if task['name'] == bench)
 assert tasks[ordinal]['world_model_mode'] == 'real'
 if 'cold_bootstrap' in proof: assert proof['cold_bootstrap']['policy'] == 'real-empty-bootstrap-v1'
-intent = {'version': 1, 'policy': 'real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm',
+intent = {'version': 1, 'policy': proof['explicit_idle']['workspace_policy'] if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
           'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
           'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
 with os.fdopen(os.open(destination, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600), 'w') as stream:
@@ -13105,6 +13128,18 @@ if ! cloudbench_controller_lock_acquire_wait \
     "$LOCK_DIR" "${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"; then
     echo "❌ Cloud benchmark controller lock failed." >&2
     exit 1
+fi
+
+if [ "${#EXPLICIT_IDLE_ARGS[@]}" -gt 0 ]; then
+    CLOUDBENCH_IDLE_WORKSPACE="$ROOT_DIR" CLOUDBENCH_IDLE_COMMON="$GIT_COMMON_DIR" \
+    CLOUDBENCH_IDLE_POOL_IDS="$POOL_IDS_FILE" CLOUDBENCH_IDLE_POOL_META="$POOL_META_FILE" \
+    FLY_APP_NAME="$APP" python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-explicit-idle-admission.py" admit \
+        --request "${EXPLICIT_IDLE_ARGS[0]}" --sha256 "${EXPLICIT_IDLE_ARGS[1]}" \
+        --authority "${EXPLICIT_IDLE_ARGS[2]}" --authority-sha256 "${EXPLICIT_IDLE_ARGS[3]}" \
+        --custody-fd "${EXPLICIT_IDLE_ARGS[4]}"
+    explicit_idle_status=$?
+    cloudbench_controller_lock_release "$LOCK_DIR"
+    exit "$explicit_idle_status"
 fi
 
 if [ -n "$COLD_HANDOFF_REQUEST" ]; then
