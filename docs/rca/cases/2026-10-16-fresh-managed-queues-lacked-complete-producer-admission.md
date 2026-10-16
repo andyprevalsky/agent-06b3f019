@@ -89,6 +89,19 @@ continue-as-new arguments, terminal policy, or visibility-zero waiver changed.
 
 None recorded.
 
+## Full-suite fixture correction
+
+The first full backend run at
+`8171b24d0f934b38a5b932f836b8726f40b07a96` correctly rejected the Postgres
+fixture's old three-argument pointer publication with
+`Managed queue publication requires its deployment job and lease owner`.
+The production guard was retained. The fixture now supplies its actual owned
+READY job, eight healthy candidate IDs, and an expected legacy pointer for the
+publication CAS. All 15 original assertions remain identical and in order.
+The same registered Postgres owner failed before and passed after the setup
+correction, using an explicitly bound isolated local database. Full integration
+and the native bootstrap qualifications above remain required.
+
 ## Reusable lesson
 
 Qualify every way work can enter a new queue before allowing that queue to retire,

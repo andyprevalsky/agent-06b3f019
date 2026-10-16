@@ -111,7 +111,28 @@ async function main() {
       /published/
     );
     assert.equal(calls.length, 0);
-    await setCurrentAgentQueue(queue, surfaceHash, 'owner');
+    const candidateMachineIds = Array.from({ length: 8 }, (_, index) => `candidate-${index}`);
+    await db.toolSideEffect.update({
+      where: { operationKey: `deployment:worker-job:${jobId}` },
+      data: {
+        request: {
+          version: 1,
+          jobId,
+          stage: 'READY',
+          ownerId: 'owner',
+          identity: { sourceCommit: input.sourceCommit, surfaceHash },
+          candidateMachineIds,
+          evidence: { READY: { healthyMachineIds: candidateMachineIds } },
+        },
+      },
+    });
+    await db.agentQueuePointer.create({
+      data: { id: 'singleton', taskQueue: 'legacy-old-served', surfaceHash: 'c'.repeat(12) },
+    });
+    await setCurrentAgentQueue(queue, surfaceHash, jobId, {
+      expectedCurrentQueue: 'legacy-old-served',
+      deploymentOwnerId: 'owner',
+    });
     const results = await Promise.all([
       startAgentWorkflowExecutionWithClient(client as never, params),
       startAgentWorkflowExecutionWithClient(client as never, params),

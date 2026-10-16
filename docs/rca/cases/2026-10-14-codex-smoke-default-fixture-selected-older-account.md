@@ -202,6 +202,28 @@ files at89.62% line coverage, including its real current-authority Codex smoke.
 These runs establish the scope correction; the original credential-selection
 incident and its mitigation below remain unchanged.
 
+### Reusable cutover qualification recurrence, October 16
+
+At source `8171b24d0f934b38a5b932f836b8726f40b07a96`, the full backend run
+selected integration `49fa2d59-1624-4877-b8e8-4dd93b845c99`, last synced at
+04:32:51 UTC. Its account differed from the current local auth file. Closed
+session `29b72fee-64a6-4780-a384-d712253333b5` retained 5,373 bytes showing
+OAuth revocation followed by the unfunded fallback, with no completion sentinel.
+The unchanged skip detector correctly returned null on that captured output.
+
+The canonical `codex-code` domain was rerun once with a dedicated UUID shared
+by the supported token-sync and blackbox-user settings, pooling disabled, and
+the current absolute local auth path. It used a newly created, explicitly bound
+local database, separate from the prepared coverage database. The unchanged
+domain passed all 28 checks with zero failures or skips; the real E2B smoke took
+11,469 ms. Its owned backend and database were retired after the run. The frozen
+receipt is `.context/lantern-deploy-preflight/.context/preflight-artifacts/codex-8171b24d-FINAL.json`.
+
+The next complete backend run must retain that backend-only fixture binding.
+Agent coverage must not inherit it. This repairs the invocation's authority
+selection; it does not repair or waive the old account's revocation, assert that
+the funded key has credit, or turn the original full-suite failure into a pass.
+
 ### Concise kickoff deployment recurrence on October 15
 
 The concise SMS/WhatsApp kickoff deployment initially stopped after the default

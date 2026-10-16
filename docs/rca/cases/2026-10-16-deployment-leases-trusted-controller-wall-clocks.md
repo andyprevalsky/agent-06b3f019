@@ -70,3 +70,29 @@ operational authority is inferred from these tests.
 ## Reusable lesson
 
 Use the same authoritative clock to acquire, renew, and validate a distributed lease.
+
+## Integration fixture correction
+
+The first complete backend run at
+`8171b24d0f934b38a5b932f836b8726f40b07a96` exposed two callers whose in-memory
+transaction doubles still omitted the newly required database clock:
+`worker-process-envelope.test.ts` and the Steel rotation cases in
+`browser-provider.helpers.ts`. They failed with
+`TypeError: tx.$queryRaw is not a function`, before exercising their original
+recovery assertions. The full run reported 287 of 289 unit files and 196 of 199
+API domains passing; those failures remain recorded, not reclassified as passes.
+
+Each corrected double accepts only the actual `SELECT clock_timestamp() AS now`
+query, preserves explicit database timestamps, and evaluates the strict
+`updatedAt > cutoff` predicate. The Steel double exposes the same guarded
+update through the transaction delegate. No production lease behavior changed.
+The unchanged owning commands failed before these fixture corrections and passed
+afterward: the envelope owner passed nine cases and the offline browser-provider
+owner passed 27. Existing recovery, release ordering, and duplicate-cleanup
+assertions were preserved. The real Postgres queue/lease tests remain a separate
+check of the production transaction path.
+
+Evidence is retained in
+`.context/lantern-fixtures8171/.context/fixture-rca/`, including the original
+and corrected owner logs. This focused verification does not establish a full
+backend pass; the complete test loop must run on the composed source.
