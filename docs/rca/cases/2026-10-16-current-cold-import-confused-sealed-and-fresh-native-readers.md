@@ -19,7 +19,7 @@ tags:
 sources:
   - PR #1525
   - commit 6189d6e6cdbcc82d7715809daef25158e6834534
-repro: scripts/tests/cloudbench-bootstrap-recovery.test.py CurrentColdImportedNativeTests
+repro: scripts/tests/cloudbench-bootstrap-recovery.test.py CurrentColdImportedNativeTests RetainedTargetSourceSuccessorTests
 status: fixed
 ---
 
@@ -89,9 +89,11 @@ guest-source allowlist, where the unchanged guest AST/semantic comparison still
 applies. Unknown or modified helper bytes remain rejected. Original source
 meta, latches, outer terminal, archive and task/dependency predicates remain.
 
-Command: `python3 scripts/tests/cloudbench-bootstrap-recovery.test.py CurrentColdImportedNativeTests`.
-All6 cases passed five consecutive runs with unchanged test and implementation
-bytes, after the same final tests failed on the6189 implementation. The suite
+Command: `python3 scripts/tests/cloudbench-bootstrap-recovery.test.py CurrentColdImportedNativeTests RetainedTargetSourceSuccessorTests`.
+All13 cases passed five consecutive runs with unchanged test and implementation
+bytes, after the same final tests failed on the6189 implementation. The fresh
+native pair also explicitly rejects two hard-linked paths to the same file;
+substituting the sealed-volume reader must not remove that identity guard. The suite
 is already registered as `cloudbench-bootstrap-recovery` in
 `scripts/run-deploy-structural-gates.py`; default unittest discovery includes
 the new class. Three existing current-cold/absent-runtime/preconfig import cases
@@ -110,15 +112,40 @@ the sealed resolver a local fallback. Root retains integration and native work.
 
 Verify immutable source evidence through its sealed resolver and fresh destination observations through their explicit current reader, then compare identities without merging the two namespaces.
 
-### Native rollout prerequisite
+### Explicit target-source successor and completed import
 
-The source-reader fix does not authorize changing the packet's destination
-source ref. The actual packet targets6189. Retained endpoint capture still
-requires actual HEAD == request.tool_ref, import requires exact target equality,
-and later imported-pool verification requires that original target source ref.
-Root must coordinate a separate explicit, canonical-continuation-bound target
-source-successor proof before importing this old packet on a new source. Such
-a proof must retain original packet/target bytes, verify all physical endpoint
-fields and old/current custody, and be checked again by later pool-proof reuse.
-No generic equality check is relaxed by this patch; a new source alone is not
-native execution authority.
+The actual immutable packet targets6189. The repaired helper necessarily has a
+new source ref. The retained endpoint now supports an explicit separate
+`target_source_successor` request containing exact `old_ref`, `new_ref` and a
+private `receipt_output`. It validates the actual new endpoint under the existing
+canonical live retained-controller verifier, unchanged Machine/Volume/config/
+roots/ownership/preservation/pool fields, and ancestry from the exact old ref.
+Every packet/native/volume/ownership/continuation input is hash-bound. It never
+rewrites the old packet or changes generic target equality. Base import uses
+the original target only after this separate live admission succeeds.
+
+Only after the canonical import audit and terminal exist does import durably
+publish a completion attestation in the same private common store. It binds
+original packet SHA, both targets, continuation and physical root anchors,
+and exact-owner nofollow file inode/content bindings for the successor receipt,
+audit and terminal. A prepared proof or incomplete import cannot authorize
+pool reuse. Exact recovery after a terminal-publication interruption is allowed
+under live admission; conflicting bytes remain fatal.
+
+Later pool checks consume that same immutable proof plus completion, check
+actual current source/common and clean scripts, physical roots and ownership,
+and retain full fresh child native/volume and sealed-source verification. They
+do not require the completed import driver to remain alive. A subsequent
+source ref requires separate supported admission; it is not globally accepted.
+Registered cases cover post-driver-exit reuse, preterminal refusal, exact
+postterminal recovery, missing or modified completion, changed audit, replaced
+terminal inode, hard-linked proof, wrong source/common, and initial wrong
+packet hash/target/config/continuation/physical root.
+
+The retained-process boundary is mocked in these offline successor fixtures;
+existing canonical endpoint and continuation tests cover that implementation.
+The actual old packet is separately replayed through its exact sealed producer
+and fresh child observations, with a clearly labelled offline successor-boundary
+replay. Root must prepare real fresh canonical continuation/native inputs on
+the new checkout and independently review this change before native execution.
+No provider/guest calls, runtime integration or REAL600 qualification are claimed.

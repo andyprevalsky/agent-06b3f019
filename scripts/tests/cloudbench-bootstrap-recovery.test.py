@@ -2021,10 +2021,13 @@ class AllocatedCurrentColdTests(PreconfigStartupArchiveTests):
 
 class CurrentColdImportedNativeTests(unittest.TestCase):
     """Sealed source custody and fresh destination observations are separate inputs."""
-    def fixture(self, legacy=False):
+    def fixture(self, legacy=False, local_target=False, configure_target=None):
         case=AllocatedCurrentColdTests('test_current_phase_source_import_and_actual_claim_preserve_unknown_history')
         case.setUp();self.addCleanup(case.doCleanups)
         verifier=case.helper
+        if local_target:
+            workspace=case.base/'destination-workspace';workspace.mkdir()
+            case.target['workspace']=str(workspace)
         if legacy:
             # Exact approved 6189 capture source, not a rewritten sealed capsule.
             source=gzip.decompress((ROOT/'tests/fixtures/current-cold-capture-6189.py.gz').read_bytes())
@@ -2032,6 +2035,7 @@ class CurrentColdImportedNativeTests(unittest.TestCase):
             helper=case.base/'legacy/cloudbench-startup-failure-archive.py';write(helper,source)
             write(helper.with_name('cloudbench_execution_provenance.py'),(ROOT/'cloudbench_execution_provenance.py').read_bytes())
             case.helper=runpy.run_path(str(helper))
+        if configure_target is not None:configure_target(case)
         case.prepare_current()
         case.helper['export_cold_handoff'](case.source,case.registry,case.out,MACHINE,TOKEN,case.receipt,
             case.before,case.after,case.target,'2'*32,case.packet,source_endpoint=case.source_endpoint)
@@ -2092,6 +2096,13 @@ class CurrentColdImportedNativeTests(unittest.TestCase):
                 helper['import_cold_handoff'](case.destination,case.target,case.packet,before,after)
             self.assertFalse((case.destination/'cloudbench-pool-claims').exists())
 
+    def test_fresh_hardlinked_observations_refuse_before_claim(self):
+        case,helper,before,after,packet=self.fixture()
+        after.unlink();os.link(before,after)
+        with self.assertRaisesRegex(ValueError,'same file'):
+            helper['import_cold_handoff'](case.destination,case.target,case.packet,before,after)
+        self.assertFalse((case.destination/'cloudbench-pool-claims').exists())
+
     def test_unapproved_source_helper_still_refuses(self):
         case,helper,before,after,packet=self.fixture(legacy=True)
         # Repack a self-consistent archive with an unapproved helper, keeping the
@@ -2110,6 +2121,156 @@ class CurrentColdImportedNativeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'current phase custody binding differs'):
             helper['verify_imported_cold_handoff'](packet,case.target,before,after)
         self.assertFalse((case.destination/'cloudbench-pool-claims').exists())
+
+
+
+class RetainedTargetSourceSuccessorTests(unittest.TestCase):
+    """Exact old packet survives a separately verified target source successor."""
+    fixture=CurrentColdImportedNativeTests.fixture
+
+    def setup_successor(self):
+        prepared={}
+        def configure(case):
+            native=dict(id=case.target['machine'],instance_id='controller-original',state='started',config=dict(
+                init={'cmd':['bash','/tmp/gate.sh']},image='image@sha256:fixture',restart={'policy':'no'},
+                auto_destroy=False,rootfs={'persist':'always','size_gb':50},mounts=[{'volume':case.target['volume'],'path':'/data'}]))
+            record={'workspace_ownership_sha256':'', 'continuation':{'old_init_pid':791,'old_init_birth':'original-init','new_ref':'f'*40},
+                    'root_anchors':{name:{'inode':Path(name).stat().st_ino} for name in (str(case.destination),case.target['workspace'])}}
+            def document(name,value):
+                path=case.base/name;write(path,json.dumps(value));return str(path)
+            owner=document('controller-owner.json',dict(schema='cloudbench-controller-workspace-ownership-v1',volume_id=case.target['volume'],app=APP,mount_path='/data'))
+            record['workspace_ownership_sha256']=digest(Path(owner).read_bytes())
+            case.target['ownership_sha256']=record['workspace_ownership_sha256']
+            case.target['controller_config_sha256']=digest(json.dumps(native['config'],sort_keys=True,separators=(',',':')).encode())
+            retained={'record':document('controller-record.json',record),'original_native':document('controller-original.json',native)}
+            retained['original_native_sha256']=digest(Path(retained['original_native']).read_bytes())
+            prepared.update(native=native,record=record,owner=owner,retained=retained,document=document)
+        case,helper,before,after,packet=self.fixture(legacy=True,local_target=True,configure_target=configure)
+        endpoint=runpy.run_path(str(ROOT/'cloudbench-retained-controller-endpoint.py'))
+        current=dict(case.target,source_ref='f'*40)
+        native=prepared['native'];record=prepared['record'];document=prepared['document']
+        request={'packet':str(case.packet),'packet_sha256':digest(case.packet.read_bytes()),'target':packet['target'],
+                 'retained_controller':prepared['retained'],'controller_before':document('controller-before.json',native),
+                 'controller_after':document('controller-after.json',native),'controller_volume':document('controller-volume.json',dict(id=current['volume'],attached_machine_id=current['machine'],state='created')),
+                 'workspace_ownership':prepared['owner'],'target_source_successor':{'old_ref':case.target['source_ref'],'new_ref':current['source_ref'],'receipt_output':str(case.base/'successor.json')}}
+        original_loader=runpy.run_path;original_run=subprocess.run;original_output=subprocess.check_output
+        def load(path,*args,**kwargs):
+            return endpoint if str(path).endswith('/cloudbench-retained-controller-endpoint.py') else original_loader(path,*args,**kwargs)
+        def canonical(workspace,ref,observed,evidence):
+            self.assertEqual(ref,current['source_ref'])
+            if observed!=native or json.loads(Path(evidence['record']).read_bytes())!=record:
+                raise ValueError('canonical retained continuation changed')
+            if case.destination.stat().st_ino!=record['root_anchors'][str(case.destination)]['inode']:
+                raise ValueError('canonical physical root changed')
+            return record
+        def output(cmd,*args,**kwargs):
+            if cmd[0]=='git':
+                if 'diff' in cmd:return ''
+                return str(case.destination)+'\n' if '--git-common-dir' in cmd else current['source_ref']+'\n'
+            return original_output(cmd,*args,**kwargs)
+        def run(cmd,*args,**kwargs):
+            if cmd[0]=='git' and 'merge-base' in cmd:
+                self.assertEqual(cmd[-2:],[case.target['source_ref'],current['source_ref']]);return subprocess.CompletedProcess(cmd,0)
+            return original_run(cmd,*args,**kwargs)
+        from contextlib import ExitStack
+        stack=ExitStack();self.addCleanup(stack.close)
+        stack.enter_context(patch.dict(os.environ,FLY_APP_NAME=APP,FLY_MACHINE_ID=current['machine']))
+        stack.enter_context(patch.dict(endpoint['capture_retained_target'].__globals__,verify_retained_endpoint=canonical))
+        stack.enter_context(patch('runpy.run_path',side_effect=load));stack.enter_context(patch('subprocess.check_output',side_effect=output));stack.enter_context(patch('subprocess.run',side_effect=run))
+        descriptor=endpoint['create_target_source_successor'](request,current)
+        return case,helper,before,after,packet,current,request,descriptor,endpoint
+
+    def test_old_packet_new_ref_import_and_pool_reuse_keep_packet_immutable(self):
+        case,helper,before,after,packet,current,request,proof,endpoint=self.setup_successor()
+        raw=case.packet.read_bytes()
+        helper['import_cold_handoff'](case.destination,current,case.packet,before,after,target_source_successor=proof)
+        imported=case.destination/'cloudbench-pool-reuse'/(MACHINE+'.json')
+        with patch.dict(endpoint['capture_retained_target'].__globals__,verify_retained_endpoint=lambda *a: (_ for _ in ()).throw(ValueError('old driver exited'))):
+            helper['verify_imported_pool_proof'](imported,case.destination,before,after,current['source_ref'],native_volume=json.loads(case.volume.read_bytes()))
+        self.assertEqual(case.packet.read_bytes(),raw)
+        row=json.loads(imported.read_bytes())['imported_cold']
+        self.assertEqual(row['target'],packet['target']);self.assertEqual(row['target_source_successor'],proof)
+        with self.assertRaises(ValueError):
+            helper['verify_imported_pool_proof'](imported,case.destination,before,after,'1'*40,native_volume=json.loads(case.volume.read_bytes()))
+
+    def test_retained_request_gateway_requires_explicit_successor(self):
+        case,helper,before,after,packet,current,request,proof,endpoint=self.setup_successor()
+        request.update(operation='import',endpoint=current,tool_ref=current['source_ref'],pool_name=current['pool_name'],
+                       native_before=str(before),native_after=str(after),native_volume=str(case.volume),machine=MACHINE,volume=VOLUME)
+        path=case.base/'import-request.json'
+        authorization=request.pop('target_source_successor')
+        write(path,json.dumps(request));path.chmod(0o600)
+        with self.assertRaisesRegex(ValueError,'target/packet differs'):
+            endpoint['cold_handoff_request'](path,digest(path.read_bytes()),current['workspace'],case.destination)
+        self.assertFalse((case.destination/'cloudbench-pool-claims').exists())
+        request['target_source_successor']=authorization
+        write(path,json.dumps(request));path.chmod(0o600)
+        endpoint['cold_handoff_request'](path,digest(path.read_bytes()),current['workspace'],case.destination)
+        proof_path=case.destination/'cloudbench-pool-reuse'/(MACHINE+'.json')
+        helper['verify_imported_pool_proof'](proof_path,case.destination,before,after,current['source_ref'],native_volume=json.loads(case.volume.read_bytes()))
+
+    def test_successor_wrong_hash_target_config_continuation_or_root_refuses_before_claim(self):
+        for fault in ('hash','target','config','continuation','root'):
+            with self.subTest(fault=fault):
+                case,helper,before,after,packet,current,request,proof,endpoint=self.setup_successor()
+                if fault=='hash':proof=dict(proof,sha256='0'*64)
+                if fault=='target':current=dict(current,machine='9'*14)
+                if fault in ('config','continuation'):
+                    value=json.loads(Path(proof['path']).read_bytes())
+                    if fault=='continuation':value['continuation']=dict(value['continuation'],old_init_pid=99)
+                    else:
+                        item=value['inputs']['controller_before'];native=json.loads(Path(item['path']).read_bytes());native['config']['init']['cmd']=['sleep','infinity'];write(Path(item['path']),json.dumps(native));item['sha256']=digest(Path(item['path']).read_bytes())
+                    write(Path(proof['path']),json.dumps(value));proof=dict(proof,sha256=digest(Path(proof['path']).read_bytes()))
+                if fault=='root':case.destination.rename(case.base/'old-root');case.destination.mkdir()
+                with self.assertRaises(ValueError):
+                    helper['import_cold_handoff'](case.destination,current,case.packet,before,after,target_source_successor=proof)
+                self.assertFalse((case.destination/'cloudbench-pool-claims').exists())
+
+    def test_completion_required_after_terminal_and_cannot_use_prepared_proof(self):
+        case,helper,before,after,packet,current,request,proof,endpoint=self.setup_successor()
+        def stop(stage):
+            if stage=='destination-audit':raise RuntimeError('interrupted before terminal')
+        with self.assertRaises(RuntimeError):
+            helper['import_cold_handoff'](case.destination,current,case.packet,before,after,stop,target_source_successor=proof)
+        completion=case.destination/'cloudbench-cold-handoffs/successors'/(MACHINE+'.json')
+        self.assertFalse(completion.exists())
+        with self.assertRaises(FileNotFoundError):
+            helper['verify_imported_pool_proof'](case.destination/'cloudbench-pool-reuse'/(MACHINE+'.json'),case.destination,before,after,current['source_ref'],native_volume=json.loads(case.volume.read_bytes()))
+        helper['import_cold_handoff'](case.destination,current,case.packet,before,after,target_source_successor=proof)
+        self.assertTrue(completion.exists())
+
+    def test_completion_rejects_missing_tampered_replaced_linked_or_foreign_authority(self):
+        for fault in ('missing','content','terminal-inode','audit-content','linked-proof','common','source'):
+            with self.subTest(fault=fault):
+                case,helper,before,after,packet,current,request,proof,endpoint=self.setup_successor()
+                helper['import_cold_handoff'](case.destination,current,case.packet,before,after,target_source_successor=proof)
+                completion=case.destination/'cloudbench-cold-handoffs/successors'/(MACHINE+'.json')
+                root=case.destination;expected=current['source_ref']
+                if fault=='missing':completion.unlink()
+                if fault=='content':
+                    value=json.loads(completion.read_bytes());value['continuation']['old_init_pid']=99;write(completion,json.dumps(value))
+                if fault=='terminal-inode':
+                    path=case.destination/'cloudbench-cold-handoffs/imported'/(MACHINE+'.json');saved=path.read_bytes();path.rename(path.with_suffix('.old'));write(path,saved);path.chmod(0o600)
+                if fault=='audit-content':
+                    path=case.destination/'cloudbench-cold-handoffs/audit'/(MACHINE+'.json');write(path,'{}')
+                if fault=='linked-proof':os.link(proof['path'],case.base/'proof-alias')
+                if fault=='common':root=case.base/'foreign';root.mkdir()
+                if fault=='source':expected='1'*40
+                with self.assertRaises((ValueError,FileNotFoundError)):
+                    helper['verify_imported_pool_proof'](case.destination/'cloudbench-pool-reuse'/(MACHINE+'.json'),root,before,after,expected,native_volume=json.loads(case.volume.read_bytes()))
+
+    def test_completion_recovery_after_terminal_is_exact_and_idempotent(self):
+        case,helper,before,after,packet,current,request,proof,endpoint=self.setup_successor()
+        def stop(stage):
+            if stage=='destination-terminal':raise RuntimeError('interrupted after terminal')
+        with self.assertRaises(RuntimeError):
+            helper['import_cold_handoff'](case.destination,current,case.packet,before,after,stop,target_source_successor=proof)
+        completion=case.destination/'cloudbench-cold-handoffs/successors'/(MACHINE+'.json')
+        self.assertFalse(completion.exists())
+        helper['import_cold_handoff'](case.destination,current,case.packet,before,after,target_source_successor=proof)
+        raw=completion.read_bytes();inode=completion.stat().st_ino
+        helper['import_cold_handoff'](case.destination,current,case.packet,before,after,target_source_successor=proof)
+        self.assertEqual(completion.read_bytes(),raw);self.assertEqual(completion.stat().st_ino,inode)
 
 
 class CrossControllerColdHandoffTests(PreconfigStartupArchiveTests):

@@ -974,6 +974,8 @@ def verify_current_cold_receipt(registry,output,machine,token,receipt,before,aft
         phase['archive_path'],lambda p,n=MAXIMUM: files['current/volume.json'] if p==phase['archive_path'] else reader(p,n))
     if any(source_native[key]!=phase.get(key) for key in source_native):
         raise ValueError('sealed current allocated config changed')
+    if Path(before).samefile(after):
+        raise ValueError('fresh native observations reuse the same file')
     native=current_cold_native(machine,original,before,after,phase['archive_path'],
         lambda p,n=MAXIMUM: files['current/volume.json'] if p==phase['archive_path'] else read(p,n))
     if native['config_sha256']!=phase['config_sha256'] or native['instance_id']!=phase['instance_id']:
@@ -1203,7 +1205,68 @@ def verify_imported_cold_handoff(packet, target, before, after):
     return phase
 
 
-def import_cold_handoff(common, target, packet_path, before, after, checkpoint=lambda stage: None):
+
+def verify_target_source_successor(descriptor, packet, target, *, live=True):
+    if not isinstance(descriptor,dict) or set(descriptor)!={'path','sha256'}:
+        raise ValueError('target source successor descriptor differs')
+    raw=read(descriptor['path'],1048576)
+    if digest(raw)!=descriptor['sha256']:raise ValueError('target source successor receipt changed')
+    value=json.loads(raw)
+    verifier=runpy.run_path(str(Path(__file__).with_name('cloudbench-retained-controller-endpoint.py')))
+    return verifier['verify_target_source_successor'](value,packet,target,live=live)
+
+
+def successor_file_binding(path):
+    path=Path(path)
+    raw=read(path)
+    info=path.lstat()
+    if info.st_uid!=os.getuid() or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)&0o077:
+        raise ValueError('successor completion file is not private exact-owner')
+    return dict(path=str(path),sha256=digest(raw),device=info.st_dev,inode=info.st_ino,
+                uid=info.st_uid,mode=info.st_mode,size=info.st_size)
+
+
+def complete_target_source_successor(common, packet, descriptor, verified, authority):
+    # Called only after canonical audit and terminal are durably committed.
+    common=Path(common);machine=packet['machine_id']
+    bindings={key:successor_file_binding(common/'cloudbench-cold-handoffs'/directory/(machine+'.json'))
+              for key,directory in (('terminal','imported'),('audit','audit'))}
+    if any(json.loads(read(item['path']))!=authority for item in bindings.values()):
+        raise ValueError('successor completion lacks exact import terminal/audit')
+    value=dict(schema='cloudbench-target-source-successor-completed-v1',
+               successor=successor_file_binding(descriptor['path']),packet_sha256=authority['packet_sha256'],
+               original_target=packet['target'],current_target=verified['current_target'],
+               continuation=verified['continuation'],root_anchors=verified['root_anchors'],bindings=bindings)
+    path=common/'cloudbench-cold-handoffs/successors'/(machine+'.json')
+    durable_handoff_json(path,value)
+
+
+def verify_completed_target_source_successor(common, packet, descriptor, target):
+    common=Path(common);machine=packet['machine_id']
+    path=common/'cloudbench-cold-handoffs/successors'/(machine+'.json')
+    successor_file_binding(path)
+    value=json.loads(read(path))
+    if set(value)!={'schema','successor','packet_sha256','original_target','current_target','continuation','root_anchors','bindings'} or value['schema']!='cloudbench-target-source-successor-completed-v1':
+        raise ValueError('invalid successor completion')
+    binding=successor_file_binding(descriptor['path'])
+    if value['successor']!=binding or binding['sha256']!=descriptor['sha256']:
+        raise ValueError('successor completion proof binding changed')
+    proof=json.loads(read(descriptor['path']))
+    if (value['original_target']!=packet['target'] or value['current_target']!=target
+            or value['packet_sha256']!=proof['packet_sha256']
+            or value['continuation']!=proof['continuation'] or value['root_anchors']!=proof['root_anchors']):
+        raise ValueError('successor completion endpoint/continuation differs')
+    authority=dict(schema=HANDOFF_SCHEMA,nonce=packet['nonce'],packet_sha256=value['packet_sha256'],
+                   target=packet['target'],machine_id=machine,volume_id=packet['volume_id'],target_source_successor=descriptor)
+    if set(value['bindings'])!={'terminal','audit'}:raise ValueError('successor completion terminal set differs')
+    for key,directory in (('terminal','imported'),('audit','audit')):
+        expected=common/'cloudbench-cold-handoffs'/directory/(machine+'.json')
+        if value['bindings'][key]!=successor_file_binding(expected) or json.loads(read(expected))!=authority:
+            raise ValueError('successor completion terminal/audit changed')
+    return verify_target_source_successor(descriptor,packet,target,live=False)
+
+
+def import_cold_handoff(common, target, packet_path, before, after, checkpoint=lambda stage: None, *, target_source_successor=None):
     """Verified source seal -> claim -> ledger -> audit -> terminal -> release last.
     The source must be contacted only through its separately authenticated exact
     export operation. This function never mutates it or rewrites its receipts.
@@ -1215,6 +1278,9 @@ def import_cold_handoff(common, target, packet_path, before, after, checkpoint=l
     packet_raw = read(packet_path); packet = json.loads(packet_raw)
     if (common / 'cloudbench-cold-handoffs/outgoing' / packet['machine_id']).exists():
         raise ValueError('destination already delegated this allocation outward')
+    if target_source_successor is not None:
+        verified_successor=verify_target_source_successor(target_source_successor,packet,target)
+        target=handoff_target(packet['target'])
     phase = verify_imported_cold_handoff(packet, target, before, after)
     machine, volume = packet["machine_id"], packet["volume_id"]
     claims = common / "cloudbench-pool-claims"; handoff_directory(claims)
@@ -1224,10 +1290,13 @@ def import_cold_handoff(common, target, packet_path, before, after, checkpoint=l
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         authority = {"schema": HANDOFF_SCHEMA, "nonce": packet["nonce"], "packet_sha256": digest(packet_raw),
                      "target": target, "machine_id": machine, "volume_id": volume}
+        if target_source_successor is not None:authority["target_source_successor"]=target_source_successor
         terminal = common / "cloudbench-cold-handoffs/imported" / (machine + ".json")
         if terminal.exists():
             if json.loads(read(terminal)) != authority:
                 raise ValueError("different handoff already owns destination MID")
+            if target_source_successor is not None:
+                complete_target_source_successor(common,packet,target_source_successor,verified_successor,authority)
             if (claims / machine).exists():
                 if json.loads(read(claims / machine)) != authority:
                     raise ValueError("terminal handoff cannot release foreign claim")
@@ -1248,6 +1317,7 @@ def import_cold_handoff(common, target, packet_path, before, after, checkpoint=l
                  "config_sha256": phase["config_sha256"],
                  "image_digest": packet["native"]["config"]["image"].rpartition("@")[2],
                  "imported_cold": {"packet_path": str(evidence), "packet_sha256": digest(read(evidence)), "target": target}}
+        if target_source_successor is not None:proof["imported_cold"]["target_source_successor"]=target_source_successor
         # Recover the real app from immutable source archive rather than its
         # filesystem location or a fabricated destination source registry.
         reader = sealed_original_reader(packet["originals"])
@@ -1289,6 +1359,8 @@ def import_cold_handoff(common, target, packet_path, before, after, checkpoint=l
         checkpoint("destination-audit")
         durable_handoff_json(terminal, authority)
         checkpoint("destination-terminal")
+        if target_source_successor is not None:
+            complete_target_source_successor(common,packet,target_source_successor,verified_successor,authority)
         if json.loads(read(claims / machine)) != authority:
             raise ValueError("import claim identity changed before release")
         (claims / machine).unlink()
@@ -1375,14 +1447,18 @@ def capture_cold_handoff_target(workspace, common, before, after, ownership, sou
 
 def verify_imported_pool_proof(path, common, before, after, expected_source, *, native_volume):
     proof = json.loads(read(path, 65536)); imported = proof["imported_cold"]
+    successor=imported.get('target_source_successor')
     if (str(Path(common).resolve(strict=True)) != imported["target"]["common"]
             or imported["target"]["machine"] != os.environ.get("FLY_MACHINE_ID")
-            or imported["target"]["source_ref"] != expected_source):
+            or (successor is None and imported["target"]["source_ref"] != expected_source)):
         raise ValueError("imported proof used in foreign controller/common/source")
     raw = read(imported["packet_path"])
     if digest(raw) != imported["packet_sha256"]:
         raise ValueError("imported original packet changed")
     packet = json.loads(raw)
+    if successor is not None:
+        current_target=dict(imported['target'],source_ref=expected_source)
+        verify_completed_target_source_successor(common,packet,successor,current_target)
     if native_volume.get('id') != packet['volume_id'] or native_volume.get('attached_machine_id') != packet['machine_id'] or native_volume.get('state') != 'created':
         raise ValueError('imported current Volume attachment/state differs')
     phase = verify_imported_cold_handoff(packet, imported["target"], before, after)
