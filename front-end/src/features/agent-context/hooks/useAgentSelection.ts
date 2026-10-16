@@ -101,13 +101,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
         if (selectedAgentIdRef.current === agentId) setIsLoadingAgent(false);
       }
     },
-    [
-      initialLoadDoneRef,
-      applyAgentDetail,
-      selectedAgentIdRef,
-      setIsLoadingAgent,
-      stateRef,
-    ],
+    [initialLoadDoneRef, applyAgentDetail, selectedAgentIdRef, setIsLoadingAgent, stateRef],
   );
 
   useEffect(() => {

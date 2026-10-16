@@ -103,9 +103,10 @@ export function useAttentionActions({
     const response =
       overrideResponse ??
       (responses[requestId]?.trim() || (isAuthAssistance ? 'Authentication complete' : 'Approved'));
-    const userMessage = overrideResponse === undefined && responses[requestId]?.trim()
-      ? responses[requestId]
-      : undefined;
+    const userMessage =
+      overrideResponse === undefined && responses[requestId]?.trim()
+        ? responses[requestId]
+        : undefined;
     const remaining = countRemaining(requests, requestId);
     void run({
       requestId,
@@ -148,7 +149,11 @@ export function useAttentionActions({
     const remaining = countRemaining(requests, requestId);
     void run({
       requestId,
-      mutate: () => rejectAttentionRequest(requestId, responses[requestId]?.trim() ? responses[requestId] : undefined),
+      mutate: () =>
+        rejectAttentionRequest(
+          requestId,
+          responses[requestId]?.trim() ? responses[requestId] : undefined,
+        ),
       successToast: {
         title: 'Action rejected',
         description: 'The agent will skip this action and continue',

@@ -104,6 +104,11 @@ async function main(): Promise<void> {
             'offline-task',
             { forceManagedRotation: true },
             {
+              retrieveProfile: async (profileId) => {
+                assert.strictEqual(profileId, 'offline-profile');
+                assert.strictEqual(released, true);
+                return { status: 'READY' };
+              },
               createSession: async () => {
                 creates++;
                 if (!released)
