@@ -32,7 +32,8 @@ class Admission(unittest.TestCase):
         def save(value):
             self.counter+=1;p=self.root/f'evidence-{self.counter}.json';p.write_bytes(mod.canonical(value));return mod.descriptor(p)
         self.save=save
-        control_config=dict(init={'exec':['/bin/sleep','180']},mounts=[{'volume':'vol_controller','path':'/data'}],restart={'policy':'no'},rootfs={'persist':'always','size_gb':50})
+        actual_controller=json.loads(SCRIPT.with_name('tests').joinpath('explicit-idle-controller-init.fixture.json').read_text())
+        control_config=dict(init=actual_controller['init'],mounts=[{'volume':'vol_controller','path':'/data'}],restart={'policy':'no'},rootfs=actual_controller['rootfs'])
         ctrl=dict(id=self.controller,state='started',instance_id='controller-instance',config=control_config)
         own=dict(schema='cloudbench-controller-workspace-ownership-v1',volume_id='vol_controller',app='app',mount_path='/data')
         own_desc=save(own)
@@ -82,9 +83,26 @@ class Admission(unittest.TestCase):
     def test_nonempty_workspace_cannot_claim_empty_bootstrap(self):
         req=copy.deepcopy(self.request);req['workspace_policy']='real-empty-bootstrap-v1'
         with self.assertRaises(ValueError):mod.validate_request(req)
+    def test_identical_or_same_inode_native_pair_refuses_before_read(self):
+        req=copy.deepcopy(self.request);req['native_after']=dict(req['native_before'])
+        with self.assertRaises(ValueError):mod.validate_request(req)
+        req['native_after']=dict(req['native_before'],path=str(self.root/'different-name'))
+        with self.assertRaises(ValueError):mod.validate_request(req)
+    def test_actual_gate_init_controller_uses_separate_explicit_endpoint(self):
+        mod.validate_consumer(self.request)
+        old=mod.sibling('cloudbench-startup-failure-archive.py')['capture_cold_handoff_target']
+        target=self.request['consumer']
+        with self.assertRaisesRegex(ValueError,'not exact inert maintenance controller'):old(target['workspace'],target['common'],self.request['controller_before']['path'],self.request['controller_after']['path'],self.request['workspace_ownership']['path'],target['source_ref'],target['pool_name'])
+    def test_controller_identity_config_and_pair_mismatch_refuse(self):
+        req=copy.deepcopy(self.request);req['controller_after']=dict(req['controller_before'])
+        with self.assertRaises(ValueError):mod.validate_consumer(req)
+        req=copy.deepcopy(self.request);req['consumer']['machine']='22222222222222'
+        with self.assertRaises(ValueError):mod.validate_consumer(req)
+        req=copy.deepcopy(self.request);req['consumer']['controller_config_sha256']='0'*64
+        with self.assertRaises(ValueError):mod.validate_consumer(req)
     def authority(self):
         req=self.root/'request.json';req.write_bytes(mod.canonical(self.request));lock=self.root/'custody.lock';lock.touch(mode=0o600);fd=os.open(lock,os.O_RDWR);fcntl.flock(fd,fcntl.LOCK_EX);self.addCleanup(os.close,fd)
-        value=dict(schema='explicit-idle-authority-v1',app='app',machine_id=self.mid,volume_id=self.vol,admission_nonce=self.nonce,request_sha256=mod.sha(req.read_bytes()),coordinator_thread='test-coordinator',custody_lock=str(lock),protected_overlay={k:self.request['protected_overlay'][k] for k in ('path','sha256')},sole_operator=True,old_actors_joined=True,historical_task_credit=0,allowed_operations=['observe','same-config-start','stop','publish-pool'])
+        value=dict(schema='explicit-idle-authority-v1',consumer=self.request['consumer'],app='app',machine_id=self.mid,volume_id=self.vol,admission_nonce=self.nonce,request_sha256=mod.sha(req.read_bytes()),coordinator_thread='test-coordinator',custody_lock=str(lock),protected_overlay={k:self.request['protected_overlay'][k] for k in ('path','sha256')},sole_operator=True,old_actors_joined=True,historical_task_credit=0,allowed_operations=['observe','same-config-start','stop','publish-pool'])
         auth=self.root/'authority.json';auth.write_bytes(mod.canonical(value));auth.chmod(0o600)
         return req,auth,fd
     @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')

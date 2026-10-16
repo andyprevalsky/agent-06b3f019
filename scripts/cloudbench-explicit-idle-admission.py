@@ -106,6 +106,7 @@ def observation(data, machine, instance, nonce):
 
 
 def native_pair(before, after, resource, reader=described):
+    require(before['path']!=after['path'] and (before['device'],before['inode'])!=(after['device'],after['inode']), 'native pair reused one read')
     first, last = reader(before), reader(after)
     require(first == last, 'native pair differs')
     config = first.get('config', {})
@@ -191,6 +192,31 @@ def validate_request(request, reader=described):
     return final
 
 
+def validate_consumer(request):
+    target=request['consumer'];before=request['controller_before'];after=request['controller_after']
+    require(before['path']!=after['path'] and (before['device'],before['inode'])!=(after['device'],after['inode']), 'controller pair reused one read')
+    first,last=described(before),described(after)
+    require(first==last and first.get('id')==target['machine']==os.environ.get('FLY_MACHINE_ID')
+            and first.get('state')=='started' and first.get('instance_id'), 'current controller identity')
+    config=first['config'];mounts=config.get('mounts',[])
+    require(config.get('restart')=={'policy':'no'} and config.get('auto_destroy') in (None,False)
+            and len(mounts)==1 and mounts[0]['volume']==target['volume'], 'current controller lifecycle/Volume')
+    require(sha(canonical(config))==target['controller_config_sha256'], 'current controller config')
+    common=Path(target['common']);workspace=Path(target['workspace']);mount=Path(mounts[0]['path'])
+    preservation='rootfs-always' if config.get('rootfs')=={'persist':'always','size_gb':50} else 'same-volume-device'
+    if preservation=='same-volume-device':
+        require(mount.resolve(strict=True)==mount and os.path.ismount(mount) and mount.stat().st_dev==common.stat().st_dev,'controller durable common')
+    require(target['preservation']==preservation, 'controller preservation')
+    ownership=described(request['workspace_ownership'])
+    require(ownership.get('schema')=='cloudbench-controller-workspace-ownership-v1'
+            and ownership.get('volume_id')==target['volume'] and ownership.get('app')==request['resource']['app']==os.environ.get('FLY_APP_NAME')
+            and ownership.get('mount_path')==str(mount)
+            and request['workspace_ownership']['sha256']==target['ownership_sha256'], 'controller ownership')
+    actual_common=subprocess.check_output(['git','-c','safe.directory='+str(workspace),'-C',str(workspace),'rev-parse','--path-format=absolute','--git-common-dir'],text=True,timeout=5).strip()
+    actual_ref=subprocess.check_output(['git','-c','safe.directory='+str(workspace),'-C',str(workspace),'rev-parse','HEAD'],text=True,timeout=5).strip()
+    require(actual_common==str(common) and actual_ref==target['source_ref'],'controller source/common')
+
+
 def authorize(authority_path, authority_sha, request, request_sha, custody_fd):
     require(os.geteuid() == 0, 'root authority required')
     path = Path(authority_path); raw = read(path); info = path.stat(); authority = json.loads(raw)
@@ -201,6 +227,7 @@ def authorize(authority_path, authority_sha, request, request_sha, custody_fd):
                               sole_operator=True, old_actors_joined=True, historical_task_credit=0).items():
         require(authority.get(key) == expected, 'authority '+key)
     require(authority['protected_overlay'] == {k:request['protected_overlay'][k] for k in ('path','sha256')}, 'authority protected overlay')
+    require(authority.get('consumer')==request['consumer'],'authority consumer binding')
     require(authority['coordinator_thread'] and set(authority['allowed_operations']) == {'observe','same-config-start','stop','publish-pool'}, 'authority operations')
     lock = Path(authority['custody_lock']); lock_info = lock.stat(); fd_info = os.fstat(custody_fd)
     require(lock.resolve(strict=True) == lock and stat.S_ISREG(lock_info.st_mode) and lock_info.st_uid == 0
@@ -218,10 +245,7 @@ def publish(request_path, request_sha, authority_path, authority_sha, custody_fd
     for key, env in (('workspace','CLOUDBENCH_IDLE_WORKSPACE'),('common','CLOUDBENCH_IDLE_COMMON'),
                      ('pool_ids_file','CLOUDBENCH_IDLE_POOL_IDS'),('pool_meta_file','CLOUDBENCH_IDLE_POOL_META')):
         require(target[key] == os.environ.get(env), 'canonical consumer '+key)
-    endpoint=sibling('cloudbench-startup-failure-archive.py')['capture_cold_handoff_target'](
-        target['workspace'],target['common'],request['controller_before']['path'],request['controller_after']['path'],
-        request['workspace_ownership']['path'],target['source_ref'],Path(target['pool_ids_file']).name)
-    require(all(target[key]==value for key,value in endpoint.items()), 'actual consumer endpoint')
+    validate_consumer(request)
     base = sibling('cloudbench-startup-failure-archive.py'); claims=common/'cloudbench-pool-claims'; uid=common.stat().st_uid; gid=common.stat().st_gid
     def sync_directory(path):
         fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
