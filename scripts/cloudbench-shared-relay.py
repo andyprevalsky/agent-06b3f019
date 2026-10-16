@@ -121,7 +121,8 @@ async def closed(writer):
     writer.close()
     try:
         async with asyncio.timeout(.5):await writer.wait_closed()
-    except (OSError,ConnectionError,TimeoutError):pass
+    except TimeoutError:writer.transport.abort()
+    except (OSError,ConnectionError):pass
 
 class Broker:
     def __init__(self, auth, digest, directory):
