@@ -7161,6 +7161,9 @@ reconcile_stale_fleet_registries() {
     if [ "$status" = 10 ]; then
         status=0
         reconcile_stale_fleet_registries_full || status=$?
+        # Preserve startup order: historical recovery, then the unchanged
+        # app-scoped orphan sweep, before publishing cohort completion.
+        if [ "$status" = 0 ]; then reap_orphaned_fleet_proxies || true; fi
         python3 "$helper" complete "${args[@]}" --fd "$fd" --status "$status" || status=1
     fi
     exec {fd}>&-
@@ -15517,7 +15520,9 @@ fi
 reconcile_stale_fleet_registries || exit 1
 # Reap data-plane proxy tunnels leaked by SIGKILLed/crashed controllers before
 # provisioning, so a backlog of orphaned tunnels can't starve this run's proxies.
-reap_orphaned_fleet_proxies
+if [ -z "${RUN_BENCH_CLEANUP_COHORT_DIR:-}" ] || [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
+    reap_orphaned_fleet_proxies
+fi
 # Recovery may have removed active machines. Capacity must classify the
 # post-reconciliation provider state, not the earlier warm-source lookup.
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then

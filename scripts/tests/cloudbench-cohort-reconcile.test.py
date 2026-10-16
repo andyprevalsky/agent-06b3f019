@@ -43,6 +43,9 @@ class ReconciliationFixture:
         source=Path(os.environ.get('CLOUDBENCH_TEST_RECONCILE_SOURCE',str(ROOT/'scripts/run-bench-fleet'))).read_text()
         # Wrapper and original full scanner are both production functions.
         self.functions=(function(source,'reconcile_stale_fleet_registries_full')if 'reconcile_stale_fleet_registries_full()'in source else '')+function(source,'reconcile_stale_fleet_registries')
+        start=source.index('reconcile_stale_fleet_registries || exit 1\n')
+        end=source.index('# Recovery may have removed active machines.',start)
+        self.callsite=source[start:end]
         self.body=r'''
 registry_meta_value(){
  printf '%s %s %s\n' "$$" "$1" "$2" >> "$CASE/metadata-calls"
@@ -57,13 +60,20 @@ registry_owner_alive(){ case "$1" in */unknown/meta)return 2;;*)return 0;;esac; 
 release_cleanup_disk_reserve(){ echo FORBIDDEN >> "$CASE/provider-calls";return 1; }
 acquire_registry_recovery_lock(){ echo FORBIDDEN >> "$CASE/provider-calls";return 1; }
 FLY(){ echo FORBIDDEN >> "$CASE/provider-calls";return 1; }
+reap_orphaned_fleet_proxies(){
+ printf '%s\n' "$$" >> "$CASE/proxy-sweeps"
+ if [ -n "${RUN_BENCH_CLEANUP_COHORT_DIR:-}" ] && [ -e "$RUN_BENCH_CLEANUP_COHORT_DIR/stale-reconcile.completed.json" ];then
+  echo late >> "$CASE/proxy-after-completion"
+ fi
+ return 1  # Existing app-scoped best-effort cleanup never aborts provisioning.
+}
 read -r ready
 FLEET_OWNER_PID_START="$(cat "$CASE/birth-$$")"
-reconcile_stale_fleet_registries
-status=$?
+__STARTUP_CALLSITE__
+status=0
 printf 'status=%s mutated=%s\n' "$status" "${FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED:-unset}"
 exit "$status"
-'''
+'''.replace('__STARTUP_CALLSITE__',self.callsite)
         self.children=[]
 
     def spawn(self,index,sealed=True):
@@ -114,6 +124,8 @@ class CohortReconciliation(unittest.TestCase):
             code,out,err=f.join(p);self.assertEqual(code,0,out+err)
             self.assertIn('mutated=1',out,'cached peers did not request borrowed inventory refresh')
         self.assertTrue((f.ticket.cohort/'stale-reconcile.completed.json').exists())
+        self.assertEqual(len((f.root/'proxy-sweeps').read_text().splitlines()),1)
+        self.assertFalse((f.root/'proxy-after-completion').exists(),'proxy sweep followed completion publication')
         self.assertEqual(len(f.metadata()),12,'cohort repeated the full registry walk')
         done=f.ticket.cohort/'stale-reconcile.completed.json'
         failed=f.ticket.cohort/'stale-reconcile.failed.json'
@@ -175,6 +187,7 @@ class CohortReconciliation(unittest.TestCase):
         for index in (1,2):
             code,out,err=f.join(f.spawn(index));self.assertNotEqual(code,0,out+err)
         self.assertEqual(len(f.metadata()),count)
+        self.assertFalse((f.root/'proxy-sweeps').exists(),'failed scanner ran orphan sweep')
         f.assert_records_preserved()
 
     def test_unknown_same_host_owner_remains_refused_and_untouched(self):
@@ -188,6 +201,7 @@ class CohortReconciliation(unittest.TestCase):
         for index in range(3):
             code,out,err=f.join(f.spawn(index,sealed=False));self.assertEqual(code,0,out+err)
         self.assertEqual(len(f.metadata()),36)
+        self.assertEqual(len((f.root/'proxy-sweeps').read_text().splitlines()),3)
         f.assert_records_preserved()
 
 

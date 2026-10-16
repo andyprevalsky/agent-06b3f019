@@ -84,6 +84,20 @@ a subsequent unchanged benchmark verifies this production boundary and its
 complete outcome. No current-run edit, provider call, task change, new benchmark
 gate, timeout extension or automatic run restart is part of this repair.
 
+### Follow-up: coalesce the immediately adjacent orphan sweep
+
+Attempt57 subsequently moved past the peer metadata scan into the next original
+startup operation: `ps -o pid=,ppid=,command= -ax` in
+`reap_orphaned_fleet_proxies`, captured by monitor-1792188157798341426. That
+unchanged app-scoped orphan sweep now runs in the same successful cohort winner,
+after historical reconciliation and before its completion receipt. Its exact
+process identity/signal guards and original ignored-return behavior remain
+unchanged; standalone and explicit reuse still execute their original sweep.
+A failed registry scan cannot enter the sweep. The owning counters require one
+sweep across three cohort members and three sweeps for three standalone callers.
+This removes a second repeated global scan without introducing allocation
+batches. The active run was not patched or restarted.
+
 ## Human feedback
 
 The user required fully parallel reservation/startup without artificial batches;
