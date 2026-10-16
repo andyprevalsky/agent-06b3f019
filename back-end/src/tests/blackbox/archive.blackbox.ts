@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert';
+import { runCurationPoolControls } from './archive-curation-pool.controls';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -557,6 +558,10 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
 
 async function runAll(): Promise<void> {
   const tests = [
+    {
+      name: 'curation pool stops claims and joins in-flight work before rejecting',
+      fn: runCurationPoolControls,
+    },
     { name: 'fixture scope and restore replacement', fn: testFixtureScopeAndRestore },
     {
       name: 'start fixture snapshot excludes post-ready writes',

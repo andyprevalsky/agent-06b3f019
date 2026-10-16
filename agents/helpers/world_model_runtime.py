@@ -688,6 +688,8 @@ async def world_time_ms(agent_id: str | None) -> int | None:
         snapshot = response.json()
     except (httpx.HTTPError, ValueError):
         return None
+    if not isinstance(snapshot, dict):
+        return None
     for agent in snapshot.get("agents") or []:
         if isinstance(agent, dict) and agent.get("agent_id") == agent_id and type(agent.get("time_ms")) is int:
             return agent["time_ms"]

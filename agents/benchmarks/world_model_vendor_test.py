@@ -6,6 +6,7 @@ wheel beside the requirements file. Run by the WMH blackbox gate.
 """
 
 import hashlib
+import pytest
 import shutil
 import subprocess
 import sys
@@ -50,7 +51,7 @@ def test_vendored_world_model_wheel_resolves_offline_beside_its_requirements(tmp
 
 def _native_setup_control(tmp_path, *, override=False, cached=False, missing='', corrupt=False,
                           sources='valid', version='0.7.158+rose.bf75987e', python_version='3.12',
-                          absent_native=False, mac_hash=False):
+                          absent_native=False, mac_hash=False, caller_cwd=None, find_links_base=None):
     """Run the actual Bash owner; only installer/native execution is synthetic."""
     import os
     checkout = tmp_path / 'checkout'
@@ -104,6 +105,15 @@ exec(compile(code,'<actual installer validation>','exec'))
     uv = binaries / 'uv'
     uv.write_text('#!' + sys.executable + '\n' + '''import sys,os,pathlib,shutil
 with open(os.environ['UV_CALLS'],'a') as f:f.write(' '.join(sys.argv[1:])+'\\n')
+if sys.argv[1:3]==['pip','install'] and os.environ.get('CONTROL_FIND_LINKS_BASE'):
+    requirement=pathlib.Path(sys.argv[sys.argv.index('-r')+1])
+    assert requirement.is_absolute()
+    assert pathlib.Path(sys.argv[sys.argv.index('--python')+1]).is_absolute()
+    links=next(line.split(maxsplit=1)[1] for line in requirement.read_text().splitlines() if line.startswith('--find-links '))
+    base=pathlib.Path.cwd() if os.environ['CONTROL_FIND_LINKS_BASE']=='cwd' else requirement.parent
+    if not (base/links).is_dir():
+        print('CONTROL: vendored find-links directory missing at '+str(base/links),file=sys.stderr)
+        sys.exit(31)
 if sys.argv[1]=='venv':
     target=pathlib.Path(sys.argv[-1])/'bin';target.mkdir(parents=True)
     shutil.copy2(os.environ['CONTROL_SHIM'],target/'python')
@@ -112,10 +122,15 @@ if sys.argv[1]=='venv':
     env = {'PATH':str(binaries), 'PYTHONDONTWRITEBYTECODE':'1', 'UV_CALLS':str(calls),
            'CONTROL_SHIM':str(shim), 'CONTROL_MISSING':missing, 'CONTROL_VERSION':version,
            'CONTROL_PYTHON_VERSION':python_version}
+    if find_links_base:
+        env['CONTROL_FIND_LINKS_BASE'] = find_links_base
+    execution_cwd = checkout if caller_cwd == 'root' else tmp_path / 'arbitrary-caller' if caller_cwd == 'arbitrary' else None
+    if execution_cwd is not None:
+        execution_cwd.mkdir(exist_ok=True)
     if override:
         env['WMH_NATIVE_PYTHON'] = str(shim)
     result = subprocess.run(['/bin/bash',str(checkout / 'scripts/setup-world-model.sh')],
-                            env=env,text=True,capture_output=True,timeout=20)
+                            env=env,cwd=execution_cwd,text=True,capture_output=True,timeout=20)
     return result, calls.read_text().splitlines() if calls.exists() else [], native / 'requirements.sha256', signature
 
 
@@ -159,3 +174,28 @@ def test_native_setup_preserves_valid_override_cache_install_and_version_pins(tm
         assert result.returncode != 0
         assert ('Unexpected experiential version' if mode=='version' else 'Native world model requires Python') in result.stderr
         assert calls == [] and not marker.exists()
+
+
+@pytest.mark.parametrize("caller", ["root", "arbitrary"])
+@pytest.mark.parametrize("base", ["cwd", "requirements"])
+def test_native_setup_resolves_vendored_links_under_both_uv_path_contracts(tmp_path, caller, base):
+    """The actual installer owns cwd; old/current uv semantics resolve the same wheel."""
+    result, calls, marker, signature = _native_setup_control(
+        tmp_path, caller_cwd=caller, find_links_base=base)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(calls) == 2 and calls[0].startswith("pip install ") and calls[1].startswith("pip check ")
+    assert marker.read_text().strip() == signature
+
+
+def test_native_setup_path_independence_preserves_override_and_cached_no_install(tmp_path):
+    for caller in ("root", "arbitrary"):
+        for override, cached in ((True, False), (False, True)):
+            result, calls, marker, signature = _native_setup_control(
+                tmp_path / f"{caller}-{override}-{cached}", override=override, cached=cached,
+                caller_cwd=caller, find_links_base="cwd")
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert calls == []
+            if cached:
+                assert marker.read_text().strip() == signature
+            else:
+                assert not marker.exists()

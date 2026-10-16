@@ -496,7 +496,11 @@ def test_bundle_signature_and_refs_read_metadata_only_under_r2():
         bodies = [key for key in fetched if not key.endswith(".meta.json")]
         # A missing artifact is probed by HEAD; no ciphertext GET is allowed.
         assert bodies == [], bodies
-        assert headed == [f"trace-archive/{root_agent_id}/does/not/exist.json.gz.enc"], headed
+        assert headed == [
+            f"trace-archive/{root_agent_id}/db/start.fixture.json.gz.enc",
+            f"trace-archive/{root_agent_id}/db/start.fixture.json.gz.enc",
+            f"trace-archive/{root_agent_id}/does/not/exist.json.gz.enc",
+        ], headed
 
 
 def test_bundle_signature_r2_tracks_enumerated_ciphertext_without_metadata():
@@ -3141,6 +3145,39 @@ async def test_runtime_world_time_reads_the_agent_clock_or_reports_no_world():
             assert await runtime.world_time_ms("child-1") is None
         with patch.dict(os.environ, {"WMH_BASE_URL": "", "WORLD_MODEL_HARNESS_URL": ""}):
             assert await runtime.world_time_ms("child-1") is None
+    finally:
+        teardown_mock()
+
+
+async def test_runtime_world_time_nonobject_clock_is_unavailable():
+    import helpers.world_model_runtime as runtime
+
+    payload = None
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(200, content=json.dumps(payload), headers={"content-type": "application/json"})
+
+    setup_mock_fn(handler)
+    resolve = AsyncMock(return_value=(False, None, False, "root-1", None, False))
+    try:
+        with (
+            patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
+            patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
+        ):
+            for value in [[], None, 0, -3, 1.5, True, "clock"]:
+                payload = value
+                assert await runtime.world_time_ms("child-1") is None, repr(value)
+            for value in [-1_000, 0, 7_000]:
+                payload = {"agents": [{"agent_id": "child-1", "time_ms": value}], "shared_time_ms": 5_000}
+                assert await runtime.world_time_ms("child-1") == value
+            payload = {"agents": [], "shared_time_ms": -1_000}
+            assert await runtime.world_time_ms("child-1") == -1_000
+            payload = {"start_ms": 0}
+            assert await runtime.world_time_ms("child-1") == 0
+            assert all(p == "/world_models/rose-archive/scopes/root-1/clock" for p in requests)
+            assert resolve.await_count == len(requests)
     finally:
         teardown_mock()
 
@@ -6242,6 +6279,10 @@ async def run_all_tests():
     await r.record_async(
         "simulated_payment_approval_finishes_pending_tool",
         test_simulated_payment_card_approval_finishes_pending_tool_for_resumed_policy,
+    )
+    await r.record_async(
+        "runtime_world_time_nonobject_clock_is_unavailable",
+        test_runtime_world_time_nonobject_clock_is_unavailable,
     )
     teardown_mock()
     return r.all_passed

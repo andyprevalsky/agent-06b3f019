@@ -50,7 +50,7 @@ else
     fi
     signature="$(sha256_file "$manifest")"
     if [ ! -f "$native_env/requirements.sha256" ] || [ "$(cat "$native_env/requirements.sha256")" != "$signature" ]; then
-        uv pip install --python "$native_python" -r "$manifest" >&2
+        (cd "$repo_root/agents" && uv pip install --python "$native_python" -r "$manifest") >&2
         uv pip check --python "$native_python" >&2
         write_signature=true
     fi

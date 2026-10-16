@@ -247,26 +247,36 @@ export async function curateTraceArchives(
   const concurrency = Math.floor(requestedConcurrency);
   const results: CurateTraceArchiveResult[] = new Array(options.rootAgentIds.length);
   let next = 0;
+  let failed = false;
+  let failure: unknown;
   const worker = async (): Promise<void> => {
-    while (next < options.rootAgentIds.length) {
-      const index = next;
-      next += 1;
-      const rootAgentId = options.rootAgentIds[index];
-      const classification = await classifyTraceArchiveGold(rootAgentId, options.policy);
-      let deletedObjectCount = 0;
-      if (options.deleteRejected === true && !classification.gold) {
-        deletedObjectCount = (await deleteArchivedBundle(rootAgentId)).deletedObjectCount;
+    try {
+      while (!failed && next < options.rootAgentIds.length) {
+        const index = next;
+        next += 1;
+        const rootAgentId = options.rootAgentIds[index];
+        const classification = await classifyTraceArchiveGold(rootAgentId, options.policy);
+        let deletedObjectCount = 0;
+        if (options.deleteRejected === true && !classification.gold) {
+          deletedObjectCount = (await deleteArchivedBundle(rootAgentId)).deletedObjectCount;
+        }
+        results[index] = {
+          deleted: deletedObjectCount > 0,
+          classification,
+          deletedObjectCount,
+        };
+        options.onResult?.(results[index], index);
       }
-      results[index] = {
-        deleted: deletedObjectCount > 0,
-        classification,
-        deletedObjectCount,
-      };
-      options.onResult?.(results[index], index);
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+      }
     }
   };
   await Promise.all(
     Array.from({ length: Math.min(concurrency, options.rootAgentIds.length) }, () => worker())
   );
+  if (failed) throw failure;
   return results;
 }
