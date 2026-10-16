@@ -11190,11 +11190,12 @@ PYREAD
 
 pool_recovery_primary_plan() {  # <registry> <current node fp> <current python fp>
     python3 - "$1" "$ROOT_DIR" "$FLEET_AUDIT_ROOT" "$APP" "$2" "$3" \
-        "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py" "$POOL_CLAIMS_DIR" "${POOL_COLD_BOOTSTRAP:-0}" <<'PYPLAN'
+        "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py" "$POOL_CLAIMS_DIR" "${POOL_COLD_BOOTSTRAP:-0}" "${4:-recovery}" <<'PYPLAN'
 import os, re, runpy, stat, sys
 from pathlib import Path
 registry, root, audit_root = map(Path, sys.argv[1:4])
-app, node, python_fp, contract_path, claims_root, cold = sys.argv[4:]
+app, node, python_fp, contract_path, claims_root, cold, caller = sys.argv[4:]
+assert caller in {"recovery", "current"}
 def read(path, limit=1048576):
     assert path.resolve(strict=True) == path
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
@@ -11283,7 +11284,7 @@ for task in matrix['tasks']:
         assert pending['transfer_state'] == 'pending'
 
     print(machine, name, volume, sep='\t')
-assert seen, 'no canonically owned primary IDs to hand off'
+assert seen or caller == 'current', 'no canonically owned primary IDs to hand off'
 PYPLAN
 }
 
@@ -11317,6 +11318,52 @@ finally: os.close(fd)
 PYBASE
     pool_ledger_lock_release
     return "$status"
+}
+
+current_registry_primaries_to_pool_plan() {  # <joined> <guest-failed> <runtime-failed>; read-only exact live owner plan
+    local registry="$FLEET_REGISTRY_DIR" meta="$FLEET_REGISTRY_DIR/meta"
+    local node_fp py_fp
+    [ "$1:$2:$3" = "1:0:0" ] && [ "${KEEP_CLONES:-0}" = 0 ] \
+        && [ "${FLEET_EXECUTION_COMPLETED:-0}" = 1 ] \
+        && [ "${POOL_COLD_BOOTSTRAP:-0}" = 0 ] || return 1
+    [ "${FLEET_REGISTRY_PUBLISHED:-0}" = 1 ] || return 1
+    [ "$(registry_meta_value "$meta" fleet_owner_token)" = "$FLEET_OWNER_TOKEN" ] \
+        && [ "$(registry_meta_value "$meta" host)" = "$FLEET_OWNER_HOST" ] \
+        && [ "$(registry_meta_value "$meta" pid)" = "$$" ] \
+        && [ "$(registry_meta_value "$meta" pid_start)" = "$FLEET_OWNER_PID_START" ] \
+        && [ "$(registry_meta_value "$meta" run_id)" = "$RUN_ID" ] \
+        && [ "$(registry_meta_value "$meta" audit_dir)" = "$FLEET_TEARDOWN_OWNERSHIP_DIR" ] || return 1
+    registry_owner_alive "$meta" || return 1
+    [ ! -e "$registry/recovery-lock" ] && [ ! -L "$registry/recovery-lock" ] || return 1
+    [ "$(fleet_registry_cleanup_state "$registry" "$(registry_meta_value "$meta" cleanup_policy)")" = reap ] || return 1
+    fleet_validate_reap_cohort "$registry" || return 1
+    node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || return 1
+    py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 1
+    pool_recovery_primary_plan "$registry" "$node_fp" "$py_fp" current
+}
+
+return_current_registry_primaries_to_pool() {  # <joined> <guest-failed> <runtime-failed>; caller already stopped primaries
+    local registry="$FLEET_REGISTRY_DIR" plan baseline source_image id name volume proof proof_plan=""
+    plan="$(current_registry_primaries_to_pool_plan "$@")" || return 1
+    baseline="${plan%%$'\n'*}"
+    [ "$plan" != "$baseline" ] || return 0
+    source_image="$(pool_source_image_digest)" || return 1
+    # Every primary must have the original stopped/config/volume proof before
+    # publishing any member. A refusal leaves current ownership recoverable.
+    while IFS=$'\t' read -r id name volume; do
+        [ -n "$id" ] || continue
+        [ "$id" != "${WARM_ID:-}" ] && [ "$id" != "${SHARED_WARM_ID:-}" ] \
+            && [ "$volume" != "${WARM_VOLUME_ID:-}" ] && [ "$volume" != "${SHARED_WARM_VOLUME_ID:-}" ] || return 1
+        proof="$(pool_native_reuse_proof "$id" "$name" "$volume" "$source_image" "$registry")" || return 1
+        [ ! -e "$POOL_CLAIMS_DIR/$id" ] && [ ! -L "$POOL_CLAIMS_DIR/$id" ] || return 1
+        proof_plan+="$id"$'\t'"$proof"$'\n'
+    done < <(printf '%s\n' "$plan" | tail -n +2)
+    mkdir -p "${POOL_IDS_FILE%/*}" "$POOL_CLAIMS_DIR" || return 1
+    pool_publish_recovery_baseline "$baseline" || return 1
+    while IFS=$'\t' read -r id proof; do
+        [ -n "$id" ] || continue
+        transfer_owned_stopped_machine_to_pool "$id" "$$" "$FLEET_OWNER_PID_START" "$proof" || return 1
+    done <<< "$proof_plan"
 }
 
 recover_registry_primaries_to_pool() {  # exact recovery lock + canonical evidence must already be held
