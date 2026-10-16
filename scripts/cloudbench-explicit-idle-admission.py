@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit current-custody admission. No provider calls or historical task credit."""
+"""Explicit current-custody admission and owned worker staging; no historical credit."""
 from __future__ import annotations
 import argparse
 import base64
@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
+import socket
 import runpy
 import stat
 import subprocess
@@ -346,18 +348,170 @@ def verify_pool(proof_path, common, before, after, expected_source, volume, role
     require(admission['consumer']['common']==str(Path(common).resolve(strict=True)) and admission['consumer']['source_ref']==expected_source
             and admission['consumer']['machine']==os.environ.get('FLY_MACHINE_ID'), 'consumer common/ref/Machine')
     require(extension['workspace_policy']==request['workspace_policy'] and extension['allowed_future_roles']==request['allowed_future_roles'], 'proof policy')
-    native_pair(before,after,admission['resource'])
+    resource=admission['resource'];state=returned_state(proof_path)
+    if state:
+        require(state['source_ref']==expected_source,'returned worker source')
+        resource=dict(resource,instance_id=state['native']['instance_id'],config_sha256=sha(canonical(state['native']['config'])),shape=state['native']['config']['guest'])
+    native_pair(before,after,resource)
     require(volume['id']==proof['volume_id'] and volume['attached_machine_id']==proof['machine_id'] and volume['state']=='created','current Volume')
     require(all(proof[key]==admission['resource'][key] for key in ('app','machine_id','name','volume_id','instance_id','config_sha256','image_digest')),'proof identity')
     return proof
+
+
+def worker_profile(size, memory):
+    match=re.fullmatch('(shared-cpu|performance)-([1-9][0-9]*)x',size)
+    require(match and str(memory).isdigit() and int(memory)>0,'worker profile')
+    return dict(cpu_kind='shared' if match[1]=='shared-cpu' else 'performance',cpus=int(match[2]),memory_mb=int(memory))
+
+
+def assignment_claim(assignment):
+    proof=Path(assignment['proof']);common=proof.parent.parent
+    claim=common/'cloudbench-pool-claims'/assignment['machine_id']
+    raw=read(claim);fields=dict(line.split('=',1) for line in raw.decode().splitlines())
+    require(sha(raw)==assignment['claim_sha256'] and fields.get('fleet_owner_token')==assignment['claim_owner_token']
+            and fields.get('machine_id')==assignment['machine_id'] and fields.get('volume_id')==assignment['volume_id'], 'worker claim changed')
+    require(fields.get('host')==socket.gethostname() and sibling('cloudbench-original-volume-capture.py')['pid_birth_state'](fields.get('pid',''),fields.get('pid_start',''))=='live','worker claim owner is not live')
+    require(assignment['origin']==ORIGIN and assignment['historical_task_credit']==0 and assignment['role']=='borrowed-worker', 'worker assignment origin')
+    return common
+
+
+def stage_worker(assignment_path, source, node, python_fp, size, memory, api, *, seconds=120):
+    """One version-guarded update under an already-owned claim; never retries POST."""
+    assignment=json.loads(read(assignment_path));common=assignment_claim(assignment);mid=assignment['machine_id']
+    folder=Path(assignment['admission']);require(folder.resolve(strict=True)==folder,'worker stage path')
+    target=worker_profile(size,memory);deadline=time.monotonic()+min(120,seconds);sequence=0
+    base=sibling('cloudbench-startup-failure-archive.py');save=base['durable_handoff_json']
+    intent=folder/'resize.intent.json';terminal=folder/'stage.complete.json'
+    require(not any(os.path.lexists(folder/name) for name in ('resize.intent.json','stage.complete.json','stage.pending.json','stage.attempt.json')), 'worker stage already attempted')
+    save(folder/'stage.attempt.json',dict(assignment_sha256=sha(read(assignment_path)),machine_id=mid))
+    def call(method,path,body=None):
+        nonlocal sequence
+        remaining=deadline-time.monotonic();require(remaining>0,'worker stage deadline')
+        value=api(method,path,body,timeout=min(20,remaining));require(time.monotonic()<deadline,'worker stage deadline')
+        p=folder/(str(sequence)+'.native.json');sequence+=1;save(p,value)
+        return value,descriptor(p)
+    before,before_d=call('GET','/machines/'+mid);after,after_d=call('GET','/machines/'+mid)
+    volume,volume_d=call('GET','/volumes/'+assignment['volume_id'])
+    proof=verify_pool(assignment['proof'],common,before_d,after_d,source,volume,role='worker')
+    admission=described(proof['explicit_idle']['admission'])
+    require(admission['consumer']['dependencies']=={'node':node,'python':python_fp},'worker current dependencies')
+    desired=json.loads(json.dumps(before['config']));desired['guest']=target
+    try:
+        expected_instance=before['instance_id']
+        if desired!=before['config']:
+            assignment_claim(assignment)
+            body=dict(config=desired,skip_launch=True,current_version=before['instance_id'])
+            save(intent,dict(machine_id=mid,claim_sha256=assignment['claim_sha256'],body=body,assignment_sha256=sha(read(assignment_path))))
+            ack,_=call('POST','/machines/'+mid,body)
+            require(ack.get('id')==mid and ack.get('instance_id'),'worker resize ACK')
+            expected_instance=ack['instance_id']
+        while True:
+            final,final_d=call('GET','/machines/'+mid)
+            require(final.get('id')==mid and final.get('instance_id')==expected_instance and final.get('config')==desired
+                    and final.get('image_ref')==before.get('image_ref'),'worker resize native identity')
+            if final.get('state')=='stopped':break
+            require(final.get('state') in {'replacing','stopping'},'worker resize state')
+            time.sleep(min(.25,max(0,deadline-time.monotonic())))
+        pair,pair_d=call('GET','/machines/'+mid);require(pair==final,'worker resize pair changed')
+        vol,_=call('GET','/volumes/'+assignment['volume_id']);require(vol==volume,'worker resize Volume changed')
+        assignment_claim(assignment)
+        result=dict(schema='cloudbench-explicit-idle-worker-stage-v1',status='STOPPED_STAGED',assignment_sha256=sha(read(assignment_path)),native=final,volume=vol,source_ref=source,workspace_policy=current_policy(assignment['proof']))
+        save(terminal,result);return result
+    except BaseException as error:
+        if not (folder/'stage.pending.json').exists():save(folder/'stage.pending.json',dict(status='PENDING_NO_RETRY',error_class=type(error).__name__,machine_id=mid))
+        raise
+
+
+def verify_worker_return(assignment_path, before_path, after_path, volume_path):
+    assignment=json.loads(read(assignment_path));common=assignment_claim(assignment)
+    stage=json.loads(read(Path(assignment['admission'])/'stage.complete.json'))
+    require(stage['status']=='STOPPED_STAGED' and stage['assignment_sha256']==sha(read(assignment_path)),'worker stage binding')
+    first,last=json.loads(read(before_path)),json.loads(read(after_path));volume=json.loads(read(volume_path))
+    require(Path(before_path)!=Path(after_path) and not Path(before_path).samefile(after_path) and first==last,'worker return pair')
+    require(first.get('state')=='stopped' and all(first.get(k)==stage['native'].get(k) for k in ('id','name','instance_id','config','image_ref'))
+            and volume==stage['volume'],'worker return native/Volume')
+    output=Path(assignment_path).parent.parent
+    capture=sibling('cloudbench-worker-reuse.py')['validate_capture'](output,assignment['machine_id'],assignment['primary_machine_id'],assignment['run_token'])
+    return assignment,stage,first,volume,capture
+
+
+def record_worker_return(assignment_path, before_path, after_path, volume_path):
+    assignment,stage,native,volume,capture=verify_worker_return(assignment_path,before_path,after_path,volume_path)
+    common=Path(assignment['proof']).parent.parent;path=common/'cloudbench-explicit-idle'/(assignment['machine_id']+'.state.json')
+    previous=sha(read(path)) if path.exists() else None
+    require(previous==assignment.get('previous_state_sha256'),'worker state generation changed')
+    output=Path(assignment_path).parent.parent
+    policy='existing-git-reset-v1' if (output/'worker-runtime-evidence'/assignment['machine_id']/'capture/manifest.json').exists() else stage['workspace_policy']
+    result=dict(schema='cloudbench-explicit-idle-return-v1',status='STOPPED_RETURN_PENDING_RELEASE',assignment=descriptor(assignment_path),
+                admission_sha256=json.loads(read(assignment['proof']))['explicit_idle']['admission']['sha256'],stage=descriptor(Path(assignment['admission'])/'stage.complete.json'),native=native,volume=volume,
+                capture_sha256=capture,workspace_policy=policy,source_ref=stage['source_ref'])
+    temporary=path.with_name(path.name+'.'+assignment['claim_owner_token']);sibling('cloudbench-startup-failure-archive.py')['durable_handoff_json'](temporary,result)
+    os.replace(temporary,path);fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);os.fsync(fd);os.close(fd)
+    return result
+
+
+def returned_state(proof_path, *, require_release=True):
+    proof=json.loads(read(proof_path));path=Path(proof_path).parent.parent/'cloudbench-explicit-idle'/(proof['machine_id']+'.state.json')
+    if not path.exists():return None
+    state=json.loads(read(path));assignment=described(state['assignment']);output=Path(state['assignment']['path']).parent.parent
+    require(state['schema']=='cloudbench-explicit-idle-return-v1' and state['status']=='STOPPED_RETURN_PENDING_RELEASE'
+            and state['admission_sha256']==proof['explicit_idle']['admission']['sha256'],'worker return state binding')
+    stage=described(state['stage'])
+    require(stage['status']=='STOPPED_STAGED' and stage['assignment_sha256']==state['assignment']['sha256']
+            and state['native']==stage['native'] and state['volume']==stage['volume'] and state['source_ref']==stage['source_ref'], 'worker return stage differs')
+    expected_policy='existing-git-reset-v1' if (output/'worker-runtime-evidence'/proof['machine_id']/'capture/manifest.json').exists() else stage['workspace_policy']
+    require(state['workspace_policy']==expected_policy,'worker return policy differs')
+    returned=json.loads(read(output/'worker-borrowed'/(proof['machine_id']+'.returned.json')))
+    if require_release:
+        released=json.loads(read(output/'worker-borrowed'/(proof['machine_id']+'.released.json')))
+        require(returned==released,'worker released marker differs')
+    require(returned['machine_id']==proof['machine_id'] and returned['run_token']==assignment['run_token']
+            and returned['claim_sha256']==assignment['claim_sha256'] and returned['primary_machine_id']==assignment['primary_machine_id']
+            and returned['fleet_owner_token']==assignment['fleet_owner_token'] and returned['state']=='stopped' and returned['volume_retained'] is True,'worker release receipt')
+    capture=sibling('cloudbench-worker-reuse.py')['validate_capture'](output,proof['machine_id'],assignment['primary_machine_id'],assignment['run_token'])
+    require(capture==state['capture_sha256']==returned['evidence_sha256'],'worker return evidence')
+    claim=Path(proof_path).parent.parent/'cloudbench-pool-claims'/proof['machine_id']
+    require(not claim.exists() or sha(read(claim))!=assignment['claim_sha256'],'old worker claim still held')
+    return state
+
+
+def current_policy(proof_path):
+    state=returned_state(proof_path)
+    return state['workspace_policy'] if state else json.loads(read(proof_path))['explicit_idle']['workspace_policy']
+
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__); sub=parser.add_subparsers(dest='action',required=True)
     admit=sub.add_parser('admit');admit.add_argument('--request',required=True);admit.add_argument('--sha256',required=True);admit.add_argument('--authority',required=True);admit.add_argument('--authority-sha256',required=True);admit.add_argument('--custody-fd',type=int,required=True)
     capture=sub.add_parser('observe');capture.add_argument('--machine',required=True);capture.add_argument('--instance',required=True);capture.add_argument('--nonce',required=True);capture.add_argument('--output',required=True)
+    stage=sub.add_parser('worker-stage')
+    for name in ('assignment','source','node','python','size','memory','app'):stage.add_argument('--'+name,required=True)
+    ret=sub.add_parser('worker-return')
+    for name in ('assignment','before','after','volume'):ret.add_argument('--'+name,required=True)
+    ret.add_argument('--record',action='store_true')
     args=parser.parse_args()
     if args.action=='admit':result=publish(args.request,args.sha256,args.authority,args.authority_sha256,args.custody_fd)
+    elif args.action=='worker-stage':
+        assignment=json.loads(read(args.assignment));proof=json.loads(read(assignment['proof']))
+        require(proof['app']==args.app,'worker app binding')
+        started=time.monotonic();prior=signal.getitimer(signal.ITIMER_REAL);handler=signal.getsignal(signal.SIGALRM)
+        require(prior[1]==0,'periodic timer unsupported')
+        budget=min(120,prior[0]) if prior[0]>0 else 120
+        def expired(*unused):raise TimeoutError('worker stage whole-call deadline')
+        signal.signal(signal.SIGALRM,expired);signal.setitimer(signal.ITIMER_REAL,budget)
+        try:
+            base=sibling('cloudbench-original-volume-capture.py')
+            fly=base['Fly'](args.app,base['resolve_token']({'workspace':str(Path(assignment['proof']).parent.parent.parent)}))
+            result=stage_worker(args.assignment,args.source,args.node,args.python,args.size,args.memory,fly.api,seconds=max(0,budget-(time.monotonic()-started)))
+        finally:
+            signal.setitimer(signal.ITIMER_REAL,0);signal.signal(signal.SIGALRM,handler)
+            if prior[0]>0:signal.setitimer(signal.ITIMER_REAL,max(.000001,prior[0]-(time.monotonic()-started)))
+    elif args.action=='worker-return':
+        values=(args.assignment,args.before,args.after,args.volume)
+        if args.record:result=record_worker_return(*values)
+        else:
+            row=verify_worker_return(*values)[0];result=dict(schema='cloudbench-explicit-idle-worker-return-verified-v1',status='STOPPED_VERIFIED',machine_id=row['machine_id'])
     else:
         result=observation('/data',args.machine,args.instance,args.nonce)
         sibling('cloudbench-startup-failure-archive.py')['durable_handoff_json'](Path(args.output),result)

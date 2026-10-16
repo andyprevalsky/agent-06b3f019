@@ -12828,6 +12828,13 @@ normalize_current_pool_shape() {
         shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
         read -r state kind cpus memory <<< "$shape"
         [ "$state" = "stopped" ] || continue
+        if python3 - "$GIT_COMMON_DIR/cloudbench-pool-reuse/$id.json" <<'PY' 2>/dev/null
+import json,sys
+assert 'explicit_idle' in json.load(open(sys.argv[1]))
+PY
+        then
+            continue
+        fi
         # Dynamic fleets can reuse an already-proven large primary directly.
         # Shrinking it here forces another host-local CPU reservation when the
         # next browser task grows it again; that reservation can be unavailable
@@ -13061,11 +13068,11 @@ raw = read(proof_path); proof = json.loads(raw)
 tasks = json.loads(read(matrix))['tasks']
 ordinal = next(i for i, task in enumerate(tasks) if task['name'] == out.name)
 assert tasks[ordinal]['world_model_mode'] == 'real' and re.fullmatch('[0-9a-f]{40}', ref)
-expected = {'version': 1, 'policy': proof['explicit_idle']['workspace_policy'] if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
+expected = {'version': 1, 'policy': __import__('runpy').run_path(os.path.join(os.environ.get('CLOUDBENCH_SCRIPT_SNAPSHOT',str(Path(proof_path).parents[2]/'scripts')),'cloudbench-explicit-idle-admission.py'))['current_policy'](proof_path) if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
             'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
             'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
 assert json.loads(read(out / 'cold-primary-bootstrap')) == expected
-print(1 if proof.get('explicit_idle',{}).get('workspace_policy')=='real-empty-bootstrap-v1' or 'cold_bootstrap' in proof or 'imported_cold' in proof else 0)
+print(1 if expected['policy']=='real-empty-bootstrap-v1' else 0)
 PYINTENT
 }
 
@@ -13099,7 +13106,7 @@ tasks = json.loads(Path(matrix).read_text())['tasks']
 ordinal = next(i for i, task in enumerate(tasks) if task['name'] == bench)
 assert tasks[ordinal]['world_model_mode'] == 'real'
 if 'cold_bootstrap' in proof: assert proof['cold_bootstrap']['policy'] == 'real-empty-bootstrap-v1'
-intent = {'version': 1, 'policy': proof['explicit_idle']['workspace_policy'] if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
+intent = {'version': 1, 'policy': __import__('runpy').run_path(os.path.join(os.environ.get('CLOUDBENCH_SCRIPT_SNAPSHOT',str(Path(path).parents[2]/'scripts')),'cloudbench-explicit-idle-admission.py'))['current_policy'](path) if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
           'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
           'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
 with os.fdopen(os.open(destination, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600), 'w') as stream:
@@ -15485,9 +15492,61 @@ mandatory_autoscaler_process_acceptable() {  # <bench-output-dir> <autoscaler-pi
 # The worker-clones id-file is the SOURCE OF TRUTH for the pool size: a machine
 # is recorded the instant Fly creates it (BEFORE staging), so a slow/failed stage
 # can never make the reconcile think the pool is empty and re-clone in a loop.
+claim_explicit_idle_worker() {  # shared primary/worker pool, one exclusive MID claim
+    local out="$1" primary="$2" workspace="$3" token="$4" pip="$5"
+    local id proof volume digest attempt claim_owner current_owner="${FLEET_OWNER_TOKEN:-}"
+    local FLEET_OWNER_TOKEN helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-explicit-idle-admission.py"
+    [ -n "$current_owner" ] && [ -n "${CURRENT_NODE_FP:-}" ] && [ -n "${CURRENT_PY_FP:-}" ] || return 1
+    [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] && [ -s "${POOL_IDS_FILE:-}" ] || return 0
+    while IFS= read -r id; do
+        case "$id" in ''|*[!0-9a-f]*) continue ;; esac
+        [ "$id" != "${WARM_ID:-}" ] && [ "$id" != "${SHARED_WARM_ID:-}" ] || continue
+        [ ! -e "$out/worker-runtime-evidence/$id" ] && [ ! -e "$out/worker-borrowed/$id.json" ] || continue
+        [ ! -e "$POOL_CLAIMS_DIR/$id" ] && [ ! -L "$POOL_CLAIMS_DIR/$id" ] || continue
+        proof="$GIT_COMMON_DIR/cloudbench-pool-reuse/$id.json"
+        [ -f "$proof" ] || continue
+        volume="$(python3 - "$proof" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1]));assert 'explicit_idle' in p and 'worker' in p['explicit_idle']['allowed_future_roles']
+print(p['volume_id'])
+PY
+)" || continue
+        mkdir -p "$out/worker-borrowed" || return 1
+        claim_owner="$(python3 -c 'import secrets;print(secrets.token_hex(16))')" || return 1
+        FLEET_OWNER_TOKEN="$claim_owner"
+        write_pool_claim "$POOL_CLAIMS_DIR/$id" "$id" "$volume" || continue
+        digest="$(cloudbench_env_sha256 "$POOL_CLAIMS_DIR/$id")" || return 1
+        attempt="$(mktemp -d "$out/worker-borrowed/.admit-$id.XXXXXX")" || return 1
+        python3 - "$helper" "$out/worker-borrowed/$id.json" "$proof" "$digest" "$primary" "$workspace" "$token" "$attempt" "$current_owner" "$POOL_IDS_FILE" "$pip" "$claim_owner" "$volume" <<'PY' || return 1
+import json,os,runpy,sys
+from pathlib import Path
+helper,path,proof,digest,primary,workspace,token,attempt,owner,ledger,pip,claim_owner,volume=sys.argv[1:]
+h=runpy.run_path(helper);state=Path(proof).parent.parent/'cloudbench-explicit-idle'/(Path(path).stem+'.state.json')
+row=dict(version=1,origin=h['ORIGIN'],historical_task_credit=0,role='borrowed-worker',machine_id=Path(path).stem,volume_id=volume,proof=proof,
+ claim_sha256=digest,primary_machine_id=primary,workspace=workspace,run_token=token,admission=attempt,
+ fleet_owner_token=owner,claim_owner_token=claim_owner,ledger=ledger,primary_host=pip,
+ previous_state_sha256=h['sha'](h['read'](state)) if state.exists() else None)
+h['sibling']('cloudbench-startup-failure-archive.py')['durable_handoff_json'](Path(path),row)
+PY
+        # A failure retains the exact claim and attempt: never try another POST/MID.
+        if ! python3 "$helper" worker-stage --assignment "$out/worker-borrowed/$id.json" \
+            --source "$BENCH_REF" --node "$CURRENT_NODE_FP" --python "$CURRENT_PY_FP" \
+            --size "$FLEET_WORKER_VM_SIZE" --memory "$FLEET_WORKER_VM_MEMORY" --app "$APP" > "$attempt/verified"; then
+            pool_claim_mark_cleanup_unconfirmed "$POOL_CLAIMS_DIR/$id" || true
+            return 1
+        fi
+        worker_ledger_lock_acquire "$out" || return 1
+        printf '%s\n' "$id" >> "$out/worker-clones.ids" || { worker_ledger_lock_release "$out"; return 1; }
+        worker_ledger_lock_release "$out" || return 1
+        printf '%s' "$id"; return 0
+    done < "$POOL_IDS_FILE"
+}
+
 claim_reusable_worker() {  # <out> <primary> <workspace> <run-token> <primary-6pn>
     local out="$1" primary="$2" workspace="$3" token="$4" pip="$5" ledger id proof volume digest attempt
-    local current_owner="${FLEET_OWNER_TOKEN:-}" claim_owner
+    local current_owner="${FLEET_OWNER_TOKEN:-}" claim_owner explicit_id
+    explicit_id="$(claim_explicit_idle_worker "$@")" || return 1
+    if [ -n "$explicit_id" ]; then printf '%s' "$explicit_id"; return 0; fi
     local FLEET_OWNER_TOKEN
     local helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-reuse.py"
     [ -n "${GIT_COMMON_DIR:-}" ] && [ -d "$GIT_COMMON_DIR/cloudbench-worker-pools" ] || return 0
@@ -15549,14 +15608,14 @@ PY
 
 return_reusable_worker() {  # <out> <worker>; evidence is captured before this call
     local out="$1" wid="$2" authority="$1/worker-borrowed/$2.json" helper
-    local proof volume token digest ledger state nonce command attempt claim_owner
+    local proof volume token digest ledger state nonce command attempt claim_owner origin
     helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-reuse.py"
-    IFS=$'\t' read -r proof volume token digest ledger claim_owner < <(python3 - "$authority" "$FLEET_OWNER_TOKEN" <<'PY'
+    IFS=$'\t' read -r proof volume token digest ledger claim_owner origin < <(python3 - "$authority" "$FLEET_OWNER_TOKEN" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]));p=json.load(open(r['proof']))
 assert r['role']=='borrowed-worker' and r['fleet_owner_token']==sys.argv[2]
 assert r['machine_id']==p['machine_id']
-print(r['proof'],p['volume_id'],r['run_token'],r['claim_sha256'],r['ledger'],r['claim_owner_token'],sep='\t')
+print(r['proof'],p['volume_id'],r['run_token'],r['claim_sha256'],r['ledger'],r['claim_owner_token'],r.get('origin','historical'),sep='\t')
 PY
 ) || return 1
     [ -n "$proof" ] && [ -n "$volume" ] && [ -n "$token" ] && [ -n "$digest" ] || return 1
@@ -15596,10 +15655,16 @@ PY
     [ "$state" = stopped ] || return 1
     fleet_preconfig_native_read "$wid" "$attempt/final.json" \
         && fleet_cold_handoff_volume_read "$volume" "$attempt/volume.json" || return 1
+    if [ "$origin" = explicit-user-idle-resource ]; then
+        python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-explicit-idle-admission.py" worker-return \
+            --assignment "$authority" --before "$attempt/after.json" --after "$attempt/final.json" \
+            --volume "$attempt/volume.json" > "$attempt/verified" || return 1
+    else
     python3 "$helper" "$proof" --target "$ledger.deps" --before "$attempt/after.json" \
         --after "$attempt/final.json" --volume "$attempt/volume.json" --source "$BENCH_REF" \
         --node "$CURRENT_NODE_FP" --python "$CURRENT_PY_FP" --size "$FLEET_WORKER_VM_SIZE" \
         --memory "$FLEET_WORKER_VM_MEMORY" --app "$APP" --returning > "$attempt/verified" || return 1
+    fi
     python3 - "$helper" "$authority" "$out/worker-borrowed/$wid.returned.json" "$out/worker-runtime-evidence/$wid" <<'PY' || return 1
 import json,runpy,sys
 h=runpy.run_path(sys.argv[1]);r=json.loads(h['read'](sys.argv[2]));base=__import__('pathlib').Path(sys.argv[4])
@@ -15611,10 +15676,16 @@ receipt=dict(version=1,role='borrowed-worker',machine_id=r['machine_id'],run_tok
              evidence_sha256=h['sha'](h['read'](evidence)))
 h['sibling']('cloudbench-startup-failure-archive.py')['durable_handoff_json'](__import__('pathlib').Path(sys.argv[3]),receipt)
 PY
+    if [ "$origin" = explicit-user-idle-resource ]; then
+        python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-explicit-idle-admission.py" worker-return \
+            --assignment "$authority" --before "$attempt/after.json" --after "$attempt/final.json" \
+            --volume "$attempt/volume.json" --record > "$attempt/state-recorded" || return 1
+    else
     python3 - "$helper" "$authority" "$attempt/final.json" "$attempt/volume.json" <<'PY' || return 1
 import runpy,sys
 runpy.run_path(sys.argv[1])['record_return_state'](*sys.argv[2:])
 PY
+    fi
     pool_claim_release_exact "$POOL_CLAIMS_DIR/$wid" "$digest" "$claim_owner" \
         "$FLEET_OWNER_HOST" "$$" "$FLEET_OWNER_PID_START" || return 1
     python3 - "$helper" "$out/worker-borrowed/$wid.returned.json" "$out/worker-borrowed/$wid.released.json" <<'PY' || return 1
@@ -16043,6 +16114,18 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     fi
     else
         worker_storage=borrowed
+        if [ -f "$out/worker-borrowed/$wid.json" ]; then
+            local explicit_policy
+            explicit_policy="$(python3 - "$out/worker-borrowed/$wid.json" <<'PY'
+import json,sys
+from pathlib import Path
+r=json.load(open(sys.argv[1]))
+if r.get('origin')=='explicit-user-idle-resource':
+ print(json.load(open(Path(r['admission'])/'stage.complete.json'))['workspace_policy'])
+PY
+)" || return 1
+            [ "$explicit_policy" != real-empty-bootstrap-v1 ] || worker_storage=fresh
+        fi
     fi
     # Preserve the exact prelaunch owner before cancellation can reap a late
     # allocation. Final evidence coverage includes destroyed worker clones.

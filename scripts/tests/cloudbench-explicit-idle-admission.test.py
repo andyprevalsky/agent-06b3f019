@@ -43,7 +43,7 @@ class Admission(unittest.TestCase):
         obs=dict(schema='cloudbench-explicit-idle-observation-v1',origin=mod.ORIGIN,machine_id=self.mid,native_instance='instance',admission_nonce=self.nonce,historical_task_credit=0,collector_sha256=mod.sha(SCRIPT.read_bytes()),predicate_sha256=mod.sha(mod.billing_predicate().encode()),workspace={'kind':'existing-git','head':'f'*40,'status_sha256':'1'*64},data_mount={'device':1,'inode':2,'mount_device':'1:1'},dependencies=self.dep,before=scan,after=dict(scan,observed_epoch=2),started_epoch=1,finished_epoch=2)
         obs_desc=save(obs)
         self.request=dict(schema='cloudbench-explicit-idle-request-v1',origin=mod.ORIGIN,historical_task_credit=0,admission_nonce=self.nonce,allowed_future_roles=['primary','worker'],resource=self.resource,consumer=target,controller_before=save(ctrl),controller_after=save(ctrl),workspace_ownership=own_desc,native_before=save(native),native_after=save(native),volume=save(dict(id=self.vol,attached_machine_id=self.mid,state='created')),protected_overlay=save(dict(machines=[self.controller],volumes=['vol_controller'])),preservation=dict(snapshot_id='vs_snapshot',receipt=save(dict(volume_id=self.vol,snapshot_id='vs_snapshot',available=ready,machine_id=self.mid,source_instance='instance',source_config_sha256=self.resource['config_sha256'],capture_state='stopped',verified_epoch=0)),available_read=save(dict(volume_id=self.vol,snapshots=[ready]))),observation=obs_desc,observer_terminal=save(dict(status='OBSERVED_AND_STOPPED',machine_id=self.mid,admission_nonce=self.nonce,observation_sha256=obs_desc['sha256'],finished_epoch=3)),workspace_policy='existing-git-reset-v1')
-        self.env=dict(FLY_MACHINE_ID=self.controller,FLY_APP_NAME='app',CLOUDBENCH_IDLE_WORKSPACE=str(self.repo),CLOUDBENCH_IDLE_COMMON=str(self.common),CLOUDBENCH_IDLE_POOL_IDS=target['pool_ids_file'],CLOUDBENCH_IDLE_POOL_META=target['pool_meta_file'])
+        self.env=dict(CLOUDBENCH_SCRIPT_SNAPSHOT=str(SCRIPT.parent),FLY_MACHINE_ID=self.controller,FLY_APP_NAME='app',CLOUDBENCH_IDLE_WORKSPACE=str(self.repo),CLOUDBENCH_IDLE_COMMON=str(self.common),CLOUDBENCH_IDLE_POOL_IDS=target['pool_ids_file'],CLOUDBENCH_IDLE_POOL_META=target['pool_meta_file'])
         self.old_env={k:os.environ.get(k) for k in self.env};os.environ.update(self.env);self.addCleanup(self.restore_env)
     def restore_env(self):
         for k,v in self.old_env.items():
@@ -219,6 +219,192 @@ class CanonicalBillingPredicate(unittest.TestCase):
         args=call.call_args.args[0]
         self.assertEqual(args,[mod.sys.executable,'-c',mod.billing_predicate().replace('TARGET',repr(machine)).replace('NONCE',repr(nonce))])
         self.assertLessEqual(call.call_args.kwargs['timeout'],20)
+
+
+
+@unittest.skipUnless(os.geteuid()==0,'root publication boundary')
+class Worker(unittest.TestCase):
+    setUp=Admission.setUp
+    restore_env=Admission.restore_env
+    authority=Admission.authority
+    def prepare(self):
+        req,auth,fd=self.authority();mod.publish(req,mod.sha(req.read_bytes()),auth,mod.sha(auth.read_bytes()),fd)
+        self.proof=self.common/'cloudbench-pool-reuse'/(self.mid+'.json')
+        self.out=self.root/'run';self.borrow=self.out/'worker-borrowed';self.borrow.mkdir(parents=True)
+        self.attempt=self.borrow/'attempt';self.attempt.mkdir()
+        self.claim=self.common/'cloudbench-pool-claims'/self.mid
+        # Exercise the actual persistent-lock claim implementation, binding this live test owner.
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+        claimfn=re.search(r'^pool_claim_fs_transaction\(\).*?^}\n',fleet,re.M|re.S).group()
+        self.owner='f'*32
+        birth=mod.sibling('cloudbench-original-volume-capture.py')['bash_lib']('cloudbench-env.sh',['cloudbench_pid_start_time',str(os.getpid())])
+        args=['bash','-c',claimfn+'\npool_claim_fs_transaction publish-ordinary "$@"','claim',str(self.claim),self.mid,self.vol,mod.socket.gethostname(),str(os.getpid()),birth,self.owner,self.request['consumer']['pool_ids_file'],self.request['consumer']['pool_meta_file'],mod.sha(Path(self.request['consumer']['pool_meta_file']).read_bytes())]
+        r=subprocess.run(args,capture_output=True,text=True);self.assertEqual(r.returncode,0,r.stderr)
+        self.assignment=self.borrow/(self.mid+'.json')
+        self.row=dict(version=1,origin=mod.ORIGIN,historical_task_credit=0,role='borrowed-worker',machine_id=self.mid,volume_id=self.vol,proof=str(self.proof),claim_sha256=mod.sha(self.claim.read_bytes()),primary_machine_id='primary',workspace='repo',run_token='current-token',admission=str(self.attempt),fleet_owner_token='e'*32,claim_owner_token=self.owner,ledger=self.request['consumer']['pool_ids_file'],previous_state_sha256=None)
+        self.assignment.write_bytes(mod.canonical(self.row))
+        self.native=mod.described(self.request['native_before']);self.volume=mod.described(self.request['volume']);self.calls=[]
+    def api(self,method,path,body=None,timeout=None):
+        self.assertGreater(timeout,0);self.assertLessEqual(timeout,20);self.calls.append((method,path,copy.deepcopy(body)))
+        if method=='POST':
+            self.assertEqual(body['current_version'],self.native['instance_id']);self.assertTrue(body['skip_launch'])
+            previous=copy.deepcopy(self.native['config']);self.native['config']=copy.deepcopy(body['config'])
+            previous['guest']=self.native['config']['guest'];self.assertEqual(previous,self.native['config'])
+            self.native['instance_id']='resized-instance'
+        return copy.deepcopy(self.volume if '/volumes/' in path else self.native)
+    def stage(self,size='performance-1x',memory='2048',api=None):
+        return mod.stage_worker(self.assignment,self.request['consumer']['source_ref'],self.dep['node'],self.dep['python'],size,memory,api or self.api)
+    def evidence(self):
+        root=self.out/'worker-runtime-evidence'/self.mid;root.mkdir(parents=True)
+        owner=dict(version=1,machine_id=self.mid,primary_machine_id='primary',run_token='current-token',workspace='repo')
+        (root/'owner.json').write_bytes(mod.canonical(owner));stage=self.out/('worker-'+self.mid+'.stage.log');stage.write_bytes(b'not launched')
+        (root/'not-launched.json').write_bytes(mod.canonical(dict(owner,worker_started=False,stage_sha256=mod.sha(stage.read_bytes()))))
+        return mod.sibling('cloudbench-worker-reuse.py')['validate_capture'](self.out,self.mid,'primary','current-token')
+    def return_inputs(self):
+        return [self.save(self.native)['path'],self.save(self.native)['path'],self.save(self.volume)['path']]
+    def test_requested_worker_shape_one_versioned_update(self):
+        self.prepare();result=self.stage()
+        self.assertEqual(result['native']['config']['guest'],dict(cpu_kind='performance',cpus=1,memory_mb=2048))
+        self.assertEqual(sum(c[0]=='POST' for c in self.calls),1);self.assertTrue(self.claim.exists())
+        self.assertEqual(result['native']['config']['mounts'][0]['volume'],self.vol)
+    def test_matching_shape_needs_no_update(self):
+        self.prepare();self.stage('shared-cpu-4x','8192');self.assertFalse(any(c[0]=='POST' for c in self.calls))
+    def test_ambiguous_update_cannot_retry(self):
+        self.prepare()
+        def api(method,*args,**kwargs):
+            result=self.api(method,*args,**kwargs)
+            if method=='POST':raise TimeoutError('ambiguous ACK')
+            return result
+        with self.assertRaises(TimeoutError):self.stage(api=api)
+        before=len(self.calls)
+        with self.assertRaises(ValueError):self.stage()
+        self.assertEqual(len(self.calls),before);self.assertEqual(sum(c[0]=='POST' for c in self.calls),1)
+        self.assertEqual(json.loads((self.attempt/'stage.pending.json').read_text())['status'],'PENDING_NO_RETRY')
+    def test_wrong_volume_refuses_before_update(self):
+        self.prepare();self.volume['attached_machine_id']='foreign'
+        with self.assertRaises(ValueError):self.stage()
+        self.assertFalse(any(c[0]=='POST' for c in self.calls));self.assertTrue(self.claim.exists())
+    def test_claim_changed_refuses_before_api(self):
+        self.prepare();self.claim.write_bytes(self.claim.read_bytes()+b'changed=yes\n')
+        with self.assertRaises(ValueError):self.stage()
+        self.assertFalse(self.calls)
+    def test_deadline_cannot_publish_or_retry(self):
+        self.prepare()
+        with self.assertRaises(ValueError):mod.stage_worker(self.assignment,self.request['consumer']['source_ref'],self.dep['node'],self.dep['python'],'performance-1x','2048',self.api,seconds=0)
+        self.assertFalse(self.calls);self.assertFalse((self.attempt/'stage.complete.json').exists())
+        with self.assertRaises(ValueError):self.stage()
+    def test_return_release_allows_next_primary_or_worker(self):
+        self.prepare();self.stage();evidence=self.evidence();before,after,volume=self.return_inputs()
+        state=mod.record_worker_return(self.assignment,before,after,volume)
+        receipt=dict(machine_id=self.mid,run_token='current-token',claim_sha256=self.row['claim_sha256'],primary_machine_id='primary',fleet_owner_token=self.row['fleet_owner_token'],state='stopped',volume_retained=True,evidence_sha256=evidence)
+        returned=self.borrow/(self.mid+'.returned.json');returned.write_bytes(mod.canonical(receipt))
+        with self.assertRaises((ValueError,FileNotFoundError)):mod.returned_state(self.proof)
+        self.claim.unlink()
+        helper=mod.sibling('cloudbench-worker-reuse.py');helper['recover_return_release'](self.out,self.mid,'primary','current-token')
+        self.assertEqual(mod.returned_state(self.proof),state)
+        for role in ('primary','worker'):
+            mod.verify_pool(self.proof,self.common,mod.descriptor(before),mod.descriptor(after),self.request['consumer']['source_ref'],self.volume,role=role)
+        self.assertEqual(mod.current_policy(self.proof),'existing-git-reset-v1')
+        state_path=self.common/'cloudbench-explicit-idle'/(self.mid+'.state.json')
+        tampered=copy.deepcopy(state);tampered['native']['config']['guest']['memory_mb']=1024;state_path.write_bytes(mod.canonical(tampered))
+        with self.assertRaises(ValueError):mod.returned_state(self.proof)
+        state_path.write_bytes(mod.canonical(state))
+        self.assertEqual(Path(self.request['consumer']['pool_ids_file']).read_text(),self.mid+'\n')
+    def test_return_running_or_alias_pair_or_missing_capture_refuses(self):
+        self.prepare();self.stage();before,after,volume=self.return_inputs()
+        with self.assertRaises(FileNotFoundError):mod.record_worker_return(self.assignment,before,after,volume)
+        self.evidence()
+        with self.assertRaises(ValueError):mod.record_worker_return(self.assignment,before,before,volume)
+        self.native['state']='started';before,after,volume=self.return_inputs()
+        with self.assertRaises(ValueError):mod.record_worker_return(self.assignment,before,after,volume)
+    def test_second_role_cannot_claim_same_machine(self):
+        self.prepare();fleet=SCRIPT.with_name('run-bench-fleet').read_text();claimfn=re.search(r'^pool_claim_fs_transaction\(\).*?^}\n',fleet,re.M|re.S).group()
+        fields=dict(line.split('=',1) for line in self.claim.read_text().splitlines())
+        args=['bash','-c',claimfn+'\npool_claim_fs_transaction publish-ordinary "$@"','claim',str(self.claim),self.mid,self.vol,fields['host'],fields['pid'],fields['pid_start'],'a'*32,fields['pool_ledger_file'],fields['pool_meta_file'],fields['pool_meta_sha256']]
+        result=subprocess.run(args,capture_output=True,text=True)
+        self.assertNotEqual(result.returncode,0);self.assertEqual(mod.sha(self.claim.read_bytes()),self.row['claim_sha256'])
+
+
+    def test_actual_worker_cli_claim_stage_return_and_next_claim(self):
+        self.prepare();self.claim.unlink();self.assignment.unlink()
+        fixture=self.root/'api.json';fixture.write_text(json.dumps(dict(native=self.native,volume=self.volume)))
+        runner=self.root/'stage-api.py'
+        runner.write_text('''import argparse,json,runpy,sys
+from pathlib import Path
+h=runpy.run_path(sys.argv[1]);p=argparse.ArgumentParser()
+for name in ('assignment','source','node','python','size','memory','app'):p.add_argument('--'+name,required=True)
+a=p.parse_args(sys.argv[3:]);f=Path('''+repr(str(fixture))+''');data=json.loads(f.read_text());calls=[]
+def api(method,path,body=None,timeout=None):
+ assert timeout<=20
+ calls.append([method,path,body])
+ if method=='POST':
+  assert body['current_version']==data['native']['instance_id'] and body['skip_launch'] is True
+  data['native']['config']=body['config'];data['native']['instance_id']='worker-instance'
+ return data['volume'] if '/volumes/' in path else data['native']
+h['stage_worker'](a.assignment,a.source,a.node,a.python,a.size,a.memory,api)
+f.write_text(json.dumps(data));f.with_suffix('.calls').write_text(json.dumps(calls))
+r=json.loads(Path(a.assignment).read_text());out=Path(a.assignment).parent.parent
+e=out/'worker-runtime-evidence'/r['machine_id'];e.mkdir(parents=True)
+owner=dict(version=1,machine_id=r['machine_id'],primary_machine_id=r['primary_machine_id'],run_token=r['run_token'])
+(e/'owner.json').write_text(json.dumps(owner));s=out/('worker-'+r['machine_id']+'.stage.log');s.write_bytes(b'not launched')
+(e/'not-launched.json').write_text(json.dumps(dict(owner,worker_started=False,stage_sha256=h['sha'](s.read_bytes()))))
+''')
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+        def function(name):return re.search(r'^'+name+r'\(\).*?^}\n',fleet,re.M|re.S).group()
+        # Historical fallback remains present and unchanged; explicit path must win first.
+        shell='\n'.join(function(n) for n in ('pool_claim_fs_transaction','write_pool_claim','pool_claim_release_exact','claim_explicit_idle_worker','claim_reusable_worker','return_reusable_worker'))
+        shell+='''
+set -e
+python3() {
+ if [ "$1" = "$IDLE_HELPER" ] && [ "$2" = worker-stage ]; then
+  command python3 "$RUNNER" "$@"
+ else command python3 "$@"; fi
+}
+cloudbench_env_sha256() { sha256sum "$1" | cut -d' ' -f1; }
+cloudbench_fsync_directory() { return 0; }
+worker_ledger_lock_acquire() { return 0; }
+worker_ledger_lock_release() { return 0; }
+pool_claim_mark_cleanup_unconfirmed() { echo unexpected-unconfirmed >&2; return 9; }
+fleet_preconfig_native_read() { command python3 -c 'import json,sys;open(sys.argv[2],"w").write(json.dumps(json.load(open(sys.argv[1]))["native"]))' "$API_FIXTURE" "$2"; }
+fleet_cold_handoff_volume_read() { command python3 -c 'import json,sys;open(sys.argv[2],"w").write(json.dumps(json.load(open(sys.argv[1]))["volume"]))' "$API_FIXTURE" "$2"; }
+FLEET_OWNER_PID_START="$(command python3 -c 'import runpy,sys;h=runpy.run_path(sys.argv[1]);print(h["bash_lib"]("cloudbench-env.sh",["cloudbench_pid_start_time",sys.argv[2]]))' "$VOLUME_HELPER" "$$")"
+mid="$(claim_reusable_worker "$OUT" primary repo current-token ::1)"
+[ "$mid" = "$MID" ]
+return_reusable_worker "$OUT" "$mid"
+[ ! -e "$POOL_CLAIMS_DIR/$mid" ]
+write_pool_claim "$POOL_CLAIMS_DIR/$mid" "$mid" vol_fixture
+printf '%s' "$mid"
+'''
+        env={**os.environ,'OUT':str(self.out),'MID':self.mid,'IDLE_HELPER':str(SCRIPT),'VOLUME_HELPER':str(SCRIPT.with_name('cloudbench-original-volume-capture.py')),'RUNNER':str(runner),'API_FIXTURE':str(fixture),'GIT_COMMON_DIR':str(self.common),'POOL_IDS_FILE':self.request['consumer']['pool_ids_file'],'POOL_META_FILE':self.request['consumer']['pool_meta_file'],'POOL_CLAIMS_DIR':str(self.common/'cloudbench-pool-claims'),'POOL_COLD_BOOTSTRAP':'1','FLEET_OWNER_TOKEN':'e'*32,'FLEET_OWNER_HOST':mod.socket.gethostname(),'CURRENT_NODE_FP':self.dep['node'],'CURRENT_PY_FP':self.dep['python'],'BENCH_REF':self.request['consumer']['source_ref'],'FLEET_WORKER_VM_SIZE':'performance-1x','FLEET_WORKER_VM_MEMORY':'2048','APP':'app'}
+        result=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(result.stdout,self.mid)
+        calls=json.loads(fixture.with_suffix('.calls').read_text());self.assertEqual(sum(c[0]=='POST' for c in calls),1)
+        self.assertEqual(json.loads(fixture.read_text())['native']['config']['guest'],dict(cpu_kind='performance',cpus=1,memory_mb=2048))
+        self.assertEqual(mod.returned_state(self.proof)['native']['instance_id'],'worker-instance')
+        self.assertEqual((self.out/'worker-clones.ids').read_text(),self.mid+'\n')
+        self.assertEqual(Path(self.request['consumer']['pool_ids_file']).read_text(),self.mid+'\n')
+
+
+    def test_current_runtime_capture_promotes_empty_workspace_policy(self):
+        obs=mod.described(self.request['observation']);obs['workspace']={'kind':'empty'}
+        self.request['observation']=self.save(obs);self.request['workspace_policy']='real-empty-bootstrap-v1'
+        terminal=mod.described(self.request['observer_terminal']);terminal['observation_sha256']=self.request['observation']['sha256'];self.request['observer_terminal']=self.save(terminal)
+        self.prepare();self.stage()
+        expected=dict(version=1,machine_id=self.mid,run_token='current-token')
+        process=dict(pid=11,birth='linux:01234567-1234-1234-1234-123456789abc:1')
+        owner=dict(expected,primary_machine_id='primary',supervisor=process,expected_worker_logs=['worker.json'])
+        terminal=dict(expected,supervisor=process,child=dict(process,pid=12),exit_code=0,worker_started=True,quiescent=True,children_reaped=True,streams_closed=True)
+        root=self.out/'worker-runtime-evidence'/self.mid;root.mkdir(parents=True)
+        (root/'owner.json').write_bytes(mod.canonical(owner));capture=root/'capture';capture.mkdir()
+        files={}
+        for name,value in {'receipts/owner.json':mod.canonical(owner),'receipts/terminal.json':mod.canonical(terminal),'logs/worker.log':b'current worker closed\n','logs/agents/worker.json':b'{}\n'}.items():
+            path=capture/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(value);files[name]=dict(bytes=len(value),sha256=mod.sha(value))
+        manifest=dict(expected,quiescent=True,files=files,terminal=terminal,worker_logs=['worker.json'])
+        (capture/'manifest.json').write_bytes(mod.canonical(manifest))
+        before,after,volume=self.return_inputs();state=mod.record_worker_return(self.assignment,before,after,volume)
+        self.assertEqual(state['workspace_policy'],'existing-git-reset-v1')
+        (capture/'logs/worker.log').write_bytes(b'tampered')
+        with self.assertRaises(Exception):mod.verify_worker_return(self.assignment,before,after,volume)
 
 
 if __name__=='__main__':unittest.main()

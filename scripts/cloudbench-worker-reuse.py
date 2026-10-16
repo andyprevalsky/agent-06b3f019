@@ -515,7 +515,13 @@ def validate_return(output, machine, primary, token, *, check_claim=True, requir
             returned["state"] == "stopped" and returned["volume_retained"] is True,
             "worker return is not exact terminal ownership")
     proof_path = Path(authority["proof"])
-    packet = json.loads(read(proof_path)); validate(packet, packet["target"])
+    packet = json.loads(read(proof_path))
+    if authority.get("origin") == "explicit-user-idle-resource":
+        state=sibling("cloudbench-explicit-idle-admission.py")["returned_state"](proof_path, require_release=require_release)
+        require(state is not None and state["assignment"]["sha256"] == sha(read(output / "worker-borrowed" / (machine + ".json"))), "explicit worker return assignment")
+        require(validate_capture(output, machine, primary, token) == returned["evidence_sha256"], "worker terminal evidence changed")
+        return returned
+    validate(packet, packet["target"])
     if check_claim:
         claim = proof_path.parents[2] / "cloudbench-pool-claims" / machine
         require(not claim.exists() or sha(read(claim)) != authority["claim_sha256"], "worker claim remains held")
@@ -531,15 +537,17 @@ def recover_return_release(output, machine, primary, token):
     if released.exists():
         return validate_return(output, machine, primary, token, check_claim=False)
     authority = json.loads(read(output / "worker-borrowed" / (machine + ".json")))
-    common = Path(authority["proof"]).parents[2]
+    explicit = authority.get("origin") == "explicit-user-idle-resource"
+    common = Path(authority["proof"]).parents[1 if explicit else 2]
     lock_path = common / "cloudbench-pool-claims/.locks" / (machine + ".lock")
     fd = sibling("cloudbench-original-volume-capture.py")["_billing_lock"](lock_path)
     with os.fdopen(fd, "r+"):
         # The old generation must be gone. A later generation remains untouched.
         returned = validate_return(output, machine, primary, token, require_release=False)
-        state = json.loads(read(common / "cloudbench-worker-reuse/states" / (machine + ".json")))
-        require(state["output"] == str(output) and state["primary"] == primary and state["run_token"] == token
-                and state["packet_sha256"] == sha(read(authority["proof"])), "return recovery state differs")
+        if not explicit:
+            state = json.loads(read(common / "cloudbench-worker-reuse/states" / (machine + ".json")))
+            require(state["output"] == str(output) and state["primary"] == primary and state["run_token"] == token
+                    and state["packet_sha256"] == sha(read(authority["proof"])), "return recovery state differs")
         sibling("cloudbench-startup-failure-archive.py")["durable_handoff_json"](released, returned)
     return returned
 
