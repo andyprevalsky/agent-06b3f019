@@ -514,7 +514,7 @@ def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -
     source_ref = subprocess.check_output(["git", "-C", str(source_root), "rev-parse", "HEAD"], text=True).strip()
     hashes = {}
     checked = {}
-    for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "run-bench-campaign.py", "cloudbench-port-lease.py", "cloudbench-cleanup-tickets.py", "lib/cloudbench-env.sh"):
+    for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "run-bench-campaign.py", "cloudbench-port-lease.py", "cloudbench-cleanup-tickets.py", "cloudbench-cohort-reconcile.py", "lib/cloudbench-env.sh"):
         bound = subprocess.check_output(["git", "-C", str(source_root), "show", source_ref + ":scripts/" + name])
         if (source_root / "scripts" / name).read_bytes() != bound:
             raise ValueError("mutation authority differs from immutable controller source")

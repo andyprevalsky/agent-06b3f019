@@ -758,6 +758,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-original-volume-capture.py" \
        "$ROOT_DIR/scripts/cloudbench-disposable-volume.py" \
        "$ROOT_DIR/scripts/cloudbench-cleanup-tickets.py" \
+       "$ROOT_DIR/scripts/cloudbench-cohort-reconcile.py" \
        "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
@@ -7034,7 +7035,7 @@ if data.get("id") != sys.argv[1] or data.get("state") != "waiting_for_detach" or
     echo "⚠️  deferred $count exact orphan Volume(s) awaiting Fly detach; retained dead-owner registry $registry" >&2
 }
 
-reconcile_stale_fleet_registries() {
+reconcile_stale_fleet_registries_full() {
     FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=0
     export -n FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED 2>/dev/null || true
     if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
@@ -7141,6 +7142,31 @@ reconcile_stale_fleet_registries() {
         fleet_registry_remove_if_empty "$registry" || unresolved=1
     done
     [ "$unresolved" = "0" ]
+}
+
+# A sealed cohort owns one historical reconciliation, not one scan per member.
+reconcile_stale_fleet_registries() {
+    if [ -z "${RUN_BENCH_CLEANUP_COHORT_DIR:-}" ] || [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
+        reconcile_stale_fleet_registries_full; return $?
+    fi
+    local fd status=0 job="${RUN_BENCH_CLEANUP_JOB:-${RUN_BENCH_CAMPAIGN_JOB_ID:-}}"
+    [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" != 1 ] || job="__infra_canary__"
+    local helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-cohort-reconcile.py"
+    local -a args=(--cohort "$RUN_BENCH_CLEANUP_COHORT_DIR" --cohort-id "$RUN_BENCH_CLEANUP_COHORT_ID" --job "$job" --owner-pid "$$" --owner-start "$FLEET_OWNER_PID_START" --app "$APP" --ownership-root "$FLEET_OWNERSHIP_ROOT")
+    # The persistent kernel inode is never replaced; inherited FD keeps the
+    # winner exclusive through all destructive reconciliation and its receipt.
+    (umask 077; : >> "$RUN_BENCH_CLEANUP_COHORT_DIR/stale-reconcile.lock") || return 1
+    exec {fd}<> "$RUN_BENCH_CLEANUP_COHORT_DIR/stale-reconcile.lock" || return 1
+    python3 "$helper" acquire "${args[@]}" --fd "$fd" || status=$?
+    if [ "$status" = 10 ]; then
+        status=0
+        reconcile_stale_fleet_registries_full || status=$?
+        python3 "$helper" complete "${args[@]}" --fd "$fd" --status "$status" || status=1
+    fi
+    exec {fd}>&-
+    # The winner may have changed inventory; borrowed readers must observe it.
+    FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=1
+    [ "$status" = 0 ]
 }
 
 # Every claim-path mutation for one machine is serialized by one persistent
