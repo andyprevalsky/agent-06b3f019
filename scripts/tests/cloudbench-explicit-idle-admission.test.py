@@ -258,6 +258,75 @@ provision_primary_machine task "$OUT" && primary_cold_bootstrap_requested "$OUT"
         proof=self.common/'cloudbench-pool-reuse'/(self.mid+'.json')
         with self.assertRaises(FileNotFoundError):mod.verify_pool(proof,self.common,self.request['native_before'],self.request['native_after'],self.request['consumer']['source_ref'],mod.described(self.request['volume']))
 
+    def cold_preflight_fixture(self, cold, *, inherited='0', corrupt=False):
+        request,authority,fd=self.authority()
+        mod.publish(request,mod.sha(request.read_bytes()),authority,mod.sha(authority.read_bytes()),fd)
+        if corrupt:
+            proof=self.common/'cloudbench-pool-reuse'/(self.mid+'.json')
+            value=json.loads(proof.read_bytes());value['explicit_idle']['request_sha256']='0'*64
+            proof.write_bytes(mod.canonical(value))
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+        def function(name):
+            match=re.search(r'^'+name+r'\(\).*?^}\n',fleet,re.M|re.S);assert match,name
+            return match.group()
+        start=fleet.index('while [ $# -gt 0 ]; do',fleet.index('CAPACITY_RESERVATION_ROOT='))
+        parser=fleet[start:fleet.index('\ndone\n',start)+6]
+        scripts=self.repo/'scripts';scripts.mkdir()
+        for name in ('run-fleet-infra-canary','cloudbench-infra-canary-preflight.py','cloudbench-explicit-idle-admission.py','cloudbench-original-volume-capture.py','cloudbench-startup-failure-archive.py','cloudbench-select-snapshot.py'):
+            (scripts/name).write_bytes(SCRIPT.with_name(name).read_bytes())
+        (scripts/'fleet_infra_sample.py').write_text('print("parallel-tool-calls\\nspawn-sub-agents")\n')
+        proof=self.common/'cloudbench-pool-reuse'/(self.mid+'.json')
+        nested=scripts/'run-bench-fleet'
+        nested.write_text('''set -uo pipefail
+POOL_COLD_BOOTSTRAP=0; POOL_REUSE_ONLY=1; BENCHES=(); INFRA_PROBE=0
+'''+parser+'\n'+function('pool_verify_reuse_proof')+'''
+pool_reuse_proof_file() { printf '%s' "$FIXTURE_PROOF"; }
+fleet_preconfig_native_read() { cp "$FIXTURE_NATIVE" "$2"; }
+fleet_cold_handoff_volume_read() { cp "$FIXTURE_VOLUME" "$2"; }
+[ "$INFRA_PROBE" = 1 ] || exit 91
+[ "${#BENCHES[@]}" = 2 ] || exit 92
+printf 'nested_cold=%s\n' "$POOL_COLD_BOOTSTRAP"
+pool_verify_reuse_proof "$FIXTURE_MID" vol_fixture
+''')
+        parent=self.root/'parent-fleet.sh'
+        parent.write_text('''set -uo pipefail
+POOL_COLD_BOOTSTRAP=0; POOL_REUSE_ONLY=1; BENCHES=(); INFRA_PROBE=0
+RECOVER_STALE_ONLY=0; PROVISION_POOL=
+ROOT_DIR="$FIXTURE_REPO"; CLOUDBENCH_FLEET_ROOT="$ROOT_DIR"
+CLOUDBENCH_SCRIPT_SNAPSHOT="$FIXTURE_SCRIPTS"
+export CLOUDBENCH_FLEET_ROOT CLOUDBENCH_SCRIPT_SNAPSHOT
+INFRA_CANARY_PREFLIGHT_SCRIPT="$FIXTURE_SCRIPTS/cloudbench-infra-canary-preflight.py"
+'''+parser+'\n'+function('fleet_infra_canary_preflight')+'\nfleet_infra_canary_preflight\n')
+        env={**os.environ,'RUN_BENCH_FLEET_BIN_UNDER_TEST':str(parent),'FIXTURE_REPO':str(self.repo),'FIXTURE_SCRIPTS':str(scripts),'FIXTURE_PROOF':str(proof),'FIXTURE_MID':self.mid,'FIXTURE_NATIVE':self.request['native_before']['path'],'FIXTURE_VOLUME':self.request['volume']['path'],'GIT_COMMON_DIR':str(self.common),'BENCH_REF':self.request['consumer']['source_ref'],'CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP':inherited}
+        for key in ('CLOUDBENCH_FAKE_DIR','CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT','CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE','RUN_BENCH_CAMPAIGN_BARRIER_DIR'):
+            env.pop(key,None)
+        argv=['bash',str(SCRIPT.with_name('run-bench')),'parallel-tool-calls','--reuse-pool-only','--autoscale-max','2','--foreground']
+        if cold:argv.append('--cold-primary-bootstrap')
+        result=subprocess.run(argv,env=env,capture_output=True,text=True,timeout=15)
+        return result,self.repo/'.context/fleet-infra-canary.last-pass'
+
+    @unittest.skipUnless(os.geteuid()==0,'canonical local publication needs root')
+    def test_cold_parent_cli_preflight_reaches_real_explicit_pool_proof(self):
+        result,stamp=self.cold_preflight_fixture(True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn('nested_cold=1',result.stdout);self.assertTrue(stamp.is_file())
+
+    @unittest.skipUnless(os.geteuid()==0,'canonical local publication needs root')
+    def test_no_cold_opt_in_still_refuses_explicit_pool(self):
+        result,stamp=self.cold_preflight_fixture(False)
+        self.assertNotEqual(result.returncode,0);self.assertIn('nested_cold=0',result.stdout);self.assertFalse(stamp.exists())
+
+    @unittest.skipUnless(os.geteuid()==0,'canonical local publication needs root')
+    def test_stale_canary_environment_cannot_opt_parent_into_cold(self):
+        result,stamp=self.cold_preflight_fixture(False,inherited='1')
+        self.assertNotEqual(result.returncode,0);self.assertIn('nested_cold=0',result.stdout);self.assertFalse(stamp.exists())
+
+    @unittest.skipUnless(os.geteuid()==0,'canonical local publication needs root')
+    def test_cold_preflight_corrupt_proof_still_refuses_and_never_stamps(self):
+        result,stamp=self.cold_preflight_fixture(True,corrupt=True)
+        self.assertNotEqual(result.returncode,0);self.assertIn('nested_cold=1',result.stdout);self.assertFalse(stamp.exists())
+
+
 
 class CanonicalBillingPredicate(unittest.TestCase):
     def test_actual_captured_hallpass_is_accepted_by_collector_predicate(self):

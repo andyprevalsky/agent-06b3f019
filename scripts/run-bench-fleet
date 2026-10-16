@@ -16934,7 +16934,8 @@ fleet_infra_canary_preflight() {
     # The helper holds a shared transaction lock while it rechecks the stamp,
     # runs the canary, and stamps PASS. Its lock is distinct from the nested
     # controller lifecycle lock, so nested fleet entry cannot self-deadlock.
-    if python3 "$INFRA_CANARY_PREFLIGHT_SCRIPT" \
+    if CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="${POOL_COLD_BOOTSTRAP:-0}" \
+        python3 "$INFRA_CANARY_PREFLIGHT_SCRIPT" \
         --stamp "$stamp" \
         --lock "$lock" \
         --ttl-seconds "$ttl" \
