@@ -1503,6 +1503,8 @@ async def test_autoscaler_retained_generation_cannot_start_by_matching_rollback_
                 "FLY_API_TOKEN": "fixture",
                 "FLY_MACHINE_ID": "leader",
                 "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                "TEMPORAL_WORKER_BUILD_ID": "build",
+                "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "attempt",
             },
         ):
             async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
@@ -1511,9 +1513,200 @@ async def test_autoscaler_retained_generation_cannot_start_by_matching_rollback_
         assert machines == original
 
 
+async def test_autoscaler_stopped_workers_require_current_build_and_deployment_attempt():
+    """A matching replay hash and self-consistent old marker cannot revive an old image."""
+    import copy
+    from unittest.mock import patch
+    import httpx
+    import worker
+
+    rows = []
+    for index in range(8):
+        rows.append(
+            {
+                "id": f"live-{index}",
+                "state": "started",
+                "config": {
+                    "env": {
+                        "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                        "TEMPORAL_WORKER_BUILD_ID": "current-build",
+                        "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "current-attempt",
+                    }
+                },
+            }
+        )
+    for mode in (
+        "old",
+        "old-legacy",
+        "old-build",
+        "old-attempt",
+        "current",
+        "current-legacy",
+        "rolling",
+        "idle",
+        "protected",
+        "foreign",
+        "foreign-generation",
+    ):
+        build = "old-build" if mode in ("old", "old-legacy", "old-build") else "current-build"
+        token = "old-attempt" if mode in ("old", "old-legacy", "old-attempt") else "current-attempt"
+        marker = {
+            "version": 1,
+            "phase": "active",
+            "app": "app",
+            "id": mode,
+            "hash": "A",
+            "build": build,
+            "token": token,
+        }
+        if mode == "rolling":
+            marker.update(build="old-build", token="old-attempt", rolling={"build": build, "token": token})
+        if mode == "idle":
+            marker["phase"] = "idle"
+        if mode == "foreign":
+            marker["app"] = "foreign"
+        if mode == "foreign-generation":
+            marker["hash"] = "B"
+        metadata = {} if mode.endswith("legacy") else {"rose_cooperative_worker_pool": json.dumps(marker)}
+        if mode == "protected":
+            metadata["rose_worker_reuse_protected"] = "true"
+        rows.append(
+            {
+                "id": mode,
+                "state": "stopped",
+                "config": {
+                    "image": f"registry/app:{build}",
+                    "metadata": metadata,
+                    "env": {
+                        "TEMPORAL_WORKER_SURFACE_HASH": "B" if mode == "foreign-generation" else "A",
+                        "TEMPORAL_WORKER_BUILD_ID": build,
+                        "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": token,
+                    },
+                },
+            }
+        )
+    original = copy.deepcopy(rows)
+    posts = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=rows)
+        posts.append(request.url.path)
+        return httpx.Response(200, json={})
+
+    with patch.dict(
+        os.environ,
+        {
+            "FLY_APP_NAME": "app",
+            "FLY_API_TOKEN": "fixture",
+            "FLY_MACHINE_ID": "live-0",
+            "TEMPORAL_WORKER_SURFACE_HASH": "A",
+            "TEMPORAL_WORKER_BUILD_ID": "current-build",
+            "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "current-attempt",
+        },
+    ):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            await worker._scale_fleet(20, http)
+    assert posts == [f"/v1/apps/app/machines/{mid}/start" for mid in ("current", "current-legacy", "rolling")], posts
+    assert rows == original, "start eligibility must not update/relabel old worker data"
+
+
+async def test_autoscaler_missing_current_provenance_does_not_start_surface_workers():
+    from unittest.mock import patch
+    import httpx
+    import worker
+
+    for build, token in (("", "current-attempt"), ("current-build", ""), ("", "")):
+        posts = []
+        rows = [
+            {
+                "id": "stopped",
+                "state": "stopped",
+                "config": {
+                    "env": {
+                        "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                        "TEMPORAL_WORKER_BUILD_ID": "current-build",
+                        "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "current-attempt",
+                    }
+                },
+            }
+        ]
+
+        def handler(request):
+            if request.method == "GET":
+                return httpx.Response(200, json=rows)
+            posts.append(request.url.path)
+            return httpx.Response(200, json={})
+
+        with patch.dict(
+            os.environ,
+            {
+                "FLY_APP_NAME": "app",
+                "FLY_API_TOKEN": "fixture",
+                "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                "TEMPORAL_WORKER_BUILD_ID": build,
+                "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": token,
+            },
+        ):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+                await worker._scale_fleet(8, http)
+        assert not posts, (build, token, posts)
+
+
+async def test_autoscaler_build_start_filter_preserves_busy_live_worker_scale_down():
+    from unittest.mock import patch
+    import httpx
+    import worker
+
+    rows = []
+    for index, mid in enumerate(("leader", "old-busy", "old-idle", "current-idle")):
+        old = mid.startswith("old-")
+        rows.append(
+            {
+                "id": mid,
+                "state": "started",
+                "private_ip": f"fdaa::{index + 1}",
+                "config": {
+                    "env": {
+                        "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                        "TEMPORAL_WORKER_BUILD_ID": "old" if old else "current",
+                        "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "old-attempt" if old else "current-attempt",
+                    }
+                },
+            }
+        )
+    posts = []
+
+    def handler(request):
+        if request.url.host == "api.machines.dev":
+            if request.method == "GET":
+                return httpx.Response(200, json=rows)
+            posts.append(request.url.path)
+            return httpx.Response(200, json={})
+        return httpx.Response(200, text=f"activity_slots_used {1 if request.url.host == 'fdaa::2' else 0}\n")
+
+    with patch.dict(
+        os.environ,
+        {
+            "FLY_APP_NAME": "app",
+            "FLY_API_TOKEN": "fixture",
+            "FLY_MACHINE_ID": "leader",
+            "TEMPORAL_WORKER_SURFACE_HASH": "A",
+            "TEMPORAL_WORKER_BUILD_ID": "current",
+            "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "current-attempt",
+        },
+    ):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            await worker._scale_fleet(1, http)
+    assert posts == [f"/v1/apps/app/machines/{mid}/stop" for mid in ("old-idle", "current-idle")], posts
+
+
 async def run_all_tests():
     print("worker blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("autoscaler_stopped_current_build_attempt", test_autoscaler_stopped_workers_require_current_build_and_deployment_attempt)
+    await r.record_async("autoscaler_missing_current_provenance", test_autoscaler_missing_current_provenance_does_not_start_surface_workers)
+    await r.record_async("autoscaler_build_filter_preserves_live_drain", test_autoscaler_build_start_filter_preserves_busy_live_worker_scale_down)
     await r.record_async("autoscaler_retained_pool_rollback_custody", test_autoscaler_retained_generation_cannot_start_by_matching_rollback_hash)
     r.record("worker_does_not_use_python_custom_activity_slots", test_worker_does_not_use_python_custom_activity_slots)
     r.record(

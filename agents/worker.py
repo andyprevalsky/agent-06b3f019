@@ -699,6 +699,17 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
         machines = [m for m in machines if _owned_active_pool(m)]
         started = [m for m in machines if m["state"] == "started"]
         stopped = [m for m in machines if m["state"] == "stopped"]
+        # Same-surface rolling deploys leave stopped old images untouched.
+        # Only the running build/attempt may admit a stopped peer back to work.
+        if my_surface:
+            current_build = os.getenv("TEMPORAL_WORKER_BUILD_ID")
+            current_token = os.getenv("TEMPORAL_WORKER_DEPLOYMENT_TOKEN")
+            stopped = [
+                m for m in stopped
+                if current_build and current_token
+                and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_BUILD_ID") == current_build
+                and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_DEPLOYMENT_TOKEN") == current_token
+            ]
         current = len(started)
 
         if desired > current and stopped:
