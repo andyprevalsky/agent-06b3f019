@@ -3516,8 +3516,15 @@ boot_update_with_capacity_recovery() {
         if _with_timeout "$timeout_seconds" "$@" > "$update_log" 2>&1; then
             return 0
         fi
+        # An organization Machine-count limit is a permanent refusal for this
+        # attempt, even for a same-ID update. Retain the first response; do not
+        # replay the mutation as though host CPU capacity might become free.
+        if grep -Eiq 'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached' "$update_log" 2>/dev/null; then
+            echo "❌ boot update refused by organization Machine limit; no retry" >&2
+            return 1
+        fi
         if grep -Eiq \
-            'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached|cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)|insufficient CPUs available to fulfill request on the current host' \
+            'cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)|insufficient CPUs available to fulfill request on the current host' \
             "$update_log" 2>/dev/null; then
             if [ "$SECONDS" -ge "$capacity_deadline" ]; then
                 echo "❌ boot update replacement capacity did not return within ${capacity_wait}s" >&2

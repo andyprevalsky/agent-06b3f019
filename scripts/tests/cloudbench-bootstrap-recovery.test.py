@@ -3525,5 +3525,48 @@ reap_registry_clones(){ echo FORBIDDEN; }
         self.assertNotEqual(r.returncode,0);self.assertNotIn('FORBIDDEN',r.stdout)
 
 
+class BootUpdatePermanentQuotaTests(unittest.TestCase):
+    def run_update(self, error):
+        source=(REPO/'scripts/run-bench-cloud').read_text()
+        start=source.index('boot_update_with_capacity_recovery() {')
+        end=source.index('\n}\n',start)+3
+        with tempfile.TemporaryDirectory() as tmp:
+            script=source[start:end]+"""
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2
+CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS=1200
+CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS=8
+CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS=8
+calls=0; sleeps=0
+_with_timeout() {
+  calls=$((calls+1))
+  if [ "$calls" = 1 ]; then printf '%s\n' "$TEST_ERROR"; return 1; fi
+  return 0
+}
+sleep() { sleeps=$((sleeps+1)); }
+boot_update_with_capacity_recovery "$TEST_LOG" fake update
+result=$?
+printf '%s %s %s\n' "$result" "$calls" "$sleeps"
+"""
+            p=subprocess.run(['bash','-c',script],env={**os.environ,'TEST_ERROR':error,'TEST_LOG':tmp+'/update.log'},capture_output=True,text=True,timeout=5)
+            self.assertEqual(p.returncode,0,p.stderr)
+            return tuple(map(int,p.stdout.split())),p.stderr,Path(tmp+'/update.log').read_text()
+
+    def test_reached_org_machine_limit_is_one_attempt_no_wait(self):
+        result,stderr,log=self.run_update('Error: organization has reached its machine limit (422)')
+        self.assertEqual(result,(1,1,0));self.assertIn('no retry',stderr);self.assertIn('(422)',log)
+
+    def test_machine_limit_reached_variant_is_one_attempt_no_wait(self):
+        result,stderr,log=self.run_update('Error: machine limit: reached')
+        self.assertEqual(result,(1,1,0));self.assertIn('no retry',stderr)
+
+    def test_host_cpu_capacity_keeps_existing_retry(self):
+        result,stderr,log=self.run_update('Error: insufficient CPUs available to fulfill request on the current host')
+        self.assertEqual(result,(0,2,1));self.assertIn('1200s ceiling',stderr)
+
+    def test_rate_limit_keeps_existing_regular_retry(self):
+        result,stderr,log=self.run_update('Error: 429 Too Many Requests')
+        self.assertEqual(result,(0,2,1));self.assertNotIn('Machine limit',stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
