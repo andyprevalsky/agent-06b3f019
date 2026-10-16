@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Owning offline mutation admission; no provider calls."""
-import hashlib,json,os,subprocess,sys,tempfile,time,unittest,uuid
+import fcntl,hashlib,json,os,subprocess,sys,tempfile,time,unittest,uuid
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 SOURCE=Path(os.environ.get('PARALLEL_MUTATION_SOURCE',ROOT/'scripts/cloudbench-campaign-mutation.py'))
+CLOUD_SOURCE=Path(os.environ.get('PARALLEL_CLOUD_SOURCE',ROOT/'scripts/run-bench-cloud'))
 def birth(pid):
  fields=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()
  return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+fields[19]
@@ -37,6 +38,18 @@ class Admission(unittest.TestCase):
   self.require(self.call('backoff','--response-code','resource_exhausted','--retry-after','1.5'))
   start=time.monotonic();result=self.call('acquire','--wait-seconds','1');self.assertNotEqual(result.returncode,0);self.assertLess(time.monotonic()-start,1.4)
   self.assertFalse(list(self.capacity.rglob('lease-*.json')))
+ def test_shared_backoff_cannot_extend_original_strict_campaign_deadline(self):
+  consumer=self.root/'consumer';feed=consumer/'.context/campaigns/token/native';(feed/'inventory/current').mkdir(parents=True)
+  for relative in ['owner','machines.json','inventory/current/health']:(feed/relative).write_bytes((self.feed/relative).read_bytes())
+  auth=json.loads(self.env['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY']);auth['directory']=str(feed);self.env['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY']=json.dumps(auth);self.env['CLOUDBENCH_CAMPAIGN_INVENTORY_DIR']=str(feed)
+  barrier=feed.parent/'startup-cohorts/cohort';barrier.mkdir(parents=True);task=consumer/'fleet/runs/run/task';task.mkdir(parents=True)
+  deadline=time.monotonic()+.5;(barrier/'manifest.json').write_text(json.dumps(dict(cohort_id='cohort',jobs={'r1-j1':os.getpid()},e2e_deadline_monotonic=deadline)))
+  self.env.update(RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(barrier),RUN_BENCH_CAMPAIGN_COHORT='cohort',RUN_BENCH_CAMPAIGN_JOB_ID='r1-j1',RUN_BENCH_CAMPAIGN_TASK='task',RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC=str(deadline))
+  with (barrier.parent/'parent.lock').open('w')as held:
+   fcntl.flock(held,fcntl.LOCK_EX)
+   self.require(self.call('backoff','--response-code','429','--retry-after','2'))
+   start=time.monotonic();result=self.call('pace','--wait-seconds','4','--strict-primary','--task-root',str(task));self.assertNotEqual(result.returncode,0);self.assertLess(time.monotonic()-start,.8)
+  self.assertFalse(list(self.capacity.rglob('lease-*.json')))
  def test_foreign_source_or_unclassified_response_cannot_grant(self):
   self.assertNotEqual(self.call('backoff','--response-code','500','--retry-after','1').returncode,0)
   auth=json.loads(self.env['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY']);auth['source']['sha256']['cloudbench-campaign-mutation.py']='0'*64;self.env['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY']=json.dumps(auth)
@@ -55,7 +68,7 @@ class Admission(unittest.TestCase):
   finally:
    if child.poll()is None:child.terminate();child.wait(timeout=3)
  def test_actual_boot_retry_publishes_rate_event_and_uses_remaining_budget(self):
-  text=(ROOT/'scripts/run-bench-cloud').read_text();a=text.index('boot_update_with_capacity_recovery() {');b=text.index('\n}',a)+2;function=text[a:b]
+  text=CLOUD_SOURCE.read_text();a=text.index('boot_update_with_capacity_recovery() {');b=text.index('\n}',a)+2;function=text[a:b]
   script='''set -eu
 APP=fixture; MUTATION_OWNER_PID_START=fixture; CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=1; CLOUDBENCH_RUNTIME_SCRIPT_ROOT=/fixture
 CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2; CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS=1
@@ -65,4 +78,18 @@ _with_timeout() { printf 'native %s\\n' "$1" >> "$EVENTS"; n=$((n+1)); if [ "$n"
 '''+function+'\nboot_update_with_capacity_recovery "$UPDATE_LOG" fake-update\n'
   events=self.root/'events';result=subprocess.run(['bash','-c',script],env=dict(os.environ,EVENTS=str(events),UPDATE_LOG=str(self.root/'update.log')),text=True,capture_output=True,timeout=5)
   self.assertEqual(result.returncode,0,result.stderr);rows=events.read_text().splitlines();self.assertEqual(sum(' pace 'in row for row in rows),2);self.assertEqual(sum(' backoff 'in row for row in rows),1);self.assertEqual([row for row in rows if row.startswith('native ')],['native 89','native 89'])
+ def test_actual_boot_rate_publication_preserves_zero_and_large_local_retry(self):
+  text=CLOUD_SOURCE.read_text();a=text.index('boot_update_with_capacity_recovery() {');b=text.index('\n}',a)+2;function=text[a:b]
+  for local,shared in [(0,1),(120,90)]:
+   with self.subTest(local=local):
+    script='''set -eu
+APP=fixture; MUTATION_OWNER_PID_START=fixture; CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=1; CLOUDBENCH_RUNTIME_SCRIPT_ROOT=/fixture
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2; CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS=LOCAL
+n=0
+sleep() { printf 'sleep %s\\n' "$1" >> "$EVENTS"; }
+cloudbench_mutation_admission() { printf '%s\\n' "$*" >> "$EVENTS"; case "$2" in pace) printf '89\\n';; esac; }
+_with_timeout() { n=$((n+1)); if [ "$n" = 1 ]; then echo 'Error: HTTP 429 rate limit'; return 1; fi; return 0; }
+'''.replace('LOCAL',str(local))+function+'\nboot_update_with_capacity_recovery "$UPDATE_LOG" fake-update\n'
+    events=self.root/('events-'+str(local));result=subprocess.run(['bash','-c',script],env=dict(os.environ,EVENTS=str(events),UPDATE_LOG=str(self.root/'update.log')),text=True,capture_output=True,timeout=5)
+    self.assertEqual(result.returncode,0,result.stderr);rows=events.read_text().splitlines();reported=[row for row in rows if ' backoff 'in row];self.assertEqual(len(reported),1);self.assertIn('--retry-after '+str(shared),reported[0]);self.assertIn('sleep '+str(local),rows)
 if __name__=='__main__':unittest.main()

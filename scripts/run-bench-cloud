@@ -3505,7 +3505,7 @@ acquire_boot_config_update_slot() {
 }
 boot_update_with_capacity_recovery() {
     local update_log="$1" regular_attempts max_regular timeout_seconds
-    local capacity_wait capacity_retry regular_retry capacity_deadline native_budget rate_code
+    local capacity_wait capacity_retry regular_retry capacity_deadline native_budget rate_code rate_delay
     shift
     max_regular="${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"
     timeout_seconds="${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}"
@@ -3550,10 +3550,13 @@ boot_update_with_capacity_recovery() {
             if grep -Eiq '(^|[^[:alnum:]])429([^[:alnum:]]|$)' "$update_log"; then rate_code=429
             elif grep -Eiq 'resource_exhausted' "$update_log"; then rate_code=resource_exhausted; fi
             if [ -n "$rate_code" ]; then
+                rate_delay="$regular_retry"
+                [ "$rate_delay" -ge 1 ] || rate_delay=1
+                [ "$rate_delay" -le 90 ] || rate_delay=90
                 cloudbench_mutation_admission "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-campaign-mutation.py" backoff \
                     --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
                     --owner-pid "$$" --owner-start "$MUTATION_OWNER_PID_START" \
-                    --response-code "$rate_code" --retry-after "$regular_retry" || return 1
+                    --response-code "$rate_code" --retry-after "$rate_delay" || return 1
             fi
         fi
         if grep -Eiq \
