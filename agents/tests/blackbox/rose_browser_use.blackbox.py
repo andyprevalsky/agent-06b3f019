@@ -427,8 +427,8 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert auth_help["description"] == BROWSER_USE_TOOLS["request_user_assistance_for_authentication"]["description"]
     assert "Never use this for CAPTCHA" in auth_help["description"]
     assert "Bot or Not" in auth_help["description"]
-    assert auth_help["input_schema"]["properties"] == {}
-    assert auth_help["input_schema"]["required"] == []
+    assert set(auth_help["input_schema"]["properties"]) == {"auth_assessment"}
+    assert auth_help["input_schema"]["required"] == ["auth_assessment"]
 
     payment = tools[3]
     assert "only if checkout requires you to enter new card details" in payment["description"]
@@ -1434,13 +1434,46 @@ def test_normalize_provider_special_key_batch_keeps_first_action():
 
 
 def test_normalize_request_user_assistance():
+    from browser_tools.schemas import RequestUserAssistanceForAuthenticationBrowserTool
+    from domains.spawn_browser_agent_v3.auth_assessment import auth_assistance_assessment_result
+    from pydantic import ValidationError
+
+    assessment = {
+        "auth_realm": "shop.example", "page_url": "https://shop.example/verify",
+        "blocker": "user_only_verification", "reason": "The accepted account requires approval on its other device.",
+        "recipient_options": [{"method": "email_otp", "recipient": "owned@example.test",
+                               "status": "not_applicable", "evidence": "The accepted challenge cannot use an email code."}],
+    }
     out = normalize_browser_use_response(
-        {
-            "action": [{"request_user_assistance_for_authentication": {}}],
-        }
+        {"action": [{"request_user_assistance_for_authentication": {"auth_assessment": assessment}}]}
     )
     assert out["action"] == "request_user_assistance_for_authentication"
-    assert out["params"] == {}
+    assert out["params"] == {"auth_assessment": assessment}
+    assert RequestUserAssistanceForAuthenticationBrowserTool.model_validate(
+        {"tool": out["action"], **out["params"]}
+    ).auth_assessment.recipient_options[0].recipient == "owned@example.test"
+
+    # Normalization preserves missing/invalid input for the owning validators;
+    # it must not manufacture a valid assessment or silently discard metadata.
+    missing = normalize_browser_use_response({"action": [{"request_user_assistance_for_authentication": {}}]})
+    assert missing["params"] == {"auth_assessment": None}
+    invalid = {**assessment, "blocker": "unknown_blocker"}
+    malformed = normalize_browser_use_response(
+        {"action": [{"request_user_assistance_for_authentication": {"auth_assessment": invalid}}]}
+    )
+    assert malformed["params"] == {"auth_assessment": invalid}
+    for params in (missing["params"], malformed["params"]):
+        try:
+            RequestUserAssistanceForAuthenticationBrowserTool.model_validate({"tool": out["action"], **params})
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError("Missing/invalid auth assessment accepted by native tool schema")
+        result = auth_assistance_assessment_result(
+            params["auth_assessment"], auth_options={}, auth_realm="shop.example",
+            current_url="https://shop.example/verify", action_history=[],
+        )
+        assert result["error"] == "authentication_assessment_incomplete"
 
 
 def test_normalize_request_payment_card_preserves_receipt():
