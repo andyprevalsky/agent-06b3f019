@@ -1149,7 +1149,7 @@ print(json.dumps({'kind':'exact-inert-quiescence-v1','machine':TARGET,'nonce':NO
 
 
 # Billing custody is deliberately separate from recovery/evidence acceptance.
-# Only exact fresh inert allocations are supported; other phases remain PENDING.
+# Exact fresh inert or provenance-bound configured allocations only; no pool credit.
 BILLING_SCHEMA = 'cloudbench-billing-stop-retain-v1'
 
 
@@ -1299,7 +1299,7 @@ def _billing_stop_retained_owned(fly, registry, audit, run_dir, receipt_root,
     Call synchronously from the current fleet cleanup child after all producers
     and collectors have joined. Receipts use one stable private run directory;
     an existing per-Machine directory always prevents a repeated STOP attempt.
-    Pool/warm, configured and incomplete allocation phases stay PENDING.
+    Pool/warm and unbound configured or incomplete allocation phases stay PENDING.
     """
     summary = {'schema': BILLING_SCHEMA, 'owner': expected_owner, 'results': [],
                'evidence_or_task_credit': False, 'native_release': False,
@@ -1378,6 +1378,49 @@ def _billing_stop_retained_owned(fly, registry, audit, run_dir, receipt_root,
     return summary
 
 
+def _billing_configured_source(registry, meta, mid, config):
+    """Bind a configured fresh task without requiring its missing runtime archive."""
+    _billing_require(config.get('init') == {'cmd': DRIVER_CMD}, 'unsupported configured init')
+    env = config.get('env')
+    barrier = os.environ.get('CLOUDBENCH_BARRIER_TOKEN')
+    _billing_require(isinstance(env, dict) and 'GATE_REF' not in env
+                     and isinstance(barrier, str) and SAFE_TOKEN.fullmatch(barrier)
+                     and env.get('CLOUDBENCH_BARRIER_TOKEN') == barrier,
+                     'configured caller credential mismatch')
+    run = Path(meta['runs_root'])/meta['run_id']
+    files = {}
+    def read(path, limit=1048576):
+        raw = _billing_file(path, limit)
+        files[str(path)] = sha(raw)
+        return raw
+    contract = sibling('cloudbench_execution_provenance.py')
+    provenance = json.loads(read(run/'execution-provenance.json'))
+    matrix = json.loads(read(run/'execution-task-matrix.json'))
+    _billing_require(not contract['validate_task_matrix_binding'](provenance, matrix),
+                     'configured source provenance mismatch')
+    _billing_require(provenance['config']['values'].get('app') == meta['app']
+                     and env.get('REF') == provenance['base_sha'], 'configured source ref mismatch')
+    matches = []
+    for index, task in enumerate(matrix['tasks']):
+        out = run/task['name']
+        if not lexists(out/'.cid'):
+            continue
+        source, machine = read(out/'.cid', 4096).decode().split()
+        if machine == mid:
+            _billing_require(source == 'clone', 'configured task is not fresh-owned')
+            matches.append((index, out))
+    _billing_require(len(matches) == 1, 'configured task identity is ambiguous')
+    index, out = matches[0]
+    token = registry.name+'-'+str(index)
+    _billing_require(env.get('CLOUDBENCH_RUN_TOKEN') == token,
+                     'configured task token mismatch')
+    owner = json.loads(read(out/'runtime-evidence.owner.json', 65536))
+    _billing_require(owner == {'version': 1, 'machine_id': mid, 'run_token': token},
+                     'configured runtime owner mismatch')
+    _billing_require(config['mounts'][0].get('path') == DATA_PATH, 'configured data mount mismatch')
+    return files
+
+
 def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, name, receipts, result):
     import secrets
     # This shared per-Machine inode prevents concurrent claim publication. Any
@@ -1432,8 +1475,10 @@ def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, na
                 signal.setitimer(signal.ITIMER_REAL, max(0.000001, before-(time.monotonic()-call_start)))
         pinned = None
         final_pair = None
+        configured_source = None
+        configured_config = None
         def pair(bound=deadline):
-            nonlocal pinned, final_pair
+            nonlocal pinned, final_pair, configured_source, configured_config
             machine = api('GET', '/machines/'+mid, bound=bound)
             volume = api('GET', '/volumes/'+vol, bound=bound)
             _billing_require(isinstance(machine, dict) and isinstance(volume, dict)
@@ -1447,12 +1492,17 @@ def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, na
                              and machine.get('state') in ('started', 'stopping', 'stopped')
                              and volume.get('id') == vol and volume.get('attached_machine_id') == mid,
                              'native ownership mismatch')
-            _billing_require(cfg.get('init') == {'cmd': INERT_CMD} and cfg.get('env') in (None, {})
-                             and cfg.get('restart') == {'policy': 'no'}
+            _billing_require(cfg.get('restart') == {'policy': 'no'}
                              and cfg.get('auto_destroy', False) is False
                              and isinstance(cfg.get('mounts'), list) and len(cfg['mounts']) == 1
                              and isinstance(cfg['mounts'][0], dict)
-                             and cfg['mounts'][0].get('volume') == vol, 'unsupported inert config')
+                             and cfg['mounts'][0].get('volume') == vol, 'unsupported billing config')
+            if cfg.get('init') != {'cmd': INERT_CMD} or cfg.get('env') not in (None, {}):
+                binding = _billing_configured_source(registry, meta, mid, cfg)
+                if configured_source is None:
+                    configured_source, configured_config = binding, cfg
+                    publish_bytes(target/'configured-source.private.json', canonical(binding))
+                _billing_require(binding == configured_source, 'configured source changed')
             if pinned is None:
                 pinned = identity
                 publish_bytes(target/'native-before.private.json', canonical({'machine': machine, 'volume': volume}))
@@ -1460,6 +1510,9 @@ def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, na
             final_pair = {'machine': machine, 'volume': volume}
             return machine
         def local_unchanged():
+            if configured_source is not None:
+                _billing_require(_billing_configured_source(registry, meta, mid, configured_config)
+                                 == configured_source, 'configured source changed')
             _billing_require((_billing_tree(registry), _billing_tree(audit)) == original
                              and not lexists(claims/mid)
                              and pid_birth_state(meta['pid'], meta['pid_start']) == 'live',
@@ -1510,6 +1563,8 @@ def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, na
                       guest_source_sha256=sha(BILLING_GUEST.encode()))
         if lexists(target/'quiescence.private.json'):
             result['quiescence_sha256'] = sha(_billing_file(target/'quiescence.private.json'))
+        if configured_source is not None:
+            result['configured_source_sha256'] = sha(_billing_file(target/'configured-source.private.json'))
         publish_bytes(target/'result.private.json', canonical(result))
     except (Refusal, OSError, ValueError, TimeoutError, CaptureFailure, NotFound) as error:
         result['status'] = 'PENDING'

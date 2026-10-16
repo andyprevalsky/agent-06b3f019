@@ -2922,6 +2922,95 @@ class BillingStopRetainTests(unittest.TestCase):
                 self.run,self.receipts,self.owner,os.getppid(),'fixture-birth',
                 joins_verified=kwargs.get('joins_verified',True))
 
+    def configure_owned_boot(self):
+        contract = runpy.run_path(str(REPO/'scripts/cloudbench_execution_provenance.py'))
+        matrix = contract['build_task_matrix'](['configured-task=real'])
+        config = contract['build_config']('cloudbench-fleet-config-v1',
+            ['app=test-app', 'task_count=1', 'task_matrix_sha256='+matrix['sha256']])
+        snapshot = self.base/'snapshot'; snapshot.mkdir()
+        write(snapshot/'fixture.py', 'pass\n')
+        provenance = contract['build_provenance'](base_sha='c'*40,
+            workspace_patch_sha256='none',
+            snapshot_manifest=contract['build_snapshot_manifest'](snapshot), config=config)
+        write(self.run/'execution-provenance.json', json.dumps(provenance))
+        write(self.run/'execution-task-matrix.json', json.dumps(matrix))
+        self.task = self.run/'configured-task'; self.task.mkdir()
+        write(self.task/'.cid', 'clone '+self.mid+'\n')
+        write(self.task/'runtime-evidence.owner.json', json.dumps(
+            dict(version=1, machine_id=self.mid, run_token=self.owner+'-0')))
+        self.machine['config']['init']={'cmd':['bash','/cloudbench-boot.sh']}
+        self.machine['config']['env']={'REF':'c'*40, 'CLOUDBENCH_RUN_TOKEN':self.owner+'-0',
+            'CLOUDBENCH_BARRIER_TOKEN':'actual-fleet-credential'}
+        env_patch=patch.dict(os.environ, CLOUDBENCH_BARRIER_TOKEN='actual-fleet-credential')
+        env_patch.start(); self.addCleanup(env_patch.stop)
+        self.original=self.files()
+        self.configured_originals={str(p):p.read_bytes() for p in self.run.rglob('*') if p.is_file()}
+
+    def test_configured_owned_boot_stops_and_retains_failed_evidence(self):
+        self.configure_owned_boot()
+        result=self.call()
+        self.assertEqual(result['status'],'COMPLETE',result)
+        self.assertEqual(result['results'][0]['status'],'STOPPED_RETAINED')
+        self.assertEqual(self.fly.posts,['/machines/'+self.mid+'/stop'])
+        self.assertEqual(self.fly.probes,1)
+        self.assertEqual(self.files(),self.original)
+        self.assertFalse(result['native_release'])
+        self.assertFalse(result['evidence_or_task_credit'])
+        self.assertIn('configured_source_sha256',result['results'][0])
+        self.assertEqual({str(p):p.read_bytes() for p in self.run.rglob('*')
+                          if p.is_file() and '_batch' not in p.parts},
+                         {p:v for p,v in self.configured_originals.items() if '_batch' not in Path(p).parts})
+
+    def test_configured_boot_foreign_ref_tokens_and_task_refuse_before_probe(self):
+        for field,value in [('REF','d'*40),('CLOUDBENCH_RUN_TOKEN','foreign-0'),
+                            ('CLOUDBENCH_BARRIER_TOKEN','foreign-credential')]:
+            with self.subTest(field=field):
+                self.setUp(); self.configure_owned_boot()
+                self.machine['config']['env'][field]=value
+                self.assertEqual(self.call()['status'],'PENDING')
+                self.assertEqual((self.fly.probes,self.fly.posts),(0,[]))
+        self.setUp(); self.configure_owned_boot()
+        write(self.task/'.cid','clone '+('d'*14)+'\n')
+        self.assertEqual(self.call()['status'],'PENDING')
+        self.assertEqual((self.fly.probes,self.fly.posts),(0,[]))
+
+    def test_configured_boot_unknown_process_never_stops(self):
+        self.configure_owned_boot(); self.fly.unknown=True
+        self.assertEqual(self.call()['status'],'PENDING')
+        self.assertEqual(self.fly.probes,1)
+        self.assertEqual(self.fly.posts,[])
+        self.assertEqual(self.files(),self.original)
+
+    def test_configured_boot_source_change_after_probe_never_stops(self):
+        self.configure_owned_boot()
+        old=self.fly.machine_exec_json
+        def changed(*args,**kwargs):
+            result=old(*args,**kwargs)
+            write(self.task/'.cid','clone '+('d'*14)+'\n')
+            return result
+        self.fly.machine_exec_json=changed
+        self.assertEqual(self.call()['status'],'PENDING')
+        self.assertEqual(self.fly.posts,[])
+
+    def test_configured_boot_already_stopped_preserves_custody(self):
+        self.configure_owned_boot(); self.machine['state']='stopped'
+        result=self.call()
+        self.assertEqual(result['results'][0]['status'],'ALREADY_STOPPED_RETAINED',result)
+        self.assertEqual((self.fly.probes,self.fly.posts),(0,[]))
+        self.assertEqual(self.files(),self.original)
+
+    def test_configured_boot_missing_or_forged_provenance_refuses(self):
+        for kind in ('missing-owner','changed-matrix','extra-init','unjoined','missing-barrier','foreign-owner'):
+            with self.subTest(kind=kind):
+                self.setUp(); self.configure_owned_boot()
+                if kind=='missing-owner':(self.task/'runtime-evidence.owner.json').unlink()
+                if kind=='changed-matrix':write(self.run/'execution-task-matrix.json','{}')
+                if kind=='extra-init':self.machine['config']['init']['entrypoint']=['other']
+                if kind=='missing-barrier':os.environ.pop('CLOUDBENCH_BARRIER_TOKEN',None)
+                if kind=='foreign-owner':self.put(self.registry/'meta',dict(self.meta,fleet_owner_token='f'*32))
+                self.assertEqual(self.call(joins_verified=kind!='unjoined')['status'],'PENDING')
+                self.assertEqual((self.fly.probes,self.fly.posts),(0,[]))
+
     def test_exact_inert_primary_or_worker_stops_once_retains_every_record(self):
         result=self.call()
         self.assertEqual(result['status'],'COMPLETE',result)
