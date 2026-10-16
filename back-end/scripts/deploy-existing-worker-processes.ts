@@ -1,6 +1,9 @@
 #!/usr/bin/env tsx
 /** Explicit process-only deployment. Never allocates/updates/stops a Machine or old worker. */
 import { readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
+import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
 import { config } from 'dotenv';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma } from '../src/providers/database';
@@ -37,7 +40,10 @@ function argument(flag: string): string {
 function transport() {
   return createWorkerProcessTransport(process.env.FLY_API_TOKEN ?? '');
 }
-export function requireCandidateRuntimeValidation(value: unknown, plan: WorkerProcessPlan): void {
+export function requireCandidateRuntimeValidation(
+  value: unknown,
+  plan: WorkerProcessPlan
+): string[] {
   const proof = value as {
     runId?: string;
     results?: { test: string; status: string }[];
@@ -48,6 +54,8 @@ export function requireCandidateRuntimeValidation(value: unknown, plan: WorkerPr
       deploymentToken?: string;
       namespace?: string;
       taskQueue?: string;
+      qualifiedIdentities?: string[];
+      executingIdentities?: string[];
     };
   };
   const runtime = proof?.runtime;
@@ -70,9 +78,16 @@ export function requireCandidateRuntimeValidation(value: unknown, plan: WorkerPr
     runtime.bundleSHA256 !== plan.artifact.bundleSHA256 ||
     runtime.deploymentToken !== plan.attempt ||
     runtime.namespace !== plan.artifact.namespace ||
-    runtime.taskQueue !== plan.artifact.validationTaskQueue
+    runtime.taskQueue !== plan.artifact.validationTaskQueue ||
+    !Array.isArray(runtime.qualifiedIdentities) ||
+    runtime.qualifiedIdentities.length !== 8 ||
+    new Set(runtime.qualifiedIdentities).size !== 8 ||
+    !Array.isArray(runtime.executingIdentities) ||
+    runtime.executingIdentities.length === 0 ||
+    !runtime.executingIdentities.every((id) => runtime.qualifiedIdentities!.includes(id))
   )
     throw new Error('Exact native candidate validation and cleanup receipt is required');
+  return runtime.qualifiedIdentities;
 }
 
 async function requireNativePollers(plan: WorkerProcessPlan, queue: string, identities: string[]) {
@@ -95,15 +110,23 @@ async function requireNativePollers(plan: WorkerProcessPlan, queue: string, iden
         })
         .map((poller) => poller.identity)
     );
-    if (!identities.every((identity) => pollers.has(identity)))
+    if (pollers.size !== 8 || !identities.every((identity) => pollers.has(identity)))
       throw new Error('All eight exact native workflow and activity pollers are required');
   }
 }
 
+function requireSourceCheckout(source: string): void {
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: resolve(__dirname, '../..'),
+    encoding: 'utf8',
+  }).trim();
+  if (head !== source) throw new Error('Process controller checkout does not match exact source');
+}
 async function capturePlan(): Promise<void> {
   const artifact = JSON.parse(
     readFileSync(argument('--artifact'), 'utf8')
   ) as WorkerProcessArtifact;
+  requireSourceCheckout(artifact.sourceCommit);
   const ids = argument('--hosts').split(',');
   if (ids.length !== 8 || new Set(ids).size !== 8)
     throw new Error('Supply eight expressly authorized existing host IDs');
@@ -127,6 +150,11 @@ async function capturePlan(): Promise<void> {
     app,
     attempt: artifact.deploymentToken,
     previousQueue: pointer.taskQueue,
+    controlPlane: {
+      serviceId: argument('--backend-service-id'),
+      databaseHost: new URL(process.env.DATABASE_URL ?? '').hostname,
+      databaseName: new URL(process.env.DATABASE_URL ?? '').pathname.slice(1),
+    },
     artifact,
     hosts,
     healthPort: 0,
@@ -165,7 +193,7 @@ async function requirePointerCustody(plan: WorkerProcessPlan): Promise<void> {
 }
 
 async function activate(plan: WorkerProcessPlan): Promise<void> {
-  requireCandidateRuntimeValidation(
+  const validatedIdentities = requireCandidateRuntimeValidation(
     JSON.parse(readFileSync(argument('--validation-receipt'), 'utf8')),
     plan
   );
@@ -190,6 +218,8 @@ async function activate(plan: WorkerProcessPlan): Promise<void> {
     if (!markerExists) {
       const rows = await observe(plan, lease);
       const identities = requireEightWorkerProcesses(plan, rows, 'STANDBY');
+      if (!identities.every((id) => validatedIdentities.includes(id)))
+        throw new Error('Candidate cohort changed since its native validation');
       await requireNativePollers(plan, plan.artifact.validationTaskQueue, identities);
       await lease.assertOwned();
       await activateTemporalWorkerBuild(plan.artifact.buildId, plan.attempt);
@@ -241,6 +271,15 @@ async function main(): Promise<void> {
   config();
   if (!process.argv.includes('--execute'))
     throw new Error('Explicit --execute is required for native process operations');
+  if (
+    process.env.PRODUCTION_WORKER_PROCESS_DEPLOYMENT !== '1' ||
+    !process.env.DATABASE_URL ||
+    nonLocalDatabaseReason(process.env.DATABASE_URL) === null ||
+    process.env.TEMPORAL_TASK_QUEUE !== 'navi-agent-tasks'
+  )
+    throw new Error(
+      'Explicit production process opt-in, nonlocal database and production base queue are required'
+    );
   const action = process.argv[2];
   if (action === 'capture-plan') {
     await capturePlan();
@@ -248,6 +287,13 @@ async function main(): Promise<void> {
   }
   const plan = JSON.parse(readFileSync(argument('--plan'), 'utf8')) as WorkerProcessPlan;
   validateWorkerProcessPlan(plan);
+  requireSourceCheckout(plan.artifact.sourceCommit);
+  const database = new URL(process.env.DATABASE_URL);
+  if (
+    database.hostname !== plan.controlPlane.databaseHost ||
+    database.pathname.slice(1) !== plan.controlPlane.databaseName
+  )
+    throw new Error('Process controller database differs from retained custody');
   if (action === 'activate') {
     await activate(plan);
     return;
@@ -280,7 +326,7 @@ async function main(): Promise<void> {
     const pointer = await readAgentQueuePointer();
     if (pointer?.taskQueue !== queue || pointer.surfaceHash !== plan.artifact.surfaceHash)
       throw new Error('Live pointer does not match exact process source');
-    await requireBackendWorkerRecovery(plan);
+    await requireBackendWorkerRecovery(plan, 'RUNNING');
   }
   process.stdout.write(
     `${JSON.stringify({ mode: 'existing-worker-process', phase, queue, nativeIdentities: identities, hosts: rows, oldWorkers: 'retained and served' })}\n`

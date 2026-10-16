@@ -79,7 +79,20 @@ export function createWorkerProcessTransport(
   };
   return {
     async getMachine(app, id) {
-      return (await request(exactURL(app, id))) as NativeWorkerHost;
+      const raw = (await request(exactURL(app, id))) as NativeWorkerHost & {
+        instance_id?: unknown;
+      };
+      const version = raw.version ?? raw.instance_id;
+      if (
+        raw.id !== id ||
+        typeof version !== 'string' ||
+        !version ||
+        (raw.version !== undefined &&
+          raw.instance_id !== undefined &&
+          raw.version !== raw.instance_id)
+      )
+        throw new Error('Existing Machine instance identity is absent or conflicting');
+      return { ...raw, version };
     },
     async readFacts(app, id) {
       return (await run(app, id, FACTS_SCRIPT)) as RuntimeHostFacts;

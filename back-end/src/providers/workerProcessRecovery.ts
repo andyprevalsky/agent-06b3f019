@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
+import { nonLocalDatabaseReason } from '../utils/localDatabaseUrl';
 import {
   acquireWorkflowDeploymentLease,
   type WorkflowDeploymentLease,
@@ -26,56 +27,93 @@ export interface WorkerProcessRepository {
   read(): Promise<DesiredWorkerProcesses | undefined>;
   record(identity: string, rows: HostProcessObservation[]): Promise<boolean>;
 }
-const repository: WorkerProcessRepository = {
-  async read() {
-    const row = await prisma.toolSideEffect.findUnique({
-      where: { operationKey: WORKER_PROCESS_DESIRED_KEY },
-    });
-    if (!row) return undefined;
-    if (row.operationType !== OPERATION_TYPE || row.status !== 'ACTIVE')
-      throw new Error('Existing-process desired state is not active');
-    return row.request as unknown as DesiredWorkerProcesses;
-  },
-  async record(identity, rows) {
-    return runTransactionWithRetry(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${WORKER_PROCESS_DESIRED_KEY}))`;
-      const current = await tx.toolSideEffect.findUnique({
+function recoveryRepository(publishBackendProof = false): WorkerProcessRepository {
+  return {
+    async read() {
+      const row = await prisma.toolSideEffect.findUnique({
         where: { operationKey: WORKER_PROCESS_DESIRED_KEY },
       });
-      const request = current?.request as unknown as DesiredWorkerProcesses | undefined;
-      if (
-        current?.operationType !== OPERATION_TYPE ||
-        current.status !== 'ACTIVE' ||
-        request?.identity !== identity
-      )
-        return false;
-      const prior = current.response as { backendRecovery?: Prisma.InputJsonValue } | null;
-      const observation = {
-        observedAt: new Date().toISOString(),
-        identity,
-        hosts: rows as unknown as Prisma.InputJsonArray,
-        instanceId: process.env.RENDER_INSTANCE_ID ?? null,
-        backendSource: process.env.RENDER_GIT_COMMIT ?? null,
-      };
-      await tx.toolSideEffect.update({
-        where: { operationKey: WORKER_PROCESS_DESIRED_KEY },
-        data: {
-          response: {
-            ...observation,
-            ...(process.env.RENDER_INSTANCE_ID && process.env.RENDER_GIT_COMMIT
-              ? { backendRecovery: observation }
-              : prior?.backendRecovery
-                ? { backendRecovery: prior.backendRecovery }
-                : {}),
+      if (!row) return undefined;
+      if (row.operationType !== OPERATION_TYPE || row.status !== 'ACTIVE')
+        throw new Error('Existing-process desired state is not active');
+      return row.request as unknown as DesiredWorkerProcesses;
+    },
+    async record(identity, rows) {
+      return runTransactionWithRetry(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${WORKER_PROCESS_DESIRED_KEY}))`;
+        const current = await tx.toolSideEffect.findUnique({
+          where: { operationKey: WORKER_PROCESS_DESIRED_KEY },
+        });
+        const request = current?.request as unknown as DesiredWorkerProcesses | undefined;
+        if (
+          current?.operationType !== OPERATION_TYPE ||
+          current.status !== 'ACTIVE' ||
+          request?.identity !== identity
+        )
+          return false;
+        const prior = current.response as { backendRecovery?: Prisma.InputJsonValue } | null;
+        const observation = {
+          observedAt: new Date().toISOString(),
+          identity,
+          hosts: rows as unknown as Prisma.InputJsonArray,
+          instanceId: process.env.RENDER_INSTANCE_ID ?? null,
+          backendSource: process.env.RENDER_GIT_COMMIT ?? null,
+          serviceId: process.env.RENDER_SERVICE_ID ?? null,
+        };
+        await tx.toolSideEffect.update({
+          where: { operationKey: WORKER_PROCESS_DESIRED_KEY },
+          data: {
+            response: {
+              ...observation,
+              ...(publishBackendProof
+                ? { backendRecovery: observation }
+                : prior?.backendRecovery
+                  ? { backendRecovery: prior.backendRecovery }
+                  : {}),
+            },
           },
-        },
+        });
+        return true;
       });
-      return true;
-    });
-  },
-};
+    },
+  };
+}
+const repository = recoveryRepository();
 
-export async function requireBackendWorkerRecovery(plan: WorkerProcessPlan): Promise<void> {
+export function isBackendWorkerRecoveryOwner(
+  environment: NodeJS.ProcessEnv,
+  plan?: WorkerProcessPlan
+): boolean {
+  if (
+    environment.RENDER !== 'true' ||
+    environment.NODE_ENV !== 'production' ||
+    !environment.RENDER_SERVICE_ID ||
+    !environment.RENDER_INSTANCE_ID ||
+    !/^[a-f0-9]{40}$/.test(environment.RENDER_GIT_COMMIT ?? '') ||
+    !environment.DATABASE_URL ||
+    nonLocalDatabaseReason(environment.DATABASE_URL) === null
+  )
+    return false;
+  try {
+    const database = new URL(environment.DATABASE_URL);
+    return (
+      ['postgres:', 'postgresql:'].includes(database.protocol) &&
+      !!database.hostname &&
+      (!plan ||
+        (environment.RENDER_SERVICE_ID === plan.controlPlane.serviceId &&
+          database.hostname === plan.controlPlane.databaseHost &&
+          database.pathname.slice(1) === plan.controlPlane.databaseName &&
+          environment.RENDER_GIT_COMMIT === plan.artifact.sourceCommit))
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function requireBackendWorkerRecovery(
+  plan: WorkerProcessPlan,
+  expectedPhase?: 'STANDBY' | 'RUNNING'
+): Promise<void> {
   const row = await prisma.toolSideEffect.findUnique({
     where: { operationKey: WORKER_PROCESS_DESIRED_KEY },
   });
@@ -83,6 +121,7 @@ export async function requireBackendWorkerRecovery(plan: WorkerProcessPlan): Pro
     backendRecovery?: {
       identity?: string;
       backendSource?: string;
+      serviceId?: string;
       instanceId?: string;
       observedAt?: string;
       hosts?: HostProcessObservation[];
@@ -91,7 +130,11 @@ export async function requireBackendWorkerRecovery(plan: WorkerProcessPlan): Pro
   const proof = response?.backendRecovery;
   const at = Date.parse(proof?.observedAt ?? '');
   if (
+    row?.operationType !== OPERATION_TYPE ||
+    row.status !== 'ACTIVE' ||
+    (row.request as unknown as DesiredWorkerProcesses)?.identity !== workerPlanIdentity(plan) ||
     !proof?.instanceId ||
+    proof.serviceId !== plan.controlPlane.serviceId ||
     proof.identity !== workerPlanIdentity(plan) ||
     proof.backendSource !== plan.artifact.sourceCommit ||
     !Number.isFinite(at) ||
@@ -106,7 +149,7 @@ export async function requireBackendWorkerRecovery(plan: WorkerProcessPlan): Pro
   requireEightWorkerProcesses(
     plan,
     proof.hosts,
-    proof.hosts.every((host) => host.phase === 'RUNNING') ? 'RUNNING' : 'STANDBY'
+    expectedPhase ?? (proof.hosts.every((host) => host.phase === 'RUNNING') ? 'RUNNING' : 'STANDBY')
   );
 }
 
@@ -193,11 +236,18 @@ export async function recoverExistingWorkerProcesses(options: {
   }
 }
 
-export async function recoverConfiguredWorkerProcesses(): Promise<HostProcessObservation[]> {
+export async function recoverConfiguredWorkerProcesses(
+  options: { transport?: WorkerProcessTransport } = {}
+): Promise<HostProcessObservation[]> {
   // An ordinary backend deployment without an explicit retained intent has no Fly effects.
-  if (!(await repository.read())) return [];
+  if (!isBackendWorkerRecoveryOwner(process.env)) return [];
+  const desired = await repository.read();
+  if (!desired) return [];
+  if (!isBackendWorkerRecoveryOwner(process.env, desired.plan))
+    throw new Error('Backend service, database or source cannot own this process deployment');
   return recoverExistingWorkerProcesses({
-    transport: createWorkerProcessTransport(process.env.FLY_API_TOKEN ?? ''),
+    repository: recoveryRepository(true),
+    transport: options.transport ?? createWorkerProcessTransport(process.env.FLY_API_TOKEN ?? ''),
     key: process.env.BACKEND_API_KEY ?? '',
   });
 }

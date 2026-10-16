@@ -38,6 +38,7 @@ export interface WorkerProcessPlan {
   app: string;
   attempt: string;
   previousQueue: string;
+  controlPlane: { serviceId: string; databaseHost: string; databaseName: string };
   artifact: WorkerProcessArtifact;
   hosts: ExistingWorkerHost[];
   healthPort: number;
@@ -128,8 +129,17 @@ function requireValue(condition: unknown, message: string): asserts condition {
 export function validateWorkerProcessPlan(plan: WorkerProcessPlan): void {
   requireValue(plan.version === 1, 'Unsupported worker process plan');
   requireValue(/^[a-z0-9][a-z0-9-]{1,62}$/.test(plan.app), 'Invalid existing worker app');
-  requireValue(/^[a-zA-Z0-9._-]{1,80}$/.test(plan.attempt), 'Invalid worker attempt');
+  requireValue(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(plan.attempt), 'Invalid worker attempt');
   requireValue(/^[a-zA-Z0-9@._-]{1,200}$/.test(plan.previousQueue), 'Missing exact prior queue');
+  requireValue(
+    /^srv-[a-zA-Z0-9-]+$/.test(plan.controlPlane?.serviceId ?? ''),
+    'Missing backend service custody'
+  );
+  requireValue(
+    /^[a-zA-Z0-9.-]+$/.test(plan.controlPlane?.databaseHost ?? '') &&
+      /^[a-zA-Z0-9_-]+$/.test(plan.controlPlane?.databaseName ?? ''),
+    'Missing database custody'
+  );
   requireValue(plan.hosts.length === 8, 'Exactly eight existing worker hosts are required');
   requireValue(new Set(plan.hosts.map((host) => host.id)).size === 8, 'Duplicate existing host');
   for (const host of plan.hosts) {
@@ -142,8 +152,14 @@ export function validateWorkerProcessPlan(plan: WorkerProcessPlan): void {
   requireValue(artifact.buildId === artifact.sourceCommit, 'Build does not bind source commit');
   requireValue(/^[a-f0-9]{12}$/.test(artifact.surfaceHash), 'Invalid worker surface hash');
   requireValue(artifact.deploymentToken === plan.attempt, 'Attempt token mismatch');
-  requireValue(/^[a-zA-Z0-9._-]{1,200}$/.test(artifact.namespace), 'Missing native namespace');
-  requireValue(/^[a-zA-Z0-9._-]+$/.test(artifact.baseTaskQueue), 'Invalid base queue');
+  requireValue(
+    /^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,199}$/.test(artifact.namespace),
+    'Missing native namespace'
+  );
+  requireValue(
+    /^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,186}$/.test(artifact.baseTaskQueue),
+    'Invalid base queue'
+  );
   requireValue(
     artifact.validationTaskQueue === `navi-agent-candidate-${plan.attempt}`,
     'Missing exact validation queue'
@@ -444,4 +460,43 @@ export function requireEightWorkerProcesses(
   }
   requireValue(new Set(identities).size === 8, 'Duplicate native worker identities');
   return identities;
+}
+
+/** Bind fixture execution to the positively attested worker processes, not caller labels. */
+export function requireCandidateExecutionCohort(
+  history: { events?: unknown[] | null },
+  qualified: string[]
+): string[] {
+  requireValue(
+    qualified.length === 8 && new Set(qualified).size === 8,
+    'Exactly eight qualified native identities are required'
+  );
+  const executing = new Set<string>();
+  let workflowStarts = 0,
+    activityStarts = 0;
+  for (const item of history.events ?? []) {
+    if (item === null || typeof item !== 'object') continue;
+    const event = item as Record<string, unknown>;
+    for (const key of [
+      'workflowTaskStartedEventAttributes',
+      'workflowTaskCompletedEventAttributes',
+      'activityTaskStartedEventAttributes',
+      'activityTaskCompletedEventAttributes',
+    ]) {
+      const attributes = event[key] as { identity?: string } | null | undefined;
+      if (!attributes) continue;
+      requireValue(
+        typeof attributes.identity === 'string' && qualified.includes(attributes.identity),
+        'Candidate fixture executed on an unqualified native worker'
+      );
+      executing.add(attributes.identity);
+      if (key === 'workflowTaskStartedEventAttributes') workflowStarts++;
+      if (key === 'activityTaskStartedEventAttributes') activityStarts++;
+    }
+  }
+  requireValue(
+    workflowStarts > 0 && activityStarts > 0,
+    'Native workflow and activity execution identities are required'
+  );
+  return [...executing].sort();
 }

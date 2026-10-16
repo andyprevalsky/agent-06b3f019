@@ -6,132 +6,28 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import {
-  canonicalWorkerJSON,
   reconcileWorkerProcesses,
   requireEightWorkerProcesses,
   signWorkerEnvelope,
   validateWorkerProcessPlan,
   workerSHA256,
   workerPlanIdentity,
-  type ProcessReceipt,
   type WorkerProcessPlan,
-  type WorkerProcessTransport,
+  requireCandidateExecutionCohort,
 } from '../../providers/workerProcessDeployment';
 import { createTestHarness } from './trace-archive-test-utils';
 import {
   recoverExistingWorkerProcesses,
   type WorkerProcessRepository,
+  isBackendWorkerRecoveryOwner,
 } from '../../providers/workerProcessRecovery';
 import { createWorkerProcessTransport } from '../../providers/workerProcessTransport';
 import { setCurrentAgentQueue } from '../../providers/agentQueuePointer';
 import { prisma } from '../../providers/database';
+import { fixture, config } from './worker-process-test-fixtures';
 import { requireCandidateRuntimeValidation } from '../../../scripts/deploy-existing-worker-processes';
 
 const { test, finish } = createTestHarness('existing worker process deployment');
-const config = { env: { TEMPORAL_WORKER_BUILD_ID: 'old' }, image: 'old' };
-function fixture() {
-  const source = 'a'.repeat(40);
-  const digest = 'b'.repeat(64);
-  const plan: WorkerProcessPlan = {
-    version: 1,
-    app: 'owned-production-app',
-    attempt: 'qualified-attempt-1',
-    previousQueue: 'navi-agent-tasks@old-generation',
-    hosts: Array.from({ length: 8 }, (_, index) => ({
-      id: index.toString(16).padStart(14, '0'),
-      configSHA256: workerSHA256(canonicalWorkerJSON(config)),
-      imageDigest: `sha256:${digest}`,
-    })),
-    healthPort: 18080,
-    sdkMetricsPort: 19090,
-    limits: {
-      maxAddressBytes: 1024 ** 3,
-      aggregateMemoryBytes: 1024 ** 3,
-      minFreeAfterMaxAddressBytes: 256 * 1024 ** 2,
-      memoryController: 'v1-memory',
-    },
-    artifact: {
-      sourceCommit: source,
-      buildId: source,
-      surfaceHash: 'c'.repeat(12),
-      deploymentToken: 'qualified-attempt-1',
-      namespace: 'native-test',
-      baseTaskQueue: 'navi-agent-tasks',
-      validationTaskQueue: 'navi-agent-candidate-qualified-attempt-1',
-      bundleBase64: Buffer.from('source-fixture').toString('base64'),
-      bundleSHA256: workerSHA256('source-fixture'),
-      bootstrapSource: '# actual source substituted by packaging owner',
-      bootstrapSHA256: workerSHA256('# actual source substituted by packaging owner'),
-      manifest: {
-        version: 1,
-        sourceCommit: source,
-        requirementsSHA256: digest,
-        installedDistributionsSHA256: digest,
-        pythonSHA256: digest,
-        files: ['agents/worker.py', 'agents/requirements.txt'].map((path) => ({
-          path,
-          sha256: digest,
-          size: 1,
-          mode: 0o644,
-        })),
-      },
-    },
-  };
-  const calls: { id: string; action: unknown; hasBundle: boolean }[] = [];
-  let phase: ProcessReceipt['phase'] = 'STANDBY';
-  let wrongConfig = false;
-  let wrongBoot = false;
-  const bootId = randomUUID();
-  const transport: WorkerProcessTransport = {
-    async getMachine(_app, id) {
-      return {
-        id,
-        state: 'started',
-        version: 'existing-instance',
-        image_ref: { digest: `sha256:${digest}` },
-        config: wrongConfig ? { changed: true } : config,
-      };
-    },
-    async readFacts(_app, id) {
-      return {
-        machineId: id,
-        machineVersion: 'existing-instance',
-        bootId,
-        primary: { pid: 10, birthTicks: '1', buildId: 'old', healthy: true, phase: 'running' },
-      };
-    },
-    async execBootstrap(_app, id, _source, envelope) {
-      calls.push({ id, action: envelope.action, hasBundle: !!envelope.bundleBase64 });
-      return {
-        version: 1,
-        app: plan.app,
-        machineId: id,
-        machineVersion: 'existing-instance',
-        bootId: wrongBoot ? randomUUID() : bootId,
-        sourceCommit: source,
-        bundleSHA256: plan.artifact.bundleSHA256,
-        buildId: source,
-        deploymentToken: plan.attempt,
-        phase: envelope.action === 'ensure' ? 'BOOTING' : phase,
-        supervisorPid: 20,
-        supervisorBirthTicks: '100',
-        workerPid: 30,
-        workerBirthTicks: '101',
-        hostname: id,
-        aggregateMemoryBytes: 1024 ** 3,
-        health: { healthy: true, phase: 'standby', build_id: source },
-      };
-    },
-  };
-  return {
-    plan,
-    calls,
-    transport,
-    setPhase: (value: ProcessReceipt['phase']) => (phase = value),
-    changeConfig: () => (wrongConfig = true),
-    changeBoot: () => (wrongBoot = true),
-  };
-}
 async function main() {
   await test('eight exact standby runtimes are distinct from unchanged native image identity', async () => {
     const f = fixture();
@@ -334,7 +230,7 @@ async function main() {
       return new Response(
         JSON.stringify(
           options?.method === 'GET'
-            ? { id: '00000000000000' }
+            ? { id: '00000000000000', instance_id: 'existing-instance' }
             : { exit_code: 0, exit_signal: 0, stdout: '{}' }
         )
       );
@@ -356,6 +252,43 @@ async function main() {
     const count = calls.length;
     await assert.rejects(transport.getMachine('../another-app', '00000000000000'));
     assert.equal(calls.length, count);
+  });
+  await test('actual native instance_id traverses the transport and qualifies all eight runtimes', async () => {
+    const f = fixture();
+    const transport = createWorkerProcessTransport('private-test-key', (async (url, options) => {
+      const id = String(url).split('/machines/')[1].split('/')[0];
+      if (options?.method === 'GET') {
+        const { version, ...machine } = await f.transport.getMachine(f.plan.app, id);
+        return new Response(JSON.stringify({ ...machine, instance_id: version }));
+      }
+      const body = JSON.parse(String(options?.body));
+      const output = body.stdin
+        ? await f.transport.execBootstrap(
+            f.plan.app,
+            id,
+            f.plan.artifact.bootstrapSource,
+            JSON.parse(body.stdin)
+          )
+        : await f.transport.readFacts(f.plan.app, id);
+      return new Response(
+        JSON.stringify({ exit_code: 0, exit_signal: 0, stdout: JSON.stringify(output) })
+      );
+    }) as typeof fetch);
+    const rows = await reconcileWorkerProcesses(
+      f.plan,
+      transport,
+      'private-test-key',
+      async () => {}
+    );
+    assert.equal(requireEightWorkerProcesses(f.plan, rows, 'STANDBY').length, 8);
+    for (const value of [{}, { instance_id: '' }, { instance_id: 'old', version: 'different' }]) {
+      const invalid = createWorkerProcessTransport(
+        'private-test-key',
+        (async () =>
+          new Response(JSON.stringify({ id: f.plan.hosts[0].id, ...value }))) as typeof fetch
+      );
+      await assert.rejects(invalid.getMachine(f.plan.app, f.plan.hosts[0].id));
+    }
   });
   await test('cohort qualification rechecks process and host identity instead of trusting a saved phase', async () => {
     const f = fixture();
@@ -539,6 +472,8 @@ async function main() {
         deploymentToken: plan.attempt,
         namespace: plan.artifact.namespace,
         taskQueue: plan.artifact.validationTaskQueue,
+        qualifiedIdentities: Array.from({ length: 8 }, (_, i) => `${i + 10}@owned`),
+        executingIdentities: ['10@owned'],
       },
     };
     requireCandidateRuntimeValidation(receipt, plan);
@@ -560,6 +495,63 @@ async function main() {
     failed.results[0].status = 'FAIL';
     assert.throws(() => requireCandidateRuntimeValidation(failed, plan));
     assert.throws(() => requireCandidateRuntimeValidation(null, plan));
+    const foreignExecutor = structuredClone(receipt);
+    foreignExecutor.runtime.executingIdentities = ['999@foreign'];
+    assert.throws(() => requireCandidateRuntimeValidation(foreignExecutor, plan));
+  });
+  await test('native history attribution rejects foreign or absent workflow and activity executors', async () => {
+    const qualified = Array.from({ length: 8 }, (_, i) => `${i + 10}@owned`);
+    const history = {
+      events: [
+        { workflowTaskStartedEventAttributes: { identity: qualified[0] } },
+        { workflowTaskCompletedEventAttributes: { identity: qualified[0] } },
+        { activityTaskStartedEventAttributes: { identity: qualified[1] } },
+        { activityTaskCompletedEventAttributes: { identity: qualified[1] } },
+      ],
+    };
+    assert.deepEqual(requireCandidateExecutionCohort(history, qualified), [
+      qualified[0],
+      qualified[1],
+    ]);
+    for (const key of [
+      'workflowTaskStartedEventAttributes',
+      'activityTaskStartedEventAttributes',
+    ]) {
+      assert.throws(() =>
+        requireCandidateExecutionCohort(
+          { events: [...history.events, { [key]: { identity: '999@foreign' } }] },
+          qualified
+        )
+      );
+      assert.throws(() =>
+        requireCandidateExecutionCohort({ events: [...history.events, { [key]: {} }] }, qualified)
+      );
+    }
+    assert.throws(() => requireCandidateExecutionCohort({ events: [] }, qualified));
+  });
+  await test('copied desired records cannot authorize dev, benchmark or another backend service', async () => {
+    const { plan } = fixture();
+    const env = {
+      RENDER: 'true',
+      NODE_ENV: 'production',
+      RENDER_SERVICE_ID: plan.controlPlane.serviceId,
+      RENDER_INSTANCE_ID: 'LOCAL-TEST',
+      RENDER_GIT_COMMIT: plan.artifact.sourceCommit,
+      DATABASE_URL: 'postgresql://fixture:fixture@qualified.remote.test/production',
+    };
+    assert.equal(isBackendWorkerRecoveryOwner(env, plan), true);
+    for (const changes of [
+      { RENDER: 'false' },
+      { NODE_ENV: 'test' },
+      { RENDER_SERVICE_ID: 'srv-other' },
+      { RENDER_INSTANCE_ID: '' },
+      { DATABASE_URL: 'postgresql://fixture:fixture@127.0.0.1/production' },
+      { DATABASE_URL: 'postgresql://fixture:fixture@staging.remote.test/production' },
+      { DATABASE_URL: 'postgresql://fixture:fixture@qualified.remote.test/copied' },
+      { RENDER_GIT_COMMIT: 'd'.repeat(40) },
+    ]) {
+      assert.equal(isBackendWorkerRecoveryOwner({ ...env, ...changes }, plan), false);
+    }
   });
   finish();
 }
