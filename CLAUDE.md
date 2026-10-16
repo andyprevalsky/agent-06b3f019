@@ -93,6 +93,7 @@ AI agent platform.
 
 ## Sub-agent delegation
 
+- Every agent-created thread title must start with the exact prefix `--ai--`; include it in creation instructions and have the child set and verify its title as soon as it starts, preserving the prefix on later renames.
 - Explicit user default for all sub-agents: **medium reasoning effort and
   ultrafast speed**. This overrides inherited effort/speed unless the user
   explicitly requests otherwise. Pass both settings through supported execution
@@ -1993,6 +1994,8 @@ curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT"
 Typical signatures to look for: `peer closed connection` during streaming, `[NO END]` on an LLM call (crashed/cutoff mid-stream), `Failed to fetch pricing` retries (underlying-model 404s burning 30s each), P2024 Prisma pool timeouts (5s × 3 retry on `db.findFirst`), 429 from Anthropic on the `claude_token` path (rate-limit fallback to waterfall), `thinking.adaptive.effort: Extra inputs` (effort must go in `output_config`, not `thinking`), 0% cache hit on claudeAuth (check `cache.prefix_fingerprint` hashes match across calls — differing hashes = different prefix = no cache reuse).
 
 ## Deploy command regression scheduling
+
+New tests must pass five consecutive runs with unchanged test code before being finalized, to catch flaky behavior.
 
 `python3 scripts/run-deploy-structural-gates.py` runs the complete deploy
 command registry with eight concurrent suites by default. Use `--max-workers N`
