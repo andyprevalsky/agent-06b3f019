@@ -56,6 +56,29 @@ The same PR codified the RCA requirement that a fix ship with a saved pre-fix re
 that fails and the exact same command passing post-fix — which is how this resolver
 change was validated.
 
+## 2026-10-16 direct unit-entrypoint recurrence
+
+During reusable-cutover qualification, the workflow-generation baseline was
+launched directly without an explicit local `DATABASE_URL`. Its database loader
+read the repository `.env`, reaching the production Supabase pooler. This was
+an invocation error, not a production deployment or an authorized test result.
+The original five passing cases remain invalid as qualification evidence. The
+same baseline subsequently passed against the explicitly owned local database.
+
+The run created five synthetic agents during 18:43:08–18:43:23 UTC. Its awaited
+cleanup deleted those agents, but one synthetic attention request did not
+cascade. A bounded read found zero matching agents and that one exact request.
+An identity- and time-bound transaction removed only that request and confirmed
+zero remaining rows at 18:49:33 UTC. The original log and sanitized connection,
+verification, and cleanup receipts are retained under
+`.context/lantern-producer-f3315/.context/producer-rca/`; no credentials are in
+the receipts. No result from the accidental production run supplies gate credit.
+
+The direct test entrypoint now rejects a nonlocal database before any query,
+and its fixture cleanup explicitly removes its own attention requests before
+removing the agent. This closes both the fallback path and the observed orphan
+instead of assuming that deleting an agent cascades to every test record.
+
 ## Reusable lesson
 
 Resource selection in a test harness must key on immutable identity and fail

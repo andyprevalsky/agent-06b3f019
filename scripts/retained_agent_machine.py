@@ -15,6 +15,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import sys
 from contextlib import contextmanager
 from urllib.parse import quote
@@ -23,6 +24,7 @@ from urllib.request import Request, urlopen
 POOL_KEY = "rose_cooperative_worker_pool"
 CUSTODY_KEY = "rose_worker_reuse_custody"
 API = "https://api.machines.dev/v1"
+SPARE_SURFACE = "pool-unassigned"
 
 
 def config_digest(config):
@@ -32,15 +34,13 @@ def config_digest(config):
         metadata.pop(key, None)
     if not metadata:
         config.pop("metadata", None)
-    return hashlib.sha256(
-        json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def record(machine, app):
     config = machine["config"]
     env = config.get("env", {})
-    return {
+    value = {
         "app": app,
         "id": machine["id"],
         "instance_id": machine["instance_id"],
@@ -49,13 +49,14 @@ def record(machine, app):
         "build": env.get("TEMPORAL_WORKER_BUILD_ID"),
         "token": env.get("TEMPORAL_WORKER_DEPLOYMENT_TOKEN"),
     }
+    if env.get("TEMPORAL_WORKER_POOL_QUEUE"):
+        value["queue"] = env["TEMPORAL_WORKER_POOL_QUEUE"]
+    return value
 
 
 def metadata(machine, key):
     try:
-        value = json.loads(
-            machine.get("config", {}).get("metadata", {}).get(key, "null")
-        )
+        value = json.loads(machine.get("config", {}).get("metadata", {}).get(key, "null"))
         return value if isinstance(value, dict) else {}
     except (ValueError, TypeError):
         return {}
@@ -66,10 +67,7 @@ def custody_ready(machine, app):
     source = record(machine, app)
     return (
         custody.get("version") == 1
-        and all(
-            custody.get(key) == source[key]
-            for key in ("app", "id", "instance_id", "config_sha256")
-        )
+        and all(custody.get(key) == source[key] for key in ("app", "id", "instance_id", "config_sha256"))
         and isinstance(custody.get("evidence_ref"), str)
         and custody["evidence_ref"].startswith("https://")
         and custody.get("rootfs_disposition") in ("stateless", "archived")
@@ -93,44 +91,71 @@ def active_owner(machine, app):
         and pool.get("hash") == source["hash"]
         and bool(attempt["build"])
         and bool(attempt["token"])
-        and (
-            all(pool.get(key) == value for key, value in attempt.items())
-            or pool.get("rolling") == attempt
-        )
+        and (all(pool.get(key) == value for key, value in attempt.items()) or pool.get("rolling") == attempt)
     )
 
 
-def eligible(machine, app, live_hash):
+def eligible(machine, app, live_hash, live_queue=None):
     try:
         pool = metadata(machine, POOL_KEY)
         source = record(machine, app)
         return (
-            machine["state"] == "stopped"
+            (machine["state"] == "stopped" or (machine["state"] == "created" and pool.get("origin") == "preallocated"))
             and bool(live_hash)
-            and all(
-                source.get(key) for key in ("hash", "build", "token", "instance_id")
+            and all(source.get(key) for key in ("hash", "build", "token", "instance_id"))
+            and (
+                source.get("queue") != live_queue if live_queue and source.get("queue") else source["hash"] != live_hash
             )
-            and source["hash"] != live_hash
             # Persisted overlays can mask the newly pinned worker image. They
             # remain retained, but require a separate data/source migration.
-            and (machine["config"].get("rootfs") or {}).get("persist")
-            in (None, "", "never", 0)
-            and (machine["config"].get("guest") or {}).get("persist_rootfs")
-            in (None, "", "never", 0)
-            and not machine["config"]
-            .get("metadata", {})
-            .get("rose_worker_reuse_protected")
+            and (machine["config"].get("rootfs") or {}).get("persist") in (None, "", "never", 0)
+            and (machine["config"].get("guest") or {}).get("persist_rootfs") in (None, "", "never", 0)
+            and not machine["config"].get("metadata", {}).get("rose_worker_reuse_protected")
             and pool.get("version") == 1
             and pool.get("phase") == "idle"
             and pool.get("source") == source
             and isinstance(pool.get("retired_by"), dict)
             and bool(pool.get("retired_by", {}).get("build"))
             and bool(pool.get("retired_by", {}).get("token"))
-            and pool.get("drained_queue") == f"navi-agent-tasks@{source['hash']}"
+            and pool.get("drained_queue") == source.get("queue", f"navi-agent-tasks@{source['hash']}")
             and custody_ready(machine, app)
         )
     except (KeyError, TypeError):
         return False
+
+
+def reserved(machine, args):
+    """A reservation keeps its source snapshot until the pinned image is written."""
+    try:
+        marker = metadata(machine, POOL_KEY)
+        return (
+            marker.get("version") == 1
+            and marker.get("phase") == "reserved"
+            and marker.get("job") == args.job
+            and marker.get("target")
+            == {
+                "hash": args.hash,
+                "build": args.build,
+                "token": args.token,
+            }
+            and marker.get("source") == record(machine, args.app)
+            and machine["state"] in ("stopped", "created")
+            and custody_ready(machine, args.app)
+            and not machine["config"].get("metadata", {}).get("rose_worker_reuse_protected")
+        )
+    except (AttributeError, KeyError, TypeError):
+        return False
+
+
+def initial_spare(machine, app, live_hash):
+    """Only deliberately enrolled, never-production pool entries bypass drain."""
+    return (
+        eligible(machine, app, live_hash)
+        and record(machine, app)["hash"] == SPARE_SURFACE
+        and metadata(machine, POOL_KEY).get("origin") == "preallocated"
+        and metadata(machine, CUSTODY_KEY).get("rootfs_disposition") == "stateless"
+        and machine["config"].get("env", {}).get("TEMPORAL_WORKER_POOL_SPARE") == "1"
+    )
 
 
 class Fly:
@@ -147,9 +172,7 @@ class Fly:
             headers["fly-machine-lease-nonce"] = self.nonce
         body = None if data is None else json.dumps(data).encode()
         with urlopen(
-            Request(
-                API + self.path + suffix, data=body, headers=headers, method=method
-            ),
+            Request(API + self.path + suffix, data=body, headers=headers, method=method),
             timeout=30,
         ) as response:
             raw = response.read()
@@ -157,9 +180,9 @@ class Fly:
 
     @contextmanager
     def lease(self):
-        self.nonce = self.request(
-            "POST", "/lease", {"ttl": 500, "description": "cooperative-worker-pool"}
-        )["data"]["nonce"]
+        self.nonce = self.request("POST", "/lease", {"ttl": 500, "description": "cooperative-worker-pool"})["data"][
+            "nonce"
+        ]
         try:
             yield
         finally:
@@ -185,18 +208,92 @@ def operate(args, expected, fly):
         if current.get("id") != args.id:
             raise ValueError("Fly returned a different Machine")
         source = record(expected, args.app)
-        if args.action == "reuse":
+        if args.action == "enroll":
             if (
-                args.hash == args.live_hash
-                or args.queue != f"navi-agent-tasks@{args.hash}"
+                record(current, args.app) != source
+                or current["state"] not in ("stopped", "created")
+                or source["hash"] != SPARE_SURFACE
+                or not custody_ready(current, args.app)
+                or metadata(current, CUSTODY_KEY).get("rootfs_disposition") != "stateless"
+                or (current["config"].get("rootfs") or {}).get("persist") not in (None, "", "never", 0)
+                or (current["config"].get("guest") or {}).get("persist_rootfs") not in (None, "", "never", 0)
+                or current["config"].get("env", {}).get("TEMPORAL_WORKER_POOL_SPARE") != "1"
+                or current["config"].get("metadata", {}).get("rose_worker_reuse_protected")
             ):
-                raise ValueError(
-                    "Reuse requires a different, exact target generation queue"
+                raise ValueError("Only an explicitly stateless unassigned spare may be enrolled")
+            marker = {
+                "version": 1,
+                "phase": "idle",
+                "origin": "preallocated",
+                "source": source,
+                "drained_queue": f"navi-agent-tasks@{SPARE_SURFACE}",
+                "retired_by": {"build": args.build, "token": args.token},
+            }
+            prior = metadata(current, POOL_KEY)
+            if prior and prior != marker:
+                raise ValueError("Preallocated enrollment cannot overwrite another owner")
+            if prior != marker:
+                fly.request(
+                    "POST",
+                    f"/metadata/{POOL_KEY}",
+                    {"value": json.dumps(marker, sort_keys=True)},
                 )
-            if not eligible(expected, args.app, args.live_hash):
-                raise ValueError(
-                    "Machine lacks an eligible stopped, drained custody record"
-                )
+            if not initial_spare(fly.request("GET"), args.app, args.live_hash):
+                raise ValueError("Preallocated spare enrollment was not verified")
+        elif args.action == "reserve":
+            if not getattr(args, "job", None):
+                raise ValueError("A durable deployment job is required for reservation")
+            if reserved(current, args):
+                return {"id": args.id, "action": args.action, "verified": True}
+            if record(current, args.app) != source or not eligible(
+                current, args.app, args.live_hash, getattr(args, "live_queue", None)
+            ):
+                raise ValueError("Only an unchanged released Machine may be reserved")
+            marker = {
+                "version": 1,
+                "phase": "reserved",
+                "job": args.job,
+                "source": source,
+                "previous": metadata(current, POOL_KEY),
+                "target": {"hash": args.hash, "build": args.build, "token": args.token},
+            }
+            fly.request(
+                "POST",
+                f"/metadata/{POOL_KEY}",
+                {"value": json.dumps(marker, sort_keys=True)},
+            )
+            verified = fly.request("GET")
+            if not reserved(verified, args):
+                raise ValueError("Native reservation did not preserve its source")
+        elif args.action == "release-reservation":
+            if not getattr(args, "job", None) or not reserved(current, args):
+                raise ValueError("Only the unchanged owning reservation may be released")
+            marker = metadata(current, POOL_KEY)
+            restored = copy.deepcopy(current)
+            restored["config"]["metadata"][POOL_KEY] = json.dumps(marker.get("previous"))
+            if record(current, args.app) != source or not eligible(
+                restored, args.app, args.live_hash, getattr(args, "live_queue", None)
+            ):
+                raise ValueError("Reservation source is not a reusable idle Machine")
+            fly.request("POST", f"/metadata/{POOL_KEY}", {"value": json.dumps(marker["previous"], sort_keys=True)})
+            verified = fly.request("GET")
+            if record(verified, args.app) != source or not eligible(
+                verified, args.app, args.live_hash, getattr(args, "live_queue", None)
+            ):
+                raise ValueError("Reservation release was not verified")
+        elif args.action == "reuse":
+            if not re.fullmatch(r"[A-Za-z0-9._-]+@" + re.escape(args.hash), args.queue) or (
+                args.queue == getattr(args, "live_queue", None)
+                if getattr(args, "live_queue", None)
+                else args.hash == args.live_hash
+            ):
+                raise ValueError("Reuse requires a different, exact target generation queue")
+            if not (
+                reserved(expected, args)
+                if getattr(args, "job", None)
+                else eligible(expected, args.app, args.live_hash, getattr(args, "live_queue", None))
+            ):
+                raise ValueError("Machine lacks an eligible stopped, drained custody record")
             config = copy.deepcopy(expected["config"])
             config["image"] = args.image
             config.setdefault("env", {}).update(
@@ -207,6 +304,17 @@ def operate(args, expected, fly):
                     "TEMPORAL_WORKER_REQUIRE_ACTIVATION": "0",
                 }
             )
+            config["env"].pop("TEMPORAL_WORKER_POOL_SPARE", None)
+            if getattr(args, "job", None):
+                config["env"].update(
+                    {
+                        "TEMPORAL_TASK_QUEUE": args.queue.rsplit("@", 1)[0],
+                        "TASK_QUEUE": args.queue.rsplit("@", 1)[0],
+                        "TEMPORAL_WORKER_POOL_QUEUE": args.queue,
+                        "AUTOSCALER_ACTUATE": "0",
+                        "PEOPLE_CREDENTIAL_BROKER_URL": "https://navi-j9a9.onrender.com",
+                    }
+                )
             marker = {
                 "version": 1,
                 "phase": "active",
@@ -216,19 +324,23 @@ def operate(args, expected, fly):
                 "build": args.build,
                 "token": args.token,
             }
-            config.setdefault("metadata", {})[POOL_KEY] = json.dumps(
-                marker, sort_keys=True
-            )
+            if getattr(args, "job", None):
+                marker["job"] = args.job
+                marker["source"] = source
+                marker["configSHA256"] = config_digest(config)
+            config.setdefault("metadata", {})[POOL_KEY] = json.dumps(marker, sort_keys=True)
             # Reconcile a native update whose response was lost, under the same
             # lease and attempt. A different owner/attempt is never adopted.
             already_updated = (
-                config_digest(current["config"]) == config_digest(config)
-                and metadata(current, POOL_KEY) == marker
+                config_digest(current["config"]) == config_digest(config) and metadata(current, POOL_KEY) == marker
             )
             if not already_updated:
-                if record(current, args.app) != source or not eligible(
-                    current, args.app, args.live_hash
-                ):
+                selected = (
+                    reserved(current, args)
+                    if getattr(args, "job", None)
+                    else eligible(current, args.app, args.live_hash, getattr(args, "live_queue", None))
+                )
+                if record(current, args.app) != source or not selected:
                     raise ValueError("Stopped Machine changed before its leased reuse")
                 fly.request(
                     "POST",
@@ -244,9 +356,33 @@ def operate(args, expected, fly):
                 or config_digest(verified["config"]) != config_digest(config)
                 or metadata(verified, POOL_KEY) != marker
             ):
-                raise ValueError(
-                    "Native update did not preserve the expected worker configuration"
+                raise ValueError("Native update did not preserve the expected worker configuration")
+            # A stateless grant follows this exact, verified image/env update.
+            # An archive of the old runtime cannot certify newly written data.
+            custody = metadata(expected, CUSTODY_KEY)
+            if custody.get("rootfs_disposition") == "stateless":
+                refreshed = copy.deepcopy(custody)
+                refreshed.update(
+                    {
+                        key: value
+                        for key, value in record(verified, args.app).items()
+                        if key in ("app", "id", "instance_id", "config_sha256")
+                    }
                 )
+                if metadata(verified, CUSTODY_KEY) != refreshed:
+                    fly.request(
+                        "POST",
+                        f"/metadata/{CUSTODY_KEY}",
+                        {"value": json.dumps(refreshed, sort_keys=True)},
+                    )
+                final = fly.request("GET")
+                if (
+                    record(final, args.app) != record(verified, args.app)
+                    or metadata(final, POOL_KEY) != marker
+                    or metadata(final, CUSTODY_KEY) != refreshed
+                    or not custody_ready(final, args.app)
+                ):
+                    raise ValueError("Stateless pool custody was not retained")
         elif args.action in ("activate", "prepare-roll"):
             # flyctl owns the rolling update and health checks. Only refresh
             # metadata on its explicitly selected, now-updated native snapshot.
@@ -256,14 +392,9 @@ def operate(args, expected, fly):
                 or source["hash"] != args.hash
                 or args.live_hash != args.hash
                 or not active_owner(current, args.app)
-                or (
-                    args.action == "activate"
-                    and (source["build"] != args.build or source["token"] != args.token)
-                )
+                or (args.action == "activate" and (source["build"] != args.build or source["token"] != args.token))
             ):
-                raise ValueError(
-                    "Rolling activation does not match its live owned snapshot"
-                )
+                raise ValueError("Rolling activation does not match its live owned snapshot")
             marker = {
                 "version": 1,
                 "phase": "active",
@@ -291,27 +422,24 @@ def operate(args, expected, fly):
                 raise ValueError("Rolling metadata did not preserve its live Machine")
         else:
             if current["config"].get("metadata", {}).get("rose_worker_reuse_protected"):
-                raise ValueError(
-                    "Protected Machine cannot be assigned to the retired pool"
-                )
-            if record(current, args.app) != source or current["state"] != "stopped":
-                raise ValueError(
-                    "Retirement requires the exact stopped Machine snapshot"
-                )
-            if source["hash"] != args.hash or not all(
-                source.get(key) for key in ("hash", "build", "token")
+                raise ValueError("Protected Machine cannot be assigned to the retired pool")
+            if record(current, args.app) != source or (
+                current["state"] != "stopped"
+                and not (getattr(args, "allow_created", False) and current["state"] == "created")
             ):
-                raise ValueError(
-                    "Retirement source generation/provenance is missing or changed"
-                )
+                raise ValueError("Retirement requires the exact stopped Machine snapshot")
+            if source["hash"] != args.hash or not all(source.get(key) for key in ("hash", "build", "token")):
+                raise ValueError("Retirement source generation/provenance is missing or changed")
             if (
                 not args.live_hash
-                or args.live_hash == args.hash
-                or args.queue != f"navi-agent-tasks@{args.hash}"
-            ):
-                raise ValueError(
-                    "Retirement cannot certify the live generation or another queue"
+                or (
+                    args.queue == getattr(args, "live_queue", None)
+                    if getattr(args, "live_queue", None)
+                    else args.live_hash == args.hash
                 )
+                or args.queue != source.get("queue", f"navi-agent-tasks@{args.hash}")
+            ):
+                raise ValueError("Retirement cannot certify the live generation or another queue")
             marker = {
                 "version": 1,
                 "phase": "idle",
@@ -319,6 +447,8 @@ def operate(args, expected, fly):
                 "drained_queue": args.queue,
                 "retired_by": {"build": args.build, "token": args.token},
             }
+            if current["state"] == "created":
+                marker["origin"] = "preallocated"
             fly.request(
                 "POST",
                 f"/metadata/{POOL_KEY}",
@@ -327,32 +457,40 @@ def operate(args, expected, fly):
             verified = fly.request("GET")
             if (
                 record(verified, args.app) != source
-                or verified["state"] != "stopped"
+                or verified["state"] != current["state"]
                 or metadata(verified, POOL_KEY) != marker
             ):
-                raise ValueError(
-                    "Retirement metadata did not preserve the stopped Machine"
-                )
+                raise ValueError("Retirement metadata did not preserve the stopped Machine")
     return {"id": args.id, "action": args.action, "verified": True}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "action", choices=("candidates", "reuse", "retire", "activate", "prepare-roll")
+        "action",
+        choices=(
+            "candidates",
+            "enroll",
+            "reserve",
+            "release-reservation",
+            "reuse",
+            "retire",
+            "activate",
+            "prepare-roll",
+        ),
     )
     for flag in ("app", "live-hash", "id", "hash", "build", "token", "image", "queue"):
         parser.add_argument("--" + flag, required=flag in ("app", "live-hash"))
+    parser.add_argument("--job")
+    parser.add_argument("--live-queue")
     args = parser.parse_args()
     expected = json.load(sys.stdin)
     if args.action == "candidates":
         for machine in expected:
-            if eligible(machine, args.app, args.live_hash):
+            if eligible(machine, args.app, args.live_hash, args.live_queue):
                 print(machine["id"])
         return
-    if not all((args.id, args.hash, args.build, args.token)) or (
-        args.action == "reuse" and not args.image
-    ):
+    if not all((args.id, args.hash, args.build, args.token)) or (args.action == "reuse" and not args.image):
         raise ValueError("Missing generation/attempt/image provenance")
     print(json.dumps(operate(args, expected, Fly(args.app, args.id))))
 
