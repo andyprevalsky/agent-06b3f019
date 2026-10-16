@@ -364,19 +364,23 @@ def operate(args, expected, fly):
                 # instance through GET. Wait for the acknowledged version;
                 # neither another update nor a matching old version is proof.
                 updated_version = updated["instance_id"]
-                completed = fly.request(
-                    "GET",
-                    f"/wait?state=stopped&instance_id={quote(updated_version, safe='')}&timeout=10",
-                )
-                if not isinstance(completed, dict) or completed.get("ok") is not True:
-                    raise ValueError("Native updated worker did not reach its stopped state")
             else:
                 updated_version = current["instance_id"]
+            if not isinstance(updated_version, str) or not updated_version:
+                raise ValueError("Native updated worker has no exact instance version")
+            # A lost acknowledgement can leave the exact target version still
+            # replacing. Both paths require native stopped-state confirmation.
+            completed = fly.request(
+                "GET",
+                f"/wait?state=stopped&instance_id={quote(updated_version, safe='')}&timeout=10",
+            )
+            if not isinstance(completed, dict) or completed.get("ok") is not True:
+                raise ValueError("Native updated worker did not reach its stopped state")
             verified = fly.request("GET")
             if (
                 verified.get("id") != args.id
                 or verified.get("instance_id") != updated_version
-                or (not already_updated and verified.get("state") != "stopped")
+                or verified.get("state") != "stopped"
                 or config_digest(verified["config"]) != config_digest(config)
                 or metadata(verified, POOL_KEY) != marker
             ):

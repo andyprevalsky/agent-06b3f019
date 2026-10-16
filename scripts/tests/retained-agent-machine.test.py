@@ -313,6 +313,73 @@ class RetainedWorkerTests(unittest.TestCase):
                 ):
                     self.assertFalse(native.waited)
 
+    def test_lost_ack_retry_rejects_empty_or_nonstring_version_before_wait(self):
+        for version in ("", None, 7):
+            with self.subTest(version=version):
+                value = self.released()
+                native = NativeHTTP(value)
+                native.lose_update_ack = True
+                with self.assertRaises(URLError):
+                    self.run_operation(native, args("reuse"), value)
+                native.machine["instance_id"] = version
+                before = len(native.requests)
+                with self.assertRaises(ValueError):
+                    self.run_operation(native, args("reuse"), value)
+                requests = native.requests[before:]
+                self.assertFalse(any("/wait?" in url for _, url, _ in requests))
+                self.assertFalse(any(method == "POST" and not url.endswith("/lease") for method, url, _ in requests))
+                self.assertEqual(native.update_count, 1)
+                self.assertFalse(native.leased)
+
+    def test_lost_ack_retry_waits_exact_version_before_verification_and_custody(self):
+        for fault in ("", "wait-error", "foreign-version", "still-starting"):
+            with self.subTest(fault=fault):
+                value = machine()
+                custody(value)
+                grant = pool.metadata(value, pool.CUSTODY_KEY)
+                grant["rootfs_disposition"] = "stateless"
+                value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(grant)
+                value = self.retire(value).machine
+
+                class LostAckHTTP(NativeHTTP):
+                    def __call__(self, request, timeout):
+                        suffix = request.full_url.split("/machines/1234", 1)[1]
+                        if request.method == "POST" and not suffix:
+                            self.machine["state"] = "replacing"
+                        if suffix.startswith("/wait?") and fault == "wait-error":
+                            raise URLError("fixture wait failed")
+                        response = super().__call__(request, timeout)
+                        if suffix.startswith("/wait?"):
+                            if fault == "foreign-version":
+                                self.machine["instance_id"] = "foreign-version"
+                            elif fault == "still-starting":
+                                self.machine["state"] = "starting"
+                        return response
+
+                native = LostAckHTTP(value)
+                native.lose_update_ack = True
+                with self.assertRaises(URLError):
+                    self.run_operation(native, args("reuse"), value)
+                self.assertEqual(native.update_count, 1)
+                self.assertEqual(native.machine["state"], "replacing")
+                self.assertEqual(pool.metadata(native.machine, pool.CUSTODY_KEY), grant)
+                if fault:
+                    with self.assertRaises((ValueError, URLError)):
+                        self.run_operation(native, args("reuse"), value)
+                    self.assertEqual(pool.metadata(native.machine, pool.CUSTODY_KEY), grant)
+                else:
+                    result = self.run_operation(native, args("reuse"), value)
+                    self.assertTrue(result["verified"])
+                    self.assertEqual(native.machine["state"], "stopped")
+                    self.assertEqual(pool.metadata(native.machine, pool.CUSTODY_KEY)["instance_id"], "native-version-2")
+                self.assertEqual(native.update_count, 1, "retry issued another config POST")
+                waits = [url for method, url, _ in native.requests if "/wait?" in url]
+                if fault != "wait-error":
+                    self.assertEqual(len(waits), 1)
+                    self.assertIn("instance_id=native-version-2", waits[0])
+                self.assertFalse(native.leased)
+                self.assertFalse(any(url.endswith(("/stop", "/start")) for _, url, _ in native.requests))
+
     def test_reuse_keeps_id_volumes_config_and_unrelated_env(self):
         value = self.released()
         native = NativeHTTP(value)
