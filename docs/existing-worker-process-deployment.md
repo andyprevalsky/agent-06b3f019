@@ -22,6 +22,16 @@ The distribution digest identifies installed metadata; it does not certify every
 package file. Verify dependency compatibility through actual candidate startup
 and the canonical native workflow fixture. Do not install into the old runtime.
 
+Before any host command, require the complete native app listing to contain
+exactly the planned eight members of the original surface, across every state.
+Names do not determine membership. Bind each member's full native configuration
+to the saved fingerprint and require its actual `MIN_MACHINES` to cover all
+eight hosts. A stopped or created peer in that surface can be auto-started by
+the old worker, allowing a later scale-down to stop a shared host. Candidate
+`AUTOSCALER_ACTUATE=0` does not disable the original process's autoscaler.
+Unknown membership or floor blocks admission; do not recapture a changed
+baseline, ignore a stopped peer, or assume a deployment lease fences old code.
+
 The signed bootstrap verifies the complete archive and actual interpreter,
 distributions, Machine version and boot before effects. It creates an exclusive
 owned source/artifact slot and a new v1 memory leaf with a hard 1 GiB aggregate
@@ -138,6 +148,12 @@ later legitimate descendant starts. Legacy/ambiguous admission remains UNKNOWN;
 this mode does not manufacture a retirement certificate. Do not run the classic
 Machine-retirement or force-migration fallback against shared hosts. Actual
 old-queue retirement is a separate, positively certified operation.
+
+The durable desired plan and per-boot process slot each retain one generation's
+custody. A different future plan is rejected until an explicit, qualified
+generation reconciliation exists. Do not clear the desired row or delete the
+slot to force another deployment. This mode does not yet provide automatic
+promotion of a second process generation.
 
 A successful process cutover completes only the worker lane. Run all remaining
 production backend, workflow replacement, semantic frontend, evidence publication
