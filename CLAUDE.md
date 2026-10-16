@@ -30,6 +30,8 @@ links. A file pointer never substitutes for the diff.
 
 - Use actual text colors, latest **3** runs, Experiment # and launches/day,
   Pacific local time, one status emoji, no UPD/nulls, and LIFE far right.
+- Show the live HTML scorecard inline in the answer, with readable text and a
+  compact first view; keep QA screenshots private and never send image previews.
 - Track the worker's **current assignment** with timestamped milestones. Show
   real 15-minute pp/min; new scopes read `warming <age>`. Keep earlier scopes
   and lifetimes. Every red row names its blocker and corrective action.
