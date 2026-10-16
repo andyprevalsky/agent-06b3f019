@@ -123,7 +123,7 @@ async function testPhaseUsesDirectCerebras(): Promise<void> {
     assert.equal(capturedBody.temperature, 0.7);
     assert.equal(capturedBody.clear_thinking, undefined);
     assert.equal(capturedBody.reasoning_effort, 'low');
-    assert.deepEqual(capturedBody.messages, options.messages);
+    assert.deepEqual(capturedBody.messages, JSON.parse(JSON.stringify(options.messages)));
     assert.deepEqual(capturedBody.response_format, options.response_format);
     const format = capturedBody.response_format as {
       json_schema?: { name?: string; strict?: boolean; schema?: unknown };

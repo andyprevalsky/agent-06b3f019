@@ -43,6 +43,8 @@ async function main(): Promise<void> {
     const request = requests[0];
     assert.equal(request.model, 'rose-labs/rose-1-flash');
     assert.equal(request.messages[0].content, inbound);
+    assert.equal(request.messages.at(-1)?.role, 'user');
+    assert.match(String(request.messages.at(-1)?.content), /Current UTC time:/);
     assert.equal(request.provider_route, undefined);
     assert.equal(request.claude_token, undefined);
     assert.equal(request.response_model?.name, 'sms_supervisor_reaction');

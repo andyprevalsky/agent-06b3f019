@@ -8,6 +8,7 @@
  */
 
 import type { CompletionMessage, ContentBlock, ResponseFormat } from './types';
+import { isUncachedContext, markUncachedContext } from './cache';
 
 const DATA_URI_RE = /^data:([^;]+);base64,([\s\S]+)$/;
 
@@ -121,14 +122,13 @@ export function transformMessagesForAnthropic(messages: CompletionMessage[]): An
       continue;
     }
 
-    if (Array.isArray(msg.content)) {
-      out.push({
-        role: msg.role,
-        content: msg.content.map(transformContentBlockForAnthropic),
-      });
-    } else {
-      out.push({ role: msg.role, content: msg.content });
-    }
+    const converted = {
+      role: msg.role,
+      content: Array.isArray(msg.content)
+        ? msg.content.map(transformContentBlockForAnthropic)
+        : msg.content,
+    };
+    out.push(isUncachedContext(msg) ? markUncachedContext(converted) : converted);
   }
 
   while (out.length > 0 && out[out.length - 1].role === 'assistant') {
