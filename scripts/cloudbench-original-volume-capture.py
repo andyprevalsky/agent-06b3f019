@@ -1510,6 +1510,8 @@ def billing_stop_current_owned(fly, registry, audit, run_dir, output, mid, role,
     started = time.monotonic()
     try:
         import threading
+        _billing_require(isinstance(mid, str) and re.fullmatch('[0-9a-f]{14}', mid),
+                         'invalid current idle-stop machine')
         _billing_require(threading.current_thread() is threading.main_thread() and prior[1] == 0,
                          'idle-stop requires main-thread bounded clock')
         budget = min(180, prior[0]) if prior[0] > 0 else 180
