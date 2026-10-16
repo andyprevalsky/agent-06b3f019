@@ -335,3 +335,71 @@ owning stages add two failures, yielding 420 entries (337 passed, 83 failed).
 Their ledger-rounded duration is 127.8 seconds; the nested 38.9-second task is
 not counted as an additional stage. Raw dumps, profiles and database archives
 remain private. Formal deploy eligibility remains false.
+
+### Fresh full FILL rerun, 22:00 UTC investigation — OPEN
+
+Canonical `scripts/run-bench --local sms-supervisor-fill-form-searches-then-delegates`
+on 3710f0fc1 (run 1792187378-1677844-85311) FAILED in 45.0 task seconds;
+its original timed owning stage records 79.9 seconds. All four actual model
+calls were Qwen 3.8 27B. The unchanged evaluator reported zero started agents
+where one was required. The trace is reaction, two successful grep calls in
+round zero, send_user_message, then accepted attempt_completion. Full current
+SMS owning pytest passed 135/135 before this run; source/hash qualification is
+explicitly diagnostic only, with no fresh full-G3 or deploy eligibility claim.
+
+This FILL attempt has a different immediate retrieval boundary from the older
+666 failure. Its documents grep returned zero matches, and its message search
+did not supply the Travel docs note. The actual saved bad-request prefix lacks
+the note's content and exact field values. The documents pattern uses lowercase passport/date-of-birth
+alternatives without the optional case-insensitive flag; other alternatives
+include uppercase terms. Running that exact
+pattern and seeded title/content through the actual validateGrepInput and
+regexPredicate into a read-only PostgreSQL scalar query returns false with the
+unchanged default and true when only the existing `-i` argument is supplied.
+This scalar-literal probe demonstrates an input-dependent search miss for the
+catalog text, not a grep implementation defect or authority to change its
+default. The runtime log reports one successful document seed, but a positive
+row read-back joining that exact document, user and source to all search filters
+was not captured; case sensitivity remains a candidate mechanism for this actual
+zero-hit query, not a completed causal diagnosis. The later choice to
+ask rather than delegate still violates the task outcome. The earlier FILL
+request really contained the retrieved note; these two paths are not conflated.
+
+Two verified original-model CLOSED decision samples chose web_search and
+(two) grep calls, respectively, instead of the saved spawn/send decision.
+The two verified old-prefix FILL samples chose grep. No business tools execute
+in these observers; none is counted as a passing canonical task. The older
+wrong-model samples and HTTP429 remain excluded from behavioral comparison.
+An independently executed origin/main classifier replay accepts both actual
+inputs and outgoing messages. Thus deleting those classifiers did not change
+acceptance for these specific samples; this is not a complete main/current
+canonical comparison. The private executable/result hashes are respectively
+`68be791eb8c042d09843a5e9cbeceed5de35e2bdda28ddbe7d391f02e434fcaf`
+and `795fafd526f8b337176664cb320cb8a52f90699bf4f4c8910034b185d4196c0d`.
+
+Fresh FILL canonical task cleanup verified all 51 owned seeded fixture rows,
+with zero actual native workflow generations and zero positive browser/profile
+allocations. Latency/log diagnostics exited zero; the cache diagnostic exited
+one because the seeded fixture root had no llm.cache events. That failure is
+retained and cache metrics remain unavailable. The exact DB dump and four
+source-bound backend LLM dumps were copied privately before stop. Root-reviewed
+canonical stack stop exited zero, and the observer exited zero. The exact DB
+and all 20 post-task-observed process births were absent. Observation began
+after task termination; complete descendant capture is explicitly unproved.
+
+Private archive SHA256
+`5c21f1312843a83d1b0b004ae9b2324222129defb5206ae45bc8164cf76c4b3d`
+has full persistent read-back of 263/263 members and all 323 source bindings;
+cutoff is 22:01:02 UTC. Its source payloads are tied to the prior verified
+source archive. The later read-only case-sensitivity probe is a separate
+supporting artifact, not silently included in that snapshot. Timing keeps the
+420-entry exact prefix and adds this failed owning stage: 421 total, 337 passed,
+84 failed. The nested 45-second task is not double-counted as another stage.
+
+No new prompt, schema, model, decoder, classifier, fixture or timeout has been
+applied. MENU and USE-RETRIEVED-FACTS remain unapproved experiments, not verified
+repairs. Both business-behavior RCAs remain open. Decision variability alone
+does not establish harmless flakiness, model capability causality or a PR-induced
+regression. A valid next experiment must preserve these failures, hold its
+variables constant, and obtain any required exact approval before changing
+LLM-visible inputs.
