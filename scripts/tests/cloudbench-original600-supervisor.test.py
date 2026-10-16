@@ -56,4 +56,33 @@ while True:time.sleep(.01)
     self.assertEqual(parent.wait(timeout=5),7);self.assertEqual((campaign/'cleaned').read_text(),'joined')
    finally:
     if parent.poll()is None:parent.terminate();parent.wait(timeout=5)
+ def test_main_post_spawn_save_failure_terms_and_joins_parent(self):
+  with tempfile.TemporaryDirectory()as d:
+   repo=Path(d);(repo/'agents').mkdir();tasks_path=Path(__file__).parent/'fixtures/original600-tasks.json';tasks=json.loads(tasks_path.read_bytes());epoch=time.time();ref='a'*40
+   script=repo/'run-bench-campaign.py';script.write_text("import fcntl,signal,sys,time\nfrom pathlib import Path\np=Path(sys.argv[1]);f=(p/'startup-cohorts/parent.lock').open('w');fcntl.flock(f,fcntl.LOCK_EX)\ndef done(*a):\n (p/'cleaned').write_text('done');sys.exit(7)\nsignal.signal(signal.SIGTERM,done);(p/'ready').write_text('ready')\nwhile True:time.sleep(.01)\n")
+   original_popen=subprocess.Popen;children=[];campaigns=[]
+   def spawn(*unused,**kwargs):
+    cid=kwargs['env']['RUN_BENCH_CAMPAIGN_ID'];c=repo/'.context/benchmarks/campaigns'/cid;(c/'startup-cohorts/c001').mkdir(parents=True)
+    v=summary();v['campaign_id']=cid;v['e2e_started_at_epoch']=epoch
+    for j,t in zip(v['jobs'],[t for t in tasks for unused in (1,2,3)]):j['task']=t
+    (c/'summary.json').write_text(json.dumps(v));(c/'startup-cohorts/c001/manifest.json').write_text(json.dumps(dict(cohort_id='c001',jobs={j['job_id']:None for j in v['jobs']},e2e_deadline_monotonic=time.monotonic()+5400)))
+    child=original_popen([sys.executable,str(script),str(c)],cwd=repo/'agents');children.append(child);campaigns.append(c)
+    end=time.monotonic()+5
+    while not(c/'ready').exists()and time.monotonic()<end:time.sleep(.01)
+    return child
+   real_save=S['save_once']
+   def fail_save(path,raw):
+    if path.name=='threshold-original-parent.private.json':raise OSError('injected post-spawn save failure')
+    return real_save(path,raw)
+   command=['operator',str(epoch),'bash','scripts/run-bench','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref','570830dbf17635e13d16a6f03b4d705f6b6443b1','--strict-barrier',*tasks]
+   env=dict(REVIEWED_OPERATOR_ROOT=str(repo),REVIEWED_OPERATOR_SOURCE_REF=ref,REVIEWED_OPERATOR_TASKS=str(tasks_path),REVIEWED_OPERATOR_TASKS_SHA256=__import__('hashlib').sha256(tasks_path.read_bytes()).hexdigest())
+   handlers={s:signal.getsignal(s)for s in(signal.SIGTERM,signal.SIGINT)}
+   try:
+    with patch.dict(os.environ,env),patch.object(sys,'argv',command),patch.object(subprocess,'Popen',side_effect=spawn),patch.object(subprocess,'check_output',return_value=ref+'\n'),patch.dict(S['main'].__globals__,save_once=fail_save):
+     with self.assertRaises(OSError):S['main']()
+    self.assertEqual(len(children),1);self.assertIsNotNone(children[0].poll(),'supervisor orphaned its campaign parent');self.assertEqual(children[0].wait(timeout=5),7);self.assertTrue((campaigns[0]/'cleaned').exists())
+   finally:
+    for child in children:
+     if child.poll()is None:child.terminate();child.wait(timeout=5)
+    for sig,handler in handlers.items():signal.signal(sig,handler)
 if __name__=='__main__':unittest.main()

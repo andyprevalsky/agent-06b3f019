@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 
 TERMINAL = {'failed', 'passed', 'cancelled'}
 
@@ -127,6 +128,39 @@ def fence(repo, parent, expected_birth, ref, campaign):
     if not owned or birth(parent.pid) != expected_birth:
         raise ValueError('parent lock owner mismatch')
 
+@contextmanager
+def owned_parent(args, repo, env, destination, ref, epoch):
+    """Keep this supervisor alive through exact parent cleanup after local failure."""
+    parent = subprocess.Popen(args, cwd=repo, env=env)
+    expected_birth = None
+    try:
+        expected_birth = birth(parent.pid)
+        yield parent, expected_birth
+    finally:
+        if parent.poll() is None and expected_birth is not None:
+            try:
+                if birth(parent.pid) == expected_birth:
+                    parent.send_signal(signal.SIGTERM)
+            except (FileNotFoundError, ProcessLookupError, ValueError):
+                pass
+        # No group signal or kill. A source-owned parent joins its controllers.
+        status = parent.wait()
+        value = dict(parent_pid=parent.pid, parent_birth=expected_birth,
+                     parent_exit_code=status, parent_joined=True,
+                     source_ref=ref, original_epoch=epoch)
+        save_once(destination/'supervisor-parent-joined.safe.json', encode(value))
+        identity_path = env.get('REVIEWED_OPERATOR_IDENTITY_PATH')
+        if identity_path:
+            path = Path(identity_path)
+            identity = json.loads(path.read_bytes())
+            if identity['pid'] != os.getpid() or identity['birth'] != birth(os.getpid()):
+                raise ValueError('external supervisor identity changed')
+            code = status if sys.exc_info()[0] is None else 1
+            save_once(path.with_suffix('.terminal.json'), encode(dict(
+                **identity, supervisor_exit_code=code, supervisor_joined=True,
+                parent_pid=parent.pid, parent_birth=expected_birth,
+                parent_joined=True, epoch_finished=time.time())))
+
 def main():
     repo = Path(os.environ['REVIEWED_OPERATOR_ROOT']).resolve(strict=True)
     ref = os.environ['REVIEWED_OPERATOR_SOURCE_REF']
@@ -162,83 +196,82 @@ def main():
     if campaign.exists():
         raise ValueError('new campaign destination exists')
     env = dict(os.environ, RUN_BENCH_CAMPAIGN_ID=campaign_id)
-    parent = subprocess.Popen(args,cwd=repo,env=env)
-    if parent.poll() is not None:
-        return parent.wait()
-    expected_birth = birth(parent.pid)
-    def forward_owner_stop(signum, frame):
-        if parent.poll() is None and birth(parent.pid) == expected_birth:
-            parent.send_signal(signal.SIGTERM)
-    signal.signal(signal.SIGTERM, forward_owner_stop)
-    signal.signal(signal.SIGINT, forward_owner_stop)
     destination = repo/'.context/stress200-host'/campaign_id
     destination.mkdir(mode=0o700, parents=True, exist_ok=False)
-    original_deadline = None
-    original_membership = None
-    first_reported = False
-    stopped = False
-    last_refusal = None
-    while True:
-        try:
-            raw = (campaign/'summary.json').read_bytes()
-            summary = json.loads(raw)
-            manifest_raw = (campaign/'startup-cohorts/c001/manifest.json').read_bytes()
-            manifest = json.loads(manifest_raw)
-            if original_deadline is None:
-                fence(repo,parent,expected_birth,ref,campaign)
-                original_deadline = manifest['e2e_deadline_monotonic']
-                original_membership = sorted(manifest['jobs'])
-                validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline,tasks)
-                save_once(destination/'threshold-original-parent.private.json',encode({
-                    'parent_pid':parent.pid,'parent_birth':expected_birth,'source_ref':ref,
-                    'original_epoch':epoch,'campaign_id':campaign_id,
-                    'e2e_deadline_monotonic':original_deadline,'members':original_membership}))
-            result = validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline,tasks)
-            if result['infra_true'] and not first_reported:
-                evidence = {'summary_sha256':hashlib.sha256(raw).hexdigest(),
-                            'observed_epoch':time.time(),**result}
-                save_once(destination/'first-authentic-infra-summary.private.json',raw)
-                save_once(destination/'first-authentic-infra.private.json',encode(evidence))
-                first = next(r for r in result['records'] if r.get('infra_failure') is True and r.get('status') != 'cancelled')
-                print('FIRST_AUTHENTIC_INFRA '+json.dumps({k:first.get(k) for k in ['job_id','task','attempt','log','run_id','task_status']}),flush=True)
-                first_reported = True
-            if should_stop(result, (destination/'first-infra-threshold-trigger.private.json').exists()) and not stopped and parent.poll() is None:
-                trigger = {'source_ref':ref,'parent_pid':parent.pid,'parent_birth':expected_birth,
-                           'original_epoch':epoch,'original_deadline':original_deadline,
-                           'summary_sha256':hashlib.sha256(raw).hexdigest(),
-                           'observed_epoch':time.time(),**result}
-                trigger_path = destination/'first-infra-threshold-trigger.private.json'
-                if not trigger_path.exists():
-                    save_once(destination/'first-infra-threshold-summary.private.json',raw)
-                    save_once(trigger_path,encode(trigger))
-                fence(repo,parent,expected_birth,ref,campaign)
-                current = json.loads((campaign/'summary.json').read_bytes())
-                current_manifest = json.loads((campaign/'startup-cohorts/c001/manifest.json').read_bytes())
-                validate_snapshot(current,current_manifest,epoch,campaign_id,original_deadline,tasks)
-                # The preserved first trigger is irrevocable, even if later cancellations dilute it.
-                if sorted(current_manifest['jobs']) != original_membership:
-                    raise ValueError('original members changed')
-                if birth(parent.pid) != expected_birth:
-                    raise ValueError('parent changed before TERM')
-                parent.send_signal(signal.SIGTERM)
-                stopped = True
-                save_once(destination/'infra-threshold-parent-term.safe.json',encode({
-                    'signal':'SIGTERM','parent_pid':parent.pid,'parent_birth':expected_birth,
-                    'trigger_sha256':hashlib.sha256(trigger_path.read_bytes()).hexdigest(),
-                    'observed_epoch':time.time(),'child_or_group_signals':False}))
-                print('INFRA_THRESHOLD_PARENT_TERM '+json.dumps({'parent_pid':parent.pid,
-                    'terminal':result['terminal'],'infra_true':result['infra_true']}),flush=True)
-        except FileNotFoundError:
-            pass  # Source-owned campaign/manifest can still be initializing or retiring.
-        except (ValueError,KeyError,AssertionError,json.JSONDecodeError) as error:
-            message = type(error).__name__+': '+str(error)
-            if message != last_refusal:
-                print('INFRA_STOP_FENCE_REFUSAL '+message,file=sys.stderr,flush=True)
-                last_refusal = message
+    with owned_parent(args,repo,env,destination,ref,epoch) as (parent,expected_birth):
         if parent.poll() is not None:
-            break
-        time.sleep(0.25)
-    return parent.wait()
+            return parent.wait()
+        def forward_owner_stop(signum, frame):
+            if parent.poll() is None and birth(parent.pid) == expected_birth:
+                parent.send_signal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, forward_owner_stop)
+        signal.signal(signal.SIGINT, forward_owner_stop)
+        original_deadline = None
+        original_membership = None
+        first_reported = False
+        stopped = False
+        last_refusal = None
+        while True:
+            try:
+                raw = (campaign/'summary.json').read_bytes()
+                summary = json.loads(raw)
+                manifest_raw = (campaign/'startup-cohorts/c001/manifest.json').read_bytes()
+                manifest = json.loads(manifest_raw)
+                if original_deadline is None:
+                    fence(repo,parent,expected_birth,ref,campaign)
+                    original_deadline = manifest['e2e_deadline_monotonic']
+                    original_membership = sorted(manifest['jobs'])
+                    validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline,tasks)
+                    save_once(destination/'threshold-original-parent.private.json',encode({
+                        'parent_pid':parent.pid,'parent_birth':expected_birth,'source_ref':ref,
+                        'original_epoch':epoch,'campaign_id':campaign_id,
+                        'e2e_deadline_monotonic':original_deadline,'members':original_membership}))
+                result = validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline,tasks)
+                if result['infra_true'] and not first_reported:
+                    evidence = {'summary_sha256':hashlib.sha256(raw).hexdigest(),
+                                'observed_epoch':time.time(),**result}
+                    save_once(destination/'first-authentic-infra-summary.private.json',raw)
+                    save_once(destination/'first-authentic-infra.private.json',encode(evidence))
+                    first = next(r for r in result['records'] if r.get('infra_failure') is True and r.get('status') != 'cancelled')
+                    print('FIRST_AUTHENTIC_INFRA '+json.dumps({k:first.get(k) for k in ['job_id','task','attempt','log','run_id','task_status']}),flush=True)
+                    first_reported = True
+                if should_stop(result, (destination/'first-infra-threshold-trigger.private.json').exists()) and not stopped and parent.poll() is None:
+                    trigger = {'source_ref':ref,'parent_pid':parent.pid,'parent_birth':expected_birth,
+                               'original_epoch':epoch,'original_deadline':original_deadline,
+                               'summary_sha256':hashlib.sha256(raw).hexdigest(),
+                               'observed_epoch':time.time(),**result}
+                    trigger_path = destination/'first-infra-threshold-trigger.private.json'
+                    if not trigger_path.exists():
+                        save_once(destination/'first-infra-threshold-summary.private.json',raw)
+                        save_once(trigger_path,encode(trigger))
+                    fence(repo,parent,expected_birth,ref,campaign)
+                    current = json.loads((campaign/'summary.json').read_bytes())
+                    current_manifest = json.loads((campaign/'startup-cohorts/c001/manifest.json').read_bytes())
+                    validate_snapshot(current,current_manifest,epoch,campaign_id,original_deadline,tasks)
+                    # The preserved first trigger is irrevocable, even if later cancellations dilute it.
+                    if sorted(current_manifest['jobs']) != original_membership:
+                        raise ValueError('original members changed')
+                    if birth(parent.pid) != expected_birth:
+                        raise ValueError('parent changed before TERM')
+                    parent.send_signal(signal.SIGTERM)
+                    stopped = True
+                    save_once(destination/'infra-threshold-parent-term.safe.json',encode({
+                        'signal':'SIGTERM','parent_pid':parent.pid,'parent_birth':expected_birth,
+                        'trigger_sha256':hashlib.sha256(trigger_path.read_bytes()).hexdigest(),
+                        'observed_epoch':time.time(),'child_or_group_signals':False}))
+                    print('INFRA_THRESHOLD_PARENT_TERM '+json.dumps({'parent_pid':parent.pid,
+                        'terminal':result['terminal'],'infra_true':result['infra_true']}),flush=True)
+            except FileNotFoundError:
+                pass  # Source-owned campaign/manifest can still be initializing or retiring.
+            except (ValueError,KeyError,AssertionError,json.JSONDecodeError) as error:
+                message = type(error).__name__+': '+str(error)
+                if message != last_refusal:
+                    print('INFRA_STOP_FENCE_REFUSAL '+message,file=sys.stderr,flush=True)
+                    last_refusal = message
+            if parent.poll() is not None:
+                break
+            time.sleep(0.25)
+        return parent.wait()
 
 if __name__ == '__main__':
     raise SystemExit(main())
