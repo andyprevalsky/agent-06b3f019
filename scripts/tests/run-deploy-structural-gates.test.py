@@ -436,9 +436,14 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
 
 
 class LinuxGateStorageRetentionTests(unittest.TestCase):
-    'Run the actual wrapper with a bounded native-provider transport.'
+    """Test public refusal and the post-admission body with offline transports.
 
-    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0"):
+    The public wrapper deliberately has no allocation authority. Legacy storage
+    and export cases therefore need synthetic admission in a temporary copy;
+    they are component coverage, never proof that the public route may allocate.
+    """
+
+    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0", admitted=True):
         temporary = tempfile.TemporaryDirectory(prefix="gate-storage-retention-")
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -559,10 +564,29 @@ else: print('origin/fixture')
                "CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB":workspace,"GATE_TEST_VOLUME_FAULT":volume_fault}
         env.pop("CLOUDBENCH_GATE_SELF_COPY", None)
         env.pop("CLOUDBENCH_GATE_ROOT_DIR", None)
-        result = subprocess.run(["bash",str(ROOT/"scripts/run-cloudbench-controller-gate"),"--",*(command or ["true"])],
+        gate = ROOT / "scripts/run-cloudbench-controller-gate"
+        if admitted:
+            # Only the offline fixture crosses admission. Keep the production
+            # file untouched and retain all refusal checks in public tests.
+            source = gate.read_text()
+            boundary = "controller_machine_creation_admission || exit $?"
+            self.assertEqual(source.count(boundary), 4)
+            gate = root / "synthetically-admitted-gate.sh"
+            gate.write_text(source.replace(boundary, ": # offline fixture admission"))
+            env["CLOUDBENCH_GATE_SELF_COPY"] = str(gate)
+            env["CLOUDBENCH_GATE_ROOT_DIR"] = str(ROOT)
+        result = subprocess.run(["bash",str(gate),"--",*(command or ["true"])],
                                 cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
         records = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
         return result, records
+
+    def test_public_entrypoint_refuses_unadmitted_creation_before_any_provider_call(self):
+        for options in ({}, {"retain": "1", "export": "1", "workspace": "80", "size": "50"}):
+            with self.subTest(options=options):
+                result, calls = self._run(admitted=False, **options)
+                self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+                self.assertIn("reuse an existing retained controller", result.stderr)
+                self.assertEqual(calls, [])
 
     def test_stress200_existing_allocator_requires_sealed_minimum_plan(self):
         driver=ROOT/"agents/benchmarks/fixtures/cloudbench_cleanup_reserve_cohort.py"
