@@ -443,7 +443,7 @@ class LinuxGateStorageRetentionTests(unittest.TestCase):
     they are component coverage, never proof that the public route may allocate.
     """
 
-    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0", admitted=True):
+    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0", admitted=True, disposable=False, gate_path=None):
         temporary = tempfile.TemporaryDirectory(prefix="gate-storage-retention-")
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -467,8 +467,13 @@ if args[:2]==['volumes','create']:
     if fault=='attached': value['attached_machine_id']='foreign'
     if fault=='unencrypted': value['encrypted']=False
     if fault=='bad-id': value['id']='foreign/unsafe'
+    if os.environ.get('GATE_TEST_NATIVE_STATE'):
+        state=Path(os.environ['GATE_TEST_NATIVE_STATE']);values=json.loads(state.read_text());values['volume']={**value,'state':'created','auto_backup_enabled':True};state.write_text(json.dumps(values))
     print(json.dumps(value))
 elif args[:2]==['machine','run']:
+    if os.environ.get('GATE_TEST_VOLUME_FAULT')=='machine-refused': print('provider refused before creation');raise SystemExit(6)
+    if os.environ.get('GATE_TEST_NATIVE_STATE'):
+        state=Path(os.environ['GATE_TEST_NATIVE_STATE']);values=json.loads(state.read_text());values['machine']={'id':'abcdef12345678','instance_id':'fixture-instance','name':args[args.index('--name')+1],'region':args[args.index('--region')+1],'state':'started','config':{'image':args[2],'guest':{'cpu_kind':'performance','cpus':8,'memory_mb':32768},'mounts':[{'volume':values['volume']['id'],'path':'/tmp/gate'}]}};values['volume']['attached_machine_id']='abcdef12345678';state.write_text(json.dumps(values))
     import subprocess
     uploaded=dict(arg.split('=',1) for i,arg in enumerate(args) if i and args[i-1]=='--file-local')
     subprocess.run(['bash','-n',uploaded['/tmp/gate.sh']],check=True)
@@ -536,7 +541,9 @@ from pathlib import Path
 args=sys.argv[1:]
 if 'show' in args:
     if os.environ.get('GATE_TEST_BAD_COLLECTOR')=='1': sys.stdout.write('substituted bytes')
-    else: sys.stdout.buffer.write(Path(os.environ['GATE_TEST_SOURCE']).read_bytes())
+    else:
+        path=args[args.index('show')+1].split(':',1)[1]
+        sys.stdout.buffer.write((Path(os.environ['GATE_TEST_SOURCE']).parent.parent/path).read_bytes())
 elif '--git-common-dir' in args: print(str(Path(os.environ['GATE_TEST_REMOTE'])/'repo/.git'))
 elif 'diff' in args: pass
 elif 'rev-parse' in args: print('a'*40)
@@ -564,7 +571,38 @@ else: print('origin/fixture')
                "CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB":workspace,"GATE_TEST_VOLUME_FAULT":volume_fault}
         env.pop("CLOUDBENCH_GATE_SELF_COPY", None)
         env.pop("CLOUDBENCH_GATE_ROOT_DIR", None)
-        gate = ROOT / "scripts/run-cloudbench-controller-gate"
+        gate = Path(gate_path) if gate_path else ROOT / "scripts/run-cloudbench-controller-gate"
+        if disposable:
+            import hashlib,runpy,threading
+            from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+            state=root/'native-state.json';state.write_text(json.dumps(dict(machine=None,volume=None)))
+            protected=['keep'+str(i)for i in range(4)]
+            api_calls=[]
+            class Handler(BaseHTTPRequestHandler):
+                def log_message(self,*unused):pass
+                def dispatch(self):
+                    path=self.path.split('/v1/apps/navi-whisper-lux-bench',1)[1]
+                    api_calls.append([self.command,path]);values=json.loads(state.read_text());result=None;status=200
+                    if self.command=='GET' and path=='/machines':result=[dict(id=x)for x in protected]+([values['machine']]if values['machine']else [])
+                    elif self.command=='GET' and path=='/machines/abcdef12345678':result=values['machine'];status=200 if result else 404
+                    elif self.command=='GET' and path=='/volumes/vol_fixture123':result=values['volume'];status=200 if result else 404
+                    elif self.command=='PUT' and path=='/volumes/vol_fixture123':
+                        body=json.loads(self.rfile.read(int(self.headers['Content-Length'])));assert body=={'auto_backup_enabled':False};values['volume'].update(body);result=values['volume'];state.write_text(json.dumps(values))
+                    elif self.command=='DELETE' and path=='/machines/abcdef12345678?kill=true':values['machine']=None;values['volume']['attached_machine_id']=None;state.write_text(json.dumps(values));result={}
+                    elif self.command=='DELETE' and path=='/volumes/vol_fixture123':values['volume']['state']='pending_destroy';state.write_text(json.dumps(values));result={}
+                    else:raise AssertionError((self.command,path))
+                    raw=json.dumps(result).encode();self.send_response(status);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+                do_GET=do_PUT=do_DELETE=dispatch
+            server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+            subject=runpy.run_path(str(ROOT/'scripts/cloudbench-disposable-controller.py'))
+            auth=dict(schema='cloudbench-disposable-controller-authority-v1',allowed=True,single_host=True,app='navi-whisper-lux-bench',region='iad',vm_size='performance-8x',memory_mib=32768,workspace_size_gb=256,org_machine_limit=1000,org_object_count=4,verified_epoch=time.time(),cleanup_owner_pid=os.getpid(),cleanup_owner_birth=subject['birth'](os.getpid()),protected_machines=protected,protected_volumes=['vol_keep'],source_ref='a'*40,env_files={},output_directory=str(root/'custody'))
+            proof=root/'capacity.json';proof.write_text('{}');proof.chmod(0o600);auth['capacity_proof']=dict(path=str(proof),sha256=hashlib.sha256(proof.read_bytes()).hexdigest())
+            for component in ('agents','backend'):
+                file=root/(component+'.env');file.write_text('COMPLETE_FIXTURE=value\n');file.chmod(0o600);auth['env_files'][component]=dict(path=str(file),sha256=hashlib.sha256(file.read_bytes()).hexdigest())
+            authority=root/'authority.json';authority.write_text(json.dumps(auth));authority.chmod(0o600)
+            env.update(FLY_API_HOSTNAME='http://127.0.0.1:'+str(server.server_port),GATE_TEST_NATIVE_STATE=str(state),GATE_TEST_EXPORT='1')
+            admitted=False
         if admitted:
             # Only the offline fixture crosses admission. Keep the production
             # file untouched and retain all refusal checks in public tests.
@@ -575,10 +613,35 @@ else: print('origin/fixture')
             gate.write_text(source.replace(boundary, ": # offline fixture admission"))
             env["CLOUDBENCH_GATE_SELF_COPY"] = str(gate)
             env["CLOUDBENCH_GATE_ROOT_DIR"] = str(ROOT)
-        result = subprocess.run(["bash",str(gate),"--",*(command or ["true"])],
+        flag=["--disposable-controller",str(authority)]if disposable else []
+        result = subprocess.run(["bash",str(gate),*flag,"--",*(command or ["true"])],
                                 cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
         records = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+        if disposable:
+            failed_before_host=volume_fault=='machine-refused'
+            if failed_before_host:self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+            else:
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                self.assertTrue((root/'custody/disposable-export.verified.json').exists())
+            helper=ROOT/'scripts/cloudbench-disposable-controller.py'
+            cleanup=subprocess.run([sys.executable,str(helper),'cleanup-workspace'if failed_before_host else'cleanup','--authority',str(authority),'--root',str(ROOT),'--directory',str(root/'custody'),'--workspace',str(root/'custody/workspace-volume.ownership.json')],env=env,capture_output=True,text=True,timeout=20)
+            self.assertEqual(cleanup.returncode,0,cleanup.stdout+cleanup.stderr)
+            self.assertEqual([x for x in api_calls if x[0]=='DELETE'],([['DELETE','/volumes/vol_fixture123']]if failed_before_host else[['DELETE','/machines/abcdef12345678?kill=true'],['DELETE','/volumes/vol_fixture123']]))
+            self.assertTrue((root/'custody/disposable-controller.release.json').exists())
         return result, records
+
+    def test_public_disposable_controller_creates_exports_and_disposes_exact_host(self):
+        result,calls=self._run(disposable=True,command=['true'])
+        create=next(row for row in calls if row[:2]==['volumes','create'])
+        self.assertEqual(create[create.index('--size')+1],'256')
+        run=next(row for row in calls if row[:2]==['machine','run'])
+        self.assertEqual(run[run.index('--vm-size')+1],'performance-8x')
+        self.assertEqual(run[run.index('--vm-memory')+1],'32768')
+        self.assertIn('GATE_EXPORT_VERIFIED',result.stdout)
+
+    def test_public_disposable_controller_partial_failure_disposes_only_exact_workspace(self):
+        result,calls=self._run(disposable=True,command=['true'],volume_fault='machine-refused')
+        self.assertFalse(any(row[:2]==['machine','destroy']for row in calls))
 
     def test_public_entrypoint_refuses_unadmitted_creation_before_any_provider_call(self):
         for options in ({}, {"retain": "1", "export": "1", "workspace": "80", "size": "50"}):

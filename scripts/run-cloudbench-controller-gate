@@ -20,15 +20,46 @@
 #   bash scripts/run-cloudbench-controller-gate            # the Step 4cb suites
 #   bash scripts/run-cloudbench-controller-gate -- bash scripts/tests/cloudbench-env.test.sh
 #   CLOUDBENCH_GATE_REF=<sha> bash scripts/run-cloudbench-controller-gate
+#   bash scripts/run-cloudbench-controller-gate --disposable-controller AUTHORITY -- COMMAND
+# The explicit disposable mode requires a live caller which joins, exports and
+# destroys the exact owned controller/workspace; see docs/cloudbench-disposable-controller.md.
 # Env: CLOUDBENCH_GATE_TIMEOUT_S (default 5400), WARM_IMAGE_REF (default: newest
 # cloudbench-warm image on the fleet), CLOUDBENCH_GATE_VM_SIZE / _VM_MEMORY.
 # Opt-in: CLOUDBENCH_GATE_EXPORT_HOST=1 captures and verifies originals (no release credit).
 # CLOUDBENCH_GATE_ROOTFS_SIZE_GB=<positive integer> and
 # CLOUDBENCH_GATE_RETAIN_HOST=1 retain the host for explicit evidence/owner closure.
 set -euo pipefail
+umask 077
 ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 cd "$ROOT_DIR"
+DISPOSABLE_AUTHORITY=""
+if [ "${1:-}" = "--disposable-controller" ]; then
+  [ "$#" -ge 4 ] && [ "${3:-}" = -- ] || { echo "usage: --disposable-controller AUTHORITY -- COMMAND" >&2; exit 2; }
+  DISPOSABLE_AUTHORITY="$2"; shift 2
+fi
+disposable_controller() {
+  python3 -I -B - "$ROOT_DIR" "$@" <<'PY_DISPOSABLE_CHECKED'
+import os,subprocess,sys
+from pathlib import Path
+root=Path(sys.argv[1]);args=sys.argv[2:];path=root/'scripts/cloudbench-disposable-controller.py'
+ref=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
+expected=subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',ref+':scripts/cloudbench-disposable-controller.py'])
+with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW),'rb')as stream:actual=stream.read()
+if actual!=expected:raise SystemExit('disposable controller authority source changed')
+sys.argv=[str(path),*args,'--root',str(root)]
+exec(compile(expected,str(path),'exec'),{'__name__':'__main__','__file__':str(path)})
+PY_DISPOSABLE_CHECKED
+}
 controller_machine_creation_admission() {
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+    if [ -n "${WORKSPACE_VOLUME_ID:-}" ]; then
+      disposable_controller continue-allocation --authority "$DISPOSABLE_AUTHORITY" --driver-pid "$$" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json"
+      return $?
+    fi
+    disposable_controller admit --authority "$DISPOSABLE_AUTHORITY" || return $?
+    disposable_controller reserve --authority "$DISPOSABLE_AUTHORITY" --driver-pid "$$"
+    return $?
+  fi
   echo "Controller capacity gap: reuse an existing retained controller; new Machine creation requires measured admission, which this entrypoint does not provide." >&2
   return 78
 }
@@ -44,6 +75,7 @@ if [ -z "${CLOUDBENCH_GATE_SELF_COPY:-}" ]; then
   CLOUDBENCH_GATE_SELF_COPY="$(mktemp -t cloudbench-gate-self.XXXXXX)"
   cat "${BASH_SOURCE[0]}" > "$CLOUDBENCH_GATE_SELF_COPY"
   export CLOUDBENCH_GATE_SELF_COPY CLOUDBENCH_GATE_ROOT_DIR="$ROOT_DIR"
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then exec bash "$CLOUDBENCH_GATE_SELF_COPY" --disposable-controller "$DISPOSABLE_AUTHORITY" "$@"; fi
   exec bash "$CLOUDBENCH_GATE_SELF_COPY" "$@"
 fi
 
@@ -58,6 +90,12 @@ KEEP_FIXTURE_ON_FAILURE="${CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE:-0}"
 WORKSPACE_VOLUME_SIZE_GB="${CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB:-}"
 WORKSPACE_VOLUME_ID=""; WORKSPACE_VOLUME_INTENT=""
 WORKSPACE_VOLUME_ARGS=()
+if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+  [ "$APP" = navi-whisper-lux-bench ] && [ "$REGION" = iad ] || { echo "disposable controller app/region mismatch" >&2; exit 2; }
+  VM_SIZE=performance-8x; VM_MEMORY=32768; WORKSPACE_VOLUME_SIZE_GB=256
+  RETAIN_HOST=1; EXPORT_HOST=1
+  [ -z "$ROOTFS_SIZE_GB" ] || [ "$ROOTFS_SIZE_GB" -le 50 ] || exit 2
+fi
 case "$EXPORT_HOST" in 0|1) ;; *) echo "invalid CLOUDBENCH_GATE_EXPORT_HOST" >&2; exit 2 ;; esac
 case "$KEEP_FIXTURE_ON_FAILURE" in 0|1) ;; *) echo "invalid CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE" >&2; exit 2 ;; esac
 [ "$EXPORT_HOST" != 1 ] || [ "$RETAIN_HOST" = 1 ] || { echo "controller export requires retain-host mode" >&2; exit 2; }
@@ -245,6 +283,14 @@ print(hashlib.sha256(value).hexdigest())
 PY_EXPORT_DIGEST
 )"
   GATE_EXPORT_FILES=(-e "GATE_EXPORT_HELPER_SHA256=$GATE_EXPORT_DIGEST" -e "GATE_IMAGE_REF=$IMAGE_REF" --file-local "/tmp/controller-host-export.py=$GATE_EXPORT_HELPER" --file-local "/tmp/controller-host-caller.json=$GATE_EXPORT_CALLER")
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+    disposable_controller env-files --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR"
+    for component in agents backend; do
+      digest="$(sha256sum "$GATE_EXPORT_LOCAL_DIR/current-$component.private.env" | awk '{print $1}')"
+      GATE_EXPORT_FILES+=(--file-local "/tmp/controller-current-$component.env=$GATE_EXPORT_LOCAL_DIR/current-$component.private.env" -e "GATE_CURRENT_${component^^}_SHA256=$digest")
+    done
+    GATE_EXPORT_FILES+=(-e GATE_DISPOSABLE_CONTROLLER=1)
+  fi
 fi
 
 {
@@ -272,6 +318,20 @@ fi
   echo '# provider settings from those files exactly as they do on a developer host.'
   echo '[ -z "${BACKEND_ENV_B64:-}" ] || printf "%s" "$BACKEND_ENV_B64" | base64 -d > back-end/.env'
   echo '[ -z "${AGENTS_ENV_B64:-}" ] || printf "%s" "$AGENTS_ENV_B64" | base64 -d > agents/.env'
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+    cat <<'REMOTE_CURRENT_ENV'
+python3 -I -B - <<'PY_CURRENT_ENV'
+import hashlib,os
+from pathlib import Path
+for component,target in [('agents','agents/.env'),('backend','back-end/.env')]:
+    source=Path('/tmp/controller-current-'+component+'.env')
+    with os.fdopen(os.open(source,os.O_RDONLY|os.O_NOFOLLOW),'rb')as stream:raw=stream.read()
+    if hashlib.sha256(raw).hexdigest()!=os.environ['GATE_CURRENT_'+component.upper()+'_SHA256']:raise SystemExit('complete current environment changed')
+    Path(target).write_bytes(raw);Path(target).chmod(0o600);source.unlink()
+PY_CURRENT_ENV
+[ "$?" = 0 ] || { echo "GATE_RESULT exit=94 current_env_failed"; exit 94; }
+REMOTE_CURRENT_ENV
+  fi
   echo 'echo "GATE_ENV backend_env=$([ -s back-end/.env ] && echo yes || echo no) agents_env=$([ -s agents/.env ] && echo yes || echo no)"'
   echo 'chown -R rose:rose /tmp/gate 2>/dev/null || true'
   echo 'export PATH="/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
@@ -314,7 +374,24 @@ REMOTE_WORKSPACE_CUSTODY
   for suite in "${SUITES[@]}"; do
     printf 'n=$((n+1)); printf "GATE_STEP_START #%%s %%s\\n" "$n" %q\n' "$suite"
     # bash -l re-reads the profile and resets PATH, so the gate's Node and venv go on PATH inside the command.
+    if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+      printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1 & command_pid=$!\n' "export PATH=/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
+      cat <<'REMOTE_COMMAND_IDENTITY'
+python3 -I -B - "$command_pid" <<'PY_COMMAND_IDENTITY'
+import json,os,sys,time
+from pathlib import Path
+pid=int(sys.argv[1]);assert pid>1
+try:
+    fields=Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1].split()
+    value=dict(pid=pid,birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+fields[19],machine_id=os.environ['FLY_MACHINE_ID'],source_ref=os.environ['GATE_REF'],epoch=time.time())
+except FileNotFoundError:value=dict(pid=pid,already_joined=True,machine_id=os.environ['FLY_MACHINE_ID'],source_ref=os.environ['GATE_REF'],epoch=time.time())
+with os.fdopen(os.open('/tmp/gate/controller-command.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w')as stream:json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
+PY_COMMAND_IDENTITY
+wait "$command_pid"; rc=$?
+REMOTE_COMMAND_IDENTITY
+    else
     printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
+    fi
     printf 'printf "GATE_STEP %%s exit=%%s\\n" %q "$rc"; [ $rc -eq 0 ] || { overall=1; failed_steps="$failed_steps $n"; echo "GATE_STEP_FAILED $n"; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
   done
   echo 'echo "GATE_FAILED_STEPS${failed_steps}"'
@@ -373,11 +450,17 @@ with os.fdopen(fd,'w') as out:json.dump(value,out,sort_keys=True);out.write('\n'
 fd=os.open(output.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd);print(native['id'])
 PY_WORKSPACE_SEAL
 )"
+  if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+    disposable_controller backup-off --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json"
+  fi
   WORKSPACE_VOLUME_ARGS=(--volume "$WORKSPACE_VOLUME_ID:/tmp/gate")
   WORKSPACE_VOLUME_SHA="$(sha256sum "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" | awk '{print $1}')"
   GATE_EXPORT_FILES+=(-e "GATE_WORKSPACE_VOLUME_ID=$WORKSPACE_VOLUME_ID" -e "GATE_WORKSPACE_VOLUME_SHA256=$WORKSPACE_VOLUME_SHA" --file-local "/tmp/controller-host-workspace.json=$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json")
 fi
 controller_machine_creation_admission || exit $?
+if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+  disposable_controller create-intent --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" --name "$MACHINE_NAME" --image "$IMAGE_REF"
+fi
 RUN_LOG="$(mktemp -t cloudbench-gate-run.XXXXXX)"
 # flyctl's own start wait is shorter than a cold 2 GB image pull and then exits
 # non-zero even though the machine comes up; the machine id in its output is
@@ -406,6 +489,9 @@ PY_EXPORT_ID
 fi
 rm -f "$RUN_LOG" "$GATE_TOKEN_FILE"
 [ -n "$MACHINE_ID" ] || { echo "❌ Could not read the gate machine id" >&2; exit 1; }
+if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+  disposable_controller seal --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" --machine "$MACHINE_ID" --name "$MACHINE_NAME" --image "$IMAGE_REF"
+fi
 echo "✅ machine $MACHINE_ID started; waiting up to ${TIMEOUT_S}s"
 
 deadline=$((SECONDS + TIMEOUT_S))
@@ -549,6 +635,9 @@ sys.argv=[path,*args]
 exec(compile(expected,path,'exec'),{'__name__':'__main__','__file__':path,'CHECKED_COLLECTOR_SHA256':hashlib.sha256(expected).hexdigest()})
 PY_EXPORT_VERIFY
   then
+    if [ -n "$DISPOSABLE_AUTHORITY" ]; then
+      disposable_controller export-ready --authority "$DISPOSABLE_AUTHORITY" --directory "$export_dir" --machine "$MACHINE_ID" --image "$IMAGE_REF"
+    fi
     echo "GATE_EXPORT_VERIFIED machine=$MACHINE_ID directory=$export_dir resource_release_verified=false"
   else
     echo "GATE_EXPORT_PENDING machine=$MACHINE_ID; host retained, no release credit" >&2
