@@ -86,6 +86,20 @@ function useActionRunner(
   return { loading, run };
 }
 
+function skipActionSpec(requests: AttentionRequest[], requestId: string): ActionSpec {
+  const remaining = countRemaining(requests, requestId);
+  return {
+    requestId,
+    mutate: () => skipAttentionRequest(requestId),
+    successToast: {
+      title: 'Request skipped',
+      description: remainingDescription(remaining, 'No more pending requests'),
+    },
+    errorToast: { title: 'Error', description: 'Failed to skip request' },
+    keepOpen: true,
+  };
+}
+
 export function useAttentionActions({
   requests,
   responses,
@@ -132,17 +146,7 @@ export function useAttentionActions({
   };
 
   const handleSkip = (requestId: string) => {
-    const remaining = countRemaining(requests, requestId);
-    void run({
-      requestId,
-      mutate: () => skipAttentionRequest(requestId),
-      successToast: {
-        title: 'Request skipped',
-        description: remainingDescription(remaining, 'No more pending requests'),
-      },
-      errorToast: { title: 'Error', description: 'Failed to skip request' },
-      keepOpen: true,
-    });
+    void run(skipActionSpec(requests, requestId));
   };
 
   const handleReject = (requestId: string) => {
