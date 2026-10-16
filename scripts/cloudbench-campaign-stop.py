@@ -7,7 +7,6 @@ import math
 import os
 from pathlib import Path
 import re
-import runpy
 import signal
 import stat
 import subprocess
@@ -163,7 +162,12 @@ def main():
     binding = None
     if os.environ.get('CLOUDBENCH_FLEET_ROOT') and Path(os.environ['CLOUDBENCH_FLEET_ROOT']).resolve() != repo.resolve():
         control = Path(__file__).resolve().parent.parent
-        campaign_module = runpy.run_path(str(control/'scripts/run-bench-campaign.py'))
+        module_path = control/'scripts/run-bench-campaign.py'
+        checked = subprocess.check_output(['git','--no-replace-objects','-C',str(control),'show',ref+':scripts/run-bench-campaign.py'])
+        if module_path.read_bytes() != checked:
+            raise ValueError('campaign helper differs from exact reviewed source')
+        campaign_module = {'__name__':'campaign_stop_binding','__file__':str(module_path)}
+        exec(compile(checked,str(module_path),'exec'),campaign_module)
         workspace, binding = campaign_module['campaign_workspace'](control, args[2:])
         if binding is None or binding['control_ref'] != ref:
             raise ValueError('watcher control/workspace binding differs')

@@ -34,7 +34,8 @@ def bound_campaign(tmp_path):
                  'cloudbench-production-only-tasks.py', 'cloudbench-campaign-seed.py',
                  'cloudbench-campaign-barrier.py', 'cloudbench-script-snapshot.py',
                  'cloudbench_execution_provenance.py', 'cloudbench-campaign-stop.py'):
-        supplied = Path(os.environ['CLOUDBENCH_CAMPAIGN_UNDER_TEST']) if name == 'run-bench-campaign.py' and os.environ.get('CLOUDBENCH_CAMPAIGN_UNDER_TEST') else ROOT / 'scripts' / name
+        override = {'run-bench-campaign.py':'CLOUDBENCH_CAMPAIGN_UNDER_TEST','cloudbench-campaign-stop.py':'CLOUDBENCH_CAMPAIGN_STOP_UNDER_TEST'}.get(name)
+        supplied = Path(os.environ[override]) if override and os.environ.get(override) else ROOT / 'scripts' / name
         shutil.copyfile(supplied, scripts / name)
     # The old consumer entry must not be used as executable control code.
     (scripts / 'run-bench-fleet').write_text('#!/bin/bash\nexit 93\n')
@@ -172,8 +173,7 @@ def test_campaign_workspace_threshold_watcher_uses_consumer_and_control(bound_ca
     source,workspace,snapshot,source_ref,task_ref,env=bound_campaign
     for key,value in env.items():monkeypatch.setenv(key,value)
     monkeypatch.setenv('REVIEWED_OPERATOR_SOURCE_REF',source_ref)
-    supplied=os.environ.get('CLOUDBENCH_CAMPAIGN_STOP_UNDER_TEST')
-    guard=runpy.run_path(supplied or str(source/'scripts/cloudbench-campaign-stop.py'))
+    guard=runpy.run_path(str(source/'scripts/cloudbench-campaign-stop.py'))
     namespace=guard['main'].__globals__
     epoch=123.0;boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
     digest=hashlib.sha256((float(epoch).hex()+':'+boot).encode()).hexdigest()[:24]
@@ -213,3 +213,18 @@ def test_campaign_workspace_threshold_watcher_uses_consumer_and_control(bound_ca
     receipt=json.loads((destination/'threshold-original-parent.private.json').read_text())
     assert receipt['workspace_binding']['workspace_root']==str(workspace)
     assert receipt['workspace_binding']['control_ref']==source_ref
+
+
+def test_campaign_workspace_watcher_checks_bytes_before_import(bound_campaign,monkeypatch):
+    import runpy
+    source,workspace,snapshot,source_ref,task_ref,env=bound_campaign
+    for key,value in env.items():monkeypatch.setenv(key,value)
+    monkeypatch.setenv('REVIEWED_OPERATOR_SOURCE_REF',source_ref)
+    marker=workspace/'substituted-code-ran'
+    with (source/'scripts/run-bench-campaign.py').open('a')as stream:
+        stream.write('\nPath('+repr(str(marker))+').write_text("untrusted")\n')
+    guard=runpy.run_path(str(source/'scripts/cloudbench-campaign-stop.py'))
+    monkeypatch.setattr(sys,'argv',['stop','123','--watcher-scope','new','bash','scripts/run-bench','--ref',task_ref])
+    with pytest.raises(ValueError):guard['main']()
+    assert not marker.exists()
+    assert not (workspace/'.context').exists()
