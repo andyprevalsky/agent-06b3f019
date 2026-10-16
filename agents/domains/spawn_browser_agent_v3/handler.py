@@ -80,6 +80,7 @@ from .activity_heartbeat import (
     stop_browser_activity_heartbeat,
     wait_for_browser_work,
 )
+from .auth_assessment import auth_assistance_assessment_result
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
@@ -7788,7 +7789,10 @@ async def _spawn_browser_agent_activity_v3_real(
             action_redaction_refs = redaction_refs
             kwargs["auth_context_for_url"] = _auth_context_for_url
             try:
+                before_actions = len(action_history)
                 result = await execute_action(*args, **kwargs)
+                if len(action_history) > before_actions:
+                    result["action_step"] = action_history.last_action_step()
                 # Ref names can collide across realms. Keep each binding's
                 # values until this result is safe to log, persist, and submit.
                 for refs in redaction_refs:
@@ -8717,6 +8721,28 @@ async def _spawn_browser_agent_activity_v3_real(
             if action_name == "attempt_completion":
                 auth_runtime_state.mark_guest_attempted()
 
+            # An explicit per-recipient assessment is part of the assistance
+            # action contract. Return actual missing/remaining facts to the
+            # planner; never choose or submit another identity on its behalf.
+            if action_name == "request_user_assistance_for_authentication":
+                assessment_result = auth_assistance_assessment_result(
+                    (unified_action.get("params") or {}).get("auth_assessment"),
+                    auth_options=auth_options, auth_realm=auth_realm, current_url=current_url,
+                    action_history=action_history.get_entries(),
+                )
+                if assessment_result is not None:
+                    await action_history.record_action(
+                        dom_service=dom_service, action=action_name, thinking=thinking,
+                        params=unified_action.get("params") or {}, result=assessment_result,
+                    )
+                    _append_browser_turn_messages(
+                        browser_turn_messages, unified_action=unified_action,
+                        result=assessment_result,
+                        tool_call_id=str(llm_result.get("tool_call_id") or uuid_module.uuid4()),
+                    )
+                    await browser_stream.finish_tools(status="ERROR")
+                    continue
+
             # 5. Handle special actions
             if action_name == "request_user_assistance_for_authentication":
                 tool_call_id_action = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
@@ -8935,7 +8961,8 @@ async def _spawn_browser_agent_activity_v3_real(
                     or (request_info.get("request") or {}).get("id")
                 )
 
-                success_result = {"success": True, "request_id": request_id}
+                success_result = {"success": True, "request_id": request_id,
+                                  "auth_assessment": (unified_action.get("params") or {})["auth_assessment"]}
                 if dom_service is not None:
                     await action_history.record_action(
                         dom_service=dom_service,
@@ -8981,7 +9008,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_url=browser_url,
                     status="awaiting_auth_assistance",
                     success=False,
-                    message="Automated authentication options were exhausted; requesting user assistance.",
+                    message=(unified_action.get("params") or {})["auth_assessment"]["reason"],
                 )
                 await browser_stream.finish_tools(status="FINISHED")
 
@@ -8989,6 +9016,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     "status": "awaiting_auth_assistance",
                     "request_id": request_id,
                     "auth_assistance_request": request_info,
+                    "auth_assessment": (unified_action.get("params") or {})["auth_assessment"],
                     "base_site": base_site,
                     "auth_realm": auth_realm or base_site,
                     "task_id": task_id,
@@ -12147,6 +12175,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "toolName": "spawn_browser_agent",
                                 "action_type": "auth_assistance",
+                                **({"auth_assessment": result["auth_assessment"]} if result.get("auth_assessment") else {}),
                                 "task_id": result.get("task_id"),
                                 "requestUserAuthentication": {
                                     "requestId": request_id,

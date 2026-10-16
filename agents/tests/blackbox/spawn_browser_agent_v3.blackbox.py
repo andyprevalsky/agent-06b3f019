@@ -21252,7 +21252,7 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
     assert model_contexts and "# Auth Options for claude.ai" not in str(model_contexts[0]), "stale Claude auth inventory reached Google model turn"
 
 @_in_browser_activity_context
-async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", resume_step_count=0, expected_exhaustion=False):
+async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", resume_step_count=0, expected_exhaustion=False, auth_review=None):
     """An inbox result received during a model call precedes handoff commit."""
     from contextlib import ExitStack
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3, drain_background_browser_cleanups
@@ -21270,6 +21270,8 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         "credential_ref": {"kind": "cookie_bundle", "id": "shop-bundle"},
         "same_session_available": True,
     }
+    if auth_review is not None:
+        session_info["auth_options"] = auth_review["inventory"]
     create_auth = AsyncMock(return_value={"id": "request-1"})
     tool_events = AsyncMock()
     stream_instances = []
@@ -21391,6 +21393,8 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
     async def model_step(**kwargs):
         model_contexts.append(copy.deepcopy(kwargs))
         action = "read_browser_state" if (case == "sealed_loop_harvest" or foreground_seal) and len(model_contexts) == 1 else "request_user_assistance_for_authentication"
+        if auth_review is not None:
+            action = auth_review["actions"][len(model_contexts) - 1]["action"]
         await stream_instances[-1].on_chunk(StreamChunk(kind="tool_call", data={"id": f"handoff-{len(model_contexts)}", "name": action, "arguments": {}}))
         if len(model_contexts) == 1:
             if case not in {"during_drain", "sealed_during_drain", "foreground_sealed_held_poll"}:
@@ -21403,6 +21407,9 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         if case.startswith(("repeated_", "persistence_")):
             await (await poll_events.get()).wait()
         ordering.append("decision_returned")
+        if auth_review is not None:
+            chosen = auth_review["actions"][len(model_contexts) - 1]
+            return {"action": chosen, "usage": {}, "mode": "waterfall"}
         return {"action": {"action": action, "thinking": "Verification required", "params": {}}, "usage": {}, "mode": "waterfall"}
 
     async def drain_poll(task, **kwargs):
@@ -21416,6 +21423,9 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         await real_drain(task, **kwargs)
         ordering.append("drain_finished")
     class HandoffDomService(_FakeDomService):
+        async def get_element_coordinates(self, index):
+            return (10, 10)
+
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://shop.example/login/verify", "screenshot": None}
 
@@ -21454,11 +21464,26 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         patch(handler + "save_browser_assistant_message", AsyncMock()),
         patch(handler + "save_browser_credential_ref_message", persist_otp),
         patch(handler + "persist_resume_context", AsyncMock(return_value={})),
-        patch("browser_tools.dom_service.DOMService", HandoffDomService if case == "sealed_loop_harvest" or foreground_seal else _FakeDomService),
+        patch("browser_tools.dom_service.DOMService", HandoffDomService if case == "sealed_loop_harvest" or foreground_seal or auth_review is not None else _FakeDomService),
         patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
         patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
         patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
     ]
+    if auth_review is not None:
+        async def reviewed_action(*args, **kwargs):
+            from domains.spawn_browser_agent_v3.service_actions import _input_success_result
+            action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
+            auth_review.setdefault("executed", []).append(action)
+            result = (_input_success_result((action.get("params") or {}).get("text", ""), None)
+                      if action["action"] == "input_text" else
+                      {"success": True, "url": "https://shop.example/login/verify", "visible_text": "Unknown account for the submitted recipient"})
+            await args[1].record_action(dom_service=args[0], action=action["action"],
+                                       thinking=action.get("thinking", ""), params=action.get("params", {}), result=result)
+            return result
+        targets.extend([
+            patch(handler + "prepare_browser_auth", AsyncMock(return_value={"auth_realm": "shop.example", "auth_options": auth_review["inventory"], "passwords": [], "passkeys": []})),
+            patch(handler + "execute_action", reviewed_action),
+        ])
     if sealed_case:
         targets.extend([
             patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=sealed_browser_recorder)),
@@ -21501,7 +21526,7 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             stack.enter_context(target)
         try:
             result = await spawn_browser_agent_activity_v3(
-                user_id="user-1", agent_id="agent-1", goal="Read my member number",
+                user_id="user-1", agent_id="agent-1", goal=(auth_review or {}).get("goal", "Read my member number"),
                 tool_call_id="tool-1", task_id="task-1", is_resume=True,
                 start_url="https://shop.example", output_schema={"fields": [{"name": "result", "type": "string"}]},
                 use_claude_mode=False, write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1", "step_count": resume_step_count},
@@ -21513,6 +21538,16 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             result = {"status": "fixture_generation_sealed"}
         finally:
             await drain_background_browser_cleanups()
+    if auth_review is not None:
+        assert result["status"] == auth_review.get("expected_status", "awaiting_auth_assistance")
+        assert len(model_contexts) == len(auth_review["actions"]), "assistance committed before the declared remaining operation"
+        if result["status"] == "awaiting_auth_assistance":
+            create_auth.assert_awaited_once()
+        else:
+            create_auth.assert_not_awaited()
+        auth_review["contexts"] = model_contexts
+        auth_review["result"] = result
+        return
     if sealed_case:
         assert result["status"] == "fixture_generation_sealed", "sealed generation was swallowed by the activity"
         assert len(model_contexts) == 1, "sealed generation made another model decision"
@@ -28072,6 +28107,8 @@ async def run_all_tests():
     await r.record_async("otp_duplicate_keeps_first_provenance", assert_duplicate_otp_keeps_first_provenance)
     r.record("unexecuted_action_refund_bounded", assert_unexecuted_action_refund_is_bounded)
     await r.record_async("otp_at_exhausted_budget", lambda: assert_otp_at_exhausted_budget_does_not_run_more_actions(test_auth_handoff_consumes_otp_received_during_decision))
+    from auth_assessment_behavior import assert_auth_assessment_controls
+    await r.record_async("auth_assessment_per_recipient_activity", lambda: assert_auth_assessment_controls(test_auth_handoff_consumes_otp_received_during_decision))
     await r.record_async("auth_handoff_consumes_otp_received_during_decision", test_auth_handoff_consumes_otp_received_during_decision)
     for otp_case in ("empty", "stale", "app_approval", "during_drain"):
         await r.record_async(f"auth_handoff_preserves_{otp_case}", lambda otp_case=otp_case: test_auth_handoff_consumes_otp_received_during_decision(otp_case))
