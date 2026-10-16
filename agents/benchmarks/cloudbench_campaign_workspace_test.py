@@ -1,0 +1,162 @@
+"""Real campaign dispatch across a shared Git source/consumer boundary, offline."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import secrets
+import shutil
+import subprocess
+import sys
+
+import pytest
+
+from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
+
+ROOT = Path(os.environ.get('CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST', Path(__file__).resolve().parents[2]))
+
+
+def git(root, *args):
+    return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.DEVNULL, text=True).strip()
+
+
+@pytest.fixture
+def bound_campaign(tmp_path):
+    source = tmp_path / 'source'
+    scripts = source / 'scripts'
+    scripts.mkdir(parents=True)
+    (source / 'agents/benchmarks').mkdir(parents=True)
+    report = source / '.claude/shared/benchmark-report-format.txt'
+    report.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / '.claude/shared/benchmark-report-format.txt', report)
+    for catalog in (ROOT / 'agents/benchmarks').glob('*.json'):
+        shutil.copyfile(catalog, source / 'agents/benchmarks' / catalog.name)
+    for name in ('run-bench', 'run-bench-campaign.py', 'cloudbench_catalog.py',
+                 'cloudbench-production-only-tasks.py', 'cloudbench-campaign-seed.py',
+                 'cloudbench-campaign-barrier.py', 'cloudbench-script-snapshot.py',
+                 'cloudbench_execution_provenance.py'):
+        supplied = Path(os.environ['CLOUDBENCH_CAMPAIGN_UNDER_TEST']) if name == 'run-bench-campaign.py' and os.environ.get('CLOUDBENCH_CAMPAIGN_UNDER_TEST') else ROOT / 'scripts' / name
+        shutil.copyfile(supplied, scripts / name)
+    # The old consumer entry must not be used as executable control code.
+    (scripts / 'run-bench-fleet').write_text('#!/bin/bash\nexit 93\n')
+    git(source, 'init', '-q')
+    git(source, 'add', '.')
+    git(source, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'consumer')
+    task_ref = git(source, 'rev-parse', 'HEAD')
+    workspace = tmp_path / 'consumer'
+    git(source, 'worktree', 'add', '--detach', str(workspace), task_ref)
+    (scripts / 'run-bench-fleet').write_text('''#!/bin/bash
+set -eu
+cd "$CLOUDBENCH_FLEET_ROOT"
+exec python3 - "$@" <<'CHILD'
+import json, os, subprocess, sys, time
+from pathlib import Path
+workspace=Path(os.environ['CLOUDBENCH_FLEET_ROOT']); job=os.environ['RUN_BENCH_CAMPAIGN_JOB_ID']; task=sys.argv[1]
+assert Path.cwd()==workspace
+assert os.environ['CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE']=='borrow'
+assert '--foreground' in sys.argv and '--reuse-pool-only' in sys.argv
+assert sys.argv[sys.argv.index('--ref')+1]==os.environ['FIXTURE_TASK_REF']
+fleet=workspace/'.context/fleet/runs'/job; (fleet/'_batch').mkdir(parents=True)
+owner=job; audit=workspace/'.git-fixture/cloudbench-fleet-audits'/owner; audit.mkdir(parents=True)
+record={'run_id':job,'tasks':[{'name':task,'status':'PASSED','passed':True,'lifecycle_stage':'released'}]}
+(fleet/'_batch/run.json').write_text(json.dumps(record))
+(fleet/'_batch/lifecycle.json').write_text(json.dumps({'run_id':job,'fleet_owner_token':owner,'workspace_root':str(workspace),'status':'verified','hub_publication_failed':False}))
+meta=f'run_id={job}\\nfleet_owner_token={owner}\\nworkspace_root={workspace}\\nstatus=provider-teardown-verified\\n'
+(audit/'meta').write_text(meta);(audit/'provider-teardown-verified.epoch').write_text(str(time.time()))
+(fleet/'teardown-ownership.path').write_text(str(audit));(fleet/'teardown-ownership').mkdir()
+for n in ('meta','provider-teardown-verified.epoch'):(fleet/'teardown-ownership'/n).write_bytes((audit/n).read_bytes())
+print(f'{workspace}/scripts/run-bench monitor {fleet}',flush=True)
+subprocess.run([sys.executable,os.environ['FIXTURE_BARRIER'],'--deadline',str(time.time()+60),'--controller-pid',str(os.getpid())],check=True)
+CHILD
+''')
+    git(source, 'add', '.')
+    git(source, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'control')
+    source_ref = git(source, 'rev-parse', 'HEAD')
+    snapshot = tmp_path / ('cloudbench-scripts.' + secrets.token_hex(16))
+    snapshot.mkdir(mode=0o700)
+    for name in ('run-bench-fleet', 'cloudbench-script-snapshot.py', 'cloudbench_execution_provenance.py'):
+        shutil.copyfile(scripts / name, snapshot / name)
+    fields=Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()
+    birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+fields[19]
+    subprocess.run([sys.executable,str(snapshot/'cloudbench-script-snapshot.py'),'initialize','--path',str(snapshot),'--temp-root',str(tmp_path),'--token',snapshot.name.split('.')[-1],'--pid',str(os.getpid()),'--pid-start',birth],check=True,capture_output=True)
+    subprocess.run([sys.executable,str(snapshot/'cloudbench_execution_provenance.py'),'snapshot','--snapshot-dir',str(snapshot),'--output',str(snapshot/'cloudbench-controller-snapshot-manifest.json')],check=True,capture_output=True)
+    env={k:v for k,v in os.environ.items() if not k.startswith(('CLOUDBENCH_', 'RUN_BENCH_', 'BENCHMARK_HUB_'))}
+    env.update(CLOUDBENCH_FLEET_ROOT=str(workspace),CLOUDBENCH_SCRIPT_SNAPSHOT=str(snapshot),CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE='borrow',CLOUDBENCH_PRESTACK_CONTROLLER_REF=source_ref,CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY='0',BENCHMARK_HUB_PARENT_RUN_ID='fixture',TMPDIR=str(tmp_path),FIXTURE_TASK_REF=task_ref,FIXTURE_BARRIER=str(scripts/'cloudbench-campaign-barrier.py'))
+    return source,workspace,snapshot,source_ref,task_ref,env
+
+
+def invoke(bound):
+    source,workspace,snapshot,source_ref,task_ref,env=bound
+    return subprocess.run(['bash',str(source/'scripts/run-bench'),'parallel-tool-calls','spawn-sub-agents','-k','2','--concurrency','4','--strict-barrier','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--reuse-pool-only','--cold-primary-bootstrap','--ref',task_ref],cwd=workspace,env=env,capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+def test_campaign_workspace_real_cli_dispatch_and_release(bound_campaign):
+    source,workspace,snapshot,source_ref,task_ref,env=bound_campaign
+    result=invoke(bound_campaign)
+    assert result.returncode==0,result.stdout+result.stderr
+    summary=json.loads(next((workspace/'.context/benchmarks/campaigns').glob('*/summary.json')).read_text())
+    assert summary['total_jobs']==summary['peak_concurrency']==4
+    assert summary['startup_cohorts'][0]['released_count']==4
+    assert all(j['resources_released'] and j['lifecycle_verified'] for j in summary['jobs'])
+    assert summary['workspace_binding']['control_ref']==source_ref
+    assert summary['workspace_binding']['task_ref']==task_ref
+    assert not (source/'.context').exists()
+    assert snapshot.exists()  # owner still holds it; campaign/children never delete it
+
+
+@pytest.mark.parametrize('fault',('borrow','task-ref','control-ref','catalog','snapshot','owner','common'))
+def test_campaign_workspace_refuses_before_child_dispatch(bound_campaign,fault):
+    source,workspace,snapshot,source_ref,task_ref,env=bound_campaign
+    if fault=='borrow':env.pop('CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE')
+    elif fault=='task-ref':git(workspace,'checkout','--detach',source_ref)
+    elif fault=='control-ref':env['CLOUDBENCH_PRESTACK_CONTROLLER_REF']='0'*40
+    elif fault=='catalog':
+        path=workspace/'agents/benchmarks/tasks.json';path.write_bytes(path.read_bytes()+b'\n')
+    elif fault=='snapshot':(snapshot/'run-bench-fleet').write_text('changed')
+    elif fault=='owner':
+        p=snapshot/'.cloudbench-script-snapshot-owner.json';v=json.loads(p.read_text());v['owner_pid_start']='wrong';p.write_text(json.dumps(v))
+    elif fault=='common':
+        foreign=workspace.parent/'foreign';subprocess.run(['git','clone','-q',str(source),str(foreign)],check=True);git(foreign,'checkout','--detach',task_ref);env['CLOUDBENCH_FLEET_ROOT']=str(foreign)
+    result=invoke(bound_campaign)
+    assert result.returncode!=0,result.stdout+result.stderr
+    assert not (workspace/'.context').exists()
+    assert not (source/'.context').exists()
+
+
+def test_campaign_workspace_default_path_is_unchanged(tmp_path,monkeypatch):
+    spec=importlib.util.spec_from_file_location('campaign_default',ROOT/'scripts/run-bench-campaign.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    monkeypatch.delenv('CLOUDBENCH_FLEET_ROOT',raising=False)
+    if not hasattr(module,'campaign_workspace'):
+        pytest.skip('unchanged base has no optional workspace binding')
+    assert module.campaign_workspace(tmp_path,[])==(tmp_path,None)
+
+
+def test_campaign_workspace_normal_cli_preserves_original600_shape(tmp_path):
+    """Exercise the normal entry's argv translation, with no controller launch."""
+    source=tmp_path/'source';scripts=source/'scripts';scripts.mkdir(parents=True)
+    (source/'agents/benchmarks').mkdir(parents=True)
+    report=source/'.claude/shared/benchmark-report-format.txt';report.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT/'.claude/shared/benchmark-report-format.txt',report)
+    for name in ('run-bench','cloudbench_catalog.py'):
+        shutil.copyfile(ROOT/'scripts'/name,scripts/name)
+    for path in (ROOT/'agents/benchmarks').glob('*.json'):
+        shutil.copyfile(path,source/'agents/benchmarks'/path.name)
+    override=os.environ.get('CLOUDBENCH_ORIGINAL600_TASK_FILE_UNDER_TEST')
+    if override:
+        import hashlib
+        raw=Path(override).read_bytes()
+        assert hashlib.sha256(raw).hexdigest()=='660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bcb0a8987f1b59f5'
+        tasks=raw.decode().splitlines()
+    else:
+        spec=importlib.util.spec_from_file_location('fixture_catalog',ROOT/'scripts/cloudbench_catalog.py')
+        catalog=importlib.util.module_from_spec(spec);spec.loader.exec_module(catalog)
+        tasks=[row['name'] for row in catalog.load_unified_catalog(ROOT/'agents/benchmarks/tasks.json')][:200]
+    assert len(tasks)==len(set(tasks))==200
+    captured=tmp_path/'argv.json'
+    (scripts/'run-bench-campaign.py').write_text("import os,sys,json;json.dump(sys.argv[1:],open(os.environ['FIXTURE_CAPTURE'],'w'))\n")
+    result=subprocess.run(['bash',str(scripts/'run-bench'),'--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at','1791410000','--reuse-pool-only','--cold-primary-bootstrap','--ref','5'*40,*tasks],env={**os.environ,'FIXTURE_CAPTURE':str(captured)},capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode==0,result.stdout+result.stderr
+    args=json.loads(captured.read_text())
+    assert [v.removeprefix('--task=') for v in args if v.startswith('--task=')]==tasks
+    assert all(v in args for v in ('--stress-defaults','--concurrency=600','--runs=3','--retry-infra=1','--e2e-timeout=5400','--e2e-started-at=1791410000','--forward-arg=--strict-barrier','--forward-arg=--timeout','--forward-arg=1200','--forward-arg=--reuse-pool-only','--forward-arg=--cold-primary-bootstrap','--forward-arg=--ref','--forward-arg='+'5'*40))
+    assert '--forward-arg=--foreground' not in args

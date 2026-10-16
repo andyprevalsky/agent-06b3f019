@@ -426,8 +426,9 @@ def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
 
 
 def start_shared_inventory(
-    root: Path, campaign_dir: Path
+    root: Path, campaign_dir: Path, workspace: Path | None = None
 ) -> tuple[subprocess.Popen, object, Path]:
+    workspace = workspace or root
     refresh = int(os.environ.get("CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS", "30"))
     lock_wait = int(
         os.environ.get("CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS", str(refresh * 3 + 5))
@@ -458,11 +459,11 @@ def start_shared_inventory(
         [
             "bash",
             str(source / "cloudbench-campaign-inventory.sh"),
-            str(root),
+            str(workspace),
             str(directory),
             str(os.getpid()),
         ],
-        cwd=root,
+        cwd=workspace,
         env=environment,
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -536,6 +537,60 @@ def stop_shared_inventory(
     return process.returncode == 0
 
 
+def campaign_workspace(root: Path, forward_args: list[str]) -> tuple[Path, dict[str, str] | None]:
+    """Bind an existing borrowed fleet snapshot to its admitted task workspace."""
+    requested = os.environ.get("CLOUDBENCH_FLEET_ROOT")
+    if not requested or Path(requested).resolve() == root:
+        return root, None
+    if Path(__file__).resolve() != root / "scripts/run-bench-campaign.py":
+        raise ValueError("campaign interpreter differs from control root")
+    workspace = Path(requested).resolve(strict=True)
+    snapshot = Path(os.environ.get("CLOUDBENCH_SCRIPT_SNAPSHOT", "")).resolve(strict=True)
+    if os.environ.get("CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE") != "borrow" or not snapshot.is_dir():
+        raise ValueError("separate campaign workspace requires a borrowed snapshot")
+    def git(path: Path, *args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(path), *args], text=True).strip()
+    source_ref = git(root, "rev-parse", "HEAD")
+    if os.environ.get("CLOUDBENCH_PRESTACK_CONTROLLER_REF") != source_ref:
+        raise ValueError("campaign control source differs from borrowed snapshot binding")
+    refs = [forward_args[i + 1] for i, arg in enumerate(forward_args[:-1]) if arg == "--ref"]
+    if len(refs) != 1 or any(arg.startswith("--ref=") for arg in forward_args):
+        raise ValueError("separate campaign workspace requires one exact task ref")
+    task_ref = refs[0]
+    if len(task_ref) != 40 or any(c not in "0123456789abcdef" for c in task_ref) or git(workspace, "rev-parse", "HEAD") != task_ref:
+        raise ValueError("campaign task workspace differs from exact task ref")
+    common = git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common != git(workspace, "rev-parse", "--path-format=absolute", "--git-common-dir"):
+        raise ValueError("campaign source and task workspace have different common Git")
+    checked = {}
+    for relative in ("scripts/run-bench", "scripts/run-bench-campaign.py", "scripts/run-bench-fleet",
+                     "scripts/cloudbench-script-snapshot.py", "scripts/cloudbench_execution_provenance.py"):
+        raw = subprocess.check_output(["git", "-C", str(root), "show", source_ref + ":" + relative])
+        if (root / relative).read_bytes() != raw:
+            raise ValueError("campaign control source changed: " + relative)
+        checked[Path(relative).name] = raw
+    for name in ("run-bench-fleet", "cloudbench-script-snapshot.py", "cloudbench_execution_provenance.py"):
+        if (snapshot / name).read_bytes() != checked[name]:
+            raise ValueError("campaign borrowed snapshot source changed: " + name)
+    owner = ModuleType("campaign_snapshot_owner")
+    exec(compile(checked["cloudbench-script-snapshot.py"], str(root / "scripts/cloudbench-script-snapshot.py"), "exec"), owner.__dict__)
+    token = snapshot.name.removeprefix("cloudbench-scripts.")
+    owner._validate_path(snapshot, Path(os.environ.get("TMPDIR", "/tmp")), token)
+    marker = owner._read_marker(snapshot, token)
+    if marker["state"] != "armed" or not owner._process_matches(int(marker["owner_pid"]), marker["owner_pid_start"]):
+        raise ValueError("campaign borrowed snapshot owner is not live and armed")
+    manifest = snapshot / "cloudbench-controller-snapshot-manifest.json"
+    subprocess.run([sys.executable, "-I", "-S", "-B", str(snapshot / "cloudbench_execution_provenance.py"),
+                    "verify-snapshot", "--snapshot-dir", str(snapshot), "--manifest", str(manifest)],
+                   check=True, capture_output=True)
+    for name in ("tasks.json", "polar_tasks.json"):
+        if (root / "agents/benchmarks" / name).read_bytes() != (workspace / "agents/benchmarks" / name).read_bytes():
+            raise ValueError("campaign task catalogs differ across source and workspace")
+    return workspace, {"control_root": str(root), "control_ref": source_ref,
+                       "workspace_root": str(workspace), "task_ref": task_ref,
+                       "snapshot": str(snapshot), "snapshot_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}
+
+
 def main() -> int:
     args = parse_args()
     if args.runs < 1 or args.concurrency < 1 or not args.task:
@@ -555,6 +610,7 @@ def main() -> int:
         return e2e_deadline is not None and time.monotonic() >= e2e_deadline
 
     root = args.root.resolve()
+    workspace, workspace_binding = campaign_workspace(root, args.forward_arg)
     if args.stress_defaults and (args.concurrency not in (200, 600) or args.runs != 3 or len(args.task) != 200 or len(set(args.task)) != 200):
         raise SystemExit("--stress-defaults requires 200 distinct tasks, k3, peak200 or peak600")
     if args.stress_defaults_plan:
@@ -605,7 +661,7 @@ def main() -> int:
     campaign_root = Path(
         os.environ.get(
             "RUN_BENCH_CAMPAIGN_ROOT",
-            root / ".context" / "benchmarks" / "campaigns",
+            workspace / ".context" / "benchmarks" / "campaigns",
         )
     )
     campaign_dir = campaign_root / safe_id
@@ -641,6 +697,7 @@ def main() -> int:
 
     state: dict[str, object] = {
         "campaign_id": safe_id,
+        **({"workspace_binding": workspace_binding} if workspace_binding else {}),
         "started_at": utc_now(),
         "finished_at": None,
         "status": "running",
@@ -878,7 +935,7 @@ def main() -> int:
             "BENCHMARK_HUB_PARENT_RUN_ID"
         ):
             publish_campaign_group(
-                root,
+                workspace,
                 campaign_dir,
                 state,
                 live=True,
@@ -893,7 +950,7 @@ def main() -> int:
         ):
             try:
                 inventory_process, inventory_log, inventory_directory = (
-                    start_shared_inventory(root, campaign_dir)
+                    start_shared_inventory(root, campaign_dir, workspace)
                 )
                 if args.stress_defaults or os.environ.get("CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION", "0") == "1":
                     mutation_authority = mutation_inventory_authority(inventory_directory, inventory_process)
@@ -980,7 +1037,7 @@ def main() -> int:
                                         ),
                                         "prepare",
                                         "--root",
-                                        str(root),
+                                        str(workspace),
                                         "--inventory",
                                         str(inventory_directory),
                                         "--barrier",
@@ -1102,7 +1159,7 @@ def main() -> int:
                 log_handle = open(str(job["log"]), "w", encoding="utf-8")
                 process = subprocess.Popen(
                     controller_prefix + command,
-                    cwd=root,
+                    cwd=workspace,
                     env=environment,
                     stdout=log_handle,
                     stderr=subprocess.STDOUT,
@@ -1184,7 +1241,7 @@ def main() -> int:
                 )
                 active.pop(process_id)
                 if args.retry_infra:
-                    disposition = released_attempt(root, job)
+                    disposition = released_attempt(workspace, job)
                     for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
                                 "resources_released", "lifecycle_verified", "infra_failure", "terminal_task",
                                 "released_at_epoch", "retry_blocked"):
@@ -1287,7 +1344,7 @@ def main() -> int:
         stops_before_publication = stop_requests
         deadline_before_publication = deadline_expired()
         publication_completed = publish_campaign_group(
-            root,
+            workspace,
             campaign_dir,
             state,
             live=False,
