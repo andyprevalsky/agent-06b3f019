@@ -1154,19 +1154,39 @@ def _model_visible_browser_verifier_context(context: Any, dom_service: Any, brow
                                                secret_values_used=getattr(dom_service, "secret_values_used", False))
                 for message in context]
                if isinstance(context, list) else dom_service.model_visible_value(context))
+    if isinstance(context, list) and isinstance(visible, list):
+        for observation_index, (original, safe_message) in enumerate(zip(context, visible)):
+            metadata = original.get("metadata") if isinstance(original, dict) else None
+            if not isinstance(metadata, dict) or not isinstance(safe_message, dict):
+                continue
+            step = metadata.get("browser_action_step")
+            evidence = metadata.get("structured_response")
+            if (original.get("role") == "TOOL" and metadata.get("toolName") == "read_browser_state"
+                    and type(step) is int and isinstance(evidence, dict) and evidence.get("step") == step):
+                visible[observation_index] = {
+                    "role": "TOOL", "text": "",
+                    "metadata": {"toolName": "read_browser_state", "toolStatus": "FINISHED", "browser_action_step": step,
+                                 "structured_response": {"step": step, "formatted_state": dom_service.model_visible_value(evidence.get("formatted_state"))}},
+                }
     screenshot = browser_state.get("screenshot")
     if (getattr(dom_service, "secret_values_used", False) or browser_state.get("screenshot_placeholder")
             or not isinstance(screenshot, str) or not screenshot
             or not isinstance(context, list) or not context or not isinstance(visible, list)):
         return visible
-    original = context[-1]
+    # Final evidence precedes optional historical observations in admission.
+    final_index = next((index for index in range(len(context) - 1, -1, -1)
+                        if isinstance(context[index], dict)
+                        and (context[index].get("metadata") or {}).get("toolName") == "final_screenshot"), -1)
+    if final_index < 0:
+        return visible
+    original = context[final_index]
     if not isinstance(original, dict) or original.get("role") != "TOOL":
         return visible
     metadata = original.get("metadata")
     if (isinstance(metadata, dict) and metadata.get("toolName") == "final_screenshot"
-            and metadata.get("screenshot_b64") == screenshot and isinstance(visible[-1], dict)):
-        visible[-1]["role"] = "TOOL"
-        visible[-1]["metadata"] = {
+            and metadata.get("screenshot_b64") == screenshot and isinstance(visible[final_index], dict)):
+        visible[final_index]["role"] = "TOOL"
+        visible[final_index]["metadata"] = {
             **dom_service.model_visible_value(metadata),
             "toolName": "final_screenshot", "toolStatus": "FINISHED", "screenshot_b64": screenshot,
         }

@@ -30,16 +30,10 @@ from tools.prompts import attempt_completion_prompt
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
-from utils.browser_auth_contract import OTP_DELIVERY_CONTRACT
+from utils.browser_auth_contract import AUTH_ASSISTANCE_HANDOFF_RULE, build_authentication_contract
 
 logger = structlog.get_logger()
 
-AUTH_ASSISTANCE_HANDOFF_RULE = (
-    "Keep the current sign-in or verification step open and visible when requesting help. "
-    "Do not go back, restart sign-in, or repeat a successful step merely to show a password or code form. "
-    "When the current step requires an action only the user can perform, request assistance "
-    "promptly instead of waiting for an action you have not asked the user to take."
-)
 
 
 def recover_from_challenge_enabled() -> bool:
@@ -753,6 +747,11 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
     return tools
 
 
+def build_browser_authentication_contract(available_actions: List[str]) -> str:
+    recover_enabled = recover_from_challenge_enabled() and "recover_from_challenge" in set(available_actions or [])
+    return build_authentication_contract(recover_enabled=recover_enabled)
+
+
 def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     """Canonical browser-automation system prompt.
 
@@ -764,27 +763,7 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     present. Provider transforms strip the marker before sending the request.
     """
     _ = available_actions
-    recover_enabled = recover_from_challenge_enabled() and "recover_from_challenge" in set(available_actions or [])
-    if recover_enabled:
-        challenge_rule = (
-            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
-            "are not authentication. recover_from_challenge is a relatively expensive way to "
-            "force-open a blocked page or service - do not use it when an alternate path can "
-            "complete the goal. Do not drag sliders, click verify buttons, or otherwise try "
-            "to solve challenge widgets yourself. Never call "
-            "request_user_assistance_for_authentication while a challenge interstitial is "
-            "still visible."
-        )
-    else:
-        challenge_rule = (
-            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
-            "are not authentication. No challenge-recovery tool is available - wait briefly "
-            "for the provider auto-solver, try an alternate URL or path to complete the "
-            "goal, and do not drag sliders, click verify buttons, or otherwise try to solve "
-            "challenge widgets yourself. Never call "
-            "request_user_assistance_for_authentication while a challenge interstitial is "
-            "still visible."
-        )
+    authentication_contract = build_browser_authentication_contract(available_actions)
     return f"""# Role
 
 You are a browser automation agent. You take in a user goal and complete the goal by interacting with a browser you are exposed to via tools.
@@ -844,30 +823,7 @@ action envelope in text; use the provided tool call.
 - When the goal excludes groceries (or food), treat food, beverages, snacks, protein bars, candy, water, soft drinks, and grocery-marketplace packs as groceries even if Amazon shows a Return items button for a packaged SKU. Prefer the most recently delivered eligible non-excluded physical item.
 - If Amazon shows that a return request needs to be reviewed or to contact customer service, that item's self-service return path is blocked. Do not open Contact Us. Leave that item, pick the next eligible non-excluded item, or report the exact visible blocker if none remain.
 
-# Authentication
-
-- Use the cheapest viable authentication path for this single site.
-- Priority:
-  - 1. Existing Steel/cookie session
-  - 2. Passkey (if one is listed in Auth Options)
-  - 3. Saved passwords
-  - 4. Email OTP
-  - 5. SMS OTP
-  - 6. Guest/anonymous completion, if viable (prefer guest checkout over Sign in / Log in when both appear)
-  - 7. Minted account
-  - 8. request_user_assistance_for_authentication - only after 1-7 are exhausted or unavailable
-- Cookie-based and existing Steel-session auth are applied automatically before you start.
-- If a passkey is listed for this site and you are not already logged in, you MUST try the passkey path before any saved password. The passkey is pre-loaded into the browser's authenticator and signs silently once the site starts WebAuthn; no browser passkey popup is expected. First focus/click the username, email, or account field to trigger any passkey autofill/conditional WebAuthn. If the site asks for an identifier, enter the relevant account email/username from the page or saved credentials and continue, but do not type a password yet. If a "Sign in with a passkey", "Use passkey", or similar option appears, choose it. Wait briefly for navigation, OTP, or account access. Only fall through to saved passwords after the passkey option is absent, unavailable, or visibly fails.
-- For saved passwords, use the listed private placeholder in your chosen browser tool and target. The runtime resolves it privately in input_text, evaluate, and other browser tools, and redacts credential values from observations. Enter each field explicitly.
-- For multi-account sites, prefer the task-specific user context when present, then the freshest enabled cookie bundle.
-- When a site offers OTP delivery options, prefer email over SMS.
-- {OTP_DELIVERY_CONTRACT}
-- Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 6 first.
-- If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.
-- When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
-- {AUTH_ASSISTANCE_HANDOFF_RULE}
-{challenge_rule}
-- Do not open webmail or inbox websites to retrieve OTP codes."""
+{authentication_contract}"""
 
 
 # ---------------------------------------------------------------------------

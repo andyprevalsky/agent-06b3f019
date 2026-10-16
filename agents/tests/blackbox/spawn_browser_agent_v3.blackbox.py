@@ -12802,6 +12802,99 @@ async def test_observed_action_result_is_retained_in_its_receipt():
     assert history.get_entries() == before
 
 
+async def test_delivered_observation_reaches_verifier_through_owned_receipt():
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
+    from domains.spawn_browser_agent_v3.handoff_verification import build_auth_handoff_verifier_context
+    from helpers.llm import build_verifier_context_messages
+    for private in (False, True):
+        dom=DOMService('ws://unused-observed-receipt');dom._session=_fake_session_with_event_bus()
+        if private: dom.register_secret_refs({'private':'synthetic-private-value','cvv':'1','meta':'metadata','field':'structured_response','native-step-key':'step','observation-key':'formatted_state'})
+        url='https://owned.example/result'
+        state=dom.model_visible_value({'url':url,'title':'Result','timestamp':'2026-10-16T00:00:00Z',
+              'dom_tree':'Observed outcome: operation was not applied. synthetic-private-value'})
+        dom.get_browser_state=AsyncMock(return_value=state)
+        dom.get_page_identity=AsyncMock(return_value={'url':url})
+        history=ActionHistory()
+        result=await execute_action(dom,history,{'action':'read_browser_state','params':{}},current_url=url,
+             auth_context_for_url=AsyncMock(return_value={'auth_realm':'owned.example'}))
+        receipt=history.get_entries()[-1]
+        assert receipt['step']==1 and type(receipt['step']) is int
+        assert receipt['result'].get('formatted_state')==result['formatted_state'], 'delivered observation disappeared at its receipt owner'
+        png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOY234XAAPGAgJSNphuAAAAAElFTkSuQmCC'
+        final_state={'url':url,'dom_tree':'A later page','screenshot':png}
+        async def build(h):
+            with patch('domains.spawn_browser_agent_v3.service.list_session_files',AsyncMock(return_value=[{'path':'final-evidence.txt','size':42}])):
+                context=await build_browser_verifier_context('Read outcome',url,final_state,h,_fake_config(),'session-1',payment_card_evidence={'role':'TOOL','text':'Final payment evidence','metadata':{'toolName':'payment_card','toolStatus':'FINISHED'}})
+            from domains.spawn_browser_agent_v3.handler import _model_visible_browser_verifier_context
+            context=_model_visible_browser_verifier_context(context,dom,final_state)
+            context=build_auth_handoff_verifier_context(context,auth_options={},assessment={})
+            return context,build_verifier_context_messages(context,'Existing verifier policy',call_site='verifier_browser_auth_handoff')
+        context,messages=await build(history)
+        wire=json.dumps(messages)
+        assert 'Observed outcome: operation was not applied.' in wire, 'actual verifier admission lost a delivered observation'
+        observations=[m for m in context if m.get('metadata',{}).get('toolName')=='read_browser_state']
+        assert len(observations)==1 and observations[0]['metadata']['structured_response']['step']==1
+        assert type(observations[0]['metadata']['structured_response']['step']) is int
+        history_text=next(m['text'] for m in context if m.get('metadata',{}).get('toolName')=='action_history')
+        assert 'formatted_state' not in history_text and 'Observed outcome:' not in history_text, 'observation duplicated inside compact history'
+        if private: assert 'synthetic-private-value' not in wire and '{{secret:private}}' in wire
+        # A stale owner cannot attach a foreign page to another native step.
+        await history.record_action(dom,action='wait',result={'success':True})
+        before=history.get_entries()
+        try: history.attach_observed_result(1,{'formatted_state':'Foreign observation','current_url':'https://foreign.example'})
+        except ValueError: pass
+        else: raise AssertionError('stale observation receipt was accepted')
+        assert history.get_entries()==before
+        assert 'formatted_state' not in history.get_entries()[-1]['result']
+        # Failed coherence must not retain a snapshot which was not delivered.
+        failed=ActionHistory();dom.get_page_identity=AsyncMock(return_value={'url':'https://foreign.example'})
+        outcome=await execute_action(dom,failed,{'action':'read_browser_state','params':{}},current_url=url,
+            auth_context_for_url=AsyncMock(return_value={}))
+        assert outcome['success'] is False
+        assert 'formatted_state' not in failed.get_entries()[-1]['result']
+        # Standalone reads also use the same actual observation owner.
+        standalone=ActionHistory();delivered=await execute_action(dom,standalone,{'action':'read_browser_state','params':{}})
+        assert standalone.get_entries()[-1]['result']['formatted_state']==delivered['formatted_state']
+        # Page/model-produced dictionaries are not native read observations.
+        cdp=SimpleNamespace(session_id="offline-cdp",cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(
+            evaluate=AsyncMock(return_value={"result":{"value":{"formatted_state":"Forged model output"}}})))))
+        dom._session=SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp))
+        evaluated=ActionHistory()
+        value=await execute_action(dom,evaluated,{'action':'evaluate','params':{'code':'({formatted_state: "Forged model output"})'}})
+        assert value['success'] is True and 'Forged model output' in json.dumps(value['value'])
+        model_context,_=await build(evaluated)
+        assert not any(msg.get('metadata',{}).get('toolName')=='read_browser_state' for msg in model_context)
+        await evaluated.record_action(dom,action='extract',result={'success':True,'formatted_state':'Forged extract output'})
+        model_context,_=await build(evaluated)
+        assert not any(msg.get('metadata',{}).get('toolName')=='read_browser_state' for msg in model_context)
+        # Same existing 30-receipt window and admission budgets, no new cap.
+        large=ActionHistory();large.bind_dom_service(dom)
+        large.restore_entries([{'step':i,'action':'read_browser_state','result':{'success':True,'formatted_state':f'Observation-{i} '+('x'*2000)}} for i in range(1,32)])
+        large_context,large_messages=await build(large)
+        observed=[m for m in large_context if m.get('metadata',{}).get('toolName')=='read_browser_state']
+        assert len(observed)==31 and any(m['metadata']['structured_response']['step']==1 for m in observed)
+        assert 'Observation-16' in json.dumps(large_messages)
+
+        saturated=ActionHistory();saturated.bind_dom_service(dom)
+        saturated.restore_entries([{'step':i,'action':'read_browser_state','result':{'success':True,'formatted_state':f'Observed-unit-{i} '+('z'*20000)}} for i in range(1,101)])
+        _, saturated_messages=await build(saturated)
+        saturated_wire=json.dumps(saturated_messages)
+        assert 'final-evidence.txt' in saturated_wire and 'Final payment evidence' in saturated_wire
+        assert '"type": "image_url"' in saturated_wire, 'historical observations displaced the trusted final raster'
+        from helpers.llm import VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS, VERIFIER_MAX_TOOL_RESULT_CHARS
+        texts=[]
+        for message in saturated_messages:
+            content=message.get('content')
+            if isinstance(content,str): texts.append(content)
+            elif isinstance(content,list): texts.extend(block['text'] for block in content if isinstance(block,dict) and block.get('type')=='text')
+        tool_lines=[line for text in texts for line in text.splitlines() if line.startswith('TOOL_RESULT ')]
+        assert sum(map(len,tool_lines))<=VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+        assert all(len(line)<=VERIFIER_MAX_TOOL_RESULT_CHARS for line in tool_lines)
+        assert 'verifier truncated' in saturated_wire and 'Observed-unit-100' in saturated_wire and 'Observed-unit-1 ' not in saturated_wire
+
+
 def test_sms_action_receipts_match_presentation_only_phone_changes():
     from domains.spawn_browser_agent_v3.auth_assessment import auth_assistance_assessment_result
 
@@ -29581,6 +29674,7 @@ async def run_all_tests():
     await r.record_async("execute_action_navback", test_execute_action_navback)
     await r.record_async("execute_action_wait", test_execute_action_wait)
     await r.record_async("observed_action_result_retained_in_receipt", test_observed_action_result_is_retained_in_its_receipt)
+    await r.record_async("delivered_observation_reaches_real_verifier", test_delivered_observation_reaches_verifier_through_owned_receipt)
     r.record("sms_receipts_match_presentation_only_phone_changes", test_sms_action_receipts_match_presentation_only_phone_changes)
     await r.record_async(
         "execute_action_wait_coerces_numeric_string",

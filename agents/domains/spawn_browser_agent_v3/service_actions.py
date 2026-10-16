@@ -1697,6 +1697,8 @@ async def execute_action(
     """Resolve private values and report successful use privately to the caller."""
     execution = locals().copy()
     execution.pop("successful_secret_refs")
+    previous_action_step = None
+    action_execution_started = False
     if successful_secret_refs is not None:
         successful_secret_refs.clear()
     refs = dict(secret_refs or {})
@@ -1742,6 +1744,8 @@ async def execute_action(
         execution["action"] = {**action, "params": params}
         execution["model_params"] = model_params
         execution["action_history"] = _PrivateActionHistory(action_history, refs)
+        previous_action_step = action_history.last_action_step()
+        action_execution_started = True
         with secret_logging_context(refs):
             result = await _execute_resolved_action(**execution)
         if result.get("success") and len(used) == 1:
@@ -1759,6 +1763,14 @@ async def execute_action(
     if result.get("success") and successful_secret_refs is not None:
         successful_secret_refs.update(used)
     safe_result = visible(result)
+    completed_action_step = action_history.last_action_step() if action_execution_started else None
+    attach_observation = action_name == "read_browser_state" or (
+        auth_context_for_url is not None and not result.get("status")
+        and (action_name in _INTERACTION_ACTIONS or action_name in _NAVIGATION_ACTIONS or action_name == "evaluate")
+    )
+    if attach_observation and completed_action_step is not None and completed_action_step != previous_action_step:
+        action_history.attach_observed_result(completed_action_step, safe_result)
+
     if used_credential:
         # Credential bookkeeping comes from the private binding inventory,
         # rather than page data. Preserve its exact routing identity even if
@@ -1825,7 +1837,6 @@ async def _execute_resolved_action(
         return {"success": False, "error": "Browser not connected"}
 
     action_name = action.get("action", "")
-    previous_action_step = action_history.last_action_step()
     index = action.get("index")
     params = action.get("params", {})
     thinking = action.get("thinking")
@@ -1920,9 +1931,6 @@ async def _execute_resolved_action(
         result = await _attach_observed_auth_context(
             dom_service, action_name, result, auth_context_for_url, previous_url=current_url,
         )
-        completed_action_step = action_history.last_action_step()
-        if completed_action_step is not None and completed_action_step != previous_action_step:
-            action_history.attach_observed_result(completed_action_step, result)
     return result
 
 

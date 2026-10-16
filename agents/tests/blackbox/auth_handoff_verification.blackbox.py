@@ -295,8 +295,32 @@ async def test_rebound_public_recipient_receipts_fail_closed():
                 assert (result is None)==(not rotate), 'past attempt certified the rebound identity through a non-exhausted row'
 
 
+
+def test_handoff_receives_complete_actor_authentication_contract():
+    from copy import deepcopy
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from providers.rose.browser_use import build_browser_use_system_prompt
+    from domains.spawn_browser_agent_v3.handoff_verification import build_auth_handoff_verifier_context
+    from unittest.mock import patch
+    for flag in ('0', '1', 'true', 'yes', 'on', 'false'):
+        with patch.dict('os.environ', {'BROWSER_DISABLE_RECOVER_FROM_CHALLENGE': flag}):
+            planner = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
+            expected = '# Authentication\n' + planner.split('# Authentication\n', 1)[1]
+            for restriction in ('Use only the explicitly named account.', 'The accepted account needs its approval device.', 'The required account is locked.', 'The established channel is unreadable.', 'No authorized automation remains available; registration is unknown.'):
+                context = [{'role': 'USER', 'text': restriction}, {'role': 'TOOL', 'text': 'Actual observed state'}]
+                proposal = {'reason': restriction, 'recipient_options': []}
+                old = deepcopy((context, proposal, INVENTORY))
+                actual = build_auth_handoff_verifier_context(context, auth_options=INVENTORY, assessment=proposal)
+                assert expected in actual[-1]['text'], 'handoff judge omitted the complete authoritative actor Authentication contract'
+                assert actual[-1]['text'].count(expected) == 1
+                assert (context, proposal, INVENTORY) == old
+                assert actual[:-1] == context
+                assert actual[-1]['role'] == 'USER'
+                assert not any('tool_calls' in message for message in actual)
+
 async def run_all_tests():
     result=BlackboxResult()
+    result.record("complete actor Authentication contract at independent handoff consumer", test_handoff_receives_complete_actor_authentication_contract)
     await result.record_async("rebound public alias receipts fail closed",test_rebound_public_recipient_receipts_fail_closed)
     await result.record_async("private native page binding and public collision drift",test_handoff_private_native_page_binding)
     result.record("private and public handoff binding parity",test_handoff_uses_model_visible_owned_bindings)

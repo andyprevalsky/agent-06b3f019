@@ -550,7 +550,12 @@ class ActionHistory:
             if key in entry:
                 # Their outer keys are tool protocol. Nested evaluate result
                 # keys still belong to the page and remain subject to masking.
-                safe_entry[key] = self._dom_service.model_visible_value(entry[key])
+                value = entry[key]
+                if key == "result" and entry.get("action") == "read_browser_state" and isinstance(value, dict) and isinstance(value.get("formatted_state"), str):
+                    safe_entry[key] = self._dom_service.model_visible_value({k: v for k, v in value.items() if k != "formatted_state"})
+                    safe_entry[key]["formatted_state"] = self._dom_service.model_visible_value(value["formatted_state"])
+                else:
+                    safe_entry[key] = self._dom_service.model_visible_value(value)
         if not self._dom_service.secret_values_used and entry.get("screenshot"):
             safe_entry["screenshot"] = entry["screenshot"]
         # These are harness-owned mechanics, rather than page echoes. A CVV
@@ -678,6 +683,15 @@ class ActionHistory:
             value = result.get(key)
             if isinstance(value, str) and value:
                 self._entries[-1].result[key] = value
+
+        # Retain only the normalized observation actually delivered by the
+        # native state reader. A failed coherence check withdraws its snapshot.
+        if self._entries[-1].action == "read_browser_state":
+            state = result.get("formatted_state")
+            if result.get("success", True) and isinstance(state, str) and state:
+                self._entries[-1].result["formatted_state"] = self.model_visible_value(state)
+            else:
+                self._entries[-1].result.pop("formatted_state", None)
 
     def get_entries(self) -> List[Dict[str, Any]]:
         """Get all entries as dicts for Rose API request."""

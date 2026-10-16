@@ -404,12 +404,25 @@ async def build_browser_verifier_context(
             display_params = {k: v for k, v in eparams.items() if k not in ["screenshot", "dom_tree"]}
             if display_params:
                 line += f"\n  Params: {display_params}"
-        display_result = {k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree"]}
+        display_result = {k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree", "formatted_state"]}
         if display_result:
             line += f"\n  Result: {display_result}"
         action_details_lines.append(line)
 
     actions_text = "\n\n".join(action_details_lines)
+    # Each delivered native observation keeps its own receipt identity and
+    # existing per-tool/aggregate verifier admission. Do not bury many DOM
+    # observations inside the single compact action-history TOOL_RESULT.
+    observation_evidence = [
+        {"role": "TOOL", "text": "",
+         "metadata": {"toolName": entry["action"], "toolStatus": "FINISHED", "browser_action_step": entry["step"],
+                      "structured_response": {"step": entry["step"], "formatted_state": entry["result"]["formatted_state"]}}}
+        for entry in reversed(all_action_entries)
+        if type(entry.get("step")) is int and entry.get("action") == "read_browser_state"
+        and isinstance((entry.get("result") or {}).get("formatted_state"), str)
+        and entry["result"]["formatted_state"]
+    ]
+
 
     page_stats = browser_state.get("page_stats", {})
     scroll_pos = browser_state.get("scroll_position", {})
@@ -418,9 +431,9 @@ async def build_browser_verifier_context(
 
     # C10: Browser verifier infers from action_history + final-state
     # ground truth. Multi-step browser tasks would balloon if we
-    # stuffed every step's DOM into the verifier prompt; instead
-    # we pass the action history (which logs URL transitions and
-    # tool inputs/outputs), the final-state DOM, and the final-state
+    # duplicated every raw step DOM inside compact history. Delivered native
+    # read observations now have separate exact-step evidence under the same
+    # verifier admission budgets; we retain final-state DOM and final-state
     # screenshot reference. The verifier reconstructs the journey
     # from action_history and grounds the answer in the FINAL state.
     #
@@ -561,7 +574,7 @@ async def build_browser_verifier_context(
                 "screenshot_b64": final_screenshot_b64 or "",
             },
         },
-    ]
+    ] + observation_evidence
 
 
 def append_completion_evidence(

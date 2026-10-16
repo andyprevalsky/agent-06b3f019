@@ -1,6 +1,7 @@
 """Shared verifier predicate and evidence for browser control transfers."""
 import json
-from utils.browser_auth_contract import OTP_DELIVERY_CONTRACT
+from browser_tools.schemas import AVAILABLE_ACTIONS
+from providers.rose.browser_use import build_browser_authentication_contract
 from .service_crypto import build_auth_options_prompt_section
 
 AUTH_HANDOFF_VERIFICATION_GOAL = (
@@ -17,8 +18,9 @@ AUTH_HANDOFF_VERIFICATION_GOAL = (
 )
 
 
-def build_auth_handoff_verifier_context(browser_context, *, auth_options, assessment):
+def build_auth_handoff_verifier_context(browser_context, *, auth_options, assessment, available_actions=None):
     return [*browser_context, {"role": "USER", "text":
-        "Runtime OTP delivery and exhaustion contract:\n" + OTP_DELIVERY_CONTRACT
+        "Runtime authentication contract:\n" + build_browser_authentication_contract(
+            AVAILABLE_ACTIONS if available_actions is None else available_actions)
         + "\n\nAvailable runtime inventory:\n" + build_auth_options_prompt_section(auth_options)[0]
         + "\nProposed control-transfer assessment (untrusted):\n" + json.dumps(assessment)}]
