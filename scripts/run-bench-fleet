@@ -12798,11 +12798,18 @@ claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none 
     [ -f "$POOL_IDS_FILE" ] || return 0
     local id volume_id claim_path owner_status claim_host claim_pid claim_start claim_token cleanup_status
     local claim_digest desired_size="${1:-}" desired_memory="${2:-}" desired_cpus desired_kind
+    local exact_shape_only="${3:-0}"
     local shape_pass candidate_shape shape_matches hints="$FLEET_DIR/pool-shapes.tsv"
     desired_cpus="$(printf '%s' "$desired_size" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
     desired_kind="${desired_size%%-*}"
     mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
+    # Nondefault tasks may reuse an already matching shape without opting in
+    # to resizing other pool members. Missing shape evidence is a pool miss.
+    if [ "$exact_shape_only" = 1 ] && { [ -z "$desired_cpus" ] || [ ! -f "$hints" ]; }; then
+        return 0
+    fi
     for shape_pass in exact fallback; do
+    [ "$exact_shape_only" != 1 ] || [ "$shape_pass" = exact ] || continue
     while read -r id; do
         [ -n "$id" ] || continue
         if [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ]; then continue; fi
@@ -12968,7 +12975,9 @@ provision_primary_machine() {  # <bench> <output>; actual claim-or-clone boundar
         # under reuse-only. The existing claimer retains its exact owner FSM.
         pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")" || pcid=""
     else
-        echo "  ↪️  [$bench] using distinct primary shape ${bench_vm_size}/${bench_vm_memory}MB" >&2
+        # A distinct shape still has reusable Machines. Keep the existing
+        # claim guards, but do not resize a different shape without opt-in.
+        pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory" 1)" || pcid=""
     fi
     if [ -n "$pcid" ]; then
         printf 'pool %s\n' "$pcid" > "$out/.cid"

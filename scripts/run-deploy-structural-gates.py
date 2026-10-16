@@ -164,6 +164,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-prestack-recovery.test.py"),
     ),
     Gate(
+        "cloudbench-primary-exact-shape-reuse",
+        ("python3", "scripts/tests/cloudbench-primary-exact-shape-reuse.test.py"),
+    ),
+    Gate(
         "cloudbench-maintenance-env",
         ("python3", "scripts/tests/cloudbench-maintenance-env.test.py"),
     ),
