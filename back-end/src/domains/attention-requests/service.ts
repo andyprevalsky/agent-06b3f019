@@ -174,7 +174,17 @@ export async function getById(id: string, userId: string | undefined, isInternal
 export async function respond(id: string, userId: string, data: RespondInput) {
   const request = await repo.findById(id);
   if (request === null) throw new NotFoundError('Attention request not found');
-  if (request.userId !== userId) throw new ForbiddenError('Not authorized');
+  if (request.userId !== userId) {
+    log.warn('Approval response refused for a different account', {
+      request_id: id,
+      agent_id: request.agentId,
+      authenticated_user_id: userId,
+      owner_user_id: request.userId,
+    });
+    throw new ForbiddenError(
+      'Switch to the account that owns this approval request, then try again.'
+    );
+  }
 
   // A decline is an answer like any other gate's: it must reach the agent as a
   // decline, never be recorded as the user having signed in.

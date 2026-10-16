@@ -9547,7 +9547,8 @@ async def test_credential_propagation_redacts_classifier_and_diagnostic_payloads
 
     refs = {"card_number": "4111111111111111", "pwd:fixture": "synthetic-fatal-propagation-password"}
     echoed = "failure: " + " | ".join(refs.values())
-    redact = lambda value: mask_secret_values(value, refs)
+    def redact(value):
+        return mask_secret_values(value, refs)
     for fail, diagnostic_fails in ((False, False), (True, False), (True, True)):
         propagate = AsyncMock(**({"side_effect": RuntimeError(echoed)} if fail else {"return_value": {"outcome": "unknown", "refs": 0, "applied": 0, "detail": echoed}}))
 
@@ -9582,7 +9583,8 @@ def test_browser_activity_error_redaction_preserves_temporal_retry_metadata():
     from helpers.workflow_generation import WorkflowGenerationSealed
 
     refs = {"card_number": "4111111111111111", "pwd:fixture": "synthetic-fatal-temporal-password"}
-    redact = lambda value: mask_secret_values(value, refs)
+    def redact(value):
+        return mask_secret_values(value, refs)
     delay = timedelta(seconds=17)
     for message in ("failure: " + refs["card_number"], "A safe outer failure"):
         raw = ApplicationError(
@@ -22541,6 +22543,13 @@ async def test_private_browser_pause_urls_use_protected_continuity():
 
         actor_client = AsyncMock(side_effect=actor_transport)
         judge = AsyncMock(return_value={"score": 1.0, "structured_response": {"url": raw_url}, "usage": {}})
+        verifier_prompt_builder = MagicMock(wraps=handler.build_verifier_prompt)
+        screenshot_upload = AsyncMock(return_value={
+            "id": "fixture-final-screenshot", "storage_path": "fixtures/screenshot_final.png",
+            "original_filename": "screenshot_final.png", "mime_type": "image/png",
+            "size_bytes": len(base64.b64decode(screenshot, validate=True)),
+            "created_at": "2026-10-16T00:00:00+00:00",
+        })
         from domains.spawn_browser_agent_v3 import service as browser_service
 
         async def verifier_context(**kwargs):
@@ -22582,29 +22591,39 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             patch(prefix + "build_browser_verifier_context", verifier_context),
             patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
             patch(prefix + "call_temporal_activity_from_activity", judge),
+            patch(prefix + "build_verifier_prompt", verifier_prompt_builder),
+            patch(prefix + "upload_to_storage", screenshot_upload),
         ]
+        resume_state = {
+            "approval_type": handler.AUTH_ASSISTANCE_DECLINED if pause == "declined" else "manual_pause",
+            "secret_redaction_refs": {
+                "pwd:url": secret, "card_cvv": "234", "pwd:image-token": "image_url",
+                "pwd:content-token": "content", "pwd:metadata-token": "metadata",
+                "pwd:user-token": "user", "pwd:assistant-token": "assistant",
+                "pwd:tool-token": "tool", "pwd:function-token": "function", "pwd:name-token": "name",
+                "pwd:upper-user-token": "USER", "pwd:upper-tool-token": "TOOL",
+            },
+            "secret_values_used": private_entry,
+            "browser_turn_messages": copy.deepcopy(prior_messages),
+        }
         if pause == "max_steps":
             # Exercise the native terminal branch with a single fixture step.
             patches.append(patch(prefix + "MAX_ITERATIONS", 1))
+            private_resume = {
+                **copy.deepcopy(resume_state),
+                "private_browser_runtime": {"browser_output_schema": copy.deepcopy(output_schema)},
+            }
+            patches.append(patch(prefix + "hydrate_resume_context", AsyncMock(return_value=private_resume)))
+            resume_state = {"approval_type": "manual_pause", "browser_resume_context_ref": archive_ref}
         with ExitStack() as stack:
             for item in patches:
                 stack.enter_context(item)
             result = await env.run(
                 handler.spawn_browser_agent_activity_v3, user_id="u1", agent_id="a1", goal="Inspect checkout",
                 tool_call_id="tool-1", task_id="task-1", is_resume=True, use_claude_mode=False,
-                output_schema=copy.deepcopy(output_schema),
-                start_url=start_url, write_lock_resume_state={
-                    "approval_type": handler.AUTH_ASSISTANCE_DECLINED if pause == "declined" else "manual_pause",
-                    "secret_redaction_refs": {
-                        "pwd:url": secret, "card_cvv": "234", "pwd:image-token": "image_url",
-                        "pwd:content-token": "content", "pwd:metadata-token": "metadata",
-                        "pwd:user-token": "user", "pwd:assistant-token": "assistant",
-                        "pwd:tool-token": "tool", "pwd:function-token": "function", "pwd:name-token": "name",
-                        "pwd:upper-user-token": "USER", "pwd:upper-tool-token": "TOOL",
-                    },
-                    "secret_values_used": private_entry,
-                    "browser_turn_messages": copy.deepcopy(prior_messages),
-                },
+                output_schema={"fields": [{**output_schema["fields"][0], "description": visible_url}]}
+                    if pause == "max_steps" else copy.deepcopy(output_schema),
+                start_url=start_url, write_lock_resume_state=resume_state,
             )
             if pause == "write" and snapshots[-1]["state"].get("private_browser_runtime"):
                 protected = snapshots[-1]["state"]["private_browser_runtime"]
@@ -22681,6 +22700,13 @@ async def test_private_browser_pause_urls_use_protected_continuity():
                     "payment": "awaiting_payment_card_approval", "auth": "awaiting_auth_assistance",
                     "completed": "completed", "max_steps": "max_iterations", "declined": "completed"}[pause]
         assert result["status"] == expected
+        if scenario == "raster_completed":
+            screenshot_upload.assert_awaited_once_with(
+                user_id="u1", file_content=base64.b64decode(screenshot, validate=True),
+                filename="screenshot_final.png", mime_type="image/png",
+            )
+        else:
+            screenshot_upload.assert_not_awaited()
         if actor_resume:
             assert actor_client.await_count == 1, "resumed actor did not reach the actual model boundary"
             actor_history = actor_client.await_args.kwargs["turn_messages"]
@@ -22725,6 +22751,20 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             assert finished[-1]["message"] == "{{secret:pwd:url}}"
         if pause in {"completed", "max_steps"}:
             assert judge.await_count == 1
+            verifier_args = judge.await_args.kwargs["args"]
+            assert verifier_args[5] == ("verifier_browser_max_steps" if pause == "max_steps" else "verifier_browser")
+            verifier_prompt_builder.assert_called_once()
+            prompt_schema = verifier_prompt_builder.call_args.kwargs["response_schema"]
+            expected_schema = {"fields": [{**output_schema["fields"][0], "description": visible_url}]}
+            for boundary, schema in (("prompt-builder", prompt_schema), ("check-progress", verifier_args[3])):
+                if schema != expected_schema:
+                    failures.append(scenario + "-" + boundary + "-unredacted-schema")
+            if secret in verifier_args[1]:
+                failures.append(scenario + "-rendered-verifier-prompt-secret")
+            if pause == "max_steps":
+                if prompt_schema is not verifier_args[3]:
+                    failures.append(scenario + "-verifier-schema-not-shared")
+                assert private_resume["private_browser_runtime"]["browser_output_schema"] == output_schema
             context = judge.await_args.kwargs["args"][0]
             validate_transport_images(context)
             assert context[0]["role"] == "USER" and context[-1]["role"] == "TOOL"
@@ -24947,6 +24987,8 @@ async def _drive_payment_card_gate(
     reject_gate=False,
     agentcard_connected=True,
     checkout_error=None,
+    lookup_result=None,
+    approval_calls=None,
 ):
     """Drive execute_tool through the payment-card gate branch.
 
@@ -25012,7 +25054,7 @@ async def _drive_payment_card_gate(
             activity_name if isinstance(activity_name, str) else getattr(activity_name, "__name__", "callable")
         )
         if activity_name == "lookup_purchase_activity":
-            return {"found": False, "reusable": False, "purchase": None}
+            return lookup_result or {"found": False, "reusable": False, "purchase": None}
         if activity_name == "mint_purchase_card_activity":
             return _next_mint()
         if activity_name == "agentcard_status_activity":
@@ -25026,6 +25068,8 @@ async def _drive_payment_card_gate(
         raise AssertionError(f"unexpected activity: {activity_name}")
 
     async def fake_request_user_approval_direct(*_args, **_kwargs):
+        if approval_calls is not None:
+            approval_calls.append(_kwargs)
         return {"attention_request_id": "approval-1"}
 
     async def fake_request_user_attention_direct(*_args, **kwargs):
@@ -25079,6 +25123,35 @@ async def _drive_payment_card_gate(
         ):
             events.append(event)
     return events, activity_calls, gate_keys, gate_payloads
+
+async def test_manager_payment_retry_reuses_approved_purchase_without_prompt():
+    approval_calls = []
+    events, calls, _, _ = await _drive_payment_card_gate(
+        mint_results=[{"cardId": "held-card", "pan": "4242424242421372", "expiry": "12/30", "cvv": "123", "last4": "1372"}],
+        lookup_result={"found": True, "reusable": True, "purchase": {
+            "id": "approved-purchase", "agentId": "agent-1", "status": "HELD", "fingerprint": "approved-key", "cardId": "held-card"
+        }},
+        approval_calls=approval_calls,
+    )
+    assert approval_calls == [], "already-approved same-agent retry must not request approval again"
+    assert calls == ["lookup_purchase_activity", "mint_purchase_card_activity"]
+    assert any(getattr(e, "title", "") == "Payment card ready" for e in events)
+
+async def test_manager_payment_lookup_error_tracks_usage_without_approving():
+    from tools.base import EventType, MessageStatus
+    approvals = []
+    events, calls, _, _ = await _drive_payment_card_gate(
+        mint_results=[], approval_calls=approvals,
+        lookup_result={"error": "Invalid purchase approval reuse decision", "usageItems": [
+            {"type": "llm", "model": "fixture-model", "input_tokens": 37, "output_tokens": 11}
+        ]},
+    )
+    assert approvals == [] and calls == ["lookup_purchase_activity"]
+    usage = [e for e in events if e.type == EventType.USAGE]
+    assert len(usage) == 1
+    assert usage[0].data["usage"]["llm"][0]["tokens_in"] == 37
+    assert usage[0].data["usage"]["llm"][0]["tokens_out"] == 11
+    assert any(e.status == MessageStatus.ERROR for e in events)
 
 async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries():
     events, activity_calls, _, _ = await _drive_payment_card_gate(
@@ -28459,6 +28532,8 @@ async def run_all_tests():
     # service_actions statics
     r.record("get_domain_from_url", test_get_domain_from_url_variants)
     r.record("get_base_domain", test_get_base_domain)
+    await r.record_async("manager_payment_retry_reuses_approved_purchase_without_prompt", test_manager_payment_retry_reuses_approved_purchase_without_prompt)
+    await r.record_async("manager_payment_lookup_error_tracks_usage_without_approving", test_manager_payment_lookup_error_tracks_usage_without_approving)
     r.record("is_approval_valid_none", test_is_approval_valid_no_approvals)
     r.record("is_approval_valid_missing_fields", test_is_approval_valid_missing_fields)
     r.record("is_approval_valid_domain_mismatch", test_is_approval_valid_domain_mismatch)

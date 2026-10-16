@@ -3208,6 +3208,136 @@ def test_agent_messages_ready_for_browser_hub_archive_waits_for_recording():
     assert bench._agent_messages_ready_for_browser_hub_archive([])
 
 
+def _resumed_recording_archive_rows():
+    # Captured a806f2a9: saved first part, resumed the SAME browser task, then
+    # paused before the resumed part was attached. No real media is fabricated.
+    identity = dict(
+        toolName="spawn_browser_agent",
+        task_id="owned-resumed-browser",
+        workflowGeneration="owned-root-generation",
+        browser_url="https://fixture.kernel.sh/browser/live/owned-session",
+        browser_session_metadata={"provider": "kernel"},
+    )
+
+    def row(action, status, **extra):
+        return {
+            "metadata": dict(identity, action_type=action, toolStatus=status, **extra)
+        }
+
+    first = row("recording", "IN_PROGRESS", toolCallId="first-start")
+    saved = row(
+        "recording",
+        "FINISHED",
+        toolCallId="first-saved",
+        recording_view_url="https://fixture.invalid/first-part",
+    )
+    resumed = row("recording", "IN_PROGRESS", toolCallId="resumed-start")
+    terminal = row("task_complete", "ERROR", toolCallId="owned-tool")
+    latest = row(
+        "recording",
+        "FINISHED",
+        toolCallId="resumed-saved",
+        recording_view_url="https://fixture.invalid/resumed-part",
+    )
+    return [first, saved, resumed, terminal], latest
+
+
+def test_browser_archive_requires_each_resumed_recording_part():
+    from copy import deepcopy
+    import benchmarks.run_benchmark as bench
+
+    rows, latest = _resumed_recording_archive_rows()
+    before = deepcopy(rows)
+    assert not bench._agent_messages_have_browser_recording_ready(rows), (
+        "earlier task recording concealed missing resumed part"
+    )
+    assert not bench._agent_messages_ready_for_browser_hub_archive(rows)
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(rows)
+    assert rows == before, "readiness mutated captured transcript"
+    complete = rows + [latest]
+    assert bench._agent_messages_ready_for_browser_hub_archive(complete)
+    assert bench._agent_messages_ready_for_durable_browser_evidence(complete)
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(
+        [rows[0], rows[2], latest, rows[3]]
+    ), "a later saved part concealed an earlier missing part"
+    for field, value in (
+        ("workflowGeneration", "foreign-generation"),
+        ("browser_url", "https://fixture.kernel.sh/browser/live/foreign-session"),
+    ):
+        foreign = deepcopy(latest)
+        foreign["metadata"][field] = value
+        assert not bench._agent_messages_ready_for_durable_browser_evidence(
+            rows + [foreign]
+        ), field
+    empty = deepcopy(latest)
+    empty["metadata"].pop("recording_view_url")
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(rows + [empty])
+
+
+async def test_browser_archive_refresh_waits_for_resumed_recording_part():
+    from copy import deepcopy
+    import benchmarks.run_benchmark as bench
+
+    rows, latest = _resumed_recording_archive_rows()
+    root = "owned-root-generation"
+    incomplete = {"agent": {"status": "PAUSED"}, "messages": rows}
+    complete = {"agent": {"status": "PAUSED"}, "messages": rows + [latest]}
+    logs = {}
+    with (
+        patch.object(
+            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
+        ) as tree,
+        patch.object(
+            bench,
+            "get_agent",
+            AsyncMock(side_effect=[deepcopy(incomplete), deepcopy(complete)]),
+        ) as get,
+        patch.object(bench.asyncio, "sleep", AsyncMock()),
+    ):
+        observed = await bench._refresh_browser_archive_snapshot(
+            "https://fixture.invalid", root, {}, logs, expected_agent_ids={root}
+        )
+    assert get.await_count == tree.await_count == 2, (
+        "archive owner returned before resumed recording was attached"
+    )
+    assert observed["messages"] == complete["messages"]
+    assert len(logs["tree"][root]["messages"]) == len(complete["messages"])
+
+
+async def test_browser_archive_missing_resumed_part_preserves_existing_deadline():
+    import benchmarks.run_benchmark as bench
+
+    rows, _ = _resumed_recording_archive_rows()
+    root = "owned-root-generation"
+    logs = {}
+    with (
+        patch.object(
+            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
+        ),
+        patch.object(
+            bench,
+            "get_agent",
+            AsyncMock(return_value={"agent": {"status": "PAUSED"}, "messages": rows}),
+        ),
+    ):
+        try:
+            await bench._refresh_browser_archive_snapshot(
+                "https://fixture.invalid",
+                root,
+                {},
+                logs,
+                expected_agent_ids={root},
+                timeout_seconds=0.02,
+            )
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError(
+                "missing resumed recording bypassed the archive deadline"
+            )
+    assert logs["browser_archive_observation"]["ready"] is False
+
+
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
     """A displayed tax-rate qualifier is equivalent only when its amount is exact."""
     from benchmarks.benchmark_tasks import BenchmarkTask
@@ -24034,6 +24164,15 @@ async def run_all_tests():
     r.record(
         "payment_setup_resume_stays_exclusive_beside_event_ticket",
         test_payment_setup_resume_stays_exclusive_beside_event_ticket,
+    )
+    r.record(
+        "browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part
+    )
+    await r.record_async(
+        "browser_archive_waits_resumed_recording_part", test_browser_archive_refresh_waits_for_resumed_recording_part
+    )
+    await r.record_async(
+        "browser_archive_missing_resumed_part_deadline", test_browser_archive_missing_resumed_part_preserves_existing_deadline
     )
     r.record(
         "agent_messages_ready_for_browser_hub_archive_waits_for_recording",

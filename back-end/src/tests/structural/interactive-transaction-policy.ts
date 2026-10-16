@@ -94,8 +94,9 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
   {
     file: 'providers/database.ts',
     scope: 'runTransactionWithRetry',
-    fingerprint: 'd9e5233d162c357a',
-    reason: 'canonical wrapper implementation',
+    fingerprint: 'abc1f6000607a968',
+    reason:
+      'canonical wrapper implementation; caller deadline bounds acquisition/body and only pre-body failures retry',
   },
   {
     file: 'providers/purchase-wallet-funding-repo.ts',

@@ -1,3 +1,8 @@
+import {
+  hasUnacknowledgedWorkflowStart,
+  updateAgentUnlessStartPending,
+  workflowStartMembership,
+} from './workflowStartPending';
 /**
  * Seal agent rows whose Temporal workflow is already closed, and chat-mode rows
  * whose escalation never started a workflow.
@@ -193,7 +198,8 @@ export async function findStuckChatCandidates(
 async function sealAgent(
   candidate: LivenessCandidate,
   temporalStatus: string,
-  deps: Pick<WorkflowLivenessDependencies, 'finalizeInterruptedTools' | 'releaseBrowserSessions'>
+  deps: Pick<WorkflowLivenessDependencies, 'finalizeInterruptedTools' | 'releaseBrowserSessions'>,
+  membership: string
 ): Promise<boolean> {
   // Reconcile the generation that actually died — `candidate.workflowId` — not the
   // agent id. They differ for every agent that already survived a deploy
@@ -205,15 +211,21 @@ async function sealAgent(
     candidate.workflowId
   );
 
-  const { count } = await prisma.agent.updateMany({
-    where: {
-      id: candidate.agentId,
-      temporalWorkflowId: candidate.workflowId,
-      deletedAt: null,
-      status: { notIn: [...TERMINAL_AGENT_STATUSES] },
+  const { count } = await updateAgentUnlessStartPending(
+    candidate.agentId,
+    candidate.workflowId,
+    temporalStatus,
+    {
+      where: {
+        id: candidate.agentId,
+        temporalWorkflowId: candidate.workflowId,
+        deletedAt: null,
+        status: { notIn: [...TERMINAL_AGENT_STATUSES] },
+      },
+      data: { status: 'FAILED', statusMessage: RECONCILED_STATUS_MESSAGE },
     },
-    data: { status: 'FAILED', statusMessage: RECONCILED_STATUS_MESSAGE },
-  });
+    membership
+  );
 
   if (count === 0) return false;
 
@@ -282,23 +294,30 @@ async function sealAgent(
  */
 async function sealStuckChatAgent(
   candidate: StuckChatCandidate,
-  deps: Pick<WorkflowLivenessDependencies, 'finalizeInterruptedTools' | 'releaseBrowserSessions'>
+  deps: Pick<WorkflowLivenessDependencies, 'finalizeInterruptedTools' | 'releaseBrowserSessions'>,
+  membership: string
 ): Promise<boolean> {
   const inProgressTools = await captureInProgressWorkflowTools(
     candidate.agentId,
     candidate.agentId
   );
 
-  const { count } = await prisma.agent.updateMany({
-    where: {
-      id: candidate.agentId,
-      temporalWorkflowId: null,
-      deletedAt: null,
-      status: 'ACTIVE',
-      messageCount: 0,
+  const { count } = await updateAgentUnlessStartPending(
+    candidate.agentId,
+    undefined,
+    undefined,
+    {
+      where: {
+        id: candidate.agentId,
+        temporalWorkflowId: null,
+        deletedAt: null,
+        status: 'ACTIVE',
+        messageCount: 0,
+      },
+      data: { status: 'FAILED', statusMessage: STUCK_CHAT_STATUS_MESSAGE },
     },
-    data: { status: 'FAILED', statusMessage: STUCK_CHAT_STATUS_MESSAGE },
-  });
+    membership
+  );
 
   if (count === 0) return false;
 
@@ -376,7 +395,13 @@ export async function reconcileWorkflowLiveness(
 
   await mapWithConcurrency(candidates, deps.concurrency, async (candidate) => {
     let temporalStatus: string;
+    let membership: string;
     try {
+      if (await hasUnacknowledgedWorkflowStart(candidate.agentId, candidate.workflowId)) {
+        inconclusive++;
+        return;
+      }
+      membership = await workflowStartMembership(candidate.agentId, candidate.workflowId);
       temporalStatus = await deps.describeStatus(candidate.workflowId);
     } catch (error) {
       // Inconclusive: Temporal unreachable, throttled, or erroring. Leave the row
@@ -394,7 +419,7 @@ export async function reconcileWorkflowLiveness(
     if (normalized !== 'NOT_FOUND' && !CLOSED_TEMPORAL_STATUSES.has(normalized)) return;
 
     try {
-      if (await sealAgent(candidate, normalized, deps)) sealed++;
+      if (await sealAgent(candidate, normalized, deps, membership)) sealed++;
     } catch (error) {
       // One provider/tool cleanup failure must not reject the shared worker and
       // abandon every later candidate in its cursor. `sealAgent` has already
@@ -410,7 +435,14 @@ export async function reconcileWorkflowLiveness(
 
   await mapWithConcurrency(stuckChatCandidates, deps.concurrency, async (candidate) => {
     try {
-      if (await sealStuckChatAgent(candidate, deps)) sealed++;
+      if (await hasUnacknowledgedWorkflowStart(candidate.agentId)) {
+        inconclusive++;
+        return;
+      }
+      if (
+        await sealStuckChatAgent(candidate, deps, await workflowStartMembership(candidate.agentId))
+      )
+        sealed++;
     } catch (error) {
       inconclusive++;
       log.warn('Stuck-chat terminal cleanup inconclusive; restored agent for retry', {

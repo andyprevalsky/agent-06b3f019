@@ -9,6 +9,7 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: AgentChatArea used inspection_context only for an identity badge and mounted the writable InputArea for a foreign account run
 symptoms:
   - Failed to pause agent
+  - POST /api/attention-requests/cmv8b7buz0l7hzjsggc1gqgfs/respond returned 403
   - POST /api/agents/ae17b024-5287-4199-84d0-6cce3bd1765d/pause returned 404
   - Agent detail GET returned 200 while pause POST returned 404
   - Read-only inspection exposed Stop and pending approval controls
@@ -22,6 +23,7 @@ sources:
   - agent ae17b024-5287-4199-84d0-6cce3bd1765d
   - commit b784977b0bf699c56bc67b063ae849a9cf5150fb
   - PR #1511
+  - agent 389d96c6-4c8b-4729-a201-bbc73499f662
 repro: front-end/src/tests/blackbox/admin-agent-inspection.blackbox.tsx
 status: fixed
 ---
@@ -135,6 +137,14 @@ The same five owning suites fail 42/43 on the intermediate loading candidate
 and pass all 43 after the failure reset, in 14.36 seconds. App typecheck,
 targeted lint and diff checks pass. Ordinary owned control, optimistic creation,
 and the unselected landing composer retain their existing behavior.
+
+## Additional approval evidence — October 16
+
+Agent `389d96c6-4c8b-4729-a201-bbc73499f662` independently exposed the same first-bad inspection boundary during payment approval, so this evidence is appended here rather than keeping a duplicate RCA case. Retained backend traces show four `POST /api/attention-requests/cmv8b7buz0l7hzjsggc1gqgfs/respond` requests returning 403 at 16:30:21.046, 16:30:26.556, 16:30:27.583 and 16:30:32.029 UTC on October 14. Request IDs: `0af4b8c250af`, `3fa34ec7dd14`, `8c7112a3f177`, `16181818059a`; each took 30–34 ms. Successful User.findUnique and AgentAttentionRequest.findUnique preceded the first denial. SMS resolved the same request at 16:30:39.090. This proves a refused approval request, not a transaction timeout or a successful approval followed by a toast failure.
+
+The historical browser's authenticated subject remains unknown. Two User records share the phone, and current Supabase phone mapping points at a legacy identity; that does not prove which session made these historical requests. No account merge, production session mint, approval submission or ownership bypass was performed. Authentication identity policy remains unchanged.
+
+The independent full-Terminal regression, populated with the captured payment attention and foreign inspection context, failed on the original b784977b0 source: the Accept button was enabled. The same fixture passed after constraining mutation controls, alongside an owned-agent positive control; the first valid measured baseline was one failure/four passes in 12.95 seconds, candidate five passes in 12.01 seconds. This independently reproduces the existing source defect; it does not resolve historical caller attribution. Main's broader PR #1511 fix already supplies the read-only branch and browser restrictions. After syncing main, the duplicate switch component, account-switch API modification, inspection guards and duplicate tests were removed from the approval-retry branch. It keeps the already-landed owning tests and only improves server refusal diagnostics and error toast text. Backend respond still requires the authenticated request owner and now records both identities on a denial.
 
 ## Human feedback
 
