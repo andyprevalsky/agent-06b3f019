@@ -948,6 +948,21 @@ def build_auth_options_prompt_section(
                 f"- Minted account: Email -> {minted_email} (codes mailed here reach you automatically)"
                 f"{phone_clause}{password_clause} | {_disabled_label(minted)}"
             )
+            # Auth options is scoped to the task user. Its realm record is
+            # can be provisioned before site registration/verification succeeds.
+            # Project provenance separately from site state and reader health.
+            identity_facts = {
+                "source": "auth_options.minted",
+                "ownership_scope": "task_user",
+                "site_registration": "not_established_by_inventory",
+                "sms_reader_provider": (
+                    "disabled" if minted.get("disabled") else
+                    "not_applicable" if not minted_phone else
+                    "agentphone" if minted.get("phoneProvider") == "agentphone" else "unknown"
+                ),
+                "sms_delivery": "not_established_by_inventory",
+            }
+            lines.append("- Supplied identity facts: " + json.dumps(identity_facts, sort_keys=True))
             credential_refs_by_secret_ref[str(minted_email)] = {
                 "kind": "minted_account",
                 "id": str(minted_id or minted_email),
