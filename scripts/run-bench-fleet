@@ -55,6 +55,7 @@
 #                      as it does an unset BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS)
 #   --autoscale-max N  per-bench ceiling including the primary; must be >=2
 #                      (default 15 = prod MAX_MACHINES)
+#   --qualify-worker   separate one-task REAL run with one required reusable worker
 #   --infra-probe      fleet substrate canary: bring-up + barrier + DONE without
 #                      run_benchmark / LLM; implies --strict-barrier
 #   --skip-autoscaler  skip mandatory per-bench worker autoscalers (DEMO $0
@@ -1033,6 +1034,7 @@ FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
 FRESH_VOLUMES_REQUESTED=0
 INFRA_PROBE="${CLOUDBENCH_INFRA_PROBE:-0}"
 SKIP_AUTOSCALER="${CLOUDBENCH_SKIP_AUTOSCALER:-0}"
+QUALIFY_WORKER=0
 STRICT_BARRIER="${CLOUDBENCH_STRICT_BARRIER:-0}"
 COLD_HANDOFF_REQUEST=""
 COLD_HANDOFF_REQUEST_SHA=""
@@ -1244,6 +1246,7 @@ while [ $# -gt 0 ]; do
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
         --fresh-volumes) FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED=1; shift ;;
         --snapshot-volumes) FRESH_VOLUMES=0; FRESH_VOLUMES_REQUESTED=0; shift ;;
+        --qualify-worker) QUALIFY_WORKER=1; shift ;;
         --infra-probe)    INFRA_PROBE="1"; STRICT_BARRIER="1"; shift ;;
         --skip-autoscaler) SKIP_AUTOSCALER="1"; shift ;;
         --strict-barrier) STRICT_BARRIER="1"; shift ;;
@@ -1395,6 +1398,17 @@ fi
     || [ "${#BENCHES[@]}" -ge 1 ] \
     || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }
 
+# A worker qualification is a separate single-task execution, never a campaign
+# floor or a synthetic infra probe. Fail before credentials/provider access.
+if [ "$QUALIFY_WORKER" = 1 ]; then
+    [ "${#BENCHES[@]}" = 1 ] && [ "$INFRA_PROBE" = 0 ] \
+        && [ "$SKIP_AUTOSCALER" = 0 ] && [ "$KEEP_CLONES" = 0 ] \
+        && [ "$POOL_REUSE_ONLY" = 1 ] && [ "$RECOVER_STALE_ONLY" = 0 ] \
+        && [ "$FLEET_WORKER_VM_SIZE" = performance-1x ] && [ "$FLEET_WORKER_VM_MEMORY" = 2048 ] \
+        && [ -z "$PROVISION_POOL" ] && [ -z "$SIM_ON_CSV" ] && [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ] \
+        || { echo "❌ --qualify-worker requires one REAL staged reusable task with autoscaling and teardown" >&2; exit 2; }
+fi
+
 # Validate the whole runnable batch before detaching, resolving Fly credentials,
 # or touching provider state. Besides rejecting typos without provisioning paid
 # machines, one catalog read gives launch a stable per-task mode snapshot instead
@@ -1468,6 +1482,9 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
     catalog_index=0
     while IFS=$'\t' read -r catalog_mode browser_requirement catalog_timeout; do
         [ -n "$catalog_mode" ] || continue
+        if [ "$QUALIFY_WORKER" = 1 ] && [ "$catalog_mode" != real ]; then
+            echo "❌ --qualify-worker requires a REAL task" >&2; exit 2
+        fi
         case "$catalog_mode" in
             real|simulate) CATALOG_MODES+=("$catalog_mode") ;;
             *) echo "❌ benchmark catalog returned invalid world-model mode: $catalog_mode" >&2; exit 1 ;;
@@ -13949,6 +13966,32 @@ stop_current_registry_primaries_for_pool() {  # <joins> <guest-failed> <runtime-
     done
 }
 
+verify_worker_qualification() {  # <out>; existing canonical capture and return only
+    python3 - "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-reuse.py" \
+        "$1" "$FLEET_OWNER_TOKEN" "$POOL_CLAIMS_DIR" <<'PYVERIFY'
+import json,runpy,sys
+from pathlib import Path
+h=runpy.run_path(sys.argv[1]);out=Path(sys.argv[2]);owner=sys.argv[3];claims=Path(sys.argv[4]);qualified=[]
+for path in sorted((out/'worker-borrowed').glob('*.released.json')):
+    returned=json.loads(h['read'](path));mid=returned['machine_id']
+    assignment=json.loads(h['read'](out/'worker-borrowed'/(mid+'.json')))
+    assert returned==json.loads(h['read'](out/'worker-borrowed'/(mid+'.returned.json')))
+    assert assignment['fleet_owner_token']==returned['fleet_owner_token']==owner
+    assert assignment['machine_id']==mid and assignment['claim_sha256']==returned['claim_sha256']
+    assert assignment['primary_machine_id']==returned['primary_machine_id'] and assignment['run_token']==returned['run_token']
+    assert returned['state']=='stopped' and returned['volume_retained'] is True
+    assert not (claims/mid).exists() and not (claims/mid).is_symlink()
+    capture=out/'worker-runtime-evidence'/mid/'capture/manifest.json'
+    assert capture.is_file() and not capture.is_symlink()
+    assert json.loads(h['read'](capture))['terminal']['worker_started'] is True
+    assert h['read'](out/('worker-'+mid+'.qualification-ready')).decode().strip()==mid+'|'+assignment['run_token']+'|'+assignment['primary_machine_id']
+    assert h['validate_capture'](out,mid,assignment['primary_machine_id'],assignment['run_token'])==returned['evidence_sha256']
+    qualified.append(mid)
+assert qualified, 'no runtime-verified released worker'
+print(json.dumps({'schema':'cloudbench-worker-qualification-v1','worker_ids':qualified,'floor':2,'original_campaign_credit':0}))
+PYVERIFY
+}
+
 cleanup() {
     local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}" publication_failed=0
     local id i out claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
@@ -14286,6 +14329,14 @@ cleanup() {
     # argv too, so that sweep KILLED the very resolver we persist (→ dead link
     # post-run). Per-bench viewers are reaped by their own run-bench-cloud child's
     # exit trap when we SIGTERM CHILD_PIDS above; the batch resolver lives on.
+    if [ "${QUALIFY_WORKER:-0}" = 1 ] && [ "$ec" = 0 ]; then
+        for out in "${CHILD_OUT[@]}"; do
+            if ! verify_worker_qualification "$out"; then
+                echo "❌ worker qualification lacks verified runtime and stopped/released worker" >&2
+                ec=1
+            fi
+        done
+    fi
     fleet_native_reap_close || { ec=1; teardown_failed=1; }
     [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
     if [ "$guest_shutdown_failed" = "1" ] || [ "$runtime_evidence_failed" = "1" ]; then
@@ -15494,6 +15545,9 @@ if [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ]; then
         PROVENANCE_CONFIG_ARGS+=(--config-value "infra_probe=1")
     fi
 fi
+if [ "$QUALIFY_WORKER" = 1 ]; then
+    PROVENANCE_CONFIG_ARGS+=(--config-value "worker_qualification_floor=2")
+fi
 if [ -n "$FRESH_TARGET_REGION" ]; then
     PROVENANCE_CONFIG_ARGS+=(--config-value "donor_region=$REGION")
 fi
@@ -16552,7 +16606,11 @@ PY
       }
       publish_worker_ready() {
           local ready_tmp="$out/worker-$wid.ready.tmp.$$"
-          : > "$ready_tmp" && mv "$ready_tmp" "$out/worker-$wid.ready"
+          : > "$ready_tmp" && mv "$ready_tmp" "$out/worker-$wid.ready" || return 1
+          if [ "${QUALIFY_WORKER:-0}" = 1 ]; then
+              printf '%s|%s|%s\n' "$wid" "$runtime_run_token" "$primary_id" > "$ready_tmp" \
+                  && mv "$ready_tmp" "$out/worker-$wid.qualification-ready" || return 1
+          fi
       }
       log_worker_stage() {
           printf '[%s] %s\n' \
@@ -17034,7 +17092,10 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             continue
         fi
         scrape_failures=0
+        # Only explicit qualification changes the controller demand floor.
+        # Keep the actual guest metric intact in logs and ordinary execution.
         want=$((desired - 1)); [ "$want" -lt 0 ] && want=0
+        if [ "${QUALIFY_WORKER:-0}" = 1 ] && [ "$want" -lt 1 ]; then want=1; fi
         [ "$want" -gt $((AUTOSCALE_MAX - 1)) ] && want=$((AUTOSCALE_MAX - 1))
         # Publish outstanding demand before readiness or provider allocation.
         # Final acceptance therefore cannot see tracked=ready=0 and pass while

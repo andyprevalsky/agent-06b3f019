@@ -356,7 +356,7 @@ while [ "$#" -gt 0 ]; do
             INTERNAL_OPERATION=1
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --keep-clones|--reuse-pool-only|--cold-primary-bootstrap|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
+        --qualify-worker|--keep-clones|--reuse-pool-only|--cold-primary-bootstrap|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
             FLEET_ARGS+=("$1"); shift
             ;;
         -h|--help)
@@ -384,6 +384,12 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+if [ "$CAMPAIGN_REQUESTED" = 1 ]; then
+    for arg in "${FLEET_ARGS[@]}"; do
+        [ "$arg" != --qualify-worker ] || { echo "❌ --qualify-worker is separate from campaigns" >&2; exit 2; }
+    done
+fi
 
 case "$RETRY_INFRA" in
     ''|*[!0-9]*) echo "❌ --retry-infra requires a nonnegative integer" >&2; exit 2 ;;
