@@ -154,6 +154,7 @@ async function capturePlan(): Promise<void> {
   }
   const plan: WorkerProcessPlan = {
     version: 1,
+    peopleCredentialBrokerOrigin: WORKER_PROCESS_BACKEND_ORIGIN,
     app,
     attempt: artifact.deploymentToken,
     previousQueue: pointer.taskQueue,

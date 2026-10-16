@@ -1747,6 +1747,7 @@ def _production_process_request():
         "namespace": "fixture.namespace",
         "baseTaskQueue": "navi-agent-tasks",
         "validationTaskQueue": "fixture-validation",
+        "peopleCredentialBrokerOrigin": "https://navi-j9a9.onrender.com",
         "bundleSHA256": hashlib.sha256(data).hexdigest(),
         "bundleBase64": base64.b64encode(data).decode(),
         "healthPort": 0,
@@ -1817,6 +1818,7 @@ def test_production_process_environment_preserves_old_owner_and_activation():
     request, _ = _production_process_request()
     original = {
         "BACKEND_API_KEY": "fixture",
+        "PEOPLE_CREDENTIAL_BROKER_URL": "https://foreign.example",
         "TEMPORAL_TASK_QUEUE": "old",
         "TEMPORAL_NAMESPACE": "fixture.namespace",
         "PYTHONPATH": "/old/app",
@@ -1827,6 +1829,7 @@ def test_production_process_environment_preserves_old_owner_and_activation():
     before = dict(original)
     environment = module.worker_environment(request, Path("/owned/runtime"), original)
     assert original == before
+    assert environment.get("PEOPLE_CREDENTIAL_BROKER_URL") == request["peopleCredentialBrokerOrigin"]
     assert environment["AUTOSCALER_ACTUATE"] == "0"
     assert environment["TEMPORAL_WORKER_REQUIRE_ACTIVATION"] == "1"
     assert environment["TEMPORAL_TASK_QUEUE"] == "navi-agent-tasks"
@@ -2058,7 +2061,7 @@ countfile=home/'launches'
 count=int(countfile.read_text())+1 if countfile.exists() else 1
 countfile.write_text(str(count))
 with (home/'observations').open('a') as output:
-    output.write(json.dumps({'pid':os.getpid(),'cwd':os.getcwd(),'limit':resource.getrlimit(resource.RLIMIT_AS),'activation':os.environ['TEMPORAL_WORKER_REQUIRE_ACTIVATION'],'autoscale':os.environ['AUTOSCALER_ACTUATE'],'count':count,'oom':pathlib.Path('/proc/self/oom_score_adj').read_text().strip()})+'\n')
+    output.write(json.dumps({'pid':os.getpid(),'cwd':os.getcwd(),'limit':resource.getrlimit(resource.RLIMIT_AS),'broker':os.environ['PEOPLE_CREDENTIAL_BROKER_URL'],'activation':os.environ['TEMPORAL_WORKER_REQUIRE_ACTIVATION'],'autoscale':os.environ['AUTOSCALER_ACTUATE'],'count':count,'oom':pathlib.Path('/proc/self/oom_score_adj').read_text().strip()})+'\n')
 if count==1:
     raise SystemExit(17)
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -2210,6 +2213,7 @@ print(json.dumps(m.dispatch(request)),flush=True)
             assert len(observations) == 3 and len({item["pid"] for item in observations}) == 3, observations
             assert all(item["limit"] == [1073741824, 1073741824] for item in observations)
             assert all(item["oom"] == "1000" for item in observations)
+            assert all(item["broker"] == request["peopleCredentialBrokerOrigin"] for item in observations)
             assert all(item["activation"] == "1" and item["autoscale"] == "0" for item in observations)
             assert all(item["cwd"].endswith("/source/agents") for item in observations)
             assert old_source.read_text() == "preserve original source" and old.poll() is None

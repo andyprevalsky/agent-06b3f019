@@ -43,6 +43,7 @@ REQUEST_KEYS = {
     "version",
     "action",
     "app",
+    "peopleCredentialBrokerOrigin",
     "machineId",
     "machineVersion",
     "bootId",
@@ -94,6 +95,9 @@ def authenticate(request, key):
     require(hmac.compare_digest(signature, expected), "signature mismatch")
     require(type(request["version"]) is int and request["version"] == 1, "request version")
     require(request["action"] in ("ensure", "status"), "action")
+    require(
+        request["peopleCredentialBrokerOrigin"] == "https://navi-j9a9.onrender.com", "people credential broker origin"
+    )
     require(request["action"] == "status" or isinstance(request.get("bundleBase64"), str), "ensure archive required")
     for name in (
         "app",
@@ -378,6 +382,7 @@ def worker_environment(request, runtime, inherited):
     }
     environment.update(
         {
+            "PEOPLE_CREDENTIAL_BROKER_URL": request["peopleCredentialBrokerOrigin"],
             "TEMPORAL_NAMESPACE": request["namespace"],
             "TEMPORAL_TASK_QUEUE": request["baseTaskQueue"],
             "TEMPORAL_WORKER_SURFACE_HASH": request["surfaceHash"],
