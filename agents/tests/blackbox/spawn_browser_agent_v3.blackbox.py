@@ -21539,6 +21539,8 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             return (10, 10)
 
         async def get_browser_state(self, include_screenshot=False):
+            if auth_review is not None and auth_review.get("observed_states"):
+                return auth_review["observed_states"].pop(0)
             return {"url": "https://shop.example/login/verify", "screenshot": None}
 
         async def get_page_identity(self):
@@ -21548,6 +21550,12 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             return fallback or "https://shop.example/login/verify"
 
     handler = "domains.spawn_browser_agent_v3.handler."
+    import helpers.llm as fixture_llm
+    original_fixture_verifier = fixture_llm.check_progress
+    async def scripted_handoff_verifier(*args, **kwargs):
+        if len(args)>5 and args[5]=="verifier_browser_auth_handoff":
+            return {"score":1.0,"reasoning":"Scripted human-transfer verdict for the OTP handoff fixture","usage":{}}
+        return await original_fixture_verifier(*args, **kwargs)
     targets = [
         patch(handler + "_fetch_and_append_recent_otp_user_messages", poll),
         patch(handler + "BrowserThinkingStream", make_stream),
@@ -21581,6 +21589,10 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
         patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
     ]
+    # Explicit fixture-local reviewer for old direct OTP cases; preserve an
+    # injected reviewer (including rejection/soft-pass tests) without override.
+    if not isinstance(original_fixture_verifier, AsyncMock):
+        targets.append(patch("helpers.llm.check_progress", scripted_handoff_verifier))
     if auth_review is not None:
         async def reviewed_action(*args, **kwargs):
             from domains.spawn_browser_agent_v3.service_actions import _input_success_result

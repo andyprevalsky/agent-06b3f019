@@ -26,7 +26,7 @@ async def assert_auth_assessment_controls(owning_fixture):
         rejected = uniform_check(missing_rows, auth_options=INVENTORY, auth_realm="shop.example", current_url=URL, action_history=[])
         corrected = assessment(phone="unavailable", blocker=blocker, reason="Current named account requires user action; no permitted readable channel remains.")
         r = {"inventory": deepcopy(INVENTORY), "actions": [handoff(missing_rows), handoff(corrected)]}
-        with _offline_activity_edges():
+        with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
             await owning_fixture("empty", auth_review=r)
         assert len(r["contexts"]) == 2
         assert rejected and rejected["error"] == "authentication_assessment_incomplete", "blocker must not bypass supplied-recipient accounting"
@@ -61,7 +61,7 @@ async def assert_auth_assessment_controls(owning_fixture):
         {"action":"read_browser_state", "params":{}},
         handoff(final),
     ]}
-    with _offline_activity_edges():
+    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
         await owning_fixture("empty", auth_review=r)
     assert [x["params"]["text"] for x in r["executed"] if x["action"] == "input_text"] == ["+15550000001", "+15550000002"]
     assert "action_step" in str(r["contexts"][7]["turn_messages"])
@@ -77,7 +77,7 @@ async def assert_auth_assessment_controls(owning_fixture):
         assessment(phone="not_applicable", blocker="user_only_verification", reason="Password was accepted; approve on the separate device."),
     ]:
         r = {"inventory": deepcopy(INVENTORY), "goal": ("Read the member number for named@example.test only" if a["recipient_options"][1]["status"] == "not_applicable" else "Read my member number"), "actions": [handoff(a)]}
-        with _offline_activity_edges():
+        with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
             await owning_fixture("empty", auth_review=r)
         assert not r.get("executed"), "handoff must never retarget a restricted or accepted account"
         assert r["result"]["auth_assessment"] == a
@@ -102,7 +102,7 @@ async def assert_auth_assessment_controls(owning_fixture):
                            "blocker": "automated_options_exhausted", "reason": "All three supplied recipients were individually rejected",
                            "recipient_options": [{"method": "email_otp", "recipient": v, "status": "exhausted", "evidence": "Observed individual rejection", "evidence_steps": [4*j+2,4*j+4]} for j,v in enumerate(addresses)]}))
     finite = {"inventory": inventory, "actions": actions}
-    with _offline_activity_edges():
+    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
         await owning_fixture("empty", auth_review=finite)
     assert [x["params"]["text"] for x in finite["executed"] if x["action"] == "input_text"] == addresses
     assert len(finite["contexts"]) == 13
@@ -121,7 +121,7 @@ async def assert_auth_assessment_controls(owning_fixture):
             invalid["recipient_options"][1].update(status="exhausted", evidence_steps=[999])
         corrected = assessment(phone="unavailable", reason="No applicable readable recipient remains")
         r = {"inventory": deepcopy(INVENTORY), "actions": [handoff(invalid), handoff(corrected)]}
-        with _offline_activity_edges():
+        with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
             await owning_fixture("empty", auth_review=r)
         assert "authentication_assessment_incomplete" in str(r["contexts"][1]["turn_messages"])
         assert not r.get("executed")
@@ -138,7 +138,7 @@ async def assert_auth_assessment_controls(owning_fixture):
     label_first = {"auth_realm":"shop.example","page_url":URL,"blocker":"automated_options_exhausted","reason":"Assess this supplied recipient","recipient_options":label_rows}
     label_last=deepcopy(label_first);label_last["recipient_options"][0].update(status="exhausted", evidence="Observed recipient rejection", evidence_steps=[2,4])
     labelled={"inventory":{"realm":"shop.example","minted":{"accountLabel":"label@example.test"}}, "actions":[handoff(label_first),{"action":"input_text","index":7,"params":{"text":"label@example.test"}},{"action":"click","index":8,"params":{}},{"action":"read_browser_state","params":{}},handoff(label_last)]}
-    with _offline_activity_edges():
+    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
         await owning_fixture("empty",auth_review=labelled)
     assert [a["params"]["text"] for a in labelled["executed"] if a["action"]=="input_text"] == ["label@example.test"]
     observations.append({"case":"label_only_minted_identity","decisions":5,"inputs":1})
@@ -182,7 +182,7 @@ async def assert_auth_assessment_controls(owning_fixture):
     from domains.spawn_browser_agent_v3.config import MAX_ITERATIONS
     invalid = assessment();invalid["page_url"]="https://stale.example/"
     bounded = {"inventory": deepcopy(INVENTORY), "actions": [handoff(invalid)], "expected_status": "max_iterations"}
-    with _offline_activity_edges():
+    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
         await owning_fixture("empty", resume_step_count=MAX_ITERATIONS-1, auth_review=bounded)
     assert not bounded.get("executed")
 

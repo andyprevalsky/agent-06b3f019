@@ -141,7 +141,7 @@ async def assert_archive_abort_cancels_only_exclusive_queued_futures(mixed=False
 
 async def assert_abort_before_archive_start_releases_admission_slot():
     from domains.spawn_browser_agent_v3 import recording
-    with _offline_activity_edges():
+    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
         # Serial admission must keep succeeding when abort precedes coroutine entry.
         for _ in range(8):
             owner = _recorder()
