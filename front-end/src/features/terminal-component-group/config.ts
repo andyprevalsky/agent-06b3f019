@@ -17,7 +17,7 @@ export const API_BASE_WITH_PATH = backendApiUrl();
 export const CLAUDE_CODE_WS_RETRY_DELAYS = [100, 400, 800];
 export const CLAUDE_CODE_WS_MAX_RETRIES = 3;
 
-/** Default expanded sidebar width in pixels (used until the user drags it). */
+/** Reference expanded sidebar width in pixels for saved resize preferences. */
 export const SIDEBAR_WIDTH_EXPANDED = 300;
 
 /** Collapsed sidebar width in pixels (icon rail). */

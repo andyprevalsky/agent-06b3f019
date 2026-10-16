@@ -263,7 +263,11 @@ export type { Stripe };
  * charged. A lost/terminal response is only considered successful after re-reading Stripe and
  * proving that the intent was captured; a canceled intent must never be returned as a usable card.
  */
-export async function captureAuthorizedHold(paymentIntentId: string): Promise<void> {
+export async function captureAuthorizedHold(
+  paymentIntentId: string,
+  livemode = false
+): Promise<void> {
+  const stripe = getStripeClientForLivemode(livemode);
   try {
     await stripe.paymentIntents.capture(paymentIntentId);
   } catch (error) {
@@ -288,7 +292,11 @@ export async function captureAuthorizedHold(paymentIntentId: string): Promise<vo
  * user-visible charge/refund churn or fee. An ambiguous response is only successful after Stripe
  * confirms cancellation; if a concurrent capture won, the caller must retry through refund logic.
  */
-export async function cancelAuthorizedHold(paymentIntentId: string): Promise<void> {
+export async function cancelAuthorizedHold(
+  paymentIntentId: string,
+  livemode = false
+): Promise<void> {
+  const stripe = getStripeClientForLivemode(livemode);
   try {
     await stripe.paymentIntents.cancel(paymentIntentId);
   } catch (error) {
@@ -315,8 +323,10 @@ export async function cancelAuthorizedHold(paymentIntentId: string): Promise<voi
  */
 export async function refundCapturedPurchase(
   paymentIntentId: string,
-  purchaseId: string
+  purchaseId: string,
+  livemode = false
 ): Promise<void> {
+  const stripe = getStripeClientForLivemode(livemode);
   const acknowledgement = await stripe.refunds.create(
     {
       payment_intent: paymentIntentId,
@@ -369,8 +379,10 @@ function paymentIntentWasCaptured(intent: ReturnType<typeof paymentIntentStatus>
  */
 export async function reversePurchasePaymentIntent(
   paymentIntentId: string,
-  purchaseId: string
+  purchaseId: string,
+  livemode = false
 ): Promise<'canceled' | 'refunded' | 'noop'> {
+  const stripe = getStripeClientForLivemode(livemode);
   const intent = paymentIntentStatus(await stripe.paymentIntents.retrieve(paymentIntentId));
   if (intent.status === 'canceled') {
     return 'noop';
@@ -379,7 +391,7 @@ export async function reversePurchasePaymentIntent(
     intent.status === 'requires_capture' ||
     (intent.amountCapturable !== undefined && intent.amountCapturable > 0)
   ) {
-    await cancelAuthorizedHold(paymentIntentId);
+    await cancelAuthorizedHold(paymentIntentId, livemode);
     return 'canceled';
   }
   if (
@@ -388,6 +400,6 @@ export async function reversePurchasePaymentIntent(
   ) {
     return 'noop';
   }
-  await refundCapturedPurchase(paymentIntentId, purchaseId);
+  await refundCapturedPurchase(paymentIntentId, purchaseId, livemode);
   return 'refunded';
 }

@@ -213,6 +213,28 @@ candidate and original log/test hashes, then each reran the unchanged normal
 twelve-control command successfully. Production qualification remains pending;
 the immutable author receipt retains its original pending-review state.
 
+### 2026-10-14 release-evidence delay
+
+WhatsApp media release verification passed all eight local smoke tasks, but
+both terminal mirrors timed out. The seven-task final bundle entered the
+production store at 23:13:42.332Z and committed at 23:31:23.624878Z, a measured
+1,061.293 seconds later. Strict R2 reads at 23:26:49 confirmed the bundle and
+visibility marker were still absent. The eventually stored body exactly
+matched the unchanged canonical publisher body; the recovered index was
+`live:false`, with all seven tasks passed. FE, recordings and the rendered last
+LLM dump then verified through the canonical publisher.
+
+During the delay, other runs continued committing. Of 145 logged live stores,
+139 current durable index entries remained all-starting with no root IDs.
+Those entries use the same foreground FIFO as finals after the earlier
+registration repair. This is evidence of the remaining shared-writer admission
+ceiling; the snapshot census is not an immutable capture of each original
+request. The separate 23:16–23:17 gateway 502 burst is also retained. No new
+local red/green admission reproduction or repair was completed in this media
+investigation, so this case remains open. Private strict reads, exact body
+comparison, store timestamps and the census are retained under
+`.context/whatsapp-media-rca/hub-publication-rca/`.
+
 ## Human feedback
 
 The user asked for the full `/deploy` after the messaging-mock change. That

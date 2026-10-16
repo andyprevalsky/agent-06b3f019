@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { Message } from '@/lib/api';
 
 import { deduplicateToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
 import { computeActiveBrowserPanels } from '@/features/terminal/hooks/derivations';
@@ -107,7 +108,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'x',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -141,7 +142,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'x',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -171,7 +172,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'x',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -202,7 +203,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'x',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -269,7 +270,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'x',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -304,7 +305,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'a',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -331,7 +332,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'b',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
     ];
@@ -355,7 +356,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'https://kernel.example/live/a',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -369,7 +370,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'https://steel.example/live/b',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
     ];
@@ -396,7 +397,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'x',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -430,7 +431,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'https://connect.steel.dev/v1/sessions/live/view',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -463,7 +464,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'https://connect.steel.dev/v1/sessions/live/view',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -498,7 +499,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'a',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -524,7 +525,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'b',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
     ];
@@ -544,7 +545,7 @@ describe('computeActiveBrowserPanels', () => {
           toolName: 'spawn_browser_agent',
           action_type: 'browser',
           browser_url: 'x',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
         },
       },
       {
@@ -565,7 +566,7 @@ describe('computeActiveBrowserPanels', () => {
 
 describe('rotate_ip progress lifecycle', () => {
   it('renders one tool when streamed and persisted progress share the model tool-call id', () => {
-    const messages = [
+    const messages: Message[] = [
       {
         message_id: 'streamed-rotate',
         timestamp: '2026-07-19T11:58:12.000Z',
@@ -574,7 +575,7 @@ describe('rotate_ip progress lifecycle', () => {
         metadata: {
           toolCallId: 'call-rotate-1',
           toolName: 'rotate_ip',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
           title: 'Starting rotate_ip...',
         },
       },
@@ -586,7 +587,7 @@ describe('rotate_ip progress lifecycle', () => {
         metadata: {
           toolCallId: 'call-rotate-1',
           toolName: 'rotate_ip',
-          toolStatus: 'IN_PROGRESS',
+          toolStatus: 'IN_PROGRESS' as const,
           title: 'Rotating browser IP',
         },
       },

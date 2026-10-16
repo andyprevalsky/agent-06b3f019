@@ -13,10 +13,7 @@ import type { FeatureKey, MarkersFile } from '../types';
 import type { CustomPlan, StageMode } from './stage-helpers';
 import { runTick, type MachineRefs } from './stage-state-machine';
 
-interface RVFCVideo extends HTMLVideoElement {
-  requestVideoFrameCallback?: (cb: (now: number, meta: { mediaTime?: number }) => void) => number;
-  cancelVideoFrameCallback?: (id: number) => void;
-}
+type RVFCVideo = HTMLVideoElement;
 
 export interface VideoStateMachineConfig {
   videoRef: RefObject<HTMLVideoElement | null>;

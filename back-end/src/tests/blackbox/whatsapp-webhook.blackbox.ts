@@ -16,8 +16,8 @@
  *   - signature verification (pure fn): a body signed with the app secret passes;
  *     a tampered body / bad scheme / absent header fails (constant-time compare)
  *   - waId normalization: Meta's `15551234567` -> `+15551234567` (matches User.phone)
- *   - inbound parsing: first text message extracted; status-only receipts and
- *     non-text media yield no route (acknowledged 200, no provisioning)
+ *   - inbound parsing: text, image captions, and media-only images/voice notes
+ *     survive normalization; status-only receipts and unsupported types do not route
  *   - provisioning: an unknown WhatsApp number is SILENTLY onboarded (User row
  *     created) and routes to the supervisor (lastInboundSeq bumped)
  *   - harness independence: supervisor runs async; webhook returns 200 immediately
@@ -25,18 +25,27 @@
  *
  * Usage:
  *   npx tsx src/tests/blackbox/whatsapp-webhook.blackbox.ts
+ *   npx tsx src/tests/blackbox/whatsapp-webhook.blackbox.ts --parse-media-only
+ *   npx tsx src/tests/blackbox/whatsapp-webhook.blackbox.ts --media-processing-only
  */
 
 import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { createHmac } from 'node:crypto';
+import { deepStrictEqual } from 'node:assert';
 import { verifyMetaSignature } from '../../providers/whatsappCloud';
 import {
+  mediaProcessingTests,
+  testInbound_mediaOnlyPersistsRoutesAndDeduplicates,
+} from './whatsapp-webhook.media.behavior';
+import {
   parseWhatsAppInbound,
+  parseWhatsAppInboundMessages,
   normalizeWaId,
   resolveWebhookVerification,
   isStatusOnlyEvent,
 } from '../../domains/whatsapp-webhook/service.validation';
+import { createWhatsAppReactionReplyTests } from './whatsapp-webhook.reaction-reply.behavior';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -46,6 +55,15 @@ const CASE_CONCURRENCY = Number(
 const VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ?? '';
 
 const prisma = new PrismaClient();
+const { testInbound_reactionPrecedesReply, testInbound_quotesEarlierIncomingAndSentMessages } =
+  createWhatsAppReactionReplyTests(prisma, {
+    BASE_URL,
+    request,
+    assertStatus,
+    assertEqual,
+    uniqueWaNumber,
+    inboundPayload,
+  });
 
 // ==================== TEST INFRASTRUCTURE ====================
 
@@ -256,6 +274,7 @@ async function testUnit_parseInbound_text() {
   assertEqual(parsed.fromPhone, '+15551234567', 'fromPhone normalized');
   assertEqual(parsed.messageBody, 'hello rose', 'body trimmed');
   assertEqual(parsed.messageId, 'wamid.TEST', 'messageId');
+  assertEqual('attachments' in parsed, false, 'text preserves its existing shape');
 }
 
 async function testUnit_parseInbound_statusOnly() {
@@ -263,22 +282,122 @@ async function testUnit_parseInbound_statusOnly() {
   assertEqual(parseWhatsAppInbound(statusPayload()), null, 'status-only yields no message');
 }
 
-async function testUnit_parseInbound_nonText() {
-  const image = inboundPayload('15551234567', 'x');
-  // Replace the text message with an image message (no text.body).
+function inboundMessagesPayload(messages: Record<string, unknown>[]): Record<string, unknown> {
+  const payload = inboundPayload('15551234567', 'x');
   (
-    ((image.entry as Record<string, unknown>[])[0].changes as Record<string, unknown>[])[0]
+    ((payload.entry as Record<string, unknown>[])[0].changes as Record<string, unknown>[])[0]
       .value as Record<string, unknown>
-  ).messages = [
+  ).messages = messages;
+  return payload;
+}
+
+function inboundMediaMessage(
+  kind: 'image' | 'audio',
+  media: Record<string, unknown>,
+  messageId = `wamid.${kind.toUpperCase()}`
+): Record<string, unknown> {
+  return {
+    from: '15551234567',
+    id: messageId,
+    timestamp: '1700000000',
+    type: kind,
+    [kind]: media,
+  };
+}
+
+async function testUnit_parseInbound_imageCaption() {
+  const payload = inboundMessagesPayload([
+    inboundMediaMessage('image', {
+      id: '172304219900001',
+      mime_type: 'image/jpeg',
+      caption: '  Please describe this photo  ',
+    }),
+  ]);
+  deepStrictEqual(parseWhatsAppInbound(payload), {
+    fromPhone: '+15551234567',
+    messageBody: 'Please describe this photo',
+    messageId: 'wamid.IMAGE',
+    attachments: [{ mediaId: '172304219900001', type: 'image/jpeg' }],
+  });
+}
+
+async function testUnit_parseInbound_imageWithoutCaption() {
+  const payload = inboundMessagesPayload([inboundMediaMessage('image', { id: '172304219900002' })]);
+  deepStrictEqual(parseWhatsAppInbound(payload), {
+    fromPhone: '+15551234567',
+    messageBody: '',
+    messageId: 'wamid.IMAGE',
+    attachments: [{ mediaId: '172304219900002', type: null }],
+  });
+}
+
+async function testUnit_parseInbound_voiceWithoutText() {
+  const payload = inboundMessagesPayload([
+    inboundMediaMessage('audio', {
+      id: '172304219900003',
+      mime_type: 'audio/ogg; codecs=opus',
+      voice: true,
+    }),
+  ]);
+  deepStrictEqual(parseWhatsAppInbound(payload), {
+    fromPhone: '+15551234567',
+    messageBody: '',
+    messageId: 'wamid.AUDIO',
+    attachments: [{ mediaId: '172304219900003', type: 'audio/ogg; codecs=opus' }],
+  });
+}
+
+async function testUnit_parseInbound_invalidMediaId() {
+  for (const kind of ['image', 'audio'] as const) {
+    for (const media of [{}, { id: '' }, { id: 42 }]) {
+      assertEqual(
+        parseWhatsAppInbound(inboundMessagesPayload([inboundMediaMessage(kind, media)])),
+        null,
+        `${kind} requires a nonempty string media ID: ${JSON.stringify(media)}`
+      );
+    }
+  }
+}
+
+async function testUnit_parseInbound_unsupportedType() {
+  const payload = inboundMessagesPayload([
     {
       from: '15551234567',
-      id: 'wamid.IMG',
-      timestamp: '1700000000',
-      type: 'image',
-      image: { id: 'MEDIA' },
+      id: 'wamid.LOCATION',
+      type: 'location',
+      location: { latitude: 37.7749, longitude: -122.4194 },
     },
-  ];
-  assertEqual(parseWhatsAppInbound(image), null, 'non-text yields no message (v1 media follow-up)');
+  ]);
+  assertEqual(parseWhatsAppInbound(payload), null, 'unsupported location does not route');
+}
+
+async function testUnit_parseInbound_mixedBatch() {
+  const payload = inboundMessagesPayload([
+    { from: '15551234567', id: 'wamid.TEXT', type: 'text', text: { body: '  hello  ' } },
+    inboundMediaMessage('image', {
+      id: '172304219900004',
+      caption: ' Look ',
+      mime_type: 'image/png',
+    }),
+    { from: '15551234567', id: 'wamid.LOCATION', type: 'location', location: {} },
+    inboundMediaMessage('audio', { id: '172304219900005', mime_type: 'audio/ogg', voice: true }),
+    inboundMediaMessage('image', {}),
+  ]);
+  deepStrictEqual(parseWhatsAppInboundMessages(payload), [
+    { fromPhone: '+15551234567', messageBody: 'hello', messageId: 'wamid.TEXT' },
+    {
+      fromPhone: '+15551234567',
+      messageBody: 'Look',
+      messageId: 'wamid.IMAGE',
+      attachments: [{ mediaId: '172304219900004', type: 'image/png' }],
+    },
+    {
+      fromPhone: '+15551234567',
+      messageBody: '',
+      messageId: 'wamid.AUDIO',
+      attachments: [{ mediaId: '172304219900005', type: 'audio/ogg' }],
+    },
+  ]);
 }
 
 // ==================== GET verification (HTTP) ====================
@@ -321,7 +440,7 @@ async function testInbound_statusOnlyAcknowledgedNotRouted() {
   assertStatus(res.status, 200, res.data);
 }
 
-async function testInbound_nonTextAcknowledged() {
+async function testInbound_unsupportedTypeAcknowledged() {
   const image = inboundPayload('15559990000', 'x');
   (
     ((image.entry as Record<string, unknown>[])[0].changes as Record<string, unknown>[])[0]
@@ -329,10 +448,10 @@ async function testInbound_nonTextAcknowledged() {
   ).messages = [
     {
       from: '15559990000',
-      id: 'wamid.IMG',
+      id: 'wamid.LOCATION',
       timestamp: '1700000000',
-      type: 'image',
-      image: { id: 'MEDIA' },
+      type: 'location',
+      location: { latitude: 37.7749, longitude: -122.4194 },
     },
   ];
   const res = await request(`${BASE_URL}/api/whatsapp/webhook`, {
@@ -340,11 +459,11 @@ async function testInbound_nonTextAcknowledged() {
     body: JSON.stringify(image),
   });
   assertStatus(res.status, 200, res.data);
-  // No provisioning for non-text in v1.
+  // Unsupported message types must not provision a user.
   const user = await prisma.user.findFirst({ where: { phone: '+15559990000' } });
   if (user) {
     await prisma.user.deleteMany({ where: { phone: '+15559990000' } }).catch(() => {});
-    throw new Error('non-text message must not provision a user');
+    throw new Error('unsupported message must not provision a user');
   }
 }
 
@@ -429,53 +548,103 @@ async function testConcurrency_parallelVerify() {
 
 // ==================== RUN ====================
 
+const mediaParsingTests = [
+  { name: 'unit -- parseWhatsAppInbound text compatibility', fn: testUnit_parseInbound_text },
+  { name: 'unit -- parseWhatsAppInbound status-only', fn: testUnit_parseInbound_statusOnly },
+  { name: 'media -- image caption preserved', fn: testUnit_parseInbound_imageCaption },
+  {
+    name: 'media -- image without caption retained',
+    fn: testUnit_parseInbound_imageWithoutCaption,
+  },
+  { name: 'media -- voice note without text retained', fn: testUnit_parseInbound_voiceWithoutText },
+  { name: 'media -- invalid media IDs rejected', fn: testUnit_parseInbound_invalidMediaId },
+  { name: 'media -- unsupported type rejected', fn: testUnit_parseInbound_unsupportedType },
+  {
+    name: 'media -- mixed batch retains text, images, and audio',
+    fn: testUnit_parseInbound_mixedBatch,
+  },
+];
+
 async function runAll() {
+  const parseMediaOnly = process.argv.includes('--parse-media-only');
+  const mediaProcessingOnly = process.argv.includes('--media-processing-only');
+  const focused = parseMediaOnly || mediaProcessingOnly;
   console.log('WhatsApp Webhook Black-box Tests\n');
-  console.log(`Testing against: ${BASE_URL}`);
+  console.log(
+    focused ? 'Testing media without DB/server or live providers' : `Testing against: ${BASE_URL}`
+  );
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
 
-  const parallelTests = [
-    // pure-function coverage (no server needed, safe to parallelize)
-    { name: 'unit -- normalizeWaId', fn: testUnit_normalizeWaId },
-    { name: 'unit -- verifyMetaSignature accepts valid', fn: testUnit_verifyMetaSignature_valid },
-    {
-      name: 'unit -- verifyMetaSignature rejects tampered/bad',
-      fn: testUnit_verifyMetaSignature_rejects,
-    },
-    { name: 'unit -- resolveWebhookVerification', fn: testUnit_resolveWebhookVerification },
-    { name: 'unit -- parseWhatsAppInbound text', fn: testUnit_parseInbound_text },
-    { name: 'unit -- parseWhatsAppInbound status-only', fn: testUnit_parseInbound_statusOnly },
-    { name: 'unit -- parseWhatsAppInbound non-text', fn: testUnit_parseInbound_nonText },
-    // GET verification
-    {
-      name: 'GET /whatsapp/webhook -- correct token echoes challenge',
-      fn: testVerify_correctTokenEchoesChallenge,
-    },
-    { name: 'GET /whatsapp/webhook -- wrong token -> 403', fn: testVerify_wrongTokenForbidden },
-    { name: 'GET /whatsapp/webhook -- wrong mode -> 403', fn: testVerify_wrongModeForbidden },
-    // POST acknowledge-only paths (no provisioning)
-    {
-      name: 'POST /whatsapp/webhook -- status-only receipt acknowledged',
-      fn: testInbound_statusOnlyAcknowledgedNotRouted,
-    },
-    {
-      name: 'POST /whatsapp/webhook -- non-text acknowledged, not provisioned',
-      fn: testInbound_nonTextAcknowledged,
-    },
-    {
-      name: 'POST /whatsapp/webhook -- malformed acknowledged',
-      fn: testInbound_malformedAcknowledged,
-    },
-    // invariants
-    { name: 'concurrency -- 10 parallel verifies consistent', fn: testConcurrency_parallelVerify },
-  ];
+  const parallelTests = mediaProcessingOnly
+    ? []
+    : parseMediaOnly
+      ? mediaParsingTests
+      : [
+          // pure-function coverage (no server needed, safe to parallelize)
+          { name: 'unit -- normalizeWaId', fn: testUnit_normalizeWaId },
+          {
+            name: 'unit -- verifyMetaSignature accepts valid',
+            fn: testUnit_verifyMetaSignature_valid,
+          },
+          {
+            name: 'unit -- verifyMetaSignature rejects tampered/bad',
+            fn: testUnit_verifyMetaSignature_rejects,
+          },
+          { name: 'unit -- resolveWebhookVerification', fn: testUnit_resolveWebhookVerification },
+          ...mediaParsingTests,
+          // GET verification
+          {
+            name: 'GET /whatsapp/webhook -- correct token echoes challenge',
+            fn: testVerify_correctTokenEchoesChallenge,
+          },
+          {
+            name: 'GET /whatsapp/webhook -- wrong token -> 403',
+            fn: testVerify_wrongTokenForbidden,
+          },
+          { name: 'GET /whatsapp/webhook -- wrong mode -> 403', fn: testVerify_wrongModeForbidden },
+          // POST acknowledge-only paths (no provisioning)
+          {
+            name: 'POST /whatsapp/webhook -- status-only receipt acknowledged',
+            fn: testInbound_statusOnlyAcknowledgedNotRouted,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- unsupported type acknowledged, not provisioned',
+            fn: testInbound_unsupportedTypeAcknowledged,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- malformed acknowledged',
+            fn: testInbound_malformedAcknowledged,
+          },
+          // invariants
+          {
+            name: 'concurrency -- 10 parallel verifies consistent',
+            fn: testConcurrency_parallelVerify,
+          },
+        ];
 
-  const sequentialTests = [
-    {
-      name: 'POST /whatsapp/webhook -- new number provisions + routes to supervisor',
-      fn: testInbound_newNumberProvisionsAndRoutes,
-    },
-  ];
+  const sequentialTests = parseMediaOnly
+    ? []
+    : mediaProcessingOnly
+      ? mediaProcessingTests
+      : [
+          ...mediaProcessingTests,
+          {
+            name: 'POST /whatsapp/webhook -- media-only persists, routes, and deduplicates',
+            fn: () => testInbound_mediaOnlyPersistsRoutesAndDeduplicates(prisma),
+          },
+          {
+            name: 'POST /whatsapp/webhook -- quote earlier incoming and sent messages',
+            fn: testInbound_quotesEarlierIncomingAndSentMessages,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- native reaction precedes reply',
+            fn: testInbound_reactionPrecedesReply,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- new number provisions + routes to supervisor',
+            fn: testInbound_newNumberProvisionsAndRoutes,
+          },
+        ];
 
   console.log(
     `Running ${parallelTests.length} parallel tests (concurrency=${CASE_CONCURRENCY})...`

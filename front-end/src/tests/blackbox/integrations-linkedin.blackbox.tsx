@@ -4,7 +4,7 @@
  * Split from integrations.blackbox.tsx to keep both files under the
  * 600-line max-lines budget.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { screen, waitFor, within, renderHook, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -72,7 +72,7 @@ describe('Integrations page - LinkedIn export flow', () => {
       await waitFor(() => {
         expect(screen.getByText('Socials')).toBeInTheDocument();
       });
-      const socialsSection = screen.getByText('Socials').closest('.rounded-lg')!;
+      const socialsSection = screen.getByText('Socials').closest<HTMLElement>('.rounded-lg')!;
       await user.click(within(socialsSection).getAllByRole('button')[0]);
       await waitFor(() => {
         expect(screen.getByText('LinkedIn')).toBeInTheDocument();
@@ -188,7 +188,7 @@ describe('Integrations page - LinkedIn export flow', () => {
       const linkedInButton = await expandSocialsAndGetLinkedInButton(user);
       const linkedInRow = screen
         .getByText('LinkedIn')
-        .closest('.flex.items-center.justify-between')!;
+        .closest<HTMLElement>('.flex.items-center.justify-between')!;
 
       // Before connecting: no status sub-label and no rose glow on the row icon.
       expect(within(linkedInRow).queryByText(/Connecting your data/)).not.toBeInTheDocument();
@@ -223,7 +223,7 @@ describe('Integrations page - LinkedIn export flow', () => {
       );
 
       const linkedInButton = await expandSocialsAndGetLinkedInButton(user);
-      const socialsSection = screen.getByText('Socials').closest('.rounded-lg')!;
+      const socialsSection = screen.getByText('Socials').closest<HTMLElement>('.rounded-lg')!;
 
       // Before connecting the section header must not claim to be connected.
       expect(within(socialsSection).queryByText('Connected')).not.toBeInTheDocument();

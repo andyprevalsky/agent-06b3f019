@@ -11,6 +11,7 @@ import {
   reclaimFailedToolSideEffect,
 } from '../../providers/toolSideEffects';
 import { notifyWriteLock } from '../../providers/smsSupervisor/outboundEvents';
+import { NotificationDeliveryError } from '../../providers/smsSupervisor/notificationDelivery';
 import type { SupervisorChannel } from '../../providers/smsSupervisor/channelDelivery';
 import type { NotifyInput } from './types';
 
@@ -35,6 +36,20 @@ export async function dispatchWriteLockOnce(
     attentionRequestId === ''
       ? ''
       : `${WRITE_LOCK_SMS_OPERATION_TYPE}:${attentionRequestId}:initial`;
+  let deliveryAttempted = false;
+  const notify = () =>
+    notifyWriteLock(
+      data.user_id,
+      { id: data.agent_id },
+      (payload.question as string | undefined) ?? '',
+      attentionRequestId,
+      (payload.workflow_id as string | undefined) ?? '',
+      payload.metadata,
+      channels,
+      () => {
+        deliveryAttempted = true;
+      }
+    );
 
   if (operationKey !== '') {
     let claim = await claimToolSideEffect({
@@ -60,36 +75,27 @@ export async function dispatchWriteLockOnce(
       return;
     }
     try {
-      await notifyWriteLock(
-        data.user_id,
-        { id: data.agent_id },
-        (payload.question as string | undefined) ?? '',
-        attentionRequestId,
-        (payload.workflow_id as string | undefined) ?? '',
-        payload.metadata,
-        channels
-      );
+      await notify();
       await markToolSideEffectSucceeded({
         operationKey,
         externalId: `${attentionRequestId}:initial`,
       });
     } catch (error) {
-      await markToolSideEffectFailed({
-        operationKey,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      // Preparation cannot deliver a message. Once a send is attempted, only
+      // known rejection permits retry; uncertain or accepted sends retain the claim.
+      if (
+        !deliveryAttempted ||
+        (error instanceof NotificationDeliveryError && error.definitiveFailure)
+      ) {
+        await markToolSideEffectFailed({
+          operationKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       throw error;
     }
     return;
   }
 
-  await notifyWriteLock(
-    data.user_id,
-    { id: data.agent_id },
-    (payload.question as string | undefined) ?? '',
-    attentionRequestId,
-    (payload.workflow_id as string | undefined) ?? '',
-    payload.metadata,
-    channels
-  );
+  await notify();
 }

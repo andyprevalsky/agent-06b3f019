@@ -75,8 +75,11 @@ function classifyOAuthFallbackReason(message) {
   ) {
     return "usage_limit_reached";
   }
+  // Called only for typed Codex error/turn.failed events, using the complete
+  // message (including continuation lines), never command output or agent text.
+  // Keep explicit revocation markers aligned with computeGrantFailure.ts.
   if (
-    /refresh_token_invalidated|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again/i.test(
+    /\b(?:token_revoked|refresh_token_invalidated|refresh_token_reused|refresh_token_expired|invalid_refresh_token|invalid_grant)\b|oauth (?:access )?token has been revoked|refresh token (?:was )?revoked|refresh token not found or invalid|access token could not be refreshed|your session has ended|log ?out and sign in again/i.test(
       text,
     )
   ) {

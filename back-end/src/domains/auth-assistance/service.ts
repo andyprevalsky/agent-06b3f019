@@ -117,7 +117,7 @@ export async function createAuthAssistanceRequest(
     authRealm,
     ...(browserSessionId !== null ? { browserSessionId } : {}),
     steelSessionId,
-    workflowId: agent.temporalWorkflowId ?? '',
+    workflowId: agent.temporalWorkflowId ?? agent.id,
     liveViewUrl: handoff.liveViewUrl,
   });
 

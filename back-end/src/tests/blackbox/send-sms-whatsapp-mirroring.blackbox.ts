@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { assertLocalDatabase } from './assertLocalDatabase';
+import { notificationFixtureKey } from '../../providers/smsSupervisor/notificationLlm';
 
 config();
 assertLocalDatabase();
@@ -48,9 +49,16 @@ async function readCaptures(token: string): Promise<CapturedCall[]> {
   return (response.data as { captures: CapturedCall[] }).captures;
 }
 
-async function cleanup(userId: string, agentId: string): Promise<void> {
+async function cleanup(userId: string, agentId: string, attentionId?: string): Promise<void> {
   await prisma.toolSideEffect.deleteMany({
-    where: { operationKey: `lifecycle-sms.completion:${agentId}` },
+    where: {
+      operationKey: {
+        in: [
+          `lifecycle-sms.completion:${agentId}`,
+          `lifecycle-sms.write_lock:${attentionId}:initial`,
+        ],
+      },
+    },
   });
   await prisma.smsSession.deleteMany({ where: { userId } });
   await prisma.agent.deleteMany({ where: { id: agentId } });
@@ -122,10 +130,181 @@ async function testSmsSuccessSurvivesWhatsAppFailure(): Promise<void> {
   }
 }
 
+async function testKickoffUsesNotificationAndLink(): Promise<void> {
+  for (const source of ['SMS', 'WHATSAPP'] as const) {
+    const userId = randomUUID();
+    const captureToken = `kickoff-${userId}`;
+    const phone = `+1555${String(Math.floor(Math.random() * 10_000_000)).padStart(7, '0')}`;
+    const goal = 'INTERNAL_TASK_SENTINEL: use the saved account and compare pickup locations.';
+    const notification = "I'll order your usual Blue Bottle coffee.";
+    await prisma.user.create({
+      data: { userId, phone, isAnonymous: true, whatsappReachable: true },
+    });
+    const agent = await prisma.agent.create({
+      data: {
+        userId,
+        goal,
+        source,
+        messages: {
+          create: {
+            text: goal,
+            role: 'USER',
+            metadata: { startNotification: { message: notification } },
+          },
+        },
+      },
+    });
+    try {
+      for (const override of [undefined, "I'll check pickup availability first."]) {
+        const expected = `${override ?? notification}\nhttps://roselabs.ai/?agent-id=${agent.id}`;
+        const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+          method: 'POST',
+          headers: { 'X-API-Key': API_KEY, 'X-Capture-Token': captureToken },
+          body: JSON.stringify({
+            user_id: userId,
+            agent_id: agent.id,
+            event_type: 'agent_started',
+            payload: { goal, notification_message: override },
+          }),
+        });
+        assert(response.status === 200, `kickoff returned ${response.status}`);
+        const calls = await readCaptures(captureToken);
+        const sms = calls.filter((call) => new URL(call.url).hostname === 'api.surge.app');
+        const whatsapp = calls.filter(
+          (call) => new URL(call.url).hostname === 'graph.facebook.com'
+        );
+        assert(sms.length === (override ? 2 : 1), 'expected one SMS per kickoff event');
+        assert(whatsapp.length === sms.length, 'kickoff must reach both messaging channels');
+        const smsBody = JSON.parse(sms.at(-1)!.requestBody!) as { body: string };
+        const whatsappBody = JSON.parse(whatsapp.at(-1)!.requestBody!) as {
+          text: { body: string };
+        };
+        assert(smsBody.body === expected, `Unexpected kickoff SMS: ${smsBody.body}`);
+        assert(whatsappBody.text.body === expected, 'WhatsApp kickoff differs from SMS');
+        const session = await prisma.smsSession.findUnique({ where: { userId } });
+        assert(
+          session?.messages.includes(expected.replaceAll('\n', '\\n')),
+          'kickoff missing from transcript'
+        );
+      }
+      const stored = await prisma.agent.findUnique({ where: { id: agent.id } });
+      assert(stored?.goal === goal, 'kickoff formatting changed the internal agent goal');
+    } finally {
+      await cleanup(userId, agent.id);
+    }
+  }
+}
+
+async function testWriteLockRetriesOnlyRejectedDelivery(): Promise<void> {
+  for (const failure of ['ambiguous', 'rejected', 'mixed']) {
+    const rejected = failure !== 'ambiguous';
+    const mirrored = failure === 'mixed';
+    const userId = randomUUID();
+    const attentionId = randomUUID();
+    const captureToken = `write-lock-retry-${userId}`;
+    const operationKey = `lifecycle-sms.write_lock:${attentionId}:initial`;
+    const marker =
+      (rejected ? '__BLACKBOX_SURGE_422__' : '__BLACKBOX_SURGE_502__') +
+      (mirrored ? `\n${WHATSAPP_FAILURE_MARKER}` : '');
+    await prisma.user.create({
+      data: {
+        userId,
+        phone: `+1555${String(Math.floor(Math.random() * 10_000_000)).padStart(7, '0')}`,
+        isAnonymous: true,
+        whatsappReachable: mirrored,
+      },
+    });
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'blackbox approval retry', source: 'SMS', status: 'ACTIVE' },
+    });
+    const notify = (question: string) =>
+      request(`${BASE_URL}/api/send-sms/notify`, {
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY, 'X-Capture-Token': captureToken },
+        body: JSON.stringify({
+          user_id: userId,
+          agent_id: agent.id,
+          event_type: 'write_lock',
+          payload: { question, attention_request_id: attentionId },
+        }),
+      });
+    try {
+      if (rejected) {
+        const fixture = await request(`${BASE_URL}/api/test/sms-supervisor-fixture`, {
+          method: 'POST',
+          body: JSON.stringify({
+            userId: notificationFixtureKey(agent.id),
+            fixture: JSON.stringify({
+              expected_tool_result_substrings: ['Surge API error: 422'],
+              message: `Please approve the email. ${marker}\nReview in Rose: https://roselabs.ai/?agent-id=${agent.id}`,
+            }),
+          }),
+        });
+        assert(fixture.status === 200, 'could not configure rejected notification corrections');
+      }
+      const first = await notify(`Can I send this email? ${marker}`);
+      assert(first.status === 500, `failed first delivery must return 500, got ${first.status}`);
+      const initial = await prisma.toolSideEffect.findUnique({ where: { operationKey } });
+      const firstCalls = (await readCaptures(captureToken)).filter(
+        (call) => new URL(call.url).hostname === 'api.surge.app'
+      );
+      const second = await notify(
+        failure === 'rejected' ? 'Can I send this email?' : `Can I send this email? ${marker}`
+      );
+      const calls = (await readCaptures(captureToken)).filter(
+        (call) => new URL(call.url).hostname === 'api.surge.app'
+      );
+      const claim = await prisma.toolSideEffect.findUnique({ where: { operationKey } });
+      if (failure === 'rejected') {
+        assert(initial?.status === 'FAILED', 'explicit provider rejection must remain retryable');
+        assert(firstCalls.length === 3, 'expected initial rejection plus two failed corrections');
+        assert(calls.length === 4, 'corrected repeated request must retry a rejected approval');
+        assert(
+          claim?.status === 'SUCCEEDED',
+          'corrected approval must complete the reclaimed claim'
+        );
+      } else {
+        assert(
+          calls.length === (mirrored ? 3 : 1),
+          `ambiguous approval delivery must not be resent by a repeated request; got ${calls.length} Surge sends`
+        );
+        assert(
+          initial?.status === 'STARTED',
+          'ambiguous delivery must keep the original claim pending'
+        );
+        assert(
+          claim?.status === 'STARTED',
+          'repeated request must not fail or reclaim an ambiguous claim'
+        );
+        if (mirrored) {
+          const whatsapp = (await readCaptures(captureToken)).filter(
+            (call) => new URL(call.url).hostname === 'graph.facebook.com'
+          );
+          assert(whatsapp.length === 1, 'ambiguous WhatsApp mirror must not be resent');
+          assert(whatsapp[0].responseStatus === 503, 'expected ambiguous WhatsApp mirror fixture');
+        }
+      }
+      assert(second.status === 200, `repeated notification returned ${second.status}`);
+    } finally {
+      await request(
+        `${BASE_URL}/api/test/sms-supervisor-fixture?userId=${encodeURIComponent(notificationFixtureKey(agent.id))}`,
+        { method: 'DELETE' }
+      );
+      await cleanup(userId, agent.id, attentionId);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   try {
+    await testKickoffUsesNotificationAndLink();
+    process.stdout.write('PASS SMS and WhatsApp kickoff use the notification plus agent link\n');
     await testSmsSuccessSurvivesWhatsAppFailure();
     process.stdout.write('PASS SMS success survives mirrored WhatsApp 503\n');
+    await testWriteLockRetriesOnlyRejectedDelivery();
+    process.stdout.write(
+      'PASS write-lock retries explicit rejection and preserves ambiguous claims\n'
+    );
   } finally {
     await prisma.$disconnect();
   }

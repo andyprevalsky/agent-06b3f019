@@ -310,7 +310,7 @@ function relaxNullableUnionsForAnthropic(schema: unknown): unknown {
   return out;
 }
 
-/** Returns the value branch of a two-branch `T | null` union, else null. */
+/** Unwrap nullable unions recursively, including combined optional/nullable wrappers. */
 function unwrapNullableUnion(schema: JsonSchema): JsonSchema | null {
   const branches = (Array.isArray(schema.anyOf) ? schema.anyOf : schema.oneOf) as
     JsonSchema[] | undefined;
@@ -319,7 +319,8 @@ function unwrapNullableUnion(schema: JsonSchema): JsonSchema | null {
   const hasNullBranch = branches.some((b) => b && typeof b === 'object' && b.type === 'null');
   if (!valueBranch || !hasNullBranch) return null;
 
-  const merged: JsonSchema = { ...valueBranch };
+  // Optional(nullable(T)) produces nested wrappers; collapse every layer.
+  const merged: JsonSchema = { ...(unwrapNullableUnion(valueBranch) ?? valueBranch) };
   // The description hangs off the union wrapper, not the value branch, so
   // collapsing without it would silently drop the model-facing field docs.
   if (typeof schema.description === 'string') merged.description = schema.description;

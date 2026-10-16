@@ -12,6 +12,8 @@ import {
   refreshAuthAssistanceSession,
 } from './service';
 import { AUTH_ASSISTANCE_MODES, type AuthAssistanceMode } from './types';
+import { AttentionUserMessageForbiddenError } from '../../providers/attentionUserMessages';
+import { AttentionWorkflowTargetOwnershipError } from '../../providers/attentionWorkflowTargets';
 
 const router = Router();
 const log = createLogger('AuthAssistance');
@@ -29,7 +31,11 @@ function mapError(error: unknown, res: Response): boolean {
     res.status(404).json({ error: error.message });
     return true;
   }
-  if (error instanceof ForbiddenError) {
+  if (
+    error instanceof ForbiddenError ||
+    error instanceof AttentionUserMessageForbiddenError ||
+    error instanceof AttentionWorkflowTargetOwnershipError
+  ) {
     res.status(403).json({ error: error.message });
     return true;
   }

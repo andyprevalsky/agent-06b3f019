@@ -142,6 +142,21 @@ export interface Message {
     progress?: number;
     progressComplete?: number; // 0-100 or 0-1, optional - if present shows progress bar
     error?: boolean;
+    browser_url?: string;
+    task_id?: string;
+    action_type?: import('../realtime-types/message-metadata').MessageMetadata['action_type'];
+    auxiliary?: {
+      coordinates?: { x: number; y: number };
+      [key: string]: unknown;
+    };
+    requestUserApproval?: Partial<
+      import('../realtime-types/tool-metadata').RequestUserApprovalMetadata['requestUserApproval']
+    >;
+    imageUrl?: string;
+    subAgentIds?: string[];
+    busId?: string;
+    spawnGroupId?: string;
+    forEachAggregate?: boolean;
     [key: string]: unknown;
   };
   file_pointer?: FilePointer; // File attachment (OAI-style: one file per message)

@@ -18,6 +18,8 @@ import {
   SmsSupervisorResponseSchema,
   SmsSupervisorToolCallSchema,
   SUPERVISOR_RESPONSE_MODEL,
+  SUPERVISOR_REACTION_MODEL,
+  SmsSupervisorReactionResponseSchema,
 } from './schema';
 import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
 import type { SupervisorComputeToken } from './supervisorComputeToken';
@@ -36,7 +38,8 @@ export interface SupervisorResponse {
 export async function callSupervisorLlm(
   messages: CompletionMessage[],
   computeToken: SupervisorComputeToken | null,
-  userId: string
+  userId: string,
+  reactionOnly = false
 ): Promise<SupervisorResponse> {
   const startTime = Date.now();
   const claudeToken = computeToken?.type === 'claude' ? computeToken.accessToken : null;
@@ -62,6 +65,7 @@ export async function callSupervisorLlm(
     : undefined;
 
   log.info('[SmsSupervisorLLM] Request', {
+    mode: reactionOnly ? 'reaction' : 'tools',
     model: activeModel,
     providerRoute: providerRoute ?? 'pool-default',
     messageCount: messages.length,
@@ -80,7 +84,7 @@ export async function callSupervisorLlm(
     })),
   });
 
-  const blackboxFixture = loadBlackboxSupervisorResponseFixture(userId);
+  const blackboxFixture = loadBlackboxSupervisorResponseFixture(userId, reactionOnly, messages);
   if (blackboxFixture) {
     if (blackboxFixture.delayMs > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, blackboxFixture.delayMs));
@@ -97,7 +101,7 @@ export async function callSupervisorLlm(
     model: activeModel,
     messages,
     temperature: 0.3,
-    response_model: SUPERVISOR_RESPONSE_MODEL,
+    response_model: reactionOnly ? SUPERVISOR_REACTION_MODEL : SUPERVISOR_RESPONSE_MODEL,
     ...(providerRoute !== undefined ? { provider_route: providerRoute } : {}),
     // Compute tokens only on benchmark-overridden routes that need them.
     // Default rose-fast has directAuthEnabled=false; never send tokens there.
@@ -166,7 +170,32 @@ export async function callSupervisorLlm(
     durationMs: Date.now() - startTime,
   });
 
-  return finalizeSupervisorResponse(accumulatedToolCalls, structuredOutput, accumulatedReasoning);
+  return reactionOnly
+    ? finalizeSupervisorReactionResponse(
+        accumulatedToolCalls,
+        structuredOutput,
+        accumulatedReasoning
+      )
+    : finalizeSupervisorResponse(accumulatedToolCalls, structuredOutput, accumulatedReasoning);
+}
+
+/** Reaction selection can produce exactly one reaction, never other actions. */
+export function finalizeSupervisorReactionResponse(
+  toolCalls: ToolCall[],
+  structuredOutput: StructuredOutputAccumulator,
+  reasoning: string
+): SupervisorResponse {
+  let raw: unknown;
+  try {
+    raw =
+      toolCalls.length > 0
+        ? { reasoning, tool_calls: toolCalls }
+        : JSON.parse(structuredOutput.currentText());
+  } catch {
+    return { reasoning, tool_calls: [] };
+  }
+  const parsed = SmsSupervisorReactionResponseSchema.safeParse(raw);
+  return parsed.success ? parsed.data : { reasoning, tool_calls: [] };
 }
 
 /**

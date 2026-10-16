@@ -84,6 +84,16 @@ async function createSession(params: {
   provider: 'kernel' | 'steel';
   sessionId: string;
 }) {
+  const agentId = randomUUID();
+  await prisma.agent.create({
+    data: {
+      id: agentId,
+      userId: params.userId,
+      goal: 'Capture signed-in browser state',
+      status: 'ACTIVE',
+      temporalWorkflowId: agentId,
+    },
+  });
   const context = await prisma.browserContext.upsert({
     where: { userId: params.userId },
     create: { userId: params.userId },
@@ -92,7 +102,7 @@ async function createSession(params: {
   return prisma.browserSession.create({
     data: {
       contextId: context.id,
-      agentId: randomUUID(),
+      agentId,
       sessionId: params.sessionId,
       wsUrl: 'ws://127.0.0.1:9/devtools/browser/fake',
       provider: params.provider,
@@ -111,6 +121,7 @@ async function cleanup(userId: string): Promise<void> {
   await prisma.localStorageOrigin.deleteMany({ where: { userId } });
   await prisma.cookie.deleteMany({ where: { userId } });
   await prisma.cookieBundle.deleteMany({ where: { userId } });
+  await prisma.agent.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
 }
 

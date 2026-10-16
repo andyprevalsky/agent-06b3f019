@@ -8,14 +8,15 @@
  * every rate limit, or (b) reports a revoked grant as healthy and suppresses the
  * re-mint that would fix it.
  *
- * Every body string below is a VERBATIM live response captured 2026-08-18, not an
- * invented fixture -- a hand-written 401 passes checkers that real traffic breaks.
+ * Original live-response fixtures below were captured 2026-08-18. Explicitly
+ * labelled collision controls combine known native provider dialects to pin precedence.
  */
 
 import {
   classifyComputeGrantFailure,
   type ComputeGrantVerdict,
 } from '../../providers/computeGrantFailure';
+import { codexQuotaCollisions } from './codex-quota-dialects.support';
 import { RoseAuthError } from '../../providers/rose/errors';
 
 type TestFn = () => void | Promise<void>;
@@ -194,6 +195,28 @@ test('a 429 carrying revocation text still refuses to re-mint', () => {
     'rate_limited',
     false
   );
+});
+
+// Synthetic collision controls, sourced from actual Codex quota dialects above.
+for (const { label, reason } of codexQuotaCollisions()) {
+  test(`Codex quota wins over revocation: ${label}`, () => {
+    for (const status of [400, 401, 403])
+      expectVerdict(label, { status, body: reason }, 'payment_required', false);
+    expectVerdict(label, { status: 429, body: reason }, 'rate_limited', false);
+    expectVerdict(label, { status: 200, body: reason }, 'not_a_grant_failure', false);
+  });
+}
+
+test('generic resource quota is not provider payment or suppressed revocation', () => {
+  for (const body of [
+    'disk quota exceeded',
+    'rate quota exceeded',
+    'quota',
+    'insufficient scope',
+  ]) {
+    expectVerdict(body, { status: 401, body }, 'auth_other', false);
+    expectVerdict(body, { status: 401, body: `invalid_grant ${body}` }, 'revoked', true);
+  }
 });
 
 // --- wiring: the verdict must actually reach the error the caller sees --------

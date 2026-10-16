@@ -475,9 +475,6 @@ source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # overrides remain available for proxy-specific blackbox runs.
 export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-}"
 export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
-if [[ -z "${BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON:-}" ]]; then
-  export BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON='{"reasoning":"blackbox smoke fixture","tool_calls":[{"tool":"send_user_message","arguments":{"message":"Blackbox SMS smoke reply"}},{"tool":"attempt_completion","arguments":{}}]}'
-fi
 
 cat >"$MANIFEST_PATH" <<EOF
 {"run_id":"$RUN_ID","mode":"isolated-blackbox-backend","base_url":"$TEST_BASE_URL","port":$PORT,"artifact_dir":"$ARTIFACT_DIR","backend_log":"$BACKEND_LOG","runner_log":"$RUNNER_LOG","disable_gmail_sync":true}

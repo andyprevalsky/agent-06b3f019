@@ -8,6 +8,7 @@
  *      | failure
  *      v
  * [ERROR_TOAST] --> [IDLE]
+ * Typed draft bytes are authored input; explicit protocol overrides remain protocol-only.
  */
 
 import { useState } from 'react';
@@ -106,10 +107,13 @@ export function useAttentionActions({
     const response =
       overrideResponse ??
       (responses[requestId]?.trim() || (isAuthAssistance ? 'Authentication complete' : 'Approved'));
+    const userMessage = overrideResponse === undefined && responses[requestId]?.trim()
+      ? responses[requestId]
+      : undefined;
     const remaining = countRemaining(requests, requestId);
     void run({
       requestId,
-      mutate: () => respondToAttentionRequest(requestId, response),
+      mutate: () => respondToAttentionRequest(requestId, response, userMessage),
       successToast: {
         title: isAuthAssistance ? 'Authentication complete' : 'Response sent',
         description: remainingDescription(
@@ -148,7 +152,7 @@ export function useAttentionActions({
     const remaining = countRemaining(requests, requestId);
     void run({
       requestId,
-      mutate: () => rejectAttentionRequest(requestId, responses[requestId]?.trim() || undefined),
+      mutate: () => rejectAttentionRequest(requestId, responses[requestId]?.trim() ? responses[requestId] : undefined),
       successToast: {
         title: 'Action rejected',
         description: 'The agent will skip this action and continue',

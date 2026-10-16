@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { buildOpenAiResponseFormat, responseModel } from '../rose';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
+import { SMS_DELIVERY_INSTRUCTIONS } from '../smsDeliveryContract';
 
 const replyToAgentCallSchema = z.object({
   tool: z.literal('reply_to_agent'),
@@ -35,6 +36,13 @@ const startNewAgentCallSchema = z.object({
   tool: z.literal('start_new_agent'),
   arguments: z.object({
     goal: z.string(),
+    notification_message: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'Short user-facing kickoff notification for this agent. Include what you are starting, omit internal task instructions and links; the agent link is appended automatically.'
+      ),
     budget_dollars: z
       .number()
       .nullable()
@@ -55,11 +63,18 @@ const webSearchCallSchema = z.object({
 const sendUserMessageCallSchema = z.object({
   tool: z.literal('send_user_message'),
   arguments: z.object({
+    reply_to_message_id: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'Optional message ID or reference from the reply-target index. Quote that incoming or previously sent message. SMS includes the selected message as quoted text; WhatsApp uses a native reply. Omit or null for an ordinary message.'
+      ),
     message: z
       .string()
       .describe(
         userFacingTextDescription(
-          'The exact SMS message to send to the user. Sending does not end the run.'
+          `The exact SMS message to send to the user. Sending does not end the run. ${SMS_DELIVERY_INSTRUCTIONS}`
         )
       ),
   }),
@@ -222,3 +237,30 @@ export const SUPERVISOR_RESPONSE_MODEL = responseModel(
 );
 
 export const SUPERVISOR_RESPONSE_SCHEMA = buildOpenAiResponseFormat(SUPERVISOR_RESPONSE_MODEL);
+
+export const SmsSupervisorReactionResponseSchema = z.object({
+  reasoning: z.string(),
+  tool_calls: z
+    .array(
+      z
+        .object({
+          tool: z.literal('react_to_message'),
+          arguments: z
+            .object({
+              emoji: z
+                .string()
+                .describe(
+                  'Choose any single Unicode emoji that fits the incoming message. Compound emoji, skin tones, flags, and keycaps are allowed. No fixed palette or default emoji.'
+                ),
+            })
+            .strict(),
+        })
+        .strict()
+    )
+    .length(1),
+});
+
+export const SUPERVISOR_REACTION_MODEL = responseModel(
+  'sms_supervisor_reaction',
+  SmsSupervisorReactionResponseSchema
+);

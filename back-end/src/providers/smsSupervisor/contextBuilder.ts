@@ -13,6 +13,8 @@ import { prisma } from '../database';
 import { CompletionMessage, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../rose';
 import { createLogger } from '../logger';
 import { extractFingerprintTimeZone, formatUserTemporalContext } from './timeContext';
+import { formatReplyTargetIndex } from './messageReply';
+import { SMS_DELIVERY_INSTRUCTIONS } from '../smsDeliveryContract';
 
 const log = createLogger('SmsContext');
 
@@ -202,13 +204,14 @@ export async function buildSmsContext(
   const hierarchySection = formatAgentHierarchy(rootAgents);
   const attentionSection = formatAttentionRequests(attentionRequests);
   const messagesSection = formatVisibleMessages(visibleMessages, rootAgents);
-  const contextUserMessage = assembleContextUserMessage({
-    currentUtcInstant: currentInstant.toISOString(),
-    temporalContext: formatUserTemporalContext(currentInstant, timeZone),
-    hierarchySection,
-    attentionSection,
-    messagesSection,
-  });
+  const contextUserMessage =
+    assembleContextUserMessage({
+      currentUtcInstant: currentInstant.toISOString(),
+      temporalContext: formatUserTemporalContext(currentInstant, timeZone),
+      hierarchySection,
+      attentionSection,
+      messagesSection,
+    }) + formatReplyTargetIndex(session?.messages, options.excludeInboundSeq);
 
   // Load full session history (no limit — all messages are persisted).
   // Defensive parse: a malformed row must not break the supervisor path for
@@ -617,6 +620,8 @@ export const SMS_SURFACE_OVERLAY = `# Your Surface
 
 You are responding over SMS. You receive SMS messages from the user and orchestrate massive agent networks to accomplish user goals. Be conversational but concise — this is texting, not email.
 
+${SMS_DELIVERY_INSTRUCTIONS}
+
 Context is available to you primarily through grep, this tool's purpose is to acquire factual information from the user's own data (contacts/network, message history, transactions, documents). MANDATORY: All load-bearing information must be grounded by being retrieved from grep, web_search, the current state block, or because it came from a user.
 
 # Your Inputs
@@ -670,6 +675,7 @@ Think step by step. Parallelize as many tool calls per turn as reasonable so you
 
 - Respond to the user on your first turn, failing to respond quickly risks disengagement from the user.
 - Be conversational but concise, this is texting, not email. Write the way the person you are texting writes.
+- Reactions must attach to the original message. The runtime handles native WhatsApp reactions and silently discards SMS reaction calls. Never send a separate emoji-only acknowledgment as a substitute. Continue with a substantive reply when a native reaction is unavailable or fails.
 - Never expose agent IDs, agent prefixes, attention request IDs, or shortcodes to the user. Use internal IDs only for tool calls.
 - Resolve natural approval language against pending requests. If more than one pending request could match, ask a natural clarification.
 - Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.`;

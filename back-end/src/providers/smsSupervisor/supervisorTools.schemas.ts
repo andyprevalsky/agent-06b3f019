@@ -9,6 +9,7 @@
 
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 import { START_PHASE_DESCRIPTION } from './schema';
+import { SMS_DELIVERY_INSTRUCTIONS } from '../smsDeliveryContract';
 
 export const TOOL_SCHEMAS = [
   {
@@ -82,6 +83,11 @@ export const TOOL_SCHEMAS = [
         goal: {
           type: 'string' as const,
           description: 'The task goal for the agent',
+        },
+        notification_message: {
+          type: 'string' as const,
+          description:
+            'Short user-facing kickoff notification for this agent. Include what you are starting, omit internal task instructions and links; the agent link is appended automatically.',
         },
         budget_dollars: {
           type: 'number' as const,
@@ -277,7 +283,14 @@ Returns:
       properties: {
         message: {
           type: 'string' as const,
-          description: userFacingTextDescription('The exact SMS message to send to the user.'),
+          description: userFacingTextDescription(
+            `The exact SMS message to send to the user. ${SMS_DELIVERY_INSTRUCTIONS}`
+          ),
+        },
+        reply_to_message_id: {
+          type: 'string' as const,
+          description:
+            'Optional message ID or reference from the reply-target index to quote an incoming or previously sent message. SMS includes the selected text as a quote; WhatsApp uses a native reply. Omit for an ordinary message.',
         },
       },
       required: ['message'],

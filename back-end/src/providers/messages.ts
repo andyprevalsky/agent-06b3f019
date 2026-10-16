@@ -162,7 +162,7 @@ function logUncreatedMessageWrite(params: CreateMessageParams, message: Message)
   });
 }
 
-function broadcastCreatedMessage(params: CreateMessageParams, message: Message): void {
+export function broadcastCreatedMessage(params: CreateMessageParams, message: Message): void {
   broadcastMessageInsert(params.agentId, {
     id: message.id,
     timestamp: message.timestamp,
@@ -174,6 +174,14 @@ function broadcastCreatedMessage(params: CreateMessageParams, message: Message):
   }).catch((err: unknown) =>
     log.error('broadcast failed', { err: err instanceof Error ? err.message : String(err) })
   );
+}
+
+/** Persist authored input inside its owner's transaction; broadcast after commit. */
+export async function createUserMessageInTransaction(
+  tx: Prisma.TransactionClient,
+  params: Pick<CreateMessageParams, 'agentId' | 'text' | 'metadata'>
+): Promise<Message> {
+  return (await persistOrdinaryMessage({ ...params, role: 'USER' }, null, tx)).message;
 }
 
 /** Create, deduplicate, fence, persist, and broadcast one message. */

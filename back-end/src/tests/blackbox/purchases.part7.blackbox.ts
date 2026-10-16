@@ -261,6 +261,7 @@ async function benchmarkPaymentIdentityProducesTheAssertedStripeHold(): Promise<
             `lifecycle asked for uncaptured intent ${paymentIntentId}`
           );
           return {
+            livemode: false,
             id: paymentIntentId,
             status: 'succeeded',
             amount: LIFECYCLE_TOTAL_CENTS,

@@ -13,18 +13,14 @@
  *   [IDLE] (onApprovalHandled)           [IDLE] (toast error)
  *
  *   [IDLE] --(click Reject)--> [REJECTING] --> [IDLE]
+ *   typed context --> raw authored bytes; empty input --> protocol-only action
  */
 
 import { useCallback, useState } from 'react';
 import { Check, Loader2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-  respondToAttentionRequest,
-  rejectAttentionRequest,
-  useToast,
-  useAgentContext,
-} from '../../hooks';
+import { respondToAttentionRequest, rejectAttentionRequest, useToast } from '../../hooks';
 
 interface BrowserWriteLockApprovalProps {
   attentionRequestId: string;
@@ -95,7 +91,11 @@ function useApprovalActions(
     try {
       setActionState('accepting');
       const responseText = contextInput.trim() || 'Approved';
-      await respondToAttentionRequest(attentionRequestId, responseText);
+      await respondToAttentionRequest(
+        attentionRequestId,
+        responseText,
+        contextInput.trim() ? contextInput : undefined,
+      );
       toast({ title: 'Approved', description: 'Write action approved' });
       resetInput();
       onApprovalHandled?.();
@@ -114,7 +114,7 @@ function useApprovalActions(
   const handleReject = useCallback(async () => {
     try {
       setActionState('rejecting');
-      await rejectAttentionRequest(attentionRequestId);
+      await rejectAttentionRequest(attentionRequestId, contextInput.trim() ? contextInput : undefined);
       toast({ title: 'Rejected', description: 'Write action rejected' });
       resetInput();
       onApprovalHandled?.();
@@ -124,7 +124,7 @@ function useApprovalActions(
     } finally {
       setActionState(null);
     }
-  }, [attentionRequestId, onApprovalHandled, resetInput, toast]);
+  }, [attentionRequestId, contextInput, onApprovalHandled, resetInput, toast]);
 
   const onAccept = useCallback(() => {
     void handleAccept();
@@ -142,7 +142,6 @@ export function BrowserWriteLockApproval({
   question,
   onApprovalHandled,
 }: BrowserWriteLockApprovalProps) {
-  const { inspectionContext } = useAgentContext();
   const [contextInput, setContextInput] = useState('');
   const resetInput = useCallback(() => setContextInput(''), []);
   const { actionState, onAccept, onReject } = useApprovalActions(
@@ -152,9 +151,6 @@ export function BrowserWriteLockApproval({
     onApprovalHandled,
   );
   const disabled = actionState !== null;
-  if (inspectionContext !== null) {
-    return <p className="p-4 text-sm">Switch to this agent’s account to approve its request.</p>;
-  }
 
   return (
     <div className="p-3">

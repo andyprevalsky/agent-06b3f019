@@ -37,8 +37,16 @@ import {
 import { SUPERVISOR_FALLBACK_MESSAGE } from '../../providers/smsSupervisor/supervisorHandler';
 import {
   finalizeSupervisorResponse,
+  finalizeSupervisorReactionResponse,
   type SupervisorResponse,
 } from '../../providers/smsSupervisor/supervisorLlm';
+import { isSingleEmoji } from '../../providers/smsSupervisor/inboundReaction';
+import {
+  setSupervisorFixtureOverride,
+  clearSupervisorFixtureOverride,
+  loadBlackboxSupervisorResponseFixture,
+  BYPASS_FIXTURE_REAL_LLM,
+} from '../../providers/smsSupervisor/supervisorFixtures';
 import {
   callWithRetries,
   dispatchToolSafely,
@@ -391,7 +399,108 @@ function testFallbackMessageStaysWarm(): void {
   );
 }
 
+function testAnySingleUnicodeEmoji(): void {
+  for (const emoji of ['😢', '❤️', '🙏🏽', '👩🏽‍💻', '👨‍👩‍👧‍👦', '🇯🇵', '1️⃣', '🏳️‍🌈', '🪼']) {
+    assert.equal(isSingleEmoji(emoji), true, `accept ${emoji}`);
+  }
+  // Unicode 18 modifier bases must work even when Node's property tables lag.
+  // Exercise every tone, standalone and inside the existing ZWJ grammar.
+  for (const base of ['\u{1FAF9}', '\u{1FAFA}']) {
+    for (let modifier = 0x1f3fb; modifier <= 0x1f3ff; modifier++) {
+      const emoji = base + String.fromCodePoint(modifier);
+      assert.equal(isSingleEmoji(emoji), true, `accept Unicode 18 modifier base ${emoji}`);
+      assert.equal(isSingleEmoji(base + '\uFE0F' + String.fromCodePoint(modifier)), true);
+      assert.equal(isSingleEmoji('👩🏽\u200D' + emoji), true, 'updated bases work in compounds');
+    }
+  }
+  for (const invalid of [
+    '',
+    'hello',
+    '🎉🎉',
+    '😢🎉',
+    'hello🎉',
+    '1',
+    '🇯',
+    '👩‍',
+    '🎉🏽',
+    '😢\u0301',
+    '😀\u0301',
+    '\u{1FAF9}🏽🏽',
+    '\u{1FAFA}\u200D',
+    '\u{1FAF9}\u0301',
+  ]) {
+    assert.equal(isSingleEmoji(invalid), false, `reject ${JSON.stringify(invalid)}`);
+  }
+}
+
+function testReactionOnlyOutputIsValidatedAsAWhole(): void {
+  const reaction = { tool: 'react_to_message', arguments: { emoji: '👩🏽‍💻' } };
+  const empty = new StructuredOutputAccumulator();
+  assert.deepEqual(finalizeSupervisorReactionResponse([reaction], empty, '').tool_calls, [
+    reaction,
+  ]);
+  const json = new StructuredOutputAccumulator();
+  json.addText(JSON.stringify({ reasoning: '', tool_calls: [reaction] }));
+  assert.deepEqual(finalizeSupervisorReactionResponse([], json, '').tool_calls, [reaction]);
+  for (const invalid of [
+    [],
+    [reaction, reaction],
+    [reaction, { tool: 'grep', arguments: { pattern: 'x' } }],
+    [{ tool: 'react_to_message', arguments: { emoji: '🎉', extra: 'text' } }],
+    [{ tool: 'send_user_message', arguments: { message: 'hi' } }],
+  ]) {
+    assert.deepEqual(finalizeSupervisorReactionResponse(invalid, empty, '').tool_calls, []);
+    const content = new StructuredOutputAccumulator();
+    content.addText(JSON.stringify({ reasoning: '', tool_calls: invalid }));
+    assert.deepEqual(finalizeSupervisorReactionResponse([], content, '').tool_calls, []);
+  }
+}
+
+function testReactionFixturePeekPreservesReplyCursor(): void {
+  const previousCapture = process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND;
+  process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND = '1';
+  const user = 'reaction-fixture-peek';
+  try {
+    setSupervisorFixtureOverride(
+      user,
+      JSON.stringify([
+        {
+          reasoning: 'first',
+          reaction_emoji: '😢',
+          delay_ms: 5000,
+          tool_calls: [{ tool: 'attempt_completion', arguments: {} }],
+        },
+        {
+          reasoning: 'second',
+          reaction_emoji: '🎉',
+          tool_calls: [{ tool: 'attempt_completion', arguments: {} }],
+        },
+      ])
+    );
+    for (let i = 0; i < 2; i++) {
+      const peek = loadBlackboxSupervisorResponseFixture(user, true);
+      assert.equal(peek?.response.tool_calls[0].arguments.emoji, '😢');
+      assert.equal(peek?.delayMs, 0);
+    }
+    assert.equal(loadBlackboxSupervisorResponseFixture(user)?.response.reasoning, 'first');
+    assert.equal(
+      loadBlackboxSupervisorResponseFixture(user, true)?.response.tool_calls[0].arguments.emoji,
+      '🎉'
+    );
+    assert.equal(loadBlackboxSupervisorResponseFixture(user)?.response.reasoning, 'second');
+    setSupervisorFixtureOverride(user, BYPASS_FIXTURE_REAL_LLM);
+    assert.equal(loadBlackboxSupervisorResponseFixture(user, true), null);
+  } finally {
+    clearSupervisorFixtureOverride(user);
+    if (previousCapture === undefined) delete process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND;
+    else process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND = previousCapture;
+  }
+}
+
 async function main(): Promise<void> {
+  testAnySingleUnicodeEmoji();
+  testReactionOnlyOutputIsValidatedAsAWhole();
+  testReactionFixturePeekPreservesReplyCursor();
   testReasoningOnlyStreamDoesNotThrow();
   testIgnoredPhaseOnlyStreamDoesNotThrow();
   testAmbiguousMultiItemStreamDoesNotThrow();
@@ -407,7 +516,7 @@ async function main(): Promise<void> {
   testMalformedToolIsDroppedNotThrown();
   testFinalizeUsesZodNotFinalText();
   testFallbackMessageStaysWarm();
-  console.log('PASS sms-supervisor-stream (15 cases)');
+  console.log('PASS sms-supervisor-stream (18 cases)');
 }
 
 main().catch((error) => {

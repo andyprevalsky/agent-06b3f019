@@ -1,4 +1,11 @@
+import {
+  testSendUserMessage_rejectsEmojiOnlySms,
+  testSmsQuotedReplies,
+} from './sms-supervisor.reply.behavior';
 import type { PrismaClient } from '@prisma/client';
+import { SMS_SURFACE_OVERLAY } from '../../providers/smsSupervisor/contextBuilder';
+import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
+import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
 
 import { grep as userDataGrep } from '../../domains/data/service';
 import { executeGrepTool } from '../../providers/smsSupervisor/supervisorTools.grep';
@@ -140,7 +147,7 @@ export async function testSendUserMessage_continuesUntilSubstantiveResult(prisma
     });
     if (assistantMessages[0] !== progress || assistantMessages[1] !== result) {
       throw new Error(
-        `Expected progress then substantive result in one run, got ${JSON.stringify(assistantMessages)}`
+        `Expected only progress then substantive result in one run, got ${JSON.stringify(assistantMessages)}`
       );
     }
   } finally {
@@ -196,6 +203,103 @@ export async function testSendUserMessage_identicalBodyNotResent(prisma: PrismaC
     if (delivered.length !== 1) {
       throw new Error(
         `Identical send_user_message bodies must deliver once, got ${String(delivered.length)}`
+      );
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+export function testSmsMessageLimit_isTaughtOnEverySupervisorPromptSurface() {
+  const sendTool = TOOL_SCHEMAS.find((tool) => tool.name === 'send_user_message');
+  const contracts = [
+    SMS_SURFACE_OVERLAY,
+    JSON.stringify(sendTool),
+    JSON.stringify(SUPERVISOR_RESPONSE_SCHEMA),
+  ];
+  for (const contract of contracts) {
+    if (
+      !contract.includes('at most 1600 characters') ||
+      !contract.includes('spaces, line breaks, and URLs') ||
+      !contract.includes('actual delivery error') ||
+      !contract.includes('do not claim delivery until the send succeeds')
+    ) {
+      throw new Error(
+        'SMS supervisor prompt and send schemas must teach the full-body 1600-character limit and delivery-error correction'
+      );
+    }
+  }
+}
+
+export async function testSendUserMessage_rejectedBodyFeedsErrorToNextModelRound(
+  prisma: PrismaClient
+) {
+  const probe = await request(`${BASE_URL}/api/test/captures`);
+  assertStatus(probe.status, 200, probe.data);
+  const cursor = (probe.data as { nextId: number }).nextId - 1;
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-oversize-correction');
+  const url = 'https://www.roselabs.ai/';
+  const rejected = `The report is ready. ${'Detailed report. '.repeat(110)}\n${url}`;
+  const corrected = `The report is ready. Read the details: ${url}`;
+
+  try {
+    await setFixtureOverride(
+      userId,
+      JSON.stringify([
+        {
+          reasoning: 'send the report and request completion',
+          tool_calls: [
+            { tool: 'send_user_message', arguments: { message: rejected } },
+            { tool: 'attempt_completion', arguments: {} },
+          ],
+        },
+        {
+          expected_tool_result_substrings: [
+            '[send_user_message] ERROR:',
+            'should be at most 1600 character(s)',
+            'Rejected: this run has not successfully called send_user_message',
+          ],
+          reasoning: 'the provider rejected the oversized report; shorten it and preserve the link',
+          tool_calls: [
+            { tool: 'send_user_message', arguments: { message: corrected } },
+            { tool: 'attempt_completion', arguments: {} },
+          ],
+        },
+      ])
+    );
+    const response = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: 'Please send me the report.',
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+    await waitFor(() => findSurgeCallForReply(token, cursor, phone, corrected));
+    const session = await waitFor(async () => {
+      const stored = await prisma.smsSession.findUnique({ where: { userId } });
+      if (stored === null) return null;
+      const messages = parseSmsSessionMessages(stored.messages);
+      return messages.some(
+        (message) => message.role === 'assistant' && message.content === corrected
+      )
+        ? messages
+        : null;
+    });
+    const sent = session
+      .filter((message) => message.role === 'assistant')
+      .map((message) => message.content);
+    if (sent.length !== 1 || sent[0] !== corrected) {
+      throw new Error(
+        `Only the corrected successfully delivered SMS belongs in the transcript: ${JSON.stringify(sent)}`
       );
     }
   } finally {
@@ -492,6 +596,18 @@ export async function testCatchUp_neverReplaysTheInboundEchoOrOwnSend(prisma: Pr
 export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
   return [
     {
+      name: 'send -- SMS quotes current, earlier, sent, and legacy messages once',
+      fn: () => testSmsQuotedReplies(prisma),
+    },
+    {
+      name: 'send -- prompt and schemas teach complete-body SMS limit and correction',
+      fn: async () => testSmsMessageLimit_isTaughtOnEverySupervisorPromptSurface(),
+    },
+    {
+      name: 'send -- rejected oversized SMS feeds the provider error into the next model round',
+      fn: () => testSendUserMessage_rejectedBodyFeedsErrorToNextModelRound(prisma),
+    },
+    {
       name: 'catch-up -- a lifecycle SMS is visible to an ISO watermark',
       fn: () => testCatchUp_lifecycleSmsIsVisibleToAnIsoWatermark(prisma),
     },
@@ -514,6 +630,10 @@ export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
     {
       name: 'send -- progress SMS continues to a later substantive result',
       fn: () => testSendUserMessage_continuesUntilSubstantiveResult(prisma),
+    },
+    {
+      name: 'send -- emoji-only SMS is rejected, substantive text with emoji is allowed',
+      fn: () => testSendUserMessage_rejectsEmojiOnlySms(prisma),
     },
     {
       name: 'send -- identical send_user_message body is delivered once',

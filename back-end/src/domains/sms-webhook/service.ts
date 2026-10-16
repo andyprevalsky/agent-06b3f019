@@ -17,7 +17,7 @@ import {
   parseSurgeDeliveryEvent,
   type SurgeDeliveryStatusEvent,
 } from './service.validation';
-import type { SurgeAttachment } from './types';
+import type { ParsedSurgeMessage } from './types';
 import { deleteAgentRecursive } from '../../providers/agentKill';
 import { sendSms } from '../../providers/smsQueue';
 import { createSignupBonusCredit } from '../../providers/credits';
@@ -124,11 +124,10 @@ export async function handleClearCommand(userId: string, fromPhone: string): Pro
 /* c8 ignore start -- routeToSupervisor delegates to handleSmsSupervisorMessage (excluded smsSupervisor module) */
 export async function routeToSupervisor(
   userId: string,
-  fromPhone: string,
-  messageBody: string,
-  attachments: SurgeAttachment[],
+  message: ParsedSurgeMessage,
   requestStart: number
 ): Promise<void> {
+  const { fromPhone, messageBody, attachments, messageId } = message;
   // Persist first, before any asynchronous supervisor work. Advancing the
   // sequence and appending this exact inbound record happen atomically.
   const persistedInbound = [
@@ -137,7 +136,7 @@ export async function routeToSupervisor(
   ]
     .filter((part) => part !== '')
     .join('\n\n');
-  const mySeq = await recordInboundSms(userId, persistedInbound);
+  const mySeq = await recordInboundSms(userId, persistedInbound, messageId);
 
   log.info('Routing to SMS Supervisor', {
     userId,
@@ -154,6 +153,7 @@ export async function routeToSupervisor(
     userId,
     phoneNumber: fromPhone,
     inboundMessage: messageBody,
+    inboundMessageId: messageId,
     mySeq,
     inboundAlreadyPersisted: true,
     attachments,
@@ -363,7 +363,7 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
     throw new InvalidPayloadError();
   }
 
-  const { fromPhone, messageBody, attachments } = parsed;
+  const { fromPhone, messageBody } = parsed;
 
   // Resolve (or provision) the user. An inbound SMS proves possession of the
   // number, so a first-time texter is onboarded SILENTLY — no OTP, no signup
@@ -403,7 +403,7 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
   // Await long enough to atomically bump `lastInboundSeq` so the run captures
   // the right `mySeq` before the next inbound SMS can race. The supervisor
   // itself continues async — the webhook still returns 200 promptly.
-  await routeToSupervisor(user.userId, fromPhone, messageBody, attachments, requestStart);
+  await routeToSupervisor(user.userId, parsed, requestStart);
 
   return { ok: true };
 }

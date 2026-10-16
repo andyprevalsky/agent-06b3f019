@@ -9,9 +9,10 @@ Communication contract (mandatory)
   wrap explanations to fit, and use the same units on every observation. Preserve
   full evidence URLs and exact code/prompt diffs without reflowing their contents.
 - User-requested approval messages use .claude/shared/approval-format.md instead:
-  the same styled text frame, all six existing sections, exact inline diffs and
-  the required clickable Links list immediately below. This changes presentation,
-  not when approval is required. Continue independent authorized work meanwhile.
+  the same styled text frame, all seven required sections with How: immediately
+  before TL;DR:, exact inline diffs and the clickable Links list immediately below.
+  This changes presentation, not when approval is required. Continue independent
+  authorized work meanwhile.
 - Unknown values are — with a concrete reason, never an invented zero. Keep empty
   sections as None. Never present example numbers as observations.
 

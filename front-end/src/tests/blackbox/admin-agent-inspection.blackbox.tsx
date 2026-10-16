@@ -1,15 +1,10 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-vi.mock('@/lib/adminUsers', async (original) => ({
-  ...(await original<typeof import('@/lib/adminUsers')>()),
-  switchToAccount: vi.fn(),
-}));
-import { switchToAccount } from '@/lib/adminUsers';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { TopRightControls } from '@/components/TopRightControls';
+import { Toaster } from '@/components/ui/toaster';
 import { AdminAccountSwitcher } from '@/features/admin-account-switcher';
 import { InspectionAccountBadge } from '@/features/terminal/components/InspectionAccountBadge';
 import Terminal from '@/pages/Terminal';
@@ -39,10 +34,10 @@ function mockAdminSession() {
   localStorage.setItem('app-user', JSON.stringify(user));
 }
 
-function agentDetail(inspectionContext: Record<string, string> | null) {
+function agentDetail(inspectionContext: Record<string, string> | null, agentId = 'foreign-agent') {
   return {
     agent: {
-      agent_id: 'foreign-agent',
+      agent_id: agentId,
       goal: 'Foreign account run',
       model: 'rose-1-flash',
       source: 'WEB',
@@ -75,53 +70,12 @@ function agentDetail(inspectionContext: Record<string, string> | null) {
   };
 }
 
-function approvalDetail(inspectionContext: Record<string, string> | null) {
-  const detail = agentDetail(inspectionContext);
-  return {
-    ...detail,
-    messages: [
-      {
-        message_id: 'approval-message',
-        agent_id: 'foreign-agent',
-        role: 'TOOL',
-        text: 'Approve the $500 ChatGPT Pro subscription?',
-        timestamp: '2026-10-14T16:13:35.308Z',
-        metadata: {
-          isUserAttentionMessage: true,
-          toolName: 'request_user_approval',
-          toolCallId: 'approval-tool',
-          toolStatus: 'IN_PROGRESS',
-          requestUserApproval: {
-            attentionRequestId: 'cmv8b7buz0l7hzjsggc1gqgfs',
-            toolApproval: true,
-            writePermission: true,
-            requestPaymentCard: {
-              merchant: 'ChatGPT (OpenAI)',
-              currency: 'USD',
-              totalCents: 50000,
-              lineItems: [
-                {
-                  name: 'ChatGPT Pro - Max usage (Pro 500) - Monthly subscription, $500/month',
-                  productUrl: 'https://chatgpt.com/#pricing',
-                  quantity: 1,
-                  unitPriceCents: 50000,
-                  lineTotalCents: 50000,
-                  rating: '0 stars',
-                  reviewCount: '0 reviews',
-                },
-              ],
-            },
-          },
-        },
-      },
-    ],
-  };
-}
-
 describe('admin agent inspection', () => {
   let inspectionSlot: HTMLDivElement;
+  let viewportWidth: number;
 
   beforeEach(() => {
+    viewportWidth = window.innerWidth;
     mockAdminSession();
     window.history.replaceState({}, '', '/?agent-id=foreign-agent');
     inspectionSlot = document.createElement('div');
@@ -131,46 +85,10 @@ describe('admin agent inspection', () => {
   });
 
   afterEach(() => {
+    window.innerWidth = viewportWidth;
     window.history.replaceState({}, '', '/');
     localStorage.clear();
     inspectionSlot.remove();
-  });
-
-  it('requires switching to the owner before approving an inspected account’s request', async () => {
-    const user = userEvent.setup();
-    let posts = 0;
-    server.use(
-      http.get(`${API_BASE}/agents/:agentId`, () =>
-        HttpResponse.json(
-          approvalDetail({
-            user_id: 'affected-user',
-            name: 'Andy',
-            phone: '+19729777432',
-            email: 'andy@roselabs.ai',
-          }),
-        ),
-      ),
-      http.post(`${API_BASE}/attention-requests/:id/respond`, () => {
-        posts += 1;
-        return HttpResponse.json({ error: 'Not authorized' }, { status: 403 });
-      }),
-    );
-    renderWithProviders(<Terminal />);
-    await screen.findByTestId('inspection-account-badge');
-    expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument();
-    const switchButton = await screen.findByRole('button', { name: 'Switch to this account' });
-    await user.click(switchButton);
-    expect(switchToAccount).toHaveBeenCalledWith('affected-user', 'foreign-agent');
-    expect(posts).toBe(0);
-  });
-
-  it('keeps approval available for the signed-in owner', async () => {
-    server.use(
-      http.get(`${API_BASE}/agents/:agentId`, () => HttpResponse.json(approvalDetail(null))),
-    );
-    renderWithProviders(<Terminal />);
-    expect(await screen.findByRole('button', { name: 'Accept' })).toBeEnabled();
   });
 
   it('floats the affected account identity above a cross-account run', async () => {
@@ -223,6 +141,120 @@ describe('admin agent inspection', () => {
 
     await waitFor(() => expect(detailRequests).toBeGreaterThan(0));
     expect(screen.queryByTestId('inspection-account-badge')).not.toBeInTheDocument();
+  });
+
+  it('keeps foreign inspection read-only and restores controls when selecting an owned run', async () => {
+    const user = userEvent.setup({ delay: null });
+    const agentId = 'ae17b024-5287-4199-84d0-6cce3bd1765d';
+    const owner = { user_id: 'c49b4ce3-3489-499d-bfbd-846d04ba6275', name: 'Tamara' };
+    const mutations: string[] = [];
+    window.innerWidth = 390;
+    window.history.replaceState({}, '', `/?agent-id=${agentId}`);
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
+        HttpResponse.json(
+          agentDetail(params.agentId === agentId ? owner : null, String(params.agentId)),
+        ),
+      ),
+      http.post(`${API_BASE}/agents/${agentId}/pause`, ({ request }) => {
+        mutations.push(request.url);
+        // Retained Render evidence: detail GET succeeds, owner-only pause returns 404.
+        return HttpResponse.json({ error: 'Agent not found' }, { status: 404 });
+      }),
+      http.patch(`${API_BASE}/agents/${agentId}`, ({ request }) => {
+        mutations.push(request.url);
+        return HttpResponse.json({ error: 'Agent not found' }, { status: 404 });
+      }),
+      http.post(`${API_BASE}/agents/${agentId}/messages`, ({ request }) => {
+        mutations.push(request.url);
+        return HttpResponse.json({ error: 'Agent not found' }, { status: 404 });
+      }),
+    );
+
+    renderWithProviders(
+      <>
+        <Terminal />
+        <Toaster />
+      </>,
+    );
+
+    await screen.findByTestId('inspection-account-badge');
+    const stopButton = screen
+      .queryByTestId('terminal-input-area')
+      ?.querySelector('svg.lucide-square')
+      ?.closest('button');
+    if (stopButton) {
+      await user.click(stopButton);
+      await screen.findByText('Failed to pause agent');
+      expect(mutations).toEqual([`${API_BASE}/agents/${agentId}/pause`]);
+    }
+    expect(mutations).toEqual([]);
+    expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-input-area')).not.toBeInTheDocument();
+    expect(screen.getByText(/Read-only account inspection/)).toHaveTextContent(
+      'Switch to this account to control the agent.',
+    );
+    expect(mutations).toEqual([]);
+
+    await user.click(screen.getByRole('button', { name: 'Open menu' }));
+    await user.click(await screen.findByText('Test agent'));
+
+    expect(await screen.findByPlaceholderText('Type your message...')).toBeInTheDocument();
+    const ownControls = screen.getByTestId('terminal-input-area');
+    expect(ownControls.querySelector('svg.lucide-square')).toBeInTheDocument();
+    expect(ownControls.querySelector('svg.lucide-settings')).toBeInTheDocument();
+    expect(screen.queryByTestId('inspection-account-badge')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Read-only account inspection/)).not.toBeInTheDocument();
+    expect(mutations).toEqual([]);
+  });
+
+  it('does not offer pending gate mutations while inspecting a foreign run', async () => {
+    const mutations: string[] = [];
+    const detail = agentDetail({
+      user_id: 'c49b4ce3-3489-499d-bfbd-846d04ba6275',
+      name: 'Tamara',
+    });
+    const messages = [
+      {
+        message_id: 'inspection-gate',
+        timestamp: '2026-10-14T17:33:50Z',
+        role: 'TOOL',
+        text: 'Foreign account needs a reply',
+        metadata: {
+          toolCallId: 'inspection-gate',
+          toolName: 'gate',
+          toolStatus: 'IN_PROGRESS',
+          attentionRequestId: 'inspection-attention',
+          gate: {
+            type: 'approval',
+            gateKey: 'approval:inspection',
+            presentation: {
+              title: 'Foreign account needs a reply',
+              reason: 'Confirm this action',
+              cta: 'Confirm foreign action',
+            },
+            action: { kind: 'reply', tokens: ['YES'] },
+          },
+        },
+      },
+    ];
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId`, () => HttpResponse.json({ ...detail, messages })),
+      http.post(`${API_BASE}/attention-requests/:requestId/:action`, ({ request }) => {
+        mutations.push(request.url);
+        return HttpResponse.json({ error: 'Forbidden' }, { status: 403 });
+      }),
+    );
+
+    renderWithProviders(<Terminal />);
+
+    await screen.findByTestId('inspection-account-badge');
+    expect(
+      screen.queryByRole('button', { name: 'Confirm foreign action' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Cancel/ })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-input-area')).not.toBeInTheDocument();
+    expect(mutations).toEqual([]);
   });
 });
 
