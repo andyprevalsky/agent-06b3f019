@@ -276,6 +276,10 @@ if [ "$NEED" -gt 0 ] && [ -n "$CURRENT_HASH" ]; then
       echo "Not reusing $ID: its source queue is not proven drained"
       continue
     fi
+    if ! (cd "$ROOT/back-end" && npx tsx scripts/retire-agent-queue.ts --queue "navi-agent-tasks@$SOURCE_HASH" --verify-retired); then
+      echo "Not reusing $ID: durable source admission/chain coverage is unqualified"
+      continue
+    fi
     echo "Reusing released same-app Machine $ID before fresh allocation"
     configure_new_machine "$ID" "$SNAPSHOT"
     NEED=$((NEED - 1))
@@ -355,6 +359,10 @@ if [ -z "$OLD_QUEUE" ]; then
   exit 0
 fi
 
+# Close admission before measuring drain. The durable tombstone survives process
+# failure; neither pointer cache expiry nor visibility zero authorizes retirement.
+npx tsx scripts/retire-agent-queue.ts --queue "$OLD_QUEUE" --owner "$BUILD_ID:$DEPLOYMENT_TOKEN" --begin
+
 # Temporal client logs INFO to stdout (logger.ts). Never assign the raw
 # command output to OPEN — a polluted multiline string never equals "0", so
 # the drain loop would burn the full 45m SLO even with an empty queue and
@@ -390,6 +398,9 @@ if [ -n "$CURRENT_HASH" ]; then
     echo "❌ old queue is not proven empty; refusing to certify reusable workers" >&2
     exit 1
   fi
+  # Accepted native chains and every in-flight admission must settle positively.
+  # Legacy producer ambiguity intentionally blocks this step, retaining old workers.
+  npx tsx scripts/retire-agent-queue.ts --queue "$OLD_QUEUE" --owner "$BUILD_ID:$DEPLOYMENT_TOKEN" --retire
   # Cap total retire wall-clock so N serial machines cannot burn the GHA step
   # after drain already succeeded (12 machines × 240s would be 48m alone).
   retire_deadline=$((SECONDS + 900))

@@ -15,7 +15,16 @@
  * which is why the cutover keeps old-generation workers alive past the TTL before
  * scaling them down (any lagged routing is still served).
  */
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
+import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
+import {
+  lockQueueAdmission,
+  queueAdmissionKey,
+  QUEUE_ADMISSION_OPERATION,
+  WorkflowStartAdmissionPendingError,
+  type QueueAdmission,
+} from './workflowQueueAdmission';
 
 const SINGLETON_ID = 'singleton';
 
@@ -68,10 +77,46 @@ export async function setCurrentAgentQueue(
   surfaceHash: string,
   updatedBy?: string
 ): Promise<void> {
-  await prisma.agentQueuePointer.upsert({
-    where: { id: SINGLETON_ID },
-    create: { id: SINGLETON_ID, taskQueue, surfaceHash, updatedBy: updatedBy ?? null },
-    update: { taskQueue, surfaceHash, updatedBy: updatedBy ?? null },
+  await runTransactionWithRetry(async (tx) => {
+    await lockQueueAdmission(tx);
+    const key = queueAdmissionKey(taskQueue);
+    const prior = await tx.toolSideEffect.findUnique({ where: { operationKey: key } });
+    const saved = prior?.request as unknown as QueueAdmission | undefined;
+    if (
+      saved &&
+      (saved.version !== 1 ||
+        saved.queue !== taskQueue ||
+        saved.phase !== 'OPEN' ||
+        saved.surfaceHash !== surfaceHash)
+    )
+      throw new WorkflowStartAdmissionPendingError(
+        'Closed or mismatched queue requires separately qualified reactivation'
+      );
+    if (!saved) {
+      const state: QueueAdmission = {
+        version: 1,
+        queue: taskQueue,
+        incarnation: randomUUID(),
+        owner: updatedBy ?? 'queue-pointer',
+        phase: 'OPEN',
+        surfaceHash,
+        legacyCoverage: 'UNKNOWN',
+      };
+      await tx.toolSideEffect.create({
+        data: {
+          operationKey: key,
+          operationType: QUEUE_ADMISSION_OPERATION,
+          status: 'OPEN',
+          externalId: taskQueue,
+          request: state as unknown as Prisma.InputJsonObject,
+        },
+      });
+    }
+    await tx.agentQueuePointer.upsert({
+      where: { id: SINGLETON_ID },
+      create: { id: SINGLETON_ID, taskQueue, surfaceHash, updatedBy: updatedBy ?? null },
+      update: { taskQueue, surfaceHash, updatedBy: updatedBy ?? null },
+    });
   });
   cache = null;
 }

@@ -73,6 +73,9 @@ if [[ "$*" == *'set-agent-queue-pointer.ts --read'* ]]; then
   fi
 elif [[ "$*" == *'set-agent-queue-pointer.ts --queue'* ]]; then
   echo flip >> "$FAKE_FLY_JOURNAL"
+elif [[ "$*" == *'retire-agent-queue.ts'* ]]; then
+  printf 'admission %s\n' "$*" >> "$FAKE_FLY_JOURNAL"
+  if [[ "$*" == *'--retire'* ]] && [ "${FAKE_FLY_ADMISSION_UNKNOWN:-0}" = 1 ]; then exit 7; fi
 elif [[ "$*" == *'count-open-workflows-on-queue.ts'* ]]; then
   if [ "$PWD" != "$FAKE_FLY_BACKEND_DIR" ]; then
     echo counter-cwd-refused >> "$FAKE_FLY_JOURNAL"
@@ -266,6 +269,16 @@ for row in rows[1:]:
 open(sys.argv[2], 'w').write(json.dumps(rows))
 PY
 }
+
+# Visibility zero cannot override the actual durable admission owner.
+seed_state 8 abc 0
+export FAKE_FLY_POINTER_HASH=old FAKE_FLY_NO_CREATE=1 FAKE_FLY_ADMISSION_UNKNOWN=1
+if run_cutover; then echo 'FAIL: unknown admission coverage permitted retirement' >&2; exit 1; fi
+grep -q 'admission .*--begin' "$TMP/journal" || { echo 'FAIL: admission was never closed' >&2; exit 1; }
+grep -q 'admission .*--retire' "$TMP/journal" || { echo 'FAIL: exact readiness owner was bypassed' >&2; exit 1; }
+if grep -qE '^stop |^destroy |^pool-retire ' "$TMP/journal"; then echo 'FAIL: unqualified membership stopped/released workers' >&2; exit 1; fi
+unset FAKE_FLY_POINTER_HASH FAKE_FLY_NO_CREATE FAKE_FLY_ADMISSION_UNKNOWN
+echo 'PASS: unknown durable admission coverage preserves old workers despite visibility zero'
 
 case "${1:-all}" in all|retention|reuse|idle-name|cwd|rolling|reuse-only) ;; *) echo 'Unknown test selection' >&2; exit 2 ;; esac
 if [ "${1:-all}" = all ] || [ "${1:-all}" = reuse-only ]; then

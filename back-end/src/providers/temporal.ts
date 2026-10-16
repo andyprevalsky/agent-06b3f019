@@ -7,6 +7,12 @@ import {
 } from '@temporalio/client';
 import { createLogger } from './logger';
 import { getCurrentAgentQueue } from './agentQueuePointer';
+import {
+  claimWorkflowStart,
+  retainPendingWorkflowStart,
+  acknowledgeWorkflowStart,
+  type StartAdmission,
+} from './workflowQueueAdmission';
 import type { WorkflowLaunchConfig, WorkflowResumeState } from './workflowReplacementState';
 import {
   createBlackboxTemporalClient,
@@ -444,6 +450,11 @@ export async function startAgentWorkflowExecutionWithClient(
   const workflowId = params.workflowId ?? params.agentId;
 
   let execution: TemporalWorkflowExecutionRef;
+  let admission: StartAdmission | undefined;
+  const admissionDeadline = Math.min(
+    deadlineAtMs ?? Number.POSITIVE_INFINITY,
+    Date.now() + TEMPORAL_CONTROL_RPC_TIMEOUT_MS
+  );
   try {
     const handle = await withTemporalControlDeadline(
       client,
@@ -454,9 +465,16 @@ export async function startAgentWorkflowExecutionWithClient(
         // unset. Resolved UNDER the control deadline so a cache-miss Prisma read
         // cannot block the start past the caller's deadline.
         const taskQueue = params.taskQueue || (await getCurrentAgentQueue());
-        log.info('Starting agent workflow', { workflowId, taskQueue });
-        return client.workflow.start('AgentWorkflow', {
+        admission = await claimWorkflowStart(
+          params.agentId,
+          workflowId,
           taskQueue,
+          params.rejectDuplicateWorkflowId === true,
+          admissionDeadline
+        );
+        log.info('Starting agent workflow', { workflowId, taskQueue: admission.queue });
+        return client.workflow.start('AgentWorkflow', {
+          taskQueue: admission!.queue,
           workflowId,
           args: buildAgentWorkflowArgs(params),
           ...(params.rejectDuplicateWorkflowId === true
@@ -467,19 +485,36 @@ export async function startAgentWorkflowExecutionWithClient(
             : {}),
         });
       },
-      deadlineAtMs
+      admissionDeadline
     );
     execution = {
       workflowId: handle.workflowId,
       firstExecutionRunId: handle.firstExecutionRunId,
     };
   } catch (error) {
-    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
-    execution = await resolveTemporalWorkflowExecutionRefWithClient(
-      client,
-      workflowId,
-      deadlineAtMs
-    );
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) {
+      if (admission) retainPendingWorkflowStart(error);
+      throw error;
+    }
+    try {
+      execution = await resolveTemporalWorkflowExecutionRefWithClient(
+        client,
+        workflowId,
+        admissionDeadline
+      );
+    } catch (resolveError) {
+      if (admission) retainPendingWorkflowStart(resolveError);
+      throw resolveError;
+    }
+  }
+
+  if (admission) {
+    try {
+      await acknowledgeWorkflowStart(admission, execution, admissionDeadline);
+    } catch (error) {
+      retainPendingWorkflowStart(error);
+      throw error;
+    }
   }
 
   log.info('Workflow started', {

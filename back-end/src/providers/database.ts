@@ -66,11 +66,14 @@ function normalizeMaxRetries(value: number): number {
  */
 export async function retryOnTransientTransactionStart<T>(
   run: (markBodyEntered: () => void) => Promise<T>,
-  maxRetries = 3
+  maxRetries = 3,
+  deadlineAtMs?: number
 ): Promise<T> {
   let bodyEntered = false;
   return retryWithBackoff(
     () => {
+      if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs)
+        throw new Error('Transaction deadline elapsed before acquisition');
       bodyEntered = false; // reset per attempt
       return run(() => {
         bodyEntered = true;
@@ -79,7 +82,16 @@ export async function retryOnTransientTransactionStart<T>(
     {
       maxRetries: normalizeMaxRetries(maxRetries),
       initialBackoffMs: 100,
-      isRetryable: (error) => !bodyEntered && isRetryableTransactionError(error),
+      isRetryable: (error) =>
+        !bodyEntered &&
+        (deadlineAtMs === undefined || Date.now() < deadlineAtMs) &&
+        isRetryableTransactionError(error),
+      ...(deadlineAtMs === undefined
+        ? {}
+        : {
+            getBackoffDelayMs: (_error: unknown, attempt: number) =>
+              Math.min(100 * 2 ** (attempt - 1), Math.max(0, deadlineAtMs - Date.now())),
+          }),
       component: 'PrismaTx',
     }
   );
@@ -328,11 +340,22 @@ if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
  */
 export async function runTransactionWithRetry<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
-  options?: { maxWait?: number; timeout?: number; maxRetries?: number }
+  options?: { maxWait?: number; timeout?: number; maxRetries?: number; deadlineAtMs?: number }
 ): Promise<T> {
   return retryOnTransientTransactionStart(
-    (markBodyEntered) =>
-      prisma.$transaction(
+    (markBodyEntered) => {
+      let maxWait = options?.maxWait ?? 5_000;
+      let timeout = options?.timeout ?? 10_000;
+      if (options?.deadlineAtMs !== undefined) {
+        const remaining = Math.floor(options.deadlineAtMs - Date.now());
+        if (!Number.isFinite(remaining) || remaining < 2)
+          throw new Error('Transaction deadline elapsed before acquisition');
+        // Acquisition and body share the caller's remaining budget. Prisma
+        // owns cancellation/rollback; no detached Promise.race can keep writing.
+        maxWait = Math.min(maxWait, Math.floor(remaining / 2));
+        timeout = Math.min(timeout, remaining - maxWait);
+      }
+      return prisma.$transaction(
         (tx) => {
           // The callback has now started — any failure from here on may have
           // partially executed, so it must not be retried.
@@ -340,10 +363,12 @@ export async function runTransactionWithRetry<T>(
           return fn(tx);
         },
         {
-          maxWait: options?.maxWait ?? 5_000,
-          timeout: options?.timeout ?? 10_000,
+          maxWait,
+          timeout,
         }
-      ),
-    options?.maxRetries ?? 3
+      );
+    },
+    options?.maxRetries ?? 3,
+    options?.deadlineAtMs
   );
 }

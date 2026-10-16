@@ -597,3 +597,110 @@ the primary semantic stack is also torn down before publication. PostgreSQL
 and all protected unrelated resources are preserved. The user-directed repair
 uses existing retry owners and actual input; the rejected new FAILED policy
 is not shipped, and no new approval is inferred for it.
+
+
+### October 16 deployment follow-up: durable old-queue admission membership
+
+PR1518 verification review 5543231600 on immutable
+3677693be884dd4f866f6a09369c984dd19d4db0 found a distinct deployment race:
+explicit old queues bypassed cached pointer routing, and a native start already
+in flight could acknowledge after a visibility-zero retirement decision. The
+original review remains closed with findings; this proposal is development
+work and does not reset or add a review cycle.
+
+A bounded repair journals each shared-helper start before its native SDK call.
+Starts take a shared routing lock and a keyed Agent-generation lock; queue
+closure takes the exclusive routing lock. Native RPCs and chain reconciliation
+run outside those locks. New starts requesting a closed queue may route only
+to the freshly read current pointer's verified OPEN queue. Publishing a pointer
+and its OPEN admission state shares the exclusive transaction; closed queues
+cannot be implicitly reopened for rollback. Retirement retains its durable
+RETIRED tombstone rather than clearing the barrier.
+
+The production cutover now calls the closure owner before measuring drain and
+the exact retirement owner before its first old-Machine stop. Retained pool
+reuse also requires the source retirement certificate. Visibility zero alone
+cannot satisfy the new owner: every journaled start must have a positively
+reconciled immutable native chain, with unchanged membership and gate custody
+at final commit. Missing queue identity, a mismatched first run, unresolved
+native/ACK writes, and unknown legacy coverage all deny retirement.
+
+This is deliberately a membership-only proposal. It does not persist/replay
+encoded native frames, observe every gRPC wire attempt, or change SDK retries.
+The installed SDK retries below the public service wrapper. Therefore a
+preserved ALLOW_DUPLICATE start remains UNKNOWN even after ACK and a closed
+run; those intents cannot be discharged by this proposal. The narrow planned
+replacement UUID now requests REJECT_DUPLICATE, while reusable legacy root
+IDs retain their native policy. No code automatically certifies the complete
+pre-journal producer cohort or changes UNKNOWN legacy coverage to QUALIFIED.
+The actual protected parent/children and existing-eight Machine activation
+remain unqualified. No native mutation or rollout was performed.
+
+Actual shared-helper assertions fail with frozen367 temporal.ts and pass with
+the candidate. The first explicit-old destination assertion observes old
+versus current routing; the held-RPC assertion observes zero versus eight old
+pollers. These are SOURCE-SCOPED replays: the final new admission owner and
+external storage fixture remain while only the named existing source modules
+are restored. They are not whole367 builds or native Temporal timing proofs.
+The expanded owner covers invalid targets, ALLOW_DUP ambiguity, positive and
+negative exact-chain reconciliation, unknown legacy, ACK loss, membership CAS,
+pointer reactivation denial, and ten thousand independently keyed journal
+entries. That ten-thousand case is an offline unit test with mocked storage,
+not a PostgreSQL contention or capacity measurement.
+
+Actual manual, SMS and batch callers exercise native/ACK failures; pending
+outcomes keep rows nonterminal and do not fabricate a chat-failure turn.
+Durable unresolved membership also protects the liveness read from sealing an
+unacknowledged start. The installed public SDK fixture preserves converter,
+interceptor, authored goal and legacy-root reuse semantics. Full direct-root,
+descendant and replacement caller integration, actual PostgreSQL locking,
+legacy/bootstrap qualification and current-main composition remain owning
+integration gates; this evidence does not claim them complete.
+
+The new unit files are registered by the existing recursive *.test.ts unit
+runner. Normal commands from the repository root use the existing tsx binary:
+
+```bash
+node_modules/.bin/tsx back-end/src/tests/unit/workflow-queue-admission.test.ts
+node_modules/.bin/tsx back-end/src/tests/unit/workflow-queue-admission-callers.test.ts
+node_modules/.bin/tsx back-end/src/tests/unit/database-transaction-retry.test.ts
+node_modules/.bin/tsx back-end/src/tests/unit/workflow-replacement-orchestration.test.ts
+bash scripts/tests/deploy-agent-clone-recovery.test.sh
+bash scripts/tests/cooperative-cutover-monitor.test.sh
+```
+
+All development executions explicitly set DATABASE_URL and DIRECT_URL to
+loopback port9. Provider, HTTP, native workflow and persistence collaborators
+were mocked; no paid campaign or production database was used. Final source
+identity and exact raw before/after receipts belong to the handoff manifest.
+
+
+The final development follow-up also closes the reviewed liveness race: after
+external tool capture, terminal row acceptance and pending membership are
+rechecked under the same Agent-generation serialization used by admission.
+Cleanup remains outside the transaction. An actual reconciler fixture admits a
+native start during that capture await and proves no FAILED write or cleanup.
+For NOT_FOUND and a pre-binding stuck-chat row, even an acknowledged
+ALLOW_DUP/UNKNOWN member prevents treating absence as authoritative. Existing
+positive native terminal-status behavior is preserved; it is not a queue
+retirement certificate. Native retirement status uses an explicit terminal
+allowlist; unknown/unspecified/future statuses deny. SMS errors retain the
+actual exception text rather than adding a synthetic pending instruction.
+The final two offline owners each pass eleven cases. Source-scoped367 replay
+has four owner assertion failures plus seven controls, and nine caller
+assertion failures plus two controls. TypeScript, scoped ESLint/format, existing
+sixteen DB retry cases, ten replacement cases, fake cutover/monitor and archive
+validation pass. All legacy and existing-eight limitations above remain.
+
+
+Final source review caught the fully acknowledged variant of the same liveness
+race: a reusable root can start a new live run during tool capture after an old
+CLOSED observation. The final terminal transaction now also compares the exact
+Agent/workflow journal membership captured before that native status read.
+Thus a new ACK, not just a pending STARTED member, invalidates stale terminal
+authorization. This preserves normal reusable root policy rather than treating
+all acknowledged starts as pending forever. The added actual SDK/reconciler
+case confirms that the old closed run becomes a distinct live follow-up and
+receives neither FAILED nor cleanup. The final caller owner passes twelve
+cases. A liveness-source-only367 replay retains the new helper and final
+fixtures to prove the interleaving; it is not a whole367 build.

@@ -1,3 +1,4 @@
+import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
 /**
  * SMS supervisor start_new_agent commit + web_search execution.
  * Split from supervisorTools.ts to stay under max-lines.
@@ -264,6 +265,14 @@ export async function commitStartNewAgent(
       workflowId,
     });
   } catch (error) {
+    if (isWorkflowStartAdmissionPending(error)) {
+      return {
+        tool: 'start_new_agent',
+        success: false,
+        result: '',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
     const errorMsg = error instanceof Error ? error.message : String(error);
     log.error('Failed to start workflow', {
       phase: 'start',
