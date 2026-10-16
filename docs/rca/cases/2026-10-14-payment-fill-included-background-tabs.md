@@ -449,14 +449,49 @@ valid transport or native media omission, retaining the original privacy and
 activity assertions. The identical final case rejects the pre-transport repair
 with the base64 error and five native retries (8.711180 seconds), and passes
 after repair. A separate control preserves ordinary images when no private
-redaction applies. Full benchmark outcome verification remains pending.
+redaction applies. The exact unchanged new-user journey subsequently passed
+on the repaired checkpoint, as recorded below.
 
 The failed local campaign remains 12 passed / 1 failed actual tasks, with the
 shared-cache canary never launched after smoke aborted. Its four sandbox card
-tasks passed; this does not qualify the later repair. The exact unchanged
-new-user journey and complete fresh deployment gates still require a passing
-post-repair run. The separate auth-decline override and unresolved original
-merchant/authentication observations remain open.
+tasks passed; those historical results do not qualify the later repair.
+
+The complete post-repair local campaign, on
+`be6341cc9bf9fe82e2462d9ef3a1639fd85dafa5` with runtime surface
+`5a946237d3f7`, passed all 14 unchanged requested tasks: ten effective canonical
+smoke tasks, including the new-user journey, and all four sandbox card tasks.
+The same task-definition file remains SHA-256
+`f9ac4792d7de8c0c8fce58828e8aca410e70391ef0f97c0c45d5e277c577710c`.
+The merged runtime passed 110 agents blackbox domains, 184 cache tests and
+134 unit tests at 83% coverage, mandatory type/structural/seed/live checks,
+eight semantic UI tests, the real E2B smoke and five isolated one-worker
+latency tests. All 20 measured lifecycle samples completed; path p50s were
+971/1990/641/788ms and each path had smoothness 1.000.
+
+The repaired [new-user journey](https://www.roselabs.ai/?agent-id=241ea593-a255-4204-93d5-ad6a3e52d053#benchmark-share=6d2d6b39-02eb-43c1-b679-6d471d156183.1794709220.0e5c78d12d2e082c08eb733f82fea24e9b668d1356c3eb9ba72db2fb2f1ec449)
+and its [latest recorded whole-tree LLM call](https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/241ea593-a255-4204-93d5-ad6a3e52d053/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261016%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261016T022021Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=493262e71aec11c5e1d1529d4ec562592875d39c18a4f02f1543fbd1f488b1cd)
+were verified through the canonical publisher. All 14 current roots have
+fresh-browser FE/recording and reachable HTTPS dump evidence. Every owned test
+and publication process joined; exact owned listeners and isolated databases
+were absent, with the shared Postgres preserved. All five current sandbox
+payment lifecycles were settled, including reclaimed/refunded abandonment,
+with no native pending payments, cleanup errors or warnings.
+
+The first semantic stack startup failed after 197.355207 seconds because its
+fixed SDK metrics port was occupied. Its original owner and raw artifacts were
+preserved and exact owned resources retired. A setup-only retry used the
+existing canonical port allocator outside the kernel ephemeral range; worker
+port validation and the frozen runtime were unchanged. The original competing
+socket owner was not captured and remains an observability gap.
+
+Final release review and production verification are separate. Production
+admission remains held: 999 Machine objects against cap 1000, with no verified
+eight-worker same-app spare pool for the required changed-generation overlap.
+The merged retained-worker reuse/STOP-retain repair prevents future repeated
+allocation but does not supply that initial capacity. No production rollout,
+protected worker reuse, object deletion or quota change was inferred. The
+specific auth-decline override and unresolved original merchant/authentication
+observations remain open.
 
 ## Reusable lesson
 
