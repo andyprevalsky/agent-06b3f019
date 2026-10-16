@@ -142,14 +142,40 @@ def strict_primary_deadline(args: argparse.Namespace) -> float:
     if (barrier.is_symlink() or barrier.name != cohort
             or barrier.parent.resolve() != (directory.parent / 'startup-cohorts').resolve()):
         raise ValueError('foreign strict clone queue')
-    manifest = barrier / 'manifest.json'
-    regular(manifest)
-    record = json.loads(manifest.read_text())
-    if record.get('cohort_id') != cohort or not isinstance(record.get('jobs'), dict):
-        raise ValueError('invalid strict clone membership')
-    if type(record['jobs'].get(job)) is not int or record['jobs'][job] != args.owner_pid:
-        raise ValueError('strict clone owner changed')
-    deadline = record.get('e2e_deadline_monotonic')
+    ticket_directory = os.environ.get('RUN_BENCH_CLEANUP_COHORT_DIR')
+    if ticket_directory:
+        if (Path(ticket_directory) != barrier
+                or os.environ.get('RUN_BENCH_CLEANUP_COHORT_ID') != cohort
+                or os.environ.get('RUN_BENCH_CLEANUP_JOB') != job):
+            raise ValueError('foreign strict cleanup ticket scope')
+        name = 'cloudbench-cleanup-tickets.py'
+        raw = Path(__file__).with_name(name).read_bytes()
+        if AUTHORITY['source']['sha256'].get(name) != hashlib.sha256(raw).hexdigest():
+            raise ValueError('strict cleanup ticket interpreter differs from approved source')
+        helper = types.ModuleType('strict_cleanup_identity')
+        helper.__file__ = str(Path(__file__).with_name(name))
+        exec(compile(raw, helper.__file__, 'exec'), helper.__dict__)
+        base = helper.base_for(barrier)
+        budget, _ = helper.selected(base, job)
+        number = int(os.environ['RUN_BENCH_CLEANUP_GENERATION'])
+        owner = helper.read(helper.generation(base, 'owners', job, number))
+        if (number < 1 or budget['cohort_id'] != cohort
+                or not helper.parent_active(budget) or (base / 'closing.json').exists()
+                or owner != dict(job=job, generation=number, owner_pid=args.owner_pid,
+                                 owner_start=args.owner_start, budget_sha256=helper.digest(budget))
+                or helper.read(helper.keyed(base, 'current', job)) != owner):
+            raise ValueError('strict cleanup ticket owner changed')
+        deadline = budget['deadline']
+    else:
+        # Legacy campaigns retain their original full-manifest validation.
+        manifest = barrier / 'manifest.json'
+        regular(manifest)
+        record = json.loads(manifest.read_text())
+        if record.get('cohort_id') != cohort or not isinstance(record.get('jobs'), dict):
+            raise ValueError('invalid strict clone membership')
+        if type(record['jobs'].get(job)) is not int or record['jobs'][job] != args.owner_pid:
+            raise ValueError('strict clone owner changed')
+        deadline = record.get('e2e_deadline_monotonic')
     if (isinstance(deadline, bool) or not isinstance(deadline, (int, float))
             or not math.isfinite(deadline) or deadline <= time.monotonic()
             or str(deadline) != os.environ.get('RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC')):

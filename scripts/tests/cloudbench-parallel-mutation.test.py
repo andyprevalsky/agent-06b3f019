@@ -98,6 +98,36 @@ Path.iterdir=no_scan
   for bad in [original.replace('publisher_token=fixture','publisher_token=foreign'),'\n'.join('valid_until=0' if x.startswith('valid_until=') else x for x in original.splitlines())+'\n']:
    health.write_text(bad);self.assertNotEqual(self.call('acquire','--wait-seconds','1').returncode,0)
   health.write_text(original)
+ def test_strict_ticket_admission_uses_actual_prepared_key_without_manifest_read(self):
+  consumer=self.root/'consumer';feed=consumer/'.context/campaigns/token/native';feed.mkdir(parents=True);(feed/'owner').write_bytes((self.feed/'owner').read_bytes());self.publish(feed)
+  auth=json.loads(self.env['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY']);auth['directory']=str(feed)
+  helper=ROOT/'scripts/cloudbench-cleanup-tickets.py';auth['source']['sha256'][helper.name]=hashlib.sha256(helper.read_bytes()).hexdigest();self.env['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY']=json.dumps(auth);self.env['CLOUDBENCH_CAMPAIGN_INVENTORY_DIR']=str(feed)
+  module=runpy.run_path(str(helper));barrier=feed.parent/'startup-cohorts/cohort';barrier.mkdir(parents=True);task=consumer/'fleet/runs/run/task';task.mkdir(parents=True);reserve=self.root/'reserve';reserve.mkdir()
+  deadline=time.monotonic()+10;(barrier/'manifest.json').write_text(json.dumps(dict(cohort_id='cohort',jobs={'r1-j1':os.getpid()},e2e_deadline_monotonic=deadline)))
+  self.env.update(RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(barrier),RUN_BENCH_CAMPAIGN_COHORT='cohort',RUN_BENCH_CAMPAIGN_JOB_ID='r1-j1',RUN_BENCH_CAMPAIGN_TASK='task',RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC=str(deadline),RUN_BENCH_CLEANUP_COHORT_DIR=str(barrier),RUN_BENCH_CLEANUP_COHORT_ID='cohort',RUN_BENCH_CLEANUP_JOB='r1-j1',RUN_BENCH_CLEANUP_GENERATION='1')
+  from types import SimpleNamespace
+  args=SimpleNamespace(cohort=str(barrier),cohort_id='cohort',manifest=str(barrier/'manifest.json'),parent_pid=os.getpid(),parent_start=birth(os.getpid()),preferred=1,minimum=1,headroom=0,reserve_root=str(reserve),deadline=deadline,canary_script='',canary_lock='',job='r1-j1',owner_pid=os.getpid(),owner_start=birth(os.getpid()),generation=1)
+  accounting=self.root/'ticket-accounting';accounting.mkdir()
+  module['prepare'].__globals__['global_root']=lambda path:(accounting,path.stat().st_dev)
+  with (barrier.parent/'parent.lock').open('w')as held:
+   fcntl.flock(held,fcntl.LOCK_EX);budget=module['prepare'](args)
+   grant=Path(budget['global_root'])/'ticket-grants'/(budget['global_budget_id']+'.json')
+   self.addCleanup(lambda:grant.unlink(missing_ok=True))
+   module['assign'](args)
+   (barrier/'manifest.json').write_text('full manifest must not be read')
+   hooks=self.root/'strict-hooks';hooks.mkdir();(hooks/'sitecustomize.py').write_text("""from pathlib import Path
+original=Path.read_text
+def checked(path,*a,**kw):
+ if path.name in ('manifest.json','admission-machines.json','machines.json'):raise AssertionError('aggregate strict admission read')
+ return original(path,*a,**kw)
+def no_scan(*a,**kw):raise AssertionError('strict admission directory scan')
+Path.read_text=checked
+Path.glob=no_scan
+Path.iterdir=no_scan
+""");self.env['PYTHONPATH']=str(hooks)
+   self.require(self.call('pace','--wait-seconds','2','--strict-primary','--task-root',str(task)))
+   self.env['RUN_BENCH_CLEANUP_GENERATION']='2';self.assertNotEqual(self.call('pace','--wait-seconds','2','--strict-primary','--task-root',str(task)).returncode,0)
+   self.env['RUN_BENCH_CLEANUP_GENERATION']='1';auth['source']['sha256'][helper.name]='0'*64;self.env['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY']=json.dumps(auth);self.assertNotEqual(self.call('pace','--wait-seconds','2','--strict-primary','--task-root',str(task)).returncode,0)
  def test_actual_boot_retry_publishes_rate_event_and_uses_remaining_budget(self):
   text=CLOUD_SOURCE.read_text();a=text.index('boot_update_with_capacity_recovery() {');b=text.index('\n}',a)+2;function=text[a:b]
   script='''set -eu
