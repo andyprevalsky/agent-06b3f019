@@ -742,6 +742,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-explicit-idle-preconfig.py" \
        "$ROOT_DIR/scripts/cloudbench-staged-boot.py" \
        "$ROOT_DIR/scripts/cloudbench-staged-boot-return.py" \
+       "$ROOT_DIR/scripts/cloudbench-static-service-observation.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
        "$ROOT_DIR/scripts/cloudbench-controller-export.py" \
@@ -15618,7 +15619,7 @@ row=dict(version=1,origin=h['ORIGIN'],historical_task_credit=0,role='borrowed-wo
 h['sibling']('cloudbench-startup-failure-archive.py')['durable_handoff_json'](Path(path),row)
 PY
         # A failure retains the exact claim and attempt: never try another POST/MID.
-        if ! python3 "$helper" worker-stage --assignment "$out/worker-borrowed/$id.json" \
+        if ! python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-staged-boot-return.py" worker-stage --assignment "$out/worker-borrowed/$id.json" \
             --source "$BENCH_REF" --node "$CURRENT_NODE_FP" --python "$CURRENT_PY_FP" \
             --size "$FLEET_WORKER_VM_SIZE" --memory "$FLEET_WORKER_VM_MEMORY" --app "$APP" > "$attempt/verified"; then
             pool_claim_mark_cleanup_unconfirmed "$POOL_CLAIMS_DIR/$id" || true

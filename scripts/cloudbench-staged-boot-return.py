@@ -176,7 +176,22 @@ def released(output, common, machine):
         output/'staged-boot/released.json',dict(receipt=value['receipt'],claim_sha256=receipt['claim_sha256']))
 
 
+def worker_stage(*args, **kwargs):
+    # Preserve the original stage/shape/claim/API predicates, while letting a
+    # released staged primary carry its verified reset policy into a worker.
+    original = H['stage_worker'].__globals__['current_policy']
+    H['stage_worker'].__globals__['current_policy'] = current_policy
+    try:
+        return H['stage_worker'](*args, **kwargs)
+    finally:
+        H['stage_worker'].__globals__['current_policy'] = original
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'worker-stage':
+        H['main'].__globals__['stage_worker'] = worker_stage
+        H['main']()
+        return
     if len(sys.argv) > 1 and sys.argv[1] == 'released':
         need(len(sys.argv)==5,'released arguments');released(*sys.argv[2:]);return
     p = argparse.ArgumentParser()

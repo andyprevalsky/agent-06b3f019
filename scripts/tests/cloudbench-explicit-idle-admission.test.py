@@ -471,7 +471,7 @@ def api(method,path,body=None,timeout=None):
   assert body['current_version']==data['native']['instance_id'] and body['skip_launch'] is True
   data['native']['config']=body['config'];data['native']['instance_id']='worker-instance'
  return data['volume'] if '/volumes/' in path else data['native']
-h['stage_worker'](a.assignment,a.source,a.node,a.python,a.size,a.memory,api)
+h.get('worker_stage',h.get('stage_worker'))(a.assignment,a.source,a.node,a.python,a.size,a.memory,api)
 f.write_text(json.dumps(data));f.with_suffix('.calls').write_text(json.dumps(calls))
 r=json.loads(Path(a.assignment).read_text());out=Path(a.assignment).parent.parent
 e=out/'worker-runtime-evidence'/r['machine_id'];e.mkdir(parents=True)
@@ -486,7 +486,7 @@ owner=dict(version=1,machine_id=r['machine_id'],primary_machine_id=r['primary_ma
         shell+='''
 set -e
 python3() {
- if [ "$1" = "$IDLE_HELPER" ] && [ "$2" = worker-stage ]; then
+ if [ "$1" = "$STAGED_HELPER" ] && [ "$2" = worker-stage ]; then
   command python3 "$RUNNER" "$@"
  else command python3 "$@"; fi
 }
@@ -505,7 +505,7 @@ return_reusable_worker "$OUT" "$mid"
 write_pool_claim "$POOL_CLAIMS_DIR/$mid" "$mid" vol_fixture
 printf '%s' "$mid"
 '''
-        env={**os.environ,'OUT':str(self.out),'MID':self.mid,'IDLE_HELPER':str(SCRIPT),'VOLUME_HELPER':str(SCRIPT.with_name('cloudbench-original-volume-capture.py')),'RUNNER':str(runner),'API_FIXTURE':str(fixture),'GIT_COMMON_DIR':str(self.common),'POOL_IDS_FILE':self.request['consumer']['pool_ids_file'],'POOL_META_FILE':self.request['consumer']['pool_meta_file'],'POOL_CLAIMS_DIR':str(self.common/'cloudbench-pool-claims'),'POOL_COLD_BOOTSTRAP':'1','FLEET_OWNER_TOKEN':'e'*32,'FLEET_OWNER_HOST':mod.socket.gethostname(),'CURRENT_NODE_FP':self.dep['node'],'CURRENT_PY_FP':self.dep['python'],'BENCH_REF':self.request['consumer']['source_ref'],'FLEET_WORKER_VM_SIZE':'performance-1x','FLEET_WORKER_VM_MEMORY':'2048','APP':'app'}
+        env={**os.environ,'OUT':str(self.out),'MID':self.mid,'IDLE_HELPER':str(SCRIPT),'STAGED_HELPER':str(SCRIPT.with_name('cloudbench-staged-boot-return.py')),'VOLUME_HELPER':str(SCRIPT.with_name('cloudbench-original-volume-capture.py')),'RUNNER':str(runner),'API_FIXTURE':str(fixture),'GIT_COMMON_DIR':str(self.common),'POOL_IDS_FILE':self.request['consumer']['pool_ids_file'],'POOL_META_FILE':self.request['consumer']['pool_meta_file'],'POOL_CLAIMS_DIR':str(self.common/'cloudbench-pool-claims'),'POOL_COLD_BOOTSTRAP':'1','FLEET_OWNER_TOKEN':'e'*32,'FLEET_OWNER_HOST':mod.socket.gethostname(),'CURRENT_NODE_FP':self.dep['node'],'CURRENT_PY_FP':self.dep['python'],'BENCH_REF':self.request['consumer']['source_ref'],'FLEET_WORKER_VM_SIZE':'performance-1x','FLEET_WORKER_VM_MEMORY':'2048','APP':'app'}
         result=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(result.stdout,self.mid)
         calls=json.loads(fixture.with_suffix('.calls').read_text());self.assertEqual(sum(c[0]=='POST' for c in calls),1)
@@ -801,6 +801,15 @@ class StagedPrimaryReturn(unittest.TestCase):
         completed=subprocess.run(args,text=True,capture_output=True);self.assertEqual(completed.returncode,0,completed.stderr)
         self.h['released'](self.out,self.f.common,self.f.mid)
         self.assertEqual(self.h['current_policy'](self.f.proof),'existing-git-reset-v1');self.assertEqual(self.f.proof.read_bytes(),proof_before)
+        # The same shared pool member may next be assigned as a worker. Its
+        # original stage logic must consume the released primary reset policy.
+        new_owner='a'*32
+        args=['bash','-c',fn+'\npool_claim_fs_transaction publish-ordinary "$@"','claim',str(self.f.claim),self.f.mid,self.f.vol,claim['host'],claim['pid'],claim['pid_start'],new_owner,self.f.request['consumer']['pool_ids_file'],self.f.request['consumer']['pool_meta_file'],mod.sha(Path(self.f.request['consumer']['pool_meta_file']).read_bytes())]
+        completed=subprocess.run(args,text=True,capture_output=True);self.assertEqual(completed.returncode,0,completed.stderr)
+        self.f.row['claim_owner_token']=new_owner;self.f.row['claim_sha256']=mod.sha(self.f.claim.read_bytes());self.f.assignment.write_bytes(mod.canonical(self.f.row))
+        stage=self.h['worker_stage'](self.f.assignment,self.source,self.f.dep['node'],self.f.dep['python'],'performance-1x','2048',self.f.api)
+        self.assertEqual(stage['workspace_policy'],'existing-git-reset-v1')
+        self.assertEqual(stage['native']['config']['guest'],dict(cpu_kind='performance',cpus=1,memory_mb=2048))
         (self.out/'remote-logs/runtime-evidence/stack.log').write_bytes(b'drift')
         with self.assertRaises(AssertionError):self.h['current_policy'](self.f.proof)
     def test_actual_claimed_cleanup_gate_refuses_corrupt_staged_return(self):
@@ -819,6 +828,18 @@ fleet_verify_staged_primary_return "$MID" "$VOL" && printf released
         (self.stage/'launch.ack.json').unlink()
         result=subprocess.run(['bash',str(script)],env=env,capture_output=True,text=True);self.assertNotEqual(result.returncode,0);self.assertNotIn('released',result.stdout)
         self.assertTrue(self.f.claim.exists())
+    def test_actual_flat_snapshot_transport_and_return_dependencies(self):
+        source=SCRIPT.with_name('run-bench-fleet').read_text()
+        start=source.index('|| ! cp "$ROOT_DIR/scripts/run-bench-fleet"')
+        end=source.index('"$CLOUDBENCH_SCRIPT_SNAPSHOT/"; then',start)
+        paths=re.findall(r'"\$ROOT_DIR/(scripts/[^"\n]+)"',source[start:end])
+        flat=self.f.root/'flat-snapshot';flat.mkdir()
+        for name in paths:shutil.copy2(SCRIPT.parent.parent/name,flat/Path(name).name)
+        transport=runpy.run_path(str(flat/'cloudbench-staged-boot.py'))
+        self.assertEqual(transport['native_binding'](self.f.native,self.f.volume,'shared-cpu-4x','8192'),self.f.vol)
+        h=runpy.run_path(str(flat/'cloudbench-staged-boot-return.py'))
+        result=h['verify'](self.out,self.registry,self.f.common,self.source,self.f.mid,self.f.vol,self.before,self.after,self.vol)
+        self.assertEqual(result['status'],'STOPPED_RUNTIME_VERIFIED')
 
 
 if __name__=='__main__':unittest.main()
