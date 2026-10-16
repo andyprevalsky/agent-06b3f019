@@ -104,8 +104,8 @@ metric does not become a scheduling gate merely to move its section upward.
   the coverage gap. A missing measurement never becomes an invented zero.
 - Do not print explanatory LIFE/rate/color/monitoring legend paragraphs
   below agent rows. Keep the aligned headers and meaningful row states.
-- Within each benchmark experiment, show `PASS`, `AGENT FAILURE` and
-  `INFRA FAILURE` counts. Do not add a scheduled `PENDING` result row. Queued,
+- Within each benchmark experiment, show `PASS`, `HARNESS FAILURE` and
+  `INFRA FAILURE` counts, with genuine `AGENT FAILURE` preserved separately. Do not add a scheduled `PENDING` result row. Queued,
   running and terminal counts belong to that experiment's subrows. Genuine task
   failure and confirmed infrastructure failure keep
   their original classifications and denominators. Describe unscored
@@ -119,6 +119,31 @@ Recompute usage rates from the same-scope history on every render. Warming
 ends after 15 minutes of comparable history; never reuse cached rates.
 After publishing, atomically update the existing latest-card URL and fixed
 checkpoint fields together; do not create competing URL aliases.
+
+## Standard CLI benchmark scorecard
+
+This is the default for every future CLI benchmark run (cloud, local, eval,
+campaign and production-only), its progress updates and final report.
+
+- Lead with **QUEUED**, **IN_PROGRESS** and **COMPLETED** logical task counts.
+  Keep `QUEUED + IN_PROGRESS + COMPLETED = scheduled total`. COMPLETED means a
+  recorded terminal outcome, not a pass; retries remain IN_PROGRESS until final.
+- Directly below, always show **PASS**, **HARNESS FAILURE** and **INFRA FAILURE**.
+  HARNESS FAILURE requires evidence of an orchestration/runner failure; never
+  relabel a genuine task/agent failure as a harness failure. Preserve genuine
+  **AGENT FAILURE**, cancelled, skipped, unscored and unknown outcomes separately.
+  Do not infer zero from missing classification or add overlapping categories.
+- A prepared run is explicitly **NOT LAUNCHED**. Planned queued tasks may be
+  shown only with `planned`; they are not dispatched work or an actual experiment.
+- Put the infra stop rule in a small note, using the original scheduled total
+  (for example `Stop at 30/600 unique infra-failed jobs`). It is not a headline
+  metric. Machine admission and qualification counts belong in supporting details.
+- Retain the inline CSS-colored card, last-run age, latest three experiments,
+  original clocks, current-assignment tokens, rolling 15-minute tokens/min,
+  rightmost LIFE, lifecycle/resource evidence and explicit coverage gaps.
+- Publish a fresh card when an agent starts or completes, every fixed 15-minute
+  checkpoint, and whenever benchmark state changes. Events never postpone the
+  existing checkpoint. Keep underlying 30-second operational monitoring active.
 
 ## Benchmark experiment history
 
@@ -135,8 +160,8 @@ checkpoint fields together; do not create competing URL aliases.
 - Replace LAST SLICE TRIGGERED, WHY NO NEW SLICE, BENCHMARK PROGRESS, ACTIVE RUN
   and the standalone cost/cache/LLM section with **LAST 3 EXPERIMENTS**, newest
   first. Each main row gives experiment, state, trigger, end and elapsed; use
-  aligned concise subrows for queue/running/terminal counts, PASS/AGENT FAILURE/
-  INFRA FAILURE, unknown outcomes, cost, cache and LLM metrics, and lifecycle.
+  aligned concise subrows for QUEUED/IN_PROGRESS/COMPLETED counts, PASS/HARNESS FAILURE/
+  INFRA FAILURE, genuine agent failures, unknown outcomes, cost, cache and LLM metrics, and lifecycle.
 - Ends come from the actual producer terminal artifact; do not substitute an
   observer capture or export completion. Live rows use `RUNNING` and elapsed
   since their original trigger. Missing historical end evidence reads
@@ -149,7 +174,7 @@ checkpoint fields together; do not create competing URL aliases.
   numeric cap when actually known, and the concrete action the owner or user can
   take. Distinguish app usage from organization-wide quota. Do not recommend a
   quota increase before reconciling owned idle resources and supported reuse.
-- Label the stop threshold using the original scheduled denominator: for 600
+- Put the stop threshold in a small supporting note using the original scheduled denominator: for 600
   jobs, `STOP AT 30/600 INFRA (5%)`. Explain an earlier wrong 1/1 stop as an
   erroneous early abort, not as a valid threshold breach or a retroactive pass.
 - Preserve a concise ISSUES / NEXT ACTION section. Put the actual reason and

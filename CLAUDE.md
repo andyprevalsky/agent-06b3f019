@@ -30,6 +30,7 @@ links. A file pointer never substitutes for the diff.
 
 ### Standing scorecard memory — all current and future agents
 
+- Every future CLI benchmark uses the shared scorecard: headline **QUEUED / IN_PROGRESS / COMPLETED**, then **PASS / HARNESS FAILURE / INFRA FAILURE**; preserve genuine agent failures, cancellations and unknowns separately, keep the infra threshold in a minor note, and refresh on agent starts/completions, every fixed 15 minutes and benchmark-state changes. Follow `.claude/shared/report-display-format.md` and the CLI-emitted `.claude/shared/benchmark-report-format.txt`.
 - Use actual text colors, latest **3** runs, Experiment # and launches/day,
   Pacific local time, one status emoji, no UPD/nulls, and LIFE far right.
 - At the top, show elapsed time since the latest actual benchmark ended, from

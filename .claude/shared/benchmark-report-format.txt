@@ -1,9 +1,9 @@
-BENCHMARK PARENT AGENT INSTRUCTIONS · FORMAT v6
+BENCHMARK PARENT AGENT INSTRUCTIONS · FORMAT v7
 
 Communication contract (mandatory)
 - Apply `.claude/shared/report-display-format.md` to this card and every other
   skill display: 12-hour America/Los_Angeles timestamps (PDT/PST by date), one
-  status emoji and 0–100% sub-agent milestone progress, with LIFE at the far right
+  status emoji, current-assignment tokens and rolling 15-minute tokens/min, with LIFE at the far right
   and no UPD. Stored/raw evidence timestamps remain unchanged.
 - Every benchmark progress/final message MUST contain the full scorecard using
   the template's content below. On boxes.dev publish a self-contained HTML
@@ -13,6 +13,13 @@ Communication contract (mandatory)
   every section, label and separator; use the conditional sub-agent placement
   below and retain the remaining order. Replace placeholders with recorded
   values. Do not replace the card with Markdown tables or a narrative summary.
+- This is the standard display for every future CLI benchmark route: cloud,
+  local, eval, campaign and production-only. Lead with QUEUED, IN_PROGRESS,
+  COMPLETED, then PASS, HARNESS FAILURE and INFRA FAILURE. Keep the infra stop
+  threshold in a minor note, not a headline metric. Put machine admission and
+  qualification details in supporting sections.
+- Publish the card on agent start/completion, every fixed 15-minute checkpoint,
+  and benchmark-state changes. Events never reset the checkpoint or run clock.
 - Use the /deploy Step 15 scorecard's 64-column frame. Align labels and numbers,
   wrap explanations to fit, and use the same units on every observation. Preserve
   full evidence URLs and exact code/prompt diffs without reflowing their contents.
@@ -89,12 +96,12 @@ Measurement contract
   never equate the experiment sequence number with the launch count.
 - Show only the latest three actual qualification experiments, newest first, as one
   compact table with aligned subrows. For each, retain trigger, producer end,
-  total elapsed, queued/running/terminal counts, task verdicts, infrastructure
+  total elapsed, QUEUED/IN_PROGRESS/COMPLETED counts, task verdicts, infrastructure
   reliability, costs, cache rates, LLM latencies and lifecycle coverage. These
   replace the old standalone active-run/progress/cost blocks. A live experiment
   ends RUNNING; an unknown historical end reads END UNRECORDED, not capture time.
 - Progress counts refer to scheduled logical members, not child agents or retries:
-  queued + in_progress + complete = requested total. Queued has not started;
+  QUEUED + IN_PROGRESS + COMPLETED = requested total. Queued has not started;
   in_progress includes startup, execution and evaluation before a terminal outcome;
   complete is a recorded terminal outcome, including infrastructure/cancellation
   or skipped outcomes when applicable. Show additional terminal categories rather
@@ -103,6 +110,11 @@ Measurement contract
   start. Queued execution is NOT STARTED; report oldest wait separately. Active execution
   shows min/max elapsed across executing members. Completed execution p50/p95
   uses tasks with measured execution only; omit unmeasured quantiles with a coverage note.
+- Show PASS, HARNESS FAILURE and INFRA FAILURE on every card. Classify harness
+  failure only from evidence of orchestration/runner failure; keep genuine
+  AGENT FAILURE, cancelled, skipped, unscored and unknown outcomes separately.
+  A prepared run is NOT LAUNCHED; label any queued count as planned, not dispatched.
+  Missing classifications are not zeroes, and overlapping categories are not summed.
 - TASK PASS/FAIL denominator is all scored task verdicts (PASS + task FAIL),
   excluding infra, cancellation, skip and pending. INFRA FAIL is infra failures /
   ALL terminal attempts, including retained retry attempts, with numerator and
@@ -148,13 +160,18 @@ row and its subrows for up to three launched experiments, newest first):
  <slice> · <tasks> × <runs> · <cloud/local> · <checkpoint>
  <Month D, h:mm:ss AM/PM PDT/PST> · goal elapsed <duration>
  Experiments/day <rate> · <verified launches>/<elapsed days>d
+ QUEUED <n>       IN_PROGRESS <n>       COMPLETED <n>
+ PASS <n>    HARNESS FAILURE <n/UNCLASSIFIED>    INFRA FAILURE <n>
+ <genuine AGENT FAILURE/cancelled/skipped/unknown coverage, if present>
+ Note: stop at <threshold>/<original scheduled> unique infra-failed jobs
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @@ LAST 3 EXPERIMENTS
  RUN  STATE      TRIGGERED          ENDED             ELAPSED
 @@ <id> 🔵 RUNNING <local instant> RUNNING             <duration>
-   Queue <n> · running <n> · terminal <n>/<requested>
-   PASS <n>/<scored> · AGENT FAILURE <n>/<scored>
+   QUEUED <n> · IN_PROGRESS <n> · COMPLETED <n>/<requested>
+   PASS <n>/<scored> · HARNESS FAILURE <n/UNCLASSIFIED>
    INFRA FAILURE <n>/<all terminal attempts> · unknown <n>
+   <genuine AGENT FAILURE/cancelled/skipped/unscored coverage, if present>
    Cost <metered/estimate/UNMETERED> · coverage <actual scope>
    Cache <DEMO/agent/WMH rates and denominators, or UNMEASURED>
    LLM <agent/WMH avg/p95/p99 and coverage, or UNMEASURED>

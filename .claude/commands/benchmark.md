@@ -14,13 +14,18 @@ scripts/run-bench $ARGUMENTS
 Every launch prints the mandatory parent-agent format and maintenance contract.
 Read it before communicating or scheduling the next slice; retrieve it again
 without a launch with `scripts/run-bench report-format`. Its single source is
-`.claude/shared/benchmark-report-format.txt`. Send only its exact fenced `text`
-scorecard for benchmark updates, with the /deploy frame, progress bars, clocks,
-PASS/FAIL and infra percentages/counts, cost/cache/latency, cleanup and active
-sub-agents. Keep continuously progressing. Hold a new slice iff infra failures
-are >10% of terminal attempts; at ≥3 hours since the last original trigger give
-a concrete reason, owner/action and resume condition. Delegate issues with `/RCA`
-and `/deploy` with an isolated immutable checkpoint that excludes later edits.
+`.claude/shared/benchmark-report-format.txt`, governed by
+`.claude/shared/report-display-format.md`. Use its inline CSS-colored scorecard
+on boxes.dev (the framed fallback only when HTML is unavailable): headline
+QUEUED / IN_PROGRESS / COMPLETED, then PASS / HARNESS FAILURE / INFRA FAILURE.
+Preserve genuine agent failures, cancellations and unknown classifications
+separately; keep the infra threshold in a minor note. Include the latest three
+experiments, last-run age, recorded tokens/15-minute rate, LIFE and lifecycle
+coverage. Refresh on agent start/completion, fixed 15-minute checkpoints and
+benchmark-state changes, without resetting clocks or stopping ongoing work.
+Use the original scheduled denominator for the existing 5% infra stop policy,
+not completed attempts. Delegate issues with `/RCA` and `/deploy` only within
+the user's authorized scope, using isolated immutable checkpoints.
 Required approval requests follow `.claude/shared/approval-format.md` instead,
 using the same styling and its complete evidence/diff/Links requirements.
 
