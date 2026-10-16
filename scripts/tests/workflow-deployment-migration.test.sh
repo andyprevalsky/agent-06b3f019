@@ -236,8 +236,19 @@ import subprocess
 import sys
 import textwrap
 
+import yaml
+
 with open(sys.argv[1]) as source:
     workflow = source.read()
+# BaseLoader keeps the YAML key "on" a string instead of YAML 1.1's boolean.
+config = yaml.load(workflow, Loader=yaml.BaseLoader)
+path_filters = config["on"]["push"]["paths"]
+assert isinstance(path_filters, list) and all(isinstance(value, str) for value in path_filters)
+assert "agents/**" in path_filters, "worker runtime changes must trigger deployment"
+last_runtime_include = max(i for i, value in enumerate(path_filters) if value == "agents/**")
+for excluded in ("!agents/tests/**", "!agents/benchmarks/**"):
+    assert excluded in path_filters, f"additive worker inputs must be excluded: {excluded}"
+    assert path_filters.index(excluded) > last_runtime_include, excluded
 dispatch = re.search(r"(?ms)^  workflow_dispatch:\n(.*?)^  push:", workflow)
 assert dispatch, "worker deployment needs a manual recovery entry point"
 assert "      expected_sha:" in dispatch[1] and "        required: true" in dispatch[1]
@@ -285,8 +296,6 @@ require_text "$WORKFLOW" 'Cooperative Fly deploy + generation cutover' "agent de
 require_text "$WORKFLOW" 'RELEASE_CONTEXT: agent-cutover/${{ github.run_id }}-${{ github.run_attempt }}' "deploy lock release must be scoped to the exact run attempt"
 require_text "$WORKFLOW" 'if [ -z "$CHANGED_RUNTIME$CHANGED_DEPLOY_WORKFLOW" ]; then REQUIRE_ACTIVATION=0; fi' "test-only agent deploys must not require cutover activation"
 require_text "$WORKFLOW" 'CHANGED_DEPLOY_WORKFLOW=' "deploy workflow changes must conservatively require activation"
-require_text "$WORKFLOW" "'!agents/tests/**'" "additive agent tests must not trigger a production worker replacement"
-require_text "$WORKFLOW" "'!agents/benchmarks/**'" "benchmarks must not trigger a production worker replacement"
 DOCKERIGNORE="$ROOT/agents/.dockerignore"
 require_text "$DOCKERIGNORE" $'\nbenchmarks/\n' "Fly build context must exclude benchmarks/ (ledger history blew past 100MB and timed out Depot)"
 require_text "$DOCKERIGNORE" $'\ntests/\n' "Fly build context must exclude tests/ (not shipped in the Temporal worker image)"

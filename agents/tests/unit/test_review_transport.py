@@ -12,21 +12,13 @@ import pytest
 def test_archive_metadata_probe_never_opens_ciphertext(monkeypatch):
     import helpers.trace_archive as archive
     calls = []
-    opened = []
     class Missing(Exception):
         response = {"Error": {"Code": "NoSuchKey"}}
     class Client:
         def get_object(self, *, Bucket, Key):
             calls.append(("GET", Key))
-            if Key.endswith('.meta.json'):
-                raise Missing()
-            if Key.endswith('absent.enc'):
-                raise Missing()
-            import io
-            from botocore.response import StreamingBody
-            raw = io.BytesIO(b'ciphertext')
-            opened.append(raw)
-            return {'Body': StreamingBody(raw, 10)}
+            assert Key.endswith('.meta.json'), 'metadata reader opened a ciphertext body'
+            raise Missing()
         def head_object(self, *, Bucket, Key):
             calls.append(("HEAD", Key))
             if Key.endswith('absent.enc'):
@@ -37,18 +29,33 @@ def test_archive_metadata_probe_never_opens_ciphertext(monkeypatch):
     assert archive.read_r2_artifact_metadata(root_agent_id='root', path='absent.enc') is None
     with pytest.raises(ValueError, match='Archive metadata missing for orphan.enc'):
         archive.read_r2_artifact_metadata(root_agent_id='root', path='orphan.enc')
-    assert all(raw.closed for raw in opened), 'ciphertext probe leaked an unclosed StreamingBody'
-    assert [method for method, _ in calls] == ['GET', 'HEAD', 'GET', 'HEAD']
+    absent = archive._object_key('root', 'absent.enc')
+    orphan = archive._object_key('root', 'orphan.enc')
+    assert calls == [('HEAD', absent), ('HEAD', orphan), ('GET', orphan + '.meta.json')]
+    assert all(key.endswith('.meta.json') for method, key in calls if method == 'GET')
 
 
 def test_archive_metadata_hit_only_reads_sidecar(monkeypatch):
     import helpers.trace_archive as archive
-    def read(key):
-        assert key.endswith('.meta.json')
-        return b'{"plaintext_bytes":3}'
-    monkeypatch.setattr(archive, '_read_r2_object', read)
-    monkeypatch.setattr(archive, '_r2_client', lambda: pytest.fail('unexpected ciphertext access'))
+    calls = []
+    key = archive._object_key('root', 'hit.enc')
+    class Body:
+        def read(self):
+            return b'{"plaintext_bytes":3}'
+    class Client:
+        def head_object(self, *, Bucket, Key):
+            calls.append(('HEAD', Key))
+            assert Key == key
+            return {'ContentLength': 3}
+        def get_object(self, *, Bucket, Key):
+            calls.append(('GET', Key))
+            assert Key == key + '.meta.json', 'metadata reader opened a ciphertext body'
+            return {'Body': Body()}
+    monkeypatch.setattr(archive, '_r2_client', lambda: Client())
+    monkeypatch.setattr(archive, '_r2_bucket', lambda: 'test-bucket')
     assert archive.read_r2_artifact_metadata(root_agent_id='root', path='hit.enc') == {'plaintext_bytes':3}
+    assert calls == [('HEAD', key), ('GET', key + '.meta.json')]
+    assert all(path.endswith('.meta.json') for method, path in calls if method == 'GET')
 
 
 def test_foundry_original_body_read_failure_matches_observer_off(monkeypatch):
