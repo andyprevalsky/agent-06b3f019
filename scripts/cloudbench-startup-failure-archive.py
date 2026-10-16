@@ -27,8 +27,6 @@ def read(path, maximum=MAXIMUM):
     path = Path(path)
     if path.resolve(strict=True) != path:
         raise ValueError("unsafe original evidence path")
-    if not stat.S_ISREG(path.lstat().st_mode):
-        raise ValueError("unsafe original evidence file")
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
         before = os.fstat(source.fileno())
         if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:

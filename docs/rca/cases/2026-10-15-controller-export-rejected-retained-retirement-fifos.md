@@ -168,12 +168,30 @@ again, and current receipt verification enumerates and checks every physical
 entry. Type, path, owner, link, metadata or inventory drift refuses. The original
 terminal/owner, native identity, guest isolation and caller source-quiescence
 guards remain mandatory; this does not fabricate successful producer cleanup.
-FIFOs, sockets and devices outside this narrow typed path refuse before open.
+Other nonregular entries refuse before open during current-cold inventory
+traversal. The shared historical guest reader remains byte-for-byte unchanged.
 Six registered FIFO cases passed five unchanged runs, including sealed source
 handoff and destination verification. The existing34-case current-cold family
 also passed five unchanged runs before adding that final handoff case.
 No provider, guest, live-packet or original-source operation was performed by
 this repair. Exact native revalidation remains root-owned.
+
+### Compatibility correction during integration
+
+The initial typed-FIFO patch also added a redundant `lstat` precheck to shared
+`read()`. Combined source-import checks caught that this changed the historical
+guest semantic AST: 12 errors across 13 import/successor tests, and the authentic
+206655-byte `982d377ade3a4e96f414cde1d4d658e30dd8dc72ae07b75dbababe9bcd0527ea`
+packet replay failed at `original collector guest semantics differ from trusted
+source`. No original capsule bytes were changed to hide that mismatch.
+
+The compatibility correction removes only that two-line shared-reader change.
+Its AST again exactly matches the approved source. Host inventory traversal
+retains its local nonregular precheck and typed FIFO handling. No new historical
+hash allowlist entry, AST normalization exception, or guest-semantic waiver is
+introduced. The identical13-test import/successor family and actual packet replay passed
+five unchanged runs on the corrected source. The combined52-test current-cold,
+import, source-successor and snapshot-representation check also passed.
 
 ## Human feedback
 
