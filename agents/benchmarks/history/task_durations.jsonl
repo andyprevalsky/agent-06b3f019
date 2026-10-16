@@ -6308,3 +6308,4 @@
 {"task": "agent-payment-test-shop", "duration_seconds": 202.4, "cost_cents": 1.0, "timestamp": "2026-10-15T22:39:33.450899+00:00", "agent_id": "7e556202-4fdc-42e3-9f8b-4fcd39431bd7"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 242.9, "cost_cents": 0.0, "timestamp": "2026-10-15T22:39:33.450899+00:00", "agent_id": "3b91fb50-3a63-49c7-9881-e1aa27f62513"}
 {"task": "agent-payment-abandonment", "duration_seconds": 195.3, "cost_cents": 0.0, "timestamp": "2026-10-15T22:39:33.450899+00:00", "agent_id": "28d940c2-d6ae-4926-af5d-e34d4e6c8d52"}
+{"task": "sms-supervisor-open-spawns-agent", "duration_seconds": 49.4, "cost_cents": 0.0, "timestamp": "2026-10-16T04:16:15.071199+00:00", "agent_id": ""}
