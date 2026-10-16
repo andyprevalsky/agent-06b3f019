@@ -41,7 +41,7 @@
 #   --cold-handoff-request <private-request> <sha256>  exact internal cold-only cross-controller handoff
 #   --cold-primary-bootstrap  opt into empty-checkout bootstrap for verified cold primaries
 #   --reuse-pool-only  claim existing authenticated stopped primary pool IDs only;
-#                      default: refuse misses and new worker allocation without measured admission
+#                      explicit retention opt-in; ordinary runs create/dispose owned resources
 #   --foreground       keep the controller in the launching session (tests/debugging);
 #                      paid fleet runs detach by default so EXIT cleanup survives it
 #   --wait             detach for lifecycle safety, but wait for and return the
@@ -1030,7 +1030,8 @@ WORKER_STAGE_ATTEMPT_WALL_SECONDS="120"
 AUTOSCALER_FINALIZATION_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS:-}"
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 CONTROLLER_RETRY_SECONDS="${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"
-POOL_REUSE_ONLY="1"    # existing primary IDs first; no implicit new Machine allocation
+POOL_REUSE_ONLY="0"    # ordinary runs create disposable resources
+DISPOSABLE_LIFECYCLE=1  # explicit reuse opts back into retained borrowed IDs
 POOL_COLD_BOOTSTRAP="0"  # future empty-checkout intent, never historical warm evidence
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
@@ -1244,7 +1245,7 @@ while [ $# -gt 0 ]; do
         --ref)            BENCH_REF="${2:-}"; shift 2 ;;
         --dash-base)      DASH_BASE="${2:-}"; shift 2 ;;
         --keep-clones)    KEEP_CLONES="1"; shift ;;
-        --reuse-pool-only) POOL_REUSE_ONLY="1"; shift ;;
+        --reuse-pool-only) POOL_REUSE_ONLY="1"; DISPOSABLE_LIFECYCLE=0; shift ;;
         --cold-primary-bootstrap) POOL_COLD_BOOTSTRAP="1"; shift ;;
         --timeout)        RUN_TIMEOUT="${2:-}"; RUN_TIMEOUT_OPERATOR_SET="1"; shift 2 ;;
         --autoscale-max)
@@ -1271,6 +1272,8 @@ while [ $# -gt 0 ]; do
                           shift ;;
     esac
 done
+# Maintenance reconciles its original ownership; never converts old borrowed resources.
+[ "$RECOVER_STALE_ONLY" != 1 ] || DISPOSABLE_LIFECYCLE=0
 case "$FRESH_VOLUMES" in 0|1) ;; *) echo "❌ invalid fresh-volume mode" >&2; exit 2 ;; esac
 reuse_pool_only_admission() {
     [ "${POOL_REUSE_ONLY:-0}" = 1 ] || return 0
@@ -1290,6 +1293,13 @@ reuse_pool_only_admission() {
     fi
     echo "🏊 reuse existing primary Machines; additional workers require an existing eligible worker path (new allocation is withheld)" >&2
 }
+REQUESTED_BOOT_TRANSPORT="${CLOUDBENCH_BOOT_TRANSPORT:-config}"
+if [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ]; then
+    # New resources use the existing clone/config BOOT path. Staged admission
+    # is a retained-borrowed identity protocol, not authority for a fresh clone.
+    [ "$REQUESTED_BOOT_TRANSPORT" != staged ] || echo "🧹 disposable startup selects normal image/config BOOT; retained staged transport remains available with --reuse-pool-only" >&2
+    export CLOUDBENCH_BOOT_TRANSPORT=config
+fi
 reuse_pool_only_admission || exit 2
 cold_primary_admission() {
     [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] || return 0
@@ -2054,7 +2064,7 @@ print(state.strip().lower())
 reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone's forked volume
     local vol="$1" diagnostic_log="${2:-}" i lifecycle_rc state
     local destroy_capture destroy_rc destroy_bytes destroy_excerpt destroy_suffix
-    local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0
+    local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0 once_status=0
     [ -n "$vol" ] || return 0
     if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         echo "❌ reuse-only retains Volume identity; refusing destroy of $vol" >&2
@@ -2080,13 +2090,19 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
         echo "  ❌ could not allocate bounded response capture for volume $vol; retaining exact ownership" >&2
         return 1
     }
+    if [ "${DISPOSABLE_REAP:-0}" = 1 ]; then
+        fleet_disposable_delete_intent volume "$vol" || once_status=$?
+        [ "$once_status" = 0 ] || [ "$once_status" = 2 ] || return 1
+    fi
     for i in 1 2 3 4 5 6; do
         : > "$destroy_capture" || {
             rm -f "$destroy_capture"
             echo "  ❌ could not reset response capture for volume $vol; retaining exact ownership" >&2
             return 1
         }
-        if FLY volumes destroy "$vol" -a "$APP" --yes >"$destroy_capture" 2>&1; then
+        if [ "${DISPOSABLE_REAP:-0}" = 1 ] && { [ "$i" -gt 1 ] || [ "$once_status" = 2 ]; }; then
+            destroy_rc=1 # keep reconciling exact GET; never repeat DELETE
+        elif FLY volumes destroy "$vol" -a "$APP" --yes >"$destroy_capture" 2>&1; then
             destroy_rc=0
             destroy_accepted=1
         else
@@ -2123,7 +2139,7 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
         if [ "$lifecycle_rc" -eq 0 ]; then
             case "$state" in
                 pending_destroy|destroyed)
-                    if [ "$destroy_rc" -eq 0 ]; then
+                    if [ "$destroy_rc" -eq 0 ] || [ "${DISPOSABLE_REAP:-0}" = 1 ]; then
                         rm -f "$destroy_capture"
                         return 74
                     fi
@@ -2155,8 +2171,9 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
 
 reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
     local id="$1" diagnostic_log="${2:-}" vol="${3:-}" i details="" detail_status=2
-    local state="" command_rc=0
+    local state="" command_rc=0 once_status=0
     [ -n "$id" ] || return 0
+    [ "$id" != 820224f7e069e8 ] || { echo "❌ protected WHM Machine" >&2; return 1; }
     if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         echo "❌ reuse-only retains Machine and Volume identity; refusing destroy of $id" >&2
         return 1
@@ -2182,8 +2199,14 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
             "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
             "$id" "${vol:-unknown}" >> "$diagnostic_log" 2>/dev/null || true
     fi
+    if [ "${DISPOSABLE_REAP:-0}" = 1 ]; then
+        fleet_disposable_delete_intent machine "$id" || once_status=$?
+        [ "$once_status" = 0 ] || [ "$once_status" = 2 ] || return 1
+    fi
     for i in 1 2 3 4 5; do
-        if [ -n "$diagnostic_log" ]; then
+        if [ "${DISPOSABLE_REAP:-0}" = 1 ] && { [ "$i" -gt 1 ] || [ "$once_status" = 2 ]; }; then
+            : # an ambiguous DELETE is reconciled by GET only
+        elif [ -n "$diagnostic_log" ]; then
             printf '[%s] destroy attempt %s/5\n' \
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$i" \
                 >> "$diagnostic_log" 2>/dev/null || true
@@ -2243,7 +2266,7 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
                 "$i" "$state" \
                 >> "$diagnostic_log" 2>/dev/null || true
         fi
-        if [ "$i" = 3 ]; then
+        if [ "$i" = 3 ] && [ "${DISPOSABLE_REAP:-0}" != 1 ]; then
             if [ -n "$diagnostic_log" ]; then
                 if FLY machine stop "$id" -a "$APP" >/dev/null 2>> "$diagnostic_log"; then
                     command_rc=0
@@ -2646,6 +2669,9 @@ fleet_registry_init() {
             printf 'source_manifest_sha256=%s\n' "$PRIVATE_SOURCE_SHA256"
         fi
     } > "$tmp_meta" || { rm -rf "$staging"; return 1; }
+    if [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ]; then
+        printf '%s\n%s\n' "$FLEET_OWNER_TOKEN" "$APP" > "$staging/disposable-resources-v1" || return 1
+    fi
     mv "$tmp_meta" "$meta" || { rm -rf "$staging"; return 1; }
     : > "$staging/guest-cleanup-unconfirmed" \
         || { rm -rf "$staging"; return 1; }
@@ -5572,6 +5598,45 @@ PY
     fi
 }
 
+fleet_current_disposable_registry() {
+    [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] && [ "$1" = "${FLEET_REGISTRY_DIR:-}" ] \
+        && [ "${1##*/}" = "${FLEET_OWNER_TOKEN:-}" ] \
+        && [ -f "$1/disposable-resources-v1" ] && [ ! -L "$1/disposable-resources-v1" ] \
+        && [ "$(cat "$1/disposable-resources-v1")" = "$(printf '%s\n%s' "$FLEET_OWNER_TOKEN" "$APP")" ]
+}
+
+fleet_disposable_delete_intent() {  # <machine|volume> <exact-id>;2=already dispatched
+    python3 - "$FLEET_REGISTRY_DIR" "$FLEET_OWNER_TOKEN" "$APP" "$1" "$2" <<'PYONCE'
+import json,os,stat,sys
+from pathlib import Path
+registry=Path(sys.argv[1]);owner,app,kind,identifier=sys.argv[2:]
+assert kind in ('machine','volume') and registry.name==owner
+assert registry.resolve(strict=True)==registry and not registry.is_symlink()
+assert (registry/'disposable-resources-v1').read_text().strip()==owner+'\n'+app
+path=registry/('disposable-delete-'+kind+'-'+identifier+'.json')
+raw=(json.dumps(dict(owner=owner,app=app,kind=kind,identifier=identifier),sort_keys=True)+'\n').encode()
+try: fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+except FileExistsError:
+    assert path.resolve(strict=True)==path and stat.S_ISREG(path.lstat().st_mode) and path.read_bytes()==raw
+    raise SystemExit(2)
+with os.fdopen(fd,'wb')as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+fd=os.open(registry,os.O_RDONLY|os.O_DIRECTORY)
+try:os.fsync(fd)
+finally:os.close(fd)
+PYONCE
+}
+
+fleet_record_disposable_cleanup_state() {
+    python3 - "$FLEET_DIR" "$FLEET_OWNER_TOKEN" "$1" "$2" <<'PYDISPOSAL'
+import json,os,sys
+from pathlib import Path
+root=Path(sys.argv[1])/'_batch';root.mkdir(exist_ok=True)
+p=root/'disposable-cleanup.json'
+value=dict(schema='disposable-cleanup-v1',owner=sys.argv[2],guest_cleanup_missing=sys.argv[3]=='1',runtime_evidence_missing=sys.argv[4]=='1',successful_runtime_inferred=False)
+with p.open('x')as stream:json.dump(value,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
+PYDISPOSAL
+}
+
 fleet_validate_reap_cohort() {
     python3 - "$1" "${WARM_ID:-}" "${WARM_VOLUME_ID:-}" <<'PYCOHORT'
 import os
@@ -5822,18 +5887,20 @@ fleet_reap_registry_record() {
 
 reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|forced>
     local registry="${1%/}" root="${FLEET_OWNERSHIP_ROOT%/}" mode="$2"
+    local DISPOSABLE_REAP=0
+    if [ "$mode" = current ] && fleet_current_disposable_registry "$registry"; then DISPOSABLE_REAP=1; fi
     local record clone_name id volume_id resolved details detail_status state
     local actual_name runner_count cleanup_status terminal_disposition unresolved=0
     local legacy_batch_status=0 registry_version
     [ "$registry" != "$root" ] \
         && [ "${registry%/*}" = "$root" ] \
         || { echo "❌ refusing non-child fleet registry cleanup path: $registry" >&2; return 1; }
-    if [ -e "$registry/guest-cleanup-unconfirmed" ]; then
+    if [ "${DISPOSABLE_REAP:-0}" != 1 ] && [ -e "$registry/guest-cleanup-unconfirmed" ]; then
         echo "❌ refusing to destroy fleet machines whose guest cleanup is unconfirmed: $registry" >&2
         return 1
     fi
-    if [ -e "$registry/runtime-evidence-unconfirmed" ] \
-        || [ -L "$registry/runtime-evidence-unconfirmed" ]; then
+    if [ "${DISPOSABLE_REAP:-0}" != 1 ] && { [ -e "$registry/runtime-evidence-unconfirmed" ] \
+        || [ -L "$registry/runtime-evidence-unconfirmed" ]; }; then
         echo "❌ refusing to destroy fleet machines whose runtime evidence is unconfirmed: $registry" >&2
         return 1
     fi
@@ -11937,13 +12004,16 @@ fleet_clone_with_queue_admission() {  # <native-seconds> <ledger> <clone-args...
     )
 }
 
-machine_creation_admission() {  # <target-ledger>; no ambient flag grants organization headroom
+machine_creation_admission() {  # <target-ledger>; ordinary disposable lifecycle, existing capacity still applies
+    if [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] && [ "${POOL_REUSE_ONLY:-0}" = 0 ] && [ -z "${PROVISION_POOL:-}" ]; then return 0; fi
     echo "❌ existing-Machine capacity gap (${1##*/}): new Machine allocation withheld; authenticated measured admission is not available" >&2
     return 78
 }
 
 clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] [memory-mb] [snapshot-id] [snapshot|fresh]
     machine_creation_admission "$1" || return $?
+    local DISPOSABLE_REAP=0
+    if declare -F fleet_current_disposable_registry >/dev/null && fleet_current_disposable_registry "${FLEET_REGISTRY_DIR:-}"; then DISPOSABLE_REAP=1; fi
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
     local clone_snapshot="${5:-$SNAP_ID}"
@@ -12862,6 +12932,7 @@ pool_machine_indexed_state() {  # <id>; same stdout and 0/1/2 contract as parser
 
 POOL_INVENTORY_JSON=""
 reconcile_pool() {
+    [ "${DISPOSABLE_LIFECYCLE:-0}" != 1 ] || { FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED=0; return 0; }
     local pool_file id st presence claim_path claim_host claim_pid claim_start claim_token
     local owner_status runner_count machines cleanup_status claim_digest has_pool_ids=0 pool_index_ready=0
     local -a pool_inventory_ids=() pool_inventory_status=() pool_inventory_states=()
@@ -13026,6 +13097,7 @@ resize_pool_machine() {  # resize_pool_machine <id>
 }
 
 normalize_current_pool_shape() {
+    [ "${DISPOSABLE_LIFECYCLE:-0}" != 1 ] || return 0
     local id shape state kind cpus memory failed=0 inventory
     local target_kind="shared" target_cpus
     local large_cpus large_kind
@@ -13317,6 +13389,8 @@ provision_primary_machine() {  # <bench> <output>; actual claim-or-clone boundar
         # This option never relaxes the explicit fresh-only contract.
         [ "${POOL_REUSE_ONLY:-0}" != 1 ] || return 1
         fresh_target_region_admission || return 1
+    elif [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ]; then
+        : # this run creates and owns its resources; never borrows stopped IDs
     elif bench_uses_default_pool_shape "$bench"; then
         # A lost/raced/quarantined claim is a miss, never permission to create
         # under reuse-only. The existing claimer retains its exact owner FSM.
@@ -14068,7 +14142,7 @@ cleanup() {
         guest_shutdown_failed=1
     fi
     if [ "$guest_shutdown_failed" = "1" ]; then
-        KEEP_CLONES=1
+        fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || KEEP_CLONES=1
         ec=1
         teardown_failed=1
         if ! fleet_registry_retain_unconfirmed_guest; then
@@ -14117,11 +14191,18 @@ cleanup() {
     # historical worker captures are verified, including workers scaled down
     # before the benchmark finished.
     if ! cloudbench_collect_remaining_runtime_evidence; then
-        echo "❌ runtime evidence is incomplete; retaining original fleet volumes" >&2
+        if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR"; then
+            echo "❌ runtime evidence is incomplete; failed result retained while disposable resources are retired" >&2
+        else
+            echo "❌ runtime evidence is incomplete; retaining original fleet volumes" >&2
+        fi
         runtime_evidence_failed=1
-        KEEP_CLONES=1
+        fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || KEEP_CLONES=1
         ec=1
         teardown_failed=1
+    fi
+    if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR"; then
+        fleet_record_disposable_cleanup_state "$guest_shutdown_failed" "$runtime_evidence_failed" || { ec=1; teardown_failed=1; }
     fi
     # Finish all data-plane reads first. Evidence retention does not authorize
     # provider release; this separate helper may only stop verified idle owned
@@ -14312,7 +14393,7 @@ cleanup() {
         ec=1
         teardown_failed=1
     fi
-    if [ "$FLEET_REGISTRY_PUBLISHED" = "1" ] && [ "$KEEP_CLONES" != "1" ]; then
+    if [ "$FLEET_REGISTRY_PUBLISHED" = "1" ] && [ "$KEEP_CLONES" != "1" ] && ! fleet_current_disposable_registry "$FLEET_REGISTRY_DIR"; then
         if ! stop_current_registry_primaries_for_pool "$billing_owned_joins" \
                 "$guest_shutdown_failed" "$runtime_evidence_failed" \
             || ! return_current_registry_primaries_to_pool "$billing_owned_joins" \
@@ -15035,7 +15116,7 @@ echo "🧊 forking clones from complete snapshot: $SNAP_ID"
 # for an older snapshot: the mutable warm checkout can subsequently move to an
 # older ref. Likewise, an existing pool must carry the manifest fingerprints
 # current code expects. Fail before claiming or starting a single task box.
-if [ -s "$POOL_IDS_FILE" ]; then
+if [ "${DISPOSABLE_LIFECYCLE:-0}" != 1 ] && [ -s "$POOL_IDS_FILE" ]; then
     pool_node=""; pool_py=""; pool_snap=""
     [ -f "$POOL_META_FILE" ] && read -r pool_node pool_py pool_snap < "$POOL_META_FILE" || true
     if [ -z "$CURRENT_NODE_FP" ] || [ -z "$CURRENT_PY_FP" ] \
@@ -15159,10 +15240,13 @@ enforce_app_capacity_guard() {
     # Pool provisioning does not run the post-clone boot-config update phase.
     [ -n "${PROVISION_POOL:-}" ] && replacement_slots=0
 
+    available_pool_machines=0
+    if [ "${DISPOSABLE_LIFECYCLE:-0}" != 1 ]; then
     available_pool_machines="$(available_stopped_pool_machine_count "$warm_json")" || {
         echo "❌ App capacity guard could not classify available stopped pool Machines." >&2
         return 1
     }
+    fi
     case "$available_pool_machines" in ''|*[!0-9]*)
         echo "❌ App capacity guard received an invalid available-pool count." >&2
         return 1
@@ -15522,6 +15606,8 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "boot_update_capacity_wait_seconds=$BOOT_UPDATE_CAPACITY_WAIT_SECONDS"
     --config-value "boot_config_barrier_wait_seconds=$BOOT_CONFIG_BARRIER_WAIT_SECONDS"
     --config-value "primary_reuse_only=$POOL_REUSE_ONLY" \
+    --config-value "requested_boot_transport=${REQUESTED_BOOT_TRANSPORT:-config}" \
+    --config-value "resource_lifecycle=$([ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] && printf disposable || printf retained-reuse)" \
     --config-value "cold_primary_bootstrap=$POOL_COLD_BOOTSTRAP"
     --config-value "primary_vm_size=$FLEET_PRIMARY_VM_SIZE"
     --config-value "primary_vm_memory_mb=$FLEET_PRIMARY_VM_MEMORY"
@@ -16170,7 +16256,9 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     local cleanup_log="$1/worker-$2.cleanup.log"
     local claim="$1/worker-$2.cleanup-claim" self_pid="${BASHPID:-$$}"
     local claim_token claim_line claim_pid claim_owner claim_started
-    local machine_reap_status=-1 terminal_disposition borrowed_worker=0 retained_worker=0
+    local machine_reap_status=-1 terminal_disposition borrowed_worker=0 retained_worker=0 runtime_missing=0
+    local DISPOSABLE_REAP=0
+    fleet_current_disposable_registry "${FLEET_REGISTRY_DIR:-}" && DISPOSABLE_REAP=1
     claim_token="$self_pid.$(date +%s).$RANDOM"
     local now age attempt=0 claimed=0
     local claim_attempts="${WORKER_CLEANUP_CLAIM_ATTEMPTS:-300}"
@@ -16240,8 +16328,9 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         && [ -e "$cleanup_out/worker-runtime-evidence/$cleanup_wid/owner.json" ] \
         && ! cloudbench_preserve_unlaunched_worker "$cleanup_out" "$cleanup_wid" \
         && ! cloudbench_capture_worker_runtime_evidence "$cleanup_out" "$cleanup_wid"; then
-        echo "❌ worker $cleanup_wid runtime evidence was not preserved; retaining exact ownership" >&2
-        rc=1
+        echo "❌ worker $cleanup_wid runtime evidence was not preserved" >&2
+        runtime_missing=1
+        [ "$DISPOSABLE_REAP" = 1 ] || rc=1
     fi
     if [ "$borrowed_worker" = 0 ] && [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         # A failed evidence copy still retains its error and all ownership.
@@ -16329,6 +16418,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     # claim so the durable ledger entry can be retried immediately instead of waiting for expiry.
     rm -f "$claim" || rc=1
     worker_ledger_lock_release "$cleanup_out" || rc=1
+    [ "$runtime_missing" = 0 ] || rc=1
     return "$rc"
 }
 
@@ -16392,7 +16482,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     [ ! -e "$out/benchmark-child.finished" ] \
         && [ ! -e "$out/autoscaler.runtime-completed" ] || return 0
     local wid="" borrowed_worker=0
-    if declare -F claim_reusable_worker >/dev/null; then
+    if [ "${DISPOSABLE_LIFECYCLE:-0}" != 1 ] && declare -F claim_reusable_worker >/dev/null; then
         wid="$(claim_reusable_worker "$out" "$primary_id" "$ws" "$runtime_run_token" "$pip")" || {
             printf '%s\n' "Existing worker admission is unresolved; ownership retained" > "$out/autoscaler.failed"
             return 1

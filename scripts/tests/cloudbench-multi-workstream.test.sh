@@ -413,7 +413,8 @@ clone_source_read_rate_limit_contract() (
     local refresh_calls="$TMP_ROOT/clone-source-rate-limit-refresh.calls"
     local ledger="$TMP_ROOT/clone-source-rate-limit/primary.ids"
 
-    for function_name in fleet_clone_with_queue_admission clone_failure_definitively_unallocated \
+    DISPOSABLE_LIFECYCLE=1; POOL_REUSE_ONLY=0; PROVISION_POOL=""
+    for function_name in machine_creation_admission fleet_clone_with_queue_admission clone_failure_definitively_unallocated \
         clone_failure_owned_volume_id machine_id_for_clone_name clone_machine_target; do
         function_source="$(fleet_production_function "$function_name")"
         [ -n "$function_source" ] \
@@ -686,6 +687,8 @@ assert_no_controller_script_snapshots() {
 SANDBOX="$TMP_ROOT/repo"
 mkdir -p "$SANDBOX"
 cp -R "$ROOT_DIR/scripts" "$SANDBOX/scripts"
+mkdir -p "$SANDBOX/.claude/shared"
+cp "$ROOT_DIR/.claude/shared/benchmark-report-format.txt" "$SANDBOX/.claude/shared/"
 cp -R "$ROOT_DIR/agents/benchmarks/fleet_startup_phase.py" "$SANDBOX/scripts/" 2>/dev/null || true
 # Keep the synthetic worktrees dependency-fingerprintable. Pool compatibility is
 # now a fail-closed production contract, so an intentionally minimal fake repo
@@ -2306,7 +2309,8 @@ journal_must_be_read_only() {  # journal_must_be_read_only <phase>
 
 run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-args...>
     local ws="$1" port="$2" log="$3"
-    local launch_args=() session_leader=()
+    local launch_args=() session_leader=() controller_entry=run-bench-fleet
+    [ "${CLOUDBENCH_TEST_DISPOSABLE_ONLY:-0}" != 1 ] || controller_entry=run-bench
     shift 3
     launch_args=("$@")
     # Most scenarios need direct exit-status control. The default-detach
@@ -2368,7 +2372,7 @@ os.execvp(sys.argv[1], sys.argv[1:])')
         CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0.1 \
         CLOUDBENCH_POLL_INTERVAL=2 \
         CLOUDBENCH_LAUNCH_SETTLE_SECONDS=1 \
-        "${session_leader[@]}" bash "$ws/scripts/run-bench-fleet" "${launch_args[@]}" > "$log" 2>&1
+        "${session_leader[@]}" bash "$ws/scripts/$controller_entry" "${launch_args[@]}" > "$log" 2>&1
 }
 
 write_dead_registry() {  # write_dead_registry <label> <policy> <host> <name> [id] [role]
@@ -2598,7 +2602,8 @@ CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 1 — concurrent provisioning: two controllers, isolated pool machines
 # ═════════════════════════════════════════════════════════════════════════════
-if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
+if [ "${CLOUDBENCH_TEST_DISPOSABLE_ONLY:-0}" != "1" ] \
+    && [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_READINESS_RETRY_ONLY:-0}" != "1" ] \
@@ -3644,6 +3649,66 @@ untrack_test_hub_pid 999999
     || fail "untracking an absent Hub PID fabricated an empty array member"
 echo "PASS: Hub PID untracking is idempotent for an empty exact-owner set"
 if [ "${CLOUDBENCH_TEST_PENDING_HUB_SELF_TEST:-0}" = "1" ]; then
+    exit 0
+fi
+
+if [ "${CLOUDBENCH_TEST_DISPOSABLE_ONLY:-0}" = 1 ]; then
+    assert_disposable_only_warm() {
+        python3 - "$FAKE_DIR" <<'PYDISPOSABLE'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]);state=json.loads((root/'state.json').read_text())
+assert len(state['machines'])==1 and state['machines'][0]['id']=='aaaa0000000001',state['machines']
+assert len(state['volumes'])==1 and state['volumes'][0]['id']=='vol_aaaa0001',state['volumes']
+journal=(root/'journal.log').read_text()
+assert 'machine clone ' in journal and 'machine destroy ' in journal and 'volumes destroy ' in journal,journal
+assert 'machine destroy --force aaaa0000000001' not in journal and 'volumes destroy vol_aaaa0001' not in journal,journal
+PYDISPOSABLE
+    }
+    hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" || fail "disposable Hub A"
+    hub_stub "$HUB_PORT_B" "$WS_B/.context/fleet/runs" || fail "disposable Hub B"
+    for ws in "$WS_A" "$WS_B"; do
+        reset_fake_state
+        : > "$FAKE_DIR/journal.log"; : > "$FAKE_DIR/desired-two"
+        port="$CONDUCTOR_PORT_A";[ "$ws" != "$WS_B" ] || port="$CONDUCTOR_PORT_B"
+        status=0
+        CLOUDBENCH_TEST_BARRIER_MIN=1 run_controller "$ws" "$port" "$TMP_ROOT/disposable-success-$(basename "$ws").log" autoscaler-worker-required --timeout 240 || status=$?
+        [ "$status" = 0 ] || fail "disposable outer lifecycle failed:$status"
+        assert_disposable_only_warm || fail "disposable primary/worker exact deletion"
+        [ "$(grep -c '^machine clone ' "$FAKE_DIR/journal.log")" -ge 2 ] || fail "operational worker missing"
+    done
+    [ "$(git -C "$WS_A" rev-parse HEAD)" != "$(git -C "$WS_B" rev-parse HEAD)" ] || fail "two revision fixture not distinct"
+    echo "PASS: two code revisions create/run/destroy primary+worker without retained fleets"
+    reset_fake_state
+    : > "$FAKE_DIR/journal.log"; : > "$FAKE_DIR/desired-two"; : > "$FAKE_DIR/fail-worker-launch"
+    status=0
+    CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=1 CLOUDBENCH_WORKER_READY_TIMEOUT=5 CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=30 \
+        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/disposable-worker-failed.log" autoscaler-worker-required --timeout 240 || status=$?
+    [ "$status" != 0 ] || fail "worker startup failure fabricated success"
+    assert_disposable_only_warm || fail "failed startup resources retained"
+    rm -f "$FAKE_DIR/fail-worker-launch"
+    echo "PASS: worker startup failure retains failed outcome and deletes owned storage"
+    reset_fake_state
+    : > "$FAKE_DIR/journal.log"
+    pid_file="$TMP_ROOT/disposable-cancel.pid"
+    CLOUDBENCH_TEST_NEW_SESSION=1 CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_TEST_SESSION_PID_FILE="$pid_file" \
+        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/disposable-cancel.log" bench-group-term --timeout 240 &
+    launcher_pid=$!;PIDS+=("$launcher_pid");track_session_controller "$pid_file"
+    deadline=$((SECONDS+180));marker=""
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        marker="$(find "$FAKE_DIR/markers" -maxdepth 1 -name 'benchmark-executing-*' -type f -print -quit)"
+        [ -z "$marker" ] || break
+        kill -0 "$launcher_pid" 2>/dev/null || break
+        sleep .2
+    done
+    [ -n "$marker" ] || fail "cancellation did not reach running task"
+    fleet_pid="$(cat "$pid_file")";fleet_birth="$(cloudbench_pid_start_time "$fleet_pid")"
+    cloudbench_pid_matches_start "$fleet_pid" "$fleet_birth" && [ "$(ps -o pgid= -p "$fleet_pid" | tr -d ' ')" = "$fleet_pid" ] || fail "cancel identity"
+    kill -TERM -- "-$fleet_pid"
+    status=0;wait "$launcher_pid" || status=$?;PIDS=();SESSION_CONTROLLERS=()
+    [ "$status" != 0 ] || fail "cancel fabricated success"
+    assert_disposable_only_warm || fail "cancelled resources retained"
+    echo "PASS: actual outerCLI cancelled task disposes exact run Machines and Volumes"
     exit 0
 fi
 
