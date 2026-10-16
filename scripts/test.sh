@@ -348,6 +348,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark GitHub Token" bash scripts/tests/cloudbench-github-token.test.sh
   run_suite "Cloud Benchmark Explicit Idle Admission" python3 scripts/tests/cloudbench-explicit-idle-admission.test.py
   run_suite "Cloud Benchmark Fixed Native Worker" python3 scripts/tests/cloudbench-fixed-native-worker.test.py
+  run_suite "Cloud Benchmark App Stop All" python3 scripts/tests/cloudbench-stop-all.test.py
   run_suite "Cloud Benchmark Unstaged Worker Recovery" python3 scripts/tests/cloudbench-unstaged-worker-recovery.test.py
   run_suite "Cloud Benchmark Protected Resource Union" python3 scripts/tests/cloudbench-protected-resources.test.py
   run_suite "Cloud Benchmark Pool Run Token" python3 scripts/tests/cloudbench-pool-run-token.test.py

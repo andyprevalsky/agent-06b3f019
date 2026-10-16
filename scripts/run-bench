@@ -15,6 +15,11 @@ if [[ "${1:-}" == "report-format" ]]; then
     benchmark_agent_instructions
     exit 0
 fi
+# Explicit app maintenance, before catalog, campaign, or fleet setup.
+if [[ "${1:-}" == stop-all ]]; then
+    shift
+    exec python3 "$ROOT_DIR/scripts/cloudbench-stop-all.py" "$@"
+fi
 # Reject --single-box BEFORE cd into agents/: cloudbench multi-workstream
 # sandboxes are scripts-only, and a failed cd would exit under `set -e` without
 # the parallel-safety message the guard exists to print.
@@ -213,6 +218,7 @@ fi
 usage() {
     cat <<'EOF'
 Usage: scripts/run-bench <slice-or-task...> [options]
+       scripts/run-bench stop-all --app APP --execute --out-dir NEW_PRIVATE_DIR
        scripts/run-bench report-format
        scripts/run-bench monitor <exact-run-directory>
        scripts/run-bench image-build [--no-cache] [--builder native|depot]
