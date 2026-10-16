@@ -12690,6 +12690,14 @@ reconcile_pool() {
     POOL_INVENTORY_JSON="$machines"
     for pool_file in "$GIT_COMMON_DIR"/cloudbench-pools/*.ids; do
       [ -f "$pool_file" ] || continue
+      if [ ! -r "$pool_file" ]; then
+          if [ "$pool_file" = "$POOL_IDS_FILE" ]; then
+              echo "❌ selected pool ledger is unreadable: $pool_file" >&2
+              return 1
+          fi
+          echo "  ↪️  leaving unreadable foreign pool ledger untouched: $pool_file" >&2
+          continue
+      fi
       while read -r id; do
         [ -n "$id" ] || continue
         if [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ]; then continue; fi

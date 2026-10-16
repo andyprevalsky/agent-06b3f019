@@ -534,5 +534,60 @@ printf '%s' "$mid"
         (capture/'logs/worker.log').write_bytes(b'tampered')
         with self.assertRaises(Exception):mod.verify_worker_return(self.assignment,before,after,volume)
 
+class PoolLedgerReadIsolation(unittest.TestCase):
+    def run_reconcile(self, *, foreign=True, selected_readable=True, foreign_readable=False, foreign_state='stopped'):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);root.chmod(0o700);os.chown(root,1001,1001)
+            common=root/'common';common.mkdir();os.chown(common,1001,1001)
+            pools=common/'cloudbench-pools';pools.mkdir();os.chown(pools,1001,1001)
+            selected=pools/'repo.cold.ids';selected.write_text('0123456789abcd\n');selected.chmod(0o600)
+            if selected_readable:os.chown(selected,1001,1001)
+            old=pools/'v41-primary.cold.ids'
+            if foreign:old.write_text('11111111111111\n');old.chmod(0o600)
+            if foreign and foreign_readable:os.chown(old,1001,1001)
+            original=old.stat() if foreign else None
+            native=root/'inventory.json';native.write_text(json.dumps([{'id':'0123456789abcd','state':'stopped'},{'id':'11111111111111','state':foreign_state}]))
+            native.chmod(0o644)
+            fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+            def function(name):
+                match=re.search(r'^'+name+r'\(\).*?^}\n',fleet,re.M|re.S);assert match,name
+                return match.group()
+            script='\n'.join(function(name) for name in ('pool_machine_state_from_json','reconcile_pool'))+'''
+FLY() { [ "$1 $2" = 'machines list' ] || { echo FORBIDDEN >&2; return 90; }; cat "$INVENTORY"; }
+reconcile_pool
+'''
+            env={**os.environ,'GIT_COMMON_DIR':str(common),'POOL_IDS_FILE':str(selected),'POOL_CLAIMS_DIR':str(common/'claims'),'APP':'app','INVENTORY':str(native),'CLOUDBENCH_CAMPAIGN_INVENTORY_DIR':'','PRIVATE_SOURCE_ID':''}
+            result=subprocess.run(['bash','-e','-c',script],env=env,user=1001,group=1001,extra_groups=[],capture_output=True,text=True,timeout=5)
+            self.assertNotIn('FORBIDDEN',result.stderr)
+            self.assertEqual(selected.read_text(),'0123456789abcd\n')
+            if foreign:
+                after=old.stat();self.assertEqual(old.read_text(),'11111111111111\n')
+                self.assertEqual((original.st_dev,original.st_ino,original.st_uid,original.st_gid,original.st_mode),(after.st_dev,after.st_ino,after.st_uid,after.st_gid,after.st_mode))
+            return result
+
+    @unittest.skipUnless(os.geteuid()==0,'real UID1001 permission boundary needs root')
+    def test_unreadable_foreign_pool_does_not_block_selected_pool(self):
+        result=self.run_reconcile()
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('unreadable foreign pool ledger untouched',result.stderr)
+
+    @unittest.skipUnless(os.geteuid()==0,'real UID1001 permission boundary needs root')
+    def test_unreadable_selected_pool_still_refuses(self):
+        result=self.run_reconcile(selected_readable=False)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('selected pool ledger is unreadable',result.stderr)
+
+    @unittest.skipUnless(os.geteuid()==0,'real UID1001 permission boundary needs root')
+    def test_readable_foreign_pool_still_obeys_existing_state_guard(self):
+        result=self.run_reconcile(foreign_readable=True,foreign_state='unexpected')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('unsafe pre-refresh state',result.stderr)
+
+    @unittest.skipUnless(os.geteuid()==0,'real UID1001 permission boundary needs root')
+    def test_selected_readable_pool_alone_still_reconciles(self):
+        result=self.run_reconcile(foreign=False)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('unreadable',result.stderr)
+
 
 if __name__=='__main__':unittest.main()
