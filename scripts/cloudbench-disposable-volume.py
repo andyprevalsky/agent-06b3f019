@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Disable scheduled backups only for a newly allocated, exact run-owned Volume."""
-import argparse,json,os,re,runpy,signal,stat,time
+import argparse,base64,json,os,re,runpy,signal,stat,time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -66,7 +66,7 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
         if not directory.exists():directory.mkdir(mode=0o700)
         need(directory.resolve(strict=True)==directory and directory.is_dir(),'linked evidence directory')
         def inspect():
-            config=command(['machine','status',mid,'-a',app,'-d','--json'])
+            config=command(['machine','status',mid,'-a',app,'-d'])
             mounts=config.get('mounts',[])
             need(len(mounts)==1 and mounts[0].get('volume')==vid,'native mount changed')
             value=command(['volumes','show',vid,'-a',app,'--json'])
@@ -96,8 +96,19 @@ def main():
     with bounded(60):
         helper=runpy.run_path(str(Path(__file__).resolve().with_name('cloudbench-original-volume-capture.py')))
         def command(argv):
-            status,out,unused=helper['run_bounded'](['bash','-c','FLY "$@"','disposable-volume',*argv],20,dict(os.environ))
-            need(status==0,'Volume configuration CLI failed')
+            # Native config JSON can contain secrets: retain lossless diagnostics
+            # privately, never interpolate provider output into the traceback.
+            directory=Path(args.audit).absolute()/'volume-backups'/args.volume/'commands'
+            directory.mkdir(mode=0o700,exist_ok=True)
+            info=directory.lstat()
+            need(directory.resolve(strict=True)==directory and stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and not info.st_mode&0o077,'unsafe command evidence directory')
+            stem='command-'+str(time.time_ns())+'-'+str(os.getpid())
+            intent=directory/(stem+'.intent.json');result=directory/(stem+'.result.json')
+            started=time.monotonic()
+            save(intent,dict(argv=argv,started_monotonic=started))
+            status,out,err=helper['run_bounded'](['bash','-c','FLY "$@"','disposable-volume',*argv],20,dict(os.environ))
+            save(result,dict(argv=argv,status=status,stdout_base64=base64.b64encode(out).decode(),stderr_base64=base64.b64encode(err).decode(),started_monotonic=started,finished_monotonic=time.monotonic()))
+            need(status==0,'Volume configuration CLI failed (exit '+str(status)+'; private receipt '+str(result)+')')
             value=json.loads(out);need(isinstance(value,dict),'invalid native JSON');return value
         configure(args.registry,args.owner,args.app,args.name,args.machine,args.volume,args.protected,command,audit=args.audit,run=args.run)
 if __name__=='__main__':main()
