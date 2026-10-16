@@ -330,6 +330,7 @@ run_suite "Benchmark Campaign Grouping" bash scripts/tests/campaign-hub-grouping
 run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
 run_suite "Cloud Benchmark Quiesced Forensic Retirement" python3 scripts/tests/cloudbench-forensic-quiesced.test.py
+run_suite "Cloud Benchmark Static Service Observation" python3 scripts/tests/cloudbench-static-service-observation.test.py
 run_suite "Cloud Benchmark Native Linux Runner" python3 scripts/tests/cloudbench-controller-linux.test.py
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Blackbox Backend Teardown" bash scripts/tests/blackbox-backend-teardown.test.sh

@@ -167,6 +167,10 @@ GATES = (
         "cloudbench-bootstrap-recovery",
         ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"),
     ),
+    Gate(
+        "cloudbench-static-service-observation",
+        ("python3", "scripts/tests/cloudbench-static-service-observation.test.py"),
+    ),
     Gate("wait-for-code-review", ("python3", "scripts/tests/wait-for-code-review.test.py")),
     Gate("deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),

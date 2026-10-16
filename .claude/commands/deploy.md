@@ -552,6 +552,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
 `python3 scripts/tests/cloudbench-bootstrap-recovery.test.py`,
+`python3 scripts/tests/cloudbench-static-service-observation.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
