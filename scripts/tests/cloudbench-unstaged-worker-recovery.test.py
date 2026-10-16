@@ -89,4 +89,17 @@ python3(){ printf '%s\\n' "$@" >> "$MARKER"; }
   result=subprocess.run(['bash','-c',script],env=env,capture_output=True,text=True)
   self.assertEqual(result.returncode,0,result.stderr);text=marker.read_text();self.assertIn('cloudbench-unstaged-worker-recovery.py',text);self.assertNotIn('BAD_RESERVE',text);self.assertTrue(text.endswith('RELEASE\n'))
   marker.unlink();again=script.replace('REGISTRY_RECOVERY_GUARD_FD=3; return 0','return 2');r=subprocess.run(['bash','-c',again],env=env,capture_output=True,text=True);self.assertNotEqual(r.returncode,0);self.assertFalse(marker.exists())
+class OuterRecoveryCLI(unittest.TestCase):
+ def setUp(self):
+  import tempfile
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name);self.fake=self.root/'fleet';self.fake.write_text('printf "%s\\n" "$@"\n');self.env=dict(os.environ,RUN_BENCH_FLEET_BIN_UNDER_TEST=str(self.fake))
+ def run_cli(self,*args):
+  import subprocess
+  return subprocess.run(['bash',str(D/'run-bench'),*args],capture_output=True,text=True,env=self.env)
+ def test_actual_outer_forwards_exact_recovery(self):
+  args=['--recover-unstaged-worker','117b0d8dcad34f54b5f04233e1589e4b','--cold-primary-bootstrap','--reuse-pool-only','--foreground','--ref','570830dbf17635e13d16a6f03b4d705f6b6443b1'];r=self.run_cli(*args);self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),args)
+ def test_missing_token_refuses_before_dispatch(self):
+  r=self.run_cli('--recover-unstaged-worker');self.assertEqual(r.returncode,2);self.assertIn('requires a value',r.stderr)
+ def test_campaign_mix_refuses(self):
+  r=self.run_cli('--recover-unstaged-worker','f'*32,'--runs','2');self.assertNotEqual(r.returncode,0);self.assertIn('campaign flags',r.stderr)
 if __name__=='__main__':unittest.main()
