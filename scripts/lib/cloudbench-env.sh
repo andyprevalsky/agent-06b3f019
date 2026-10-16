@@ -2083,6 +2083,21 @@ cloudbench_controller_lock_acquire() {
     fi
     status=0
     flock -n "$CLOUDBENCH_CONTROLLER_LOCK_FD" || status=$?
+    if [ "$status" -eq 1 ]; then
+      owner="$(cat "$path" 2>/dev/null || true)"
+      if { ! [[ "$owner" =~ ^[0-9]+$ ]] || ! kill -0 "$owner" 2>/dev/null; } &&
+         [ "$path" -ef "/dev/fd/$CLOUDBENCH_CONTROLLER_LOCK_FD" ]; then
+        # PID metadata can disappear after contention. Trust only a fresh
+        # kernel lock on the same inode; never replace a stale-looking path.
+        status=0
+        flock -n "$CLOUDBENCH_CONTROLLER_LOCK_FD" || status=$?
+        if [ "$status" -eq 0 ] &&
+           [ ! "$path" -ef "/dev/fd/$CLOUDBENCH_CONTROLLER_LOCK_FD" ]; then
+          flock -u "$CLOUDBENCH_CONTROLLER_LOCK_FD" 2>/dev/null || true
+          status=1
+        fi
+      fi
+    fi
     if [ "$status" -ne 0 ]; then
       exec {CLOUDBENCH_CONTROLLER_LOCK_FD}>&-
       unset CLOUDBENCH_CONTROLLER_LOCK_FD

@@ -2205,3 +2205,58 @@ bash "$ROOT_DIR/scripts/tests/cloudbench-pid-identity.test.sh" ||
   fail "cloudbench PID birth identities must survive a wall-clock step"
 
 echo "All cloud benchmark environment checks passed."
+# BEGIN registered controller lock race controls
+python3 - "$HELPER_SRC" <<'PYLOCK'
+import os, pathlib, subprocess, sys, tempfile, unittest
+HELPER=sys.argv[1]
+class ControllerKernelLock(unittest.TestCase):
+ def run_case(self,mode):
+  with tempfile.TemporaryDirectory()as td:
+   script=r'''
+set -eu
+PATH=/usr/bin:/bin; export PATH
+source "$1"
+d="$2"; mode="$3"; lock="$d/controller.lock"
+actual_flock="$(command -v flock)"
+export actual_flock
+bash -c 'exec 9<> "$1"; "$actual_flock" 9; printf "99999999\n" > "$1"; touch "$2/ready"; while [ ! -e "$2/release" ]; do sleep .01; done; "$actual_flock" -u 9; exec 9>&-; touch "$2/released"' _ "$lock" "$d" &
+holder=$!
+trap 'touch "$d/release"; wait "$holder"' EXIT
+for n in $(seq 1 200); do [ -e "$d/ready" ] && break; sleep .01; done
+[ -e "$d/ready" ]
+first=1
+flock(){
+ local rc=0
+ "$actual_flock" "$@" || rc=$?
+ if [ "$1" = -n ] && [ "$first" = 1 ]; then
+  first=0
+  [ "$rc" = 1 ]
+  if [ "$mode" != held ]; then
+   touch "$d/release"
+   for n in $(seq 1 200); do [ -e "$d/released" ] && break; sleep .01; done
+   [ -e "$d/released" ]
+   if [ "$mode" = replaced ]; then mv "$lock" "$lock.old"; printf '99999999\n' > "$lock"; fi
+  fi
+ fi
+ return "$rc"
+}
+rc=0
+cloudbench_controller_lock_acquire_wait "$lock" 1 || rc=$?
+if [ "$mode" = released ]; then
+ [ "$rc" = 0 ]
+ [ "$(cat "$lock")" = "$$" ]
+ ! "$actual_flock" -n "$lock" true
+ cloudbench_controller_lock_release "$lock"
+else
+ [ "$rc" != 0 ]
+ [ "$(cat "$lock")" = 99999999 ]
+fi
+'''
+   result=subprocess.run(['bash','-c',script,'_',HELPER,td,mode],capture_output=True,text=True,timeout=8)
+   self.assertEqual(result.returncode,0,result.stderr)
+ def test_released_owner_reacquires_same_kernel_inode(self):self.run_case('released')
+ def test_dead_metadata_with_live_kernel_holder_refuses(self):self.run_case('held')
+ def test_replaced_inode_is_not_acquired(self):self.run_case('replaced')
+unittest.main(argv=['controller-kernel-lock'],verbosity=2)
+PYLOCK
+# END registered controller lock race controls
