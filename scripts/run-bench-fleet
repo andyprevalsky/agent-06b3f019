@@ -745,6 +745,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-explicit-idle-preconfig.py" \
        "$ROOT_DIR/scripts/cloudbench-staged-boot.py" \
        "$ROOT_DIR/scripts/cloudbench-staged-boot-return.py" \
+       "$ROOT_DIR/scripts/cloudbench-staged-probe-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-static-service-observation.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
@@ -11601,6 +11602,25 @@ PY
     [ "$recovery_lock_status" -eq 2 ] && return 0
     [ "$recovery_lock_status" -eq 0 ] || return 1
     echo "🧭 force-recovering exact cancelled fleet owner $token"
+    if [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ] && [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; then
+        local staged_return_candidate=0 staged_recovery_status=0
+        for _evidence_output in "$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)"/*; do
+            if [ -e "$_evidence_output/staged-boot/return.json" ] || [ -L "$_evidence_output/staged-boot/return.json" ]; then
+                staged_return_candidate=1; break
+            fi
+        done
+        if [ "$staged_return_candidate" = 1 ]; then
+            python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-staged-probe-recovery.py" \
+                --registry "$registry" --common "$GIT_COMMON_DIR" --source "$BENCH_REF" \
+                --guard-fd "$REGISTRY_RECOVERY_GUARD_FD" --recovery-pid "$$" \
+                --recovery-birth "$FLEET_OWNER_PID_START" || staged_recovery_status=$?
+            if [ "$staged_recovery_status" = 0 ]; then
+                capacity_release_stale_owner_reservations "$meta" "$token-primary" || staged_recovery_status=$?
+            fi
+            release_registry_recovery_lock "$registry"
+            return "$staged_recovery_status"
+        fi
+    fi
     for _evidence_output in "$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)"/*; do
         if [ -e "$_evidence_output/boot-config-unapplied" ] || [ -L "$_evidence_output/boot-config-unapplied" ]; then
             preconfig_candidate=1; break

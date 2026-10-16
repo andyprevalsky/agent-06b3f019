@@ -90,13 +90,14 @@ def validate_probe(output, machine, token, app, source):
              'benchmark-child.finished', 'barrier.ready.observed', 'autoscaler.completed-after-child', 'desired-worker-count')}
 
 
-def verify(output, registry, common, source, machine, volume, before, after, volume_path):
+def _verify(output, registry, common, source, machine, volume, before, after, volume_path, *, expected_owner):
     output, registry, common = map(Path, (output, registry, common))
     need(all(p.is_absolute() and p.resolve(strict=True) == p for p in (output, registry, common)), 'physical roots')
     meta = fields(registry / 'meta')
     need(meta['fleet_owner_token'] == registry.name and meta['host'] == socket.gethostname(), 'current owner')
     owner = H['sibling']('cloudbench-explicit-idle-preconfig.py')
-    need(owner['pid_birth_state'](meta['pid'], meta['pid_start']) == 'live', 'owner no longer live')
+    need(expected_owner in ('live', 'absent'), 'invalid owner requirement')
+    need(owner['pid_birth_state'](meta['pid'], meta['pid_start']) == expected_owner, 'owner state differs')
     run = Path(meta['runs_root']) / meta['run_id']
     need(output.parent == run, 'output outside exact run')
     contract = H['sibling']('cloudbench_execution_provenance.py')
@@ -185,6 +186,10 @@ def verify(output, registry, common, source, machine, volume, before, after, vol
     else:
         result['runtime_manifest'] = H['descriptor'](output / 'remote-logs/runtime-evidence/manifest.json')
     return result
+
+
+def verify(output, registry, common, source, machine, volume, before, after, volume_path):
+    return _verify(output, registry, common, source, machine, volume, before, after, volume_path, expected_owner='live')
 
 
 def verify_existing_return(result, common):

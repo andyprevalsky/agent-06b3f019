@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import base64
 import ast
 from unittest import mock
 import fcntl
@@ -1097,5 +1098,114 @@ b="$(pool_machine_indexed_state "$2")"; br=$?
 '''
                 r=subprocess.run(['bash','-c',script,'_',str(native),target],capture_output=True,text=True)
                 self.assertEqual(r.returncode,0,(value,r.stderr))
+
+
+@unittest.skipUnless(os.geteuid()==0,'canonical dead-owner publication recovery')
+class StagedDeadProbeRecovery(unittest.TestCase):
+    def setUp(self):
+        self.f=StagedProbeReturn();self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.r=runpy.run_path(str(SCRIPT.with_name('cloudbench-staged-probe-recovery.py')))
+        f=self.f;old=f.run;f.run=f.f.repo/'.context/fleet/runs/current';f.run.parent.mkdir(parents=True);shutil.move(old,f.run);f.out=f.run/'parallel-tool-calls';f.stage=f.out/'staged-boot';f.before=f.out/'before.json';f.after=f.out/'after.json';f.vol=f.out/'volume.json'
+        self.child=subprocess.Popen(['sleep','60']);self.addCleanup(self.join_child)
+        birth=self.birth(self.child.pid);meta=dict(line.split('=',1)for line in (f.registry/'meta').read_text().splitlines());meta.update(version='2',pid=str(self.child.pid),pid_start=birth,cleanup_policy='reap',workspace_root=str(f.f.repo),runs_root=str(f.run.parent),audit_dir=str(f.f.common/'cloudbench-fleet-audits'/f.f.owner))
+        self.write_fields(f.registry/'meta',meta)
+        claim=dict(line.split('=',1)for line in f.f.claim.read_text().splitlines());claim.update(pid=str(self.child.pid),pid_start=birth);self.write_fields(f.f.claim,claim)
+        audit=Path(meta['audit_dir']);audit.mkdir(parents=True)
+        for name in ('fresh','expected-fresh','by-machine-id','pool'): (audit/name).mkdir()
+        (f.registry/'clones').mkdir()
+        self.write_fields(audit/'meta',dict(fleet_owner_token=f.f.owner,app='app',run_id='current'))
+        for name in ('owned-clones.ids','owned-clones.names'):(audit/name).write_bytes(b'')
+        row=dict(version='1',fleet_owner_token=f.f.owner,run_id='current',app='app',source='borrowed-pool',machine_id=f.f.mid,volume_id=f.f.vol,pool_ledger_file=f.f.request['consumer']['pool_ids_file'],pool_meta_file=f.f.request['consumer']['pool_meta_file'],pool_meta_sha256=mod.sha(Path(f.f.request['consumer']['pool_meta_file']).read_bytes()),disposition='claimed');self.write_fields(audit/'pool'/f.f.mid,row)
+        barrier=f.run/'.boot-config-barrier';barrier.mkdir();(barrier/'ready').mkdir();(barrier/'release').write_bytes(b'')
+        (f.run/'_batch').mkdir();f.write(f.run/'_batch/lifecycle.json',dict(status='failed',fleet_owner_token=f.f.owner,run_id='current',controller_exit_code=1));f.write(f.run/'_batch/benches.json',[dict(name='parallel-tool-calls',mode='REAL')])
+        f.h['record'](f.verify(),f.f.common);self.original=(f.stage/'return.json').read_bytes();self.lifecycle=(f.run/'_batch/lifecycle.json').read_bytes()
+        self.guard_path=f.f.common/'cloudbench-fleet-recovery-locks'/f.f.owner;self.guard_path.parent.mkdir();self.fd=os.open(self.guard_path,os.O_CREAT|os.O_RDWR,0o600);fcntl.flock(self.fd,fcntl.LOCK_EX);self.addCleanup(os.close,self.fd)
+        (f.registry/'recovery-lock').mkdir();self.recovery_birth=self.birth(os.getpid());self.write_fields(f.registry/'recovery-lock/meta',dict(host=mod.socket.gethostname(),pid=str(os.getpid()),pid_start=self.recovery_birth))
+        self.calls=[]
+    def birth(self,pid):
+        return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+Path('/proc/'+str(pid)+'/stat').read_text().split(') ',1)[1].split()[19]
+    def join_child(self):
+        if self.child.poll()is None:self.child.terminate()
+        self.child.wait()
+    def write_fields(self,path,value):path.write_text(''.join(k+'='+v+'\n'for k,v in value.items()))
+    def recover(self,native=None):
+        f=self.f
+        def nr(mid):self.calls.append(('machine',mid));return copy.deepcopy(f.f.native if native is None else native)
+        def vr(vid):self.calls.append(('volume',vid));return copy.deepcopy(f.f.volume)
+        if os.environ.get('STAGED_DEAD_RECOVERY_OLD')=='1':return self.r['P']['plan'](f.registry,f.f.common,f.source)
+        return self.r['recover'](f.registry,f.f.common,f.source,nr,vr,self.fd,os.getpid(),self.recovery_birth)
+    def test_actual_dead_owner_archives_then_returns_without_rewriting_outcome(self):
+        self.join_child();f=self.f;result=self.recover();self.assertEqual(result['status'],'RECOVERED_STOPPED_PROBES');self.assertEqual(len(self.calls),3);self.assertFalse(f.f.claim.exists())
+        self.assertEqual((f.stage/'return.json').read_bytes(),self.original);self.assertEqual((f.run/'_batch/lifecycle.json').read_bytes(),self.lifecycle);self.assertEqual(f.h['current_policy'](f.f.proof),'existing-git-reset-v1')
+        archive=json.loads((f.registry/'staged-probe-return-recovery/archive.json').read_bytes());self.assertEqual(archive['real_task_credit'],0);self.assertIn(str(f.f.claim),archive['plan']['originals'])
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text();fn=re.search(r'^pool_claim_fs_transaction\(\).*?^}\n',fleet,re.M|re.S).group();claim=dict(line.split('=',1)for line in base64.b64decode(archive['plan']['originals'][str(f.f.claim)]).decode().splitlines())
+        args=['bash','-c',fn+'\npool_claim_fs_transaction publish-ordinary "$@"','claim',str(f.f.claim),f.f.mid,f.f.vol,claim['host'],str(os.getpid()),self.recovery_birth,'a'*32,f.f.request['consumer']['pool_ids_file'],f.f.request['consumer']['pool_meta_file'],mod.sha(Path(f.f.request['consumer']['pool_meta_file']).read_bytes())]
+        done=subprocess.run(args,capture_output=True,text=True);self.assertEqual(done.returncode,0,done.stderr)
+    def test_live_original_owner_refuses_before_reads(self):
+        with self.assertRaisesRegex(ValueError,'not dead'):self.recover()
+        self.assertEqual(self.calls,[]);self.assertTrue(self.f.f.claim.exists())
+    def test_dead_owner_still_refused_by_normal_live_verifier(self):
+        self.join_child()
+        with self.assertRaisesRegex(ValueError,'owner state'):self.f.verify()
+    def test_changed_fresh_native_refuses_retains_claim(self):
+        self.join_child()
+        with self.assertRaises(ValueError):self.recover(dict(self.f.f.native,state='started'))
+        self.assertTrue(self.f.f.claim.exists());self.assertFalse((self.f.registry/'staged-probe-return-recovery/archive.json').exists())
+    def test_changed_probe_result_refuses_retains_claim(self):
+        self.join_child();(self.f.out/'benchmark-child.finished').write_text('125\n')
+        with self.assertRaises(ValueError):self.recover()
+        self.assertTrue(self.f.f.claim.exists())
+    def test_replaced_claim_refuses_retains_claim(self):
+        self.join_child();p=self.f.f.claim;p.write_text(p.read_text().replace(self.f.f.owner,'e'*32))
+        with self.assertRaises(ValueError):self.recover()
+        self.assertTrue(p.exists());self.assertEqual(self.calls,[])
+    def test_wrong_guard_owner_refuses_before_reads(self):
+        self.join_child();self.write_fields(self.f.registry/'recovery-lock/meta',dict(host=mod.socket.gethostname(),pid=str(os.getpid()),pid_start='wrong'))
+        with self.assertRaises(ValueError):self.recover()
+        self.assertEqual(self.calls,[])
+    def test_fresh_allocation_or_missing_index_refuses(self):
+        self.join_child();(self.f.registry/'clones/foreign').write_text('x')
+        with self.assertRaises(ValueError):self.recover()
+        self.assertEqual(self.calls,[])
+    def test_canonical_dispatch_selects_probe_recovery_without_preconfig_fallback(self):
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text();start=fleet.index('    if [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ] && [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; then\n        local staged_return_candidate=')
+        end=fleet.index('    for _evidence_output in ',fleet.index('    fi\n',start)+7)
+        block=fleet[start:end]
+        meta=re.search(r'^registry_meta_value\(\).*?^}\n',(SCRIPT.with_name('lib')/'cloudbench-inventory.sh').read_text(),re.M|re.S).group()
+        shell=meta+'''
+python3(){ printf '%s\n' "$1"; }
+capacity_release_stale_owner_reservations(){ :; }
+release_registry_recovery_lock(){ :; }
+invoke(){ local meta="$REGISTRY/meta" registry="$REGISTRY" token="$TOKEN";
+'''+block+'''
+printf fallback
+}
+invoke
+'''
+        env=dict(os.environ,REGISTRY=str(self.f.registry),TOKEN=self.f.f.owner,RECOVER_PRIMARY_TO_POOL='1',POOL_COLD_BOOTSTRAP='1',CLOUDBENCH_SCRIPT_SNAPSHOT=str(SCRIPT.parent),GIT_COMMON_DIR=str(self.f.f.common),BENCH_REF=self.f.source,REGISTRY_RECOVERY_GUARD_FD=str(self.fd),FLEET_OWNER_PID_START=self.recovery_birth)
+        result=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('cloudbench-staged-probe-recovery.py',result.stdout);self.assertNotIn('fallback',result.stdout)
+    def test_old_preconfig_recovery_refuses_executed_probe(self):
+        self.join_child();barrier=self.f.run/'.boot-config-barrier';barrier.mkdir(exist_ok=True);(barrier/'release').write_bytes(b'')
+        with self.assertRaisesRegex(ValueError,'barrier released'):self.r['P']['plan'](self.f.registry,self.f.f.common,self.f.source)
+    def test_missing_claim_or_return_index_refuses_without_release(self):
+        self.join_child();index=self.f.f.common/'cloudbench-staged-boot-returns'/(self.f.f.mid+'.json');raw=index.read_bytes();index.unlink()
+        with self.assertRaises(FileNotFoundError):self.recover()
+        self.assertTrue(self.f.f.claim.exists());index.write_bytes(raw);self.f.f.claim.unlink()
+        with self.assertRaises(FileNotFoundError):self.recover()
+        self.assertFalse((self.f.registry/'staged-probe-return-recovery').exists())
+    def test_aliased_recovery_mutex_parent_refuses(self):
+        self.join_child();parent=self.guard_path.parent;moved=parent.with_name('moved-recovery-locks');parent.rename(moved);parent.symlink_to(moved,target_is_directory=True)
+        with self.assertRaises(ValueError):self.recover()
+        self.assertEqual(self.calls,[]);self.assertTrue(self.f.f.claim.exists())
+    def test_aliased_machine_mutex_parent_refuses(self):
+        self.join_child();parent=self.f.f.common/'cloudbench-pool-claims/.locks';moved=parent.with_name('moved-machine-locks');parent.rename(moved);parent.symlink_to(moved,target_is_directory=True)
+        with self.assertRaises(ValueError):self.recover()
+        self.assertEqual(self.calls,[]);self.assertTrue(self.f.f.claim.exists())
+    def test_failed_recovery_cannot_blind_retry(self):
+        self.join_child()
+        with self.assertRaises(ValueError):self.recover(dict(self.f.f.native,state='started'))
+        with self.assertRaises(FileExistsError):self.recover()
+        self.assertTrue(self.f.f.claim.exists())
 
 if __name__=='__main__':unittest.main()

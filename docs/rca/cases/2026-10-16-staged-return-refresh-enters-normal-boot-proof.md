@@ -37,6 +37,12 @@ For staged transport only, refresh reruns the full existing typed verifier with 
 
 The source correction is locally verified; final native verification is still pending. Dead-owner recovery of the already failed run is a separate requirement and is not authorized by the live-owner verifier.
 
+## Dead-owner follow-up
+
+The original failed run cannot use the live-owner refresh after its controller exits. Its saved typed probe returns and owned claims were captured in private packets `v41-command-cfeee9cc78680cca`, `v41-command-55d959c1948dd1a6`, and `v41-command-ac8d986776cdff80`. The old preconfiguration recovery correctly refuses a released boot barrier, so it is not a recovery path for these executed probes.
+
+A separate `cloudbench-staged-probe-recovery.py` path now requires the canonical inherited recovery mutex, a live recovery caller, the absent original owner, failed original lifecycle, a joined zero-worker typed probe cohort, intact original return indices/claims/audits, and fresh stopped native pairs and Volumes. It archives original records before releasing each exact claim under its Machine mutex, then links the release to the original immutable return. It neither changes the failed outcome nor credits real tasks. Live verification remains pending; incomplete or absent claims, latches, mixed/fresh allocations, and changed evidence refuse instead of falling back to another recovery mode.
+
 ## Human feedback
 
 The user requires existing Machine reuse, idle teardown and preservation of IDs, Volumes and data. Root specifically required immutable original return receipts, full fresh typed validation and no live-owner impersonation for subsequent dead-owner recovery.
