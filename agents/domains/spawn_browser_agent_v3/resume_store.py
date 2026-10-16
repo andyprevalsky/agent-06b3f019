@@ -69,9 +69,16 @@ def _load_part(agent_id: str, path: str) -> bytes:
     return decrypt_and_validate_artifact(*stored)
 
 
-async def persist_resume_context(*, agent_id: str, task_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
+async def persist_resume_context(
+    *, agent_id: str, task_id: str, state: Dict[str, Any], force_private: bool = False
+) -> Dict[str, Any]:
     """Return the exact state inline, or a verified encrypted snapshot pointer."""
     body = _encoded_snapshot(state)
+    if force_private or state.get("secret_redaction_refs"):
+        # Redaction bindings contain plaintext credentials, even when the
+        # model-facing transcript has already been sanitized. Never return
+        # these inline or fall back to plaintext when the archive is down.
+        return await _store_snapshot(agent_id, task_id, body)
     if len(body) <= _PREFERRED_INLINE_BYTES:
         return state
     try:

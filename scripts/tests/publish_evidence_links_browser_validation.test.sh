@@ -735,9 +735,54 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 )
 assert any("no correctly attached recording" in f for f in failures), failures
 
-# Exercise actual socket timeouts at the public verifier boundary. A fresh GET
-# can recover a stalled response, while persistent/auth/JSON failures stay closed.
-for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
+# Once an invalid response is observed, it must fail without another request or
+# browser launch. Isolate delivery from socket scheduling: a 100ms transport
+# timeout before the response arrives is a different, retryable boundary.
+for fault in ("forbidden", "malformed"):
+    for timeout_first in (False, True):
+        requests = []
+
+        class InvalidResponseTransport(urllib.request.BaseHandler):
+            handler_order = 400
+
+            def http_open(self, request):
+                requests.append((request.get_header("Authorization"), request.timeout))
+                if timeout_first and len(requests) == 1:
+                    raise TimeoutError("fixture response not delivered")
+                if fault == "forbidden":
+                    raise urllib.error.HTTPError(
+                        request.full_url, 403, "Forbidden", Message(), io.BytesIO(b"forbidden")
+                    )
+                response = addinfourl(
+                    io.BytesIO(b"{"), Message(), request.full_url, 200
+                )
+                response.msg = "OK"
+                return response
+
+            https_open = http_open
+
+        opener = urllib.request.build_opener(InvalidResponseTransport())
+        with (
+            patch.object(mod, "_opener", lambda: opener),
+            patch.object(mod.subprocess, "run") as browser,
+        ):
+            try:
+                mod.verify_agent_reachable(agent, "fixture.signature", timeout=0.1)
+            except SystemExit as error:
+                expected_cause = (
+                    urllib.error.HTTPError if fault == "forbidden" else json.JSONDecodeError
+                )
+                assert isinstance(error.__cause__, expected_cause), (fault, error)
+            else:
+                raise AssertionError((fault, "invalid response was accepted"))
+            assert requests == [("BenchmarkShare fixture.signature", 0.1)] * (
+                2 if timeout_first else 1
+            ), (fault, timeout_first, requests)
+            browser.assert_not_called()
+
+# Exercise actual socket timeouts separately. A fresh GET can recover stalled
+# headers/body, while a persistent stall exhausts the unchanged two attempts.
+for fault in ("headers-once", "body-once", "always"):
     requests: list[str | None] = []
     release = threading.Event()
     body = json.dumps(
@@ -762,8 +807,8 @@ for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
             try:
                 if stalled and fault != "body-once":
                     release.wait(2)
-                response = b"{" if is_api and fault == "malformed" else body
-                self.send_response(403 if is_api and fault == "forbidden" else 200)
+                response = body
+                self.send_response(200)
                 self.send_header("Content-Length", str(len(response)))
                 self.end_headers()
                 if stalled and fault == "body-once":
@@ -812,7 +857,7 @@ for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
         assert observed == (("verified in fresh browser", 1) if recovered else None), (
             fault
         )
-        expected_requests = 2 if recovered or fault == "always" else 1
+        expected_requests = 2
         assert requests == ["BenchmarkShare fixture.signature"] * expected_requests, (
             fault,
             requests,

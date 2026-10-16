@@ -747,7 +747,7 @@ async def test_browser_verifier_context_uses_real_capture_not_blank_placeholder(
             return [{"step": 1, "action": "goto", "result": {"success": True}}]
 
     async def browser_state(capture):
-        dom = DOMService.__new__(DOMService)
+        dom = DOMService("ws://unused-verifier-capture-fixture")
         dom._selector_map = {}
         dom._session = SimpleNamespace(
             get_browser_state_summary=AsyncMock(
@@ -5924,7 +5924,7 @@ def test_build_auth_options_prompt_section_demo_site_ref_does_not_expose_plainte
 
     section, refs, origins, credential_refs = build_auth_options_prompt_section(auth_options, session_passwords)
 
-    assert "ref: pwd:student" in section
+    assert "ref: {{secret:pwd:student}}" in section
     assert "Password123" not in section
     assert "encrypted-password-not-plaintext" not in section
     assert refs == {"pwd:student": "encrypted-password-not-plaintext"}
@@ -6107,7 +6107,8 @@ def test_build_auth_options_prompt_section_dedupes_identical_refs_without_overwr
     assert origins[second_ref] == "https://amazon.com/login"
     assert credential_refs[first_ref] == {"kind": "password", "id": "pwd-amz-first"}
     assert credential_refs[second_ref] == {"kind": "password", "id": "pwd-amz-second"}
-    assert section.count(f"ref: {duplicate_ref}") == 2
+    assert section.count("ref: {{secret:" + first_ref + "}}") == 1
+    assert section.count("ref: {{secret:" + second_ref + "}}") == 1
 
 def test_auth_realm_from_url():
     from domains.spawn_browser_agent_v3.service_crypto import auth_realm_from_url
@@ -6316,7 +6317,7 @@ def test_payment_card_approval_finishes_original_browser_tool_result():
     result = json.loads(turns[1]["content"])
     assert result["success"] is True
     assert result["status"] == "payment_card_ready"
-    assert result["card_secret_refs"] == {key: key for key in refs}
+    assert result["card_secret_refs"] == {key: "{{secret:" + key + "}}" for key in refs}
     assert result["card_last4"] == "1111"
     assert "4111111111111111" not in turns[1]["content"]
     assert "123" not in turns[1]["content"]
@@ -9522,6 +9523,82 @@ async def test_credential_propagation_failure_keeps_the_browser_run_outcome():
             raise AssertionError("a sealed generation must not be swallowed as bookkeeping")
 
 
+async def test_credential_propagation_redacts_classifier_and_diagnostic_payloads():
+    """Credential bookkeeping cannot relay a fatal browser error into a classifier or diagnostics."""
+    from browser_tools.secret_refs import mask_secret_values
+    from domains.spawn_browser_agent_v3 import handler
+    from tools.base import MessageStatus
+
+    refs = {"card_number": "4111111111111111", "pwd:fixture": "synthetic-fatal-propagation-password"}
+    echoed = "failure: " + " | ".join(refs.values())
+    def redact(value):
+        return mask_secret_values(value, refs)
+    for fail, diagnostic_fails in ((False, False), (True, False), (True, True)):
+        propagate = AsyncMock(**({"side_effect": RuntimeError(echoed)} if fail else {"return_value": {"outcome": "unknown", "refs": 0, "applied": 0, "detail": echoed}}))
+
+        async def save(**kwargs):
+            if diagnostic_fails and kwargs.get("status") == MessageStatus.ERROR:
+                raise RuntimeError(echoed)
+
+        saved = AsyncMock(side_effect=save)
+        log = MagicMock()
+        with (
+            patch.object(handler, "propagate_browser_run_credentials", propagate),
+            patch.object(handler, "save_browser_action_message", saved),
+            patch.object(handler, "logger", log),
+        ):
+            result = await handler._propagate_browser_credentials_with_progress(
+                config=SimpleNamespace(), agent_id="agent-1", task_id="task-1", browser_url="https://fixture.test/",
+                status="error", success=False, message=echoed, redact=redact,
+            )
+        retained = str({"classifier": propagate.await_args.kwargs, "diagnostics": saved.await_args_list, "result": result, "logs": log.mock_calls})
+        assert all(secret not in retained for secret in refs.values()), "fatal credential propagation exposed a known credential"
+        assert propagate.await_args.kwargs["message"] == redact(echoed)
+        assert result["outcome"] == "unknown"
+
+
+def test_browser_activity_error_redaction_preserves_temporal_retry_metadata():
+    """The actual Temporal failure encoder receives no credential-bearing message, cause, or details."""
+    from temporalio.api.failure.v1 import Failure
+    from temporalio.converter import DefaultFailureConverter, DefaultPayloadConverter
+    from temporalio.exceptions import ApplicationError, ApplicationErrorCategory
+    from browser_tools.secret_refs import mask_secret_values
+    from domains.spawn_browser_agent_v3.handler import _redact_browser_activity_error
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    refs = {"card_number": "4111111111111111", "pwd:fixture": "synthetic-fatal-temporal-password"}
+    def redact(value):
+        return mask_secret_values(value, refs)
+    delay = timedelta(seconds=17)
+    for message in ("failure: " + refs["card_number"], "A safe outer failure"):
+        raw = ApplicationError(
+            message, {"nested": [refs["pwd:fixture"]]},
+            type="SyntheticBrowserFatal", non_retryable=True, next_retry_delay=delay,
+            category=ApplicationErrorCategory.BENIGN,
+        )
+        raw.__cause__ = ValueError(refs["pwd:fixture"])
+        try:
+            raise raw
+        except Exception as original:
+            try:
+                raise _redact_browser_activity_error(original, redact) from None
+            except Exception as sanitized:
+                failure = Failure()
+                DefaultFailureConverter().to_failure(sanitized, DefaultPayloadConverter(), failure)
+                serialized = failure.SerializeToString()
+                assert all(secret.encode() not in serialized for secret in refs.values()), "Temporal serialized a secret from a fatal message, cause, or details"
+                assert isinstance(sanitized, ApplicationError)
+                assert sanitized.type == "SyntheticBrowserFatal"
+                assert sanitized.non_retryable is True
+                assert sanitized.next_retry_delay == delay
+                assert sanitized.category == ApplicationErrorCategory.BENIGN
+                assert not failure.HasField("cause"), "the raw credential-bearing exception chain survived redaction"
+    ordinary = RuntimeError("public browser failure")
+    assert _redact_browser_activity_error(ordinary, redact) is ordinary
+    sealed = WorkflowGenerationSealed("workflow generation replaced")
+    assert _redact_browser_activity_error(sealed, redact) is sealed
+
+
 async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
     from domains.spawn_browser_agent_v3.streaming import BrowserStreamingRoseClient
     from providers.rose import RoseClient, StreamChunk
@@ -10379,10 +10456,17 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     dom.selector_map = {}
     ah = MagicMock()
     ah.record_action = AsyncMock()
+
+    async def drag(dom_service, action_history, params):
+        await action_history.record_action(
+            dom_service=dom_service, action="drag", params=params, result={"success": True},
+        )
+        return {"success": True, "message": "Dragged (1,2) → (3,4)"}
+
     with patch(
         "browser_tools.tool_executor_v2._execute_drag",
         new_callable=AsyncMock,
-        return_value={"success": True, "message": "Dragged (1,2) → (3,4)"},
+        side_effect=drag,
     ) as drag_mock:
         out = await execute_action(
             dom,
@@ -10401,7 +10485,11 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     assert out["success"] is True
     drag_mock.assert_awaited_once()
     assert drag_mock.await_args.args[0] is dom
-    assert drag_mock.await_args.args[1] is ah
+    ah.record_action.assert_awaited_once()
+    recorded = ah.record_action.await_args.kwargs
+    assert recorded["dom_service"] is dom
+    assert recorded["action"] == "drag" and recorded["result"] == {"success": True}
+    assert recorded["params"] == {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "steps": 10}
     assert drag_mock.await_args.args[2]["start_x"] == 1
     assert drag_mock.await_args.args[2]["end_y"] == 4
 
@@ -12270,34 +12358,22 @@ async def test_execute_action_scroll_missing_element_index_errors():
     hu.scroll.assert_not_awaited()
 
 
-async def test_execute_action_approved_payment_ref_recovers_from_stale_shadow_index():
-    from domains.spawn_browser_agent_v3 import service_actions
+async def test_execute_action_payment_ref_rejects_stale_index_without_autofill():
+    """A stale agent-selected index must fail without finding a different payment field."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
 
-    dom = MagicMock()
-    dom.session = _fake_session_with_event_bus()
-    dom.selector_map = {}
-    dom.ensure_browser_overlays_suppressed = AsyncMock()
-    ah = MagicMock()
-    card_refs = {
-        "card_number": "4111111111111111",
-        "card_name": "Rose Labs",
-        "card_expiry": "12/30",
-        "card_cvv": "123",
-    }
-    filled = {"success": True, "payment_ref_direct_fill": True, "payment_refs_filled": list(card_refs)}
-    with patch.object(service_actions, "_try_direct_payment_ref_fill", AsyncMock(return_value=filled)) as direct_fill:
-        out = await service_actions.execute_action(
-            dom,
-            ah,
-            {"action": "input_text", "index": 8, "params": {"text": "card_number"}},
-            secret_refs=card_refs,
-            current_url="https://checkout.example.com/pay",
-        )
+    dom, history, humanizer, evaluate = _private_secret_action_fixture()
+    refs = {"card_number": "4111111111111111", "card_name": "Rose Labs", "card_expiry": "12/30", "card_cvv": "123"}
+    result = await execute_action(
+        dom, history, {"action": "input_text", "index": 8, "params": {"text": "card_number"}},
+        humanizer=humanizer, secret_refs=refs, write_lock_enabled=False,
+    )
+    assert result["success"] is False
+    assert result["error"] == "Element with index 8 not found"
+    humanizer.type_text.assert_not_awaited()
+    humanizer.click_at_coords.assert_not_awaited()
+    evaluate.assert_not_awaited()
 
-    assert out == filled
-    direct_fill.assert_awaited_once()
-    assert direct_fill.await_args.kwargs["index"] is None
-    assert direct_fill.await_args.kwargs["text"] == card_refs["card_number"]
 
 async def test_execute_action_extract_disabled():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -12682,6 +12758,619 @@ async def test_execute_action_evaluate():
     out = await execute_action(dom, ah, {"action": "evaluate", "params": {"code": "1+1"}})
     assert out["success"] is True
     assert out["value"] == 42
+
+
+def _private_secret_action_fixture(evaluate=None):
+    """Keep the real dispatcher/history boundary with a synthetic browser transport."""
+    evaluate = evaluate or AsyncMock(return_value={"result": {"value": True}})
+    cdp = SimpleNamespace(
+        session_id="private-secret-fixture",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+    )
+    session = _fake_session_with_event_bus()
+    session.get_or_create_cdp_session = AsyncMock(return_value=cdp)
+    dom = SimpleNamespace(
+        session=session,
+        selector_map={},
+        ensure_browser_overlays_suppressed=AsyncMock(),
+        # Private dependency metadata deliberately contains the CVV fixture as
+        # part of another number. This object is never an ActionHistoryEntry.
+        synthetic_execution_metadata=17390,
+    )
+    history = SimpleNamespace(record_action=AsyncMock(), get_entries=lambda: [])
+    humanizer = SimpleNamespace(
+        click_at_coords=AsyncMock(), press_key=AsyncMock(), type_text=AsyncMock(),
+    )
+    return dom, history, humanizer, evaluate
+
+
+def _recorded_private_action_payloads(history, dom):
+    """Inspect persisted arguments without stringifying the private DOM dependency."""
+    payloads = []
+    for call in history.record_action.await_args_list:
+        assert call.kwargs["dom_service"] is dom
+        payloads.append({key: value for key, value in call.kwargs.items() if key != "dom_service"})
+    return payloads
+
+
+def _selected_payment_ref_action_fixture(ref_name="card_number", index=8, coords=(11, 12)):
+    dom, history, humanizer, evaluate = _private_secret_action_fixture()
+    element = SimpleNamespace(tag_name="input", attributes={"id": "selected-" + ref_name}, text_content="")
+    dom.selector_map[index] = element
+    dom.get_element_coordinates = AsyncMock(return_value=coords)
+    dom.get_browser_state = AsyncMock(return_value={})
+    refs = {"card_number": "4111111111111111", "card_name": "Rose Labs", "card_expiry": "12/30", "card_cvv": "123"}
+    return dom, history, humanizer, evaluate, refs
+
+
+def test_secret_ref_recursive_values_preserve_protocol_and_original_arguments():
+    """Opaque refs resolve once in values; selectors/keys and the model action stay intact."""
+    from browser_tools.secret_refs import resolve_secret_values, secret_placeholder
+
+    first = secret_placeholder("pwd:first")
+    second = secret_placeholder("pwd:second")
+    assert first == "{{secret:pwd:first}}"
+    refs = {"pwd:first": "private-with-" + second, "pwd:second": "second-private-value"}
+    model_params = {
+        "card_number": "input[name=card_number]",
+        "nested": [first, {"value": "prefix-" + second + "-suffix", second: False}],
+        "tuple": (second, 17, None),
+        "unknown": "{{secret:pwd:missing}}",
+    }
+    original = copy.deepcopy(model_params)
+    resolved = resolve_secret_values(model_params, refs)
+    assert model_params == original, "private execution modified the model's retained arguments"
+    assert resolved["card_number"] == "input[name=card_number]"
+    assert resolved["nested"][0] == refs["pwd:first"], "substitution cascaded through a secret's own contents"
+    assert resolved["nested"][1] == {"value": "prefix-second-private-value-suffix", second: False}
+    assert resolved["tuple"] == ("second-private-value", 17, None)
+    assert resolved["unknown"] == model_params["unknown"]
+
+
+async def test_execute_action_secret_refs_resolve_without_mutating_model_action():
+    """Normal text/key/evaluate actions resolve privately without retaining plaintext."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    refs = {"card_number": "4111111111111111", "pwd:fixture": "synthetic-send-keys-secret"}
+    dom, history, humanizer, evaluate = _private_secret_action_fixture()
+    actions = [
+        {"action": "input_text", "coordinates": {"x": 41, "y": 73},
+         "params": {"text": "{{secret:card_number}}", "clear": False}},
+        {"action": "press_key", "params": {"key": "{{secret:pwd:fixture}}"}},
+        {"action": "evaluate", "params": {"code": "(() => '{{secret:card_number}}')()"}},
+    ]
+    original = copy.deepcopy(actions)
+    for action in actions:
+        result = await execute_action(
+            dom, history, action, humanizer=humanizer, secret_refs=refs, write_lock_enabled=False,
+        )
+        assert result["success"] is True, result
+        assert all(secret not in str(result) for secret in refs.values()), "tool return exposed a credential"
+    assert actions == original, "resolved arguments escaped into the retained model action"
+    humanizer.type_text.assert_awaited_once_with(refs["card_number"])
+    humanizer.press_key.assert_awaited_once_with(refs["pwd:fixture"])
+    expression = evaluate.await_args.kwargs["params"]["expression"]
+    assert refs["card_number"] in expression, "evaluate did not receive its privately resolved credential"
+    assert "{{secret:card_number}}" not in expression
+    recorded = str(_recorded_private_action_payloads(history, dom))
+    assert all(secret not in recorded for secret in refs.values()), "ActionHistory retained execution plaintext"
+
+
+async def test_execute_action_secret_refs_mask_all_card_values_and_transport_errors():
+    """Every public result/history/error path protects all four card credentials."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    refs = {
+        "card_number": "4111111111111111", "card_name": "Synthetic Private Cardholder",
+        "card_expiry": "12/31", "card_cvv": "739",
+    }
+    echoed = {"cards": [dict(refs)], "cvv_number": 739, "pan_number": 4111111111111111}
+    errors = " | ".join(refs.values())
+    for outcome in (
+        {"result": {"value": echoed}},
+        {"result": {"value": echoed}, "exceptionDetails": {"text": errors}},
+        RuntimeError(errors),
+    ):
+        evaluate = AsyncMock(**({"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}))
+        dom, history, _humanizer, _evaluate = _private_secret_action_fixture(evaluate)
+        log = MagicMock()
+        action = {"action": "evaluate", "params": {"code": "window.fixtureReadback()"}}
+        with patch.object(service_actions, "logger", log):
+            result = await service_actions.execute_action(
+                dom, history, action, secret_refs=refs, write_lock_enabled=False,
+            )
+        assert result["success"] is (not isinstance(outcome, Exception) and "exceptionDetails" not in outcome)
+        retained = str({
+            "return": result,
+            "history": _recorded_private_action_payloads(history, dom),
+            "logs": log.mock_calls,
+        })
+        leaked = [ref for ref, secret in refs.items() if secret in retained]
+        assert not leaked, f"{leaked} leaked through a result, ActionHistory, or exception log"
+        assert result["success"] in (True, False), "secret masking rewrote the tool protocol"
+
+
+async def test_execute_action_secret_refs_preserve_agent_selected_fields_and_javascript_literals():
+    """Real Chromium applies only the agent's requested input, safely in each JS quote style."""
+    from playwright.async_api import async_playwright
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    refs = {
+        "card_number": "4111111111111111", "card_name": "Synthetic Private Cardholder",
+        "card_expiry": "12/31", "card_cvv": "739",
+        "pwd:fixture": "single' double\" backtick` slash\\ newline\n${globalThis.secretInjection = true} card_number",
+        "pwd:unicode": "synthetic-unicode-\u2028-\u2029-🚀-credential",
+    }
+    fields = '<input id="chosen" name="card_number"><input id="name" autocomplete="cc-name"><input id="expiry" autocomplete="cc-exp"><input id="cvv" autocomplete="cc-csc"><textarea id="password"></textarea>'
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            background = await browser.new_page()
+            await page.set_content(fields)
+            await background.set_content(fields)
+            await page.bring_to_front()
+            transport = await page.context.new_cdp_session(page)
+            expressions = []
+
+            async def evaluate(*, params, session_id):
+                expressions.append(params["expression"])
+                return await transport.send("Runtime.evaluate", params)
+
+            dom, history, humanizer, _evaluate = _private_secret_action_fixture(evaluate)
+            humanizer.click_at_coords = page.mouse.click
+            humanizer.type_text = page.keyboard.insert_text
+            box = await page.locator("#chosen").bounding_box()
+            assert box is not None
+            action = {
+                "action": "input_text",
+                "coordinates": {"x": int(box["x"] + 5), "y": int(box["y"] + 5)},
+                "params": {"text": "{{secret:card_number}}", "clear": False},
+            }
+            original = copy.deepcopy(action)
+            result = await execute_action(
+                dom, history, action, humanizer=humanizer, secret_refs=refs, write_lock_enabled=False,
+            )
+            assert result["success"] is True
+            assert await page.locator("#chosen").input_value() == refs["card_number"], "chosen field received the placeholder instead of its private credential"
+            assert action == original
+            for other in ("#name", "#expiry", "#cvv"):
+                assert await page.locator(other).input_value() == "", "entering one reference filled another field"
+            assert await background.locator("#chosen").input_value() == "", "a background checkout received credentials"
+
+            for quote in ("'", '"', "`"):
+                code = (
+                    "(() => { const card_number = 'selector-still-intact'; "
+                    "document.querySelector('#password').value = "
+                    + quote + "{{secret:pwd:fixture}}" + quote
+                    + "; return {selector: card_number, selectorFound: Boolean(document.querySelector('input[name=card_number]')), injected: Boolean(globalThis.secretInjection)}; })()"
+                )
+                action = {"action": "evaluate", "params": {"code": code}}
+                result = await execute_action(dom, history, action, secret_refs=refs, write_lock_enabled=False)
+                assert result["success"] is True, result
+                assert result["value"] == {"selector": "selector-still-intact", "selectorFound": True, "injected": False}
+                assert await page.locator("#password").input_value() == refs["pwd:fixture"], "JS escaping changed the credential bytes"
+                assert await page.locator("#chosen").input_value() == refs["card_number"]
+                assert action["params"]["code"] == code
+                assert refs["pwd:fixture"] not in str(result)
+            cases = (
+                ("bare opaque", "(() => { document.querySelector('#password').value = {{secret:pwd:fixture}}; return true; })()", True, refs["pwd:fixture"]),
+                ("nested template", "(() => { document.querySelector('#password').value = `prefix-${`{{secret:pwd:fixture}}`}-suffix`; return true; })()", True, "prefix-" + refs["pwd:fixture"] + "-suffix"),
+                ("comments and regex", "(() => { /* {{secret:pwd:fixture}} */ document.querySelector('#password').value = '{{secret:pwd:fixture}}'; return {source: /card_number/.source, matches: /card_number/.test('card_' + 'number')}; })()", {"source": "card_number", "matches": True}, refs["pwd:fixture"]),
+                ("property names", "(() => { const item = {'card_number': 'kept'}; document.querySelector('#password').value = '{{secret:pwd:fixture}}'; return [item['card_number'], Object.keys(item)[0]]; })()", ["kept", "card_number"], refs["pwd:fixture"]),
+                ("unknown marker", "(() => { document.querySelector('#password').value = '{{secret:pwd:missing}}'; return true; })()", True, "{{secret:pwd:missing}}"),
+                ("Unicode string", "(() => { document.querySelector('#password').value = '{{secret:pwd:unicode}}'; return true; })()", True, refs["pwd:unicode"]),
+            )
+            for label, code, expected, entered in cases:
+                action = {"action": "evaluate", "params": {"code": code}}
+                result = await execute_action(dom, history, action, secret_refs=refs, write_lock_enabled=False)
+                assert result["success"] is True, (label, result)
+                assert result["value"] == expected, label
+                assert await page.locator("#password").input_value() == entered, label
+                assert action["params"]["code"] == code, label
+                assert await page.locator("#chosen").input_value() == refs["card_number"], label
+                if label == "comments and regex":
+                    assert "/* {{secret:pwd:fixture}} */" in expressions[-1], "a credential marker in a comment became private source data"
+            prior_evaluations = len(expressions)
+            refused = await execute_action(
+                dom, history, {"action": "evaluate", "params": {"code": "String.raw`{{secret:pwd:fixture}}`"}},
+                secret_refs=refs, write_lock_enabled=False,
+            )
+            assert refused["success"] is False and "tagged template" in refused["error"]
+            assert len(expressions) == prior_evaluations, "unsupported credential interpolation executed JavaScript"
+            recorded = str(_recorded_private_action_payloads(history, dom))
+            assert all(secret not in recorded for secret in refs.values()), "private JS source reached ActionHistory"
+            for other in ("#name", "#expiry", "#cvv"):
+                assert await page.locator(other).input_value() == ""
+            assert await background.locator("#chosen").input_value() == ""
+        finally:
+            await browser.close()
+
+
+async def test_secret_logging_context_isolates_concurrent_actions_and_resets_after_error():
+    """A provider log uses its owning action's private bindings across awaits and exceptions."""
+    import structlog
+    from browser_tools.secret_refs import redact_secret_log_values, secret_logging_context
+
+    captured = []
+
+    class Sink:
+        def info(self, event):
+            captured.append(json.loads(event))
+
+    log = structlog.wrap_logger(
+        Sink(), processors=[redact_secret_log_values, structlog.processors.JSONRenderer()],
+    )
+    ready = asyncio.Queue()
+    release = asyncio.Event()
+    first = "synthetic-concurrent-first-credential"
+    second = "synthetic-concurrent-second-credential"
+
+    async def action(label, own, other):
+        with secret_logging_context({"pwd:" + label: own}):
+            await ready.put(label)
+            await release.wait()
+            log.info("provider transport", task=label, payload={"own": own, "other": other}, exc_info=RuntimeError(own))
+
+    tasks = [asyncio.create_task(action("first", first, second)), asyncio.create_task(action("second", second, first))]
+    await ready.get()
+    await ready.get()
+    release.set()
+    await asyncio.gather(*tasks)
+    by_task = {entry["task"]: entry for entry in captured}
+    assert first not in str(by_task["first"]) and second in str(by_task["first"])
+    assert second not in str(by_task["second"]) and first in str(by_task["second"])
+    assert by_task["first"]["payload"]["own"] == "{{secret:pwd:first}}"
+    assert by_task["second"]["payload"]["own"] == "{{secret:pwd:second}}"
+    with pytest.raises(RuntimeError, match="scope exits"):
+        with secret_logging_context({"pwd:first": first}):
+            raise RuntimeError("scope exits")
+    log.info("after action", payload=first)
+    assert captured[-1]["payload"] == first, "an action's private logging registry leaked into another action"
+
+
+async def test_prestarted_browser_event_bus_keeps_later_credentials_private_in_empty_actions():
+    """Browser handlers started before hydration share later bindings without losing empty actions."""
+    import logging
+    import structlog
+    from io import StringIO
+    from bubus import BaseEvent, EventBus
+    from browser_tools.secret_refs import (
+        redact_secret_log_values, register_logging_secret_refs, secret_logging_context,
+    )
+
+    class Probe(BaseEvent):
+        payload: str
+
+    stream = StringIO()
+    sink = logging.StreamHandler(stream)
+    sink.setFormatter(structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=[redact_secret_log_values],
+        processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, structlog.processors.JSONRenderer()],
+    ))
+    log = logging.getLogger("private_ref_prestarted_fixture")
+    prior = (list(log.handlers), log.level, log.propagate)
+    log.handlers = [sink]
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    secret = "synthetic-later-hydrated-browser-credential"
+
+    async def handle(event: Probe):
+        log.info("Sent keys: %s", event.payload)
+
+    try:
+        with secret_logging_context({}, fresh=True):
+            bus = EventBus(name="private_ref_prestarted_fixture")
+            bus.on(Probe, handle)
+            try:
+                await bus.dispatch(Probe(payload="bootstrap"))
+                register_logging_secret_refs({"pwd:later": secret})
+                with secret_logging_context({}):
+                    await bus.dispatch(Probe(payload=secret))
+                    log.info("Sent keys: %s", secret)
+            finally:
+                await bus.stop(timeout=2, clear=True)
+    finally:
+        log.handlers, log.level, log.propagate = prior
+        sink.close()
+    captured = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert captured[0]["event"] == "Sent keys: bootstrap"
+    assert len(captured) == 3
+    assert all(entry["event"] == "Sent keys: {{secret:pwd:later}}" for entry in captured[1:])
+    assert secret not in str(captured)
+    assert redact_secret_log_values(None, "info", {"event": secret})["event"] == secret
+
+
+async def test_execute_action_masks_formatted_and_encoded_credential_echoes_idempotently():
+    """Ordinary widget formatting and HTML/URL/JSON echoes cannot reveal typed credentials."""
+    from html import escape
+    from urllib.parse import quote, quote_plus
+    from browser_tools.secret_refs import mask_secret_values, secret_placeholder
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    refs = {
+        "card_number": "4111111111111111", "card_expiry": "12/31", "card_cvv": "739",
+        "card_name": "O'Neil & Sons", "pwd:fixture": "synthetic\"β\n&+=/password",
+    }
+    echoes = {
+        "pan_spaces": "4111 1111 1111 1111", "pan_hyphens": "4111-1111-1111-1111",
+        "expiry_spaces": "12 / 31", "expiry_tabs": "12\t/\t31",
+        "name_html": escape(refs["card_name"], quote=True),
+        "name_html_decimal": escape(refs["card_name"], quote=True).replace("&#x27;", "&#39;"),
+        "password_url": quote(refs["pwd:fixture"], safe=""),
+        "password_form": quote_plus(refs["pwd:fixture"]),
+        "password_json": json.dumps(refs["pwd:fixture"], ensure_ascii=True)[1:-1],
+        "expiry_json_slash": refs["card_expiry"].replace("/", "\\/"),
+        "cvv_numeric": 739,
+    }
+    expected = {
+        key: secret_placeholder("card_number" if key.startswith("pan_") else "card_expiry" if key.startswith("expiry_") else "card_name" if key.startswith("name_") else "card_cvv" if key.startswith("cvv_") else "pwd:fixture")
+        for key in echoes
+    }
+    evaluate = AsyncMock(return_value={"result": {"value": echoes}})
+    dom, history, _humanizer, _evaluate = _private_secret_action_fixture(evaluate)
+    result = await execute_action(
+        dom, history, {"action": "evaluate", "params": {"code": "window.fixtureEncodedReadback()"}},
+        secret_refs=refs, write_lock_enabled=False,
+    )
+    assert result["success"] is True
+    assert result["value"] == expected
+    assert history.record_action.await_args.kwargs["result"]["value"] == expected
+    colliding_refs = {"card_name": "card", "card_cvv": "123", "pwd:user123": "synthetic-idempotent-password"}
+    masked = mask_secret_values({"value": list(colliding_refs.values())}, colliding_refs)
+    assert masked == {"value": [secret_placeholder(ref) for ref in colliding_refs]}
+    assert mask_secret_values(masked, colliding_refs) == masked, "repeated redaction damaged public reference tokens"
+
+
+async def test_private_numeric_credentials_preserve_only_trusted_browser_mechanics():
+    """Short numeric credentials mask page values while indices and viewport metadata remain usable."""
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = DOMService("ws://unused-private-mechanics-fixture")
+    dom.register_secret_refs({"card_cvv": "007"})
+    dom.mark_secret_used()
+    history = ActionHistory()
+    history.bind_dom_service(dom)
+    history.restore_entries([{
+        "step": 7, "action": "evaluate", "index": 7, "coordinates": {"x": 7, "y": 7},
+        "result": {"success": True, "value": 7},
+    }])
+    entry = history.get_entries()[0]
+    assert entry["step"] == 7 and entry["index"] == 7 and entry["coordinates"] == {"x": 7, "y": 7}
+    assert entry["result"]["value"] == "{{secret:card_cvv}}"
+    assert len(history.get_entries()) == 1, "redaction invalidated the restored history step"
+
+    refs = {"card_cvv": "800"}
+    summary = SimpleNamespace(
+        url="https://fixture.test/", title="Safe", dom_state=None, tabs=[], screenshot=None,
+    )
+    dom = DOMService("ws://unused-private-viewport-fixture")
+    dom.register_secret_refs(refs)
+    dom._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=summary))
+    observed = await dom.get_browser_state(include_screenshot=False)
+    assert observed["viewport"]["height"] == 800
+    output = await execute_action(
+        dom, SimpleNamespace(record_action=AsyncMock()), {"action": "read_browser_state", "params": {}},
+        secret_refs=refs, write_lock_enabled=False,
+    )
+    assert output["viewport"]["height"] == 800, "the common boundary rewrote trusted viewport height as a CVV"
+    fake_dom, fake_history, _humanizer, _evaluate = _private_secret_action_fixture(
+        AsyncMock(return_value={"result": {"value": {"viewport": {"height": 800}, "index": 800}}}),
+    )
+    readback = await execute_action(
+        fake_dom, fake_history, {"action": "evaluate", "params": {"code": "window.fixtureNumericReadback()"}},
+        secret_refs=refs, write_lock_enabled=False,
+    )
+    assert readback["value"] == {"viewport": {"height": "{{secret:card_cvv}}"}, "index": "{{secret:card_cvv}}"}, "page-controlled names bypassed numeric credential masking"
+
+    from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    dom.register_secret_refs({"card_cvv": "234"})
+    argument_cases = [
+        ("input_text", {"index": 234, "text": "234", "payload": {"index": 234}}, {"index"}),
+        ("click_coordinates", {"x": 234, "y": 234, "payload": {"x": 234}}, {"x", "y"}),
+        ("drag", {"source_index": 234, "target_index": 234, "start_x": 234, "start_y": 234,
+                  "end_x": 234, "end_y": 234, "steps": 234},
+         {"source_index", "target_index", "start_x", "start_y", "end_x", "end_y"}),
+        ("evaluate", {"code": "234", "index": 234, "x": 234}, set()),
+    ]
+    messages = [{
+        "role": "assistant", "content": "234", "tool_calls": [{
+            "id": f"call-{name}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }],
+    } for name, arguments, _targets in argument_cases]
+    messages.append({"role": "tool", "name": "evaluate", "tool_call_id": "call-evaluate",
+                     "content": json.dumps({"value": {"index": 234, "x": 234}})})
+    original_messages = copy.deepcopy(messages)
+    client = _FakeRoseClient([{"actions": []}])
+    await _call_browser_use_with_rotation(
+        rose_client=client, task="fixture", dynamic_system_context="", turn_messages=messages,
+        browser_state={}, action_entries=[], config=_fake_config(), user_id="u1", agent_id="a1",
+        iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None,
+        gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, dom_service=dom,
+    )
+    visible_messages = client.calls[0]["turn_messages"]
+    for message, (name, arguments, targets) in zip(visible_messages, argument_cases):
+        visible_args = json.loads(message["tool_calls"][0]["function"]["arguments"])
+        for target in targets:
+            assert visible_args[target] == arguments[target], f"prior {name} call lost trusted target {target}"
+        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_value(
+            {key: value for key, value in arguments.items() if key not in targets}
+        )
+        assert message["content"] == "{{secret:card_cvv}}"
+    assert json.loads(visible_messages[-1]["content"]) == {
+        "value": {"index": "{{secret:card_cvv}}", "x": "{{secret:card_cvv}}"}
+    }
+    assert messages == original_messages
+
+
+async def test_execute_action_keeps_password_origins_and_trusted_credential_identity():
+    """Each ordinary action retains origin restrictions and the exact trusted bookkeeping reference."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    refs = {"pwd:fixture": "password", "card_cvv": "739"}
+    trusted = {"kind": "password", "id": "fixture-739-credential"}
+    for action in (
+        {"action": "evaluate", "params": {"code": "'{{secret:pwd:fixture}}'"}},
+        {"action": "press_key", "params": {"key": "{{secret:pwd:fixture}}"}},
+        {"action": "input_text", "params": {"text": "{{secret:pwd:fixture}}", "clear": False}},
+    ):
+        dom, history, humanizer, evaluate = _private_secret_action_fixture()
+        kwargs = dict(
+            humanizer=humanizer, secret_refs=refs, password_origins={"pwd:fixture": "https://allowed.example"},
+            credential_refs_by_secret_ref={"pwd:fixture": trusted}, write_lock_enabled=False,
+        )
+        refused = await execute_action(dom, history, action, current_url="https://unrelated.example", **kwargs)
+        assert refused["success"] is False and "Password origin mismatch" in refused["error"]
+        evaluate.assert_not_awaited()
+        humanizer.type_text.assert_not_awaited()
+        humanizer.press_key.assert_not_awaited()
+        accepted = await execute_action(dom, history, action, current_url="https://allowed.example/login", **kwargs)
+        assert accepted["success"] is True
+        assert accepted["credential_ref"] == trusted, "redaction corrupted the private inventory's routing identity"
+
+
+async def test_browser_observation_and_action_history_keep_private_values_out_after_resume():
+    """DOM, labels, prior realm values, and image observations share durable redaction."""
+    from browser_tools.dom_service import ActionHistory, DOMService
+
+    refs = {
+        "card_number": "4111111111111111", "card_name": "Synthetic Private Cardholder",
+        "card_expiry": "12/31", "card_cvv": "739", "pwd:fixture": "synthetic-old-realm-password",
+    }
+    newer = "synthetic-new-realm-password"
+    all_values = [*refs.values(), newer]
+    echoed = " | ".join(all_values)
+    dom = DOMService("ws://unused-private-observation-fixture")
+    dom.register_secret_refs(refs)
+    dom.mark_secret_used()
+    dom.register_secret_refs({"pwd:fixture": newer})
+    state = SimpleNamespace(
+        url="https://checkout.fixture.test/", title=refs["card_cvv"],
+        dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: echoed),
+        tabs=[SimpleNamespace(target_id="fixture-tab", url="https://checkout.fixture.test/", title=refs["card_number"])],
+        screenshot="fixture-image-containing-private-values", recent_events=[{"text": echoed}],
+    )
+    dom._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=state))
+    with patch.object(dom, "_capture_surface_screenshot", AsyncMock()) as capture:
+        observed = await dom.get_browser_state(include_screenshot=True)
+    dom._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=False)
+    capture.assert_not_awaited()
+    assert observed["screenshot_placeholder"] is True
+    assert "screenshot" not in observed and "media_candidates" not in observed
+    assert all(secret not in str(observed) for secret in all_values)
+    assert await dom.get_page_image_urls() == []
+    assert dom._session.get_browser_state_summary.await_count == 1, "private image lookup fetched a new raster observation"
+
+    dom._selector_map[1] = SimpleNamespace(tag_name="button", text_content=refs["card_cvv"], get_all_children_text=lambda: refs["card_cvv"])
+    history = ActionHistory()
+    entry = await history.record_action(
+        dom_service=dom, action="evaluate", index=1, coordinates={"x": 10, "y": 20},
+        params={"code": echoed}, result={"success": True, "value": echoed}, screenshot="fixture-private-image",
+    )
+    assert all(secret not in str(entry.to_dict()) for secret in all_values)
+    assert not entry.screenshot
+    assert all(secret not in str(history.get_entries()) for secret in all_values)
+    private_state = dom.secret_redaction_state()
+    replacement = DOMService("ws://unused-replacement-private-observation-fixture")
+    replacement.restore_secret_redaction_state(private_state)
+    history.bind_dom_service(replacement)
+    history.restore_entries([{"step": 7, "action": "evaluate", "params": {"code": echoed}, "result": {"success": True}, "screenshot": "fixture-private-image"}])
+    assert replacement.secret_values_used is True
+    safe = replacement.model_visible_value({
+        "text": echoed, "media_candidates": [{"url": "https://fixture.test/private-card.png"}],
+        "messages": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,PRIVATE"}}],
+    })
+    assert all(secret not in str(safe) for secret in all_values)
+    assert "media_candidates" not in safe and "image_url" not in str(safe)
+    assert all(secret not in str(history.get_entries()) for secret in all_values)
+    assert not history.get_entries()[0].get("screenshot")
+
+    # Page-controlled JSON may use any JSON value for a field named "type".
+    # It stays ordinary data while actual media and credentials are filtered.
+    for page_type in ([], {}, ["image"], {"kind": "image"}, None, 0, True):
+        visible = dom.model_visible_action_result("evaluate", {
+            "success": True,
+            "value": {
+                "type": page_type,
+                "private": refs["card_cvv"],
+                "nested": [{"type": "image", "url": "https://fixture.test/image"}],
+            },
+        })
+        assert visible["success"] is True
+        assert visible["value"]["type"] == page_type
+        assert visible["value"]["private"] == "{{secret:card_cvv}}"
+        assert visible["value"]["nested"] == [{
+            "type": "text", "text": "[image withheld after private credential entry]",
+        }]
+
+    # Exercise the native observation -> action builder -> private result boundary.
+    # Both fresh and prefetched states must retain notices, including safe echoes.
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    notice_secret = "synthetic-private-notice-password"
+    for private in (False, True):
+        notice_refs = {"pwd:notice": notice_secret} if private else {}
+        suffix = notice_secret if private else "plain-fixture"
+        events = [f"Downloaded invoice: {suffix}"]
+        popups = [f"Dismissed confirmation: {suffix}"]
+        for prefetched in (False, True):
+            notice_dom = DOMService("ws://unused-notice-observation-fixture")
+            notice_dom.register_secret_refs(notice_refs)
+            if private:
+                notice_dom.mark_secret_used()
+            notice_state = SimpleNamespace(
+                url="https://notices.fixture.test/", title="Notice fixture",
+                dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: "Fixture body"),
+                tabs=[], recent_events=events, closed_popup_messages=popups,
+            )
+            notice_dom._session = SimpleNamespace(
+                get_browser_state_summary=AsyncMock(return_value=notice_state),
+            )
+            prefetched_state = await notice_dom.get_browser_state(include_screenshot=False) if prefetched else None
+            notice_result = await execute_action(
+                notice_dom, SimpleNamespace(record_action=AsyncMock()),
+                {"action": "read_browser_state", "params": {}},
+                secret_refs=notice_refs, write_lock_enabled=False,
+                prefetched_browser_state=prefetched_state,
+            )
+            assert notice_result["success"] is True
+            expected_events = notice_dom.model_visible_value(events)
+            expected_popups = notice_dom.model_visible_value(popups)
+            assert "Recent Events: " + expected_events[0] in notice_result["formatted_state"], (
+                "native read_browser_state lost recent event notice", private, prefetched,
+            )
+            assert "Auto-closed dialogs:" in notice_result["formatted_state"]
+            assert "  - " + expected_popups[0] in notice_result["formatted_state"], (
+                "native read_browser_state lost closed popup notice", private, prefetched,
+            )
+            assert notice_result["recent_events"] == expected_events
+            assert notice_result["closed_popups"] == expected_popups
+            if private:
+                assert notice_secret not in str(notice_result)
+                assert "{{secret:pwd:notice}}" in notice_result["formatted_state"]
+            notice_dom._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=False)
+
+
+async def test_private_browser_resume_never_falls_back_to_inline_credentials():
+    """Even a tiny redaction registry needs encrypted archive storage or a hard failure."""
+    from domains.spawn_browser_agent_v3 import resume_store
+
+    secret = "synthetic-private-resume-credential"
+    state = {"secret_redaction_refs": {"pwd:fixture": secret}, "secret_values_used": True}
+    pointer = {"browser_resume_context_ref": {"paths": ["private-fixture-part"], "sha256": "fixture", "bytes": 123}}
+    store = AsyncMock(return_value=pointer)
+    with patch.object(resume_store, "_store_snapshot", store):
+        result = await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=state, force_private=True)
+    assert result == pointer and secret not in str(result)
+    assert secret.encode() in store.await_args.args[2], "private bindings were omitted from their durable encrypted snapshot"
+    for force_private in (False, True):
+        with patch.object(resume_store, "_store_snapshot", AsyncMock(side_effect=resume_store.BrowserResumeStoreError("private archive unavailable"))):
+            with pytest.raises(resume_store.BrowserResumeStoreError, match="private archive unavailable"):
+                await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=state, force_private=force_private)
 
 
 def test_normalize_evaluate_timeout_seconds_default_and_clamp():
@@ -14068,6 +14757,7 @@ async def test_evaluate_awaits_promises():
     ctx = SimpleNamespace(
         action_name="evaluate",
         params={"code": "(async () => ({ok:true,size:3}))()"},
+        model_params=None,
         session=session,
         dom_service=SimpleNamespace(),
         action_history=history,
@@ -14084,9 +14774,9 @@ async def test_evaluate_awaits_promises():
     result = await _execute_inspection_action(ctx)
     assert result["success"] is True
     assert result["value"]["size"] == 3
-    assert result["value"]["secret"] == "pwd:fixture", "evaluate result exposes synthetic password"
+    assert result["value"]["secret"] == "{{secret:pwd:fixture}}", "evaluate result exposes synthetic password"
     recorded = history.record_action.await_args.kwargs["result"]
-    assert recorded["value"]["secret"] == "pwd:fixture", "raw ActionHistory exposes synthetic password"
+    assert recorded["value"]["secret"] == "{{secret:pwd:fixture}}", "raw ActionHistory exposes synthetic password"
     assert synthetic_secret not in str(recorded)
     assert evaluate.await_args.kwargs["params"]["awaitPromise"] is True
 
@@ -16499,62 +17189,32 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     session.event_bus.dispatch.assert_not_called()
 
 async def test_execute_input_text_password_secret_ref_resolves_visible_password_coords():
-    """Password secret-ref typing must locate a visible password field when the index has no rect.
-
-    Regression for browser-amazon-return k=5 agent fbc36706: after Switch accounts →
-    account pick, indexed password coords were None and humanize refused TypeTextEvent,
-    posting toolStatus=ERROR that failed no_tool_failures even though the agent later
-    recovered to an unresolved write lock.
-    """
+    """Saved-password input keeps the existing visible-password coordinate recovery."""
     from domains.spawn_browser_agent_v3 import service_actions
 
-    session = _fake_session_with_event_bus()
-    session.highlight_interaction_element = AsyncMock()
-    dom = MagicMock()
-    dom.get_browser_state = AsyncMock(return_value={})
+    dom, history, humanizer, evaluate = _private_secret_action_fixture()
+    dom.selector_map[770] = SimpleNamespace(tag_name="input", attributes={"type": "password"}, text_content="")
     dom.get_element_coordinates = AsyncMock(return_value=None)
-    element = MagicMock()
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    hu = MagicMock()
-    hu.click_at_coords = AsyncMock()
-    hu.press_key = AsyncMock()
-    hu.type_text = AsyncMock()
-    hu.input_page = None
-
+    dom.get_browser_state = AsyncMock(return_value={})
+    humanizer.input_page = None
     with (
         patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
-        patch.object(
-            service_actions,
-            "_resolve_password_field_coordinates",
-            AsyncMock(return_value=(44, 55)),
-        ) as resolve_password,
+        patch.object(service_actions, "_resolve_password_field_coordinates", AsyncMock(return_value=(44, 55))) as resolve_password,
     ):
-        out = await service_actions._execute_input_text(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            element=element,
-            index=770,
-            coords=None,
-            params={"text": "pwd-ref-1"},
-            thinking=None,
-            humanizer=hu,
-            secret_refs={"pwd-ref-1": "secret-password"},
+        out = await service_actions.execute_action(
+            dom, history, {"action": "input_text", "index": 770, "params": {"text": "pwd-ref-1"}},
+            humanizer=humanizer, secret_refs={"pwd-ref-1": "secret-password"},
             password_origins={"pwd-ref-1": "https://www.amazon.com"},
             credential_refs_by_secret_ref={"pwd-ref-1": {"kind": "password", "id": "pwd-row"}},
             current_url="https://www.amazon.com/ap/signin",
-            write_lock_enabled=True,
-            write_lock_approvals=None,
-            system_name="Rose",
         )
-
     assert out["success"] is True
-    assert out.get("credential_ref") == {"kind": "password", "id": "pwd-row"}
+    assert out["credential_ref"] == {"kind": "password", "id": "pwd-row"}
     resolve_password.assert_awaited()
-    hu.click_at_coords.assert_awaited_once_with(44, 55)
-    hu.type_text.assert_awaited_once_with("secret-password")
-    session.event_bus.dispatch.assert_not_called()
+    humanizer.click_at_coords.assert_awaited_once_with(44, 55)
+    humanizer.type_text.assert_awaited_once_with("secret-password")
+    dom.session.event_bus.dispatch.assert_not_called()
+
 
 async def test_resolve_password_field_coordinates_uses_visible_password_input():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -16572,293 +17232,88 @@ async def test_resolve_password_field_coordinates_uses_visible_password_input():
     assert 'input[type="password"]' in script
     assert 'name="password"' in script
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
-    from domains.spawn_browser_agent_v3 import service_actions
+    """A privately approved card uses the ordinary selected input path."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
 
-    session = _fake_session_with_event_bus()
-    session.highlight_interaction_element = AsyncMock()
-    dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=(11, 12))
-    element = MagicMock()
-    element.tag_name = "input"
-    element.attributes = {"autocomplete": "cc-number"}
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    hu = MagicMock()
-    hu.click_at_coords = AsyncMock()
-    hu.press_key = AsyncMock()
-    hu.type_text = AsyncMock()
-
+    dom, history, humanizer, evaluate, refs = _selected_payment_ref_action_fixture()
     with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
-        out = await service_actions._execute_input_text(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            element=element,
-            index=8,
-            coords=None,
-            params={"text": "card_number"},
-            thinking=None,
-            humanizer=hu,
-            secret_refs={
-                "card_number": "4111111111111111",
-                "card_name": "Rose Labs",
-                "card_expiry": "12/30",
-                "card_cvv": "123",
-            },
-            password_origins=None,
-            current_url="https://checkout.example.com/pay",
-            write_lock_enabled=True,
-            write_lock_approvals=None,
-            system_name="Rose",
+        out = await execute_action(
+            dom, history, {"action": "input_text", "index": 8, "params": {"text": "card_number"}},
+            humanizer=humanizer, secret_refs=refs, current_url="https://checkout.example.com/pay",
         )
-
     assert out["success"] is True
-    assert out["typed_text"] == "[encrypted_data]"
-    hu.click_at_coords.assert_awaited_once_with(11, 12)
-    hu.type_text.assert_awaited_once_with("4111111111111111")
+    assert out["typed_text"] == "{{secret:card_number}}"
+    humanizer.click_at_coords.assert_awaited_once_with(11, 12)
+    humanizer.type_text.assert_awaited_once_with(refs["card_number"])
+    evaluate.assert_not_awaited()
 
-async def test_execute_input_text_payment_secret_ref_direct_fill_sets_exact_value():
+
+async def test_execute_input_text_payment_secret_ref_uses_selected_coordinates_only():
+    """A selected card field must not trigger semantic discovery or fill other refs."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom, history, humanizer, evaluate, refs = _selected_payment_ref_action_fixture()
+    page = SimpleNamespace(evaluate=AsyncMock(return_value={"filled": True, "x": 222, "y": 333}))
+    dom.session.get_page = AsyncMock(return_value=page)
+    out = await execute_action(
+        dom, history, {"action": "input_text", "index": 8, "params": {"text": "{{secret:card_number}}"}},
+        humanizer=humanizer, secret_refs=refs, write_lock_enabled=False,
+    )
+    assert out["success"] is True
+    assert out["typed_text"] == "{{secret:card_number}}"
+    assert "payment_refs_filled" not in out
+    humanizer.click_at_coords.assert_awaited_once_with(11, 12)
+    humanizer.type_text.assert_awaited_once_with(refs["card_number"])
+    page.evaluate.assert_not_awaited()
+    evaluate.assert_not_awaited()
+    recorded = history.record_action.await_args.kwargs
+    assert recorded["index"] == 8
+    assert recorded["coordinates"] == {"x": 11, "y": 12}
+    assert recorded["params"]["text"] == "{{secret:card_number}}"
+
+
+async def test_execute_input_text_payment_secret_ref_does_not_retarget_missing_coordinates():
+    """Missing selected-field coordinates fail rather than searching for another field."""
     from domains.spawn_browser_agent_v3 import service_actions
 
-    page = MagicMock()
-    page.evaluate = AsyncMock(
-        return_value={
-            "filled": True,
-            "x": 222,
-            "y": 333,
-            "selector": 'input[autocomplete="cc-number"]',
-            "valueLength": 16,
-        }
-    )
-    session = _fake_session_with_event_bus()
-    session.get_page = AsyncMock(return_value=page)
-    session.highlight_interaction_element = AsyncMock()
-    dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=(11, 12))
-    element = MagicMock()
-    element.tag_name = "input"
-    element.attributes = {"autocomplete": "cc-number"}
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    hu = MagicMock()
-    hu.click_at_coords = AsyncMock()
-    hu.press_key = AsyncMock()
-    hu.type_text = AsyncMock()
-
-    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
-        out = await service_actions._execute_input_text(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            element=element,
-            index=8,
-            coords=None,
-            params={"text": "card_number"},
-            thinking=None,
-            humanizer=hu,
-            secret_refs={
-                "card_number": "4111111111111111",
-                "card_name": "Rose Labs",
-                "card_expiry": "12/30",
-                "card_cvv": "123",
-            },
-            password_origins=None,
-            current_url="https://checkout.example.com/pay",
-            write_lock_enabled=True,
-            write_lock_approvals=None,
-            system_name="Rose",
-        )
-
-    assert out["success"] is True
-    assert out["typed_text"] == "[encrypted_data]"
-    assert out["payment_ref_direct_fill"] is True
-    assert out["payment_refs_filled"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
-    # wait_for_payment_ref_fields may locate first; assert the four fill payloads.
-    payloads = [
-        call.args[1]
-        for call in page.evaluate.await_args_list
-        if len(call.args) > 1 and isinstance(call.args[1], dict) and "refName" in call.args[1]
-    ]
-    assert payloads == [
-        {"refName": "card_number", "value": "4111111111111111"},
-        {"refName": "card_name", "value": "Rose Labs"},
-        {"refName": "card_expiry", "value": "12/30"},
-        {"refName": "card_cvv", "value": "123"},
-    ]
-    hu.click_at_coords.assert_not_called()
-    hu.press_key.assert_not_called()
-    hu.type_text.assert_not_called()
-    ah.record_action.assert_awaited_once()
-    recorded = ah.record_action.await_args.kwargs
-    assert recorded["coordinates"] == {"x": 222, "y": 333}
-    assert recorded["result"]["payment_ref_direct_fill"] is True
-    assert recorded["result"]["payment_refs_filled"] == [
-        "card_number",
-        "card_name",
-        "card_expiry",
-        "card_cvv",
-    ]
-
-async def test_execute_input_text_payment_secret_ref_waits_for_page_ready_before_retry():
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    page = MagicMock()
-    page.evaluate = AsyncMock(
-        side_effect=[
-            {"filled": False, "reason": "field_not_found"},
-            {
-                "filled": True,
-                "x": 222,
-                "y": 333,
-                "selector": 'input[autocomplete="cc-number"]',
-                "valueLength": 16,
-            },
-            {"filled": True, "x": 223, "y": 334, "selector": "input#card-name"},
-            {"filled": True, "x": 224, "y": 335, "selector": "input#card-expiry"},
-            {"filled": True, "x": 225, "y": 336, "selector": "input#card-cvv"},
-        ]
-    )
-    session = _fake_session_with_event_bus()
-    session.get_page = AsyncMock(return_value=page)
-    session.highlight_interaction_element = AsyncMock()
-    dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=None)
-    element = MagicMock()
-    element.tag_name = "input"
-    element.attributes = {"autocomplete": "cc-number"}
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    hu = MagicMock()
-    hu.click_at_coords = AsyncMock()
-    hu.press_key = AsyncMock()
-    hu.type_text = AsyncMock()
-
+    dom, history, humanizer, evaluate, refs = _selected_payment_ref_action_fixture(coords=None)
     with (
-        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)),
-        patch.object(
-            service_actions,
-            "wait_for_navigation_ready",
-            AsyncMock(return_value={"ready": True, "reason": "content_present"}),
-        ) as wait_ready,
-        patch.object(
-            service_actions,
-            "wait_for_payment_ref_fields",
-            AsyncMock(return_value=True),
-        ),
+        patch.object(service_actions, "wait_for_navigation_ready", AsyncMock()) as wait_ready,
+        patch.object(service_actions, "wait_for_payment_ref_fields", AsyncMock()) as wait_fields,
     ):
-        out = await service_actions._execute_input_text(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            element=element,
-            index=8,
-            coords=None,
-            params={"text": "card_number"},
-            thinking=None,
-            humanizer=hu,
-            secret_refs={
-                "card_number": "4111111111111111",
-                "card_name": "Rose Labs",
-                "card_expiry": "12/30",
-                "card_cvv": "123",
-            },
-            password_origins=None,
-            current_url="https://checkout.example.com/pay",
-            write_lock_enabled=True,
-            write_lock_approvals=None,
-            system_name="Rose",
+        out = await service_actions.execute_action(
+            dom, history, {"action": "input_text", "index": 8, "params": {"text": "card_number"}},
+            humanizer=humanizer, secret_refs=refs, write_lock_enabled=False,
         )
+    assert out["success"] is False
+    assert "Cannot humanize input_text" in out["error"]
+    dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
+    humanizer.type_text.assert_not_awaited()
+    humanizer.click_at_coords.assert_not_awaited()
+    evaluate.assert_not_awaited()
+    wait_ready.assert_not_awaited()
+    wait_fields.assert_not_awaited()
 
-    assert out["success"] is True
-    assert out["payment_ref_direct_fill"] is True
-    assert out["payment_refs_filled"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
-    wait_ready.assert_awaited_once_with(
-        dom,
-        url="https://checkout.example.com/pay",
-        timeout_seconds=3.0,
-        reload_blank_spa_once=True,
+
+async def test_execute_input_text_payment_secret_ref_keeps_selected_name_field():
+    """Choosing the cardholder name enters that value alone with ordinary input."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom, history, humanizer, evaluate, refs = _selected_payment_ref_action_fixture("card_name", 7, (444, 555))
+    out = await execute_action(
+        dom, history, {"action": "input_text", "index": 7, "params": {"text": "{{secret:card_name}}"}},
+        humanizer=humanizer, secret_refs=refs, write_lock_enabled=False,
     )
-    assert page.evaluate.await_count == 5
-    hu.click_at_coords.assert_not_called()
-    hu.type_text.assert_not_called()
-
-async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_without_page():
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    cdp_client = MagicMock()
-    cdp_client.send.Runtime.evaluate = AsyncMock(
-        return_value={
-            "result": {
-                "value": {
-                    "filled": True,
-                    "x": 444,
-                    "y": 555,
-                    "selector": "input#card-name",
-                    "valueLength": 9,
-                }
-            }
-        }
-    )
-    cdp_session = SimpleNamespace(cdp_client=cdp_client, session_id="cdp-1")
-    session = _fake_session_with_event_bus()
-    session.get_or_create_cdp_session = AsyncMock(return_value=cdp_session)
-    session.highlight_interaction_element = AsyncMock()
-    dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=None)
-    element = MagicMock()
-    element.tag_name = "input"
-    element.attributes = {"id": "card-name"}
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    hu = MagicMock()
-    hu.click_at_coords = AsyncMock()
-    hu.press_key = AsyncMock()
-    hu.type_text = AsyncMock()
-
-    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
-        out = await service_actions._execute_input_text(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            element=element,
-            index=7,
-            coords=None,
-            params={"text": "card_name"},
-            thinking=None,
-            humanizer=hu,
-            secret_refs={
-                "card_number": "4111111111111111",
-                "card_name": "Rose Labs",
-                "card_expiry": "12/30",
-                "card_cvv": "123",
-            },
-            password_origins=None,
-            current_url="https://checkout.example.com/pay",
-            write_lock_enabled=True,
-            write_lock_approvals=None,
-            system_name="Rose",
-        )
-
     assert out["success"] is True
-    assert out["payment_ref_direct_fill"] is True
-    assert out["payment_refs_filled"] == ["card_name", "card_number", "card_expiry", "card_cvv"]
-    assert session.get_or_create_cdp_session.await_count >= 4
-    for cdp_call in session.get_or_create_cdp_session.await_args_list:
-        assert cdp_call.kwargs == {"focus": True}
-    assert cdp_client.send.Runtime.evaluate.await_count >= 4
-    fill_expressions = [
-        call.kwargs["params"]["expression"]
-        for call in cdp_client.send.Runtime.evaluate.await_args_list
-        if '"value":' in call.kwargs["params"]["expression"]
-    ]
-    assert any('"refName": "card_name"' in expression for expression in fill_expressions)
-    assert any('"refName": "card_number"' in expression for expression in fill_expressions)
-    assert any('"refName": "card_expiry"' in expression for expression in fill_expressions)
-    assert any('"refName": "card_cvv"' in expression for expression in fill_expressions)
-    hu.click_at_coords.assert_not_called()
-    hu.type_text.assert_not_called()
-    recorded = ah.record_action.await_args.kwargs
+    assert out["typed_text"] == "{{secret:card_name}}"
+    humanizer.click_at_coords.assert_awaited_once_with(444, 555)
+    humanizer.type_text.assert_awaited_once_with(refs["card_name"])
+    evaluate.assert_not_awaited()
+    dom.session.get_or_create_cdp_session.assert_not_awaited()
+    recorded = history.record_action.await_args.kwargs
+    assert recorded["index"] == 7
     assert recorded["coordinates"] == {"x": 444, "y": 555}
+
 
 
 async def test_fill_payment_ref_directly_searches_playwright_frames():
@@ -17008,74 +17463,23 @@ async def test_fill_payment_ref_directly_uses_cdp_iframe_targets():
     cdp_client.send.Runtime.evaluate.assert_awaited()
 
 
-async def test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector():
-    from domains.spawn_browser_agent_v3 import service_actions
+async def test_execute_input_text_payment_secret_ref_refreshes_only_selected_index():
+    """Refreshing coordinates preserves the agent-selected element rather than selecting by card type."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
 
-    page = MagicMock()
-    page.evaluate = AsyncMock(
-        side_effect=[
-            {"filled": False, "reason": "field_not_found"},
-            {"filled": False, "reason": "field_not_found"},
-            {"x": 222, "y": 333, "selector": 'input[autocomplete="cc-number"]'},
-        ]
+    dom, history, humanizer, evaluate, refs = _selected_payment_ref_action_fixture()
+    dom.get_element_coordinates.side_effect = [None, (222, 333)]
+    out = await execute_action(
+        dom, history, {"action": "input_text", "index": 8, "params": {"text": "card_number"}},
+        humanizer=humanizer, secret_refs=refs, write_lock_enabled=False,
     )
-    session = _fake_session_with_event_bus()
-    session.get_page = AsyncMock(return_value=page)
-    session.highlight_interaction_element = AsyncMock()
-    dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=None)
-    dom.get_browser_state = AsyncMock()
-    element = MagicMock()
-    element.tag_name = "input"
-    element.attributes = {"autocomplete": "cc-number"}
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    hu = MagicMock()
-    hu.click_at_coords = AsyncMock()
-    hu.press_key = AsyncMock()
-    hu.type_text = AsyncMock()
-
-    with (
-        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)),
-        patch.object(
-            service_actions,
-            "wait_for_payment_ref_fields",
-            AsyncMock(return_value=False),
-        ),
-        patch.object(
-            service_actions,
-            "wait_for_navigation_ready",
-            AsyncMock(return_value={"ready": True, "reason": "content_present"}),
-        ),
-    ):
-        out = await service_actions._execute_input_text(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            element=element,
-            index=8,
-            coords=None,
-            params={"text": "card_number"},
-            thinking=None,
-            humanizer=hu,
-            secret_refs={
-                "card_number": "4111111111111111",
-                "card_name": "Rose Labs",
-                "card_expiry": "12/30",
-                "card_cvv": "123",
-            },
-            password_origins=None,
-            current_url="https://checkout.example.com/pay",
-            write_lock_enabled=True,
-            write_lock_approvals=None,
-            system_name="Rose",
-        )
-
     assert out["success"] is True
     dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
-    assert page.evaluate.await_count == 3
-    hu.click_at_coords.assert_awaited_once_with(222, 333)
-    hu.type_text.assert_awaited_once_with("4111111111111111")
+    assert [call.args for call in dom.get_element_coordinates.await_args_list] == [(8,), (8,)]
+    humanizer.click_at_coords.assert_awaited_once_with(222, 333)
+    humanizer.type_text.assert_awaited_once_with(refs["card_number"])
+    evaluate.assert_not_awaited()
+
 
 
 async def test_fill_payment_ref_directly_real_child_frame_fixture():
@@ -17426,63 +17830,23 @@ async def test_fill_payment_ref_via_titled_payment_iframe():
             await browser.close()
 
 
-async def test_execute_input_text_payment_secret_ref_fail_closed_without_target():
-    """Payment secret refs without element/coords must not fake-success via focused typing."""
-    from domains.spawn_browser_agent_v3 import service_actions
+async def test_execute_input_text_payment_secret_ref_uses_agent_focused_field():
+    """A focused text action follows the normal input path without semantic card discovery."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
 
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    hu = MagicMock()
-    hu.type_text = AsyncMock()
-    hu.press_key = AsyncMock()
+    dom, history, humanizer, evaluate = _private_secret_action_fixture()
+    refs = {"card_number": "4111111111111111", "card_name": "Rose Labs", "card_expiry": "12/30", "card_cvv": "123"}
+    out = await execute_action(
+        dom, history, {"action": "input_text", "params": {"text": "{{secret:card_number}}", "clear": False}},
+        humanizer=humanizer, secret_refs=refs, write_lock_enabled=False,
+    )
+    assert out["success"] is True
+    assert out["typed_text"] == "{{secret:card_number}}"
+    humanizer.type_text.assert_awaited_once_with(refs["card_number"])
+    humanizer.click_at_coords.assert_not_awaited()
+    humanizer.press_key.assert_not_awaited()
+    evaluate.assert_not_awaited()
 
-    with (
-        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
-        patch.object(
-            service_actions,
-            "wait_for_payment_ref_fields",
-            AsyncMock(return_value=False),
-        ),
-        patch.object(
-            service_actions,
-            "wait_for_navigation_ready",
-            AsyncMock(return_value={"ready": False}),
-        ),
-        patch.object(
-            service_actions,
-            "_fill_payment_ref_directly",
-            AsyncMock(return_value=None),
-        ),
-    ):
-        out = await service_actions._execute_input_text(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            element=None,
-            index=None,
-            coords=None,
-            params={"text": "card_number"},
-            thinking=None,
-            humanizer=hu,
-            secret_refs={
-                "card_number": "4111111111111111",
-                "card_name": "Rose Labs",
-                "card_expiry": "12/30",
-                "card_cvv": "123",
-            },
-            password_origins=None,
-            current_url="https://checkout.example.com/pay",
-            write_lock_enabled=True,
-            write_lock_approvals=None,
-            system_name="Rose",
-        )
-
-    assert out["success"] is False
-    assert out["error"] == "field_not_found"
-    assert out.get("payment_refs_filled") == []
-    hu.type_text.assert_not_called()
 
 
 async def test_fill_payment_ref_via_keyboard_types_after_cdp_focus():
@@ -17557,64 +17921,37 @@ async def test_fill_payment_ref_via_keyboard_types_after_cdp_focus():
 
 
 async def test_execute_input_text_secret_redacts():
-    """Text matching a secret ref is redacted in display and payment field origin mismatches abort."""
-    from domains.spawn_browser_agent_v3 import service_actions
+    """The common boundary rejects password references for an unrelated origin before input."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
 
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    element = MagicMock()
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)):
-        out = await service_actions._execute_input_text(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            element=None,
-            index=None,
-            coords=None,
-            params={"text": "pw-token"},
-            thinking=None,
-            humanizer=None,
-            secret_refs={"pw-token": "actual-pw"},
-            password_origins={"pw-token": "https://example.com"},
-            current_url="https://evil.com",  # mismatch
-            write_lock_enabled=True,
-            write_lock_approvals=None,
-            system_name="Rose",
-        )
+    dom, history, humanizer, evaluate = _private_secret_action_fixture()
+    out = await execute_action(
+        dom, history, {"action": "input_text", "params": {"text": "pw-token"}},
+        humanizer=humanizer, secret_refs={"pw-token": "actual-pw"},
+        password_origins={"pw-token": "https://example.com"}, current_url="https://evil.com",
+    )
     assert out["success"] is False
     assert "Password origin mismatch" in out["error"]
+    humanizer.type_text.assert_not_awaited()
+    evaluate.assert_not_awaited()
+
 
 async def test_execute_input_text_secret_returns_credential_ref():
-    from domains.spawn_browser_agent_v3 import service_actions
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
 
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)):
-        out = await service_actions._execute_input_text(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            element=None,
-            index=None,
-            coords=None,
-            params={"text": "pwd:alice"},
-            thinking=None,
-            humanizer=None,
-            secret_refs={"pwd:alice": "actual-pw"},
-            password_origins={"pwd:alice": "https://example.com"},
-            credential_refs_by_secret_ref={"pwd:alice": {"kind": "password", "id": "pwd1"}},
-            current_url="https://example.com/login",
-            write_lock_enabled=True,
-            write_lock_approvals=None,
-            system_name="Rose",
-        )
+    dom, history, humanizer, evaluate = _private_secret_action_fixture()
+    out = await execute_action(
+        dom, history, {"action": "input_text", "params": {"text": "pwd:alice"}},
+        humanizer=humanizer, secret_refs={"pwd:alice": "actual-pw"},
+        password_origins={"pwd:alice": "https://example.com"},
+        credential_refs_by_secret_ref={"pwd:alice": {"kind": "password", "id": "pwd1"}},
+        current_url="https://example.com/login",
+    )
     assert out["success"] is True
-    assert out["typed_text"] == "[encrypted_data]"
+    assert out["typed_text"] == "{{secret:pwd:alice}}"
     assert out["credential_ref"] == {"kind": "password", "id": "pwd1"}
+    humanizer.type_text.assert_awaited_once_with("actual-pw")
+
 
 async def test_execute_input_text_payment_triggers_approval():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -18259,41 +18596,7 @@ async def test_execute_click_and_evaluate_allow_leave_hosts():
     assert not hasattr(service_actions, "press_key_looks_like_leave_page")
 
 
-def test_handoff_payment_autofill_without_host_pin():
-    """Payment auto-fill still runs on cross-origin handoff; no sticky host pin."""
-    import inspect
 
-    from domains.spawn_browser_agent_v3 import handler
-
-    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    assert "navigation_pin_host" not in source
-    assert "navigation_pin_url" not in source
-    assert "Auto-returning to pinned handoff host" not in source
-    assert "navigation_origin_base_domain" in source
-    assert "_on_cross_origin_handoff" in source
-    assert "Auto-filled payment refs on handoff page" in source
-    assert "Handoff payment auto-fill exhausted" in source
-    assert "handoff_payment_fill_attempts" in source
-    assert '"text": "card_number"' in source
-    assert "wait_for_payment_ref_fields" in source
-    assert "Waiting for payment fields on handoff page" in source
-    assert "timeout_seconds=4.0" in source
-    # Prefer the live Playwright page (titled payment iframes) over humanizer-only.
-    assert "_autofill_page = input_page" in source
-    # Attempt counter must only advance after fields are ready (else burns retries).
-    wait_offset = source.index("wait_for_payment_ref_fields")
-    attempt_offset = source.index("handoff_payment_fill_attempts += 1")
-    assert wait_offset < attempt_offset
-    # Auto-fill gate must stay host/path agnostic and must not reintroduce pinning.
-    auto_fill_start = source.index("handoff_payment_fill_attempts += 1")
-    auto_fill_end = source.index("if browser_recorder:", auto_fill_start)
-    auto_fill_block = source[auto_fill_start:auto_fill_end]
-    assert "checkout.stripe" not in auto_fill_block
-    assert "test_payment" not in auto_fill_block
-    assert "api.stripe" not in auto_fill_block
-    assert "pin held" not in auto_fill_block
-    assert "Pinned handoff" not in auto_fill_block
-    assert "leave pinned" not in source
 
 
 def test_recovery_skips_when_live_tab_already_clear():
@@ -18795,6 +19098,51 @@ async def test_execute_screenshot_success():
     uploaded = Image.open(BytesIO(uploaded_bytes))
     assert uploaded.size == (1283, 800)
     session.get_or_create_cdp_session.assert_not_called()
+
+    # A synthetic, valid PNG with enough varied pixels to contain a numeric
+    # CVV collision in its binary transport (rather than in any page text).
+    import random
+    import re
+    from browser_tools.dom_service import ActionHistory, DOMService
+
+    png = BytesIO()
+    Image.frombytes("RGB", (16, 16), random.Random(0).randbytes(768)).save(png, format="PNG")
+    trusted_png = base64.b64encode(png.getvalue()).decode("ascii")
+    collision = re.search(r"\d{3}", trusted_png)
+    assert collision is not None
+    dom = DOMService("ws://unused-private-screenshot-fixture")
+    dom.register_secret_refs({"card_cvv": collision.group()})
+    history = ActionHistory()
+    history.bind_dom_service(dom)
+    history.restore_entries([{"step": 1, "action": "screenshot", "screenshot": trusted_png}])
+    assert history.get_entries()[0]["screenshot"] == trusted_png
+    summary = SimpleNamespace(url="https://fixture.test/", title=collision.group(), dom_state=None, tabs=[])
+    dom._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=summary))
+    with patch.object(dom, "_capture_surface_screenshot", AsyncMock(return_value=trusted_png)):
+        state = await dom.get_browser_state(include_screenshot=True)
+    assert state["screenshot"] == trusted_png and state["title"] == "{{secret:card_cvv}}"
+    for action_name in ("screenshot", "read_browser_state"):
+        visible = dom.model_visible_action_result(action_name, {
+            "screenshot": trusted_png, "screenshot_b64": trusted_png,
+            "title": collision.group(), "value": {"screenshot": collision.group()},
+        })
+        assert visible["screenshot"] == trusted_png, f"{action_name} corrupted trusted PNG transport"
+        assert visible["screenshot_b64"] == trusted_png
+        Image.open(BytesIO(base64.b64decode(visible["screenshot"], validate=True))).verify()
+        assert visible["title"] == "{{secret:card_cvv}}"
+        assert visible["value"]["screenshot"] == "{{secret:card_cvv}}"
+    assert dom.model_visible_action_result("evaluate", {"screenshot": collision.group()}) == {
+        "screenshot": "{{secret:card_cvv}}"
+    }
+    dom.mark_secret_used()
+    for action_name in ("screenshot", "read_browser_state", "evaluate"):
+        visible = dom.model_visible_action_result(action_name, {
+            "screenshot": trusted_png, "screenshot_b64": trusted_png,
+            "value": {"screenshot": trusted_png}, "media_candidates": [{"url": "https://fixture.test/image"}],
+        })
+        assert "screenshot" not in visible and "screenshot_b64" not in visible and "media_candidates" not in visible
+        assert "screenshot" not in visible["value"]
+    assert not history.get_entries()[0].get("screenshot")
 
 
 async def test_browser_use_screenshots_get_distinct_remote_names():
@@ -19411,7 +19759,7 @@ async def test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_scre
             selector_map=selector_map,
         ),
     )
-    service = DOMService.__new__(DOMService)
+    service = DOMService("ws://unused-page-image-fixture")
     service._selector_map = {}
     service._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=snapshot))
 
@@ -20754,8 +21102,16 @@ class _FakeDomSession:
         return SimpleNamespace()
 
 
+from browser_tools.dom_service import DOMService as _PrivacyPolicyDOMService
+
+
 class _FakeDomService:
     last_instance = None
+    register_secret_refs = _PrivacyPolicyDOMService.register_secret_refs
+    mark_secret_used = _PrivacyPolicyDOMService.mark_secret_used
+    secret_redaction_state = _PrivacyPolicyDOMService.secret_redaction_state
+    restore_secret_redaction_state = _PrivacyPolicyDOMService.restore_secret_redaction_state
+    model_visible_value = _PrivacyPolicyDOMService.model_visible_value
 
     def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
         self.cdp_url = cdp_url
@@ -20765,6 +21121,8 @@ class _FakeDomService:
         self.selector_map = {}
         self.disconnect = AsyncMock()
         self._captcha_poll = None
+        self._secret_redaction_refs = {}
+        self.secret_values_used = False
         _FakeDomService.last_instance = self
 
     async def connect(self):
@@ -21424,7 +21782,7 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
 
 
 
-async def _run_realm_transition_action_fixture(action_name, *, redirect=True, restoration_error=False):
+async def _run_realm_transition_action_fixture(action_name, *, redirect=True, restoration_error=False, fatal_error=None, minted_password_text=None, credential_action=None, credential_failure=False, credential_origin=None):
     """Drive real activity/action/history with synthetic CDP and private hydration."""
     from contextlib import ExitStack
     import copy
@@ -21436,15 +21794,16 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
     old_url = "https://old.example/login"
     final_url = "https://new.example/login"
     requested_url = old_url if redirect else final_url
-    autofill = action_name == "autofill"
+    preapproved_handoff = action_name == "preapproved_handoff"
     assistance_url = "https://auth.example/login"
     old_secret = "synthetic-prior-realm-password"
     new_secret = "synthetic-current-realm-password"
-    shared_ref = "pwd:fixture"
-    active_page = {"url": final_url if autofill else old_url, "title": "Sign in", "dom_tree": "Sign in"}
+    shared_ref = "pwd:new" if minted_password_text is not None or credential_action is not None else "pwd:fixture"
+    active_page = {"url": final_url if preapproved_handoff else old_url, "title": "Sign in", "dom_tree": "Sign in"}
     events = []
     model_contexts = []
     saved = AsyncMock()
+    propagated = AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})
     session_info = {
         "session_id": "session-1", "debug_url": "https://kernel.example/debug", "ws_url": "ws://old",
         "passwords": [], "auth_options": {"realm": "old.example"},
@@ -21457,7 +21816,9 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
             {"auth_realm": realm, "auth_options": {"realm": realm}}, decryption_key=None,
         )
         state.password_secret_refs = {shared_ref: old_secret if realm == "old.example" else new_secret}
-        state.password_origins = {shared_ref: "https://" + realm}
+        if credential_action is not None:
+            state.password_secret_refs["pwd:other"] = "synthetic-other-password"
+        state.password_origins = {ref: credential_origin or "https://" + realm for ref in state.password_secret_refs}
         state.credential_refs_by_secret_ref = {shared_ref: {"kind": "password", "id": realm + "-password"}}
         state.auth_options = {"realm": realm, "passwords": [{"id": realm + "-password", "ref": shared_ref}]}
         state.auth_options_section = "# Auth Options for " + realm + "\nPassword ref: " + shared_ref
@@ -21468,7 +21829,7 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         realm = urlparse(kwargs["target_url"]).hostname
         events.append(("prepare", realm))
         payload = {"auth_realm": realm, "auth_options": {"realm": realm}, "passwords": [], "passkeys": []}
-        if restoration_error or (autofill and realm == "new.example"):
+        if restoration_error or (preapproved_handoff and realm == "new.example"):
             payload["credential_preparation_error"] = "Browser state injection timed out after 18000ms"
         return payload
 
@@ -21491,7 +21852,9 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         return NavigationEvent()
 
     async def evaluate(**_kwargs):
-        events.append(("evaluate", old_url))
+        events.append(("evaluate", _kwargs["params"]["expression"]))
+        if credential_failure:
+            return {"exceptionDetails": {"text": "Synthetic JavaScript failure"}}
         active_page["url"] = final_url
         return {"result": {"value": {"prior": old_secret, "active": new_secret}}}
 
@@ -21506,18 +21869,23 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
     async def observe(*_args, **_kwargs):
         return dict(active_page)
 
-    async def autofill_action(_context):
-        events.append(("autofill", active_page["url"]))
+    async def unexpected_handoff_action(_context):
+        events.append(("unexpected-handoff-action", active_page["url"]))
         active_page["url"] = assistance_url
         return {"success": True, "payment_refs_filled": ["card_number"], "message": "Fields filled"}
 
     async def model_step(**kwargs):
         model_contexts.append(copy.deepcopy(kwargs))
         events.append(("model", len(model_contexts)))
-        action = action_name if len(model_contexts) == 1 and not autofill else "request_user_assistance_for_authentication"
+        action = action_name if len(model_contexts) == 1 and not preapproved_handoff else "request_user_assistance_for_authentication"
         params = {"code": "(() => window.fixtureReadbackAndNavigate())()"} if action == "evaluate" else (
             {"url": requested_url} if action == "goto" else {}
         )
+        if credential_action is not None and len(model_contexts) == 1:
+            action = credential_action["action"]
+            params = copy.deepcopy(credential_action["params"])
+        if action == "input_text" and minted_password_text is not None:
+            params = {"text": minted_password_text}
         return {"action": {"action": action, "thinking": "Inspect the surviving sign-in page", "params": params},
                 "usage": {}, "mode": "waterfall"}
 
@@ -21532,9 +21900,10 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         patch(prefix + "fetch_recent_otps", AsyncMock(return_value=[])),
         patch(prefix + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
         patch(prefix + "build_realm_credential_state", hydrate),
+        patch(prefix + "activity_drain_reason", AsyncMock(return_value=None)),
         patch(prefix + "prepare_browser_auth", prepare),
         patch(prefix + "_call_browser_use_with_rotation", model_step),
-        patch(prefix + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+        patch(prefix + "_wait_for_browser_user_control", AsyncMock(side_effect=fatal_error) if fatal_error is not None else AsyncMock(return_value=False)),
         patch(prefix + "_observe_step_page", observe),
         patch.object(_FakeDomService, "get_page_identity", identity),
         patch.object(_FakeDomService, "get_browser_state", observe),
@@ -21544,8 +21913,10 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         patch("domains.spawn_browser_agent_v3.service_actions.wait_for_navigation_ready", AsyncMock()),
         patch(prefix + "create_user_auth_assistance_request", AsyncMock(return_value={"id": "request-1"})),
         patch(prefix + "extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
+        patch("helpers.llm.check_progress", AsyncMock(side_effect=AssertionError("unexpected live verifier in private fixture"))),
         patch(prefix + "disconnect_browser_after_passkey_capture", AsyncMock()),
-        patch(prefix + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+        patch(prefix + "propagate_browser_run_credentials", propagated),
         patch(prefix + "close_browser_session", AsyncMock()),
         patch(prefix + "save_browser_action_message", saved),
         patch(prefix + "save_browser_assistant_message", AsyncMock()),
@@ -21558,15 +21929,29 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
         patch(prefix + "live_tab_looks_challenged", AsyncMock(return_value=False)),
     ]
-    if autofill:
+    if preapproved_handoff:
         targets.extend([
             patch("domains.spawn_browser_agent_v3.service_actions.wait_for_payment_ref_fields", AsyncMock(return_value=True)),
-            patch("domains.spawn_browser_agent_v3.service_actions._execute_interaction_action", autofill_action),
+            patch("domains.spawn_browser_agent_v3.service_actions._execute_interaction_action", unexpected_handoff_action),
+        ])
+    if minted_password_text is not None or credential_action is not None:
+        async def save_minted(_config, _user_id, url):
+            events.append(("save-minted", url))
+
+        async def type_text(_humanizer, text):
+            events.append(("type-text", text))
+            if credential_failure:
+                raise RuntimeError("Synthetic typing failure")
+
+        targets.extend([
+            patch.object(_FakeHumanizer, "type_text", type_text, create=True),
+            patch.object(_FakeHumanizer, "press_key", AsyncMock(), create=True),
+            patch(prefix + "save_minted_account_password", save_minted),
         ])
     with ExitStack() as stack:
         for target in targets:
             stack.enter_context(target)
-        result = await handler.spawn_browser_agent_activity_v3(
+        pending = handler.spawn_browser_agent_activity_v3(
             user_id="user-1", agent_id="agent-1", goal="Inspect realm-bound authentication",
             tool_call_id="tool-1", task_id="task-1", is_resume=True, start_url=old_url,
             output_schema={"fields": [{"name": "result", "type": "string"}]},
@@ -21576,14 +21961,89 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
                 **({"payment_card_refs": {
                     "card_number": "4242424242424242", "card_name": "Synthetic Fixture",
                     "card_expiry": "12/30", "card_cvv": "123",
-                }} if autofill else {}),
+                }} if preapproved_handoff else {}),
             },
         )
+        if fatal_error is not None:
+            with pytest.raises(Exception) as caught:
+                await pending
+            return {"error": caught.value, "classifier_calls": propagated.await_args_list, "saved_calls": saved.await_args_list, "contexts": model_contexts, "private_state": _FakeDomService.last_instance.secret_redaction_state()}
+        result = await pending
     assert result["status"] == "awaiting_auth_assistance"
-    assert len(model_contexts) == (1 if autofill else 2), "redirect reload added a model call"
-    if autofill:
-        assert result["auth_realm"] == "auth.example", "autofill retained prior authentication assistance realm"
+    assert len(model_contexts) == (1 if preapproved_handoff else 2), "redirect reload added a model call"
+    if preapproved_handoff:
+        assert result["auth_realm"] == "new.example", "a harness-initiated payment action changed the active realm"
     return model_contexts, saved, events, old_secret, new_secret
+
+
+@_in_browser_activity_context
+async def test_activity_saves_minted_password_after_canonical_or_legacy_entry():
+    """The actual activity saves a successfully entered advertised password ref."""
+    for text in ("{{secret:pwd:new}}", "pwd:new"):
+        contexts, _saved, events, prior, active = await _run_realm_transition_action_fixture(
+            "input_text", minted_password_text=text,
+        )
+        assert events.count(("save-minted", "https://old.example/login")) == 1, (
+            "successful minted password entry did not persist the account password"
+        )
+        assert ("type-text", prior) in events, "input_text bypassed private resolution"
+        assert prior not in str(contexts) and active not in str(contexts)
+
+    cases = [
+        ({"action": "evaluate", "params": {"code": "document.querySelector('#password').value = '{{secret:pwd:new}}'"}}, True, False, None),
+        ({"action": "goto", "params": {"url": "https://old.example/signup?password={{secret:pwd:new}}"}}, True, False, None),
+        ({"action": "input_text", "params": {"text": "ordinary text"}}, False, False, None),
+        ({"action": "input_text", "params": {"text": "{{secret:pwd:other}}"}}, False, False, None),
+        ({"action": "input_text", "params": {"text": "{{secret:pwd:missing}}"}}, False, False, None),
+        ({"action": "evaluate", "params": {"code": "/* {{secret:pwd:new}} */ 'ordinary text'"}}, False, False, None),
+        ({"action": "evaluate", "params": {"code": "'{{secret:pwd:missing}}'"}}, False, False, None),
+        ({"action": "evaluate", "params": {"code": "document.querySelector('#password').value = '{{secret:pwd:new}}'"}}, False, True, None),
+        ({"action": "input_text", "params": {"text": "{{secret:pwd:new}}"}}, False, True, None),
+        ({"action": "evaluate", "params": {"code": "'{{secret:pwd:new}}'"}}, False, False, "https://unrelated.example"),
+    ]
+    for action, should_save, failure, origin in cases:
+        contexts, _saved, events, prior, active = await _run_realm_transition_action_fixture(
+            action["action"], credential_action=action,
+            credential_failure=failure, credential_origin=origin,
+        )
+        consumed = [value for kind, value in events if kind in {"type-text", "evaluate", "navigate"}]
+        if should_save or failure:
+            assert any(prior in value for value in consumed), "action bypassed private resolution"
+        if origin:
+            assert not consumed, "password origin denial reached browser execution"
+        if action["params"].get("text") == "{{secret:pwd:other}}":
+            assert ("type-text", "synthetic-other-password") in events
+        save_calls = [event for event in events if event[0] == "save-minted"]
+        assert save_calls == ([("save-minted", "https://old.example/login")] if should_save else []), (
+            f"minted password persistence mismatch: action={action['action']}, "
+            f"should_save={should_save}, failure={failure}, denied={bool(origin)}, saves={save_calls}"
+        )
+        assert "synthetic-other-password" not in str(contexts)
+        assert prior not in str(contexts) and active not in str(contexts)
+
+
+@_in_browser_activity_context
+async def test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure():
+    """Exercise the real activity fatal boundary after its private password hydration."""
+    from temporalio.api.failure.v1 import Failure
+    from temporalio.converter import DefaultFailureConverter, DefaultPayloadConverter
+    from temporalio.exceptions import ApplicationError
+
+    secret = "synthetic-prior-realm-password"
+    raw = ApplicationError("provider returned " + secret, {"echo": secret}, type="SyntheticProviderFailure", non_retryable=True)
+    raw.__cause__ = RuntimeError("private cause: " + secret)
+    captured = await _run_realm_transition_action_fixture("evaluate", fatal_error=raw)
+    assert secret in captured["private_state"]["secret_redaction_refs"].values(), "fatal fixture did not reach private credential hydration"
+    assert not captured["contexts"], "fatal fixture unexpectedly advanced into model generation"
+    assert captured["classifier_calls"], "fatal fixture did not exercise actual credential propagation"
+    assert secret not in str(captured["classifier_calls"]), "the fatal activity sent a raw password into the credential classifier"
+    assert secret not in str(captured["saved_calls"]), "the fatal activity persisted a raw password in its completion message"
+    failure = Failure()
+    DefaultFailureConverter().to_failure(captured["error"], DefaultPayloadConverter(), failure)
+    assert secret.encode() not in failure.SerializeToString(), "the activity's fatal error leaked through Temporal into its parent agent"
+    assert isinstance(captured["error"], ApplicationError)
+    assert captured["error"].type == "SyntheticProviderFailure"
+    assert captured["error"].non_retryable is True
 
 
 @_in_browser_activity_context
@@ -21627,14 +22087,15 @@ async def test_activity_redirected_goto_reloads_prepared_realm_once():
             assert "18000ms" in context["credential_preparation_error"]
 
 @_in_browser_activity_context
-async def test_activity_autofill_redirect_rebinds_before_model():
-    """An automatic action must reobserve a redirect before assistance selection."""
-    contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture("autofill")
-    assert ("autofill", "https://new.example/login") in events
-    assert events.index(("autofill", "https://new.example/login")) < events.index(("prepare", "auth.example")) < events.index(("model", 1))
-    assert ("reload", "https://auth.example/login") in events
-    assert events.index(("reload", "https://auth.example/login")) < events.index(("model", 1))
-    assert not contexts[0]["turn_messages"], "automatic action fabricated a model-issued tool result or old-page nudge"
+async def test_activity_preapproved_handoff_waits_for_agent_action():
+    """Available card refs never cause a handoff mutation before the agent chooses an action."""
+    contexts, saved, events, prior, active = await _run_realm_transition_action_fixture("preapproved_handoff")
+    assert not any(event[0] == "unexpected-handoff-action" for event in events), "the harness issued a payment action without the agent"
+    assert events.count(("model", 1)) == 1
+    assert not any(message["role"] == "tool" for message in contexts[0]["turn_messages"]), "handoff fabricated a model-issued tool result"
+    persisted = [call.kwargs for call in saved.await_args_list]
+    assert not any(call.get("action_type") == "input_text" for call in persisted), "handoff reported an unrequested payment input"
+    assert prior not in str(contexts) and active not in str(contexts), "private credential hydration leaked into the model context"
 
 
 
@@ -21931,6 +22392,400 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert result.get("reasoning_messages") == ["Looking for the cart"], result
     llm_usage = [item for item in result.get("usage_items") or [] if item.get("type") == "llm"]
     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
+
+
+async def test_private_browser_pause_urls_use_protected_continuity():
+    """Activity results expose redacted URLs while exact continuation stays private."""
+    from contextlib import ExitStack
+    from temporalio.testing import ActivityEnvironment
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    secret = "synthetic-private-url-password"
+    realm = secret + ".fixture.test"
+    start_url = "https://" + realm + "/"
+    raw_url = start_url + "checkout?password=" + secret
+    visible_url = raw_url.replace(secret, "{{secret:pwd:url}}")
+    output_schema = {"fields": [{"name": "result", "type": "string", "description": raw_url,
+                                 "minLength": 234}]}
+    screenshot = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOY234XAAPGAgJSNphuAAAAAElFTkSuQmCC'
+    trusted_ref = {"kind": "password", "id": "fixture-234-credential", "label": secret}
+
+    def validate_transport_images(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                validate_transport_images(item)
+        elif isinstance(value, list):
+            for item in value:
+                validate_transport_images(item)
+        elif isinstance(value, str) and value.startswith("data:image/png;base64,"):
+            decoded = base64.b64decode(value.split(",", 1)[1], validate=True)
+            assert decoded.startswith(b"\x89PNG\r\n\x1a\n"), "non-PNG raster reached model transport"
+
+    # Ordinary image attachments keep vision when no private value changes
+    # their bytes or envelope, including the extra-user-message transport.
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    ordinary_image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + screenshot}}
+    ordinary_messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Inspect this ordinary image."}, copy.deepcopy(ordinary_image),
+    ]}]
+    no_secret_client = _FakeRoseClient([{"actions": []}])
+    await handler._call_browser_use_with_rotation(
+        rose_client=no_secret_client, task="Inspect image", dynamic_system_context="",
+        turn_messages=copy.deepcopy(ordinary_messages), browser_state={}, action_entries=[],
+        extra_user_messages=copy.deepcopy(ordinary_messages), config=_fake_config(), user_id="u1", agent_id="a1",
+        iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None,
+        gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None,
+        dom_service=DOMService("ws://unused-no-private-image-fixture"),
+    )
+    ordinary_call = no_secret_client.calls[0]
+    validate_transport_images(ordinary_call)
+    assert ordinary_call["turn_messages"][0]["content"][1] == ordinary_image, "no-secret attachment lost vision"
+    assert ordinary_call["browser_state"]["_extra_user_messages"][0]["content"][1] == ordinary_image
+    failures = []
+    for scenario in ("actor_before", "actor_after", "drain", "write", "payment", "auth", "completed",
+                     "max_steps", "declined", "raster_completed", "raster_max_steps"):
+        actor_resume = scenario.startswith("actor_")
+        pause = "drain" if actor_resume else scenario.removeprefix("raster_")
+        private_entry = scenario != "actor_before" and not scenario.startswith("raster_")
+        prior_messages = []
+        if actor_resume:
+            handler._append_browser_turn_messages(
+                prior_messages, unified_action={"action": "screenshot", "params": {}},
+                result={"success": True, "screenshot": screenshot}, tool_call_id="capture-234",
+            )
+            prior_messages.append({"role": "user", "content": [
+                {"type": "text", "text": secret},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + screenshot}},
+            ]})
+            handler._append_browser_turn_messages(
+                prior_messages, unified_action={"action": "click", "index": 234,
+                                                "params": {"label": secret}},
+                result={"success": True, "value": {"index": 234, "role": "user", "function": secret}},
+                tool_call_id="click-234",
+            )
+        env = ActivityEnvironment()
+        snapshots = []
+        route_calls = []
+        grants = []
+        resuming = False
+        archive_ref = {"paths": ["private-fixture-234"], "sha256": "fixture234"}
+        auth_response = {
+            "id": "request-234", "current_url": raw_url,
+            "request": {"id": "request-234", "browserSessionId": "task-234",
+                        "steelSessionId": "session-234", "authRealm": realm, "mode": "live_view"},
+            "handoff": {"type": "live_view", "steelSessionId": "session-234",
+                        "liveViewUrl": "https://kernel.fixture/view/session-234"},
+        }
+        auth_request = AsyncMock(return_value=auth_response)
+        private_target = {"index": 234, "attrs": {"href": raw_url, "value": secret}}
+
+        class PrivateURLDom(_FakeDomService):
+            def runtime_current_url(self, *, fallback=""):
+                return raw_url
+
+            async def get_page_identity(self):
+                return self.model_visible_value({"url": raw_url, "title": "Checkout"})
+
+            async def get_browser_state(self, include_screenshot=False):
+                state = self.model_visible_value({"url": raw_url, "title": "Checkout", "dom_tree": "Checkout " + secret})
+                if include_screenshot and not self.secret_values_used:
+                    state["screenshot"] = screenshot
+                return state
+
+        async def persist(**kwargs):
+            validate_transport_images(kwargs["state"])
+            snapshots.append(copy.deepcopy(kwargs))
+            return {"browser_resume_context_ref": copy.deepcopy(archive_ref)}
+
+        async def execute(*_args, **kwargs):
+            route_calls.append(kwargs["current_url"])
+            grants.append(copy.deepcopy(kwargs["write_lock_approvals"]))
+            if pause in {"drain", "max_steps"} or resuming:
+                if pause != "max_steps":
+                    env.worker_shutdown()
+                return {"success": True, "current_url": raw_url, "credential_ref": trusted_ref,
+                        "message": secret}
+            if pause == "write":
+                return {"status": "needs_write_approval", "approval_type": "purchase", "question": raw_url}
+            return {"status": "needs_payment_card_approval", "payment_request": {"url": raw_url}}
+
+        action = ("request_user_assistance_for_authentication" if pause == "auth" else
+                  "attempt_completion" if pause == "completed" else "scroll")
+        session_info = {"session_id": "session-1", "ws_url": "ws://fixture", "debug_url": "https://kernel.fixture/view",
+                        "same_session_available": True, "auth_options": {"realm": realm},
+                        "browser_session_metadata": {"provider": "kernel"}, "passwords": []}
+        fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+        prefix = "domains.spawn_browser_agent_v3.handler."
+        native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+        save_action = AsyncMock()
+        async def actor_transport(**kwargs):
+            validate_transport_images(kwargs)
+            return {"action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {}}
+
+        actor_client = AsyncMock(side_effect=actor_transport)
+        judge = AsyncMock(return_value={"score": 1.0, "structured_response": {"url": raw_url}, "usage": {}})
+        verifier_prompt_builder = MagicMock(wraps=handler.build_verifier_prompt)
+        screenshot_upload = AsyncMock(return_value={
+            "id": "fixture-final-screenshot", "storage_path": "fixtures/screenshot_final.png",
+            "original_filename": "screenshot_final.png", "mime_type": "image/png",
+            "size_bytes": len(base64.b64decode(screenshot, validate=True)),
+            "created_at": "2026-10-16T00:00:00+00:00",
+        })
+        from domains.spawn_browser_agent_v3 import service as browser_service
+
+        async def verifier_context(**kwargs):
+            context = await browser_service.build_browser_verifier_context(**kwargs)
+            context.insert(0, {"role": "USER", "text": secret, "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + screenshot}},
+            ]})
+            return context
+
+        patches = [
+            patch(prefix + "poll_new_messages", AsyncMock(return_value=[native_start])),
+            patch(prefix + "load_config", return_value=_fake_config()),
+            patch(prefix + "fetch_session_info", AsyncMock(side_effect=lambda *_args, **_kwargs: copy.deepcopy(session_info))),
+            patch(prefix + "fetch_recent_otps", AsyncMock(return_value=[])),
+            patch(prefix + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
+            patch(prefix + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
+            patch(prefix + "_call_browser_use_with_rotation", handler._call_browser_use_with_rotation if actor_resume else AsyncMock(return_value={
+                "action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {},
+                "_fast_cache_browser_target": private_target,
+            })),
+            patch(prefix + "BrowserStreamingRoseClient.complete_browser_use", actor_client),
+            patch(prefix + "execute_action", execute),
+            patch(prefix + "_generate_write_lock_notification", AsyncMock(return_value={"question": raw_url, "notification": {"service": {"url": raw_url}}})),
+            patch(prefix + "create_user_auth_assistance_request", auth_request),
+            patch(prefix + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+            patch(prefix + "extract_session_files", AsyncMock(return_value=[])),
+            patch(prefix + "disconnect_browser_after_passkey_capture", AsyncMock()),
+            patch(prefix + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+            patch(prefix + "close_browser_session", AsyncMock()),
+            patch(prefix + "save_browser_action_message", save_action),
+            patch(prefix + "save_browser_assistant_message", AsyncMock()),
+            patch(prefix + "persist_resume_context", persist),
+            patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+            patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+            patch("browser_tools.dom_service.DOMService", PrivateURLDom),
+            patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+            patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))),
+            patch(prefix + "live_tab_looks_challenged", AsyncMock(return_value=False)),
+            patch(prefix + "build_browser_verifier_context", verifier_context),
+            patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
+            patch(prefix + "call_temporal_activity_from_activity", judge),
+            patch(prefix + "build_verifier_prompt", verifier_prompt_builder),
+            patch(prefix + "upload_to_storage", screenshot_upload),
+        ]
+        resume_state = {
+            "approval_type": handler.AUTH_ASSISTANCE_DECLINED if pause == "declined" else "manual_pause",
+            "secret_redaction_refs": {
+                "pwd:url": secret, "card_cvv": "234", "pwd:image-token": "image_url",
+                "pwd:content-token": "content", "pwd:metadata-token": "metadata",
+                "pwd:user-token": "user", "pwd:assistant-token": "assistant",
+                "pwd:tool-token": "tool", "pwd:function-token": "function", "pwd:name-token": "name",
+                "pwd:upper-user-token": "USER", "pwd:upper-tool-token": "TOOL",
+            },
+            "secret_values_used": private_entry,
+            "browser_turn_messages": copy.deepcopy(prior_messages),
+        }
+        if pause == "max_steps":
+            # Exercise the native terminal branch with a single fixture step.
+            patches.append(patch(prefix + "MAX_ITERATIONS", 1))
+            private_resume = {
+                **copy.deepcopy(resume_state),
+                "private_browser_runtime": {"browser_output_schema": copy.deepcopy(output_schema)},
+            }
+            patches.append(patch(prefix + "hydrate_resume_context", AsyncMock(return_value=private_resume)))
+            resume_state = {"approval_type": "manual_pause", "browser_resume_context_ref": archive_ref}
+        with ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            result = await env.run(
+                handler.spawn_browser_agent_activity_v3, user_id="u1", agent_id="a1", goal="Inspect checkout",
+                tool_call_id="tool-1", task_id="task-1", is_resume=True, use_claude_mode=False,
+                output_schema={"fields": [{**output_schema["fields"][0], "description": visible_url}]}
+                    if pause == "max_steps" else copy.deepcopy(output_schema),
+                start_url=start_url, write_lock_resume_state=resume_state,
+            )
+            if pause == "write" and snapshots[-1]["state"].get("private_browser_runtime"):
+                protected = snapshots[-1]["state"]["private_browser_runtime"]
+                assert protected["current_url"] == raw_url
+                assert protected["auth_realm"] == realm
+                assert protected["grant_url"] == raw_url
+                assert protected["pending_action_target"] == private_target
+                assert protected["browser_output_schema"] == output_schema
+                assert snapshots[-1]["state"]["browser_output_schema"]["fields"][0] == {
+                    **output_schema["fields"][0], "description": visible_url,
+                }
+                assert result["pending_action_target"]["index"] == 234
+                # The manager transports only the opaque archive reference and
+                # the user's decision timestamp, never the exact private URL.
+                public_resume = {
+                    "approval_type": "purchase", "write_lock_approved_at": 123.0,
+                    "pending_action": {"action": "scroll", "params": {}},
+                    "pending_action_target": result["pending_action_target"],
+                    "session_id": "session-1", "task_id": "task-1", "step_count": 1,
+                    "write_lock_approvals": {"purchase": {"domain": "masked.invalid", "approved_at": 123.0}},
+                    "browser_resume_context_ref": result["browser_resume_context_ref"],
+                }
+                assert secret not in str(public_resume)
+                private_resume = {**copy.deepcopy(snapshots[-1]["state"]), **public_resume}
+                stack.enter_context(patch(prefix + "hydrate_resume_context", AsyncMock(return_value=private_resume)))
+                prepare_action = stack.enter_context(patch(
+                    prefix + "_prepare_pending_write_lock_action",
+                    AsyncMock(wraps=handler._prepare_pending_write_lock_action),
+                ))
+                env = ActivityEnvironment()
+                resuming = True
+                resumed = await env.run(
+                    handler.spawn_browser_agent_activity_v3, user_id="u1", agent_id="a1", goal="Inspect checkout",
+                    tool_call_id="tool-1", task_id="task-1", is_resume=True, use_claude_mode=False,
+                    output_schema=copy.deepcopy(output_schema),
+                    start_url="https://masked.invalid/", write_lock_resume_state=public_resume,
+                )
+                assert resumed["status"] == BROWSER_DRAIN_YIELD_STATUS
+                assert secret not in str(resumed)
+                assert grants[-1]["purchase"] == {"domain": realm, "approved_at": 123.0}
+                assert grants[-1]["site"]["domain"] == "fixture.test"
+                assert route_calls[-1] == raw_url
+                assert prepare_action.await_args.kwargs["target_signature"] == private_target
+                # A real correction invalidates the queued action, while the
+                # user's approved site permission survives private hydration.
+                previous_preparations = prepare_action.await_count
+                correction = {"id": "correction-234", "role": "USER",
+                              "text": "Keep the existing checkout permission and inspect the page.",
+                              "timestamp": "1970-01-01T00:00:01+00:00"}
+                stack.enter_context(patch(prefix + "poll_new_messages", AsyncMock(return_value=[native_start, correction])))
+                generator = stack.enter_context(patch("helpers.llm._generate_response_schema_with_rose",
+                    AsyncMock(return_value=(copy.deepcopy(output_schema), None, {}))))
+                env = ActivityEnvironment()
+                corrected = await env.run(
+                    handler.spawn_browser_agent_activity_v3, user_id="u1", agent_id="a1", goal="Inspect checkout",
+                    tool_call_id="tool-1", task_id="task-1", is_resume=True, use_claude_mode=False,
+                    output_schema=copy.deepcopy(output_schema),
+                    start_url="https://masked.invalid/", write_lock_resume_state=public_resume,
+                )
+                assert corrected["status"] == BROWSER_DRAIN_YIELD_STATUS
+                assert secret not in str(corrected)
+                assert prepare_action.await_count == previous_preparations, "new input replayed the stale queued action"
+                assert grants[-1]["purchase"] == {"domain": realm, "approved_at": 123.0}
+                assert snapshots[-1]["state"]["user_instruction_message_ids"] == ["correction-234"]
+                assert snapshots[-1]["state"]["schema_user_instruction_count"] == 1
+                assert snapshots[-1]["state"]["delivered_user_instruction_count"] == 1
+                schema_prompt = generator.await_args.args[0]
+                assert secret not in schema_prompt
+                visible_schema = json.loads(schema_prompt.split(
+                    "Current output schema (preserve fields unless later user feedback changes them):\n", 1
+                )[1].split("\n\n", 1)[0])
+                assert visible_schema["fields"][0] == {**output_schema["fields"][0], "description": visible_url}
+        expected = {"drain": BROWSER_DRAIN_YIELD_STATUS, "write": "awaiting_write_approval",
+                    "payment": "awaiting_payment_card_approval", "auth": "awaiting_auth_assistance",
+                    "completed": "completed", "max_steps": "max_iterations", "declined": "completed"}[pause]
+        assert result["status"] == expected
+        if scenario == "raster_completed":
+            screenshot_upload.assert_awaited_once_with(
+                user_id="u1", file_content=base64.b64decode(screenshot, validate=True),
+                filename="screenshot_final.png", mime_type="image/png",
+            )
+        else:
+            screenshot_upload.assert_not_awaited()
+        if actor_resume:
+            assert actor_client.await_count == 1, "resumed actor did not reach the actual model boundary"
+            actor_history = actor_client.await_args.kwargs["turn_messages"]
+            durable_history = snapshots[-1]["state"]["browser_turn_messages"]
+            for messages in (actor_history, durable_history):
+                validate_transport_images(messages)
+                assert secret not in str(messages)
+                assert [message["role"] for message in messages[:6]] == [
+                    "assistant", "tool", "user", "user", "assistant", "tool",
+                ], "native transcript roles were credential-masked"
+                call = messages[4]["tool_calls"][0]
+                assert call["id"] == "click-234" and call["type"] == "function"
+                assert call["function"]["name"] == "click"
+                assert json.loads(call["function"]["arguments"]) == {
+                    "index": 234, "label": "{{secret:pwd:url}}",
+                }
+                assert messages[5]["name"] == "click" and messages[5]["tool_call_id"] == "click-234"
+                assert json.loads(messages[5]["content"])["value"] == {
+                    "index": "{{secret:card_cvv}}", "role": "{{secret:pwd:user-token}}",
+                    "{{secret:pwd:function-token}}": "{{secret:pwd:url}}",
+                }, "page-controlled protocol-looking values bypassed redaction"
+                if private_entry:
+                    assert "data:image" not in str(messages), "private-entry resume exposed historical raster"
+                else:
+                    actual_url = messages[2]["content"][1]["image_url"]["url"]
+                    assert actual_url == "data:image/png;base64," + screenshot, "resumed screenshot transport was text-masked"
+                    assert base64.b64decode(actual_url.split(",", 1)[1], validate=True) == base64.b64decode(screenshot)
+                    # A text-masked base64 payload is invalid provider input.
+                    # Untrusted media uses the native omission block instead.
+                    assert messages[3]["content"][1] == {
+                        "type": "text", "text": "[image omitted from Temporal resume]",
+                    }
+        if pause in {"drain", "max_steps"}:
+            action_saves = [call.kwargs for call in save_action.await_args_list if call.kwargs.get("auxiliary")]
+            assert action_saves
+            for saved in action_saves:
+                assert saved["auxiliary"]["coordinates"] == {"x": 234, "y": 234}
+            finished = [saved for saved in action_saves if saved.get("extra_metadata")]
+            assert finished and finished[-1]["extra_metadata"]["credential_ref"] == {
+                **trusted_ref, "label": "{{secret:pwd:url}}",
+            }
+            assert finished[-1]["message"] == "{{secret:pwd:url}}"
+        if pause in {"completed", "max_steps"}:
+            assert judge.await_count == 1
+            verifier_args = judge.await_args.kwargs["args"]
+            assert verifier_args[5] == ("verifier_browser_max_steps" if pause == "max_steps" else "verifier_browser")
+            verifier_prompt_builder.assert_called_once()
+            prompt_schema = verifier_prompt_builder.call_args.kwargs["response_schema"]
+            expected_schema = {"fields": [{**output_schema["fields"][0], "description": visible_url}]}
+            for boundary, schema in (("prompt-builder", prompt_schema), ("check-progress", verifier_args[3])):
+                if schema != expected_schema:
+                    failures.append(scenario + "-" + boundary + "-unredacted-schema")
+            if secret in verifier_args[1]:
+                failures.append(scenario + "-rendered-verifier-prompt-secret")
+            if pause == "max_steps":
+                if prompt_schema is not verifier_args[3]:
+                    failures.append(scenario + "-verifier-schema-not-shared")
+                assert private_resume["private_browser_runtime"]["browser_output_schema"] == output_schema
+            context = judge.await_args.kwargs["args"][0]
+            validate_transport_images(context)
+            assert context[0]["role"] == "USER" and context[-1]["role"] == "TOOL"
+            final_frame = context[-1]["metadata"]
+            if private_entry:
+                assert "screenshot_b64" not in final_frame
+                assert "data:image" not in str(context)
+            else:
+                assert final_frame["screenshot_b64"] == screenshot, "trusted final verifier raster was text-masked"
+                assert context[0]["content"][0] == {
+                    "type": "text", "text": "[image omitted from Temporal resume]",
+                }, "untrusted verifier media reached the provider"
+            assert secret not in str(context)
+        if pause in {"completed", "max_steps"}:
+            assert result["browser_output_schema"]["fields"][0] == {
+                **output_schema["fields"][0], "description": visible_url,
+            }
+        if secret in str(result):
+            failures.append(pause)
+        if pause == "auth" and secret in str(auth_request.await_args.kwargs):
+            failures.append("auth-request-metadata")
+        if pause == "auth":
+            visible_auth = result["auth_assistance_request"]
+            assert result["request_id"] == visible_auth["id"] == visible_auth["request"]["id"] == "request-234"
+            assert visible_auth["request"]["browserSessionId"] == "task-234"
+            assert visible_auth["request"]["steelSessionId"] == "session-234"
+            assert visible_auth["handoff"] == auth_response["handoff"]
+        if pause not in {"auth", "completed", "max_steps", "declined"}:
+            assert result["current_url"] in (raw_url, visible_url)
+            assert route_calls and all(url == raw_url for url in route_calls), "public URL redaction changed private action routing"
+        if pause not in {"completed", "max_steps", "declined"}:
+            assert result["browser_resume_context_ref"] == archive_ref, "redaction corrupted a trusted archive reference"
+            assert result["session_id"] == "session-1" and result["task_id"] == "task-1"
+            assert snapshots and snapshots[-1]["force_private"] is True
+            if not snapshots[-1]["state"].get("private_browser_runtime"):
+                failures.append(pause + "-missing-private-continuation")
+    assert not failures, f"credential-bearing URL escaped activity pause boundary: {failures}"
 
 
 async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
@@ -25981,7 +26836,7 @@ def test_browser_payment_resume_keeps_cached_prompt_prefix():
     result = json.loads(resumed[-1]["content"])
     assert result["status"] == "approved"
     assert result["card_last4"] == "7406"
-    assert result["card_secret_refs"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
+    assert result["card_secret_refs"] == ["{{secret:" + key + "}}" for key in ("card_number", "card_name", "card_expiry", "card_cvv")]
     assert result["payment_request"] == {"merchant": "Test Shop"}
     assert action_history.get_entries()[0]["result"] == result
     assert "PAN-secret" not in resumed[-1]["content"]
@@ -26124,20 +26979,6 @@ def test_final_screenshot_fetch_isolated_from_verifier_errors():
     assert "last_screenshot_b64 = None" in window
 
 
-def test_handoff_autofill_invalidates_observe_page_state_prefetch():
-    """Payment auto-fill must drop observe_page_state before later prefetch reuse."""
-    from pathlib import Path
-
-    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
-    assert "observe_page_state = {}" in source
-    autofill = source.index("Auto-filling payment fields on handoff page")
-    invalidate = source.index(
-        "observe_page_state = {}",
-        autofill,
-    )
-    prefetch = source.index("prefetched_browser_state = observe_page_state", autofill)
-    assert invalidate < prefetch
-    assert autofill < source.index("state_prefetch.start(dom_service)", autofill) < prefetch
 
 
 def test_browser_tool_events_declare_action_type():
@@ -27892,8 +28733,8 @@ async def run_all_tests():
         test_execute_action_scroll_missing_element_index_errors,
     )
     await r.record_async(
-        "execute_action_approved_payment_ref_recovers_from_stale_shadow_index",
-        test_execute_action_approved_payment_ref_recovers_from_stale_shadow_index,
+        "execute_action_payment_ref_rejects_stale_index_without_autofill",
+        test_execute_action_payment_ref_rejects_stale_index_without_autofill,
     )
     await r.record_async("execute_action_extract_disabled", test_execute_action_extract_disabled)
     await r.record_async("execute_action_goto_delegates", test_execute_action_goto_delegates)
@@ -27942,6 +28783,50 @@ async def run_all_tests():
         test_execute_action_select_dropdown_with_element,
     )
     await r.record_async("execute_action_evaluate", test_execute_action_evaluate)
+    r.record(
+        "secret_ref_recursive_values_preserve_protocol_and_original_arguments",
+        test_secret_ref_recursive_values_preserve_protocol_and_original_arguments,
+    )
+    await r.record_async(
+        "execute_action_secret_refs_resolve_without_mutating_model_action",
+        test_execute_action_secret_refs_resolve_without_mutating_model_action,
+    )
+    await r.record_async(
+        "execute_action_secret_refs_mask_all_card_values_and_transport_errors",
+        test_execute_action_secret_refs_mask_all_card_values_and_transport_errors,
+    )
+    await r.record_async(
+        "execute_action_secret_refs_preserve_agent_selected_fields_and_javascript_literals",
+        test_execute_action_secret_refs_preserve_agent_selected_fields_and_javascript_literals,
+    )
+    await r.record_async(
+        "secret_logging_context_isolates_concurrent_actions_and_resets_after_error",
+        test_secret_logging_context_isolates_concurrent_actions_and_resets_after_error,
+    )
+    await r.record_async(
+        "prestarted_browser_event_bus_keeps_later_credentials_private_in_empty_actions",
+        test_prestarted_browser_event_bus_keeps_later_credentials_private_in_empty_actions,
+    )
+    await r.record_async(
+        "execute_action_masks_formatted_and_encoded_credential_echoes_idempotently",
+        test_execute_action_masks_formatted_and_encoded_credential_echoes_idempotently,
+    )
+    await r.record_async(
+        "private_numeric_credentials_preserve_only_trusted_browser_mechanics",
+        test_private_numeric_credentials_preserve_only_trusted_browser_mechanics,
+    )
+    await r.record_async(
+        "execute_action_keeps_password_origins_and_trusted_credential_identity",
+        test_execute_action_keeps_password_origins_and_trusted_credential_identity,
+    )
+    await r.record_async(
+        "browser_observation_and_action_history_keep_private_values_out_after_resume",
+        test_browser_observation_and_action_history_keep_private_values_out_after_resume,
+    )
+    await r.record_async(
+        "private_browser_resume_never_falls_back_to_inline_credentials",
+        test_private_browser_resume_never_falls_back_to_inline_credentials,
+    )
     r.record(
         "normalize_evaluate_timeout_seconds_default_and_clamp",
         test_normalize_evaluate_timeout_seconds_default_and_clamp,
@@ -28252,16 +29137,16 @@ async def run_all_tests():
         test_execute_input_text_payment_secret_ref_bypasses_payment_warning,
     )
     await r.record_async(
-        "execute_input_text_payment_secret_ref_direct_fill",
-        test_execute_input_text_payment_secret_ref_direct_fill_sets_exact_value,
+        "execute_input_text_payment_secret_ref_uses_selected_coordinates_only",
+        test_execute_input_text_payment_secret_ref_uses_selected_coordinates_only,
     )
     await r.record_async(
-        "execute_input_text_payment_secret_ref_direct_fill_waits_for_ready",
-        test_execute_input_text_payment_secret_ref_waits_for_page_ready_before_retry,
+        "execute_input_text_payment_secret_ref_does_not_retarget_missing_coordinates",
+        test_execute_input_text_payment_secret_ref_does_not_retarget_missing_coordinates,
     )
     await r.record_async(
-        "execute_input_text_payment_secret_ref_direct_fill_cdp",
-        test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_without_page,
+        "execute_input_text_payment_secret_ref_keeps_selected_name_field",
+        test_execute_input_text_payment_secret_ref_keeps_selected_name_field,
     )
     await r.record_async(
         "fill_payment_ref_directly_searches_playwright_frames",
@@ -28300,16 +29185,16 @@ async def run_all_tests():
         test_fill_payment_ref_via_titled_payment_iframe,
     )
     await r.record_async(
-        "execute_input_text_payment_secret_ref_fail_closed_without_target",
-        test_execute_input_text_payment_secret_ref_fail_closed_without_target,
+        "execute_input_text_payment_secret_ref_uses_agent_focused_field",
+        test_execute_input_text_payment_secret_ref_uses_agent_focused_field,
     )
     await r.record_async(
         "fill_payment_ref_via_keyboard_types_after_cdp_focus",
         test_fill_payment_ref_via_keyboard_types_after_cdp_focus,
     )
     await r.record_async(
-        "execute_input_text_payment_secret_ref_selector_recovery",
-        test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector,
+        "execute_input_text_payment_secret_ref_refreshes_only_selected_index",
+        test_execute_input_text_payment_secret_ref_refreshes_only_selected_index,
     )
     await r.record_async("execute_input_text_secret_redacts", test_execute_input_text_secret_redacts)
     await r.record_async(
@@ -28358,10 +29243,6 @@ async def run_all_tests():
     await r.record_async(
         "click_evaluate_allow_leave_hosts",
         test_execute_click_and_evaluate_allow_leave_hosts,
-    )
-    r.record(
-        "handoff_payment_autofill_without_host_pin",
-        test_handoff_payment_autofill_without_host_pin,
     )
     r.record(
         "nav_guard_no_endpoint_path_allowlists",
@@ -28787,6 +29668,14 @@ async def run_all_tests():
         test_credential_propagation_failure_keeps_the_browser_run_outcome,
     )
     await r.record_async(
+        "credential_propagation_redacts_classifier_and_diagnostic_payloads",
+        test_credential_propagation_redacts_classifier_and_diagnostic_payloads,
+    )
+    r.record(
+        "browser_activity_error_redaction_preserves_temporal_retry_metadata",
+        test_browser_activity_error_redaction_preserves_temporal_retry_metadata,
+    )
+    await r.record_async(
         "browser_streaming_rose_client_forwards_chunks",
         test_browser_streaming_rose_client_forwards_and_folds_chunks,
     )
@@ -28845,12 +29734,20 @@ async def run_all_tests():
         test_browser_supervisor_snapshot_reads_lightweight_page_state,
     )
     await r.record_async(
-        "activity_autofill_redirect_rebinds_before_model",
-        test_activity_autofill_redirect_rebinds_before_model,
+        "activity_preapproved_handoff_waits_for_agent_action",
+        test_activity_preapproved_handoff_waits_for_agent_action,
     )
     await r.record_async(
         "activity_cross_realm_action_redacts_reused_ref_values",
         test_activity_cross_realm_action_redacts_reused_ref_values,
+    )
+    await r.record_async(
+        "activity_saves_minted_password_after_canonical_or_legacy_entry",
+        test_activity_saves_minted_password_after_canonical_or_legacy_entry,
+    )
+    await r.record_async(
+        "activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure",
+        test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure,
     )
     await r.record_async(
         "activity_redirected_goto_reloads_prepared_realm_once",
@@ -28883,6 +29780,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
+    )
+    await r.record_async(
+        "private_browser_pause_urls_use_protected_continuity",
+        test_private_browser_pause_urls_use_protected_continuity,
     )
     await r.record_async(
         "reused_session_yields_before_provider_releases_it",
@@ -29184,10 +30085,6 @@ async def run_all_tests():
     r.record(
         "final_screenshot_fetch_isolated_from_verifier_errors",
         test_final_screenshot_fetch_isolated_from_verifier_errors,
-    )
-    r.record(
-        "handoff_autofill_invalidates_observe_page_state_prefetch",
-        test_handoff_autofill_invalidates_observe_page_state_prefetch,
     )
     r.record(
         "browser_tool_events_declare_action_type",

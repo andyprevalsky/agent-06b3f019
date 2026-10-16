@@ -18,6 +18,8 @@
 import assert from 'node:assert';
 
 import {
+  prisma,
+  runTransactionWithRetry,
   isRetryableTransactionError,
   retryOnTransientTransactionStart,
 } from '../../providers/database';
@@ -198,6 +200,74 @@ async function main(): Promise<void> {
       /Timed out fetching a new connection/
     );
     assert.strictEqual(attempts, 2, 'retry the pre-body failure, then stop once the body enters');
+  });
+
+  await test('transaction acquisition and body share the remaining caller deadline', async () => {
+    const original = prisma.$transaction;
+    const originalNow = Date.now;
+    let clock = 1_000;
+    const seen: { maxWait: number; timeout: number }[] = [];
+    try {
+      Date.now = () => clock;
+      prisma.$transaction = (async (
+        operation: (tx: unknown) => Promise<string>,
+        options: { maxWait: number; timeout: number }
+      ) => {
+        seen.push(options);
+        assert(options.maxWait + options.timeout <= 40);
+        clock += options.maxWait;
+        return operation({});
+      }) as typeof prisma.$transaction;
+      assert.equal(await runTransactionWithRetry(async () => 'ok', { deadlineAtMs: 1_040 }), 'ok');
+      assert.deepEqual(seen, [{ maxWait: 20, timeout: 20 }]);
+      clock = 1_040;
+      await assert.rejects(
+        runTransactionWithRetry(async () => 'late', { deadlineAtMs: 1_040 }),
+        /deadline elapsed/
+      );
+      assert.equal(seen.length, 1, 'expired caller must not acquire a transaction');
+    } finally {
+      prisma.$transaction = original;
+      Date.now = originalNow;
+    }
+  });
+
+  await test('expired acquisition failures do not retry and mid-body deadlines do not replay writes', async () => {
+    const originalNow = Date.now;
+    let clock = 1_000;
+    let attempts = 0;
+    try {
+      Date.now = () => clock;
+      await assert.rejects(
+        retryOnTransientTransactionStart(
+          async () => {
+            attempts++;
+            clock = 1_050;
+            throw txStartTimeout();
+          },
+          3,
+          1_040
+        ),
+        /Unable to start/
+      );
+      assert.equal(attempts, 1);
+      clock = 1_000;
+      await assert.rejects(
+        retryOnTransientTransactionStart(
+          async (entered) => {
+            attempts++;
+            entered();
+            throw txStartTimeout();
+          },
+          3,
+          1_040
+        ),
+        /Unable to start/
+      );
+      assert.equal(attempts, 2);
+    } finally {
+      Date.now = originalNow;
+    }
   });
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

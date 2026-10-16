@@ -2,6 +2,12 @@
 
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  requireEightWorkerProcesses,
+  requireCandidateExecutionCohort,
+  type WorkerProcessPlan,
+} from '../src/providers/workerProcessDeployment';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma } from '../src/providers/database';
 import { getTemporalClient, startAgentWorkflowExecution } from '../src/providers/temporal';
@@ -24,8 +30,40 @@ const workflowId = `${agentId}:candidate-image:${runId}`;
 const results: ValidationResult[] = [];
 let lease: WorkflowDeploymentLease | null = null;
 let workflowStarted = false;
+let runtimePlan: WorkerProcessPlan | undefined;
+let qualifiedIdentities: string[] = [];
+let executingIdentities: string[] = [];
 
 function requireProductionOptIn(): string {
+  const receiptIndex = process.argv.indexOf('--runtime-receipt');
+  if (receiptIndex >= 0) {
+    const path = process.argv[receiptIndex + 1];
+    if (!path || existsSync(path))
+      throw new Error('Recover the existing candidate receipt instead of replaying validation');
+    if (
+      !/^[a-f0-9]{40}$/.test(process.env.TEMPORAL_WORKER_BUILD_ID ?? '') ||
+      !/^[a-f0-9]{64}$/.test(process.env.TEMPORAL_WORKER_BUNDLE_SHA256 ?? '')
+    )
+      throw new Error('Runtime receipt requires exact source and bundle identities');
+    const flag = (name: string): string => {
+      const i = process.argv.indexOf(name);
+      const value = i >= 0 ? process.argv[i + 1] : undefined;
+      if (!value || value.startsWith('--')) throw new Error(`Missing ${name}`);
+      return value;
+    };
+    runtimePlan = JSON.parse(readFileSync(flag('--runtime-plan'), 'utf8')) as WorkerProcessPlan;
+    const cohort = JSON.parse(readFileSync(flag('--runtime-cohort'), 'utf8'));
+    qualifiedIdentities = requireEightWorkerProcesses(runtimePlan, cohort.hosts, 'STANDBY');
+    if (
+      runtimePlan.artifact.sourceCommit !== process.env.TEMPORAL_WORKER_BUILD_ID ||
+      runtimePlan.artifact.bundleSHA256 !== process.env.TEMPORAL_WORKER_BUNDLE_SHA256 ||
+      runtimePlan.attempt !== process.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN ||
+      runtimePlan.artifact.namespace !== process.env.TEMPORAL_NAMESPACE ||
+      runtimePlan.artifact.validationTaskQueue !==
+        process.env.TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE
+    )
+      throw new Error('Runtime validation does not match the attested process cohort');
+  }
   if (
     !process.argv.includes('--execute') ||
     process.env.PRODUCTION_WORKFLOW_MIGRATION_VALIDATION !== '1'
@@ -194,6 +232,8 @@ async function main(): Promise<void> {
       history.events?.filter((event) => event.activityTaskScheduledEventAttributes != null)
         .length ?? 0;
     assert.strictEqual(failures.length, 0);
+    if (runtimePlan)
+      executingIdentities = requireCandidateExecutionCohort(history, qualifiedIdentities);
     assert(activities > 0, 'candidate workflow did not execute common initialization activities');
     assert.strictEqual((await handle.describe()).status.name, 'RUNNING');
     return `${activities} initialization activities, zero workflow-task failures`;
@@ -261,7 +301,30 @@ main()
         });
       }
     }
-    process.stdout.write(`${JSON.stringify({ runId, results }, null, 2)}\n`);
+    const report = {
+      runId,
+      results,
+      runtime: {
+        version: 1,
+        sourceCommit: process.env.TEMPORAL_WORKER_BUILD_ID ?? null,
+        bundleSHA256: process.env.TEMPORAL_WORKER_BUNDLE_SHA256 ?? null,
+        deploymentToken: process.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN ?? null,
+        namespace: process.env.TEMPORAL_NAMESPACE ?? null,
+        taskQueue: process.env.TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE ?? null,
+        recordedAt: new Date().toISOString(),
+        qualifiedIdentities,
+        executingIdentities,
+      },
+    };
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     await prisma.$disconnect();
     if (results.some((result) => result.status === 'FAIL')) process.exitCode = 1;
+    else {
+      const index = process.argv.indexOf('--runtime-receipt');
+      if (index >= 0)
+        writeFileSync(process.argv[index + 1], `${JSON.stringify(report, null, 2)}\n`, {
+          mode: 0o600,
+          flag: 'wx',
+        });
+    }
   });
