@@ -114,7 +114,10 @@ function useApprovalActions(
   const handleReject = useCallback(async () => {
     try {
       setActionState('rejecting');
-      await rejectAttentionRequest(attentionRequestId, contextInput.trim() ? contextInput : undefined);
+      await rejectAttentionRequest(
+        attentionRequestId,
+        contextInput.trim() ? contextInput : undefined,
+      );
       toast({ title: 'Rejected', description: 'Write action rejected' });
       resetInput();
       onApprovalHandled?.();
