@@ -1008,6 +1008,165 @@ async def _load_browser_resume_user_instructions(
     }
 
 
+def _model_visible_browser_message(
+    message: Any, redact: Any, *, action_result_redact: Any = None, secret_values_used: bool = False,
+) -> Any:
+    """Project a native transcript envelope without exempting its page payloads."""
+    if not isinstance(message, dict):
+        return redact(message)
+
+    def visible_json(text: Any, action_name: str = "", *, tool_arguments: bool = False) -> Any:
+        if not isinstance(text, str):
+            return redact(text)
+        try:
+            original = json.loads(text)
+        except (ValueError, TypeError):
+            return redact(text)
+        payload = redact(original)
+        if tool_arguments:
+            target_fields = {
+                "click": ("index",), "input_text": ("index",), "scroll": ("index",),
+                "dropdown_options": ("index",), "select_dropdown": ("index",),
+                "upload_file": ("index",), "click_coordinates": ("x", "y"),
+                "drag": ("source_index", "target_index", "start_x", "start_y", "end_x", "end_y"),
+            }
+            if isinstance(original, dict) and isinstance(payload, dict):
+                for key in target_fields.get(action_name, ()):
+                    value = original.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                        payload[key] = value
+        elif action_name and callable(action_result_redact):
+            payload = action_result_redact(action_name, original)
+        return json_dumps_compact(payload)
+
+    safe = redact(message)
+    role = message.get("role")
+    if isinstance(role, str) and role in {"user", "assistant", "tool", "system", "developer", "USER", "TOOL"}:
+        safe["role"] = role
+    # These values are produced by the native transcript writer, never by a
+    # nested evaluate result or another page-controlled dictionary.
+    for key in ("tool_call_id", "name"):
+        if isinstance(message.get(key), str):
+            safe[key] = message[key]
+    content = message.get("content")
+    if isinstance(content, list):
+        blocks = []
+        for block in content:
+            visible_block = redact(block)
+            if (isinstance(block, dict) and isinstance(block.get("type"), str)
+                    and block["type"] in {"image_url", "image", "input_image"}
+                    and (secret_values_used or visible_block != block)):
+                omitted = ("[image withheld after private credential entry]" if secret_values_used
+                           else "[image omitted from Temporal resume]")
+                visible_block = {"type": "text", "text": redact(omitted)}
+            elif isinstance(block, dict) and block.get("type") == "text" and isinstance(visible_block, dict):
+                visible_block["type"] = "text"
+            blocks.append(visible_block)
+        safe["content"] = blocks
+    elif content is not None:
+        safe["content"] = visible_json(content, str(message.get("name") or "")) if role == "tool" else redact(content)
+    calls = message.get("tool_calls")
+    if isinstance(calls, list):
+        visible_calls = []
+        for call in calls:
+            if not isinstance(call, dict):
+                visible_calls.append(redact(call))
+                continue
+            visible_call = redact(call)
+            if isinstance(call.get("id"), str):
+                visible_call["id"] = call["id"]
+            if call.get("type") == "function":
+                visible_call["type"] = "function"
+            function = call.get("function")
+            if isinstance(function, dict):
+                visible_function = redact(function)
+                if isinstance(function.get("name"), str):
+                    visible_function["name"] = function["name"]
+                if "arguments" in function:
+                    visible_function["arguments"] = visible_json(
+                        function["arguments"], str(function.get("name") or ""), tool_arguments=True,
+                    )
+                visible_call["function"] = visible_function
+            visible_calls.append(visible_call)
+        safe["tool_calls"] = visible_calls
+    return safe
+
+
+def _model_visible_browser_turn_messages(
+    messages: Any, redact: Any, *, secret_values_used: bool, action_result_redact: Any = None,
+) -> Any:
+    """Preserve only screenshot-tool transport linked to its harness tool call."""
+    # Message keys are protocol; nested content still belongs to the page.
+    visible = ([_model_visible_browser_message(message, redact, action_result_redact=action_result_redact,
+                                              secret_values_used=secret_values_used)
+                for message in messages] if isinstance(messages, list) else redact(messages))
+    if secret_values_used or not isinstance(messages, list) or not isinstance(visible, list):
+        return visible
+    for index in range(2, len(messages)):
+        assistant, tool, image = messages[index - 2:index + 1]
+        if not all(isinstance(item, dict) for item in (assistant, tool, image)):
+            continue
+        if assistant.get("role") != "assistant" or tool.get("role") != "tool" or tool.get("name") != "screenshot":
+            continue
+        if not any(isinstance(call, dict) and call.get("id") == tool.get("tool_call_id")
+                   and isinstance(call.get("function"), dict) and call["function"].get("name") == "screenshot"
+                   for call in assistant.get("tool_calls") or []):
+            continue
+        try:
+            result = json.loads(tool.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        content = image.get("content")
+        screenshot_label = "Screenshot captured by the screenshot tool."
+        if (not isinstance(result, dict) or result.get("screenshot_attached") is not True
+                or image.get("role") != "user" or not isinstance(content, list) or len(content) != 2
+                or content[0] not in ({"type": "text", "text": screenshot_label},
+                                      {"type": "text", "text": redact(screenshot_label)})
+                or not isinstance(content[1], dict) or content[1].get("type") != "image_url"):
+            continue
+        payload = content[1].get("image_url")
+        url = payload.get("url") if isinstance(payload, dict) else None
+        if not isinstance(url, str) or not url.startswith("data:image/png;base64,"):
+            continue
+        try:
+            png = base64.b64decode(url.split(",", 1)[1], validate=True)
+        except ValueError:
+            continue
+        if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+            continue
+        visible_content = visible[index].get("content")
+        if isinstance(visible_content, list) and len(visible_content) == 2:
+            visible[index]["role"] = "user"
+            visible_content[0] = {"type": "text", "text": redact(content[0]["text"])}
+            visible_content[1] = {"type": "image_url", "image_url": {"url": url}}
+    return visible
+
+
+def _model_visible_browser_verifier_context(context: Any, dom_service: Any, browser_state: Dict[str, Any]) -> Any:
+    """Keep only the builder's final trusted raster intact before private entry."""
+    visible = ([_model_visible_browser_message(message, dom_service.model_visible_value,
+                                               secret_values_used=getattr(dom_service, "secret_values_used", False))
+                for message in context]
+               if isinstance(context, list) else dom_service.model_visible_value(context))
+    screenshot = browser_state.get("screenshot")
+    if (getattr(dom_service, "secret_values_used", False) or browser_state.get("screenshot_placeholder")
+            or not isinstance(screenshot, str) or not screenshot
+            or not isinstance(context, list) or not context or not isinstance(visible, list)):
+        return visible
+    original = context[-1]
+    if not isinstance(original, dict) or original.get("role") != "TOOL":
+        return visible
+    metadata = original.get("metadata")
+    if (isinstance(metadata, dict) and metadata.get("toolName") == "final_screenshot"
+            and metadata.get("screenshot_b64") == screenshot and isinstance(visible[-1], dict)):
+        visible[-1]["role"] = "TOOL"
+        visible[-1]["metadata"] = {
+            **dom_service.model_visible_value(metadata),
+            "toolName": "final_screenshot", "toolStatus": "FINISHED", "screenshot_b64": screenshot,
+        }
+    return visible
+
+
 def _model_visible_browser_output_schema(schema: Any, redact: Any) -> Any:
     """Redact schema data while retaining declared contract mechanics."""
     field_types = {
@@ -1244,6 +1403,10 @@ def _browser_resume_continuity_state(
         # must archive it encrypted whenever bindings are present.
         if privacy_state:
             state = action_history.model_visible_value(state)
+            state["browser_turn_messages"] = _model_visible_browser_turn_messages(
+                _browser_turn_messages_for_resume(browser_turn_messages), action_history.model_visible_value,
+                secret_values_used=bool(privacy_state.get("secret_values_used")),
+            )
             state["action_history"] = action_history.get_entries()
             state["auth_attempts"] = auth_runtime_state.snapshot() if auth_runtime_state is not None else None
             state["browser_output_schema"] = _model_visible_browser_output_schema(
@@ -2802,82 +2965,12 @@ async def _call_browser_use_with_rotation(
     if dom_service is not None and hasattr(dom_service, "model_visible_value"):
         redact = dom_service.model_visible_value
 
-        def visible_json(text: Any, action_name: str = "", *, tool_arguments: bool = False) -> Any:
-            if not isinstance(text, str):
-                return redact(text)
-            try:
-                payload = json.loads(text)
-            except (ValueError, TypeError):
-                return redact(text)
-            if tool_arguments:
-                original = payload
-                payload = redact(payload)
-                # Restore numeric targets only in their advertised action's
-                # top-level arguments, never page-controlled nested payloads.
-                target_fields = {
-                    "click": ("index",), "input_text": ("index",), "scroll": ("index",),
-                    "dropdown_options": ("index",), "select_dropdown": ("index",),
-                    "upload_file": ("index",), "click_coordinates": ("x", "y"),
-                    "drag": ("source_index", "target_index", "start_x", "start_y", "end_x", "end_y"),
-                }
-                if isinstance(original, dict) and isinstance(payload, dict):
-                    for key in target_fields.get(action_name, ()):
-                        value = original.get(key)
-                        if isinstance(value, (int, float)) and not isinstance(value, bool):
-                            payload[key] = value
-            elif action_name and hasattr(dom_service, "model_visible_action_result"):
-                payload = dom_service.model_visible_action_result(action_name, payload)
-            else:
-                payload = redact(payload)
-            return json_dumps_compact(payload)
-
-        def visible_message(message: Dict[str, Any]) -> Dict[str, Any]:
-            # Message roles, tool IDs/names and block types are protocol, not
-            # page text. Mask only their payloads so a password such as
-            # "string" cannot corrupt a tool schema or routing identifier.
-            safe = dict(message)
-            content = message.get("content")
-            if isinstance(content, list):
-                blocks = []
-                for block in content:
-                    if not isinstance(block, dict):
-                        blocks.append(redact(block))
-                    elif block.get("type") in {"image_url", "image", "input_image"}:
-                        blocks.append(redact(block) if dom_service.secret_values_used else dict(block))
-                    else:
-                        safe_block = dict(block)
-                        for key in ("text", "content"):
-                            if key in safe_block:
-                                safe_block[key] = redact(safe_block[key])
-                        blocks.append(safe_block)
-                safe["content"] = blocks
-            elif content is not None:
-                safe["content"] = (
-                    visible_json(content, str(message.get("name") or ""))
-                    if message.get("role") == "tool" else redact(content)
-                )
-            for key in ("reasoning", "reasoning_content", "text"):
-                if key in safe:
-                    safe[key] = redact(safe[key])
-            if isinstance(message.get("tool_calls"), list):
-                calls = []
-                for call in message["tool_calls"]:
-                    safe_call = dict(call)
-                    if isinstance(call.get("function"), dict):
-                        safe_function = dict(call["function"])
-                        if "arguments" in safe_function:
-                            safe_function["arguments"] = visible_json(
-                                safe_function["arguments"], str(safe_function.get("name") or ""),
-                                tool_arguments=True,
-                            )
-                        safe_call["function"] = safe_function
-                    calls.append(safe_call)
-                safe["tool_calls"] = calls
-            return safe
-
         for key in ("task", "dynamic_system_context", "dump_extra"):
             rose_kwargs[key] = redact(rose_kwargs[key])
-        rose_kwargs["turn_messages"] = [visible_message(message) for message in turn_messages]
+        rose_kwargs["turn_messages"] = _model_visible_browser_turn_messages(
+            turn_messages, redact, secret_values_used=dom_service.secret_values_used,
+            action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+        )
         rose_kwargs["browser_state"] = redact(browser_state_for_llm)
         rose_kwargs["action_history"] = [redact(entry) for entry in action_entries]
         # Preserve only harness-owned action mechanics, never similarly named
@@ -2902,9 +2995,10 @@ async def _call_browser_use_with_rotation(
         if not dom_service.secret_values_used and browser_state_for_llm.get("screenshot"):
             rose_kwargs["browser_state"]["screenshot"] = browser_state_for_llm["screenshot"]
         if extra_user_messages:
-            rose_kwargs["browser_state"]["_extra_user_messages"] = [
-                visible_message(message) for message in extra_user_messages
-            ]
+            rose_kwargs["browser_state"]["_extra_user_messages"] = _model_visible_browser_turn_messages(
+                extra_user_messages, redact, secret_values_used=dom_service.secret_values_used,
+                action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+            )
 
     use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
     use_gpt = browser_use_mode == "gpt" and bool(gpt_token)
@@ -6818,9 +6912,28 @@ async def _spawn_browser_agent_activity_v3_real(
 
     async def _save_browser_action_message(**kwargs: Any) -> Any:
         # Routing IDs stay exact; only user/model-visible payloads are redacted.
+        trusted_credential_ref = (kwargs.get("extra_metadata") or {}).get("credential_ref")
+        trusted_coordinates = (kwargs.get("auxiliary") or {}).get("coordinates")
         for key in ("title", "message", "extra_metadata", "auxiliary"):
             if key in kwargs:
                 kwargs[key] = _redact_activity_value(kwargs[key])
+        # Only these harness-selected bookkeeping fields bypass content masking.
+        # Page result/message dictionaries never enter these metadata slots.
+        metadata = kwargs.get("extra_metadata")
+        if isinstance(metadata, dict) and isinstance(trusted_credential_ref, dict):
+            visible_ref = metadata.get("credential_ref")
+            if isinstance(visible_ref, dict):
+                for key in ("kind", "id"):
+                    if isinstance(trusted_credential_ref.get(key), str):
+                        visible_ref[key] = trusted_credential_ref[key]
+        auxiliary = kwargs.get("auxiliary")
+        if isinstance(auxiliary, dict) and isinstance(trusted_coordinates, dict):
+            coordinates = auxiliary.get("coordinates")
+            if isinstance(coordinates, dict):
+                for key in ("x", "y"):
+                    value = trusted_coordinates.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                        coordinates[key] = value
         if "output_schema" in kwargs:
             kwargs["output_schema"] = _model_visible_browser_output_schema(kwargs["output_schema"], _redact_activity_value)
         return await save_browser_action_message(**kwargs)
@@ -7926,7 +8039,11 @@ async def _spawn_browser_agent_activity_v3_real(
             # Restore happened before credentials were decrypted. Sanitize the
             # complete histories now, before persistence, logging or a model call.
             action_history.restore_entries(action_history.get_entries())
-            browser_turn_messages[:] = dom_service.model_visible_value(browser_turn_messages)
+            browser_turn_messages[:] = _model_visible_browser_turn_messages(
+                browser_turn_messages, dom_service.model_visible_value,
+                secret_values_used=dom_service.secret_values_used,
+                action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+            )
             verifier_checkpoints[:] = dom_service.model_visible_value(verifier_checkpoints)
             reasoning_messages[:] = dom_service.model_visible_value(reasoning_messages)
             action_summary[:] = dom_service.model_visible_value(action_summary)
@@ -9973,7 +10090,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     )
 
                     if hasattr(dom_service, "model_visible_value"):
-                        verifier_context = dom_service.model_visible_value(verifier_context)
+                        verifier_context = _model_visible_browser_verifier_context(verifier_context, dom_service, verifier_browser_state)
 
                     remote_session_schema = transform_schema_for_remote_session(
                         _model_visible_browser_output_schema(response_schema, _redact_activity_value)
@@ -11037,7 +11154,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     browser_checkpoints=verifier_checkpoints,
                 )
                 if hasattr(dom_service, "model_visible_value"):
-                    final_verifier_context = dom_service.model_visible_value(final_verifier_context)
+                    final_verifier_context = _model_visible_browser_verifier_context(final_verifier_context, dom_service, final_browser_state)
                 final_verifier_prompt = build_verifier_prompt(
                     response_schema=transform_schema_for_remote_session(response_schema)
                 )

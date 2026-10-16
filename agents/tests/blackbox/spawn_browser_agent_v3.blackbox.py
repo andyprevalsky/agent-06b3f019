@@ -13305,6 +13305,53 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
             "type": "text", "text": "[image withheld after private credential entry]",
         }]
 
+    # Exercise the native observation -> action builder -> private result boundary.
+    # Both fresh and prefetched states must retain notices, including safe echoes.
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    notice_secret = "synthetic-private-notice-password"
+    for private in (False, True):
+        notice_refs = {"pwd:notice": notice_secret} if private else {}
+        suffix = notice_secret if private else "plain-fixture"
+        events = [f"Downloaded invoice: {suffix}"]
+        popups = [f"Dismissed confirmation: {suffix}"]
+        for prefetched in (False, True):
+            notice_dom = DOMService("ws://unused-notice-observation-fixture")
+            notice_dom.register_secret_refs(notice_refs)
+            if private:
+                notice_dom.mark_secret_used()
+            notice_state = SimpleNamespace(
+                url="https://notices.fixture.test/", title="Notice fixture",
+                dom_state=SimpleNamespace(selector_map={}, llm_representation=lambda: "Fixture body"),
+                tabs=[], recent_events=events, closed_popup_messages=popups,
+            )
+            notice_dom._session = SimpleNamespace(
+                get_browser_state_summary=AsyncMock(return_value=notice_state),
+            )
+            prefetched_state = await notice_dom.get_browser_state(include_screenshot=False) if prefetched else None
+            notice_result = await execute_action(
+                notice_dom, SimpleNamespace(record_action=AsyncMock()),
+                {"action": "read_browser_state", "params": {}},
+                secret_refs=notice_refs, write_lock_enabled=False,
+                prefetched_browser_state=prefetched_state,
+            )
+            assert notice_result["success"] is True
+            expected_events = notice_dom.model_visible_value(events)
+            expected_popups = notice_dom.model_visible_value(popups)
+            assert "Recent Events: " + expected_events[0] in notice_result["formatted_state"], (
+                "native read_browser_state lost recent event notice", private, prefetched,
+            )
+            assert "Auto-closed dialogs:" in notice_result["formatted_state"]
+            assert "  - " + expected_popups[0] in notice_result["formatted_state"], (
+                "native read_browser_state lost closed popup notice", private, prefetched,
+            )
+            assert notice_result["recent_events"] == expected_events
+            assert notice_result["closed_popups"] == expected_popups
+            if private:
+                assert notice_secret not in str(notice_result)
+                assert "{{secret:pwd:notice}}" in notice_result["formatted_state"]
+            notice_dom._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=False)
+
 
 async def test_private_browser_resume_never_falls_back_to_inline_credentials():
     """Even a tiny redaction registry needs encrypted archive storage or a hard failure."""
@@ -22360,8 +22407,63 @@ async def test_private_browser_pause_urls_use_protected_continuity():
     visible_url = raw_url.replace(secret, "{{secret:pwd:url}}")
     output_schema = {"fields": [{"name": "result", "type": "string", "description": raw_url,
                                  "minLength": 234}]}
+    screenshot = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOY234XAAPGAgJSNphuAAAAAElFTkSuQmCC'
+    trusted_ref = {"kind": "password", "id": "fixture-234-credential", "label": secret}
+
+    def validate_transport_images(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                validate_transport_images(item)
+        elif isinstance(value, list):
+            for item in value:
+                validate_transport_images(item)
+        elif isinstance(value, str) and value.startswith("data:image/png;base64,"):
+            decoded = base64.b64decode(value.split(",", 1)[1], validate=True)
+            assert decoded.startswith(b"\x89PNG\r\n\x1a\n"), "non-PNG raster reached model transport"
+
+    # Ordinary image attachments keep vision when no private value changes
+    # their bytes or envelope, including the extra-user-message transport.
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    ordinary_image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + screenshot}}
+    ordinary_messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Inspect this ordinary image."}, copy.deepcopy(ordinary_image),
+    ]}]
+    no_secret_client = _FakeRoseClient([{"actions": []}])
+    await handler._call_browser_use_with_rotation(
+        rose_client=no_secret_client, task="Inspect image", dynamic_system_context="",
+        turn_messages=copy.deepcopy(ordinary_messages), browser_state={}, action_entries=[],
+        extra_user_messages=copy.deepcopy(ordinary_messages), config=_fake_config(), user_id="u1", agent_id="a1",
+        iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None,
+        gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None,
+        dom_service=DOMService("ws://unused-no-private-image-fixture"),
+    )
+    ordinary_call = no_secret_client.calls[0]
+    validate_transport_images(ordinary_call)
+    assert ordinary_call["turn_messages"][0]["content"][1] == ordinary_image, "no-secret attachment lost vision"
+    assert ordinary_call["browser_state"]["_extra_user_messages"][0]["content"][1] == ordinary_image
     failures = []
-    for pause in ("drain", "write", "payment", "auth", "completed", "max_steps", "declined"):
+    for scenario in ("actor_before", "actor_after", "drain", "write", "payment", "auth", "completed",
+                     "max_steps", "declined", "raster_completed", "raster_max_steps"):
+        actor_resume = scenario.startswith("actor_")
+        pause = "drain" if actor_resume else scenario.removeprefix("raster_")
+        private_entry = scenario != "actor_before" and not scenario.startswith("raster_")
+        prior_messages = []
+        if actor_resume:
+            handler._append_browser_turn_messages(
+                prior_messages, unified_action={"action": "screenshot", "params": {}},
+                result={"success": True, "screenshot": screenshot}, tool_call_id="capture-234",
+            )
+            prior_messages.append({"role": "user", "content": [
+                {"type": "text", "text": secret},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + screenshot}},
+            ]})
+            handler._append_browser_turn_messages(
+                prior_messages, unified_action={"action": "click", "index": 234,
+                                                "params": {"label": secret}},
+                result={"success": True, "value": {"index": 234, "role": "user", "function": secret}},
+                tool_call_id="click-234",
+            )
         env = ActivityEnvironment()
         snapshots = []
         route_calls = []
@@ -22386,9 +22488,13 @@ async def test_private_browser_pause_urls_use_protected_continuity():
                 return self.model_visible_value({"url": raw_url, "title": "Checkout"})
 
             async def get_browser_state(self, include_screenshot=False):
-                return self.model_visible_value({"url": raw_url, "title": "Checkout", "dom_tree": "Checkout"})
+                state = self.model_visible_value({"url": raw_url, "title": "Checkout", "dom_tree": "Checkout " + secret})
+                if include_screenshot and not self.secret_values_used:
+                    state["screenshot"] = screenshot
+                return state
 
         async def persist(**kwargs):
+            validate_transport_images(kwargs["state"])
             snapshots.append(copy.deepcopy(kwargs))
             return {"browser_resume_context_ref": copy.deepcopy(archive_ref)}
 
@@ -22398,7 +22504,8 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             if pause in {"drain", "max_steps"} or resuming:
                 if pause != "max_steps":
                     env.worker_shutdown()
-                return {"success": True, "current_url": raw_url}
+                return {"success": True, "current_url": raw_url, "credential_ref": trusted_ref,
+                        "message": secret}
             if pause == "write":
                 return {"status": "needs_write_approval", "approval_type": "purchase", "question": raw_url}
             return {"status": "needs_payment_card_approval", "payment_request": {"url": raw_url}}
@@ -22411,6 +22518,22 @@ async def test_private_browser_pause_urls_use_protected_continuity():
         fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
         prefix = "domains.spawn_browser_agent_v3.handler."
         native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+        save_action = AsyncMock()
+        async def actor_transport(**kwargs):
+            validate_transport_images(kwargs)
+            return {"action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {}}
+
+        actor_client = AsyncMock(side_effect=actor_transport)
+        judge = AsyncMock(return_value={"score": 1.0, "structured_response": {"url": raw_url}, "usage": {}})
+        from domains.spawn_browser_agent_v3 import service as browser_service
+
+        async def verifier_context(**kwargs):
+            context = await browser_service.build_browser_verifier_context(**kwargs)
+            context.insert(0, {"role": "USER", "text": secret, "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + screenshot}},
+            ]})
+            return context
+
         patches = [
             patch(prefix + "poll_new_messages", AsyncMock(return_value=[native_start])),
             patch(prefix + "load_config", return_value=_fake_config()),
@@ -22418,10 +22541,11 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             patch(prefix + "fetch_recent_otps", AsyncMock(return_value=[])),
             patch(prefix + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
             patch(prefix + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
-            patch(prefix + "_call_browser_use_with_rotation", AsyncMock(return_value={
-                "action": {"action": action, "params": {}}, "usage": {},
+            patch(prefix + "_call_browser_use_with_rotation", handler._call_browser_use_with_rotation if actor_resume else AsyncMock(return_value={
+                "action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {},
                 "_fast_cache_browser_target": private_target,
             })),
+            patch(prefix + "BrowserStreamingRoseClient.complete_browser_use", actor_client),
             patch(prefix + "execute_action", execute),
             patch(prefix + "_generate_write_lock_notification", AsyncMock(return_value={"question": raw_url, "notification": {"service": {"url": raw_url}}})),
             patch(prefix + "create_user_auth_assistance_request", auth_request),
@@ -22430,7 +22554,7 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             patch(prefix + "disconnect_browser_after_passkey_capture", AsyncMock()),
             patch(prefix + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
             patch(prefix + "close_browser_session", AsyncMock()),
-            patch(prefix + "save_browser_action_message", AsyncMock()),
+            patch(prefix + "save_browser_action_message", save_action),
             patch(prefix + "save_browser_assistant_message", AsyncMock()),
             patch(prefix + "persist_resume_context", persist),
             patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
@@ -22439,10 +22563,9 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
             patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))),
             patch(prefix + "live_tab_looks_challenged", AsyncMock(return_value=False)),
-            patch(prefix + "build_browser_verifier_context", AsyncMock(return_value=[])),
-            patch(prefix + "call_temporal_activity_from_activity", AsyncMock(return_value={
-                "score": 1.0, "structured_response": {"url": raw_url}, "usage": {},
-            })),
+            patch(prefix + "build_browser_verifier_context", verifier_context),
+            patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
+            patch(prefix + "call_temporal_activity_from_activity", judge),
         ]
         if pause == "max_steps":
             # Exercise the native terminal branch with a single fixture step.
@@ -22456,8 +22579,15 @@ async def test_private_browser_pause_urls_use_protected_continuity():
                 output_schema=copy.deepcopy(output_schema),
                 start_url=start_url, write_lock_resume_state={
                     "approval_type": handler.AUTH_ASSISTANCE_DECLINED if pause == "declined" else "manual_pause",
-                    "secret_redaction_refs": {"pwd:url": secret, "card_cvv": "234"},
-                    "secret_values_used": True,
+                    "secret_redaction_refs": {
+                        "pwd:url": secret, "card_cvv": "234", "pwd:image-token": "image_url",
+                        "pwd:content-token": "content", "pwd:metadata-token": "metadata",
+                        "pwd:user-token": "user", "pwd:assistant-token": "assistant",
+                        "pwd:tool-token": "tool", "pwd:function-token": "function", "pwd:name-token": "name",
+                        "pwd:upper-user-token": "USER", "pwd:upper-tool-token": "TOOL",
+                    },
+                    "secret_values_used": private_entry,
+                    "browser_turn_messages": copy.deepcopy(prior_messages),
                 },
             )
             if pause == "write" and snapshots[-1]["state"].get("private_browser_runtime"):
@@ -22535,6 +22665,63 @@ async def test_private_browser_pause_urls_use_protected_continuity():
                     "payment": "awaiting_payment_card_approval", "auth": "awaiting_auth_assistance",
                     "completed": "completed", "max_steps": "max_iterations", "declined": "completed"}[pause]
         assert result["status"] == expected
+        if actor_resume:
+            assert actor_client.await_count == 1, "resumed actor did not reach the actual model boundary"
+            actor_history = actor_client.await_args.kwargs["turn_messages"]
+            durable_history = snapshots[-1]["state"]["browser_turn_messages"]
+            for messages in (actor_history, durable_history):
+                validate_transport_images(messages)
+                assert secret not in str(messages)
+                assert [message["role"] for message in messages[:6]] == [
+                    "assistant", "tool", "user", "user", "assistant", "tool",
+                ], "native transcript roles were credential-masked"
+                call = messages[4]["tool_calls"][0]
+                assert call["id"] == "click-234" and call["type"] == "function"
+                assert call["function"]["name"] == "click"
+                assert json.loads(call["function"]["arguments"]) == {
+                    "index": 234, "label": "{{secret:pwd:url}}",
+                }
+                assert messages[5]["name"] == "click" and messages[5]["tool_call_id"] == "click-234"
+                assert json.loads(messages[5]["content"])["value"] == {
+                    "index": "{{secret:card_cvv}}", "role": "{{secret:pwd:user-token}}",
+                    "{{secret:pwd:function-token}}": "{{secret:pwd:url}}",
+                }, "page-controlled protocol-looking values bypassed redaction"
+                if private_entry:
+                    assert "data:image" not in str(messages), "private-entry resume exposed historical raster"
+                else:
+                    actual_url = messages[2]["content"][1]["image_url"]["url"]
+                    assert actual_url == "data:image/png;base64," + screenshot, "resumed screenshot transport was text-masked"
+                    assert base64.b64decode(actual_url.split(",", 1)[1], validate=True) == base64.b64decode(screenshot)
+                    # A text-masked base64 payload is invalid provider input.
+                    # Untrusted media uses the native omission block instead.
+                    assert messages[3]["content"][1] == {
+                        "type": "text", "text": "[image omitted from Temporal resume]",
+                    }
+        if pause in {"drain", "max_steps"}:
+            action_saves = [call.kwargs for call in save_action.await_args_list if call.kwargs.get("auxiliary")]
+            assert action_saves
+            for saved in action_saves:
+                assert saved["auxiliary"]["coordinates"] == {"x": 234, "y": 234}
+            finished = [saved for saved in action_saves if saved.get("extra_metadata")]
+            assert finished and finished[-1]["extra_metadata"]["credential_ref"] == {
+                **trusted_ref, "label": "{{secret:pwd:url}}",
+            }
+            assert finished[-1]["message"] == "{{secret:pwd:url}}"
+        if pause in {"completed", "max_steps"}:
+            assert judge.await_count == 1
+            context = judge.await_args.kwargs["args"][0]
+            validate_transport_images(context)
+            assert context[0]["role"] == "USER" and context[-1]["role"] == "TOOL"
+            final_frame = context[-1]["metadata"]
+            if private_entry:
+                assert "screenshot_b64" not in final_frame
+                assert "data:image" not in str(context)
+            else:
+                assert final_frame["screenshot_b64"] == screenshot, "trusted final verifier raster was text-masked"
+                assert context[0]["content"][0] == {
+                    "type": "text", "text": "[image omitted from Temporal resume]",
+                }, "untrusted verifier media reached the provider"
+            assert secret not in str(context)
         if pause in {"completed", "max_steps"}:
             assert result["browser_output_schema"]["fields"][0] == {
                 **output_schema["fields"][0], "description": visible_url,

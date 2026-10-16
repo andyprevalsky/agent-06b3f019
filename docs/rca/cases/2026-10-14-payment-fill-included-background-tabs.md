@@ -392,6 +392,72 @@ applicable gates. The earlier fourteen passing benchmarks and published
 recordings prove their frozen checkpoint, not this later repair. Payment-flow
 success alone does not establish privacy at activity and approval boundaries.
 
+## Fresh deployment stabilization and resumed screenshot transport
+
+The fresh deployment's first review, on
+`e31330bd77ff8e0c3ad900c2b94d69114188de3e`, found three additional defects:
+rebuilding a DOM observation dropped recent-event and closed-popup notices;
+generic redaction changed trusted saved credential identifiers and cursor
+coordinates; and both verifier boundaries text-masked PNG base64. Review:
+[5541680195](https://github.com/Rose-Ai-Labs/rose/pull/1518#pullrequestreview-5541680195).
+The existing registered notice and full-activity cases were extended rather
+than replaced. Original assertions and registrations remain intact.
+
+The same checkpoint's canonical local campaign independently exposed an
+actor-resume variant. `agent-payment-new-user-journey`, root
+`bb1bb49d-26b0-44c8-9d1d-7ca9caefcac3`, failed after its subscription gate and
+payment approval resolved. The first resumed actor request contained a prior
+screenshot whose base64 had acquired two `{{secret:card_cvv}}` replacements.
+The original PNG decoded to 100,209 bytes; the resumed payload failed strict
+base64 decoding. Foundry and both OpenRouter fallback legs returned HTTP 400.
+After five failed model requests the browser stopped; a replacement browser
+requested another approval, violating the task's expected gate sequence.
+The provider status codes alone were not used to attribute an outage. The
+[failed native run](https://www.roselabs.ai/?agent-id=bb1bb49d-26b0-44c8-9d1d-7ca9caefcac3#benchmark-share=e92f8964-d7af-487b-8a57-ddebe9f7829c.1794705105.d10d660b5d28b7f882ab55f1b845ffd5dc456509597ab00be0ff00804c4a8d46)
+was published and verified in a fresh browser with its native failure retained.
+
+The upstream owned boundary was whole-transcript text redaction after private
+bindings were hydrated. The same mistake also affected continuation
+serialization. Earlier screenshot tests exercised action-result redaction,
+leaving the resumed actor transcript path uncovered. The extended existing
+`test_private_browser_pause_urls_use_protected_continuity` reaches the real
+activity and `_call_browser_use_with_rotation`, mocking only model transport.
+With its unchanged checked-in case and the exact frozen reviewed handler,
+the local reduction failed with `resumed screenshot transport was text-masked`
+in 0.671307 seconds. The initial repair passed that same method in 1.931278
+seconds. Isolated hydration, continuation, verifier and saved-metadata reverts
+each fail the corresponding assertion. These are causal regression results,
+not a claim that the complete benchmark is repaired.
+
+Exact owning-case command from the isolated deployment worktree:
+
+```bash
+agents/venv/bin/python .context/review-handler-repairs/run-checked.py baseline-handler.py
+agents/venv/bin/python .context/review-handler-repairs/run-checked.py
+```
+
+The repair preserves only native screenshot transport linked to its actual
+screenshot call and result, and the verifier builder's matching final image.
+Text and arbitrary page-provided media remain subject to redaction; all media
+remains withheld after private entry. A further independent check identified
+structural-token collisions, such as an unused password equal to `image_url`.
+The same owning case now covers these typed-envelope mechanics, native message
+roles and prior tool-call targets. A strict validator at the model and durable
+continuation boundaries also exposed a newly added fixture that had expected
+a placeholder inside malformed base64. That expectation was replaced with
+valid transport or native media omission, retaining the original privacy and
+activity assertions. The identical final case rejects the pre-transport repair
+with the base64 error and five native retries (8.711180 seconds), and passes
+after repair. A separate control preserves ordinary images when no private
+redaction applies. Full benchmark outcome verification remains pending.
+
+The failed local campaign remains 12 passed / 1 failed actual tasks, with the
+shared-cache canary never launched after smoke aborted. Its four sandbox card
+tasks passed; this does not qualify the later repair. The exact unchanged
+new-user journey and complete fresh deployment gates still require a passing
+post-repair run. The separate auth-decline override and unresolved original
+merchant/authentication observations remain open.
+
 ## Reusable lesson
 
 Keep private credential resolution independent of the agent's tool and target choice. A credential reference must never trigger unrequested field selection, additional writes, or fabricated progress. Redact every downstream model boundary, including observations and fatal failures.

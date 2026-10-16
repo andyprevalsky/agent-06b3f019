@@ -941,6 +941,8 @@ def _browser_state_action_result(state: Dict[str, Any]) -> Dict[str, Any]:
         "page_stats": state.get("page_stats"),
         "tabs": state.get("tabs"),
         "dom_tree": state.get("dom_tree", ""),
+        "recent_events": state.get("recent_events"),
+        "closed_popups": state.get("closed_popups"),
     }
 
 
