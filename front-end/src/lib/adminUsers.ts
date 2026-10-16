@@ -170,8 +170,9 @@ export async function requestAccountSwitch(userId: string): Promise<AdminAccount
  * query string is dropped because deep links (?agent-id=…) belong to the account
  * we just left.
  */
-function reloadAsNewIdentity(): void {
-  window.location.replace(`${window.location.origin}${window.location.pathname}`);
+function reloadAsNewIdentity(agentId?: string): void {
+  const query = agentId === undefined ? '' : `?${new URLSearchParams({ 'agent-id': agentId })}`;
+  window.location.replace(`${window.location.origin}${window.location.pathname}${query}`);
 }
 
 /**
@@ -181,10 +182,10 @@ function reloadAsNewIdentity(): void {
  * Shared by the always-on switcher and the admin Users page — it lives here
  * rather than in either feature because features may not import each other.
  */
-export async function switchToAccount(userId: string): Promise<void> {
+export async function switchToAccount(userId: string, agentId?: string): Promise<void> {
   const { account, session } = await requestAccountSwitch(userId);
   beginImpersonation(account, session);
-  reloadAsNewIdentity();
+  reloadAsNewIdentity(agentId);
 }
 
 /**

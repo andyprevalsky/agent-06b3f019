@@ -8,6 +8,7 @@
  *   AGENT_SELECTED + READY   → show message list, query input, browser status
  *
  * INPUT ROUTING:
+ *   inspectionContext !== null → show account switch notice; no mutation controls
  *   pendingApproval === null  → show QueryInput
  *   pendingApproval !== null  → replace QueryInput with ApprovalChip
  *
@@ -46,6 +47,7 @@ import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { PopularGoalsCarousel } from './PopularGoalsCarousel';
 import { composerCanSubmit } from './composerCanSubmit';
 import { TerminalLegalFooter } from './TerminalLegalFooter';
+import { InspectionActionNotice } from './InspectionActionNotice';
 
 interface AgentChatAreaProps {
   agents: AgentSlice;
@@ -114,7 +116,9 @@ export function AgentChatArea({
         </Suspense>
       )}
 
-      {sharedView ? (
+      {a.inspectionContext ? (
+        <InspectionActionNotice context={a.inspectionContext} agentId={a.selectedAgentId} />
+      ) : sharedView ? (
         <SharedRecordingNotice />
       ) : (
         <InputArea

@@ -1,0 +1,70 @@
+---
+id: 2026-10-14-approval-consent-and-card-reuse-used-different-identities
+date: 2026-10-14
+title: Payment retries reused a held card while requesting approval again for equivalent receipts
+surface: cross
+component: purchases / spawn-browser-agent-v3
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: purchase lookup matched only model-written receipt fingerprints and the browser manager always opened payment approval even for reusable purchases
+symptoms:
+  - "requested approval twice for the same semantic thing"
+  - "Browser payment purchase lookup finished reusable=false"
+  - "already-approved same-agent retry must not request approval again"
+  - "captured semantic retry must reuse prior approval before prompting"
+tags:
+  - approval
+  - payment
+  - consent
+  - receipt-identity
+sources:
+  - agent 389d96c6-4c8b-4729-a201-bbc73499f662
+  - commit b784977b0bf699c56bc67b063ae849a9cf5150fb
+  - plan:docs/plans/completed/agentcard-integration.md
+repro: back-end/src/tests/blackbox/purchases-agent-cart-reuse.blackbox.ts and agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
+status: open
+---
+
+## Problem
+
+The $500 ChatGPT Pro monthly purchase requested approval at 05:34:06 UTC, received approval at 15:35:24, then requested another approval at 16:13:35 and received it at 16:30:39 on October 14. The first receipt says `ChatGPT Pro 500 (Max usage) - Monthly subscription, renews monthly` and links to `/pricing`; the retry says `ChatGPT Pro - Max usage (Pro 500) - Monthly subscription, $500/month` and links to `/#pricing`. Both are USD 50000 cents, one item, no tax. Their fingerprints differ (`942e6fe9…` versus `4652b2e2…`). Retained worker logs show the second lookup was not reusable. Both card-ready messages report the same last four, and the database has one PurchaseSpend row under the first key. The production card is the shared static company card; deletion later voided the row. No production approval, charge, restoration, or agent execution was performed by this investigation.
+
+## Diagnosis
+
+Critical path: browser receipt extraction -> normalization/fingerprint -> backend lookup -> workflow approval -> mint reuse -> resumed checkout. Lookup only searched the text-derived fingerprint; mint had a same-agent economic-cart fallback. The manager additionally requested approval unconditionally, including exact reusable lookup hits. This made approval and financial reuse separate identities. Two local owning-boundary assertions failed before the change: `captured semantic retry must reuse prior approval before prompting` and `already-approved same-agent retry must not request approval again`.
+
+Archive searches: `Failed to respond to attention request`, `same approval repeat retries website phone write lock`, `payment fingerprint approval display drift held purchase`, and `same agent cart identity model written text approval`. The October 2 model-written-cart-identity case is a relative, not a recurrence of its mint-time defect: its one-purchase guard held here, but explicitly excluded consent reuse. Its rejection of price-only consent remains applicable.
+
+Deepest owned class: consent reuse and purchase admission do not share an explicit authorization decision. The prompt abstraction climb stopped at material equivalence of captured purchase receipts plus scoped authorization. The next broader class, automatic semantic reuse of every permission/tool gate, was rejected because different gate owners define incompatible materiality, duration and authority; one purchase comparator cannot establish those contracts. A deterministic vendor-product identifier would avoid a classifier, but neither captured receipt provides a stable identifier shared across the two links. Additional name/URL regexes would preserve the original free-text identity defect.
+
+## Solution
+
+Local draft; deployment remains pending. Scoped POST lookup recomputes the fingerprint server-side, validates the requesting owner/agent, and on a miss considers at most 20 same-agent HELD rows from the existing 24-hour window with equal merchant/currency/economic structure. One separate Rose comparison checks full observed product and subscription terms. Its input retains complete product names, URLs, item prices/quantities and fee obligations; it excludes images, review metadata and internal user/agent/fingerprint fields. Material details stated on either side must agree, while details absent on both sides are not invented requirements. Price matching alone never grants consent. Unknown ids, malformed output and provider errors do not grant approval. The workflow skips a new request only for its own available HELD purchase and preserves a separately parked approval wait. The browser approval integration is one short-circuit call to the payment utility immediately before its existing approval call; the semantic matcher remains isolated behind purchase lookup.
+
+Skipped approval sends `reusePurchaseId` to mint. The reuse-only branch binds the original id, owner, agent, key, merchant, total and age, rechecks provider availability, and cannot fall through to new purchase funding. A closed-card race raises `purchase_approval_required` and leaves one purchase row. Native single-use cards with insufficient positive balance do not qualify. The production shared static card does not prove per-purchase bank spending; this patch does not claim otherwise. Account/recipient dimensions absent from captured receipts are not proven by comparison; reuse is scoped to the same agent and observed receipt terms, not arbitrary future purchases.
+
+Classifier success and handled failures preserve actual-model/input/output/cache usage through the existing activity -> EventType.USAGE -> workflow accounting path. Errors are surfaced after usage, with no approval or mint. Lost HTTP responses and providers that emit no usage remain transport-observability limits.
+
+Executed commands:
+
+- `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria DIRECT_URL=postgresql://postgres:postgres@localhost:5432/victoria node --import tsx back-end/src/tests/blackbox/purchases-agent-cart-reuse.blackbox.ts`: pre-fix exit 1, captured retry assertion; post-fix exit 0, same assertion plus negative/expiry/owner/provider/reuse-only/error-accounting controls. Initial owning replay was under one second.
+- From `agents/`, `source venv/bin/activate` then `python scripts/run_blackbox_tests.py request-payment-card spawn-browser-agent-v3`: both owning domains passed in 50.0 seconds after the draft; the manager reproduction previously failed its no-second-prompt assertion. Running this suite from the repo root produces false relative-path failures; the recorded valid run uses its documented cwd.
+- Initial actual `createApprovedPurchaseSelector(createStreamingCompletion)` replay of the unchanged captured receipts selected the original id on qwen-3.8-27b in 1094 ms; an equal-price annual-billing control returned null in 391 ms. Both dumped finish_reason=stop. The initial new 200-token configuration produced no output. Subsequent adversarial order tests demonstrated finish_reason=length with no decision at 1024; the proposed new-call budget is now 2048 tokens, retaining the 60-second classifier / 85-second HTTP / 90-second activity bounds. No benchmark deadline or expected label changed.
+- October 15 context regression: the same owning test rejected the previous staged selector with `large image metadata must not consume semantic approval context` and passed after projection (0.61/0.70 seconds). The first frozen five examples used 4577 input tokens before and 2598 after (43.2% reduction); serialized message characters fell from 21741 to 8081 (62.8%). Those percentages describe this batch, not all production traffic.
+- October 15 semantic corpus: 25 frozen examples in batches of five, including ten independently authored before prompt iteration. An initial basic batch passed; harder product-identity inputs exhausted 1024 tokens; the first revision unnecessarily demanded service dates absent from both receipts and exhausted its budget on a positive multi-candidate case. A general missing-detail rule corrected that ambiguity. The next independently authored five passed on first exposure. Subsequent reversed-order repetition exposed another 1024-token exhaustion, so only the new call's output ceiling changed to 2048. All earlier reports are retained as errors, not relabeled false decisions.
+- Final comparator source SHA256 `f29947bb2605de91e7112e0ed2bde0a8650d0462d3fde9d25c3444ca7c1c0bf4`: each batch ran three times (original order, reversed candidate/item order, opaque candidate ids), five concurrent calls at most. Final result: 24 true positives, 51 true negatives, zero false approvals, zero false rejections and zero errors across 75 live calls on qwen-3.8-27b; p50 616 ms, p95 1648 ms. Grading controls deliberately verify FP/FN and wrong-candidate detection. No live false decision was observed in earlier attempts; the three earlier failures were no-output errors. Labels, test rationales and batch metadata are never included in comparator context. These sampled results do not establish universal semantic accuracy.
+- Replay one frozen live batch with `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria DIRECT_URL=postgresql://postgres:postgres@localhost:5432/victoria APPROVAL_REUSE_BENCH_BATCH=1 APPROVAL_REUSE_BENCH_REPEAT=3 node --import tsx back-end/src/tests/blackbox/purchases-agent-cart-reuse.blackbox.ts`; batch numbers 1–5 each select exactly five cases. The ordinary owning suite remains offline and always checks context bounds, material field preservation and confusion-matrix calibration. The larger live corpus is opt-in through that existing owning entrypoint, not an automatic live deploy gate. Inputs and result summary are committed with the regression fixtures; detailed native reports/dumps remain in `.context/approval-reuse-*` and `.llm-dumps/approval-benchmark-*`.
+
+Permanent backend discovery uses `back-end/src/tests/blackbox/run.ts` .blackbox.ts enumeration; permanent agent discovery uses `agents/scripts/run_blackbox_tests.py`. Deploy runs their full coverage gates. Golden references inspected: `codex/codex-rs/core/src/tools/network_approval.rs:670` checks scoped approved state before prompting and `:906` commits session approval; `hermes-agent/tools/approval_gateway_wait.py:105` distinguishes shared/session consent from approve-once. Rose converges on explicit scoped state, with additional receipt comparison because purchase labels are model-written.
+
+At 10k agents, new candidate reads and state are per-agent, bounded to 20 rows, with no global approval cache, polling loop or shared hot authorization row. Each eligible miss can add one logical classifier call per activity attempt, plus existing provider routing. No 10k capacity or latency campaign was run; input volume, provider quotas and transport retries remain operational limits. Existing lazy legacy fingerprint indexing is unchanged.
+
+Adversarial review identified and closed fresh-funding fallthrough, client-key binding and handled-error usage loss before the approval handoff. Full deploy gates and rollout are not claimed complete.
+
+## Human feedback
+
+The user said the first approval should authorize future attempts at the same semantic action. The user also reported phone website error toasts and asked to continue. On October 15 the user accepted the two-stage matching approach and requested efficient context plus adversarial iterations in batches of five without overfitting. On October 16 the user explicitly rejected further approval requests for the entirely new comparator's configuration and asked for minimal existing-harness changes, with one insertion. That instruction authorizes routine tuning of this new component and takes precedence over the repository's generic prompt approval rule; it does not authorize unrelated edits to existing harness prompts. The browser integration was reduced to one reuse helper before the original approval call, retaining existing transport and usage accounting.
+
+## Reusable lesson
+
+Reuse explicit scoped purchase consent before prompting, and bind every skipped prompt to a reuse-only financial operation that cannot admit fresh funding.

@@ -19,7 +19,12 @@ import { useCallback, useState } from 'react';
 import { Check, Loader2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { respondToAttentionRequest, rejectAttentionRequest, useToast } from '../../hooks';
+import {
+  respondToAttentionRequest,
+  rejectAttentionRequest,
+  useToast,
+  useAgentContext,
+} from '../../hooks';
 
 interface BrowserWriteLockApprovalProps {
   attentionRequestId: string;
@@ -96,7 +101,11 @@ function useApprovalActions(
       onApprovalHandled?.();
     } catch (error) {
       console.error('Failed to accept:', error);
-      toast({ title: 'Error', description: 'Failed to approve action', variant: 'destructive' });
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to approve action',
+        variant: 'destructive',
+      });
     } finally {
       setActionState(null);
     }
@@ -133,6 +142,7 @@ export function BrowserWriteLockApproval({
   question,
   onApprovalHandled,
 }: BrowserWriteLockApprovalProps) {
+  const { inspectionContext } = useAgentContext();
   const [contextInput, setContextInput] = useState('');
   const resetInput = useCallback(() => setContextInput(''), []);
   const { actionState, onAccept, onReject } = useApprovalActions(
@@ -142,6 +152,9 @@ export function BrowserWriteLockApproval({
     onApprovalHandled,
   );
   const disabled = actionState !== null;
+  if (inspectionContext !== null) {
+    return <p className="p-4 text-sm">Switch to this agent’s account to approve its request.</p>;
+  }
 
   return (
     <div className="p-3">

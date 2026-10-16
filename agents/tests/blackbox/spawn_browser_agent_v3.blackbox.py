@@ -23407,6 +23407,8 @@ async def _drive_payment_card_gate(
     reject_gate=False,
     agentcard_connected=True,
     checkout_error=None,
+    lookup_result=None,
+    approval_calls=None,
 ):
     """Drive execute_tool through the payment-card gate branch.
 
@@ -23472,7 +23474,7 @@ async def _drive_payment_card_gate(
             activity_name if isinstance(activity_name, str) else getattr(activity_name, "__name__", "callable")
         )
         if activity_name == "lookup_purchase_activity":
-            return {"found": False, "reusable": False, "purchase": None}
+            return lookup_result or {"found": False, "reusable": False, "purchase": None}
         if activity_name == "mint_purchase_card_activity":
             return _next_mint()
         if activity_name == "agentcard_status_activity":
@@ -23486,6 +23488,8 @@ async def _drive_payment_card_gate(
         raise AssertionError(f"unexpected activity: {activity_name}")
 
     async def fake_request_user_approval_direct(*_args, **_kwargs):
+        if approval_calls is not None:
+            approval_calls.append(_kwargs)
         return {"attention_request_id": "approval-1"}
 
     async def fake_request_user_attention_direct(*_args, **kwargs):
@@ -23539,6 +23543,35 @@ async def _drive_payment_card_gate(
         ):
             events.append(event)
     return events, activity_calls, gate_keys, gate_payloads
+
+async def test_manager_payment_retry_reuses_approved_purchase_without_prompt():
+    approval_calls = []
+    events, calls, _, _ = await _drive_payment_card_gate(
+        mint_results=[{"cardId": "held-card", "pan": "4242424242421372", "expiry": "12/30", "cvv": "123", "last4": "1372"}],
+        lookup_result={"found": True, "reusable": True, "purchase": {
+            "id": "approved-purchase", "agentId": "agent-1", "status": "HELD", "fingerprint": "approved-key", "cardId": "held-card"
+        }},
+        approval_calls=approval_calls,
+    )
+    assert approval_calls == [], "already-approved same-agent retry must not request approval again"
+    assert calls == ["lookup_purchase_activity", "mint_purchase_card_activity"]
+    assert any(getattr(e, "title", "") == "Payment card ready" for e in events)
+
+async def test_manager_payment_lookup_error_tracks_usage_without_approving():
+    from tools.base import EventType, MessageStatus
+    approvals = []
+    events, calls, _, _ = await _drive_payment_card_gate(
+        mint_results=[], approval_calls=approvals,
+        lookup_result={"error": "Invalid purchase approval reuse decision", "usageItems": [
+            {"type": "llm", "model": "fixture-model", "input_tokens": 37, "output_tokens": 11}
+        ]},
+    )
+    assert approvals == [] and calls == ["lookup_purchase_activity"]
+    usage = [e for e in events if e.type == EventType.USAGE]
+    assert len(usage) == 1
+    assert usage[0].data["usage"]["llm"][0]["tokens_in"] == 37
+    assert usage[0].data["usage"]["llm"][0]["tokens_out"] == 11
+    assert any(e.status == MessageStatus.ERROR for e in events)
 
 async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries():
     events, activity_calls, _, _ = await _drive_payment_card_gate(
@@ -26319,6 +26352,8 @@ async def run_all_tests():
     # service_actions statics
     r.record("get_domain_from_url", test_get_domain_from_url_variants)
     r.record("get_base_domain", test_get_base_domain)
+    await r.record_async("manager_payment_retry_reuses_approved_purchase_without_prompt", test_manager_payment_retry_reuses_approved_purchase_without_prompt)
+    await r.record_async("manager_payment_lookup_error_tracks_usage_without_approving", test_manager_payment_lookup_error_tracks_usage_without_approving)
     r.record("is_approval_valid_none", test_is_approval_valid_no_approvals)
     r.record("is_approval_valid_missing_fields", test_is_approval_valid_missing_fields)
     r.record("is_approval_valid_domain_mismatch", test_is_approval_valid_domain_mismatch)

@@ -1,0 +1,278 @@
+{
+  "scope": "Live comparator evaluation only; no purchases, approvals, browser execution or deployment",
+  "productionSourceSha256": "f29947bb2605de91e7112e0ed2bde0a8650d0462d3fde9d25c3444ca7c1c0bf4",
+  "fixturesFileSha256": "4b447d067647706aaa80f734fecdfa1376348cd504d23c8c51380d77019aa1f2",
+  "frozenIndependentBatchesFileSha256": "da781e23d62f4ccc6626d0fc3da75feb0c4e97404ab27d3da85bc9c8be77cf5d",
+  "examples": 25,
+  "batchSize": 5,
+  "maxConcurrentCalls": 5,
+  "repetitions": [
+    "original order",
+    "reversed candidate/item order",
+    "opaque candidate ids plus reversed order"
+  ],
+  "finalCounts": {
+    "TP": 24,
+    "TN": 51,
+    "FP": 0,
+    "FN": 0,
+    "ERROR": 0
+  },
+  "allAttemptCounts": {
+    "TP": 42,
+    "TN": 105,
+    "FP": 0,
+    "FN": 0,
+    "ERROR": 3
+  },
+  "finalLatencyMs": {
+    "mean": 715.79,
+    "p50": 616,
+    "p95": 1648,
+    "p99": 1831
+  },
+  "contextComparisonBatch1": {
+    "beforeInputTokens": 4577,
+    "afterInputTokens": 2598,
+    "inputTokenReductionPercent": 43.24,
+    "beforeMessageChars": 21741,
+    "afterMessageChars": 8081,
+    "messageCharReductionPercent": 62.83
+  },
+  "limits": [
+    "Sampled semantic accuracy only; no universal safety or 10k throughput proof",
+    "Three earlier no-output errors retained separately from FP/FN",
+    "The first unseen batch3 pass was at1024; final repetitions use2048",
+    "Live corpus is opt-in; offline regression and grading controls run with owning blackbox gate",
+    "No expected labels, rationales or batch metadata enter model context",
+    "Individual raw reports and native dumps remain private local evidence; metered costs unavailable"
+  ],
+  "history": [
+    {
+      "artifact": "approval-reuse-batch1-baseline.json",
+      "startedAt": "2026-10-15T21:42:59.636Z",
+      "finishedAt": "2026-10-15T21:43:00.634Z",
+      "batch": 1,
+      "repeat": 1,
+      "sourceSha256": "26f7c6f958e6702df31cbf47514a11fb7eafb0b03bc9f2555cf9b0d7f0dd7e62",
+      "casesSha256": "87da6581d019bef3fcbcb4f17a95789ca6ddea517a1062afd71079efd4cd2e49",
+      "counts": {
+        "TP": 2,
+        "TN": 3,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch4-baseline.json",
+      "startedAt": "2026-10-15T21:43:43.116Z",
+      "finishedAt": "2026-10-15T21:43:44.407Z",
+      "batch": 4,
+      "repeat": 1,
+      "sourceSha256": "26f7c6f958e6702df31cbf47514a11fb7eafb0b03bc9f2555cf9b0d7f0dd7e62",
+      "casesSha256": "90f081abe2e08bf15f78ade25b0b80f1fd8dde106eef13190ef6e06f9e1e6d5f",
+      "counts": {
+        "TP": 0,
+        "TN": 4,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 1
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch4-v1.json",
+      "startedAt": "2026-10-15T21:44:16.498Z",
+      "finishedAt": "2026-10-15T21:44:19.247Z",
+      "batch": 4,
+      "repeat": 1,
+      "sourceSha256": "66409fb3be329824c9819d7ce45e202fddfaa74bd58bf5273f76f9b2fee8cf54",
+      "casesSha256": "90f081abe2e08bf15f78ade25b0b80f1fd8dde106eef13190ef6e06f9e1e6d5f",
+      "counts": {
+        "TP": 0,
+        "TN": 5,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch2-v1.json",
+      "startedAt": "2026-10-15T21:44:28.223Z",
+      "finishedAt": "2026-10-15T21:44:30.986Z",
+      "batch": 2,
+      "repeat": 1,
+      "sourceSha256": "66409fb3be329824c9819d7ce45e202fddfaa74bd58bf5273f76f9b2fee8cf54",
+      "casesSha256": "92513e1424d4cde6aeb1cc8a26e9d820d9b58c0c5a995c0d2a4f8d3e8fa4914c",
+      "counts": {
+        "TP": 1,
+        "TN": 3,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 1
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch2-v2.json",
+      "startedAt": "2026-10-15T21:45:40.404Z",
+      "finishedAt": "2026-10-15T21:45:41.289Z",
+      "batch": 2,
+      "repeat": 1,
+      "sourceSha256": "d1883202ba8b26fa4279fcd0e4e0844136789028d9012f79af84dfc542689bf0",
+      "casesSha256": "92513e1424d4cde6aeb1cc8a26e9d820d9b58c0c5a995c0d2a4f8d3e8fa4914c",
+      "counts": {
+        "TP": 2,
+        "TN": 3,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch3-v2.json",
+      "startedAt": "2026-10-15T21:45:50.327Z",
+      "finishedAt": "2026-10-15T21:45:51.123Z",
+      "batch": 3,
+      "repeat": 1,
+      "sourceSha256": "d1883202ba8b26fa4279fcd0e4e0844136789028d9012f79af84dfc542689bf0",
+      "casesSha256": "9df6afe3b7832ef05d4262a58d4e820366f8f773bf374e5ed776e9c4fcd87447",
+      "counts": {
+        "TP": 2,
+        "TN": 3,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch1-final.json",
+      "startedAt": "2026-10-15T21:47:14.277Z",
+      "finishedAt": "2026-10-15T21:47:17.404Z",
+      "batch": 1,
+      "repeat": 3,
+      "sourceSha256": "d1883202ba8b26fa4279fcd0e4e0844136789028d9012f79af84dfc542689bf0",
+      "casesSha256": "87da6581d019bef3fcbcb4f17a95789ca6ddea517a1062afd71079efd4cd2e49",
+      "counts": {
+        "TP": 6,
+        "TN": 9,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch4-final.json",
+      "startedAt": "2026-10-15T21:47:17.984Z",
+      "finishedAt": "2026-10-15T21:47:20.713Z",
+      "batch": 4,
+      "repeat": 3,
+      "sourceSha256": "d1883202ba8b26fa4279fcd0e4e0844136789028d9012f79af84dfc542689bf0",
+      "casesSha256": "90f081abe2e08bf15f78ade25b0b80f1fd8dde106eef13190ef6e06f9e1e6d5f",
+      "counts": {
+        "TP": 0,
+        "TN": 15,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch2-final.json",
+      "startedAt": "2026-10-15T21:47:21.302Z",
+      "finishedAt": "2026-10-15T21:47:24.287Z",
+      "batch": 2,
+      "repeat": 3,
+      "sourceSha256": "d1883202ba8b26fa4279fcd0e4e0844136789028d9012f79af84dfc542689bf0",
+      "casesSha256": "92513e1424d4cde6aeb1cc8a26e9d820d9b58c0c5a995c0d2a4f8d3e8fa4914c",
+      "counts": {
+        "TP": 5,
+        "TN": 9,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 1
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch1-v3-final.json",
+      "startedAt": "2026-10-15T21:48:08.609Z",
+      "finishedAt": "2026-10-15T21:48:11.322Z",
+      "batch": 1,
+      "repeat": 3,
+      "sourceSha256": "f29947bb2605de91e7112e0ed2bde0a8650d0462d3fde9d25c3444ca7c1c0bf4",
+      "casesSha256": "87da6581d019bef3fcbcb4f17a95789ca6ddea517a1062afd71079efd4cd2e49",
+      "counts": {
+        "TP": 6,
+        "TN": 9,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch4-v3-final.json",
+      "startedAt": "2026-10-15T21:48:11.897Z",
+      "finishedAt": "2026-10-15T21:48:13.688Z",
+      "batch": 4,
+      "repeat": 3,
+      "sourceSha256": "f29947bb2605de91e7112e0ed2bde0a8650d0462d3fde9d25c3444ca7c1c0bf4",
+      "casesSha256": "90f081abe2e08bf15f78ade25b0b80f1fd8dde106eef13190ef6e06f9e1e6d5f",
+      "counts": {
+        "TP": 0,
+        "TN": 15,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch2-v3-final.json",
+      "startedAt": "2026-10-15T21:48:14.278Z",
+      "finishedAt": "2026-10-15T21:48:17.385Z",
+      "batch": 2,
+      "repeat": 3,
+      "sourceSha256": "f29947bb2605de91e7112e0ed2bde0a8650d0462d3fde9d25c3444ca7c1c0bf4",
+      "casesSha256": "92513e1424d4cde6aeb1cc8a26e9d820d9b58c0c5a995c0d2a4f8d3e8fa4914c",
+      "counts": {
+        "TP": 6,
+        "TN": 9,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch3-v3-final.json",
+      "startedAt": "2026-10-15T21:48:17.975Z",
+      "finishedAt": "2026-10-15T21:48:21.571Z",
+      "batch": 3,
+      "repeat": 3,
+      "sourceSha256": "f29947bb2605de91e7112e0ed2bde0a8650d0462d3fde9d25c3444ca7c1c0bf4",
+      "casesSha256": "9df6afe3b7832ef05d4262a58d4e820366f8f773bf374e5ed776e9c4fcd87447",
+      "counts": {
+        "TP": 6,
+        "TN": 9,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    },
+    {
+      "artifact": "approval-reuse-batch5-v3-final.json",
+      "startedAt": "2026-10-15T21:48:22.125Z",
+      "finishedAt": "2026-10-15T21:48:27.151Z",
+      "batch": 5,
+      "repeat": 3,
+      "sourceSha256": "f29947bb2605de91e7112e0ed2bde0a8650d0462d3fde9d25c3444ca7c1c0bf4",
+      "casesSha256": "485b7c7201103e3cbdc3f9bdd6ac5a1b274d9f6f689fe306b6c5b2f3d6f6218e",
+      "counts": {
+        "TP": 6,
+        "TN": 9,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
+    }
+  ],
+  "finalMaximumCompletionTokens": 1961,
+  "proposedOutputTokenCeiling": 2048
+}

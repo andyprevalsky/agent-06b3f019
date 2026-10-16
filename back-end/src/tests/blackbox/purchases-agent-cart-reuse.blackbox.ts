@@ -5,13 +5,20 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { config } from 'dotenv';
 import { PurchaseSpendStatus } from '@prisma/client';
+import { createApprovedPurchaseSelector } from '../../domains/purchases/approvalReuse';
+import type { CompletionChunk, CompletionOptions } from '../../providers/rose/types';
 import { cartPriceSignature, findSameAgentHeldCart } from '../../domains/purchases/agentCartReuse';
 import * as purchasesService from '../../domains/purchases/service';
 import type { MintPurchaseInput } from '../../domains/purchases/types';
 import { prisma } from '../../providers/database';
 import { assert, StubCardStateProvider } from './purchases.testkit';
+import {
+  runApprovalReuseBenchmark,
+  testApprovalBenchmarkGrading,
+} from './purchases-approval-reuse.benchmark';
 
 config();
 
@@ -176,8 +183,332 @@ async function testNoReuseAcrossAgentsOrCarts(): Promise<void> {
   );
 }
 
+async function testApprovalLookupRecognizesCapturedRetry(): Promise<void> {
+  const captured = JSON.parse(
+    readFileSync(
+      new URL('../fixtures/approval-retry-chatgpt-receipts.json', import.meta.url),
+      'utf8'
+    )
+  );
+  const userId = await createUser('approval-retry');
+  const agentId = await createAgent(userId);
+  const held = await prisma.purchaseSpend.create({
+    data: {
+      userId,
+      agentId,
+      merchant: captured.approved.merchant,
+      fingerprint: captured.approved.fingerprint,
+      canonicalFingerprint: captured.approved.fingerprint,
+      lineItemsJson: captured.approved,
+      totalCents: captured.approved.totalCents,
+      status: PurchaseSpendStatus.HELD,
+      cardId: `held-${randomUUID()}`,
+    },
+  });
+  const provider = new StubCardStateProvider({
+    status: 'OPEN',
+    balanceCents: 50000,
+    pan: '4242424242421372',
+  });
+  let semanticCalls = 0;
+  const selectEquivalent = async (
+    candidates: Array<{ id: string }>,
+    requested: MintPurchaseInput
+  ): Promise<string | null> => {
+    semanticCalls += 1;
+    assert(
+      candidates.length === 1 && candidates[0].id === held.id,
+      'semantic check must receive only this agent’s candidate'
+    );
+    assert(
+      requested.lineItems[0].name === captured.retry.lineItems[0].name,
+      'replay must retain captured product wording'
+    );
+    return held.id;
+  };
+  const input = { ...captured.retry, userId, agentId };
+  const result = await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+    userId,
+    input.fingerprint,
+    provider,
+    new Date(),
+    input,
+    selectEquivalent,
+  ]);
+  assert(
+    result.reusable === true,
+    'captured semantic retry must reuse prior approval before prompting'
+  );
+  assert(
+    result.purchase?.id === held.id,
+    'lookup must bind reuse to the original approved purchase'
+  );
+  assert(
+    result.purchase?.fingerprint === held.fingerprint,
+    'mint must receive original fingerprint'
+  );
+  assert(semanticCalls === 1, 'text drift requires one bounded semantic comparison');
+  assert(provider.getDetailsCalls === 1, 'approval reuse must verify card liveness');
+
+  const denied = await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+    userId,
+    input.fingerprint,
+    provider,
+    new Date(),
+    input,
+    async () => null,
+  ]);
+  assert(denied.reusable === false, 'equal-price different products require fresh approval');
+  const foreign = await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+    userId,
+    input.fingerprint,
+    provider,
+    new Date(),
+    { ...input, agentId: await createAgent(userId) },
+    selectEquivalent,
+  ]);
+  assert(foreign.reusable === false, 'semantic consent must never cross agents');
+
+  let requestedOptions: CompletionOptions | undefined;
+  let responseText = JSON.stringify({ purchaseId: held.id });
+  const selector = createApprovedPurchaseSelector(async (options) => {
+    requestedOptions = options;
+    return (async function* (): AsyncGenerator<CompletionChunk> {
+      yield {
+        choices: [{ index: 0, delta: { content: responseText } }],
+        requested_model: 'rose-labs/rose-1-flash',
+        actual_model: 'fixture-model',
+        pool_name: 'flash',
+        pool_size: 1,
+      };
+    })();
+  });
+  assert(
+    (await selector([held], input)) === held.id,
+    'valid model decision must retain original purchase id'
+  );
+  const noisyRetry = {
+    ...input,
+    lineItems: [
+      {
+        ...input.lineItems[0],
+        imageUrl: `data:image/png;base64,${'A'.repeat(100_000)}`,
+        rating: 'untrusted-review-rating',
+        reviewCount: 'untrusted-review-count',
+      },
+    ],
+  };
+  assert((await selector([held], noisyRetry)) === held.id, 'display metadata must not alter reuse');
+  const modelRequest = JSON.parse(String(requestedOptions?.messages[1].content));
+  assert(
+    JSON.stringify(modelRequest).length < 5000,
+    'large image metadata must not consume semantic approval context'
+  );
+  assert(
+    !JSON.stringify(modelRequest).includes('untrusted-review-') &&
+      !JSON.stringify(modelRequest).includes(input.fingerprint) &&
+      !JSON.stringify(modelRequest).includes(userId),
+    'irrelevant display metadata and internal request identity must stay out of model context'
+  );
+  assert(
+    modelRequest.approved[0].receipt.lineItems[0].name === captured.approved.lineItems[0].name,
+    'send full original item wording to semantic comparison'
+  );
+  assert(
+    modelRequest.requested.lineItems[0].productUrl === captured.retry.lineItems[0].productUrl,
+    'send full captured retry URL'
+  );
+  responseText = '{"purchaseId":null}';
+  assert(
+    (await selector([held], input)) === null,
+    'uncertainty or material differences must require approval'
+  );
+  responseText = '{"purchaseId":"foreign-purchase"}';
+  let invalidRejected = false;
+  try {
+    await selector([held], input);
+  } catch {
+    invalidRejected = true;
+  }
+  assert(invalidRejected, 'unrecognized model purchase id must fail closed');
+  responseText = 'not json';
+  let malformedRejected = false;
+  try {
+    await selector([held], input);
+  } catch {
+    malformedRejected = true;
+  }
+  assert(malformedRejected, 'malformed decision must never grant consent');
+
+  semanticCalls = 0;
+  const changed = await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+    userId,
+    input.fingerprint,
+    provider,
+    new Date(),
+    { ...input, totalCents: 50100 },
+    selectEquivalent,
+  ]);
+  assert(
+    changed.reusable === false && semanticCalls === 0,
+    'changed amount must reject before model call'
+  );
+  const exactForeign = await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+    userId,
+    held.fingerprint,
+    provider,
+    new Date(),
+    { ...input, agentId: await createAgent(userId) },
+    selectEquivalent,
+  ]);
+  assert(exactForeign.reusable === false, 'exact-fingerprint consent cannot cross agents either');
+  const expired = await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+    userId,
+    input.fingerprint,
+    provider,
+    new Date(Date.now() + 25 * 3600000),
+    input,
+    selectEquivalent,
+  ]);
+  assert(
+    expired.reusable === false && semanticCalls === 0,
+    'expired consent must not reach semantic model'
+  );
+  const usageCompletion = async () =>
+    (async function* (): AsyncGenerator<CompletionChunk> {
+      yield {
+        choices: [{ index: 0, delta: { content: 'not json' } }],
+        requested_model: 'rose-labs/rose-1-flash',
+        actual_model: 'fixture-model',
+        pool_name: 'flash',
+        pool_size: 1,
+        usage: { prompt_tokens: 37, completion_tokens: 11, total_tokens: 48 },
+      };
+    })();
+  let chargedFailure: unknown;
+  try {
+    await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+      userId,
+      input.fingerprint,
+      provider,
+      new Date(),
+      input,
+      undefined,
+      usageCompletion,
+    ]);
+  } catch (error) {
+    chargedFailure = error;
+  }
+  assert(
+    chargedFailure instanceof purchasesService.PurchaseError,
+    'invalid billed comparison must remain a lookup error'
+  );
+  const failedUsage = (chargedFailure as purchasesService.PurchaseError).details
+    .usageItems as Array<Record<string, unknown>>;
+  assert(
+    failedUsage.length === 1 &&
+      failedUsage[0].input_tokens === 37 &&
+      failedUsage[0].output_tokens === 11,
+    'terminal comparison error must retain actual model usage exactly once'
+  );
+  const successfulCompletion = async () =>
+    (async function* (): AsyncGenerator<CompletionChunk> {
+      yield {
+        choices: [{ index: 0, delta: { content: JSON.stringify({ purchaseId: held.id }) } }],
+        requested_model: 'rose-labs/rose-1-flash',
+        actual_model: 'fixture-model',
+        pool_name: 'flash',
+        pool_size: 1,
+        usage: { prompt_tokens: 37, completion_tokens: 11, total_tokens: 48 },
+      };
+    })();
+  const brokenCard = new StubCardStateProvider({
+    status: 'OPEN',
+    balanceCents: 50000,
+    pan: '4242424242421372',
+  });
+  brokenCard.getDetails = async () => {
+    throw new Error('provider unavailable');
+  };
+  let cardFailure: unknown;
+  try {
+    await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+      userId,
+      input.fingerprint,
+      brokenCard,
+      new Date(),
+      input,
+      undefined,
+      successfulCompletion,
+    ]);
+  } catch (error) {
+    cardFailure = error;
+  }
+  assert(
+    cardFailure instanceof purchasesService.PurchaseError &&
+      (cardFailure.details.usageItems as unknown[]).length === 1,
+    'card provider failure after comparison must retain usage without approval'
+  );
+  const reusedCard = await purchasesService.mintPurchaseCard(
+    { ...input, fingerprint: held.fingerprint, reusePurchaseId: held.id },
+    provider
+  );
+  assert(
+    reusedCard.purchaseId === held.id,
+    'reuse-only mint must return exactly the approved purchase'
+  );
+  const unavailable = new StubCardStateProvider({
+    status: 'CLOSED',
+    balanceCents: 0,
+    pan: '4242424242421372',
+  });
+  let approvalRequired = false;
+  try {
+    await purchasesService.mintPurchaseCard(
+      { ...input, fingerprint: held.fingerprint, reusePurchaseId: held.id },
+      unavailable
+    );
+  } catch (error) {
+    approvalRequired =
+      error instanceof purchasesService.PurchaseError &&
+      error.code === 'purchase_approval_required';
+  }
+  assert(
+    approvalRequired,
+    'closed-card race after lookup must require approval before any new funding'
+  );
+  assert(
+    (await prisma.purchaseSpend.count({ where: { userId } })) === 1,
+    'reuse-only mint must never open a second purchase'
+  );
+  await prisma.purchaseSpend.update({
+    where: { id: held.id },
+    data: { status: PurchaseSpendStatus.HELD },
+  });
+  const closed = new StubCardStateProvider({
+    status: 'CLOSED',
+    balanceCents: 0,
+    pan: '4242424242421372',
+  });
+  const consumed = await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+    userId,
+    input.fingerprint,
+    closed,
+    new Date(),
+    input,
+    selectEquivalent,
+  ]);
+  assert(consumed.reusable === false, 'consumed card must never autoapprove or duplicate payment');
+}
+
 async function main(): Promise<void> {
   try {
+    testApprovalBenchmarkGrading();
+    if (process.env.APPROVAL_REUSE_BENCH_BATCH !== undefined) {
+      await runApprovalReuseBenchmark();
+      return;
+    }
+    await testApprovalLookupRecognizesCapturedRetry();
     testSignatureIgnoresModelText();
     await testMintReusesSameAgentHeldCard();
     await testNoReuseAcrossAgentsOrCarts();

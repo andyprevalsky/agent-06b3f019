@@ -1,7 +1,13 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/lib/adminUsers', async (original) => ({
+  ...(await original<typeof import('@/lib/adminUsers')>()),
+  switchToAccount: vi.fn(),
+}));
+import { switchToAccount } from '@/lib/adminUsers';
 
 import { TopRightControls } from '@/components/TopRightControls';
 import { AdminAccountSwitcher } from '@/features/admin-account-switcher';
@@ -69,6 +75,49 @@ function agentDetail(inspectionContext: Record<string, string> | null) {
   };
 }
 
+function approvalDetail(inspectionContext: Record<string, string> | null) {
+  const detail = agentDetail(inspectionContext);
+  return {
+    ...detail,
+    messages: [
+      {
+        message_id: 'approval-message',
+        agent_id: 'foreign-agent',
+        role: 'TOOL',
+        text: 'Approve the $500 ChatGPT Pro subscription?',
+        timestamp: '2026-10-14T16:13:35.308Z',
+        metadata: {
+          isUserAttentionMessage: true,
+          toolName: 'request_user_approval',
+          toolCallId: 'approval-tool',
+          toolStatus: 'IN_PROGRESS',
+          requestUserApproval: {
+            attentionRequestId: 'cmv8b7buz0l7hzjsggc1gqgfs',
+            toolApproval: true,
+            writePermission: true,
+            requestPaymentCard: {
+              merchant: 'ChatGPT (OpenAI)',
+              currency: 'USD',
+              totalCents: 50000,
+              lineItems: [
+                {
+                  name: 'ChatGPT Pro - Max usage (Pro 500) - Monthly subscription, $500/month',
+                  productUrl: 'https://chatgpt.com/#pricing',
+                  quantity: 1,
+                  unitPriceCents: 50000,
+                  lineTotalCents: 50000,
+                  rating: '0 stars',
+                  reviewCount: '0 reviews',
+                },
+              ],
+            },
+          },
+        },
+      },
+    ],
+  };
+}
+
 describe('admin agent inspection', () => {
   let inspectionSlot: HTMLDivElement;
 
@@ -85,6 +134,43 @@ describe('admin agent inspection', () => {
     window.history.replaceState({}, '', '/');
     localStorage.clear();
     inspectionSlot.remove();
+  });
+
+  it('requires switching to the owner before approving an inspected account’s request', async () => {
+    const user = userEvent.setup();
+    let posts = 0;
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId`, () =>
+        HttpResponse.json(
+          approvalDetail({
+            user_id: 'affected-user',
+            name: 'Andy',
+            phone: '+19729777432',
+            email: 'andy@roselabs.ai',
+          }),
+        ),
+      ),
+      http.post(`${API_BASE}/attention-requests/:id/respond`, () => {
+        posts += 1;
+        return HttpResponse.json({ error: 'Not authorized' }, { status: 403 });
+      }),
+    );
+    renderWithProviders(<Terminal />);
+    await screen.findByTestId('inspection-account-badge');
+    expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument();
+    const switchButton = await screen.findByRole('button', { name: 'Switch to this account' });
+    await user.click(switchButton);
+    expect(switchToAccount).toHaveBeenCalledWith('affected-user', 'foreign-agent');
+    expect(posts).toBe(0);
+  });
+
+  it('keeps approval available for the signed-in owner', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId`, () => HttpResponse.json(approvalDetail(null))),
+    );
+    renderWithProviders(<Terminal />);
+    expect(await screen.findByRole('button', { name: 'Accept' })).toBeEnabled();
   });
 
   it('floats the affected account identity above a cross-account run', async () => {

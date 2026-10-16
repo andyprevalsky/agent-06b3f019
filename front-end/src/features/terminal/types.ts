@@ -13,6 +13,7 @@ import type {
   AncestorNode,
   FilePointer,
   CreateAgentPayload,
+  InspectionContext,
 } from '@/lib/api';
 import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import type { GateMetadata } from '@/features/terminal-component-group/components/attention-inbox/types';
@@ -132,6 +133,7 @@ export interface TerminalUIState {
 // ── AgentChatArea slices ──────────────────────────────────────────────────
 
 export interface AgentSlice {
+  inspectionContext?: InspectionContext | null;
   selectedAgentId: string | null;
   agentDetail: AgentDetail | null;
   messages: Message[];

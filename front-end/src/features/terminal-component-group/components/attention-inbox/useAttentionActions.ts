@@ -77,7 +77,11 @@ function useActionRunner(
       toast(spec.successToast);
     } catch (error) {
       console.error(`[AttentionInbox] ${spec.errorToast.title}:`, error);
-      toast({ ...spec.errorToast, variant: 'destructive' });
+      toast({
+        ...spec.errorToast,
+        description: error instanceof Error ? error.message : spec.errorToast.description,
+        variant: 'destructive',
+      });
     } finally {
       setLoading(false);
     }
