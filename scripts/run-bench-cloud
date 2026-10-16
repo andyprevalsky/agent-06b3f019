@@ -3480,9 +3480,10 @@ acquire_boot_config_update_slot() {
         *[!0-9:]*|0:*|*:0) echo "❌ invalid boot config update concurrency/wait contract" >&2; return 1 ;;
     esac
     if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then
+        # Campaign owners receive independent tracked leases; provider responses alone impose backoff.
         BOOT_CONFIG_UPDATE_SLOT="$(cloudbench_mutation_admission "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-campaign-mutation.py" acquire \
             --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
-            --owner-pid "$$" --owner-start "$MUTATION_OWNER_PID_START" --slots "$max_in_flight" --wait-seconds "$wait_seconds")" || return 1
+            --owner-pid "$$" --owner-start "$MUTATION_OWNER_PID_START" --wait-seconds "$wait_seconds")" || return 1
         BOOT_CONFIG_UPDATE_SLOT_SHARED=1
         BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
         return 0
@@ -3504,7 +3505,7 @@ acquire_boot_config_update_slot() {
 }
 boot_update_with_capacity_recovery() {
     local update_log="$1" regular_attempts max_regular timeout_seconds
-    local capacity_wait capacity_retry regular_retry capacity_deadline
+    local capacity_wait capacity_retry regular_retry capacity_deadline native_budget rate_code
     shift
     max_regular="${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"
     timeout_seconds="${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}"
@@ -3526,7 +3527,15 @@ boot_update_with_capacity_recovery() {
     regular_attempts=0
     capacity_deadline=$((SECONDS + capacity_wait))
     while [ "$regular_attempts" -lt "$max_regular" ]; do
-        if _with_timeout "$timeout_seconds" "$@" > "$update_log" 2>&1; then
+        native_budget="$timeout_seconds"
+        if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then
+            native_budget="$(cloudbench_mutation_admission "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-campaign-mutation.py" pace \
+                --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
+                --owner-pid "$$" --owner-start "$MUTATION_OWNER_PID_START" \
+                --wait-seconds "$timeout_seconds" --print-budget)" || return 1
+            case "$native_budget" in ''|*[!0-9]*|0) return 1 ;; esac
+        fi
+        if _with_timeout "$native_budget" "$@" > "$update_log" 2>&1; then
             return 0
         fi
         # An organization Machine-count limit is a permanent refusal for this
@@ -3535,6 +3544,17 @@ boot_update_with_capacity_recovery() {
         if grep -Eiq 'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached' "$update_log" 2>/dev/null; then
             echo "❌ boot update refused by organization Machine limit; no retry" >&2
             return 1
+        fi
+        if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then
+            rate_code=""
+            if grep -Eiq '(^|[^[:alnum:]])429([^[:alnum:]]|$)' "$update_log"; then rate_code=429
+            elif grep -Eiq 'resource_exhausted' "$update_log"; then rate_code=resource_exhausted; fi
+            if [ -n "$rate_code" ]; then
+                cloudbench_mutation_admission "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-campaign-mutation.py" backoff \
+                    --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
+                    --owner-pid "$$" --owner-start "$MUTATION_OWNER_PID_START" \
+                    --response-code "$rate_code" --retry-after "$regular_retry" || return 1
+            fi
         fi
         if grep -Eiq \
             'cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)|insufficient CPUs available to fulfill request on the current host' \

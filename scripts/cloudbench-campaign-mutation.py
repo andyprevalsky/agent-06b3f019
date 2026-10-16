@@ -157,9 +157,21 @@ def strict_primary_not_finished(barrier: Path, task: Path) -> None:
         raise ValueError('strict clone campaign cancelled or task finished')
 
 
+def provider_backoff(path: Path, app: str) -> float:
+    regular(path)
+    record = json.loads(path.read_text())
+    if (set(record) != {'app', 'host', 'until', 'response_code'}
+            or record['app'] != app or record['host'] != HOST
+            or record['response_code'] not in ('429', 'resource_exhausted')
+            or isinstance(record['until'], bool) or not isinstance(record['until'], (int, float))
+            or not math.isfinite(record['until']) or record['until'] < 0):
+        raise ValueError('foreign or malformed provider backoff')
+    return float(record['until'])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['pace', 'acquire', 'release', 'start-native', 'join-native'])
+    parser.add_argument('action', choices=['pace', 'acquire', 'release', 'start-native', 'join-native', 'backoff'])
     parser.add_argument('--app', required=True)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--owner-pid', type=int, required=True)
@@ -167,8 +179,11 @@ def main() -> int:
     parser.add_argument('--wait-seconds', type=int)
     parser.add_argument('--slots', type=int, default=4)
     parser.add_argument('--lease', default='')
+    parser.add_argument('--response-code', choices=['429', 'resource_exhausted'])
+    parser.add_argument('--retry-after', type=float)
     parser.add_argument('--native-owner-pid', type=int)
     parser.add_argument('--strict-primary', action='store_true')
+    parser.add_argument('--print-budget', action='store_true')
     parser.add_argument('--task-root', type=Path)
     args = parser.parse_args()
     if args.owner_pid < 1 or args.slots < 1 or not args.app or '/' in args.app:
@@ -220,6 +235,29 @@ def main() -> int:
                     json.dump(record, output)
                 temporary.replace(path)
             return 0
+        if args.action == 'backoff':
+            if (args.response_code is None or args.retry_after is None
+                    or not math.isfinite(args.retry_after) or not 0 < args.retry_after <= 90):
+                raise ValueError('actual rate response and bounded retry interval required')
+            if not feed(args.app, validate_inventory=True):
+                raise ValueError('rate response authority temporarily unknown')
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                state = directory / 'provider-backoff.json'
+                now = time.monotonic()
+                until = now + args.retry_after
+                if state.exists():
+                    until = max(until, provider_backoff(state, args.app))
+                temporary = directory / f'.backoff-{uuid.uuid4().hex}'
+                with temporary.open('x') as output:
+                    json.dump({'app': args.app, 'host': HOST, 'until': until,
+                               'response_code': args.response_code}, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+                temporary.replace(state)
+                return 0
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
         if args.wait_seconds is None or args.wait_seconds < 1:
             raise ValueError('invalid existing mutation wait budget')
         if args.strict_primary and args.action != 'pace':
@@ -240,47 +278,33 @@ def main() -> int:
             except BlockingIOError:
                 time.sleep(0.1)
                 continue
+            admitted = False
+            delay = 0.02
             try:
                 if not ready or not feed(args.app):
                     continue
+                backoff = directory / 'provider-backoff.json'
+                if backoff.exists():
+                    remaining_backoff = provider_backoff(backoff, args.app) - time.monotonic()
+                    if remaining_backoff > 0:
+                        delay = min(0.1, remaining_backoff)
+                        continue
                 if args.action == 'pace':
-                    state = directory / 'create.json'
-                    now = time.monotonic()
-                    if state.exists():
-                        regular(state)
-                        record = json.loads(state.read_text())
-                        if set(record) != {'app', 'host', 'last_dispatch'} or record['app'] != args.app or record['host'] != HOST:
-                            raise ValueError('foreign or malformed create pacing state')
-                        last_dispatch = record['last_dispatch']
-                        if isinstance(last_dispatch, bool) or not isinstance(last_dispatch, (int, float)) or not math.isfinite(last_dispatch) or last_dispatch < 0 or last_dispatch > now:
-                            raise ValueError('invalid create pacing timestamp')
-                        if now - last_dispatch < 1:
-                            continue
                     if not feed(args.app, validate_inventory=True):
                         continue
-                    native_budget = args.wait_seconds
+                    native_budget = math.floor(deadline - time.monotonic())
+                    if native_budget < 1:
+                        raise ValueError('no original mutation budget remains')
                     if args.strict_primary:
                         if strict_primary_deadline(args) != deadline:
                             raise ValueError('original strict deadline changed')
                         native_budget = min(args.wait_seconds, math.floor(deadline - time.monotonic() - 0.1))
                         if native_budget < 1:
                             raise ValueError('no original campaign budget remains for native clone')
-                    temporary = directory / f'.create-{uuid.uuid4().hex}'
-                    temporary.write_text(json.dumps({'app': args.app, 'host': HOST, 'last_dispatch': now}))
-                    temporary.replace(state)
-                    if args.strict_primary:
+                    if args.strict_primary or args.print_budget:
                         print(native_budget)
+                    admitted = True
                     return 0
-                policy = directory / 'update-policy.json'
-                expected_policy = {'app': args.app, 'host': HOST, 'slots': args.slots}
-                if policy.exists():
-                    regular(policy)
-                    if json.loads(policy.read_text()) != expected_policy:
-                        raise ValueError('shared update concurrency policy changed')
-                else:
-                    with policy.open('x') as output:
-                        json.dump(expected_policy, output)
-                occupied = 0
                 for path in directory.glob('lease-*.json'):
                     regular(path)
                     record = json.loads(path.read_text())
@@ -294,23 +318,23 @@ def main() -> int:
                             path.unlink()
                         else:
                             raise ValueError('unconfirmed dead update lease owner')
-                    elif status == 'match':
-                        occupied += 1
-                    else:
+                    elif status != 'match':
                         raise ValueError('unknown update lease owner')
-                if occupied < args.slots:
-                    if not feed(args.app, validate_inventory=True):
-                        continue
-                    token = uuid.uuid4().hex
-                    path = directory / f'lease-{token}.json'
-                    with path.open('x') as output:
-                        json.dump({'app': args.app, 'host': HOST, 'pid': args.owner_pid, 'birth': owner_birth, 'token': token, 'native_pid': None, 'native_birth': None, 'joined': False}, output)
-                    print(token, flush=True)
-                    return 0
+                if not feed(args.app, validate_inventory=True):
+                    continue
+                token = uuid.uuid4().hex
+                path = directory / f'lease-{token}.json'
+                with path.open('x') as output:
+                    json.dump({'app': args.app, 'host': HOST, 'pid': args.owner_pid, 'birth': owner_birth, 'token': token, 'native_pid': None, 'native_birth': None, 'joined': False}, output)
+                print(token, flush=True)
+                admitted = True
+                return 0
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
-                # Observations and permit waits spend the original caller clock.
-                time.sleep(0.1)
+                # Never sleep under the accounting lock, or after a healthy admission.
+                if not admitted:
+                    time.sleep(min(delay, max(0, deadline - time.monotonic())))
+
         print('mutation admission exhausted existing wait budget', file=__import__('sys').stderr)
         return 1
 
