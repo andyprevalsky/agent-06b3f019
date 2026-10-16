@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """Recover only an exact dead owner's never-started explicit-idle pool cohort."""
 from pathlib import Path
-import argparse,base64,fcntl,hashlib,json,os,re,runpy,signal,socket,stat,time
+import argparse,base64,fcntl,hashlib,json,os,re,runpy,signal,socket,stat,time,subprocess
 HERE=Path(__file__).resolve().parent
 H=runpy.run_path(str(HERE/'cloudbench-explicit-idle-admission.py'))
 B=runpy.run_path(str(HERE/'cloudbench-original-volume-capture.py'))
 need=H['require'];read=H['read'];sha=H['sha'];canonical=H['canonical']
+def pid_birth_state(pid,start):
+    # Repository libraries are nested; the immutable fleet snapshot is flat.
+    # Invoke the unchanged canonical shell predicate in either layout.
+    library=HERE/'lib/cloudbench-env.sh'
+    if not library.exists():library=HERE/'cloudbench-env.sh'
+    read(library)
+    result=subprocess.run(['bash','-c','source "$1" >/dev/null || exit; cloudbench_pid_birth_state "$2" "$3"',
+                           'preconfig-owner',str(library),pid,start],capture_output=True,text=True,timeout=20)
+    need(result.returncode==0,'canonical PID birth predicate failed')
+    state=result.stdout.strip();need(state in {'live','absent','unknown'},'invalid PID birth state');return state
 def fields(path):
     pairs=[line.split('=',1) for line in read(path,65536).decode().splitlines()]
     need(all(len(p)==2 for p in pairs),'field syntax');value=dict(pairs);need(len(value)==len(pairs),'duplicate field');return value
@@ -29,7 +39,7 @@ def plan(registry,common,source):
     need(re.fullmatch('[0-9a-f]{32}',owner),'owner token');meta=fields(registry/'meta')
     need(meta.get('version')=='2' and meta.get('fleet_owner_token')==owner and meta.get('host')==socket.gethostname(),'owner identity')
     need(meta.get('cleanup_policy') in {'reap','retain'},'owner policy')
-    need(B['pid_birth_state'](meta['pid'],meta['pid_start'])=='absent','owner is not dead')
+    need(pid_birth_state(meta['pid'],meta['pid_start'])=='absent','owner is not dead')
     run=directory(Path(meta['runs_root'])/meta['run_id'])
     # Audit root is recorded by the original owner, never inferred from a new run.
     audit=directory(Path(meta['audit_dir']));need(audit==common/'cloudbench-fleet-audits'/owner,'audit owner')

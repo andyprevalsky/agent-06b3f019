@@ -8,6 +8,7 @@ import json
 import os
 import re
 import runpy
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -617,7 +618,6 @@ class BorrowedPreconfigRecovery(unittest.TestCase):
         identity=dict(version=1,machine_id=self.f.mid,run_token=self.owner+'-0')
         self.write(self.out/'runtime-evidence.owner.json',identity);self.write(self.out/'runtime-evidence.pending',identity)
         (self.registry/'runtime-evidence-unconfirmed').write_text('pending')
-        self.h['B']['pid_birth_state']=lambda *a:'absent'
         self.native=mod.described(self.f.request['native_before']);self.volume=mod.described(self.f.request['volume'])
         self.source=self.f.request['consumer']['source_ref']
     def write(self,p,v):p.write_bytes(mod.canonical(v))
@@ -649,7 +649,7 @@ class BorrowedPreconfigRecovery(unittest.TestCase):
         self.assertTrue(self.claim.exists())
     @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
     def test_live_owner_refuses_without_archive_or_release(self):
-        self.h['B']['pid_birth_state']=lambda *a:'live'
+        self.h['plan'].__globals__['pid_birth_state']=lambda *a:'live'
         with self.assertRaises(ValueError):self.recover()
         self.assertTrue(self.claim.exists());self.assertFalse((self.registry/'explicit-idle-preconfig-recovery').exists())
     @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
@@ -692,6 +692,33 @@ class BorrowedPreconfigDeadlines(unittest.TestCase):
         h=runpy.run_path(str(SCRIPT.with_name('cloudbench-explicit-idle-preconfig.py')))
         with mock.patch.object(h['time'],'monotonic',side_effect=[0,2]):
             with self.assertRaises(h['RecoveryDeadline']):h['bounded_read'](lambda:'late',1)
+
+
+class PreconfigSnapshotLayout(unittest.TestCase):
+    def setUp(self):
+        self.f=BorrowedPreconfigRecovery();self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.flat=self.f.f.root/'flat-snapshot';self.flat.mkdir()
+        for path in SCRIPT.parent.glob('*.py'):shutil.copy2(path,self.flat/path.name)
+        shutil.copy2(SCRIPT.parent/'lib/cloudbench-env.sh',self.flat/'cloudbench-env.sh')
+        self.helper=self.flat/'cloudbench-explicit-idle-preconfig.py'
+    def test_original_wrapper_reproduces_flat_snapshot_exit127(self):
+        old=runpy.run_path(str(self.flat/'cloudbench-original-volume-capture.py'))
+        with self.assertRaisesRegex(old['Refusal'],'exit 127'):old['pid_birth_state']('99999999','dead-fixture')
+    def test_actual_flat_snapshot_plan_runs_canonical_dead_owner_predicate(self):
+        code='import runpy,sys; h=runpy.run_path(sys.argv[1]); p=h["plan"](*sys.argv[2:]); print(len(p["rows"]))'
+        result=subprocess.run(['python3','-c',code,str(self.helper),str(self.f.registry),str(self.f.f.common),self.f.source],text=True,capture_output=True,timeout=20,cwd='/')
+        self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(result.stdout.strip(),'1')
+        self.assertFalse((self.f.registry/'explicit-idle-preconfig-recovery').exists())
+    def test_actual_flat_snapshot_retains_live_owner_guard(self):
+        helper=runpy.run_path(str(self.helper))
+        birth=subprocess.check_output(['bash','-c','source "$1"; cloudbench_pid_start_time "$2"','fixture',str(self.flat/'cloudbench-env.sh'),str(os.getpid())],text=True).strip()
+        self.assertEqual(helper['pid_birth_state'](str(os.getpid()),birth),'live')
+    def test_missing_or_linked_library_fails_closed(self):
+        library=self.flat/'cloudbench-env.sh';library.unlink()
+        helper=runpy.run_path(str(self.helper))
+        with self.assertRaises(FileNotFoundError):helper['pid_birth_state']('99999999','dead-fixture')
+        library.symlink_to(SCRIPT.parent/'lib/cloudbench-env.sh')
+        with self.assertRaises(ValueError):helper['pid_birth_state']('99999999','dead-fixture')
 
 
 if __name__=='__main__':unittest.main()
