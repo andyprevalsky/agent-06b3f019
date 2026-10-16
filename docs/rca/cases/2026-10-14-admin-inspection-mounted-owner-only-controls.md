@@ -9,7 +9,6 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: AgentChatArea used inspection_context only for an identity badge and mounted the writable InputArea for a foreign account run
 symptoms:
   - Failed to pause agent
-  - phone website approval produced error toasts
   - POST /api/attention-requests/cmv8b7buz0l7hzjsggc1gqgfs/respond returned 403
   - POST /api/agents/ae17b024-5287-4199-84d0-6cce3bd1765d/pause returned 404
   - Agent detail GET returned 200 while pause POST returned 404
