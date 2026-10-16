@@ -700,7 +700,7 @@ fleet_production_function() {
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-fleet" "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh"
 }
-for function_name in fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release \
+for function_name in machine_creation_admission fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release \
   inventory_index_healthy inventory_machine_record_path inventory_machine_field; do
   function_source="$(fleet_production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
@@ -734,6 +734,23 @@ fly_with_timeout() {
   printf '%s\n' "$*" > "$clone_args"
   echo "Machine abcdef12345678 has been created..."
 }
+# The real entry point now refuses unmeasured new allocation. Exercise that
+# guard before the historical shape replay; it must not reach even our fake
+# provider or publish a target ledger.
+clone_admission_rc=0
+clone_machine_target "$TMP_ROOT/withheld-primary.ids" \
+  > "$TMP_ROOT/withheld-primary.stdout" 2> "$TMP_ROOT/withheld-primary.stderr" \
+  || clone_admission_rc=$?
+[ "$clone_admission_rc" -eq 78 ] || fail "real clone admission must refuse unmeasured allocation"
+require_text "$TMP_ROOT/withheld-primary.stderr" "new Machine allocation withheld" \
+  "real clone admission must explain its refusal"
+[ ! -e "$clone_args" ] && [ ! -e "$TMP_ROOT/withheld-primary.ids" ] || \
+  fail "refused clone admission reached transport or published a ledger"
+# Mock only admission for this exact fake-provider fixture. Keep the complete
+# production command builder and its CPU/memory assertions below unchanged.
+machine_creation_admission() {
+  [ "$1" = "$TMP_ROOT/primary.ids" ] || return 78
+}
 primary_id="$(clone_machine_target "$TMP_ROOT/primary.ids")" ||
   fail "production clone command builder failed in the capacity replay"
 [ "$primary_id" = "abcdef12345678" ] || fail "capacity replay did not resolve the fake clone"
@@ -745,7 +762,7 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
 [ -n "$primary_cpus" ] || fail "capacity replay could not parse primary CPU allocation"
 [ $((16 + 37 * primary_cpus)) -le 160 ] ||
   fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
-unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
+unset -f clone_machine_target machine_creation_admission fleet_registry_record_name fleet_registry_record_id \
   fleet_registry_release_name machine_volume_id machine_storage_ready machine_storage_failed fly_with_timeout \
   fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
   inventory_index_healthy inventory_machine_record_path inventory_machine_field
@@ -828,6 +845,20 @@ claim_function_source="$(awk '
   fail "could not load production shape-aware pool claims"
 eval "$shape_hints_source"
 eval "$claim_function_source"
+# The current claimer checks outgoing handoffs and reuse proofs even in this
+# shape-only fixture. Keep those real guards on an isolated empty Gitcommon.
+GIT_COMMON_DIR="$TMP_ROOT/mixed-shape-common"
+mkdir -p "$GIT_COMMON_DIR"
+proof_path_source="$(grep '^pool_reuse_proof_file()' "$ROOT_DIR/scripts/run-bench-fleet")"
+proof_verify_source="$(awk '
+  /^pool_verify_reuse_proof\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$proof_path_source" ] && [ -n "$proof_verify_source" ] ||
+  fail "could not load production pool reuse proof guards"
+eval "$proof_path_source"
+eval "$proof_verify_source"
 POOL_IDS_FILE="$TMP_ROOT/mixed-shape-pool.ids"
 printf 'a1\nb2\n' > "$POOL_IDS_FILE"
 FLEET_DIR="$TMP_ROOT/mixed-shape-run"
@@ -860,7 +891,8 @@ small_claim="$(claim_pool_machine shared-cpu-2x 4096)"
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
 unset -f pool_machine_shape_from_json normalize_current_pool_shape pool_write_shape_hints \
   claim_pool_machine resize_pool_machine machine_volume_id_from_json write_pool_claim \
-  cloudbench_env_sha256 fleet_audit_record_pool_machine
+  cloudbench_env_sha256 fleet_audit_record_pool_machine pool_reuse_proof_file pool_verify_reuse_proof
+unset GIT_COMMON_DIR
 
 boot_update_source="$(awk '
   /^boot_update_with_capacity_recovery\(\)/ { capture = 1 }

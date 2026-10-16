@@ -1246,6 +1246,49 @@ class PreconfigStartupArchiveTests(unittest.TestCase):
                 self.verify()
 
 
+class OriginalVolumeProcessScanTests(unittest.TestCase):
+    def setUp(self):
+        self.scan = runpy.run_path(
+            str(REPO / "scripts/cloudbench-original-volume-capture.py")
+        )["_scan_processes"]
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.proc = Path(temporary.name)
+        self.entries = ["910001", "910002", "910003"]
+        for pid, command in zip(self.entries, (
+            b"sleep\0infinity\0", b"unreadable\0", b"cloudbench-worker\0"
+        )):
+            write(self.proc / pid / "cmdline", command)
+
+    def scan_with_read_error(self, error):
+        read_bytes = Path.read_bytes
+        unreadable = self.proc / self.entries[1] / "cmdline"
+
+        def read(path):
+            if path == unreadable:
+                raise error
+            return read_bytes(path)
+
+        with patch("pathlib.Path.read_bytes", read), patch(
+            "os.listdir", return_value=self.entries
+        ), patch("os.getpid", return_value=1), patch("os.getppid", return_value=2):
+            return self.scan(self.proc)
+
+    def test_process_scan_propagates_timeout_after_observing_inert_process(self):
+        error = TimeoutError("original observation deadline")
+        with self.assertRaises(TimeoutError) as caught:
+            self.scan_with_read_error(error)
+        self.assertIs(caught.exception, error)
+
+    def test_process_scan_skips_ordinary_read_errors_and_keeps_other_evidence(self):
+        for error in (OSError("read failed"), PermissionError("denied"),
+                      FileNotFoundError("process exited")):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(self.scan_with_read_error(error), (
+                    1, [{"pid": 910003, "argv0": "cloudbench-worker"}]
+                ))
+
+
 class MachineExecDeliveryTests(unittest.TestCase):
     """Recorded machine-exec bodies are distinct from the CLI transport status."""
     def setUp(self):
@@ -1526,9 +1569,418 @@ class ControllerExportContinuationTests(unittest.TestCase):
 
 
 
+
+class RetainedControllerEndpointTests(ControllerExportContinuationTests):
+    def setUp(self):
+        super().setUp()
+        if self._testMethodName not in RetainedControllerEndpointTests.__dict__:return
+        self.prepare();self.module.launch(self.launch)
+        self.native=dict(id='abc123',instance_id='native-original',state='started',config=dict(
+            init={'cmd':['bash','/tmp/gate.sh']},image='image@sha256:fixture',restart={'policy':'no'},
+            auto_destroy=False,mounts=[{'volume':'vol_fixture','path':'/data'}]))
+        self.native_path=self.base/'original-native.json';write(self.native_path,json.dumps(self.native))
+        self.native_sha=digest(self.native_path.read_bytes())
+
+    def checked_endpoint(self,native=None,ref=None):
+        return self.module.retained_controller_endpoint(self.record,self.repo,ref or self.newref,
+            native or self.native,self.native_path,self.native_sha)
+
+    def test_retained_endpoint_preserves_original_init_and_checks_authorized_idle_driver(self):
+        with patch.object(self.module,'writers',return_value=[]),patch.object(self.module,'driver_is_ancestor',return_value=True,create=True),patch.object(self.module,'process_argv',return_value=['bash','/tmp/gate.sh'],create=True):
+            result=self.checked_endpoint()
+        self.assertEqual(result['source_ref'],self.newref)
+        self.assertEqual(self.native['config']['init'],{'cmd':['bash','/tmp/gate.sh']})
+        self.assertEqual(self.owner.read_bytes(),self.original)
+
+    def test_retained_endpoint_rejects_wrong_init_source_roots_and_live_writers(self):
+        with patch.object(self.module,'writers',return_value=[]),patch.object(self.module,'driver_is_ancestor',return_value=True,create=True),patch.object(self.module,'process_argv',return_value=['bash','/tmp/gate.sh'],create=True):
+            bad=copy.deepcopy(self.native);bad['config']['init']={'cmd':['sleep','infinity']}
+            with self.assertRaises(ValueError):self.checked_endpoint(bad)
+            with self.assertRaises(ValueError):self.checked_endpoint(ref='f'*40)
+            with patch.object(self.module,'writers',return_value=[{'pid':1999,'birth':'active'}]),self.assertRaises(ValueError):self.checked_endpoint()
+            with patch.object(self.module,'driver_is_ancestor',return_value=False,create=True),self.assertRaises(ValueError):self.checked_endpoint()
+            with patch.object(self.module,'process_argv',return_value=['bash','foreign.sh'],create=True),self.assertRaises(ValueError):self.checked_endpoint()
+            self.common.rename(self.repo/'.git-original');self.common.mkdir()
+            with self.assertRaises(ValueError):self.checked_endpoint()
+
+    def test_native_baseline_is_hashed_and_must_be_historical_exact_identity(self):
+        with patch.object(self.module,'writers',return_value=[]),patch.object(self.module,'driver_is_ancestor',return_value=True,create=True),patch.object(self.module,'process_argv',return_value=['bash','/tmp/gate.sh'],create=True):
+            bad=copy.deepcopy(self.native);bad['instance_id']='replacement'
+            with self.assertRaises(ValueError):self.checked_endpoint(bad)
+            write(self.native_path,json.dumps(dict(self.native,id='foreign')))
+            with self.assertRaises(ValueError):self.checked_endpoint()
+
+    def test_existing_target_branch_uses_retained_verifier_without_changing_native_init(self):
+        helper=runpy.run_path(os.environ.get('ROSE_RETAINED_ENDPOINT_HELPER_UNDER_TEST',str(ROOT/'cloudbench-retained-controller-endpoint.py')))
+        capture=helper['capture_retained_target'];namespace=capture.__globals__
+        mid='d'*14;volume='vol_fixture';native=dict(id=mid,instance_id='original',state='started',config=dict(
+            init={'cmd':['bash','/tmp/gate.sh']},image='image@sha256:fixture',restart={'policy':'no'},auto_destroy=False,
+            rootfs={'persist':'always','size_gb':50},mounts=[{'volume':volume,'path':'/data'}]))
+        before=self.base/'endpoint-before.json';after=self.base/'endpoint-after.json';vol=self.base/'endpoint-volume.json';owner=self.base/'endpoint-owner.json'
+        write(before,json.dumps(native));write(after,json.dumps(native));write(vol,json.dumps(dict(id=volume,attached_machine_id=mid,state='created')))
+        write(owner,json.dumps(dict(schema='cloudbench-controller-workspace-ownership-v1',volume_id=volume,app='fixture',mount_path='/data')))
+        calls=[]
+        def checked(*args):calls.append(args);return {'workspace_ownership_sha256':digest(owner.read_bytes())}
+        def git(command,**kwargs):return str(self.common)+'\n' if '--git-common-dir' in command else self.newref+'\n'
+        with patch.dict(os.environ,FLY_MACHINE_ID=mid),patch.dict(namespace,{'verify_retained_endpoint':checked}),patch('subprocess.check_output',side_effect=git):
+            result=capture(self.repo,self.common,before,after,owner,self.newref,'destination.cold.ids',
+                retained={'record':str(self.record),'original_native':str(self.native_path),'original_native_sha256':self.native_sha},controller_volume=vol)
+        self.assertEqual(result['machine'],mid);self.assertEqual(len(calls),1)
+        self.assertEqual(json.loads(before.read_bytes())['config']['init'],{'cmd':['bash','/tmp/gate.sh']})
+
+
+class SnapshotRepresentationTests(unittest.TestCase):
+    """Provider placeholder and final row share one requested snapshot identity."""
+    def setUp(self):
+        helper=Path(os.environ.get('ROSE_SNAPSHOT_SELECTOR_UNDER_TEST',str(ROOT/'cloudbench-select-snapshot.py')))
+        self.select=runpy.run_path(str(helper))['available_snapshot']
+        self.sid='vs_exact123'
+        self.pending=dict(id=self.sid,status='running',created_at='0001-01-01T00:00:00Z',digest='',size=0,volume_size=42949672960)
+        self.complete=dict(id=self.sid,status='created',created_at='2026-10-16T02:37:41Z',digest='c9d4fcc26f23a4b789d4c3c2e389fb6e3d62a97c45d3e4784e97385258aaf678',size=692691630,volume_size=42949672960,retention_days=5)
+
+    def test_pending_and_completed_same_id_selects_completed_in_either_order(self):
+        for rows in ([self.pending,self.complete],[self.complete,self.pending]):
+            self.assertEqual(self.select(rows,self.sid),self.complete)
+        self.assertIsNone(self.select([self.pending],self.sid))
+        self.assertIsNone(self.select([dict(self.complete,id='vs_other')],self.sid))
+        self.assertIsNone(self.select([self.pending,dict(self.complete,id='vs_other')],self.sid))
+        self.assertEqual(self.select([self.complete,dict(self.complete)],self.sid),self.complete)
+
+    def test_conflicting_complete_failed_and_malformed_requested_rows_refuse(self):
+        for key,value in [('digest','f'*64),('size',123),('volume_size',42),('created_at','2026-10-16T02:40:00Z')]:
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                self.select([self.complete,dict(self.complete,**{key:value})],self.sid)
+        for state in ('failed','error','cancelled'):
+            with self.subTest(state=state),self.assertRaises(ValueError):
+                self.select([self.complete,dict(self.pending,status=state)],self.sid)
+        for key in ('digest','size','created_at','status'):
+            malformed=dict(self.complete);malformed.pop(key)
+            with self.subTest(missing=key),self.assertRaises(ValueError):self.select([malformed],self.sid)
+        for row in (dict(self.pending,size=1),dict(self.complete,size=True),dict(self.complete,digest='not-a-digest'),dict(self.complete,state='running'),dict(self.pending,status=None)):
+            with self.subTest(row=row),self.assertRaises(ValueError):self.select([row],self.sid)
+
+
+class AllocatedCurrentColdTests(PreconfigStartupArchiveTests):
+    """New current-state custody never fabricates historical rejection evidence."""
+    def setUp(self):
+        super().setUp()
+        if self._testMethodName not in AllocatedCurrentColdTests.__dict__:
+            return
+        self.source = self.base / 'source-common'; self.source.mkdir()
+        self.destination = self.base / 'destination-common'; self.destination.mkdir()
+        contract = runpy.run_path(str(REPO/'scripts/cloudbench_execution_provenance.py'))
+        matrix = contract['build_task_matrix']([BENCH+'=real'])
+        config = contract['build_config'](contract['CONFIG_SCHEMA_VERSION'], ['task_count=1',
+            'task_matrix_sha256='+matrix['sha256'], 'node_dependency_fingerprint='+'b'*64,
+            'python_dependency_fingerprint='+'c'*64, 'primary_vm_size=shared-cpu-2x', 'primary_vm_memory_mb=4096'])
+        provenance = dict(schema_version=contract['EXECUTION_SCHEMA_VERSION'],base_sha='a'*40,
+            workspace_patch_sha256='none',controller_snapshot=dict(schema_version=contract['SNAPSHOT_SCHEMA_VERSION'],sha256='d'*64),config=config)
+        write(self.run/'execution-provenance.json',json.dumps(provenance))
+        write(self.run/'execution-task-matrix.json',json.dumps(matrix))
+        write(self.run/'_batch/run.json',json.dumps(dict(run_id=RUN,status='failed',controller_exit_code=1,execution_provenance=provenance)))
+        write(self.registry/'meta',(self.registry/'meta').read_bytes()+b'pid_start=proc-start:00000000-0000-0000-0000-000000000000:123\n')
+        for name in ('.cid','benchmark-child.finished','boot-config-unapplied'):
+            (self.out/name).unlink()
+        write(self.out/'primary.ids',MACHINE+'\n'); write(self.out/'primary.log','allocated '+MACHINE+'\n')
+        write(self.registry/'guest-cleanup-unconfirmed','')
+        self.native['state']='stopped'
+        self.native['config']['guest']={'cpu_kind':'shared','cpus':2,'memory_mb':4096}
+        write(self.before,json.dumps(self.native));write(self.after,json.dumps(self.native))
+        self.volume=self.base/'volume.json'
+        write(self.volume,json.dumps(dict(id=VOLUME,attached_machine_id=MACHINE,state='created')))
+        self.guest=self.base/'guest.json'
+        self.data=self.base/'data';self.data.mkdir()
+        self.controller_log=self.base/'controller.log';write(self.controller_log,'original controller '+RUN+'\n')
+        self.receipt=self.out/'allocated-current-cold/receipt.json'
+        self.target=dict(machine='d'*14,volume='vol_destination',workspace='/retained/destination',common=str(self.destination),
+            source_ref='e'*40,ownership_sha256='f'*64,controller_config_sha256='1'*64,preservation='rootfs-always',pool_name='destination.cold.ids')
+        self.source_endpoint=dict(self.target,machine='4'*14,common=str(self.source),volume='vol_source')
+        self.packet=self.base/'packet.json'
+
+    def prepare_current(self):
+        # Only the process observation boundary is mocked. Files/archive/claim FSM are real.
+        with patch.dict(os.environ,FLY_MACHINE_ID=MACHINE):
+            self.helper['capture_current_cold_guest'](self.data,TOKEN,self.guest,'original-instance','3'*32,
+                mount=lambda data: {'device':42,'inode':10,'mount_device':'254:2'}, dependencies=lambda: {'node':'b'*64,'python':'c'*64}, observe=lambda: {'kind':'exact-inert-quiescence-v1','machine':MACHINE,'boot':'0'*36,'unknown':[],'inert_sleepers':[{'pid':1,'birth':'1'}],'idle_pinned_agents':[],'idle_platform_hallpass':[],'observed_epoch':1.0})
+        self.helper['capture_current_cold'](self.registry,self.out,MACHINE,TOKEN,self.archive,
+            self.before,self.after,self.volume,self.guest,self.controller_log,self.native['config']['image'],'3'*32)
+        self.helper['commit_current_cold'](self.registry,self.out,MACHINE,TOKEN,self.archive,
+            self.before,self.after,self.volume,self.receipt)
+
+    def test_current_phase_source_import_and_actual_claim_preserve_unknown_history(self):
+        with self.assertRaises(OSError): self.capture()
+        self.prepare_current()
+        proof=json.loads(self.receipt.read_bytes())
+        self.assertEqual(proof['historical_runtime'],'UNKNOWN');self.assertFalse(proof['runtime_evidence_complete'])
+        self.assertTrue(proof['current_isolation_verified']);self.assertEqual(proof['proof_credit'],0)
+        self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+            self.before,self.after,self.target,'2'*32,self.packet,source_endpoint=self.source_endpoint)
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        path=self.destination/'cloudbench-pool-reuse'/ (MACHINE+'.json')
+        with patch.dict(os.environ,FLY_MACHINE_ID=self.target['machine']):
+            self.helper['verify_imported_pool_proof'](path,self.destination,self.before,self.after,self.target['source_ref'],native_volume=json.loads(self.volume.read_bytes()))
+        for name in ('runtime-evidence-unconfirmed','guest-cleanup-unconfirmed'):
+            self.assertTrue((self.registry/name).exists())
+        self.assertTrue((self.out/'runtime-evidence.pending').exists())
+        for name in ('.cid','benchmark-child.finished','boot-config-unapplied'):
+            self.assertFalse((self.out/name).exists())
+
+    def test_current_phase_rejects_nonempty_or_linked_checkout_and_unknown_process(self):
+        for fault in ('nonempty','symlink','unknown'):
+            with self.subTest(fault=fault):
+                case=type(self)('test_current_phase_source_import_and_actual_claim_preserve_unknown_history');case.setUp()
+                try:
+                    if fault=='nonempty':write(case.data/'repo/file','data')
+                    if fault=='symlink':(case.data/'repo').symlink_to(case.base,target_is_directory=True)
+                    observer=lambda:{'kind':'exact-inert-quiescence-v1','machine':MACHINE,'boot':'0'*36,'unknown':[],'inert_sleepers':[{'pid':1,'birth':'1'}],'idle_pinned_agents':[],'idle_platform_hallpass':[],'observed_epoch':1.0}
+                    if fault=='unknown':observer=lambda:{'kind':'exact-inert-quiescence-v1','machine':MACHINE,'boot':'0'*36,'unknown':[{'pid':9}],'inert_sleepers':[{'pid':1,'birth':'1'}],'idle_pinned_agents':[],'idle_platform_hallpass':[],'observed_epoch':1.0}
+                    with patch.dict(os.environ,FLY_MACHINE_ID=MACHINE), self.assertRaises(ValueError):
+                        case.helper['capture_current_cold_guest'](case.data,TOKEN,case.guest,'original-instance','3'*32,observe=observer,dependencies=lambda: {'node':'b'*64,'python':'c'*64},mount=lambda data: {'device':42,'inode':10,'mount_device':'254:2'})
+                    self.assertFalse(case.guest.exists())
+                finally:case.doCleanups()
+
+    def test_current_phase_native_drift_and_missing_custody_refuse(self):
+        self.prepare_current()
+        changed=copy.deepcopy(self.native);changed['instance_id']='foreign';write(self.after,json.dumps(changed))
+        with self.assertRaises(ValueError):
+            self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+                self.before,self.after,self.target,'2'*32,self.packet,source_endpoint=self.source_endpoint)
+        self.assertFalse(self.packet.exists())
+        write(self.after,json.dumps(self.native));self.archive.unlink()
+        with self.assertRaises(OSError):
+            self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+                self.before,self.after,self.target,'2'*32,self.packet,source_endpoint=self.source_endpoint)
+
+
+    def test_current_phase_crash_replay_never_grants_dual_ownership(self):
+        for stage in ('source-owner-held','source-native-held','source-sealed','destination-claimed','destination-ledger','destination-audit','destination-terminal'):
+            with self.subTest(stage=stage):
+                case=type(self)('test_current_phase_source_import_and_actual_claim_preserve_unknown_history');case.setUp()
+                try:
+                    case.prepare_current()
+                    def fail(actual):
+                        if actual==stage:raise RuntimeError('controlled durable interruption')
+                    def export(checkpoint=lambda stage:None):
+                        return case.helper['export_cold_handoff'](case.source,case.registry,case.out,MACHINE,TOKEN,case.receipt,
+                            case.before,case.after,case.target,'2'*32,case.packet,checkpoint,source_endpoint=case.source_endpoint)
+                    if stage.startswith('source'):
+                        with self.assertRaises(RuntimeError):export(fail)
+                        self.assertFalse(case.packet.exists());export()
+                    else:
+                        export()
+                        with self.assertRaises(RuntimeError):
+                            case.helper['import_cold_handoff'](case.destination,case.target,case.packet,case.before,case.after,fail)
+                        self.assertTrue((case.destination/'cloudbench-pool-claims'/MACHINE).exists())
+                    case.helper['import_cold_handoff'](case.destination,case.target,case.packet,case.before,case.after)
+                    case.helper['import_cold_handoff'](case.destination,case.target,case.packet,case.before,case.after)
+                    self.assertTrue((case.source/'cloudbench-cold-handoffs/outgoing'/MACHINE).exists())
+                    self.assertFalse((case.destination/'cloudbench-pool-claims'/MACHINE).exists())
+                    self.assertTrue((case.registry/'runtime-evidence-unconfirmed').exists())
+                finally:case.doCleanups()
+
+    def test_current_capture_rechecks_checkout_and_native_instance(self):
+        calls=[]
+        def observation():
+            calls.append(1)
+            if len(calls)==2:write(self.data/'repo/unrelated-new-file','changed')
+            return {'kind':'exact-inert-quiescence-v1','machine':MACHINE,'boot':'0'*36,'unknown':[],
+                'inert_sleepers':[{'pid':1,'birth':'1'}],'idle_pinned_agents':[],
+                'idle_platform_hallpass':[],'observed_epoch':1.0}
+        with patch.dict(os.environ,FLY_MACHINE_ID=MACHINE),self.assertRaisesRegex(ValueError,'checkout changed'):
+            self.helper['capture_current_cold_guest'](self.data,TOKEN,self.guest,'original-instance','3'*32,
+                observe=observation,dependencies=lambda:{'node':'b'*64,'python':'c'*64},
+                mount=lambda data:{'device':42,'inode':10,'mount_device':'254:2'})
+        self.assertFalse(self.guest.exists())
+        (self.data/'repo/unrelated-new-file').unlink();(self.data/'repo').rmdir()
+        self.prepare_current()
+        self.archive.unlink()
+        value=json.loads(self.guest.read_bytes());value['native_instance']='old-instance';write(self.guest,json.dumps(value))
+        with self.assertRaisesRegex(ValueError,'another native instance'):
+            self.helper['capture_current_cold'](self.registry,self.out,MACHINE,TOKEN,self.archive,self.before,self.after,
+                self.volume,self.guest,self.controller_log,self.native['config']['image'],'3'*32)
+        self.assertFalse(self.archive.exists())
+
+    def test_current_source_refuses_claim_workers_or_new_originals(self):
+        for fault in ('claim','worker','new-file','retain'):
+            with self.subTest(fault=fault):
+                case=type(self)('test_current_phase_source_import_and_actual_claim_preserve_unknown_history');case.setUp()
+                try:
+                    case.prepare_current()
+                    if fault=='claim':write(case.source/'cloudbench-pool-claims'/MACHINE,'foreign')
+                    if fault=='worker':write(case.out/'worker-clones.ids','c'*14+'\n')
+                    if fault=='new-file':write(case.out/'new-original','changed')
+                    if fault=='retain':write(case.registry/'meta',(case.registry/'meta').read_bytes().replace(b'cleanup_policy=reap',b'cleanup_policy=retain'))
+                    with self.assertRaises(ValueError):
+                        case.helper['export_cold_handoff'](case.source,case.registry,case.out,MACHINE,TOKEN,case.receipt,
+                            case.before,case.after,case.target,'2'*32,case.packet,source_endpoint=case.source_endpoint)
+                    self.assertFalse(case.packet.exists())
+                finally:case.doCleanups()
+
+
+    def test_current_export_validates_operational_lock_without_discarding_history(self):
+        import fcntl
+        self.prepare_current()
+        def birth(pid):
+            raw=Path('/proc',str(pid),'stat').read_text();parts=raw[raw.rfind(')')+2:].split()
+            return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+parts[19]
+        lock=self.registry/'recovery-lock'
+        pairs(lock/'meta',dict(host=os.uname().nodename,pid=os.getpid(),pid_start=birth(os.getpid())))
+        guard=self.registry.parent.parent/'cloudbench-fleet-recovery-locks'/OWNER
+        guard.parent.mkdir();guard.touch(mode=0o600)
+        with guard.open('r') as descriptor:
+            fcntl.flock(descriptor,fcntl.LOCK_EX)
+            with patch.dict(os.environ,CLOUDBENCH_RECOVERY_GUARD_FD=str(descriptor.fileno())):
+                self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+                    self.before,self.after,self.target,'2'*32,self.packet,source_endpoint=self.source_endpoint)
+                # A later source invocation has a new verified ancestor lock;
+                # original source archive bytes never change.
+                pairs(lock/'meta',dict(host=os.uname().nodename,pid=os.getppid(),pid_start=birth(os.getppid())))
+                self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+                    self.before,self.after,self.target,'2'*32,self.packet,source_endpoint=self.source_endpoint)
+                pairs(lock/'meta',dict(host='foreign',pid=os.getpid(),pid_start=birth(os.getpid())))
+                with self.assertRaisesRegex(ValueError,'foreign current recovery lock'):
+                    self.helper['verify_current_cold_receipt'](self.registry,self.out,MACHINE,TOKEN,self.receipt,self.before,self.after)
+
+
+    def test_current_phase_preserves_authentic_absent_guest_latch_and_present_runtime_latch(self):
+        (self.registry/'guest-cleanup-unconfirmed').unlink()
+        self.prepare_current()
+        phase=json.loads(self.receipt.read_bytes())
+        self.assertEqual(phase['source_latches']['guest-cleanup-unconfirmed'],{'present':False})
+        self.assertEqual(phase['source_latches']['runtime-evidence-unconfirmed']['present'],True)
+        self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+            self.before,self.after,self.target,'2'*32,self.packet,source_endpoint=self.source_endpoint)
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        self.assertFalse((self.registry/'guest-cleanup-unconfirmed').exists())
+        self.assertTrue((self.registry/'runtime-evidence-unconfirmed').exists())
+        write(self.registry/'guest-cleanup-unconfirmed','manufactured')
+        with self.assertRaises(ValueError):
+            self.helper['verify_current_cold_receipt'](self.registry,self.out,MACHINE,TOKEN,self.receipt,self.before,self.after)
+
+
+    def test_current_phase_verifies_original_collector_source_without_relabeling_guest(self):
+        (self.registry/'guest-cleanup-unconfirmed').unlink()
+        old_source=self.base/'original-guest-collector.py'
+        old_source.write_bytes((ROOT/'cloudbench-startup-failure-archive.py').read_bytes())
+        old_sha=digest(old_source.read_bytes());old=runpy.run_path(str(old_source))
+        observer=lambda:{'kind':'exact-inert-quiescence-v1','machine':MACHINE,'boot':'0'*36,'unknown':[],
+            'inert_sleepers':[{'pid':1,'birth':'1'}],'idle_pinned_agents':[],'idle_platform_hallpass':[],'observed_epoch':1.0}
+        with patch.dict(os.environ,FLY_MACHINE_ID=MACHINE):
+            old['capture_current_cold_guest'](self.data,TOKEN,self.guest,'original-instance','3'*32,
+                observe=observer,dependencies=lambda:{'node':'b'*64,'python':'c'*64},
+                mount=lambda data:{'device':42,'inode':10,'mount_device':'254:2'})
+        args=(self.registry,self.out,MACHINE,TOKEN,self.archive,self.before,self.after,self.volume,
+            self.guest,self.controller_log,self.native['config']['image'],'3'*32)
+        with self.assertRaisesRegex(ValueError,'collector source binding'):
+            self.helper['capture_current_cold'](*args,guest_collector_source=old_source,guest_collector_sha256='f'*64)
+        self.assertFalse(self.archive.exists())
+        self.helper['capture_current_cold'](*args,guest_collector_source=old_source,guest_collector_sha256=old_sha)
+        self.helper['commit_current_cold'](self.registry,self.out,MACHINE,TOKEN,self.archive,self.before,self.after,self.volume,self.receipt)
+        old_source.unlink()
+        self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+            self.before,self.after,self.target,'2'*32,self.packet,source_endpoint=self.source_endpoint)
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        self.assertEqual(json.loads(self.guest.read_bytes())['collector_sha256'],old_sha)
+        self.assertFalse((self.registry/'guest-cleanup-unconfirmed').exists())
+
+
+    def test_current_phase_rejects_self_consistent_untrusted_collector_validator(self):
+        source=(ROOT/'cloudbench-startup-failure-archive.py').read_text()
+        start=source.index('def validate_current_cold_guest(')
+        end=source.index('\ndef current_cold_mount(',start)
+        malicious=(source[:start]+'def validate_current_cold_guest(*args, **kwargs):\n    pass\n\n'+source[end:]).encode()
+        value={'collector_sha256':digest(malicious)}
+        with self.assertRaisesRegex(ValueError,'collector.*semantics'):
+            self.helper['validate_recorded_current_guest'](value,MACHINE,TOKEN,malicious,digest(malicious))
+
+
+    def test_current_phase_latch_presence_is_boolean_not_integer(self):
+        self.prepare_current()
+        phase=json.loads(self.receipt.read_bytes())
+        phase['source_latches']['guest-cleanup-unconfirmed']['present']=1
+        write(self.receipt,json.dumps(phase))
+        with self.assertRaisesRegex(ValueError,'presence must be boolean'):
+            self.helper['verify_current_cold_receipt'](self.registry,self.out,MACHINE,TOKEN,self.receipt,self.before,self.after)
+
+
+    def _outer_terminal_fixture(self):
+        (self.registry/'guest-cleanup-unconfirmed').unlink()
+        (self.run/'_batch/run.json').unlink();(self.out/'worker-clones.ids').unlink()
+        write(self.run/'_batch/report-card.json',json.dumps({'status':'queued','per_task':[{'name':BENCH,'status':'queued'}]}))
+        pairs(self.registry/'meta',{**self.helper['fields'](self.registry/'meta'),'pid':'17904'})
+        pairs(self.audit/'expected-fresh'/CLONE,{'clone_name':CLONE,'source_machine_id':'c'*14})
+        job_id='r001-j0046';campaign='campaign-original600';parent_birth='proc-start:00000000-0000-0000-0000-000000000000:111'
+        self.controller_log=self.base/campaign/(job_id+'.log')
+        write(self.controller_log,'monitor '+str(self.run)+'\nowner: '+OWNER+';\nexecution provenance: '+str(self.run/'execution-provenance.json')+'\n')
+        jobs=[{'job_id':f'r001-j{i:04d}','task':'other','controller_pid':20000+i} for i in range(1,601)]
+        jobs[45]=dict(job_id=job_id,task=BENCH,controller_pid=17904,log=str(self.controller_log),status='cancelled',controller_exit_code=137,
+            startup_cohort='c001',attempts=[dict(attempt=1,controller_pid=17904,log=str(self.controller_log),status='cancelled',controller_exit_code=137,
+            started_at='2026-10-15T16:32:01+00:00',finished_at='2026-10-15T16:51:39+00:00',run_id=None,fleet_owner_token=None,resources_released=False)])
+        summary=dict(campaign_id=campaign,status='cancelled',total_jobs=600,task_count=200,runs=3,concurrency=600,peak_concurrency=600,
+            e2e_started_at_epoch=1792081092.1816854,finished_at='2026-10-15T16:51:56+00:00',jobs=jobs)
+        manifest=dict(cohort_id='c001',jobs={j['job_id']:j['controller_pid'] for j in jobs},e2e_deadline_monotonic=5334.5)
+        threshold=dict(campaign_id=campaign,members=list(manifest['jobs']),source_ref='a'*40,parent_pid=16924,parent_birth=parent_birth,
+            original_epoch=1792081092.1816854,e2e_deadline_monotonic=5334.5)
+        term=dict(parent_pid=16924,parent_birth=parent_birth,signal='SIGTERM',child_or_group_signals=False,trigger_sha256='f'*64)
+        result={}
+        for key,value in [('summary',summary),('manifest',manifest),('threshold_parent',threshold),('parent_term',term)]:
+            path=self.base/(key+'.json');write(path,json.dumps(value));result[key]={'path':str(path),'sha256':digest(path.read_bytes())}
+        return result
+
+    def test_outer_cancelled_job_preserves_absent_local_batch_and_worker_ledger(self):
+        outer=self._outer_terminal_fixture()
+        observation=lambda:{'kind':'exact-inert-quiescence-v1','machine':MACHINE,'boot':'0'*36,'unknown':[],
+            'inert_sleepers':[{'pid':1,'birth':'1'}],'idle_pinned_agents':[],'idle_platform_hallpass':[],'observed_epoch':1.0}
+        with patch.dict(os.environ,FLY_MACHINE_ID=MACHINE):
+            self.helper['capture_current_cold_guest'](self.data,TOKEN,self.guest,'original-instance','3'*32,observe=observation,
+                dependencies=lambda:{'node':'b'*64,'python':'c'*64},mount=lambda data:{'device':42,'inode':10,'mount_device':'254:2'})
+        self.helper['capture_current_cold'](self.registry,self.out,MACHINE,TOKEN,self.archive,self.before,self.after,self.volume,self.guest,
+            self.controller_log,self.native['config']['image'],'3'*32,outer_terminal=outer)
+        self.helper['commit_current_cold'](self.registry,self.out,MACHINE,TOKEN,self.archive,self.before,self.after,self.volume,self.receipt)
+        self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,self.before,self.after,self.target,'2'*32,self.packet,source_endpoint=self.source_endpoint)
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        self.assertFalse((self.run/'_batch/run.json').exists());self.assertFalse((self.out/'worker-clones.ids').exists())
+        self.assertEqual(json.loads((self.run/'_batch/report-card.json').read_bytes())['status'],'queued')
+        raw,files,_=self.helper['read_current_cold_archive'](self.archive)
+        self.assertEqual(json.loads(files['outer/summary.json'])['jobs'][45]['controller_exit_code'],137)
+        self.assertEqual(json.loads(files['source-local-presence.json']),{'batch_run':False,'worker_ledger':False})
+
+
+    def test_outer_terminal_requires_exact_source_job_manifest_and_no_workers(self):
+        for fault in ('job-pid','manifest-pid','source','log-owner','extra-worker','not-terminal'):
+            with self.subTest(fault=fault):
+                case=type(self)('test_outer_cancelled_job_preserves_absent_local_batch_and_worker_ledger');case.setUp()
+                try:
+                    outer=case._outer_terminal_fixture()
+                    if fault in ('job-pid','not-terminal'):
+                        path=Path(outer['summary']['path']);row=json.loads(path.read_bytes())
+                        if fault=='job-pid':row['jobs'][45]['controller_pid']=9
+                        else:row['status']='running'
+                        write(path,json.dumps(row));outer['summary']['sha256']=digest(path.read_bytes())
+                    if fault=='manifest-pid':
+                        path=Path(outer['manifest']['path']);row=json.loads(path.read_bytes());row['jobs']['r001-j0046']=9
+                        write(path,json.dumps(row));outer['manifest']['sha256']=digest(path.read_bytes())
+                    if fault=='source':
+                        path=Path(outer['threshold_parent']['path']);row=json.loads(path.read_bytes());row['source_ref']='f'*40
+                        write(path,json.dumps(row));outer['threshold_parent']['sha256']=digest(path.read_bytes())
+                    if fault=='log-owner':write(case.controller_log,case.controller_log.read_text().replace(OWNER,'f'*32))
+                    if fault=='extra-worker':
+                        pairs(case.audit/'fresh'/'other',dict(machine_id='c'*14,source_machine_id=MACHINE))
+                    with self.assertRaises(ValueError):
+                        case.helper['current_cold_files'](case.registry,case.out,MACHINE,TOKEN,case.controller_log,
+                            outer_files=case.helper['read_outer_terminal'](outer))
+                    self.assertFalse((case.run/'_batch/run.json').exists())
+                    self.assertFalse((case.out/'worker-clones.ids').exists())
+                finally:case.doCleanups()
+
+
 class CrossControllerColdHandoffTests(PreconfigStartupArchiveTests):
     def setUp(self):
         super().setUp()
+        # Inherited archive tests exercise the original, unconsumed fixture.
+        # Only handoff tests may consume its latches before their assertions.
+        if self._testMethodName not in CrossControllerColdHandoffTests.__dict__:
+            return
         self.source = self.base / 'source-common'; self.source.mkdir()
         self.destination = self.base / 'destination-common'; self.destination.mkdir()
         import runpy
@@ -1773,7 +2225,26 @@ with helper['cold_handoff_ledger_lock'](Path(sys.argv[2])):
 
     def test_older_cleanup_policy_consumer_keeps_source_retained(self):
         self.export()
-        old_source=git_blob('scripts/run-bench-fleet').decode()
+        # Exact consumer from 9b2447b4deb33c3f15aa3d83d674eecf8c387146,
+        # before handoff awareness. Keep its bytes for shallow checkouts.
+        old_source = r'''fleet_registry_cleanup_state() {  # <registry-dir> <cleanup-policy>
+    local registry="${1%/}" policy="$2" guest_cleanup_unconfirmed=0
+    if [ -e "$registry/guest-cleanup-unconfirmed" ] \
+        || [ -L "$registry/guest-cleanup-unconfirmed" ] \
+        || [ -e "$registry/runtime-evidence-unconfirmed" ] \
+        || [ -L "$registry/runtime-evidence-unconfirmed" ]; then
+        guest_cleanup_unconfirmed=1
+    fi
+    case "$policy:$guest_cleanup_unconfirmed" in
+        reap:0) printf 'reap\n' ;;
+        retain:0) printf 'retain\n' ;;
+        reap:1|retain:1) printf 'quarantined\n' ;;
+        *) printf 'unsafe\n' ;;
+    esac
+}
+'''
+        self.assertEqual(hashlib.sha256(old_source.encode()).hexdigest(),
+                         'f3e48015335510aef80e0e53602a93bf2cf9e6708cea63ebff620415cce7f029')
         start=old_source.index('fleet_registry_cleanup_state() {')
         end=old_source.index('\n}\n',start)+3
         function=old_source[start:end]
@@ -1783,6 +2254,14 @@ with helper['cold_handoff_ledger_lock'](Path(sys.argv[2])):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(result.stdout.strip(),'retain')
         self.assertEqual(self.helper['fields'](self.registry/'meta')['cleanup_policy'],'retain')
+        # A handoff-aware consumer must preserve its stronger quarantine guard.
+        current_source=git_blob('scripts/run-bench-fleet').decode()
+        start=current_source.index('fleet_registry_cleanup_state() {')
+        end=current_source.index('\n}\n',start)+3
+        script='set -uo pipefail\n'+current_source[start:end]+'\nfleet_registry_cleanup_state "$1" retain\n'
+        result=subprocess.run(['bash','-c',script,'guard',str(self.registry)],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(result.stdout.strip(),'quarantined')
         self.export()
 
     def test_actual_destination_pool_proof_rechecks_imported_originals_and_target(self):

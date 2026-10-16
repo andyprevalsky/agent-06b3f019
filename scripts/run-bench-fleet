@@ -737,8 +737,11 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/process-identity.py" \
        "$ROOT_DIR/scripts/cloudbench-worker.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
+       "$ROOT_DIR/scripts/cloudbench-worker-reuse.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
+       "$ROOT_DIR/scripts/cloudbench-controller-export.py" \
+       "$ROOT_DIR/scripts/cloudbench-retained-controller-endpoint.py" \
        "$ROOT_DIR/scripts/cloudbench-original-volume-capture.py" \
        "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
@@ -2104,6 +2107,9 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
     local id="$1" diagnostic_log="${2:-}" vol="${3:-}" i details="" detail_status=2
     local state="" command_rc=0
     [ -n "$id" ] || return 0
+    if [ -n "${GIT_COMMON_DIR:-}" ] && [ -e "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/$id.json" ]; then
+        echo "❌ borrowed worker requires verified stop-and-return; refusing destroy" >&2; return 1
+    fi
     if [ -n "${GIT_COMMON_DIR:-}" ] && { [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ]; }; then
         echo "❌ permanent outgoing handoff retains this source allocation" >&2; return 1
     fi
@@ -2305,7 +2311,7 @@ PY
 }
 
 cloudbench_capture_worker_runtime_evidence() {  # <bench-output> <worker-id>
-    local out="$1" wid="$2" base token command capture_rc=0
+    local out="$1" wid="$2" base token command capture_rc=0 remote_archive scope=""
     base="$out/worker-runtime-evidence/$wid"
     cloudbench_preserve_unlaunched_worker "$out" "$wid" && return 0
     token="$(python3 - "$base/owner.json" "$wid" <<'PY'
@@ -2325,11 +2331,16 @@ PY
             verify-directory --run-token "$token" --machine-id "$wid" \
             --output "$base/capture" || capture_rc=1
     else
-        command="python3 /data/cloudbench-worker-evidence.py capture --run-token $token --machine-id $wid --output /data/cloudbench-worker-evidence-$wid.tar"
+        remote_archive="/data/cloudbench-worker-evidence-$wid.tar"
+        if [ -e "$out/worker-borrowed/$wid.json" ]; then
+            scope="env CLOUDBENCH_WORKER_EVIDENCE_SCOPE=run "
+            remote_archive="/data/cloudbench-worker-evidence-$wid-$token.tar"
+        fi
+        command="${scope}python3 /data/cloudbench-worker-evidence.py capture --run-token $token --machine-id $wid --output $remote_archive"
         if ! fly_with_timeout 300 ssh console -a "$APP" --machine "$wid" -C "$command" \
                 >> "$base/capture.log" 2>&1 \
             || ! fly_with_timeout 60 ssh sftp get -a "$APP" --machine "$wid" \
-                "/data/cloudbench-worker-evidence-$wid.tar" "$base/evidence.tar" \
+                "$remote_archive" "$base/evidence.tar" \
                 >> "$base/capture.log" 2>&1 \
             || ! python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-evidence.py" \
                 verify "$base/evidence.tar" --run-token "$token" --machine-id "$wid" \
@@ -2417,8 +2428,8 @@ PY
 }
 
 cloudbench_validate_worker_evidence_coverage() {  # <bench-output> <primary> <run-token>
-    python3 - "$1" "$2" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$3" <<'PY'
-import json, re, sys
+    python3 - "$1" "$2" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$3" "${CLOUDBENCH_SCRIPT_SNAPSHOT:-${ROOT_DIR:-.}/scripts}/cloudbench-worker-reuse.py" <<'PY'
+import json, re, sys, runpy
 from pathlib import Path
 out, primary, audit = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
 expected = set()
@@ -2428,6 +2439,13 @@ for path in (audit / 'fresh').iterdir():
     if row.get('source_machine_id') == primary and row.get('machine_id'):
         assert re.fullmatch(r'[0-9a-f]+', row['machine_id'])
         expected.add(row['machine_id'])
+borrowed = out / 'worker-borrowed'
+if borrowed.exists():
+    validate_return = runpy.run_path(sys.argv[5])['validate_return']
+    for path in borrowed.glob('*.json'):
+        if re.fullmatch(r'[0-9a-f]{8,32}', path.stem):
+            validate_return(out, path.stem, primary, sys.argv[4])
+            expected.add(path.stem)
 ledger = out / 'worker-clones.ids'
 if ledger.exists():
     assert not ledger.is_symlink()
@@ -2453,6 +2471,16 @@ cloudbench_collect_remaining_runtime_evidence() {
     for j in "${!CHILD_OUT[@]}"; do
         out="${CHILD_OUT[$j]}"
         [ -n "$out" ] || continue
+        # Borrowed workers never enter the destructive clone registry sweep.
+        # Close their exact runtime and stop/return them before final coverage.
+        for owner in "$out"/worker-borrowed/*.json; do
+            [ -f "$owner" ] || continue
+            wid="${owner##*/}"; wid="${wid%.json}"
+            case "$wid" in *[!0-9a-f]*) continue ;; esac
+            if worker_is_tracked "$out" "$wid"; then
+                cleanup_failed_worker "$out" "$wid" || failed=1
+            fi
+        done
         if [ -e "$out/runtime-evidence.pending" ] || [ -L "$out/runtime-evidence.pending" ]; then
             echo "❌ primary runtime evidence remains incomplete: $out" >&2
             failed=1
@@ -13001,7 +13029,20 @@ PYREQUEST
         registry_owner_alive "$cold_registry/meta"; [ "$?" -eq 1 ] || exit 1
         acquire_registry_recovery_lock "$cold_registry" || exit 1
         if [ ! -e "$cold_registry/cold-handoff-outgoing" ]; then
-            fleet_preconfig_recovery_plan "$cold_registry" >/dev/null || exit 1
+            cold_source_phase="$(CLOUDBENCH_RECOVERY_GUARD_FD="${REGISTRY_RECOVERY_GUARD_FD:-}" python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$COLD_HANDOFF_REQUEST" "$COLD_HANDOFF_REQUEST_SHA" <<'PYPHASE'
+import json,runpy,sys
+helper=runpy.run_path(sys.argv[1]);request=helper['read_cold_handoff_request'](*sys.argv[2:])
+phase=json.loads(helper['read'](request['receipt'],1048576))
+if phase.get('schema') == helper['CURRENT_COLD_SCHEMA']:
+    helper['verify_current_cold_receipt'](request['registry'],request['output'],request['machine'],request['run_token'],request['receipt'],phase['native_before_path'],phase['native_after_path'])
+    print('current-cold')
+else:
+    print('preconfig')
+PYPHASE
+)" || exit 1
+            if [ "$cold_source_phase" = preconfig ]; then
+                fleet_preconfig_recovery_plan "$cold_registry" >/dev/null || exit 1
+            fi
         fi
     fi
     # Canonical read-only exact GETs. O_EXCL private paths forbid stale-file
@@ -13022,9 +13063,17 @@ PYVOLUMES
     IFS=$'\t' read -r cold_controller_volume cold_controller_volume_path cold_child_volume cold_child_volume_path <<< "$cold_volume_fields"
     fleet_cold_handoff_volume_read "$cold_controller_volume" "$cold_controller_volume_path" || exit 1
     if [ "$cold_operation" != target ]; then fleet_cold_handoff_volume_read "$cold_child_volume" "$cold_child_volume_path" || exit 1; fi
-    python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$COLD_HANDOFF_REQUEST" "$COLD_HANDOFF_REQUEST_SHA" "$ROOT_DIR" "$GIT_COMMON_DIR" <<'PYHANDOFF' || cold_handoff_status=$?
-import json,runpy,sys
-result=runpy.run_path(sys.argv[1])['cold_handoff_request'](*sys.argv[2:])
+    CLOUDBENCH_RECOVERY_GUARD_FD="${REGISTRY_RECOVERY_GUARD_FD:-}" python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$COLD_HANDOFF_REQUEST" "$COLD_HANDOFF_REQUEST_SHA" "$ROOT_DIR" "$GIT_COMMON_DIR" <<'PYHANDOFF' || cold_handoff_status=$?
+import json,runpy,sys,subprocess
+from pathlib import Path
+base=runpy.run_path(sys.argv[1]);request=base['read_cold_handoff_request'](*sys.argv[2:4])
+dispatch=base['cold_handoff_request']
+if 'retained_controller' in request:
+    path=Path(sys.argv[1]).with_name('cloudbench-retained-controller-endpoint.py')
+    expected=subprocess.check_output(['git','-c','safe.directory='+sys.argv[4],'--no-replace-objects','-C',sys.argv[4],'show',request['tool_ref']+':scripts/cloudbench-retained-controller-endpoint.py'])
+    if base['read'](path)!=expected:raise ValueError('retained endpoint dispatcher differs from pinned source')
+    dispatch=runpy.run_path(str(path))['cold_handoff_request']
+result=dispatch(*sys.argv[2:])
 print(json.dumps({'handoff_completed':True,'native_release_verified':False,'proof_credit':0}))
 PYHANDOFF
     if [ "$cold_operation" = export ]; then release_registry_recovery_lock "$cold_registry" || exit 1; fi
@@ -15223,6 +15272,146 @@ mandatory_autoscaler_process_acceptable() {  # <bench-output-dir> <autoscaler-pi
 # The worker-clones id-file is the SOURCE OF TRUTH for the pool size: a machine
 # is recorded the instant Fly creates it (BEFORE staging), so a slow/failed stage
 # can never make the reconcile think the pool is empty and re-clone in a loop.
+claim_reusable_worker() {  # <out> <primary> <workspace> <run-token> <primary-6pn>
+    local out="$1" primary="$2" workspace="$3" token="$4" pip="$5" ledger id proof volume digest attempt
+    local current_owner="${FLEET_OWNER_TOKEN:-}" claim_owner
+    local FLEET_OWNER_TOKEN
+    local helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-reuse.py"
+    [ -n "${GIT_COMMON_DIR:-}" ] && [ -d "$GIT_COMMON_DIR/cloudbench-worker-pools" ] || return 0
+    [ -n "$current_owner" ] || return 1
+    [ -n "${CURRENT_NODE_FP:-}" ] && [ -n "${CURRENT_PY_FP:-}" ] || return 1
+    local POOL_IDS_FILE POOL_META_FILE
+    for ledger in "$GIT_COMMON_DIR"/cloudbench-worker-pools/*.ids; do
+        [ -f "$ledger" ] || continue
+        POOL_IDS_FILE="$ledger"; POOL_META_FILE="$ledger.deps"
+        while IFS= read -r id; do
+            case "$id" in ''|*[!0-9a-f]*) continue ;; esac
+            [ "$id" != "${WARM_ID:-}" ] && [ "$id" != "${SHARED_WARM_ID:-}" ] || continue
+            [ ! -e "$out/worker-runtime-evidence/$id" ] || continue
+            [ ! -e "$POOL_CLAIMS_DIR/$id" ] && [ ! -L "$POOL_CLAIMS_DIR/$id" ] || continue
+            proof="$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/$id.json"
+            [ -f "$proof" ] || continue
+            volume="$(python3 - "$proof" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['volume_id'])
+PY
+)" || continue
+            mkdir -p "$POOL_CLAIMS_DIR" "$out/worker-borrowed" || return 1
+            # The same controller can lease this worker for another primary.
+            # Give each claim its own owner token to prevent same-owner ABA.
+            claim_owner="$(python3 -c 'import secrets;print(secrets.token_hex(16))')" || return 1
+            FLEET_OWNER_TOKEN="$claim_owner"
+            write_pool_claim "$POOL_CLAIMS_DIR/$id" "$id" "$volume" || continue
+            digest="$(cloudbench_env_sha256 "$POOL_CLAIMS_DIR/$id")" || return 1
+            attempt="$(mktemp -d "$out/worker-borrowed/.admit-$id.XXXXXX")" || return 1
+            if ! fleet_preconfig_native_read "$id" "$attempt/before.json" \
+                || ! fleet_preconfig_native_read "$id" "$attempt/after.json" \
+                || ! fleet_cold_handoff_volume_read "$volume" "$attempt/volume.json" \
+                || ! python3 "$helper" "$proof" --target "$POOL_META_FILE" \
+                    --before "$attempt/before.json" --after "$attempt/after.json" --volume "$attempt/volume.json" \
+                    --source "$BENCH_REF" --node "$CURRENT_NODE_FP" --python "$CURRENT_PY_FP" \
+                    --size "$FLEET_WORKER_VM_SIZE" --memory "$FLEET_WORKER_VM_MEMORY" --app "$APP" > "$attempt/verified"; then
+                pool_claim_mark_cleanup_unconfirmed "$POOL_CLAIMS_DIR/$id" || true
+                continue
+            fi
+            python3 - "$out/worker-borrowed/$id.json" "$proof" "$digest" "$primary" "$workspace" "$token" "$attempt" "$current_owner" "$ledger" "$pip" "$claim_owner" <<'PY' || return 1
+import json,os,sys
+from pathlib import Path
+path,proof,digest,primary,workspace,token,attempt,owner,ledger,pip,claim_owner=sys.argv[1:]
+assert Path(path).parent.resolve(strict=True)==Path(path).parent
+row=dict(version=1,role='borrowed-worker',machine_id=Path(path).stem,proof=proof,
+         claim_sha256=digest,primary_machine_id=primary,workspace=workspace,run_token=token,
+         admission=attempt,fleet_owner_token=owner,claim_owner_token=claim_owner,ledger=ledger,primary_host=pip)
+with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w') as f:
+ json.dump(row,f,sort_keys=True);f.flush();os.fsync(f.fileno())
+fd=os.open(Path(path).parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+PY
+            worker_ledger_lock_acquire "$out" || return 1
+            printf '%s\n' "$id" >> "$out/worker-clones.ids" || { worker_ledger_lock_release "$out"; return 1; }
+            worker_ledger_lock_release "$out" || return 1
+            printf '%s' "$id"; return 0
+        done < "$ledger"
+    done
+}
+
+return_reusable_worker() {  # <out> <worker>; evidence is captured before this call
+    local out="$1" wid="$2" authority="$1/worker-borrowed/$2.json" helper
+    local proof volume token digest ledger state nonce command attempt claim_owner
+    helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-reuse.py"
+    IFS=$'\t' read -r proof volume token digest ledger claim_owner < <(python3 - "$authority" "$FLEET_OWNER_TOKEN" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]));p=json.load(open(r['proof']))
+assert r['role']=='borrowed-worker' and r['fleet_owner_token']==sys.argv[2]
+assert r['machine_id']==p['machine_id']
+print(r['proof'],p['volume_id'],r['run_token'],r['claim_sha256'],r['ledger'],r['claim_owner_token'],sep='\t')
+PY
+) || return 1
+    [ -n "$proof" ] && [ -n "$volume" ] && [ -n "$token" ] && [ -n "$digest" ] || return 1
+    python3 - "$helper" "$out" "$authority" <<'PY' || return 1
+import json,runpy,sys
+r=json.load(open(sys.argv[3]));runpy.run_path(sys.argv[1])['validate_capture'](sys.argv[2],r['machine_id'],r['primary_machine_id'],r['run_token'])
+PY
+    [ "$(cloudbench_env_sha256 "$POOL_CLAIMS_DIR/$wid")" = "$digest" ] || return 1
+    attempt="$(mktemp -d "$out/worker-borrowed/.return-$wid.XXXXXX")" || return 1
+    fleet_preconfig_native_read "$wid" "$attempt/before.json" || return 1
+    state="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["state"])' "$attempt/before.json")" || return 1
+    case "$state" in
+        started)
+            nonce="$(python3 -c 'import secrets;print(secrets.token_hex(16))')" || return 1
+            command="$(python3 - "$helper" "$wid" "$nonce" <<'PY'
+import runpy,sys
+print(runpy.run_path(sys.argv[1])['idle_command'](*sys.argv[2:]))
+PY
+)" || return 1
+            fly_with_timeout 30 ssh console -a "$APP" --machine "$wid" -C "$command" > "$attempt/idle.json" || return 1
+            python3 - "$helper" "$attempt/idle.json" "$wid" "$nonce" <<'PY' || return 1
+import json,runpy,sys
+runpy.run_path(sys.argv[1])['validate_idle'](json.load(open(sys.argv[2])),*sys.argv[3:])
+PY
+            fly_with_timeout 20 machine stop "$wid" -a "$APP" > "$attempt/stop.log" 2>&1 || return 1
+            ;;
+        stopped) ;;
+        *) return 1 ;;
+    esac
+    local step
+    for step in $(seq 1 20); do
+        fleet_preconfig_native_read "$wid" "$attempt/after.json" || return 1
+        state="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["state"])' "$attempt/after.json")" || return 1
+        [ "$state" != stopped ] || break
+        case "$state" in started|stopping) sleep 1 ;; *) return 1 ;; esac
+    done
+    [ "$state" = stopped ] || return 1
+    fleet_preconfig_native_read "$wid" "$attempt/final.json" \
+        && fleet_cold_handoff_volume_read "$volume" "$attempt/volume.json" || return 1
+    python3 "$helper" "$proof" --target "$ledger.deps" --before "$attempt/after.json" \
+        --after "$attempt/final.json" --volume "$attempt/volume.json" --source "$BENCH_REF" \
+        --node "$CURRENT_NODE_FP" --python "$CURRENT_PY_FP" --size "$FLEET_WORKER_VM_SIZE" \
+        --memory "$FLEET_WORKER_VM_MEMORY" --app "$APP" --returning > "$attempt/verified" || return 1
+    python3 - "$helper" "$authority" "$out/worker-borrowed/$wid.returned.json" "$out/worker-runtime-evidence/$wid" <<'PY' || return 1
+import json,runpy,sys
+h=runpy.run_path(sys.argv[1]);r=json.loads(h['read'](sys.argv[2]));base=__import__('pathlib').Path(sys.argv[4])
+evidence=base/'capture/manifest.json'
+if not evidence.exists(): evidence=base/'not-launched.json'
+receipt=dict(version=1,role='borrowed-worker',machine_id=r['machine_id'],run_token=r['run_token'],
+             primary_machine_id=r['primary_machine_id'],fleet_owner_token=r['fleet_owner_token'],
+             state='stopped',volume_retained=True,claim_sha256=r['claim_sha256'],
+             evidence_sha256=h['sha'](h['read'](evidence)))
+h['sibling']('cloudbench-startup-failure-archive.py')['durable_handoff_json'](__import__('pathlib').Path(sys.argv[3]),receipt)
+PY
+    python3 - "$helper" "$authority" "$attempt/final.json" "$attempt/volume.json" <<'PY' || return 1
+import runpy,sys
+runpy.run_path(sys.argv[1])['record_return_state'](*sys.argv[2:])
+PY
+    pool_claim_release_exact "$POOL_CLAIMS_DIR/$wid" "$digest" "$claim_owner" \
+        "$FLEET_OWNER_HOST" "$$" "$FLEET_OWNER_PID_START" || return 1
+    python3 - "$helper" "$out/worker-borrowed/$wid.returned.json" "$out/worker-borrowed/$wid.released.json" <<'PY' || return 1
+import json,runpy,sys
+from pathlib import Path
+h=runpy.run_path(sys.argv[1]);h['sibling']('cloudbench-startup-failure-archive.py')['durable_handoff_json'](Path(sys.argv[3]),json.loads(h['read'](sys.argv[2])))
+PY
+    cloudbench_fsync_directory "$out/worker-borrowed"
+}
+
 _pool_ids() {  # count of tracked worker machines (clean single integer)
     local f="$1/worker-clones.ids" n
     [ -f "$f" ] || { echo 0; return; }
@@ -15239,7 +15428,16 @@ _ready_pool_ids() {  # count of workers proven to have joined the queue
 }
 
 worker_operational() {  # worker_operational <machine-id>
-    local wid="$1"
+    local wid="$1" out="${2:-}" command
+    if [ -n "$out" ] && [ -e "$out/worker-borrowed/$wid.json" ]; then
+        command="$(python3 - "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-reuse.py" "$out/worker-borrowed/$wid.json" <<'PY'
+import json,runpy,sys
+row=json.load(open(sys.argv[2])); p=row['primary_host']; t=row['run_token']
+print(runpy.run_path(sys.argv[1])['ready_command'](row['machine_id'],t,p,row['workspace'],f"/data/cloudbench-worker-{row['machine_id']}-{t}.ready"))
+PY
+)" || return 1
+        fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" -C "$command" >/dev/null 2>&1 || return 1
+    fi
     # /health is 200 only after worker.run() has passed Temporal validation and
     # started its poller tasks; worker.py flips it back to 503 on fatal exit.
     # Pair it with the live process check so a stale HTTP response can never
@@ -15255,7 +15453,7 @@ ready_workers_operational() {  # ready_workers_operational <bench-output-dir>
     [ -s "$out/worker-ready.ids" ] || return 0
     while read -r wid; do
         [ -n "$wid" ] || continue
-        worker_operational "$wid" &
+        worker_operational "$wid" "$out" &
         probe_pids+=("$!")
     done < "$out/worker-ready.ids"
     for pid in "${probe_pids[@]}"; do
@@ -15341,7 +15539,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     local cleanup_log="$1/worker-$2.cleanup.log"
     local claim="$1/worker-$2.cleanup-claim" self_pid="${BASHPID:-$$}"
     local claim_token claim_line claim_pid claim_owner claim_started
-    local machine_reap_status=-1 terminal_disposition
+    local machine_reap_status=-1 terminal_disposition borrowed_worker=0
     claim_token="$self_pid.$(date +%s).$RANDOM"
     local now age attempt=0 claimed=0
     local claim_attempts="${WORKER_CLEANUP_CLAIM_ATTEMPTS:-300}"
@@ -15398,10 +15596,14 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         return 1
     fi
 
-    volume_id="$(fleet_registry_volume_for_id "$cleanup_wid")" || {
-        echo "❌ worker $cleanup_wid has no durable exact volume ownership; refusing destroy" >&2
-        rc=1
-    }
+    if [ -e "$cleanup_out/worker-borrowed/$cleanup_wid.json" ]; then
+        borrowed_worker=1
+    else
+        volume_id="$(fleet_registry_volume_for_id "$cleanup_wid")" || {
+            echo "❌ worker $cleanup_wid has no durable exact volume ownership; refusing destroy" >&2
+            rc=1
+        }
+    fi
     : >> "$cleanup_log" 2>/dev/null || true
     if [ "$rc" = "0" ] \
         && [ -e "$cleanup_out/worker-runtime-evidence/$cleanup_wid/owner.json" ] \
@@ -15410,7 +15612,9 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         echo "❌ worker $cleanup_wid runtime evidence was not preserved; retaining exact ownership" >&2
         rc=1
     fi
-    if [ "$rc" = "0" ]; then
+    if [ "$rc" = 0 ] && [ "$borrowed_worker" = 1 ]; then
+        return_reusable_worker "$cleanup_out" "$cleanup_wid" || rc=1
+    elif [ "$rc" = "0" ]; then
         if reap_machine "$cleanup_wid" "$cleanup_log" "$volume_id"; then
             machine_reap_status=0
         else
@@ -15423,10 +15627,12 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         && terminal_disposition=destroyed-provider-retained
     # reap_machine already carries the exact Volume through its terminal
     # lifecycle. A second destroy/read loop cannot strengthen that receipt.
-    [ "$rc" = "0" ] \
-        && fleet_audit_update_fresh_clone_by_id "$cleanup_wid" "$terminal_disposition" \
-        || rc=1
-    [ "$rc" = "0" ] && fleet_registry_release_id "$cleanup_wid" || rc=1
+    if [ "$borrowed_worker" = 0 ]; then
+        [ "$rc" = "0" ] \
+            && fleet_audit_update_fresh_clone_by_id "$cleanup_wid" "$terminal_disposition" \
+            || rc=1
+        [ "$rc" = "0" ] && fleet_registry_release_id "$cleanup_wid" || rc=1
+    fi
 
     worker_ledger_lock_acquire "$cleanup_out" || return 1
     claim_owner=""
@@ -15546,14 +15752,23 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     local runtime_run_token="$7"
     [ ! -e "$out/benchmark-child.finished" ] \
         && [ ! -e "$out/autoscaler.runtime-completed" ] || return 0
-    if ! machine_creation_admission "$out/worker-clones.ids"; then
+    local wid="" borrowed_worker=0
+    if declare -F claim_reusable_worker >/dev/null; then
+        wid="$(claim_reusable_worker "$out" "$primary_id" "$ws" "$runtime_run_token" "$pip")" || {
+            printf '%s\n' "Existing worker admission is unresolved; ownership retained" > "$out/autoscaler.failed"
+            return 1
+        }
+    fi
+    [ -z "$wid" ] || borrowed_worker=1
+    if [ "$borrowed_worker" = 0 ] && ! machine_creation_admission "$out/worker-clones.ids"; then
         printf '%s\n' "No eligible existing worker path; new Machine allocation withheld" > "$out/autoscaler.failed"
         return 1
     fi
-    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
+    local stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
     local primary_volume_size worker_snapshot
     local worker_storage
     worker_storage=snapshot
+    if [ "$borrowed_worker" = 0 ]; then
     [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh
     if [ "$worker_storage" = fresh ]; then
         worker_snapshot="$SNAP_ID"  # unused: fresh workers retain no donor storage
@@ -15605,6 +15820,9 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         echo "  ❌ [$bench] mandatory autoscaler: worker capacity handoff was not durable" >&2
         return 1
     fi
+    else
+        worker_storage=borrowed
+    fi
     # Preserve the exact prelaunch owner before cancellation can reap a late
     # allocation. Final evidence coverage includes destroyed worker clones.
     if ! cloudbench_record_worker_evidence_owner "$out" "$wid" "$primary_id" \
@@ -15622,6 +15840,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     fi
     echo "  ➕ [$bench] worker $wid created"
     ready_file="/data/cloudbench-worker-$wid.ready"
+    [ "$borrowed_worker" = 0 ] || ready_file="/data/cloudbench-worker-$wid-$runtime_run_token.ready"
     if ! worker_github_token_b64="$(controller_github_token_b64)"; then
         failure_reason="No current controller GitHub token available for worker ref fetch"
         if ! cleanup_failed_worker "$out" "$wid"; then
@@ -15687,6 +15906,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
         echo "export CLOUDBENCH_WORKER_EVIDENCE_HELPER=/data/cloudbench-worker-evidence.py"
         echo "export CLOUDBENCH_WORKER_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
+        [ "$borrowed_worker" = 0 ] || echo "export CLOUDBENCH_WORKER_EVIDENCE_SCOPE=run"
         echo "export CLOUDBENCH_WORKER_MACHINE_ID=$(printf '%q' "$wid")"
         echo "export WORKSPACE_NAME=$(printf '%q' "$ws")"
         echo "export PRIMARY_HOST=$(printf '%q' "$pip")"
@@ -15847,7 +16067,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
       ready_deadline=$((SECONDS + worker_ready_timeout))
       while [ "$SECONDS" -lt "$ready_deadline" ]; do
           worker_provision_cancelled && finish_cancelled_worker_provision
-          if worker_operational "$wid"; then
+          if worker_operational "$wid" "$out"; then
               publish_worker_ready
               worker_provision_cancelled && finish_cancelled_worker_provision
               rm -f "$out/worker-$wid.pending"

@@ -276,6 +276,91 @@ def launch(args):
     sync_json(args.record, value)
 
 
+def controller_active_writers(common, roots, permitted):
+    active = writers(roots, permitted)
+    ownership = common / "cloudbench-fleet-ownership"
+    if ownership.exists():
+        for meta in ownership.glob("*/meta"):
+            fields = dict(line.split("=", 1) for line in meta.read_text().splitlines())
+            pid, expected = int(fields["pid"]), fields["pid_start"]
+            if not expected.startswith("proc-start:"):
+                raise ValueError("unsupported native owner birth; retain host")
+            if birth(pid) == expected and pid not in permitted:
+                active.append({"pid":pid,"birth":expected,"registry":str(meta.parent)})
+    return active
+
+
+
+def process_argv(pid):
+    before=birth(pid)
+    raw=Path('/proc',str(pid),'cmdline').read_bytes()
+    if not before or birth(pid)!=before: raise ValueError('controller process changed during observation')
+    return [value.decode('utf-8','strict') for value in raw.split(b'\0') if value]
+
+
+def driver_is_ancestor(driver):
+    pid=os.getpid();seen=set()
+    while pid>0 and pid not in seen:
+        if pid==driver:return True
+        seen.add(pid)
+        raw=Path('/proc',str(pid),'stat').read_text()
+        pid=int(raw[raw.rfind(')')+2:].split()[1])
+    return False
+
+
+def retained_controller_endpoint(record_path, repo, ref, native, original_native, original_native_sha256):
+    """Read-only retained endpoint proof, using the original export and writer rules."""
+    repo=Path(repo).resolve(strict=True)
+    raw=sealed_bytes(record_path,67108864)[1];record=json.loads(raw)
+    if (record.get('version')!=1 or record.get('source_ref')!=ref or record.get('repo')!=str(repo)
+            or record.get('collector_sha256')!=hashlib.sha256(checked_collector_bytes()).hexdigest()
+            or record.get('machine_id')!=os.environ.get('FLY_MACHINE_ID')
+            or record.get('app')!=os.environ.get('FLY_APP_NAME') or record.get('host')!=socket.gethostname()
+            or birth(record['driver_pid'])!=record['driver_birth'] or not driver_is_ancestor(record['driver_pid'])):
+        raise ValueError('retained endpoint does not belong to authorized current driver')
+    if git(repo,'rev-parse','HEAD')!=ref or git(repo,'diff','--name-only','HEAD','--','scripts'):
+        raise ValueError('retained endpoint source differs')
+    common=Path(git(repo,'rev-parse','--path-format=absolute','--git-common-dir'))
+    if record['common_git']!=str(common) or set(record['root_anchors'])!={str(repo),str(common)}:
+        raise ValueError('retained endpoint physical roots differ')
+    for name,expected in record['root_anchors'].items():
+        actual=file_state(Path(name))
+        if Path(name).is_symlink() or any(actual[key]!=value for key,value in expected.items()):
+            raise ValueError('retained endpoint root identity changed')
+    continuation=record.get('continuation')
+    if not isinstance(continuation,dict):raise ValueError('retained endpoint requires verified continuation')
+    continuation_sha,continuation_raw=sealed_bytes(record['continuation_path'],1048576)
+    if continuation_sha!=record['continuation_sha256'] or json.loads(continuation_raw)!=continuation:
+        raise ValueError('retained endpoint continuation changed')
+    caller=Path(continuation['new_caller_path'])
+    if json.loads(sealed_bytes(caller,1048576)[1])!=record['caller']:
+        raise ValueError('retained endpoint caller changed')
+    old=continuation_binding(continuation,repo,ref,record['driver_pid'],caller,record['image'],record['epoch'])
+    baseline_sha,baseline_raw=sealed_bytes(original_native,1048576)
+    baseline=json.loads(baseline_raw)
+    if (baseline_sha!=original_native_sha256 or baseline.get('id')!=record['machine_id']
+            or native.get('id')!=baseline['id'] or native.get('instance_id')!=baseline.get('instance_id')
+            or not native.get('instance_id') or native.get('state')!='started'
+            or native.get('config')!=baseline.get('config')
+            or native['config'].get('image')!=record['image']):
+        raise ValueError('retained endpoint native config differs from original baseline')
+    init=native['config'].get('init',{})
+    if not isinstance(init,dict) or set(init)-{'cmd','entrypoint','exec'}:
+        raise ValueError('retained endpoint init shape differs')
+    if init.get('exec'):
+        if init.get('cmd') or init.get('entrypoint'): raise ValueError('retained endpoint init is ambiguous')
+        argv=init['exec']
+    else:
+        argv=init.get('entrypoint',[])+init.get('cmd',[])
+    if not argv or process_argv(old['driver_pid'])!=argv:
+        raise ValueError('retained endpoint original init process differs')
+    roots=[repo,common,*[Path(value) for value in record['temp_state_roots'] if Path(value).exists()]]
+    permitted={os.getpid(),record['driver_pid'],old['driver_pid']}
+    if controller_active_writers(common,roots,permitted):
+        raise ValueError('retained endpoint has active controller writers')
+    return record
+
+
 def export(args):
     record_raw = sealed_bytes(args.record,67108864)[1]
     record = json.loads(record_raw)
@@ -309,16 +394,7 @@ def export(args):
         old = continuation_binding(binding,repo,record['source_ref'],record['driver_pid'],
                                    Path(binding['new_caller_path']),record['image'],record['epoch'])
         permitted.add(old['driver_pid'])  # exact verified init only; descendants remain ordinary writers
-    active = writers(roots, permitted)
-    ownership = common / "cloudbench-fleet-ownership"
-    if ownership.exists():
-        for meta in ownership.glob("*/meta"):
-            fields = dict(line.split("=", 1) for line in meta.read_text().splitlines())
-            pid, expected = int(fields["pid"]), fields["pid_start"]
-            if not expected.startswith("proc-start:"):
-                raise ValueError("unsupported native owner birth; retain host")
-            if birth(pid) == expected and pid not in permitted:
-                active.append({"pid":pid,"birth":expected,"registry":str(meta.parent)})
+    active = controller_active_writers(common, roots, permitted)
     if active:
         sync_json(args.pending, {"status":"pending", "reason":"live controller writers", "writers":active,
                                  "record_sha256":hashlib.sha256(args.record.read_bytes()).hexdigest()})

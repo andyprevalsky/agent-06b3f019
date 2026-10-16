@@ -137,6 +137,8 @@ def _scan_processes(proc: Path) -> tuple[int, list[dict[str, object]]]:
             continue
         try:
             raw = (proc / entry / "cmdline").read_bytes()
+        except TimeoutError:
+            raise
         except OSError:
             continue
         argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]

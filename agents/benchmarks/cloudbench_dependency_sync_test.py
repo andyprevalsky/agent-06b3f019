@@ -4422,7 +4422,7 @@ fi
             assert "refusing to forget worker" in cleanup_log
 
         assert "ready_deadline=$((SECONDS + worker_ready_timeout))" in provision
-        assert 'if worker_operational "$wid"; then' in provision
+        assert 'if worker_operational "$wid" "$out"; then' in provision
 
     worker = WORKER_SCRIPT.read_text()
     assert worker.index("patch payload checksum mismatch") < worker.index(
@@ -6535,8 +6535,10 @@ def test_autoscaler_stops_cleanly_when_its_benchmark_child_finishes(
     assert autoscaler.index("benchmark-child.finished") < autoscaler.index('desired="$(_box_desired "$metrics_url")"')
     unreadable = autoscaler.split('if [ -z "$desired" ]; then', 1)[1].split("scrape_failures=0", 1)[0]
     assert unreadable.index("benchmark-child.finished") < unreadable.index(
-        "metrics returned no valid desired_machine_count"
+        "scrape_failures=$((scrape_failures + 1))"
     )
+    assert "guest_runtime_completed" in unreadable
+    assert "fail_autoscaler" not in unreadable
     assert "autoscaler.completed-after-child.tmp" in autoscaler
     assert 'mv "$completed_tmp" "$out/autoscaler.completed-after-child"' in autoscaler
     assert "primary disappeared from provider inventory before child completion" in autoscaler

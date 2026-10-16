@@ -1308,6 +1308,59 @@ def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
         assert (fixture / "untracked.txt").read_text() == "new\n"
 
 
+def test_cloudbench_worktree_patch_excludes_linked_dependency_environment():
+    """A local venv link must not become a source patch or a DIRTY code panel."""
+    import shlex
+
+    repo_root = Path(__file__).resolve().parents[3]
+    patch_script = repo_root / "scripts/create-worktree-patch.sh"
+    with tempfile.TemporaryDirectory() as raw_dir:
+        base = Path(raw_dir)
+        fixture, dependencies = base / "repo", base / "dependencies"
+        (fixture / "agents").mkdir(parents=True)
+        dependencies.mkdir()
+        (dependencies / "marker").write_text("retained dependency data\n")
+        for relative in (".gitignore", "agents/.gitignore"):
+            (fixture / relative).write_bytes((repo_root / relative).read_bytes())
+        (fixture / "source.txt").write_text("before\n")
+        for args in (("init", "-q"), ("config", "user.email", "bench@example.com"),
+                     ("config", "user.name", "Bench"), ("add", "-A"),
+                     ("commit", "-qm", "fixture")):
+            subprocess.run(["git", "-C", str(fixture), *args], check=True)
+        (fixture / "agents/venv").symlink_to(dependencies, target_is_directory=True)
+        command = ["bash", str(patch_script), str(fixture)]
+        result = subprocess.run(command, check=True, capture_output=True)
+        assert result.stderr == b"", result.stderr.decode()
+        assert result.stdout == b"", "local dependency links must not ship"
+
+        source = (repo_root / "scripts/run-bench-fleet").read_text()
+        start = source.index("print_code_provenance() {")
+        panel_function = source[start:source.index("\n}\n", start) + 3]
+        head = subprocess.check_output(["git", "-C", str(fixture), "rev-parse", "HEAD"], text=True).strip()
+        panel = subprocess.run(
+            ["bash", "-c", "source " + shlex.quote(str(repo_root / "scripts/lib/cloudbench-env.sh"))
+             + "\n" + panel_function + "\nprint_code_provenance"],
+            env={**os.environ, "ROOT_DIR": str(fixture), "BENCH_REF": head,
+                 "REQUESTED_BENCH_REF": head, "CLOUDBENCH_SKIP_LOCAL_PATCH": "0"},
+            check=True, capture_output=True, text=True,
+        )
+        assert "clean working tree" in panel.stdout, panel.stdout
+        assert "DIRTY" not in panel.stdout, panel.stdout
+
+        (fixture / "source.txt").write_text("after\n")
+        (fixture / "source-link").symlink_to("source.txt")
+        result = subprocess.run(command, check=True, capture_output=True)
+        assert result.stderr == b"", result.stderr.decode()
+        assert b"agents/venv" not in result.stdout
+        subprocess.run(["git", "-C", str(fixture), "reset", "--hard", "-q", "HEAD"], check=True)
+        (fixture / "source-link").unlink()
+        subprocess.run(["git", "-C", str(fixture), "apply", "-"], input=result.stdout, check=True)
+        assert (fixture / "source.txt").read_text() == "after\n"
+        assert (fixture / "source-link").is_symlink()
+        assert os.readlink(fixture / "source-link") == "source.txt"
+        assert (dependencies / "marker").read_text() == "retained dependency data\n"
+
+
 def test_run_context_normalization_keeps_absolute_workspace_path_single_rooted():
     repo_root = Path(__file__).resolve().parents[3]
     helper = repo_root / "scripts" / "lib" / "run-context.sh"
@@ -22114,6 +22167,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_patch_includes_untracked_files",
         test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,
+    )
+    r.record(
+        "cloudbench_patch_excludes_linked_dependency_environment",
+        test_cloudbench_worktree_patch_excludes_linked_dependency_environment,
     )
     r.record(
         "run_context_absolute_path_single_rooted",

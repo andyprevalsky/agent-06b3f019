@@ -105,8 +105,12 @@ AI agent platform.
   `threads options`, then pass the verified parent model, reasoning effort and
   speed explicitly with `--model`, `--reasoning-effort` and `--speed`. Verify the
   child's effective settings after launch; never treat a prompt asking for high
-  effort as a configuration change. If the live parent setting is unavailable,
-  resolve it before a new launch instead of silently accepting catalog defaults.
+  effort as a configuration change. If a live parent setting cannot be verified,
+  explicitly default the child's reasoning effort to `medium` and speed to
+  `ultrafast` for the unavailable settings. Inherit every setting that can be
+  verified, including the model; do not silently accept catalog defaults. If the
+  selected model does not support the required fallback, report that limitation
+  rather than silently substituting another effort, speed, or model.
   Do not interrupt existing workers merely to inspect or change presentation.
 - Use sub-agents maximally for independent work. Keep the main agent unblocked
   and focused on coordination and the critical path.
