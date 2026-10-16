@@ -262,27 +262,6 @@ def safe_time() -> float:
         return 0.0
 
 
-def build_auth_assistance_resume_user_message(
-    *,
-    auth_realm: Optional[str],
-    handoff_mode: Optional[str],
-) -> Dict[str, str]:
-    """Build the post-human-auth cue injected into resumed browser-use calls."""
-    realm = auth_realm or "the current site"
-    mode = handoff_mode or "live browser session"
-    return {
-        "role": "user",
-        "content": (
-            "The user has completed the requested authentication assistance for "
-            f"{realm} in the same {mode}. Continue from the current page state exactly as it is now. "
-            "Do not call request_user_assistance_for_authentication again for this same auth realm unless "
-            "the page presents a new authentication blocker that still requires human input. "
-            "Do not undo user-entered changes made during assistance; inspect the current DOM/state and "
-            "continue toward the task from that state."
-        ),
-    }
-
-
 # ========================================
 # CONTEXT SUMMARY BUILDER
 # ========================================
@@ -378,6 +357,7 @@ async def build_browser_verifier_context(
     session_id: str,
     payment_card_evidence: Optional[Dict[str, Any]] = None,
     browser_checkpoints: Optional[List[Dict[str, Any]]] = None,
+    user_instruction_messages: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble the verifier context from final-state browser ground truth.
 
@@ -536,6 +516,10 @@ async def build_browser_verifier_context(
     # media_type, data}}` instead of being inlined as text.
     return [
         {"role": "USER", "text": user_prompt},
+        *[
+            {"role": "USER", "text": message["content"]}
+            for message in user_instruction_messages or []
+        ],
         {
             "role": "TOOL",
             "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown - URL transitions, tool inputs/outputs):\n\n{actions_text}",

@@ -53,6 +53,7 @@
  *
  * TAKE CONTROL (same live session, no reinjection):
  * [AGENT] --Take control--> POST /control {mode:user} --> USER immediately
+ * [INSPECTION] -> view-only iframe, no control recovery or mutation controls
  *     |                        (same debugUrl / sessionId)
  *     |                        leftover requested / agent is NOT interactive
  *     v
@@ -103,18 +104,29 @@ function controlActionFor(
   return () => ui.onTakeControl(isDisconnected);
 }
 
-function BrowserStatusBarImpl({
-  taskId,
-  browserUrl,
-  forceMinimized = false,
-}: BrowserStatusBarProps) {
+function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
+  const { taskId, browserUrl, forceMinimized = false } = props;
   const { agent, messages, selectedAgentId } = useAgentContext();
   const agentId = agent?.agent_id ?? selectedAgentId ?? null;
   const vm = useBrowserStatusBarState(taskId);
-  const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(vm.pendingAuthAssistance);
+  const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(
+    vm.readOnly ? null : vm.pendingAuthAssistance,
+  );
   const handoffBrowserUrl = refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? null;
-  const ui = useBrowserStatusBarUi(taskId, forceMinimized, agentId, browserUrl, handoffBrowserUrl);
-  const activeBrowserUrl = ui.browserUrl;
+  const ui = useBrowserStatusBarUi(
+    taskId,
+    forceMinimized,
+    agentId,
+    browserUrl,
+    handoffBrowserUrl,
+    vm.readOnly,
+  );
+  const sharedViewProps = {
+    browserUrl: ui.browserUrl,
+    browserLive: ui.isLive,
+    outputSchema: vm.outputSchema,
+    browserSessionMetadata: vm.browserSessionMetadata,
+  };
   const isWaitingForAuthAssistance = vm.pendingAuthAssistance !== null && !ui.hasReconnected;
   const isDisconnected = vm.isDisconnected && !ui.hasReconnected;
   const controlState = presentedControlState(
@@ -129,20 +141,18 @@ function BrowserStatusBarImpl({
   if (ui.isFullscreen) {
     return (
       <BrowserStatusBarFullscreen
+        readOnly={vm.readOnly}
         agentId={agentId}
         taskId={taskId}
-        browserUrl={activeBrowserUrl}
-        browserLive={ui.isLive}
+        {...sharedViewProps}
         messages={messages}
-        outputSchema={vm.outputSchema}
-        browserSessionMetadata={vm.browserSessionMetadata}
         stepProgress={vm.stepProgress}
         isDisconnected={isDisconnected}
         isWaitingForAuthAssistance={isWaitingForAuthAssistance}
         authAssistanceRequest={vm.pendingAuthAssistance?.request}
         isResuming={ui.isResuming}
         isUserControlling={ui.isUserControlling}
-        pendingWriteLockApproval={vm.pendingWriteLockApproval}
+        pendingWriteLockApproval={vm.readOnly ? null : vm.pendingWriteLockApproval}
         onClose={ui.onFullscreenClose}
         onResume={handleControlAction}
       />
@@ -152,14 +162,11 @@ function BrowserStatusBarImpl({
   if (!ui.isExpanded) {
     return (
       <BrowserStatusBarMinimized
-        browserUrl={activeBrowserUrl}
-        browserLive={ui.isLive}
+        {...sharedViewProps}
         forceMinimized={forceMinimized}
         lastActionType={vm.lastActionType}
         lastActionTitle={vm.lastActionTitle}
         controlState={controlState}
-        outputSchema={vm.outputSchema}
-        browserSessionMetadata={vm.browserSessionMetadata}
         onExpand={ui.onExpand}
         onThumbnailClick={ui.onThumbnailClick}
         onFullscreenClick={ui.onFullscreenToggle}
@@ -170,12 +177,9 @@ function BrowserStatusBarImpl({
   return (
     <BrowserStatusBarExpanded
       taskId={taskId}
-      browserUrl={activeBrowserUrl}
-      browserLive={ui.isLive}
+      {...sharedViewProps}
       isDisconnected={isDisconnected}
       isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-      outputSchema={vm.outputSchema}
-      browserSessionMetadata={vm.browserSessionMetadata}
       stepProgress={vm.stepProgress}
       onThumbnailClick={ui.onThumbnailClick}
       onFullscreenToggle={ui.onFullscreenToggle}

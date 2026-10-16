@@ -82,7 +82,7 @@ from providers.rose.schema import (
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import reconstruct_agent_response
 from providers.rose.truncation import model_key
-from utils.error_utils import extract_error_message
+from utils.error_utils import error_chain_has_type, extract_error_message
 from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
@@ -429,6 +429,8 @@ class _GeneratedResponseSchemaNestedField(BaseModel):
         default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings."
     )
     required: bool = Field(default=True, description="Defaults to true; false allows omission.")
+    description: Optional[str] = None
+    nullable: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -452,6 +454,8 @@ class _GeneratedResponseSchemaField(BaseModel):
         default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings."
     )
     required: bool = Field(default=True, description="Defaults to true; false allows omission.")
+    description: Optional[str] = None
+    nullable: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -709,13 +713,15 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
             "required": field.required,
         }
         item.update(bounds_from_entries(field.type, field.constraints))
-        if field.type in ("object", "list[object]") and field.properties:
+        item.update({key: getattr(field, key) for key in ("description", "nullable") if getattr(field, key) is not None})
+        if field.properties is not None:
             item["properties"] = [
                 {
                     "name": prop.name,
                     "type": prop.type,
                     "required": prop.required,
                     **bounds_from_entries(prop.type, prop.constraints),
+                    **{key: getattr(prop, key) for key in ("description", "nullable") if getattr(prop, key) is not None},
                 }
                 for prop in field.properties
             ]
@@ -737,7 +743,7 @@ async def _generate_response_schema_with_rose(
     agent_id: str,
     compute_auth: Optional[Dict[str, Any]] = None,
     include_title: bool = False,
-) -> Tuple[Dict[str, Any], Optional[str], Dict[str, int]]:
+) -> Tuple[Dict[str, Any], Optional[str], Dict[str, Any]]:
     claude_auth_context, gpt_auth_context = _build_compute_auth_context_from_payload(compute_auth)
     response_model = _GeneratedResponseSchemaWithTitle if include_title else _GeneratedResponseSchema
     system_prompt = _RESPONSE_SCHEMA_SYSTEM_PROMPT + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else "")
@@ -802,14 +808,20 @@ async def _generate_response_schema_with_rose(
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": total_tokens or prompt_tokens + completion_tokens,
+                        "actual_model": usage.get("actual_model"),
+                        "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+                        "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                        "from_fast_cache": bool(usage.get("from_fast_cache")),
+                        "cache_sequence_id": usage.get("cache_sequence_id"),
                     },
                 )
-            except RoseError as exc:
-                last_error = exc
-                break
             except Exception as exc:
+                if any(error_chain_has_type(exc, kind) for kind in (
+                    "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                )):
+                    raise
                 last_error = exc
-                if max_tokens < 4000 and "finish_reason=length" in str(exc):
+                if not isinstance(exc, RoseError) and max_tokens < 4000 and "finish_reason=length" in str(exc):
                     continue
                 break
 
@@ -993,7 +1005,7 @@ def build_verifier_context_messages(
         text = _self_close_trailing_message_reference(msg.get("text", ""))
         metadata = msg.get("metadata", {}) or {}
 
-        if is_internal_subagent_message(msg):
+        if is_excluded_from_model(msg) or is_internal_subagent_message(msg):
             continue
         if role == "SYSTEM":
             continue
@@ -6575,6 +6587,47 @@ async def _persist_mass_agent_root_title(
         )
 
 
+async def _persist_response_schema(
+    client: httpx.AsyncClient,
+    agent_id: str,
+    schema: Dict[str, Any],
+    backend_url: str,
+    api_key: str,
+    title: Optional[str] = None,
+) -> None:
+    """Save an accepted schema through the existing generation-fenced API."""
+    try:
+        response = await client.patch(
+            f"{backend_url}/api/agents/{agent_id}",
+            headers={**backend_api_headers(api_key), **workflow_generation_headers()},
+            json={"response_schema": schema, **({"generated_title": title} if title else {})},
+        )
+    except httpx.HTTPError as e:
+        raise ResponseSchemaPersistenceError(
+            f"Failed to save response schema for agent {agent_id}: {extract_error_message(e)}"
+        ) from e
+    if not response.is_success:
+        raise ResponseSchemaPersistenceError(
+            f"Failed to save response schema for agent {agent_id}: HTTP {response.status_code}"
+        )
+    logger.info("Saved response schema to agent", agent_id=agent_id)
+
+
+@activity.defn
+@traced("persist_response_schema_activity")
+async def persist_response_schema_activity(agent_id: str, schema: Dict[str, Any]) -> None:
+    """Persist a schema after the owning workflow has accepted its revision."""
+    config = load_config()
+    api_key = config.backend.api_key
+    if not api_key or not isinstance(schema, dict) or not schema.get("fields"):
+        raise ResponseSchemaPersistenceError("Cannot persist response schema without credentials and fields")
+    _safe_heartbeat("Saving accepted response schema")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        await _persist_response_schema(
+            client, agent_id, schema, config.backend.api_url.rstrip("/"), api_key
+        )
+
+
 @activity.defn
 @traced("set_response_schema_activity")
 async def set_response_schema_activity(
@@ -6583,6 +6636,7 @@ async def set_response_schema_activity(
     compute_auth: Optional[Dict[str, Any]] = None,
     fast_mode_cache_enabled: bool = False,
     include_title: bool = False,
+    persist: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """
     Generate and save a structured response schema for an agent.
@@ -6596,9 +6650,12 @@ async def set_response_schema_activity(
         compute_auth: Optional selected compute token from the workflow cache
         include_title: Generate a sidebar title in the same LLM response. This is
             true only for the initial schema of a top-level agent.
+        persist: Save immediately for startup callers. Background refreshes
+            defer persistence until the workflow accepts the generated revision.
 
     Returns:
-        The generated schema dict with 'fields' array, or None on failure
+        The generated schema dict with 'fields' array. Generation errors are
+        raised so the existing activity retry policy can retry the call.
     """
     import time
 
@@ -6722,36 +6779,11 @@ async def set_response_schema_activity(
             if not schema.get("fields"):
                 raise ValueError("LLM returned no response schema content")
 
-            # 2. Save schema to agent record
-            save_start = time.perf_counter()
-            try:
-                save_response = await client.patch(
-                    f"{backend_url}/api/agents/{agent_id}",
-                    headers={
-                        **backend_api_headers(api_key),
-                        **workflow_generation_headers(),
-                    },
-                    json={
-                        "response_schema": schema,
-                        **({"generated_title": title} if title else {}),
-                    },
-                )
-            except httpx.HTTPError as e:
-                raise ResponseSchemaPersistenceError(
-                    f"Failed to save response schema for agent {agent_id}: {extract_error_message(e)}"
-                ) from e
-            save_elapsed = time.perf_counter() - save_start
-            logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
-
-            if not save_response.is_success:
-                logger.warning(
-                    "Failed to save response schema", agent_id=agent_id, status_code=save_response.status_code
-                )
-                raise ResponseSchemaPersistenceError(
-                    f"Failed to save response schema for agent {agent_id}: HTTP {save_response.status_code}"
-                )
-
-            logger.info("Saved response schema to agent", agent_id=agent_id)
+            if persist:
+                save_start = time.perf_counter()
+                await _persist_response_schema(client, agent_id, schema, backend_url, api_key, title)
+                save_elapsed = time.perf_counter() - save_start
+                logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
 
             activity_elapsed = time.perf_counter() - activity_start
             logger.info(
@@ -6774,14 +6806,20 @@ async def set_response_schema_activity(
             status_code=e.response.status_code,
             response_text=e.response.text[:500],
         )
-        await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
-        return None
+        if persist:
+            await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
+        raise
     except ResponseSchemaPersistenceError:
         raise
     except Exception as e:
+        if any(error_chain_has_type(e, kind) for kind in (
+            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+        )):
+            raise
         logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
-        await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
-        return None
+        if persist:
+            await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
+        raise
 
 
 async def fetch_claude_max_token(user_id: str) -> Optional[Dict[str, Any]]:

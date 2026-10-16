@@ -17,7 +17,11 @@ from temporalio import activity
 
 from config import load_config
 from helpers.context_compaction import project_model_context_after_compaction
-from helpers.context_scope import filter_internal_subagent_messages, select_completion_evidence_messages
+from helpers.context_scope import (
+    filter_internal_subagent_messages,
+    is_internal_subagent_message,
+    select_completion_evidence_messages,
+)
 from helpers.fetch_config import _fetch_agent_data_impl
 from helpers.http_client import get_http_client
 from helpers.tracing import span
@@ -854,6 +858,8 @@ async def poll_new_messages(
     agent_id: str,
     last_checked: Union[datetime, str],
     include_internal_subagent: bool = False,
+    browser_tool_call_id: Optional[str] = None,
+    browser_task_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Poll for ALL new messages (USER, ASSISTANT, TOOL) since last check.
@@ -875,8 +881,22 @@ async def poll_new_messages(
         logger.info(f"Polling for new messages: agent_id={agent_id}, last_checked={since.isoformat()}")
 
         # Use the single fetch_agent_data implementation with server-side filtering
-        data = await _fetch_agent_data_impl(agent_id, since=since.isoformat())
+        data = await _fetch_agent_data_impl(
+            agent_id, since=since.isoformat(),
+            **({"browser_tool_call_id": browser_tool_call_id} if browser_tool_call_id else {}),
+        )
         new_messages = data.get("messages", [])
+        if browser_tool_call_id:
+            # The same durable read carries actual USER sources and the exact
+            # delegated task's native start event. Browser internals and root
+            # compaction summaries are not user instructions.
+            return [row for row in new_messages if (row.get("role") == "USER" and not is_internal_subagent_message(row)
+                and ((row.get("metadata") or {}).get("browserTaskId") in (None, browser_task_id))) or (
+                row.get("role") == "TOOL"
+                and (row.get("metadata") or {}).get("toolCallId") == browser_tool_call_id
+                and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"
+                and (row.get("metadata") or {}).get("action_type") == "session_starting"
+            )]
         new_messages = project_model_context_after_compaction(new_messages)
 
         # Drop sub-agent internal work-stream rows before crossing the activity

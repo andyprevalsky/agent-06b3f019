@@ -56,6 +56,7 @@ export interface BrowserProxyLocation {
 
 /** Full view-model surfaced by the useBrowserStatusBarState hook. */
 export interface BrowserStatusBarViewModel {
+  readOnly: boolean;
   browserMessages: Message[];
   lastActionType: string | undefined;
   lastActionTitle: string;

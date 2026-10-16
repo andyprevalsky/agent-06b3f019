@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
-from _test_utils import BlackboxResult, setup_mock_fn, teardown_mock
+from _test_utils import BlackboxResult, native_browser_start_source, setup_mock_fn, teardown_mock
 
 
 def _with_archive_env(tmp: str):
@@ -2250,13 +2250,17 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
         browser_pool="rose-1-ultra",
     )
     pricing = AsyncMock(return_value={})
+    native_start = await native_browser_start_source("2026-01-01T00:00:00+00:00", tool_call_id="browser-call", mode="simulate")
     with (
+        patch.object(browser_handler.activity, "info", return_value=types.SimpleNamespace(
+            scheduled_time=browser_handler.datetime.now(browser_handler.timezone.utc))),
         patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
         patch.object(browser_handler, "get_model_pricing_with_fallback", pricing),
         patch.object(browser_handler, "BrowserThinkingStream", FakeStream),
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
+        patch.object(browser_handler, "poll_new_messages", AsyncMock(return_value=[native_start])),
         patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
@@ -2284,7 +2288,7 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
     assert "4111111111111111" not in resumed_turns[-1]["content"]
 
 
-async def test_simulated_browser_runs_five_policy_steps_then_verified_completion():
+async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_feedback=False, poll_failure_calls=(), schema_failures=0, permanent_schema_failure=False, schema_invalid=False, return_replay=False, emit_tool_stream=False):
     from domains.spawn_browser_agent_v3 import handler as browser_handler
 
     class FakeWorldModel:
@@ -2359,7 +2363,45 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
             "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
     )
-    policy = AsyncMock(side_effect=policy_results)
+    import copy
+    from datetime import datetime, timedelta, timezone
+    correction = "Use the existing signed-in account, preserving the order ID deliverable."
+    scheduled_time = datetime.now(timezone.utc) - timedelta(seconds=30)
+    rows = [{"id": "prior-task", "role": "USER", "text": "Historical task input",
+             "timestamp": (scheduled_time - timedelta(seconds=1)).isoformat()}]
+    rows.append(await native_browser_start_source(scheduled_time.isoformat(), tool_call_id="tool-browser", mode="simulate"))
+    if startup_feedback:
+        rows.append({"id": "queued-correction", "role": "USER", "text": correction,
+                     "timestamp": (scheduled_time + timedelta(seconds=1)).isoformat()})
+    model_inputs = []
+    async def decide(**kwargs):
+        model_inputs.append(copy.deepcopy(kwargs["turn_messages"]))
+        if emit_tool_stream:
+            from providers.rose import StreamChunk
+            await kwargs["rose_client"].stream.on_chunk(StreamChunk(kind="tool_call", data={
+                "id": f"native-action-{len(model_inputs)}", "name": "attempt_completion" if len(model_inputs) == 6 else "click", "arguments": {},
+            }))
+        if active_feedback and len(model_inputs) == 1:
+            rows.append({"id": "active-correction", "role": "USER", "text": correction,
+                         "timestamp": datetime.now(timezone.utc).isoformat()})
+        return policy_results[len(model_inputs) - 1]
+    poll_calls = 0
+    async def poll(_agent_id, since, **kwargs):
+        nonlocal poll_calls
+        poll_calls += 1
+        if poll_calls in poll_failure_calls:
+            raise TimeoutError("instruction backend unavailable")
+        return [row for row in rows if datetime.fromisoformat(row["timestamp"]) >= since]
+    schema = {"fields": [{"name": "order_id", "type": "string",
+                          "description": "Amazon order confirmation ID", "required": True}]}
+    async def generate_schema(*args, **kwargs):
+        if schema_invalid:
+            return {"fields": []}, None, {"prompt_tokens": 7, "completion_tokens": 2, "actual_model": "schema-test-model"}
+        if permanent_schema_failure or generator.await_count <= schema_failures:
+            raise TimeoutError("schema provider unavailable")
+        return schema, None, {}
+    generator = AsyncMock(side_effect=generate_schema)
+    policy = AsyncMock(side_effect=decide)
     verifier = AsyncMock(
         return_value={
             "score": 1,
@@ -2368,17 +2410,24 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
         }
     )
     world_model = FakeWorldModel()
+    tool_events = AsyncMock()
+    native_stream = browser_handler.BrowserThinkingStream
     with (
+        patch.object(browser_handler.activity, "info", return_value=types.SimpleNamespace(scheduled_time=scheduled_time)),
         patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
         patch.object(
             browser_handler,
             "get_model_pricing_with_fallback",
             AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
         ),
-        patch.object(browser_handler, "BrowserThinkingStream", FakeStream),
+        patch.object(browser_handler, "BrowserThinkingStream", native_stream if emit_tool_stream else FakeStream),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", tool_events),
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
+        patch.object(browser_handler, "poll_new_messages", AsyncMock(side_effect=poll)),
+        patch("helpers.llm._generate_response_schema_with_rose", generator),
         patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
@@ -2415,6 +2464,10 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
             world_model=world_model,
         )
 
+    if return_replay:
+        return {"result": result, "model_inputs": model_inputs, "policy": policy,
+                "generator": generator, "verifier": verifier, "correction": correction,
+                "actions": world_model.actions, "poll_calls": poll_calls, "tool_events": tool_events}
     assert result["status"] == "completed"
     assert result["world_model_simulated"] is True
     assert result["simulated_browser_steps"] == 6
@@ -2434,11 +2487,88 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
     verifier_actions = verifier.await_args.kwargs["action_entries"]
     assert [entry["step"] for entry in verifier_actions] == [1, 2, 3, 4, 5, 6]
 
+    assert all("Historical task input" not in json.dumps(turns) for turns in model_inputs), "fresh browser replayed prior history"
+    if active_feedback or startup_feedback:
+        assert {"role": "user", "content": correction} in model_inputs[0 if startup_feedback else 1], "active simulated browser lost the actual USER correction"
+        assert verifier.await_args.kwargs.get("user_instruction_messages") == [{"role": "user", "content": correction}], "simulated verifier omitted the actual USER correction"
+        generator.assert_awaited_once()
+        assert all("Output schema revised" not in json.dumps(turns) for turns in model_inputs)
+    else:
+        generator.assert_not_awaited()
 
-async def test_simulated_browser_persists_post_approval_confirmation_state():
+
+async def test_simulated_browser_publishes_native_task_start_for_resume_scope():
+    from _test_utils import native_browser_start_source
+    for mode in ("real", "simulate"):
+        row = await native_browser_start_source("2026-10-14T17:00:00+00:00", mode=mode)
+        assert row["role"] == "TOOL"
+        assert row["metadata"]["toolCallId"] == "tool-1"
+        assert row["metadata"]["toolName"] == "spawn_browser_agent"
+        assert row["metadata"]["action_type"] == "session_starting"
+        assert row["metadata"]["toolStatus"] == "IN_PROGRESS"
+
+
+async def test_simulated_browser_runs_five_policy_steps_then_verified_completion():
+    await _exercise_simulated_browser_policy()
+
+
+async def test_simulated_browser_instruction_poll_recovers_before_actor():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, poll_failure_calls=(2,), return_replay=True)
+    assert replay["result"]["status"] == "completed"
+    assert replay["policy"].await_count == 6
+    assert [m["content"] for m in replay["model_inputs"][-1] if m.get("role") == "user"] == [replay["correction"]]
+    assert replay["verifier"].await_args.kwargs["user_instruction_messages"] == [{"role": "user", "content": replay["correction"]}]
+
+
+async def test_simulated_browser_failed_schema_retries_at_completion():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, schema_failures=1, return_replay=True)
+    assert replay["result"]["status"] == "completed"
+    assert replay["generator"].await_count == 2
+    assert replay["policy"].await_count == 6
+    assert replay["verifier"].await_args.kwargs["user_instruction_messages"] == [{"role": "user", "content": replay["correction"]}]
+
+
+async def test_simulated_browser_permanent_schema_failure_exits_without_iteration_burn():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, permanent_schema_failure=True, return_replay=True, emit_tool_stream=True)
+    assert replay["result"]["status"] == "failed"
+    assert replay["result"].get("browser_error_type") == "TimeoutError"
+    assert "schema provider unavailable" in replay["result"]["message"]
+    assert replay["policy"].await_count == 6
+    replay["verifier"].assert_not_awaited()
+    assert any(call.kwargs.get("tool_call_id") == "native-action-6" and call.kwargs.get("status") == "ERROR" for call in replay["tool_events"].await_args_list), "actual announced simulated completion tool remained unresolved"
+
+
+async def test_simulated_browser_unconfirmed_input_blocks_actual_click_transition():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, poll_failure_calls=(2, 3), return_replay=True)
+    assert replay["result"]["status"] == "failed" and replay["result"].get("browser_error_type") == "TimeoutError"
+    assert replay["actions"] == []
+    replay["policy"].assert_not_awaited()
+    replay["verifier"].assert_not_awaited()
+
+
+async def test_simulated_browser_failed_schema_keeps_known_usage():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, schema_invalid=True, return_replay=True)
+    assert replay["result"]["status"] == "failed"
+    assert replay["policy"].await_count == 6 and replay["generator"].await_count == 2
+    llm = [row for row in replay["result"]["usage_items"] if row["type"] == "llm"]
+    assert sum(row["input_tokens"] for row in llm) == 74
+    assert sum(row["output_tokens"] for row in llm) == 16
+
+
+async def test_simulated_browser_preserves_active_user_input_without_narration():
+    await _exercise_simulated_browser_policy(active_feedback=True)
+
+
+async def test_simulated_browser_preserves_user_input_queued_before_activity_execution():
+    await _exercise_simulated_browser_policy(startup_feedback=True)
+
+
+async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False, initial_poll_failure=False):
     from domains.spawn_browser_agent_v3 import handler as browser_handler
+    from datetime import datetime, timedelta, timezone
 
     confirmation_url = "https://amazon.example.test/gp/buy/thankyou/handlers/display.html"
+    executed_actions = []
 
     class FakeWorldModel:
         world_model_name = "rose-amazon"
@@ -2459,6 +2589,7 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
             assert tool_args["action"] == "evaluate"
             assert tool_args["approval"]["granted"] is True
             assert tool_call_id == "place-order:approved"
+            executed_actions.append(tool_args["action"])
             return {
                 "success": True,
                 "status": "completed",
@@ -2539,6 +2670,29 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
         "simulated_reasoning_messages": [],
         "simulated_action_summary": ["evaluate: place order"],
     }
+    correction = "Do not place this order. Inspect the checkout instead."
+    now = datetime.now(timezone.utc)
+    if not legacy_resume:
+        resume_state["user_message_cursor"] = (now - timedelta(minutes=1)).isoformat()
+        resume_state["user_message_cursor_is_task_start"] = True
+    rows = [{"id": "cancel-pending-order", "role": "USER", "text": correction,
+             "timestamp": (now - timedelta(seconds=30) if legacy_resume else now).isoformat()}] if user_feedback else []
+
+    if legacy_resume:
+        from _test_utils import native_browser_start_source
+        rows.insert(0, await native_browser_start_source((now - timedelta(minutes=1)).isoformat(), tool_call_id="tool-browser", mode="simulate"))
+
+    pending_poll_calls = 0
+    async def poll(_agent_id, since, **kwargs):
+        nonlocal pending_poll_calls
+        pending_poll_calls += 1
+        if initial_poll_failure and pending_poll_calls == 1:
+            raise TimeoutError("resume input backend unavailable")
+        return [row for row in rows if datetime.fromisoformat(row["timestamp"]) >= since]
+
+    schema = {"fields": [{"name": "order_id", "type": "string",
+                          "description": "Amazon order confirmation ID", "required": True}]}
+    generation = AsyncMock(return_value=(schema, None, {}))
 
     with (
         patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
@@ -2551,6 +2705,8 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
+        patch.object(browser_handler, "poll_new_messages", AsyncMock(side_effect=poll)),
+        patch("helpers.llm._generate_response_schema_with_rose", generation),
         patch.object(browser_handler, "save_browser_action_message", saved_actions),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
@@ -2588,6 +2744,17 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
         )
 
     assert result["status"] == "completed"
+    if user_feedback:
+        assert executed_actions == [], "resumed approval executed the queued write before reconsidering real USER feedback"
+        assert [message for message in policy.await_args.kwargs["turn_messages"] if message.get("role") == "user"] == [
+            {"role": "user", "content": correction}
+        ], "resumed policy lost or duplicated the authored correction"
+        assert verifier.await_args.kwargs["user_instruction_messages"] == [{"role": "user", "content": correction}]
+        assert result["browser_output_schema"] == schema, "unchanged deliverable changed the output contract"
+        generation.assert_awaited_once()
+        return
+    assert executed_actions == ["evaluate"], "ordinary approval omitted its authorized queued action"
+    generation.assert_not_awaited()
     assert result["current_url"] == confirmation_url
     assert confirmation_url in result["message"]
     approval_event = next(
@@ -2598,6 +2765,69 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
     assert approval_evidence["browser_state"]["url"] == confirmation_url
     assert "Order placed, thanks Aman!" in approval_evidence["browser_state"]["dom_tree"]
     assert approval_event.kwargs["steps_taken"] == 6
+
+
+async def test_simulated_browser_persists_post_approval_confirmation_state():
+    await _exercise_simulated_browser_pending_approval()
+
+
+async def test_simulated_browser_user_feedback_invalidates_pending_approved_action():
+    await _exercise_simulated_browser_pending_approval(user_feedback=True)
+
+
+async def test_simulated_browser_resume_poll_miss_disqualifies_pending_write():
+    await _exercise_simulated_browser_pending_approval(user_feedback=True, initial_poll_failure=True)
+
+
+async def test_fresh_simulated_browser_uses_native_manager_input_boundary():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3 import handler
+    from _test_utils import native_browser_start_source
+
+    class StoppedBeforeExternalPricing(Exception):
+        pass
+
+    scheduled = datetime(2026, 10, 14, 17, 2, tzinfo=timezone.utc)
+    initial_state = None
+    with (
+        patch.object(handler.activity, "info", return_value=SimpleNamespace(scheduled_time=scheduled)),
+        patch.object(handler, "load_config", return_value=SimpleNamespace()),
+        patch.object(handler, "get_model_pricing_with_fallback", AsyncMock(side_effect=StoppedBeforeExternalPricing)),
+    ):
+        try:
+            await handler._spawn_browser_agent_activity_v3_simulated(
+                user_id="user-1", agent_id="agent-1", goal="Read calendar", tool_call_id="tool-1", task_id="task-1",
+                session_id=None, cdp_url=None, is_resume=False, output_schema={"fields": [{"name": "events", "type": "str"}]},
+                attachments=None, write_lock_enabled=True, start_url="about:blank", write_lock_resume_state=None,
+                system_name="Rose", use_claude_mode=False, gpt_token=None, gpt_account_id=None,
+                gpt_token_source=None, gpt_token_pool_id=None, world_model=SimpleNamespace(),
+            )
+        except StoppedBeforeExternalPricing as error:
+            frame = error.__traceback__
+            while frame:
+                if frame.tb_frame.f_code.co_name == "_spawn_browser_agent_activity_v3_simulated":
+                    initial_state = dict(frame.tb_frame.f_locals["instruction_state"])
+                frame = frame.tb_next
+    assert initial_state is not None
+    rows = [await native_browser_start_source("2026-10-14T17:00:00+00:00", mode="simulate"),
+            {"id": "prior", "role": "USER", "text": "Previous task", "timestamp": "2026-10-14T16:59:00+00:00"},
+            {"id": "actual", "role": "USER", "text": "Use Andy account instead", "timestamp": "2026-10-14T17:01:00+00:00"}]
+    async def poll(_agent, since, **options):
+        assert options["browser_tool_call_id"] == "tool-1"
+        return [row for row in rows if datetime.fromisoformat(row["timestamp"]) > since]
+    with patch.object(handler, "poll_new_messages", AsyncMock(side_effect=poll)):
+        state = await handler._load_browser_resume_user_instructions("agent-1", initial_state)
+    assert state["user_instruction_messages"] == [{"role": "user", "content": "Use Andy account instead"}], "fresh simulated activity dropped actual pre-scheduling feedback"
+    assert state["user_message_cursor"] == "2026-10-14T17:00:00+00:00"
+
+
+async def test_simulated_browser_transient_read_retains_approved_write():
+    await _exercise_simulated_browser_pending_approval(initial_poll_failure=True)
+
+
+async def test_simulated_browser_legacy_resume_reads_feedback_sent_during_pause():
+    await _exercise_simulated_browser_pending_approval(user_feedback=True, legacy_resume=True)
 
 
 async def test_runtime_world_model_session_uses_first_tool_goal_as_task():
@@ -2995,9 +3225,30 @@ def test_write_eval_suite_matches_wmh_examples_shape():
         assert 'judge = "rubric"' in text
 
 
+def test_simulated_resume_preserves_full_user_instruction_tail():
+    from domains.spawn_browser_agent_v3.handler import _simulated_browser_resume_payload
+    correction = {"role": "user", "content": "A" * 8000}
+    turns = [correction] + [{"role": "tool", "content": "actual result"} for _ in range(30)]
+    state = _simulated_browser_resume_payload(
+        browser_state={}, action_entries=[], turn_messages=turns, recording_ref=None,
+        frame_count=0, visited_urls=[], reasoning_messages=[], action_summary=[],
+        world_model_session_id="simulated", total_input_tokens=0, total_output_tokens=0, usage_by_model={},
+    )
+    assert correction in state["simulated_turn_messages"], "resume discarded or truncated real USER input"
+
+
 async def run_all_tests():
     print("world model harness blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("simulated_browser_transient_read_retains_approved_write", test_simulated_browser_transient_read_retains_approved_write)
+    await r.record_async("fresh_simulated_browser_uses_native_manager_input_boundary", test_fresh_simulated_browser_uses_native_manager_input_boundary)
+    await r.record_async("simulated_browser_publishes_native_task_start_for_resume_scope", test_simulated_browser_publishes_native_task_start_for_resume_scope)
+    await r.record_async("simulated_browser_resume_poll_miss_disqualifies_pending_write", test_simulated_browser_resume_poll_miss_disqualifies_pending_write)
+    await r.record_async("simulated_browser_unconfirmed_input_blocks_actual_click_transition", test_simulated_browser_unconfirmed_input_blocks_actual_click_transition)
+    await r.record_async("simulated_browser_failed_schema_keeps_known_usage", test_simulated_browser_failed_schema_keeps_known_usage)
+    await r.record_async("simulated_browser_instruction_poll_recovers_before_actor", test_simulated_browser_instruction_poll_recovers_before_actor)
+    await r.record_async("simulated_browser_failed_schema_retries_at_completion", test_simulated_browser_failed_schema_retries_at_completion)
+    await r.record_async("simulated_browser_permanent_schema_failure_exits_without_iteration_burn", test_simulated_browser_permanent_schema_failure_exits_without_iteration_burn)
     r.record(
         "exported_otel_jsonl_ingests_with_upstream_wmh_and_preserves_state_refs",
         test_exported_otel_jsonl_ingests_with_upstream_wmh_and_preserves_state_refs,
@@ -3103,6 +3354,9 @@ async def run_all_tests():
         test_wmh_http_clients_allow_slow_grounded_transitions,
     )
     r.record("write_eval_suite_matches_wmh_examples_shape", test_write_eval_suite_matches_wmh_examples_shape)
+    await r.record_async("simulated_browser_preserves_active_user_input_without_narration", test_simulated_browser_preserves_active_user_input_without_narration)
+    await r.record_async("simulated_browser_preserves_user_input_queued_before_activity_execution", test_simulated_browser_preserves_user_input_queued_before_activity_execution)
+    r.record("simulated_resume_preserves_full_user_instruction_tail", test_simulated_resume_preserves_full_user_instruction_tail)
     await r.record_async(
         "wmh_http_client_matches_upstream_serving_routes", test_wmh_http_client_matches_upstream_serving_routes
     )
@@ -3165,6 +3419,14 @@ async def run_all_tests():
     await r.record_async(
         "simulated_browser_persists_post_approval_confirmation_state",
         test_simulated_browser_persists_post_approval_confirmation_state,
+    )
+    await r.record_async(
+        "simulated_browser_user_feedback_invalidates_pending_approved_action",
+        test_simulated_browser_user_feedback_invalidates_pending_approved_action,
+    )
+    await r.record_async(
+        "simulated_browser_legacy_resume_reads_feedback_sent_during_pause",
+        test_simulated_browser_legacy_resume_reads_feedback_sent_during_pause,
     )
     await r.record_async(
         "simulated_provider_activities_call_wmh_instead_of_live_services",

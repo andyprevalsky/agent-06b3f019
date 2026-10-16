@@ -10,11 +10,12 @@ async function testCheckoutSessionCompletedResolvesSubscriptionGate(): Promise<v
   const gateKey = 'subscription';
 
   await prisma.user.upsert({ where: { userId }, create: { userId }, update: {} });
+  const agent = await prisma.agent.create({ data: { userId, goal: 'Subscription gate test' } });
   const request = await prisma.agentAttentionRequest.create({
     data: {
       userId,
-      agentId: 'agent-test',
-      workflowId: `wf-${userId}`,
+      agentId: agent.id,
+      workflowId: agent.id,
       question: 'Subscribe to continue',
       gateKey,
       metadata: {
@@ -51,6 +52,7 @@ async function testCheckoutSessionCompletedResolvesSubscriptionGate(): Promise<v
     await prisma.credit.deleteMany({ where: { userId } });
     await prisma.subscription.deleteMany({ where: { userId } });
     await prisma.agentAttentionRequest.deleteMany({ where: { userId } });
+    await prisma.agent.delete({ where: { id: agent.id } });
     await prisma.user.deleteMany({ where: { userId } });
   }
 }
