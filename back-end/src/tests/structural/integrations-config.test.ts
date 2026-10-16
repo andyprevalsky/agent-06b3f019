@@ -64,14 +64,17 @@ async function testReadableInboxProjection() {
     const end = source.indexOf('\n}', start) + 2;
     return stripTypeScriptTypes(asyncPrefix + source.slice(start, end));
   }
-  const queries: Array<Record<string, any>> = [];
+  type CredentialQuery = { where: { userId: string; provider: string;
+    integration: { name: string; status: string }; state: { not: string } } };
+  type IntegrationQuery = { where: { userId: string } };
+  const queries: CredentialQuery[] = [];
   const rows = [
     { userId: 'one', email: 'ONE@example.test', accessToken: 'secret-access', refreshToken: 'secret-refresh' },
     { userId: 'one', email: 'one@example.test', accessToken: 'a', refreshToken: 'r' },
     { userId: 'one', email: 'stale@example.test', accessToken: '', refreshToken: 'r' },
     { userId: 'foreign', email: 'foreign@example.test', accessToken: 'a', refreshToken: 'r' },
   ];
-  const prisma = { emailIntegrationCredential: { findMany: async (query: Record<string, any>) => {
+  const prisma = { emailIntegrationCredential: { findMany: async (query: CredentialQuery) => {
     queries.push(query);
     assert.equal(query.where.provider, 'GMAIL');
     assert.deepEqual(query.where.integration, { name: 'gmail', status: 'CONNECTED' });
@@ -80,11 +83,11 @@ async function testReadableInboxProjection() {
   } } };
   const readable = Function('prisma', `return (${extract(store, 'findReadableInboxEmails')});`)(prisma);
   const derive = Function('isEmailProviderSlug', `return (${extract(service, 'withDerivedConnectedEmails')});`)((name: string) => name === 'gmail');
-  const integrationQueries: any[] = [];
+  const integrationQueries: IntegrationQuery[] = [];
   let healthCalls = 0;
   const list = Function('prisma', 'withGoogleScopeHealth', 'findReadableInboxEmails',
     `return (${extract(listing, 'findIntegrationsByUser')});`)(
-      { integration: { findMany: async (query: any) => {
+      { integration: { findMany: async (query: IntegrationQuery) => {
         integrationQueries.push(query);
         return [
           { name: 'gmail', status: 'CONNECTED', config: {}, emailCredentials: [] },
@@ -92,7 +95,7 @@ async function testReadableInboxProjection() {
           { name: 'gmail', status: 'CONNECTED', config: {}, emailCredentials: [] },
         ];
       } } },
-      (rows: any[]) => { healthCalls += 1; return rows; }, readable);
+      (rows: unknown[]) => { healthCalls += 1; return rows; }, readable);
   const repo = {
     isAuthDomainsCached: () => true,
     findIntegrationsByUser: list,

@@ -68,6 +68,7 @@
  */
 
 import { config } from 'dotenv';
+import { deepStrictEqual } from 'node:assert';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { prisma } from '../../providers/database';
@@ -2586,6 +2587,40 @@ async function testEmailOAuthStart_preservesConnectedEmailsOnAbandonedFlow() {
  * Even if some other writer already stripped the denormalized copy, the list
  * response must still show the accounts: credentials are the source of truth.
  */
+async function testGetIntegrations_readableOtpInboxBoundary() {
+  const first = await createAnonSession();
+  const other = await createAnonSession();
+  const integration = await prisma.integration.create({ data: {
+    userId: first.userId, name: 'gmail', type: 'DATA_SOURCE', status: 'CONNECTED',
+    config: { connectedEmails: ['configured-only@example.test'] },
+  } });
+  const foreign = await prisma.integration.create({ data: {
+    userId: other.userId, name: 'gmail', type: 'DATA_SOURCE', status: 'CONNECTED',
+  } });
+  const url = `${BASE_URL}/api/integrations`;
+  const before = await request(url, { headers: authHeaders(first.accessToken) });
+  assertStatus(before.status, 200, before.data);
+  type Listed = { name: string; readableInboxEmails?: string[]; emailCredentials?: unknown[] };
+  const gmail = (body: unknown) => (body as { integrations: Listed[] }).integrations.find(row => row.name === 'gmail');
+  deepStrictEqual(gmail(before.data)?.readableInboxEmails, [], 'connected Gmail without OTP selectors must expose an explicit empty set');
+  await prisma.emailIntegrationCredential.createMany({ data: [
+    { userId: first.userId, integrationId: integration.id, provider: 'GMAIL', email: 'READABLE@example.test', accessToken: 'private-access-one', refreshToken: 'private-refresh-one' },
+    { userId: first.userId, integrationId: integration.id, provider: 'GMAIL', email: 'stale@example.test', accessToken: 'private-access-stale', refreshToken: 'private-refresh-stale', state: 'needs_reconnect' },
+    { userId: first.userId, integrationId: integration.id, provider: 'GMAIL', email: 'tokenless@example.test' },
+    { userId: other.userId, integrationId: foreign.id, provider: 'GMAIL', email: 'foreign@example.test', accessToken: 'private-access-foreign', refreshToken: 'private-refresh-foreign' },
+  ] });
+  const after = await request(url, { headers: authHeaders(first.accessToken) });
+  assertStatus(after.status, 200, after.data);
+  deepStrictEqual(gmail(after.data)?.readableInboxEmails, ['readable@example.test']);
+  const foreignResponse = await request(url, { headers: authHeaders(other.accessToken) });
+  assertStatus(foreignResponse.status, 200, foreignResponse.data);
+  deepStrictEqual(gmail(foreignResponse.data)?.readableInboxEmails, ['foreign@example.test']);
+  const serialized = JSON.stringify(after.data);
+  for (const secret of ['private-access', 'private-refresh', 'foreign@example.test']) {
+    assert(!serialized.includes(secret), 'OTP selector response must not expose tokens or another user');
+  }
+}
+
 async function testGetIntegrations_derivesConnectedEmailsFromCredentials() {
   const { accessToken, userId } = await createAnonSession();
   const integration = await prisma.integration.create({
@@ -7306,6 +7341,10 @@ async function runAll() {
     {
       name: 'GET / derives connectedEmails from credentials when config is stripped',
       fn: testGetIntegrations_derivesConnectedEmailsFromCredentials,
+    },
+    {
+      name: 'GET /integrations preserves OTP selector scope, emptiness, tenant isolation and no secrets',
+      fn: testGetIntegrations_readableOtpInboxBoundary,
     },
     {
       name: 'POST /email/gmail/start concurrent starts preserve config',
