@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Verify a completed staged primary before the existing exact claim release."""
+import argparse
+import io
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import socket
+import stat
+import sys
+import tarfile
+
+HERE = Path(__file__).resolve().parent
+H = runpy.run_path(str(HERE / 'cloudbench-explicit-idle-admission.py'))
+read, sha, canonical, need = (H[k] for k in ('read', 'sha', 'canonical', 'require'))
+
+
+def fields(path):
+    pairs = [line.split('=', 1) for line in read(path, 65536).decode().splitlines()]
+    need(all(len(p) == 2 for p in pairs) and len(dict(pairs)) == len(pairs), 'invalid fields')
+    return dict(pairs)
+
+
+def validate_runtime(output, machine, token):
+    # Execute the canonical validator verbatim from this same sealed script
+    # snapshot, rather than maintaining a second runtime-evidence predicate.
+    source = read(HERE / 'run-bench-fleet', 4 * 1024 * 1024).decode()
+    marker = 'cloudbench_validate_primary_runtime_evidence() {  # <bench-output> <machine> <run-token>\n    python3 - "$@" <<\'PY\'\n'
+    need(source.count(marker) == 1, 'canonical runtime validator missing')
+    code = source.split(marker, 1)[1].split('\nPY\n}', 1)[0]
+    previous = sys.argv
+    try:
+        sys.argv = ['runtime-evidence', str(output), machine, token]
+        exec(compile(code, 'canonical-primary-runtime-validator', 'exec'), {})
+    finally:
+        sys.argv = previous
+    return sha(code.encode())
+
+
+def verify(output, registry, common, source, machine, volume, before, after, volume_path):
+    output, registry, common = map(Path, (output, registry, common))
+    need(all(p.is_absolute() and p.resolve(strict=True) == p for p in (output, registry, common)), 'physical roots')
+    meta = fields(registry / 'meta')
+    need(meta['fleet_owner_token'] == registry.name and meta['host'] == socket.gethostname(), 'current owner')
+    owner = H['sibling']('cloudbench-explicit-idle-preconfig.py')
+    need(owner['pid_birth_state'](meta['pid'], meta['pid_start']) == 'live', 'owner no longer live')
+    run = Path(meta['runs_root']) / meta['run_id']
+    need(output.parent == run, 'output outside exact run')
+    contract = H['sibling']('cloudbench_execution_provenance.py')
+    provenance = contract['load_provenance'](run / 'execution-provenance.json')
+    matrix = contract['load_task_matrix'](run / 'execution-task-matrix.json')
+    need(not contract['validate_task_matrix_binding'](provenance, matrix), 'task binding')
+    values = provenance['config']['values']
+    need(provenance['base_sha'] == source and values.get('boot_transport') == 'staged'
+         and all(values.get(k) == '1' for k in ('boot_launch', 'primary_reuse_only', 'cold_primary_bootstrap')), 'staged provenance')
+    matches = [i for i, task in enumerate(matrix['tasks']) if task['name'] == output.name]
+    need(len(matches) == 1, 'exact task')
+    token = registry.name + '-' + str(matches[0])
+    need(read(output / '.cid', 256).decode().split() == ['pool', machine], 'borrowed identity')
+    claim_path = common / 'cloudbench-pool-claims' / machine
+    claim = fields(claim_path)
+    need(all(claim.get(k) == meta.get(k) for k in ('fleet_owner_token', 'host', 'pid', 'pid_start'))
+         and claim.get('machine_id') == machine and claim.get('volume_id') == volume, 'exact current claim')
+    stage = output / 'staged-boot'
+    intent = json.loads(read(stage / 'intent.json'))
+    ack = json.loads(read(stage / 'launch.ack.json'))
+    terminal = json.loads(read(stage / 'terminal.json'))
+    need(intent['schema'] == 'cloudbench-staged-boot-request-v1' and intent['update_attempted'] is False, 'staged intent')
+    need(ack['schema'] == 'cloudbench-staged-boot-launch-v1' and ack['dispatched'] is True
+         and ack['runtime_success'] is False, 'dispatch ACK')
+    need(all(intent[k] == ack[k] for k in ('app', 'machine', 'volume_id', 'instance_id', 'run_token', 'source_ref', 'config_sha256', 'nonce')), 'ACK identity differs')
+    need((intent['app'], intent['machine'], intent['volume_id'], intent['run_token'], intent['source_ref'])
+         == (meta['app'], machine, volume, token, source), 'intent current identity')
+    need(ack['intent_sha256'] == sha(read(stage / 'intent.json'))
+         and terminal == dict(status='BOOT_DISPATCHED', intent_sha256=sha(read(stage / 'intent.json')),
+                              launch_ack_sha256=sha(read(stage / 'launch.ack.json')), runtime_success=False, update_attempted=False), 'dispatch terminal binding')
+    need(ack['guest_once'] == '/tmp/cloudbench-staged-boot/' + token
+         and type(ack['supervisor_pid']) is int and ack['supervisor_pid'] > 1
+         and re.fullmatch('[0-9]+', ack['supervisor_birth']), 'guest dispatch identity')
+    payload = json.loads(read(stage / 'payload.json'))
+    archive = read(stage / 'boot.tar.gz', 16 * 1024 * 1024)
+    need(payload == dict(archive_sha256=sha(archive), bytes=len(archive))
+         and ack['archive_sha256'] == sha(archive), 'dispatch archive binding')
+    with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as tar:
+        members = tar.getmembers()
+        need(len(members) == 7 and len({m.name for m in members}) == 7
+             and all(m.isfile() and '/' not in m.name and m.size <= 16 * 1024 * 1024 for m in members), 'archive members')
+        contents = {m.name: tar.extractfile(m).read() for m in members}
+    need(json.loads(contents['request.json']) == intent, 'archive intent differs')
+    environment = json.loads(contents['env.json'])
+    need(environment.get('REF') == source and environment.get('CLOUDBENCH_RUN_TOKEN') == token
+         and environment.get('CLOUDBENCH_BOOT') == '1', 'archive runtime identity')
+    need(set(intent['files']) == {'cloudbench-boot.sh', 'cloudbench-status-server.py',
+                                  'cloudbench-boot-payload.py', 'cloudbench-boot-payload.json.gz'}, 'payload entrypoints')
+    for name, binding in intent['files'].items():
+        need(binding == dict(sha256=sha(contents[name]), bytes=len(contents[name])), 'payload file differs')
+    original = json.loads(read(stage / 'native-before.json'))
+    started = json.loads(read(stage / 'native-started.json'))
+    original_volume = json.loads(read(stage / 'volume-before.json'))
+    need(original['id'] == machine and original['instance_id'] == intent['instance_id']
+         and original['state'] == 'stopped' and started['state'] == 'started'
+         and all(original.get(k) == started.get(k) for k in ('id', 'name', 'instance_id', 'config', 'image_ref'))
+         and sha(canonical(original['config'])) == intent['config_sha256'], 'same-config dispatch native')
+    first, last = json.loads(read(before)), json.loads(read(after))
+    need(Path(before) != Path(after) and not Path(before).samefile(after), 'distinct return reads')
+    need(all(first.get(k) == last.get(k) == original.get(k) for k in ('id', 'name', 'instance_id', 'config', 'image_ref'))
+         and first['state'] == last['state'] == 'stopped', 'return native changed')
+    current_volume = json.loads(read(volume_path))
+    need(current_volume == original_volume, 'return Volume changed')
+    proof = common / 'cloudbench-pool-reuse' / (machine + '.json')
+    H['verify_pool'](proof, common, H['descriptor'](before), H['descriptor'](after), source, current_volume)
+    validator_sha = validate_runtime(output, machine, token)
+    need(read(output / 'guest-shutdown.confirmed', 256).decode().strip() == meta['run_id'], 'guest shutdown not confirmed')
+    need(not os.path.lexists(output / 'runtime-evidence.pending'), 'runtime evidence still pending')
+    return dict(schema='cloudbench-staged-boot-return-v1', status='STOPPED_RUNTIME_VERIFIED',
+                machine=machine, volume_id=volume, run_token=token, source_ref=source,
+                proof=H['descriptor'](proof), output=str(output),
+                claim_sha256=sha(read(claim_path)), launch_ack_sha256=sha(read(stage / 'launch.ack.json')),
+                canonical_validator_sha256=validator_sha,
+                runtime_manifest=H['descriptor'](output / 'remote-logs/runtime-evidence/manifest.json'),
+                before=H['descriptor'](before), after=H['descriptor'](after), volume=H['descriptor'](volume_path))
+
+
+def current_policy(proof_path):
+    proof_path = Path(proof_path)
+    index = proof_path.parent.parent / 'cloudbench-staged-boot-returns' / (proof_path.stem + '.json')
+    if not os.path.lexists(index):
+        return H['current_policy'](proof_path)
+    value = json.loads(read(index))
+    receipt = H['described'](value['receipt'])
+    need(receipt['schema'] == 'cloudbench-staged-boot-return-v1'
+         and receipt['status'] == 'STOPPED_RUNTIME_VERIFIED'
+         and receipt['proof'] == H['descriptor'](proof_path), 'staged return proof changed')
+    output = Path(receipt['output'])
+    released = json.loads(read(output / 'staged-boot/released.json'))
+    need(released == dict(receipt=value['receipt'], claim_sha256=receipt['claim_sha256']), 'staged return not released')
+    claim = proof_path.parent.parent / 'cloudbench-pool-claims' / proof_path.stem
+    need(not os.path.lexists(claim) or sha(read(claim)) != receipt['claim_sha256'], 'original staged claim still held')
+    for key in ('before', 'after', 'volume', 'runtime_manifest'):
+        H['described'](receipt[key])
+    need(sha(read(output / 'staged-boot/launch.ack.json')) == receipt['launch_ack_sha256'], 'launch ACK changed')
+    validate_runtime(output, receipt['machine'], receipt['run_token'])
+    return 'existing-git-reset-v1'
+
+
+def record(result, common):
+    output = Path(result['output']); target = output / 'staged-boot/return.json'
+    save = H['sibling']('cloudbench-startup-failure-archive.py')['durable_handoff_json']
+    save(target, result)
+    parent = Path(common) / 'cloudbench-staged-boot-returns'
+    if not os.path.lexists(parent):
+        parent.mkdir(mode=0o700)
+        fd=os.open(parent.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+    info=parent.lstat()
+    need(parent.resolve(strict=True)==parent and stat.S_ISDIR(info.st_mode)
+         and info.st_uid==Path(common).stat().st_uid and stat.S_IMODE(info.st_mode)==0o700, 'return index directory')
+    index=parent/(result['machine']+'.json');temporary=parent/(result['machine']+'.'+result['claim_sha256'])
+    save(temporary, dict(receipt=H['descriptor'](target)))
+    os.replace(temporary,index)
+    fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:os.fsync(fd)
+    finally:os.close(fd)
+
+
+def released(output, common, machine):
+    output,common=Path(output),Path(common)
+    value=json.loads(read(common/'cloudbench-staged-boot-returns'/(machine+'.json')))
+    receipt=H['described'](value['receipt'])
+    need(receipt['output']==str(output) and receipt['machine']==machine,'released return identity')
+    need(not os.path.lexists(common/'cloudbench-pool-claims'/machine),'claim still exists')
+    H['sibling']('cloudbench-startup-failure-archive.py')['durable_handoff_json'](
+        output/'staged-boot/released.json',dict(receipt=value['receipt'],claim_sha256=receipt['claim_sha256']))
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'released':
+        need(len(sys.argv)==5,'released arguments');released(*sys.argv[2:]);return
+    p = argparse.ArgumentParser()
+    for key in ('output', 'registry', 'common', 'source', 'machine', 'volume', 'before', 'after', 'volume-path'):
+        p.add_argument('--' + key, required=True)
+    args = vars(p.parse_args())
+    result = verify(**{k.replace('-', '_'): v for k, v in args.items()})
+    record(result,args['common'])
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == '__main__':
+    main()

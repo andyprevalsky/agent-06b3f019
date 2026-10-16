@@ -721,4 +721,104 @@ class PreconfigSnapshotLayout(unittest.TestCase):
         with self.assertRaises(ValueError):helper['pid_birth_state']('99999999','dead-fixture')
 
 
+@unittest.skipUnless(os.geteuid()==0,'real publication and claim boundary')
+class StagedPrimaryReturn(unittest.TestCase):
+    def setUp(self):
+        self.f=Worker();self.f.setUp();self.addCleanup(self.f.doCleanups);self.f.prepare()
+        self.h=runpy.run_path(str(SCRIPT.with_name('cloudbench-staged-boot-return.py')))
+        self.transport=runpy.run_path(str(SCRIPT.with_name('cloudbench-staged-boot.py')))
+        self.registry=self.f.common/'cloudbench-fleet-ownership'/self.f.owner;self.registry.mkdir(parents=True)
+        self.run=self.f.root/'runs'/'current';self.out=self.run/'parallel-tool-calls';self.out.mkdir(parents=True)
+        self.stage=self.out/'staged-boot';self.stage.mkdir()
+        self.source=self.f.request['consumer']['source_ref'];self.token=self.f.owner+'-0'
+        claim=dict(line.split('=',1) for line in self.f.claim.read_text().splitlines())
+        meta=dict(claim,app='app',run_id='current',runs_root=str(self.run.parent))
+        (self.registry/'meta').write_text(''.join(k+'='+v+'\n' for k,v in meta.items()))
+        c=runpy.run_path(str(SCRIPT.with_name('cloudbench_execution_provenance.py')))
+        matrix=c['build_task_matrix'](['parallel-tool-calls=real'])
+        config=c['build_config'](c['CONFIG_SCHEMA_VERSION'],['task_count=1','task_matrix_sha256='+matrix['sha256'],'boot_launch=1','primary_reuse_only=1','cold_primary_bootstrap=1','boot_transport=staged'])
+        self.provenance=dict(schema_version=c['EXECUTION_SCHEMA_VERSION'],base_sha=self.source,workspace_patch_sha256='none',controller_snapshot=dict(schema_version=c['SNAPSHOT_SCHEMA_VERSION'],sha256='f'*64),config=config)
+        self.write(self.run/'execution-provenance.json',self.provenance);self.write(self.run/'execution-task-matrix.json',matrix)
+        (self.out/'.cid').write_text('pool '+self.f.mid+'\n')
+        request=dict(schema='cloudbench-staged-boot-request-v1',app='app',machine=self.f.mid,volume_id=self.f.vol,instance_id=self.f.native['instance_id'],run_token=self.token,source_ref=self.source,nonce='a'*32,config_sha256=mod.sha(mod.canonical(self.f.native['config'])),update_attempted=False,idle_probe='bound fixture')
+        payload={n:b'fixture source' for n in ('cloudbench-boot.sh','cloudbench-status-server.py','cloudbench-boot-payload.py','cloudbench-boot-payload.json.gz')}
+        archive_sha,request=self.transport['bundle'](self.stage/'boot.tar.gz',dict(REF=self.source,CLOUDBENCH_RUN_TOKEN=self.token,CLOUDBENCH_BOOT='1'),payload,request)
+        self.write(self.stage/'intent.json',request)
+        self.write(self.stage/'payload.json',dict(archive_sha256=archive_sha,bytes=(self.stage/'boot.tar.gz').stat().st_size))
+        self.ack=dict(schema='cloudbench-staged-boot-launch-v1',**{k:request[k] for k in ('app','machine','volume_id','instance_id','run_token','source_ref','nonce','config_sha256')},archive_sha256=archive_sha,intent_sha256=mod.sha((self.stage/'intent.json').read_bytes()),guest_once='/tmp/cloudbench-staged-boot/'+self.token,supervisor_pid=42,supervisor_birth='123',dispatched=True,runtime_success=False)
+        self.write(self.stage/'launch.ack.json',self.ack);self.terminal()
+        self.write(self.stage/'native-before.json',self.f.native);self.write(self.stage/'native-started.json',dict(self.f.native,state='started'));self.write(self.stage/'volume-before.json',self.f.volume)
+        self.before=self.out/'before.json';self.after=self.out/'after.json';self.vol=self.out/'volume.json'
+        self.write(self.before,self.f.native);self.write(self.after,self.f.native);self.write(self.vol,self.f.volume)
+        self.write(self.out/'runtime-evidence.owner.json',dict(version=1,machine_id=self.f.mid,run_token=self.token))
+        runtime=self.out/'remote-logs/runtime-evidence';(runtime/'logs').mkdir(parents=True)
+        entries={'services.json':mod.canonical(dict(status='stopped',env=dict(worker_processes=1))), 'run.json':b'{}','stack.log':b'log','cloudbench-stack-cleanup-'+self.token+'.status':('state=clean\ntoken='+self.token+'\n').encode(),'logs/backend.log':b'backend','logs/worker.log':b'worker'}
+        for name,raw in entries.items():(runtime/name).write_bytes(raw)
+        self.write(runtime/'manifest.json',dict(version=1,machine_id=self.f.mid,run_token=self.token,files={n:dict(bytes=len(v),sha256=mod.sha(v)) for n,v in entries.items()}))
+        (self.out/'guest-shutdown.confirmed').write_text('current\n')
+    def write(self,path,value):path.write_bytes(mod.canonical(value)+b'\n')
+    def terminal(self):self.write(self.stage/'terminal.json',dict(status='BOOT_DISPATCHED',intent_sha256=mod.sha((self.stage/'intent.json').read_bytes()),launch_ack_sha256=mod.sha((self.stage/'launch.ack.json').read_bytes()),runtime_success=False,update_attempted=False))
+    def verify(self):return self.h['verify'](self.out,self.registry,self.f.common,self.source,self.f.mid,self.f.vol,self.before,self.after,self.vol)
+    def test_real_claim_producer_archive_and_canonical_runtime_return(self):
+        before=self.f.claim.read_bytes();self.assertEqual(self.verify()['status'],'STOPPED_RUNTIME_VERIFIED');self.assertEqual(self.f.claim.read_bytes(),before)
+    def test_no_ack_or_pending_dispatch_cannot_use_preconfig_return(self):
+        (self.stage/'launch.ack.json').unlink()
+        with self.assertRaises(FileNotFoundError):self.verify()
+        self.assertTrue(self.f.claim.exists())
+    def test_wrong_run_ack_even_with_rehashed_terminal_refuses(self):
+        self.ack['run_token']='other';self.write(self.stage/'launch.ack.json',self.ack);self.terminal()
+        with self.assertRaises(ValueError):self.verify()
+    def test_alias_or_changed_native_pair_refuses(self):
+        self.after.unlink();os.link(self.before,self.after)
+        with self.assertRaises(ValueError):self.verify()
+        self.after.unlink();self.write(self.after,dict(self.f.native,state='started'))
+        with self.assertRaises(ValueError):self.verify()
+    def test_corrupt_runtime_manifest_member_refuses(self):
+        (self.out/'remote-logs/runtime-evidence/logs/worker.log').write_bytes(b'corrupt')
+        with self.assertRaises(AssertionError):self.verify()
+    def test_missing_shutdown_or_pending_runtime_refuses(self):
+        (self.out/'guest-shutdown.confirmed').unlink()
+        with self.assertRaises(FileNotFoundError):self.verify()
+        (self.out/'guest-shutdown.confirmed').write_text('current\n');(self.out/'runtime-evidence.pending').write_text('pending')
+        with self.assertRaises(ValueError):self.verify()
+    def test_changed_volume_and_claim_refuse(self):
+        self.write(self.vol,dict(self.f.volume,attached_machine_id='other'))
+        with self.assertRaises(ValueError):self.verify()
+        self.write(self.vol,self.f.volume);self.f.claim.write_text(self.f.claim.read_text().replace(self.f.owner,'0'*32))
+        with self.assertRaises(ValueError):self.verify()
+    def test_nonstaged_provenance_cannot_borrow_new_proof(self):
+        c=runpy.run_path(str(SCRIPT.with_name('cloudbench_execution_provenance.py')))
+        values=self.provenance['config']['values'];values.pop('boot_transport')
+        self.provenance['config']=c['build_config'](c['CONFIG_SCHEMA_VERSION'],[k+'='+v for k,v in values.items()])
+        self.write(self.run/'execution-provenance.json',self.provenance)
+        with self.assertRaises(ValueError):self.verify()
+    def test_canonical_release_enables_next_reuse_without_changing_admission(self):
+        proof_before=self.f.proof.read_bytes();result=self.verify();self.h['record'](result,self.f.common)
+        with self.assertRaises(FileNotFoundError):self.h['current_policy'](self.f.proof)
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text();fn=re.search(r'^pool_claim_fs_transaction\(\).*?^}\n',fleet,re.M|re.S).group()
+        claim=dict(line.split('=',1) for line in self.f.claim.read_text().splitlines())
+        args=['bash','-c',fn+'\npool_claim_fs_transaction release "$@"','release',str(self.f.claim),self.f.mid,result['claim_sha256'],claim['host'],claim['pid'],claim['pid_start'],claim['fleet_owner_token']]
+        completed=subprocess.run(args,text=True,capture_output=True);self.assertEqual(completed.returncode,0,completed.stderr)
+        self.h['released'](self.out,self.f.common,self.f.mid)
+        self.assertEqual(self.h['current_policy'](self.f.proof),'existing-git-reset-v1');self.assertEqual(self.f.proof.read_bytes(),proof_before)
+        (self.out/'remote-logs/runtime-evidence/stack.log').write_bytes(b'drift')
+        with self.assertRaises(AssertionError):self.h['current_policy'](self.f.proof)
+    def test_actual_claimed_cleanup_gate_refuses_corrupt_staged_return(self):
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+        wrapper=re.search(r'^fleet_verify_staged_primary_return\(\).*?^}\n',fleet,re.M|re.S).group()
+        script=self.f.root/'cleanup-gate.sh'
+        script.write_text('''set -u
+CHILD_MACHINE=("$MID"); CHILD_OUT=("$OUT"); CLOUDBENCH_BOOT_TRANSPORT=staged
+fleet_preconfig_native_read() { cp "$BEFORE" "$2"; }
+fleet_cold_handoff_volume_read() { cp "$VOLUME" "$2"; }
+'''+wrapper+'''
+fleet_verify_staged_primary_return "$MID" "$VOL" && printf released
+''')
+        env=dict(os.environ,MID=self.f.mid,OUT=str(self.out),BEFORE=str(self.before),VOLUME=str(self.vol),VOL=self.f.vol,CLOUDBENCH_SCRIPT_SNAPSHOT=str(SCRIPT.parent),FLEET_REGISTRY_DIR=str(self.registry),GIT_COMMON_DIR=str(self.f.common),BENCH_REF=self.source)
+        result=subprocess.run(['bash',str(script)],env=env,capture_output=True,text=True);self.assertEqual(result.returncode,0,result.stderr);self.assertIn('released',result.stdout)
+        (self.stage/'launch.ack.json').unlink()
+        result=subprocess.run(['bash',str(script)],env=env,capture_output=True,text=True);self.assertNotEqual(result.returncode,0);self.assertNotIn('released',result.stdout)
+        self.assertTrue(self.f.claim.exists())
+
+
 if __name__=='__main__':unittest.main()

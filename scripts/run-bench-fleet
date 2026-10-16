@@ -740,6 +740,8 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-worker-reuse.py" \
        "$ROOT_DIR/scripts/cloudbench-explicit-idle-admission.py" \
        "$ROOT_DIR/scripts/cloudbench-explicit-idle-preconfig.py" \
+       "$ROOT_DIR/scripts/cloudbench-staged-boot.py" \
+       "$ROOT_DIR/scripts/cloudbench-staged-boot-return.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
        "$ROOT_DIR/scripts/cloudbench-controller-export.py" \
@@ -13112,7 +13114,7 @@ raw = read(proof_path); proof = json.loads(raw)
 tasks = json.loads(read(matrix))['tasks']
 ordinal = next(i for i, task in enumerate(tasks) if task['name'] == out.name)
 assert tasks[ordinal]['world_model_mode'] == 'real' and re.fullmatch('[0-9a-f]{40}', ref)
-expected = {'version': 1, 'policy': __import__('runpy').run_path(os.path.join(os.environ.get('CLOUDBENCH_SCRIPT_SNAPSHOT',str(Path(proof_path).parents[2]/'scripts')),'cloudbench-explicit-idle-admission.py'))['current_policy'](proof_path) if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
+expected = {'version': 1, 'policy': __import__('runpy').run_path(os.path.join(os.environ.get('CLOUDBENCH_SCRIPT_SNAPSHOT',str(Path(proof_path).parents[2]/'scripts')),'cloudbench-staged-boot-return.py'))['current_policy'](proof_path) if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
             'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
             'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
 assert json.loads(read(out / 'cold-primary-bootstrap')) == expected
@@ -13150,7 +13152,7 @@ tasks = json.loads(Path(matrix).read_text())['tasks']
 ordinal = next(i for i, task in enumerate(tasks) if task['name'] == bench)
 assert tasks[ordinal]['world_model_mode'] == 'real'
 if 'cold_bootstrap' in proof: assert proof['cold_bootstrap']['policy'] == 'real-empty-bootstrap-v1'
-intent = {'version': 1, 'policy': __import__('runpy').run_path(os.path.join(os.environ.get('CLOUDBENCH_SCRIPT_SNAPSHOT',str(Path(path).parents[2]/'scripts')),'cloudbench-explicit-idle-admission.py'))['current_policy'](path) if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
+intent = {'version': 1, 'policy': __import__('runpy').run_path(os.path.join(os.environ.get('CLOUDBENCH_SCRIPT_SNAPSHOT',str(Path(path).parents[2]/'scripts')),'cloudbench-staged-boot-return.py'))['current_policy'](path) if 'explicit_idle' in proof else ('real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm'),
           'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
           'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
 with os.fdopen(os.open(destination, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600), 'w') as stream:
@@ -13706,6 +13708,44 @@ except Exception as error:
 PYBILLING
 }
 
+fleet_verify_staged_primary_return() {  # <machine> <volume>; before exact claim release
+    local id="$1" volume="$2" index out="" attempt
+    for index in "${!CHILD_MACHINE[@]}"; do
+        if [ "${CHILD_MACHINE[$index]}" = "$id" ]; then
+            [ -z "$out" ] || return 1
+            out="${CHILD_OUT[$index]}"
+        fi
+    done
+    if [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" != staged ]; then
+        [ -z "$out" ] || { [ ! -e "$out/staged-boot" ] && [ ! -L "$out/staged-boot" ]; } || return 1
+        return 0
+    fi
+    [ -n "$out" ] && [ -d "$out/staged-boot" ] && [ ! -L "$out/staged-boot" ] || return 1
+    attempt="$(mktemp -d "$out/staged-boot/.return.XXXXXX")" || return 1
+    fleet_preconfig_native_read "$id" "$attempt/before.json" \
+        && fleet_preconfig_native_read "$id" "$attempt/after.json" \
+        && fleet_cold_handoff_volume_read "$volume" "$attempt/volume.json" || return 1
+    python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-staged-boot-return.py" \
+        --output "$out" --registry "$FLEET_REGISTRY_DIR" --common "$GIT_COMMON_DIR" \
+        --source "$BENCH_REF" --machine "$id" --volume "$volume" \
+        --before "$attempt/before.json" --after "$attempt/after.json" \
+        --volume-path "$attempt/volume.json" > "$attempt/verified.json"
+}
+
+fleet_record_staged_primary_release() {  # <machine>; exact claim was just released
+    local index out=""
+    [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ] || return 0
+    for index in "${!CHILD_MACHINE[@]}"; do
+        if [ "${CHILD_MACHINE[$index]}" = "$1" ]; then
+            [ -z "$out" ] || return 1
+            out="${CHILD_OUT[$index]}"
+        fi
+    done
+    [ -n "$out" ] || return 1
+    python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-staged-boot-return.py" released \
+        "$out" "$GIT_COMMON_DIR" "$1"
+}
+
 # The live-owner plan shares the return-to-pool ownership/provenance guards.
 # Guest shutdown and owned joins must already have completed before this call.
 stop_current_registry_primaries_for_pool() {  # <joins> <guest-failed> <runtime-failed>
@@ -14008,11 +14048,13 @@ cleanup() {
                     echo "↩️  claimed pool machine $id verified stopped; retaining claim for missing runtime evidence" >&2
                     continue
                 fi
-                if fleet_audit_record_pool_machine "$id" "$pool_volume_id" \
+                if fleet_verify_staged_primary_return "$id" "$pool_volume_id" \
+                    && fleet_audit_record_pool_machine "$id" "$pool_volume_id" \
                     returned-stopped-claim-released \
                     && pool_claim_release_exact "$claim_path" "$claim_digest" \
                         "$FLEET_OWNER_TOKEN" "$FLEET_OWNER_HOST" "$$" \
-                        "$FLEET_OWNER_PID_START"; then
+                        "$FLEET_OWNER_PID_START" \
+                    && fleet_record_staged_primary_release "$id"; then
                     for i in "${!CHILD_MACHINE[@]}"; do
                         if [ "${CHILD_MACHINE[$i]}" = "$id" ]; then
                             date +%s > "${CHILD_OUT[$i]}/pool-primary.returned-epoch" \
@@ -15290,6 +15332,9 @@ PROVENANCE_CONFIG_ARGS=(
 )
 if [ "${CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE+x}" = x ]; then
     PROVENANCE_CONFIG_ARGS+=(--config-value "fresh_volume_unique_zone=$CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE")
+fi
+if [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ]; then
+    PROVENANCE_CONFIG_ARGS+=(--config-value "boot_transport=staged")
 fi
 if [ -n "$FRESH_TARGET_REGION" ]; then
     PROVENANCE_CONFIG_ARGS+=(--config-value "donor_region=$REGION")
@@ -17268,6 +17313,10 @@ for bench in "${BENCHES[@]}"; do
     echo "   ✅ machine=$cid allocated → launching run-bench-cloud (isolated) ..."
     pool_boot_vm_size=""
     pool_boot_vm_memory=""
+    if [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ]; then
+        pool_boot_vm_size="$(primary_vm_size_for_bench "$bench")"
+        pool_boot_vm_memory="$(primary_vm_memory_for_bench "$bench")"
+    fi
     if [ "$src" = "pool" ] \
         && [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ]; then
         desired_vm_size="$(primary_vm_size_for_bench "$bench")"
