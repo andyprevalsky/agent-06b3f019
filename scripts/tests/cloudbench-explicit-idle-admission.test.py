@@ -613,7 +613,7 @@ class BorrowedPreconfigRecovery(unittest.TestCase):
         self.fields(self.audit/'pool'/self.f.mid,self.pool)
         proof=self.f.common/'cloudbench-pool-reuse'/(self.f.mid+'.json')
         self.write(self.out/'cold-primary-bootstrap',dict(version=1,policy=mod.current_policy(proof),machine_id=self.f.mid,volume_id=self.f.vol,source_ref=self.f.request['consumer']['source_ref'],run_id='failed',run_token=self.owner+'-0',proof_sha256=mod.sha(proof.read_bytes())))
-        for name,raw in {'.cid':'pool '+self.f.mid+'\n','benchmark-child.finished':'125\n','boot-config-unapplied':self.f.mid+'\n','worker-clones.ids':'','cloudbench-boot-update.log':'Error: organization has reached its machine limit\n'}.items():(self.out/name).write_text(raw)
+        for name,raw in {'.cid':'pool '+self.f.mid+'\n','benchmark-child.finished':'125\n','boot-config-unapplied':self.f.mid+'\n','worker-clones.ids':'','cloudbench-boot-update.log':'Error: organization has reached its machine limit\n','autoscaler.completed-after-child':'','desired-worker-count':'0\n'}.items():(self.out/name).write_text(raw)
         identity=dict(version=1,machine_id=self.f.mid,run_token=self.owner+'-0')
         self.write(self.out/'runtime-evidence.owner.json',identity);self.write(self.out/'runtime-evidence.pending',identity)
         (self.registry/'runtime-evidence-unconfirmed').write_text('pending')
@@ -674,6 +674,20 @@ class BorrowedPreconfigRecovery(unittest.TestCase):
         self.fields(self.claim,dict(host=self.meta['host'],pid=self.meta['pid'],pid_start=self.meta['pid_start'],fleet_owner_token=self.owner,cleanup_state='unconfirmed'))
         (self.out/'.cid').write_text('clone '+self.f.mid+'\n')
         with self.assertRaises(ValueError):self.recover()
+
+
+class BorrowedPreconfigDeadlines(unittest.TestCase):
+    def test_alarm_is_not_swallowed_by_oserror_catch(self):
+        import time
+        h=runpy.run_path(str(SCRIPT.with_name('cloudbench-explicit-idle-preconfig.py')))
+        def legacy_api():
+            try:time.sleep(.05)
+            except OSError:return 'swallowed'
+        with self.assertRaises(h['RecoveryDeadline']):h['bounded_read'](legacy_api,time.monotonic()+.01)
+    def test_late_return_is_refused(self):
+        h=runpy.run_path(str(SCRIPT.with_name('cloudbench-explicit-idle-preconfig.py')))
+        with mock.patch.object(h['time'],'monotonic',side_effect=[0,2]):
+            with self.assertRaises(h['RecoveryDeadline']):h['bounded_read'](lambda:'late',1)
 
 
 if __name__=='__main__':unittest.main()

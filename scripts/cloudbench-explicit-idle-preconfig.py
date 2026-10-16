@@ -67,6 +67,7 @@ def plan(registry,common,source):
         claim=common/'cloudbench-pool-claims'/mid;cr=retain(claim);cf=fields(claim)
         need(all(cf.get(k)==meta.get(k) for k in ('fleet_owner_token','host','pid','pid_start')) and cf.get('cleanup_state') in {'owned','unconfirmed'},'claim owner')
         need(retain(out/'benchmark-child.finished').strip()==b'125' and retain(out/'boot-config-unapplied').strip()==mid.encode(),'not unapplied failure')
+        need(retain(out/'autoscaler.completed-after-child')==b'' and retain(out/'desired-worker-count').strip()==b'0','worker controller not joined')
         if os.path.lexists(out/'worker-clones.ids'):need(retain(out/'worker-clones.ids')==b'','worker allocation')
         expected=dict(version=1,machine_id=mid,run_token=owner+'-'+str(ordinal))
         runtime_paths=[out/'runtime-evidence.owner.json',out/'runtime-evidence.pending']
@@ -135,16 +136,40 @@ def recover(registry,common,source,native_read,volume_read,checkpoint=lambda sta
     finally:
         for fd in locks:os.close(fd)
 
+class RecoveryDeadline(BaseException):
+    pass
+
+
+def bounded_read(fn,deadline):
+    previous=signal.getitimer(signal.ITIMER_REAL);handler=signal.getsignal(signal.SIGALRM)
+    need(previous[1]==0,'periodic caller timer')
+    start=time.monotonic();remaining=min(20,deadline-start)
+    if remaining<=0:raise RecoveryDeadline('recovery deadline expired')
+    if previous[0]>0:remaining=min(remaining,previous[0])
+    def expired(*unused):raise RecoveryDeadline('bounded recovery read expired')
+    signal.signal(signal.SIGALRM,expired);signal.setitimer(signal.ITIMER_REAL,remaining)
+    try:
+        value=fn()
+        if time.monotonic()>=deadline:raise RecoveryDeadline('late recovery read')
+        return value
+    finally:
+        signal.setitimer(signal.ITIMER_REAL,0);signal.signal(signal.SIGALRM,handler)
+        if previous[0]>0:signal.setitimer(signal.ITIMER_REAL,max(.000001,previous[0]-(time.monotonic()-start)))
+
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--registry',type=Path,required=True);parser.add_argument('--common',type=Path,required=True);parser.add_argument('--source',required=True);args=parser.parse_args()
     # The invoking canonical exact-owner command holds its recovery mutex.
     app=fields(args.registry/'meta')['app'];deadline=time.monotonic()+180;client=runpy.run_path(str(HERE/'cloudbench-campaign-machines.py'))
-    def expired(*unused):raise TimeoutError('exact recovery read20s')
-    def bounded(fn):
-        signal.signal(signal.SIGALRM,expired);remaining=min(20,deadline-time.monotonic());need(remaining>0,'recovery180s exhausted');signal.setitimer(signal.ITIMER_REAL,remaining)
-        try:return fn()
-        finally:signal.setitimer(signal.ITIMER_REAL,0)
-    native=lambda mid:bounded(lambda:json.loads(client['fetch'](app,20,mid)))
-    volume=lambda vid:bounded(lambda:B['Fly'](app,os.environ['FLY_API_TOKEN']).api('GET','/volumes/'+vid,timeout=20))
-    print(json.dumps(recover(args.registry,args.common,args.source,native,volume),sort_keys=True))
+    native=lambda mid:bounded_read(lambda:json.loads(client['fetch'](app,20,mid)),deadline)
+    volume=lambda vid:bounded_read(lambda:B['Fly'](app,os.environ['FLY_API_TOKEN']).api('GET','/volumes/'+vid,timeout=20),deadline)
+    previous=signal.getitimer(signal.ITIMER_REAL);handler=signal.getsignal(signal.SIGALRM)
+    need(previous[1]==0,'periodic caller timer')
+    def expired(*unused):raise RecoveryDeadline('whole recovery180s expired')
+    signal.signal(signal.SIGALRM,expired);signal.setitimer(signal.ITIMER_REAL,min(180,previous[0]) if previous[0]>0 else 180)
+    start=time.monotonic()
+    try:print(json.dumps(recover(args.registry,args.common,args.source,native,volume),sort_keys=True))
+    finally:
+        signal.setitimer(signal.ITIMER_REAL,0);signal.signal(signal.SIGALRM,handler)
+        if previous[0]>0:signal.setitimer(signal.ITIMER_REAL,max(.000001,previous[0]-(time.monotonic()-start)))
 if __name__=='__main__':main()
