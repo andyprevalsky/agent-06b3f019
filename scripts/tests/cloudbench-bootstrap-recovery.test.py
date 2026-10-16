@@ -1728,6 +1728,100 @@ class AllocatedCurrentColdTests(PreconfigStartupArchiveTests):
         self.helper['commit_current_cold'](self.registry,self.out,MACHINE,TOKEN,self.archive,
             self.before,self.after,self.volume,self.receipt)
 
+    def test_retained_run_fifo_is_typed_custody_without_content_open(self):
+        fifo=self.run/'.native-retirement.pipe';os.mkfifo(fifo,0o644)
+        original=fifo.lstat();real_open=os.open;real_fstat=os.fstat;substituted=set()
+        def no_fifo_open(path,*args,**kwargs):
+            if Path(path)==fifo:
+                # Reproduce the old fstat refusal without ever opening the IPC.
+                fd=real_open(os.devnull,*args,**kwargs);substituted.add(fd);return fd
+            return real_open(path,*args,**kwargs)
+        def fifo_stat(fd):return original if fd in substituted else real_fstat(fd)
+        with patch.object(os,'open',no_fifo_open),patch.object(os,'fstat',fifo_stat):
+            self.prepare_current()
+            self.helper['verify_current_cold_receipt'](self.registry,self.out,MACHINE,TOKEN,self.receipt,self.before,self.after)
+            raw,files,manifest=self.helper['read_current_cold_archive'](self.archive)
+        self.assertFalse(substituted,'fixed capture must classify FIFO before any content open')
+        self.assertEqual(fifo.lstat(),original)
+        self.assertNotIn('run/.native-retirement.pipe',files)
+        record=manifest['fifos']['run/.native-retirement.pipe']
+        self.assertEqual(record['kind'],'fifo');self.assertTrue(record['metadata_only'])
+        self.assertEqual(record['stat']['inode'],original.st_ino)
+        with tarfile.open(self.archive) as archive:
+            member=archive.getmember('run/.native-retirement.pipe')
+            self.assertTrue(member.isfifo());self.assertEqual(member.size,0)
+            self.assertEqual(json.loads(member.pax_headers['cloudbench.fifo-source-stat']),record['stat'])
+        self.assertEqual(json.loads(self.receipt.read_bytes())['proof_credit'],0)
+
+    def test_retained_run_fifo_metadata_drift_refuses_revalidation(self):
+        fifo=self.run/'.native-retirement.pipe';os.mkfifo(fifo,0o644)
+        self.prepare_current();fifo.chmod(0o600)
+        with self.assertRaises(ValueError):
+            self.helper['verify_current_cold_receipt'](self.registry,self.out,MACHINE,TOKEN,self.receipt,self.before,self.after)
+
+    def test_fifo_custody_rejects_unexpected_path_type_or_hardlink(self):
+        for fault in ('unexpected-path','regular-type','directory-type','hardlink','symlink'):
+            with self.subTest(fault=fault):
+                case=type(self)('test_retained_run_fifo_is_typed_custody_without_content_open');case.setUp()
+                try:
+                    fifo=case.run/'.native-retirement.pipe'
+                    if fault=='regular-type':fifo.write_bytes(b'not FIFO')
+                    elif fault=='directory-type':fifo.mkdir()
+                    elif fault=='symlink':fifo.symlink_to(case.controller_log)
+                    else:
+                        os.mkfifo(fifo if fault=='hardlink' else case.run/'unexpected.pipe',0o644)
+                        if fault=='hardlink':os.link(fifo,case.run/'second.pipe')
+                    with self.assertRaises((ValueError,OSError)):case.prepare_current()
+                finally:case.doCleanups()
+
+    def test_fifo_archive_rejects_metadata_type_link_and_path_tamper(self):
+        with self.assertRaises(ValueError):
+            self.helper['current_fifo_records']({'run/.native-retirement.pipe':b''})
+        fifo=self.run/'.native-retirement.pipe';os.mkfifo(fifo,0o644)
+        self.prepare_current()
+        for fault in ('mode','uid','gid','inode','type','regular-manifest','link','path'):
+            with self.subTest(fault=fault):
+                damaged=self.base/('fifo-'+fault+'.tar.gz')
+                with tarfile.open(self.archive) as source,tarfile.open(damaged,'w:gz') as target:
+                    for member in source:
+                        data=source.extractfile(member).read() if member.isfile() else None
+                        if fault=='regular-manifest' and member.name=='source-fifos.json':continue
+                        if fault=='regular-manifest' and member.name=='capture-manifest.json':
+                            value=json.loads(data);value.pop('fifos');value['files'].pop('source-fifos.json')
+                            value['files']['run/.native-retirement.pipe']={'bytes':0,'sha256':hashlib.sha256(b'').hexdigest()}
+                            data=json.dumps(value).encode();member.size=len(data)
+                        if member.name=='run/.native-retirement.pipe':
+                            if fault in ('mode','uid','gid'):setattr(member,fault,getattr(member,fault)+1)
+                            if fault=='inode':
+                                value=json.loads(member.pax_headers['cloudbench.fifo-source-stat']);value['inode']+=1
+                                member.pax_headers['cloudbench.fifo-source-stat']=json.dumps(value)
+                            if fault in ('type','regular-manifest'):member.type=tarfile.REGTYPE;data=b''
+                            if fault=='link':member.type=tarfile.LNKTYPE;member.linkname='controller.log'
+                            if fault=='path':member.name='run/other.pipe'
+                        target.addfile(member,io.BytesIO(data) if data is not None else None)
+                with self.assertRaises(ValueError):self.helper['read_current_cold_archive'](damaged)
+
+    def test_fifo_source_owner_link_and_terminal_guards_are_not_waived(self):
+        import types
+        fifo=self.run/'.native-retirement.pipe';os.mkfifo(fifo,0o644)
+        lstat=Path.lstat
+        for field in ('st_uid','st_gid','st_nlink'):
+            with self.subTest(field=field):
+                def changed(path,*args,**kwargs):
+                    value=lstat(path,*args,**kwargs)
+                    if path==fifo:
+                        attrs={key:getattr(value,key) for key in dir(value) if key.startswith('st_')}
+                        attrs[field]+=1;return types.SimpleNamespace(**attrs)
+                    return value
+                with patch.object(Path,'lstat',changed),self.assertRaises(ValueError):
+                    self.helper['current_cold_files'](self.registry,self.out,MACHINE,TOKEN,self.controller_log)
+        batch=self.run/'_batch/run.json';value=json.loads(batch.read_bytes());value['status']='running';batch.write_text(json.dumps(value))
+        with self.assertRaises(ValueError):self.prepare_current()
+
+    def test_typed_fifo_survives_original_seal_and_destination_verification(self):
+        os.mkfifo(self.run/'.native-retirement.pipe',0o644)
+        self.test_current_phase_source_import_and_actual_claim_preserve_unknown_history()
+
     def test_current_phase_source_import_and_actual_claim_preserve_unknown_history(self):
         with self.assertRaises(OSError): self.capture()
         self.prepare_current()

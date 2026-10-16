@@ -27,6 +27,8 @@ def read(path, maximum=MAXIMUM):
     path = Path(path)
     if path.resolve(strict=True) != path:
         raise ValueError("unsafe original evidence path")
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError("unsafe original evidence file")
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
         before = os.fstat(source.fileno())
         if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
@@ -199,23 +201,42 @@ def capture_preconfig(registry, output, machine, token, destination):
 
 def read_preconfig_archive(archive_path, reader=read, *, schema=PRECONFIG_SCHEMA):
     raw = reader(archive_path)
-    files, total = {}, 0
+    files, fifos, total = {}, {}, 0
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
         for member in archive:
             total += member.size
             name = Path(member.name)
-            if (not member.isfile() or member.name in files or member.size < 0
+            if (member.name in files or member.name in fifos or member.size < 0
                     or name.is_absolute() or ".." in name.parts or name.as_posix() != member.name
-                    or total > MAXIMUM or len(files) > 1030):
+                    or total > MAXIMUM or len(files)+len(fifos) > 1030):
                 raise ValueError("unsafe pre-config archive member")
+            if member.isfifo() and schema == CURRENT_COLD_SCHEMA:
+                from decimal import Decimal, InvalidOperation
+                try:
+                    metadata=json.loads(member.pax_headers.get('cloudbench.fifo-source-stat','null'))
+                    if (member.name!=FIFO_NAME or not isinstance(metadata,dict) or member.size!=0 or member.linkname
+                            or member.mode!=stat.S_IMODE(metadata['mode']) or member.uid!=metadata['uid'] or member.gid!=metadata['gid']
+                            or Decimal(member.pax_headers.get('mtime','NaN'))*1000000000!=metadata['mtime_ns']):
+                        raise ValueError('archive FIFO metadata differs')
+                except (KeyError,TypeError,InvalidOperation) as error:
+                    raise ValueError('invalid archive FIFO metadata') from error
+                fifos[member.name]=metadata
+                continue
+            if not member.isfile(): raise ValueError("unsafe pre-config archive member")
             data = archive.extractfile(member).read(member.size + 1)
             if len(data) != member.size:
                 raise ValueError("truncated pre-config original")
             files[member.name] = data
     manifest = json.loads(files.pop("capture-manifest.json"))
-    if type(manifest.get("proof_credit")) is not int or manifest != {"schema": schema, "machine_id": manifest.get("machine_id"),
-            "run_token": manifest.get("run_token"), "proof_credit": 0,
-            "files": {name: {"bytes": len(data), "sha256": digest(data)} for name, data in files.items()}}:
+    expected = {"schema": schema, "machine_id": manifest.get("machine_id"),
+        "run_token": manifest.get("run_token"), "proof_credit": 0,
+        "files": {name: {"bytes": len(data), "sha256": digest(data)} for name, data in files.items()}}
+    records=current_fifo_records(files) if schema == CURRENT_COLD_SCHEMA else {}
+    if fifos or (schema == CURRENT_COLD_SCHEMA and FIFO_METADATA in files):
+        if {name:row['stat'] for name,row in records.items()}!=fifos or not records:
+            raise ValueError('archive FIFO inventory differs')
+        expected['fifos']=records
+    if type(manifest.get("proof_credit")) is not int or manifest != expected:
         raise ValueError("pre-config archive manifest differs from original bytes")
     return raw, files, manifest
 
@@ -668,6 +689,60 @@ def validate_current_source_termination(files,meta,output,token):
             raise ValueError('missing worker ledger requires complete singleton original audit')
 
 
+FIFO_METADATA = 'source-fifos.json'
+FIFO_NAME = 'run/.native-retirement.pipe'
+
+
+def current_fifo_stat(path, uid, gid):
+    """Observe the one retained run FIFO without opening an IPC endpoint."""
+    path = Path(path)
+    if path.resolve(strict=True) != path:
+        raise ValueError('noncanonical current FIFO path')
+    value = path.lstat()
+    if (not stat.S_ISFIFO(value.st_mode) or value.st_size != 0 or value.st_nlink != 1
+            or value.st_uid != uid or value.st_gid != gid or value.st_mode & 0o7000):
+        raise ValueError('unsafe current FIFO metadata')
+    return dict(device=value.st_dev,inode=value.st_ino,bytes=value.st_size,
+        mtime_ns=value.st_mtime_ns,ctime_ns=value.st_ctime_ns,mode=value.st_mode,
+        uid=value.st_uid,gid=value.st_gid,nlink=value.st_nlink,allocated_bytes=value.st_blocks*512)
+
+
+def current_fifo_records(files, output=None):
+    """Typed custody metadata is separate from regular original-file bytes."""
+    if FIFO_NAME in files: raise ValueError('current FIFO represented as regular bytes')
+    records = json.loads(files[FIFO_METADATA]) if FIFO_METADATA in files else {}
+    if not isinstance(records,dict) or (records and set(records)!={FIFO_NAME}):
+        raise ValueError('unexpected current FIFO inventory')
+    for record in records.values():
+        if (not isinstance(record,dict) or set(record)!={'kind','metadata_only','path','stat'}
+                or record['kind']!='fifo' or record['metadata_only'] is not True
+                or not isinstance(record['path'],str) or not Path(record['path']).is_absolute()
+                or Path(record['path']).name!='.native-retirement.pipe'
+                or str(Path(record['path']))!=record['path'] or record['path'].startswith('//')
+                or '..' in Path(record['path']).parts):
+            raise ValueError('invalid current FIFO record')
+        value=record['stat']
+        if (not isinstance(value,dict) or set(value)!={'device','inode','bytes','mtime_ns','ctime_ns','mode','uid','gid','nlink','allocated_bytes'}
+                or any(type(v) is not int or v<0 for v in value.values())
+                or not stat.S_ISFIFO(value['mode']) or value['mode'] & 0o7000
+                or value['bytes']!=0 or value['nlink']!=1 or value['inode']==0):
+            raise ValueError('invalid current FIFO stat')
+        if output is not None and record['path']!=str(Path(output).parent/'.native-retirement.pipe'):
+            raise ValueError('current FIFO original path differs')
+    return records
+
+
+def add_current_fifo(archive, name, record):
+    """Use the controller-export FIFO/PAX convention; never synthesize content."""
+    value=record['stat'];member=tarfile.TarInfo(name)
+    member.type=tarfile.FIFOTYPE;member.size=0;member.mode=stat.S_IMODE(value['mode'])
+    member.uid=value['uid'];member.gid=value['gid']
+    seconds,nanos=divmod(value['mtime_ns'],1000000000)
+    member.pax_headers['mtime']=str(seconds)+'.'+str(nanos).zfill(9)
+    member.pax_headers['cloudbench.fifo-source-stat']=json.dumps(value,sort_keys=True,separators=(',',':'))
+    archive.addfile(member)
+
+
 def current_cold_files(registry, output, machine, token, controller_log, *, outer_files=None):
     registry, output = Path(registry), Path(output)
     meta = fields(registry/'meta'); audit = Path(meta['audit_dir']); run = output.parent
@@ -713,16 +788,24 @@ def current_cold_files(registry, output, machine, token, controller_log, *, oute
         for parent,dirs,names in os.walk(root,followlinks=False):
             parent=Path(parent)
             dirs[:] = [name for name in dirs if not (parent==output and name=='allocated-current-cold')]
+            if parent==run and '.native-retirement.pipe' in dirs: raise ValueError('current FIFO became a directory')
             if any((parent/name).is_symlink() for name in dirs): raise ValueError('linked current original directory')
             for name in names:
                 path=parent/name
                 if label=='registry' and name.startswith(('.handoff-retain-','cold-handoff-outgoing')): continue
                 paths[label+'/'+str(path.relative_to(root))]=path
-    files={};remaining=MAXIMUM
+    files={};fifos={};remaining=MAXIMUM
+    owner_stat=(registry/'meta').stat()
     for name,path in paths.items():
         info=path.lstat()
         if info.st_uid != (registry/'meta').stat().st_uid or info.st_nlink != 1: raise ValueError('current original ownership changed')
-        files[name]=read(path,remaining);remaining-=len(files[name])
+        if name==FIFO_NAME:
+            fifos[name]=dict(kind='fifo',metadata_only=True,path=str(path),
+                stat=current_fifo_stat(path,owner_stat.st_uid,owner_stat.st_gid))
+        else:
+            if not stat.S_ISREG(info.st_mode): raise ValueError('unsafe original evidence file')
+            files[name]=read(path,remaining);remaining-=len(files[name])
+    if fifos: files[FIFO_METADATA]=json.dumps(fifos,sort_keys=True,separators=(',',':')).encode()
     files['controller-log.path']=str(Path(controller_log)).encode()
     if outer_files: files.update(outer_files)
     files['source-local-presence.json']=json.dumps({'batch_run':batch_path.exists(),'worker_ledger':worker_path.exists()},sort_keys=True).encode()
@@ -822,13 +905,16 @@ def capture_current_cold(registry,output,machine,token,destination,before,after,
     files['current/guest-collector.py']=collector_bytes
     files['current/volume.json']=read(volume,1048576)
     files['current/native-before.json']=read(before,1048576);files['current/native-after.json']=read(after,1048576)
+    fifos=current_fifo_records(files,output)
     manifest=dict(schema=CURRENT_COLD_SCHEMA,machine_id=machine,run_token=token,proof_credit=0,
         files={name:dict(bytes=len(raw),sha256=digest(raw)) for name,raw in files.items()})
+    if fifos: manifest['fifos']=fifos
     destination=Path(destination)
     with os.fdopen(os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb') as stream:
         with tarfile.open(fileobj=stream,mode='w:gz') as archive:
             for name,raw in {**files,'capture-manifest.json':json.dumps(manifest,sort_keys=True).encode()}.items():
                 item=tarfile.TarInfo(name);item.size=len(raw);item.mode=0o600;archive.addfile(item,io.BytesIO(raw))
+            for name,record in fifos.items():add_current_fifo(archive,name,record)
         stream.flush();os.fsync(stream.fileno())
     if current_cold_files(registry,output,machine,token,controller_log,outer_files=outer_files)[2] != {k:v for k,v in files.items() if not k.startswith('current/')}:
         raise ValueError('current originals changed during capture')
@@ -840,6 +926,7 @@ def read_current_cold_archive(path,reader=read):
 
 def validate_current_cold_semantics(files,registry,output,machine,token):
     meta,original=archived_current_cold_identity(files,registry,output,machine,token)
+    current_fifo_records(files,output)
     intent=json.loads(files['current/intent.json'])
     if set(intent)!={'image','capture_nonce','guest_collector_sha256'} or not re.fullmatch(r'.+@sha256:[0-9a-f]{64}',intent['image']):
         raise ValueError('current capture lacks explicit pinned image')
@@ -997,9 +1084,15 @@ def verify_current_cold_receipt(registry,output,machine,token,receipt,before,aft
                 for name in names:
                     if label=='registry' and (name=='cold-handoff-outgoing' or name.startswith('.handoff-retain-')): continue
                     relative=label+'/'+str((parent/name).relative_to(path));actual.add(relative)
-                    if relative!='registry/meta' and read(parent/name)!=files.get(relative):
-                        raise ValueError('current preserved original changed')
-            expected_names={name for name in files if name.startswith(label+'/') and not (overlay and name.startswith('registry/recovery-lock/'))}
+                    fifos=current_fifo_records(files,output)
+                    if relative in fifos:
+                        record=fifos[relative]
+                        if (str(parent/name)!=record['path'] or current_fifo_stat(parent/name,record['stat']['uid'],record['stat']['gid'])!=record['stat']):
+                            raise ValueError('current preserved FIFO changed')
+                    elif relative!='registry/meta':
+                        if not stat.S_ISREG((parent/name).lstat().st_mode) or read(parent/name)!=files.get(relative):
+                            raise ValueError('current preserved original changed')
+            expected_names={name for name in set(files)|set(current_fifo_records(files,output)) if name.startswith(label+'/') and not (overlay and name.startswith('registry/recovery-lock/'))}
             if actual != expected_names:
                 raise ValueError('current preserved original inventory changed')
         if read(Path(files['current/controller-log-path'].decode()))!=files['controller.log']:

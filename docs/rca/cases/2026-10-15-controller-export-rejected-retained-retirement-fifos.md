@@ -131,6 +131,50 @@ resumed. Durable local transfer and another local verification follow separately
 This fixes the original archive failure; it grants no task grade, native release
 or 600-task qualification credit.
 
+## Related current-cold consumer failure (2026-10-16)
+
+Five next39 source rows refused at `current_cold_files -> read` with
+`unsafe original evidence file`. The subsequent guarded diagnostic identified
+exactly `run/.native-retirement.pipe` for each: FIFO type4096, mode4516,
+size0, uid/gid1001 and nlink1. It opened no FIFO content. The rows remain
+excluded until a new root-owned source/custody transaction proves them; this
+local repair grants no admission or qualification credit.
+
+Archive searches used `unsafe original evidence file` and `retained retirement
+FIFO`. This is a related consumer-contract recurrence: controller export already
+preserved typed FIFO metadata, while current-cold capture still modeled every
+original as regular-file bytes. Its regular-file refusal was correct; treating
+IPC content as bytes or dropping the entry would be the wrong repair.
+
+The registered canonical capture test
+`AllocatedCurrentColdTests.test_retained_run_fifo_is_typed_custody_without_content_open`
+reproduces the exact ValueError against unchanged534614ab1. The test intercepts
+the old open boundary and supplies its real FIFO stat on a harmless descriptor,
+so even the RED execution never opens the pipe. The same unchanged test then
+exercises capture, commit, archive hash/type validation and local revalidation.
+
+The additive current-cold format retains its regular-byte map. A generated
+`source-fifos.json` inventory binds the exact original absolute path and stat;
+`manifest.fifos` mirrors that typed record, and the archive includes a real
+`FIFOTYPE` member with the existing `cloudbench.fifo-source-stat` PAX convention.
+There is no regular-byte stand-in for the FIFO. The only supported special entry
+is the canonical run-level retirement pipe, with zero size, one link and exact
+source owner/group. Device/inode, mode, nanosecond mtime/ctime, UID/GID, size,
+link count and allocation metadata are retained. Old regular-only archives stay
+readable, and preconfig archives still reject special members.
+
+Capture compares the complete typed inventory after writing, commit compares it
+again, and current receipt verification enumerates and checks every physical
+entry. Type, path, owner, link, metadata or inventory drift refuses. The original
+terminal/owner, native identity, guest isolation and caller source-quiescence
+guards remain mandatory; this does not fabricate successful producer cleanup.
+FIFOs, sockets and devices outside this narrow typed path refuse before open.
+Six registered FIFO cases passed five unchanged runs, including sealed source
+handoff and destination verification. The existing34-case current-cold family
+also passed five unchanged runs before adding that final handoff case.
+No provider, guest, live-packet or original-source operation was performed by
+this repair. Exact native revalidation remains root-owned.
+
 ## Human feedback
 
 The user required continued repair, reuse of owned resources, protection of warm
