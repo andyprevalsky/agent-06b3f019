@@ -123,6 +123,13 @@ export async function findApprovedPurchaseRetry(
     (purchase) => cartPriceSignature(purchase.lineItemsJson, purchase.totalCents) === signature
   );
   if (candidates.length === 0) return null;
+  // A financial fingerprint can discard product-description details. Only full
+  // consent fields may skip semantic review; display metadata remains excluded.
+  const requestedReceipt = JSON.stringify(consentReceipt(input));
+  const exact = candidates.find(
+    (purchase) => JSON.stringify(consentReceipt(purchase.lineItemsJson)) === requestedReceipt
+  );
+  if (exact !== undefined) return exact;
   const id = await select(candidates, input);
   return candidates.find((candidate) => candidate.id === id) ?? null;
 }

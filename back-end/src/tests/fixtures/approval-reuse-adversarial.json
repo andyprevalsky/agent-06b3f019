@@ -1447,5 +1447,255 @@
       "fingerprint": "4652b2e2c7876e4c644df0f6547431e07170f66aa84526ccdd8d76964a82edb0",
       "subtotalCents": 50000
     }
+  },
+  {
+    "id": "description-variant-collision",
+    "batch": 6,
+    "reason": "Color, size and personalization changed despite a colliding financial key.",
+    "expectedPurchaseId": null,
+    "approved": [
+      {
+        "id": "approved-boundary",
+        "merchant": "Receipt Boundary Lab",
+        "receipt": {
+          "merchant": "Receipt Boundary Lab",
+          "currency": "USD",
+          "lineItems": [
+            {
+              "name": "Canvas Tote - blue cotton size large with initials AJ",
+              "productUrl": "https://receipt-boundary.example/products/canvas-tote",
+              "imageUrl": null,
+              "rating": "4.8 stars",
+              "reviewCount": "100 reviews",
+              "unitPriceCents": 2400,
+              "quantity": 1,
+              "lineTotalCents": 2400
+            }
+          ],
+          "fees": [],
+          "subtotalCents": 2400,
+          "totalCents": 2400
+        }
+      }
+    ],
+    "requested": {
+      "merchant": "Receipt Boundary Lab",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "Canvas Tote - red cotton size small with initials BK",
+          "productUrl": "https://receipt-boundary.example/products/canvas-tote",
+          "imageUrl": null,
+          "rating": "4.8 stars",
+          "reviewCount": "100 reviews",
+          "unitPriceCents": 2400,
+          "quantity": 1,
+          "lineTotalCents": 2400
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 2400,
+      "totalCents": 2400
+    }
+  },
+  {
+    "id": "description-renewal-collision",
+    "batch": 6,
+    "reason": "Subscription and renewal period changed despite the same total.",
+    "expectedPurchaseId": null,
+    "approved": [
+      {
+        "id": "approved-boundary",
+        "merchant": "Receipt Boundary Lab",
+        "receipt": {
+          "merchant": "Receipt Boundary Lab",
+          "currency": "USD",
+          "lineItems": [
+            {
+              "name": "Studio Plan - monthly subscription for one seat renews every month",
+              "productUrl": "https://receipt-boundary.example/products/studio-plan",
+              "imageUrl": null,
+              "rating": "4.8 stars",
+              "reviewCount": "100 reviews",
+              "unitPriceCents": 2400,
+              "quantity": 1,
+              "lineTotalCents": 2400
+            }
+          ],
+          "fees": [],
+          "subtotalCents": 2400,
+          "totalCents": 2400
+        }
+      }
+    ],
+    "requested": {
+      "merchant": "Receipt Boundary Lab",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "Studio Plan - annual subscription for one seat renews every year",
+          "productUrl": "https://receipt-boundary.example/products/studio-plan",
+          "imageUrl": null,
+          "rating": "4.8 stars",
+          "reviewCount": "100 reviews",
+          "unitPriceCents": 2400,
+          "quantity": 1,
+          "lineTotalCents": 2400
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 2400,
+      "totalCents": 2400
+    }
+  },
+  {
+    "id": "description-recipient-collision",
+    "batch": 6,
+    "reason": "Recipient and delivery address changed within the discarded description.",
+    "expectedPurchaseId": null,
+    "approved": [
+      {
+        "id": "approved-boundary",
+        "merchant": "Receipt Boundary Lab",
+        "receipt": {
+          "merchant": "Receipt Boundary Lab",
+          "currency": "USD",
+          "lineItems": [
+            {
+              "name": "Gift Box - deliver to Alex Rivera at 12 Oak Street",
+              "productUrl": "https://receipt-boundary.example/products/gift-box",
+              "imageUrl": null,
+              "rating": "4.8 stars",
+              "reviewCount": "100 reviews",
+              "unitPriceCents": 2400,
+              "quantity": 1,
+              "lineTotalCents": 2400
+            }
+          ],
+          "fees": [],
+          "subtotalCents": 2400,
+          "totalCents": 2400
+        }
+      }
+    ],
+    "requested": {
+      "merchant": "Receipt Boundary Lab",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "Gift Box - deliver to Morgan Lee at 87 Pine Avenue",
+          "productUrl": "https://receipt-boundary.example/products/gift-box",
+          "imageUrl": null,
+          "rating": "4.8 stars",
+          "reviewCount": "100 reviews",
+          "unitPriceCents": 2400,
+          "quantity": 1,
+          "lineTotalCents": 2400
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 2400,
+      "totalCents": 2400
+    }
+  },
+  {
+    "id": "description-service-date-collision",
+    "batch": 6,
+    "reason": "Service date changed within the discarded description.",
+    "expectedPurchaseId": null,
+    "approved": [
+      {
+        "id": "approved-boundary",
+        "merchant": "Receipt Boundary Lab",
+        "receipt": {
+          "merchant": "Receipt Boundary Lab",
+          "currency": "USD",
+          "lineItems": [
+            {
+              "name": "Workshop Pass - single entry for October 18 2026 at noon",
+              "productUrl": "https://receipt-boundary.example/products/workshop-pass",
+              "imageUrl": null,
+              "rating": "4.8 stars",
+              "reviewCount": "100 reviews",
+              "unitPriceCents": 2400,
+              "quantity": 1,
+              "lineTotalCents": 2400
+            }
+          ],
+          "fees": [],
+          "subtotalCents": 2400,
+          "totalCents": 2400
+        }
+      }
+    ],
+    "requested": {
+      "merchant": "Receipt Boundary Lab",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "Workshop Pass - single entry for October 19 2026 at noon",
+          "productUrl": "https://receipt-boundary.example/products/workshop-pass",
+          "imageUrl": null,
+          "rating": "4.8 stars",
+          "reviewCount": "100 reviews",
+          "unitPriceCents": 2400,
+          "quantity": 1,
+          "lineTotalCents": 2400
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 2400,
+      "totalCents": 2400
+    }
+  },
+  {
+    "id": "description-paraphrase-collision",
+    "batch": 6,
+    "reason": "Same product, color, material, finish and capacity with equivalent wording.",
+    "expectedPurchaseId": "approved-boundary",
+    "approved": [
+      {
+        "id": "approved-boundary",
+        "merchant": "Receipt Boundary Lab",
+        "receipt": {
+          "merchant": "Receipt Boundary Lab",
+          "currency": "USD",
+          "lineItems": [
+            {
+              "name": "Ceramic Mug - blue glazed ceramic with twelve ounce capacity",
+              "productUrl": "https://receipt-boundary.example/products/ceramic-mug",
+              "imageUrl": null,
+              "rating": "4.8 stars",
+              "reviewCount": "100 reviews",
+              "unitPriceCents": 2400,
+              "quantity": 1,
+              "lineTotalCents": 2400
+            }
+          ],
+          "fees": [],
+          "subtotalCents": 2400,
+          "totalCents": 2400
+        }
+      }
+    ],
+    "requested": {
+      "merchant": "Receipt Boundary Lab",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "Ceramic Mug - twelve ounce blue ceramic with a glazed finish",
+          "productUrl": "https://receipt-boundary.example/products/ceramic-mug",
+          "imageUrl": null,
+          "rating": "4.8 stars",
+          "reviewCount": "100 reviews",
+          "unitPriceCents": 2400,
+          "quantity": 1,
+          "lineTotalCents": 2400
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 2400,
+      "totalCents": 2400
+    }
   }
 ]

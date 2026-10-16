@@ -1,9 +1,9 @@
 {
   "scope": "Live comparator evaluation only; no purchases, approvals, browser execution or deployment",
-  "productionSourceSha256": "f29947bb2605de91e7112e0ed2bde0a8650d0462d3fde9d25c3444ca7c1c0bf4",
-  "fixturesFileSha256": "4b447d067647706aaa80f734fecdfa1376348cd504d23c8c51380d77019aa1f2",
+  "productionSourceSha256": "15fb231b41fff8be78d68bee828d170e5bdf2d37ac18c2c5752603883d7c9faf",
+  "fixturesFileSha256": "4596fa1f4fbaaf1e6dd940060064c82f7cf57c8d58cd39f7b9d12a6c8dccb9b5",
   "frozenIndependentBatchesFileSha256": "da781e23d62f4ccc6626d0fc3da75feb0c4e97404ab27d3da85bc9c8be77cf5d",
-  "examples": 25,
+  "examples": 30,
   "batchSize": 5,
   "maxConcurrentCalls": 5,
   "repetitions": [
@@ -12,23 +12,23 @@
     "opaque candidate ids plus reversed order"
   ],
   "finalCounts": {
-    "TP": 24,
-    "TN": 51,
+    "TP": 27,
+    "TN": 63,
     "FP": 0,
     "FN": 0,
     "ERROR": 0
   },
   "allAttemptCounts": {
-    "TP": 42,
-    "TN": 105,
+    "TP": 45,
+    "TN": 117,
     "FP": 0,
     "FN": 0,
     "ERROR": 3
   },
   "finalLatencyMs": {
-    "mean": 715.79,
-    "p50": 616,
-    "p95": 1648,
+    "mean": 672.27,
+    "p50": 557,
+    "p95": 1568,
     "p99": 1831
   },
   "contextComparisonBatch1": {
@@ -45,7 +45,8 @@
     "The first unseen batch3 pass was at1024; final repetitions use2048",
     "Live corpus is opt-in; offline regression and grading controls run with owning blackbox gate",
     "No expected labels, rationales or batch metadata enter model context",
-    "Individual raw reports and native dumps remain private local evidence; metered costs unavailable"
+    "Individual raw reports and native dumps remain private local evidence; metered costs unavailable",
+    "Prior 75 live decisions remain at the preceding source; new code changes only scoped candidate selection and complete-receipt exact comparison, with unchanged model prompt/config/projection. Batch6 adds 15 live decisions at current source."
   ],
   "history": [
     {
@@ -271,8 +272,51 @@
         "FN": 0,
         "ERROR": 0
       }
+    },
+    {
+      "artifact": "approval-reuse-batch6-final.json",
+      "startedAt": "2026-10-16T04:24:37.209Z",
+      "finishedAt": "2026-10-16T04:24:39.152Z",
+      "batch": 6,
+      "repeat": 3,
+      "sourceSha256": "15fb231b41fff8be78d68bee828d170e5bdf2d37ac18c2c5752603883d7c9faf",
+      "casesSha256": "9df19f278692b9bd8470150d90876845af2614c10839abc927b8e3fd9d63b760",
+      "counts": {
+        "TP": 3,
+        "TN": 12,
+        "FP": 0,
+        "FN": 0,
+        "ERROR": 0
+      }
     }
   ],
   "finalMaximumCompletionTokens": 1961,
-  "proposedOutputTokenCeiling": 2048
+  "proposedOutputTokenCeiling": 2048,
+  "previousComparatorSourceSha256": "f29947bb2605de91e7112e0ed2bde0a8650d0462d3fde9d25c3444ca7c1c0bf4",
+  "boundaryRegression": {
+    "scope": "Owning local database lookup, not live-model classification",
+    "before": {
+      "TP": 1,
+      "TN": 0,
+      "FP": 4,
+      "FN": 0,
+      "ERROR": 0,
+      "semanticCalls": 0
+    },
+    "after": {
+      "TP": 1,
+      "TN": 4,
+      "FP": 0,
+      "FN": 0,
+      "ERROR": 0,
+      "semanticCalls": 5
+    },
+    "exactReceiptControls": "Five unchanged receipts skip model context before and after",
+    "command": "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_approval_receipt_guard DIRECT_URL=postgresql://postgres:postgres@localhost:5432/victoria_approval_receipt_guard node --import tsx src/tests/blackbox/purchases-agent-cart-reuse.blackbox.ts",
+    "cwd": "back-end",
+    "baseline": "ceebb1f603eb0586aa67bb9b92b60056ed21fe10 plus unchanged five-case regression",
+    "cause": "Financial canonicalization discards material description suffixes; scoped exact-key shortcut skipped semantic review",
+    "fix": "Route scoped lookup through bounded financial candidates; skip model only for identical full consent projections",
+    "modelCallUnchanged": true
+  }
 }

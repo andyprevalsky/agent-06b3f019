@@ -92,19 +92,15 @@ async function lookupAvailablePurchase(
   requested: MintPurchaseInput | undefined,
   select: ApprovedPurchaseSelector
 ): Promise<PurchaseLookupResult> {
-  let purchase = await repo.findRecentPurchaseByUserAndFingerprint(userId, fingerprint, since);
-  if (!purchase) {
+  // Receipt-scoped consent always checks the complete receipt within financial
+  // and ownership bounds. Legacy monetary lookup keeps its existing key contract.
+  let purchase =
+    requested === undefined
+      ? await repo.findRecentPurchaseByUserAndFingerprint(userId, fingerprint, since)
+      : await findApprovedPurchaseRetry({ ...requested, userId, fingerprint }, since, select);
+  if (!purchase && requested === undefined) {
     await ensureRecentLegacyFingerprintsIndexed(userId, since);
     purchase = await repo.findRecentPurchaseByUserAndFingerprint(userId, fingerprint, since);
-  }
-  if (!purchase) {
-    if (requested !== undefined) {
-      purchase = await findApprovedPurchaseRetry(
-        { ...requested, userId, fingerprint },
-        since,
-        select
-      );
-    }
   }
   if (!purchase) {
     return {

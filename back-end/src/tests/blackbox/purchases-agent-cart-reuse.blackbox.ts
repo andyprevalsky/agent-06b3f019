@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { config } from 'dotenv';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { createApprovedPurchaseSelector } from '../../domains/purchases/approvalReuse';
+import { canonicalStoredPurchaseFingerprint } from '../../domains/purchases/fingerprint';
 import type { CompletionChunk, CompletionOptions } from '../../providers/rose/types';
 import { cartPriceSignature, findSameAgentHeldCart } from '../../domains/purchases/agentCartReuse';
 import * as purchasesService from '../../domains/purchases/service';
@@ -501,6 +502,98 @@ async function testApprovalLookupRecognizesCapturedRetry(): Promise<void> {
   assert(consumed.reusable === false, 'consumed card must never autoapprove or duplicate payment');
 }
 
+async function testCanonicalKeyDoesNotEstablishConsent(): Promise<void> {
+  const cases = JSON.parse(
+    readFileSync(new URL('../fixtures/approval-reuse-adversarial.json', import.meta.url), 'utf8')
+  ).filter((example: { batch: number }) => example.batch === 6);
+  assert(cases.length === 5, 'receipt-boundary batch must remain frozen at five cases');
+  const failures: string[] = [];
+  for (const example of cases) {
+    const userId = await createUser(example.id);
+    const agentId = await createAgent(userId);
+    const approved = example.approved[0].receipt;
+    const fingerprint = canonicalStoredPurchaseFingerprint({
+      userId,
+      merchant: approved.merchant,
+      lineItemsJson: approved,
+      totalCents: approved.totalCents,
+    });
+    const input: MintPurchaseInput = {
+      ...example.requested,
+      userId,
+      agentId,
+      fingerprint: fingerprint!,
+    };
+    assert(fingerprint !== null, 'approved financial identity must be valid');
+    assert(
+      canonicalStoredPurchaseFingerprint({
+        userId,
+        merchant: input.merchant,
+        lineItemsJson: input,
+        totalCents: input.totalCents,
+      }) === fingerprint,
+      'fixture must reach the colliding canonical-key path'
+    );
+    const held = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        agentId,
+        merchant: approved.merchant,
+        fingerprint: fingerprint!,
+        canonicalFingerprint: fingerprint,
+        lineItemsJson: approved,
+        totalCents: approved.totalCents,
+        status: PurchaseSpendStatus.HELD,
+        cardId: `held-${randomUUID()}`,
+      },
+    });
+    let calls = 0;
+    const provider = new StubCardStateProvider({
+      status: 'OPEN',
+      balanceCents: 2400,
+      pan: '4242424242421372',
+    });
+    const result = await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+      userId,
+      fingerprint,
+      provider,
+      new Date(),
+      input,
+      async (candidates: Array<{ id: string }>) => {
+        calls += 1;
+        assert(
+          candidates.length === 1 && candidates[0].id === held.id,
+          'scope must retain the original candidate'
+        );
+        return example.expectedPurchaseId === null ? null : held.id;
+      },
+    ]);
+    const expected = example.expectedPurchaseId !== null;
+    const outcome =
+      result.reusable === expected ? (expected ? 'TP' : 'TN') : result.reusable ? 'FP' : 'FN';
+    console.log(`CONSENT_BOUNDARY ${example.id} ${outcome} semanticCalls=${calls}`);
+    if (result.reusable !== expected || calls !== 1)
+      failures.push(`${example.id}: ${outcome}, semanticCalls=${calls}`);
+
+    // Full consent fields identical: avoid a model call on an unchanged receipt.
+    const exact = await Reflect.apply(purchasesService.lookupPurchase, undefined, [
+      userId,
+      fingerprint,
+      provider,
+      new Date(),
+      { ...input, ...approved },
+      async () => {
+        throw new Error('identical consent must not use model context');
+      },
+    ]);
+    assert(exact.reusable === true, 'identical complete consent fields must retain exact reuse');
+  }
+  assert(
+    failures.length === 0,
+    `Canonical key is insufficient for consent: ${failures.join('; ')}`
+  );
+}
+
 async function main(): Promise<void> {
   try {
     testApprovalBenchmarkGrading();
@@ -508,6 +601,7 @@ async function main(): Promise<void> {
       await runApprovalReuseBenchmark();
       return;
     }
+    await testCanonicalKeyDoesNotEstablishConsent();
     await testApprovalLookupRecognizesCapturedRetry();
     testSignatureIgnoresModelText();
     await testMintReusesSameAgentHeldCard();
