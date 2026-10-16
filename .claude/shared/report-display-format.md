@@ -122,6 +122,10 @@ checkpoint fields together; do not create competing URL aliases.
 
 ## Benchmark experiment history
 
+- At the top, show **Since last benchmark ended** with the run label and elapsed
+  time from its actual producer terminal timestamp. Keep this clock across
+  diagnostics, cleanup and card refreshes. For a live benchmark show RUNNING;
+  a missing end reads END UNRECORDED, never a guessed duration.
 - First row: current **Experiment #<number>** and state. Beneath it show the
   average experiments/day for this goal: distinct actually launched original
   experiments divided by elapsed goal days. Preserve the original goal start;

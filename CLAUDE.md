@@ -32,6 +32,9 @@ links. A file pointer never substitutes for the diff.
 
 - Use actual text colors, latest **3** runs, Experiment # and launches/day,
   Pacific local time, one status emoji, no UPD/nulls, and LIFE far right.
+- At the top, show elapsed time since the latest actual benchmark ended, from
+  its producer terminal timestamp. Diagnostics, cleanup and card renders never
+  reset it. A missing end stays UNRECORDED; an active benchmark shows RUNNING.
 - Show the live HTML scorecard inline in the answer, with readable text and a
   compact first view; keep QA screenshots private and never send image previews.
 - Show **current-assignment tokens spent** and rolling **15-minute tokens/min**

@@ -120,6 +120,9 @@ Measurement contract
   Keep DEMO response replay separate from agent and WMH prompt-cache rates; show
   their actual hit/look-up or cached-input/all-input denominators. An enabled flag
   does not prove a hit. Report agent and WMH LLM avg/p95/p99 separately.
+- At the top, show time since the latest actual benchmark ended, with its label
+  and actual producer end as baseline. Diagnostics, cleanup and card refreshes
+  never reset this clock; a live run shows RUNNING, missing end END UNRECORDED.
 - Active sub-agents: one line each, one status emoji + short name/work + recorded
   current-assignment tokens spent + rolling 15-minute tokens/min. LIFE stays at
   the far right; remove PCT, pp/min, UPD and progress wheels. Use actual harness
