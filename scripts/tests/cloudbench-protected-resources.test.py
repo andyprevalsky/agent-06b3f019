@@ -47,5 +47,17 @@ class ProtectionUnion(unittest.TestCase):
         x={'owners':[dict(cleanup_policy='reap', latches={'recovery-lock':True}, clones=[dict(recorded_id=self.MID)])]}
         self.assertIn(self.MID, m.combine([('ledger', x)])['machines'])
 
+    def test_raw_id_alias_and_nested_recovery_or_outgoing_hold(self):
+        prefix = 'git-common/cloudbench-fleet-ownership/owner'
+        for hold in ('recovery-lock/meta', 'cold-handoff-outgoing/intent'):
+            raw = {prefix+'/meta':'cleanup_policy=reap\n', prefix+'/clones/one':f'id={self.MID}\n', prefix+'/'+hold:'state=pending\n'}
+            self.assertIn(self.MID, m.combine([('raw', raw)])['machines'])
+
+    def test_duplicate_policy_and_malformed_fields_refuse(self):
+        prefix = 'git-common/cloudbench-fleet-ownership/owner'
+        for meta in ('cleanup_policy=retain\ncleanup_policy=reap\n', 'cleanup_policy=reap\nbad-line\n'):
+            raw = {prefix+'/meta':meta, prefix+'/clones/one':f'id={self.MID}\n'}
+            with self.assertRaises(ValueError):m.combine([('raw', raw)])
+
 
 if __name__ == '__main__':unittest.main()

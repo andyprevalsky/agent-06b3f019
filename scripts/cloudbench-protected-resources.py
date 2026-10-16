@@ -15,7 +15,7 @@ def combine(sources):
     machines, volumes, names, evidence = set(), set(), set(), []
 
     def add(row, source):
-        mid = row.get('machine', row.get('machine_id', row.get('recorded_id')))
+        mid = row.get('machine', row.get('machine_id', row.get('recorded_id', row.get('id'))))
         vol = row.get('volume', row.get('volume_id', row.get('recorded_volume')))
         name = row.get('name', row.get('clone_name'))
         if mid:
@@ -57,7 +57,17 @@ def combine(sources):
         elif data and all(isinstance(k, str) and k.startswith('git-common/')
                           and isinstance(v, str) for k, v in data.items()):
             def fields(raw):
-                return dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+                result = {}
+                for line in raw.splitlines():
+                    if not line:
+                        continue
+                    if '=' not in line:
+                        raise ValueError('malformed protection record')
+                    key, value = line.split('=', 1)
+                    if not key or key in result:
+                        raise ValueError('duplicate protection field')
+                    result[key] = value
+                return result
             prefix = 'git-common/cloudbench-fleet-ownership/'
             for path, raw in data.items():
                 if path.startswith(prefix) and '/clones/' in path:
@@ -65,7 +75,8 @@ def combine(sources):
                     meta_raw = data.get(owner_path+'/meta')
                     meta = fields(meta_raw) if meta_raw is not None else {}
                     latch = any(k.startswith(owner_path+'/') and
-                                k.rsplit('/', 1)[-1] in ('recovery-lock', 'runtime-evidence-unconfirmed', 'guest-cleanup-unconfirmed')
+                                any(part in ('recovery-lock', 'runtime-evidence-unconfirmed', 'guest-cleanup-unconfirmed', 'cold-handoff-outgoing')
+                                    for part in k[len(owner_path)+1:].split('/'))
                                 for k in data)
                     row = fields(raw)
                     if held(meta) or latch:
