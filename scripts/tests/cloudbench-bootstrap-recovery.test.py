@@ -3069,6 +3069,21 @@ class BillingStopRetainTests(unittest.TestCase):
             self.assertFalse(env['hallpass_identity'](*altered))
 
 
+    def test_captured_oct13_platform_hallpass_descriptor(self):
+        import ast
+        descriptor=json.loads(Path(__file__).with_name('hallpass-platform-descriptor.fixture.json').read_text())
+        function=next(n for n in ast.parse(self.ns['BILLING_GUEST']).body
+                      if isinstance(n,ast.FunctionDef)and n.name=='hallpass_identity')
+        env={};exec(compile(ast.Module(body=[function],type_ignores=[]),'captured-platform-identity','exec'),env)
+        values=[descriptor['uid'],descriptor['ppid'],descriptor['pgid'],
+                [b'/.fly/hallpass'] if descriptor['exact_argv'] else [], descriptor['exe'],
+                descriptor['exe_sha256'],descriptor['birth_stable'],descriptor['exe_regular'],descriptor['exe_owner']]
+        self.assertTrue(env['hallpass_identity'](*values))
+        for index,bad in enumerate([1,2,1,[b'/.fly/hallpass',b'--unknown'],'/tmp/hallpass','f'*64,False,False,1]):
+            with self.subTest(field=index):
+                altered=list(values);altered[index]=bad
+                self.assertFalse(env['hallpass_identity'](*altered))
+
     def test_whole_cohort_owns_one_clock_and_preserves_shorter_caller_budget(self):
         import signal
         second='c'*14

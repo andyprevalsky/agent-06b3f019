@@ -1108,7 +1108,7 @@ ancestors={os.getpid()};pid=os.getpid()
 while pid>1:
  raw=Path('/proc',str(pid),'stat').read_text().split(') ',1)[1].split();pid=int(raw[1]);ancestors.add(pid)
 def hallpass_identity(uid,ppid,pgid,args,path,digest,birth_stable,regular,owner):
- return uid==0 and ppid==1 and pgid==0 and args==[b'/.fly/hallpass']and path=='/.fly/hallpass'and digest in {'7e42662dc2361058814d06b80bafbed13b7e8d6da4f477604001b54dc905ce52','02f70fcb946d386f697ad7fbe16d91a2f9243f85c6db583e3778582cd23b35c0'}and birth_stable is True and regular is True and owner==0
+ return uid==0 and ppid==1 and pgid==0 and args==[b'/.fly/hallpass']and path=='/.fly/hallpass'and digest in {'7e42662dc2361058814d06b80bafbed13b7e8d6da4f477604001b54dc905ce52','02f70fcb946d386f697ad7fbe16d91a2f9243f85c6db583e3778582cd23b35c0','1fc252c042a279787eb1a83a15c7e19d634fc0059ad8abf4acaa9a752f5684a2'}and birth_stable is True and regular is True and owner==0
 def hallpass_binary(exe):
  if exe!=Path('/.fly/hallpass'):return 'UNMEASURED',False,-1
  fd=os.open(exe,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)

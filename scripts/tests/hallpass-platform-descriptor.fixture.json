@@ -1,0 +1,1 @@
+{"kind": "exact-hallpass-descriptor", "machine": "82d16e1a091498", "pid": 651, "birth": "93", "ppid": 1, "pgid": 0, "uid": 0, "exact_argv": true, "exe": "/.fly/hallpass", "exe_sha256": "1fc252c042a279787eb1a83a15c7e19d634fc0059ad8abf4acaa9a752f5684a2", "exe_owner": 0, "exe_regular": true, "bytes": 15589111, "birth_stable": true}
