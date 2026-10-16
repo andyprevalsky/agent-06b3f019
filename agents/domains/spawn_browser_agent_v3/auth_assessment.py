@@ -4,6 +4,7 @@ This validates the model's per-recipient accounting, not site registration or
 semantic truth. It never selects an identity, submits a form, or reads an inbox.
 """
 from typing import Any, Dict, Optional
+import re
 
 
 def auth_recipient_options(options: Dict[str, Any]) -> list[dict[str, str]]:
@@ -16,6 +17,10 @@ def auth_recipient_options(options: Dict[str, Any]) -> list[dict[str, str]]:
     minted = options.get("minted") or {}
     if not minted.get("disabled"):
         address = minted.get("email") or minted.get("agentEmail") or minted.get("agent_email")
+        if not address:
+            label = minted.get("accountLabel") or minted.get("account_label")
+            if isinstance(label, str) and re.fullmatch(r"[^@\s]+@[^@\s]+", label):
+                address = label
         phone = minted.get("phone") or minted.get("agentPhone") or minted.get("agent_phone")
         if address:
             recipients.append({"method": "email_otp", "recipient": str(address)})
@@ -24,6 +29,21 @@ def auth_recipient_options(options: Dict[str, Any]) -> list[dict[str, str]]:
     # Same address may be both a connected inbox and the minted identity.
     return [{"method": method, "recipient": recipient}
             for method, recipient in dict.fromkeys((x["method"], x["recipient"]) for x in recipients)]
+
+
+def _recipient_receipts_bound(recipient: str, steps: list[int], entries: Dict[int, Any]) -> bool:
+    """Bind cited input and later observation, not the semantic site verdict."""
+    inputs = [step for step in steps if entries[step].get("action") == "input_text"
+              and (entries[step].get("params") or {}).get("text") == recipient]
+    def has_observation(entry: Dict[str, Any]) -> bool:
+        result = entry.get("result") or {}
+        return isinstance(result, dict) and any(
+            key in result and result[key] is not None and result[key] != ""
+            for key in ("url", "current_url", "title", "dom_tree", "formatted_state", "value")
+        )
+    return any(entries[step].get("action") != "input_text" and step > input_step
+               and has_observation(entries[step])
+               for input_step in inputs for step in steps)
 
 
 def auth_assistance_assessment_result(
@@ -56,10 +76,8 @@ def auth_assistance_assessment_result(
         steps = attempt.get("evidence_steps") or []
         if not isinstance(steps, list) or not steps or any(type(step) is not int or step not in entries_by_step for step in steps):
             return incomplete("A past attempt has no valid action receipts.")
-        if not any(entries_by_step[step].get("action") == "input_text" and
-                   (entries_by_step[step].get("params") or {}).get("text") == attempt.get("recipient")
-                   for step in steps):
-            return incomplete("A past recipient is not bound to a cited input action.")
+        if not _recipient_receipts_bound(attempt.get("recipient"), steps, entries_by_step):
+            return incomplete("A past recipient lacks its cited input and later observation receipts.")
     blocker = assessment.get("blocker")
     # Never require trying another identity during an accepted/user-only step.
     if blocker in {"user_only_verification", "account_locked"}:
@@ -85,8 +103,8 @@ def auth_assistance_assessment_result(
         evidence_steps = row.get("evidence_steps") or []
         if not isinstance(evidence_steps, list) or any(type(step) is not int or step not in observed_steps for step in evidence_steps):
             return incomplete("An outcome cites an action receipt that is absent from this browser history.")
-        if row["status"] == "exhausted" and not evidence_steps:
-            return incomplete("An exhausted recipient option cites no observed action receipt.")
+        if row["status"] == "exhausted" and not _recipient_receipts_bound(row["recipient"], evidence_steps, entries_by_step):
+            return incomplete("An exhausted recipient option lacks its own input and later observation receipts.")
         if row["status"] == "remaining":
             remaining.append({"method": key[0], "recipient": key[1], "evidence": row["evidence"]})
     if seen != catalog:

@@ -442,7 +442,7 @@ class AuthRecipientAssessment(BaseModel):
     recipient: str = Field(description="Exact supplied inbox address or phone number, not a guessed alias")
     status: Literal["remaining", "exhausted", "not_applicable", "unavailable"]
     evidence: str = Field(description="Recipient-specific observed outcome or task/page restriction; ownership alone does not prove a site account")
-    evidence_steps: List[int] = Field(default_factory=list, description="For exhausted, cite the actual action_step receipt(s) carrying this recipient outcome. Typing success alone is not account rejection or code delivery.")
+    evidence_steps: List[int] = Field(default_factory=list, description="For exhausted, cite this recipient input action_step AND its later result/observation action_step. Typing success alone is not account rejection or code delivery.")
 
 
 class AuthAssistanceAssessment(BaseModel):

@@ -9,7 +9,7 @@ def assessment(*, phone="not_applicable", email="not_applicable", blocker="autom
     return {"auth_realm": "shop.example", "page_url": URL, "blocker": blocker,
             "reason": reason, "recipient_options": [
                 {"method": "email_otp", "recipient": "owned@example.test", "status": email, "evidence": "This form accepts phone numbers only."},
-                {"method": "sms_otp", "recipient": "+15550000002", "status": phone, "evidence": "Observed recipient-specific result, not a site membership assertion.", "evidence_steps": [3] if phone == "exhausted" else []},
+                {"method": "sms_otp", "recipient": "+15550000002", "status": phone, "evidence": "Observed recipient-specific result, not a site membership assertion.", "evidence_steps": [2,3] if phone == "exhausted" else []},
             ]}
 
 def handoff(a):
@@ -20,22 +20,24 @@ async def assert_auth_assessment_controls(owning_fixture):
     # The old real activity pauses immediately at the first declaration, even
     # though that same declaration says an applicable supplied operation remains.
     before_other_recipient = assessment(phone="remaining")
-    before_other_recipient["attempted_recipient_options"] = [{"method": "sms_otp", "recipient": "+15550000001", "status": "exhausted", "evidence": "The submitted personal recipient was rejected", "evidence_steps": [1,2]}]
-    final = assessment(phone="exhausted");final["recipient_options"][1]["evidence_steps"] = [5]
+    before_other_recipient["attempted_recipient_options"] = [{"method": "sms_otp", "recipient": "+15550000001", "status": "exhausted", "evidence": "The submitted personal recipient was rejected", "evidence_steps": [1,3]}]
+    final = assessment(phone="exhausted");final["recipient_options"][1]["evidence_steps"] = [5,7]
     final["attempted_recipient_options"] = deepcopy(before_other_recipient["attempted_recipient_options"])
     r = {"inventory": deepcopy(INVENTORY), "actions": [
         {"action": "input_text", "index": 7, "params": {"text": "+15550000001"}},
         {"action": "click", "index": 8, "params": {}},
+        {"action":"read_browser_state", "params":{}},
         handoff(before_other_recipient),
         {"action": "input_text", "index": 7, "params": {"text": "+15550000002"}, "thinking": "Use the supplied phone on the current form"},
         {"action": "click", "index": 8, "params": {}, "thinking": "Submit the supplied recipient"},
+        {"action":"read_browser_state", "params":{}},
         handoff(final),
     ]}
     with _offline_activity_edges():
         await owning_fixture("empty", auth_review=r)
     assert [x["params"]["text"] for x in r["executed"] if x["action"] == "input_text"] == ["+15550000001", "+15550000002"]
-    assert "action_step" in str(r["contexts"][5]["turn_messages"])
-    assert "authentication_options_remaining" in str(r["contexts"][3]["turn_messages"])
+    assert "action_step" in str(r["contexts"][7]["turn_messages"])
+    assert "authentication_options_remaining" in str(r["contexts"][4]["turn_messages"])
     assert r["result"]["auth_assessment"] == final
     observations.append({"case": "remaining_sms_to_native_input", "decisions": len(r["contexts"]), "inputs": 2})
     # Named account exclusion / unknown reader are deliberate model judgements,
@@ -62,20 +64,21 @@ async def assert_auth_assessment_controls(owning_fixture):
         rows = [{"method": "email_otp", "recipient": value,
                  "status": "exhausted" if j < i else "remaining",
                  "evidence": "Observed individual rejection" if j < i else "Permitted supplied inbox on the current email form",
-                 "evidence_steps": [3*j+3] if j < i else []} for j,value in enumerate(addresses)]
+                 "evidence_steps": [4*j+2,4*j+4] if j < i else []} for j,value in enumerate(addresses)]
         actions.extend([handoff({"auth_realm": "shop.example", "page_url": URL,
                                "blocker": "automated_options_exhausted", "reason": "Assess the remaining permitted recipients", "recipient_options": rows}),
                         {"action": "input_text", "index": 7, "params": {"text": address}},
-                        {"action": "click", "index": 8, "params": {}}])
+                        {"action": "click", "index": 8, "params": {}},
+                        {"action":"read_browser_state", "params":{}}])
     actions.append(handoff({"auth_realm": "shop.example", "page_url": URL,
                            "blocker": "automated_options_exhausted", "reason": "All three supplied recipients were individually rejected",
-                           "recipient_options": [{"method": "email_otp", "recipient": v, "status": "exhausted", "evidence": "Observed individual rejection", "evidence_steps": [3*j+3]} for j,v in enumerate(addresses)]}))
+                           "recipient_options": [{"method": "email_otp", "recipient": v, "status": "exhausted", "evidence": "Observed individual rejection", "evidence_steps": [4*j+2,4*j+4]} for j,v in enumerate(addresses)]}))
     finite = {"inventory": inventory, "actions": actions}
     with _offline_activity_edges():
         await owning_fixture("empty", auth_review=finite)
     assert [x["params"]["text"] for x in finite["executed"] if x["action"] == "input_text"] == addresses
-    assert len(finite["contexts"]) == 10
-    observations.append({"case": "three_email_candidate_exhaustion", "decisions": 10, "inputs": 3})
+    assert len(finite["contexts"]) == 13
+    observations.append({"case": "three_email_candidate_exhaustion", "decisions": 13, "inputs": 3})
     # Malformed/stale/foreign receipts return factual context through the real
     # activity; they cannot send an assistance request on their first turn.
     for case in ("missing", "stale", "duplicate", "foreign_receipt"):
@@ -95,9 +98,25 @@ async def assert_auth_assessment_controls(owning_fixture):
         assert "authentication_assessment_incomplete" in str(r["contexts"][1]["turn_messages"])
         assert not r.get("executed")
         observations.append({"case": case, "decisions": 2, "inputs": 0})
+    # Account-label aliases are rendered by the real authoritative formatter.
+    from domains.spawn_browser_agent_v3.auth_assessment import auth_recipient_options
+    from domains.spawn_browser_agent_v3.service_crypto import build_auth_options_prompt_section
+    for key in ("email", "agentEmail", "agent_email", "accountLabel", "account_label"):
+        inv = {"realm":"shop.example", "minted":{key:"label@example.test"}}
+        assert "label@example.test" in build_auth_options_prompt_section(inv)[0]
+        assert auth_recipient_options(inv) == [{"method":"email_otp","recipient":"label@example.test"}]
+    assert auth_recipient_options({"minted":{"accountLabel":"arbitrary human label"}}) == []
+    label_rows = [{"method":"email_otp","recipient":"label@example.test","status":"remaining","evidence":"Supplied verifiable recipient on the form","evidence_steps":[]}]
+    label_first = {"auth_realm":"shop.example","page_url":URL,"blocker":"automated_options_exhausted","reason":"Assess this supplied recipient","recipient_options":label_rows}
+    label_last=deepcopy(label_first);label_last["recipient_options"][0].update(status="exhausted", evidence="Observed recipient rejection", evidence_steps=[2,4])
+    labelled={"inventory":{"realm":"shop.example","minted":{"accountLabel":"label@example.test"}}, "actions":[handoff(label_first),{"action":"input_text","index":7,"params":{"text":"label@example.test"}},{"action":"click","index":8,"params":{}},{"action":"read_browser_state","params":{}},handoff(label_last)]}
+    with _offline_activity_edges():
+        await owning_fixture("empty",auth_review=labelled)
+    assert [a["params"]["text"] for a in labelled["executed"] if a["action"]=="input_text"] == ["label@example.test"]
+    observations.append({"case":"label_only_minted_identity","decisions":5,"inputs":1})
     from domains.spawn_browser_agent_v3.auth_assessment import auth_assistance_assessment_result as check
     def result(a):
-        return check(a, auth_options=INVENTORY, auth_realm="shop.example", current_url=URL, action_history=[{"step":3}])
+        return check(a, auth_options=INVENTORY, auth_realm="shop.example", current_url=URL, action_history=[{"step":2,"action":"input_text","params":{"text":"+15550000002"}}, {"step":3,"action":"click","result":{"url":URL, "title":"Unknown account"}}])
     for mutation in [lambda a: a.update(page_url="https://elsewhere.test/"),
                      lambda a: a["recipient_options"].append(deepcopy(a["recipient_options"][0])),
                      lambda a: a["recipient_options"].pop(),
@@ -105,6 +124,11 @@ async def assert_auth_assessment_controls(owning_fixture):
         a=assessment();mutation(a);assert result(a)["error"]=="authentication_assessment_incomplete"
     absent = assessment(phone="exhausted");absent["recipient_options"][1]["evidence_steps"]=[999]
     assert result(absent)["error"] == "authentication_assessment_incomplete"
+    foreign_history = [{"step":2,"action":"input_text","params":{"text":"+15550000001"}}, {"step":3,"action":"click","result":{"url":URL, "title":"Unknown account for that other recipient"}}]
+    assert check(assessment(phone="exhausted"), auth_options=INVENTORY, auth_realm="shop.example", current_url=URL, action_history=foreign_history)["error"] == "authentication_assessment_incomplete"
+    ack_only=assessment(phone="exhausted");ack_only["recipient_options"][1]["evidence_steps"]=[2]
+    assert result(ack_only)["error"] == "authentication_assessment_incomplete"
+    assert check(assessment(phone="exhausted"), auth_options=INVENTORY, auth_realm="shop.example", current_url=URL, action_history=[{"step":2,"action":"input_text","params":{"text":"+15550000002"}},{"step":3,"action":"click","result":{"success":True}}])["error"] == "authentication_assessment_incomplete"
     assert result(None)["error"]=="authentication_assessment_incomplete"
     assert result(assessment(phone="remaining"))["remaining_recipient_options"][0]["recipient"]=="+15550000002"
     assert result(assessment(phone="exhausted")) is None  # unregistered recipient is a bounded exhausted operation
