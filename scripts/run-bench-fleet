@@ -12696,10 +12696,60 @@ campaign_inventory_capture() {
     campaign_inventory_wait campaign_inventory_capture_once "$@"
 }
 
+# Parse this invocation's already-captured inventory once. Dynamic-scope arrays
+# belong to reconcile_pool; no index survives into a later inventory read.
+pool_machine_inventory_index() {  # <captured JSON>
+    local index_file id status state
+    index_file="$(mktemp "${TMPDIR:-/tmp}/cloudbench-pool-index.XXXXXX")" || return 2
+    if ! printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(m, dict) for m in machines):
+    raise SystemExit(2)
+seen = set()
+for machine in machines:
+    ident = machine.get("id")
+    # Ledger read supplies one shell string per line; these IDs cannot match it.
+    if not isinstance(ident, str) or "\0" in ident or "\n" in ident or ident in seen:
+        continue
+    seen.add(ident)
+    state = machine.get("state")
+    status = 0 if isinstance(state, str) and state else 2
+    # Match the original command substitution: NULs and trailing newlines vanish.
+    state = state.replace("\0", "").rstrip("\n") if status == 0 else ""
+    sys.stdout.write(ident + "\0" + str(status) + "\0" + state + "\0")
+' > "$index_file"; then
+        rm -f "$index_file"
+        return 2
+    fi
+    pool_inventory_ids=(); pool_inventory_status=(); pool_inventory_states=()
+    while IFS= read -r -d '' id && IFS= read -r -d '' status && IFS= read -r -d '' state; do
+        pool_inventory_ids+=("$id")
+        pool_inventory_status+=("$status")
+        pool_inventory_states+=("$state")
+    done < "$index_file"
+    rm -f "$index_file"
+}
+pool_machine_indexed_state() {  # <id>; same stdout and 0/1/2 contract as parser
+    local i
+    for ((i=0; i<${#pool_inventory_ids[@]}; i++)); do
+        if [ "${pool_inventory_ids[$i]}" = "$1" ]; then
+            [ "${pool_inventory_status[$i]}" = 0 ] || return 2
+            printf '%s\n' "${pool_inventory_states[$i]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 POOL_INVENTORY_JSON=""
 reconcile_pool() {
     local pool_file id st presence claim_path claim_host claim_pid claim_start claim_token
-    local owner_status runner_count machines cleanup_status claim_digest has_pool_ids=0
+    local owner_status runner_count machines cleanup_status claim_digest has_pool_ids=0 pool_index_ready=0
+    local -a pool_inventory_ids=() pool_inventory_status=() pool_inventory_states=()
     FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED=0
     export -n machines POOL_INVENTORY_JSON FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED 2>/dev/null || true
     POOL_INVENTORY_JSON="[]"
@@ -12737,7 +12787,14 @@ reconcile_pool() {
         if [ -n "${PRIVATE_SOURCE_ID:-}" ]; then
             private_source_allows_provider_call machine stop "$id" || return 1
         fi
-        st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id")"
+        if [ "$pool_index_ready" = 0 ]; then
+            pool_machine_inventory_index "$machines" || {
+                echo "❌ could not read pool machine $id before refresh" >&2
+                return 1
+            }
+            pool_index_ready=1
+        fi
+        st="$(pool_machine_indexed_state "$id")"
         presence=$?
         [ "$presence" -eq 1 ] && continue
         [ "$presence" -eq 0 ] || { echo "❌ could not read pool machine $id before refresh" >&2; return 1; }

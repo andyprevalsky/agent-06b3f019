@@ -184,7 +184,7 @@ cloudbench_controller_lock_release() { printf released > "$FIXTURE_COMMON/lock-r
         start=fleet.index('# A newer snapshot is not proof')
         end=fleet.index('# Recover only positively owned ephemeral clones',start)
         preflight=fleet[start:end]
-        preflight+='\n'+'\n'.join(function(n) for n in ('pool_machine_state_from_json','reconcile_pool','pool_machine_shape_from_json','normalize_current_pool_shape','pool_write_shape_hints'))
+        preflight+='\n'+'\n'.join(function(n) for n in ('pool_machine_state_from_json','pool_machine_inventory_index','pool_machine_indexed_state','reconcile_pool','pool_machine_shape_from_json','normalize_current_pool_shape','pool_write_shape_hints'))
         native_file=self.root/'current-native.json';native_file.write_text(json.dumps([mod.described(self.request['native_before'])]))
         preflight+='''
 FLY() { cat "$NATIVE_FILE"; }
@@ -554,7 +554,7 @@ class PoolLedgerReadIsolation(unittest.TestCase):
             def function(name):
                 match=re.search(r'^'+name+r'\(\).*?^}\n',fleet,re.M|re.S);assert match,name
                 return match.group()
-            script='\n'.join(function(name) for name in ('pool_machine_state_from_json','reconcile_pool'))+'''
+            script='\n'.join(function(name) for name in ('pool_machine_state_from_json','pool_machine_inventory_index','pool_machine_indexed_state','reconcile_pool'))+'''
 FLY() { [ "$1 $2" = 'machines list' ] || { echo FORBIDDEN >&2; return 90; }; cat "$INVENTORY"; }
 reconcile_pool
 '''
@@ -947,5 +947,67 @@ claim_explicit_idle_worker "$OUT" primary repo current-token ::1
         env=dict(os.environ,OUT=str(self.f.out),BAD_STAGE=str(bad),STAGED_HELPER=str(SCRIPT.with_name('cloudbench-staged-boot-return.py')),VOLUME_HELPER=str(SCRIPT.with_name('cloudbench-original-volume-capture.py')),GIT_COMMON_DIR=str(self.f.common),POOL_IDS_FILE=self.f.request['consumer']['pool_ids_file'],POOL_META_FILE=self.f.request['consumer']['pool_meta_file'],POOL_CLAIMS_DIR=str(self.f.common/'cloudbench-pool-claims'),POOL_COLD_BOOTSTRAP='1',FLEET_OWNER_TOKEN='e'*32,FLEET_OWNER_HOST=mod.socket.gethostname(),CURRENT_NODE_FP=self.f.dep['node'],CURRENT_PY_FP=self.f.dep['python'],BENCH_REF=self.f.request['consumer']['source_ref'],FLEET_WORKER_VM_SIZE='performance-1x',FLEET_WORKER_VM_MEMORY='2048',APP='app',CLOUDBENCH_BOOT_TRANSPORT='staged',CLOUDBENCH_SCRIPT_SNAPSHOT=str(SCRIPT.parent))
         result=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(result.stdout,'');self.assertFalse(self.f.claim.exists());self.assertFalse(bad.exists())
+
+class PoolInventoryIndex(unittest.TestCase):
+    def functions(self):
+        text=SCRIPT.with_name('run-bench-fleet').read_text()
+        names=['pool_machine_state_from_json','pool_machine_inventory_index','pool_machine_indexed_state','reconcile_pool']
+        return '\n'.join(re.search(r'^'+n+r'\(\).*?^}\n',text,re.M|re.S).group() for n in names if re.search(r'^'+n+r'\(\)',text,re.M))
+    def run_full(self, inventory, rows, *, extra=''):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);common=root/'common';pools=common/'cloudbench-pools';pools.mkdir(parents=True)
+            for n,ids in enumerate(rows):(pools/f'{n}.ids').write_text(''.join(i+'\n'for i in ids))
+            native=root/'native.json';native.write_text(json.dumps(inventory));counter=root/'parses';counter.write_text('')
+            shell='set -uo pipefail\n'+self.functions()+r'''
+python3(){ printf x >> "$COUNT"; command python3 "$@"; }
+FLY(){ [ "$1 $2" = 'machines list' ] || return 91; cat "$NATIVE"; }
+UNAVAILABLE_POOL_IDS=()
+reconcile_pool || exit $?
+printf 'UNAVAILABLE=%s\n' "${UNAVAILABLE_POOL_IDS[*]}"
+'''+extra
+            env=dict(os.environ,GIT_COMMON_DIR=str(common),POOL_IDS_FILE=str(pools/'0.ids'),POOL_CLAIMS_DIR=str(common/'claims'),APP='fixture',NATIVE=str(native),COUNT=str(counter),CLOUDBENCH_CAMPAIGN_INVENTORY_DIR='',PRIVATE_SOURCE_ID='')
+            before={p.name:p.read_bytes()for p in pools.iterdir()}
+            r=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True,timeout=30)
+            self.assertEqual({p.name:p.read_bytes()for p in pools.iterdir()},before)
+            return r,len(counter.read_text())
+    def test_full_403_rows_parse_once_and_preserve_ledgers(self):
+        ids=[f'{i:014x}' for i in range(1,404)]
+        inventory=[dict(id=f'{i:014x}',state='stopped')for i in range(1,987)]
+        r,count=self.run_full(inventory,[ids[:200],ids[200:],ids[:7]])
+        self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(count,1);self.assertEqual(r.stdout,'UNAVAILABLE=\n')
+    def test_full_reconcile_duplicate_first_match_and_absence(self):
+        r,count=self.run_full([dict(id='a',state='stopped'),dict(id='a',state='started')],[['a','missing']])
+        self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(count,1);self.assertEqual(r.stdout,'UNAVAILABLE=\n')
+    def test_full_reconcile_invalid_inventory_refuses(self):
+        for value in ({},[dict(id='a',state='stopped'),1],[dict(id='a',state='')],[dict(id='a',state=None)]):
+            with self.subTest(value=value):
+                r,_=self.run_full(value,[['a']]);self.assertNotEqual(r.returncode,0);self.assertIn('could not read pool machine a',r.stderr)
+    def test_full_reconcile_preserves_unknown_state_refusal(self):
+        r,_=self.run_full([dict(id='a',state='surprise')],[['a']]);self.assertNotEqual(r.returncode,0);self.assertIn("unsafe pre-refresh state 'surprise'",r.stderr)
+    def test_each_reconciliation_rebuilds_snapshot(self):
+        extra=r'''
+printf '[{"id":"a","state":"started"}]' > "$NATIVE"
+reconcile_pool || exit $?
+printf 'SECOND=%s\n' "${UNAVAILABLE_POOL_IDS[*]}"
+'''
+        r,count=self.run_full([dict(id='a',state='stopped')],[['a']],extra=extra)
+        self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(count,2);self.assertIn('SECOND=a',r.stdout)
+    def test_empty_ledger_keeps_lazy_inventory_validation(self):
+        r,count=self.run_full({'invalid':'but never looked up'},[['   ']])
+        self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(count,0)
+    def test_original_lookup_status_and_output_parity(self):
+        cases=[([], 'missing'),([dict(id='a',state='stopped')],'a'),([dict(id='a',state=''),dict(id='a',state='stopped')],'a'),([dict(id='a',state='started'),dict(id='a',state='stopped')],'a'),([dict(id='a',state='x\n\n')],'a'),([dict(id='a',state='x\0y')],'a'),([dict(id=['a'],state='stopped'),dict(id='a',state=8)],'a')]
+        for value,target in cases:
+            with tempfile.TemporaryDirectory()as tmp:
+                native=Path(tmp)/'native';native.write_text(json.dumps(value))
+                script='set -uo pipefail\n'+self.functions()+r'''
+pool_inventory_ids=();pool_inventory_status=();pool_inventory_states=()
+pool_machine_inventory_index "$(cat "$1")" || exit $?
+a="$(cat "$1" | pool_machine_state_from_json "$2")"; ar=$?
+b="$(pool_machine_indexed_state "$2")"; br=$?
+[ "$ar" = "$br" ] && [ "$a" = "$b" ]
+'''
+                r=subprocess.run(['bash','-c',script,'_',str(native),target],capture_output=True,text=True)
+                self.assertEqual(r.returncode,0,(value,r.stderr))
 
 if __name__=='__main__':unittest.main()
