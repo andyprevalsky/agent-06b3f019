@@ -3631,6 +3631,30 @@ printf 'rc=%s mutated=%s\n' "$rc" "$FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED"
             self.assertEqual(result.returncode,0,result.stderr);self.assertNotIn('FORBIDDEN',result.stdout)
             self.assertIn('rc=0 mutated=0',result.stdout);self.assertEqual((meta.stat().st_ino,meta.read_bytes()),before)
 
+    def test_retained_shared_claim_still_excludes_candidate(self):
+        source=(REPO/'scripts/run-bench-fleet').read_text()
+        def function(name):
+            start=source.index(name+'() {');return source[start:source.index('\n}\n',start)+3]
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);claims=root/'claims';claims.mkdir();mid='abcdef12345678'
+            claim=claims/mid;claim.write_text('host=other-host\nfleet_owner_token=old-owner\n');before=(claim.stat().st_ino,claim.read_bytes())
+            (root/'pool.ids').write_text(mid+'\n');(root/'claimed.ids').touch();(root/'pool-shapes.tsv').write_text(mid+' shared 2 4096\n')
+            script=function('reconcile_stale_fleet_registries')+'\n'+function('claim_pool_machine')+'''
+registry_meta_value() { sed -n "s/^$2=//p" "$1"; }
+pool_claim_cleanup_unconfirmed() { return 1; }
+registry_owner_alive() { return 2; }
+write_pool_claim() { echo FORBIDDEN; return 0; }
+recover_one_exact_pool_claim() { echo FORBIDDEN; return 0; }
+reconcile_stale_fleet_registries || exit 9
+id="$(claim_pool_machine shared-cpu-2x 4096)" || exit 10
+[ -z "$id" ] || exit 11
+'''
+            env={**os.environ,'POOL_REUSE_ONLY':'1','FLEET_DIR':td,'POOL_IDS_FILE':str(root/'pool.ids'),'POOL_CLAIMS_DIR':str(claims),'CLAIMED_POOL_FILE':str(root/'claimed.ids'),'GIT_COMMON_DIR':td,'PRIVATE_SOURCE_ID':'','FLEET_OWNER_HOST':'current-host'}
+            p=subprocess.run(['bash','-c',script],env=env,capture_output=True,text=True)
+            self.assertEqual(p.returncode,0,p.stderr);self.assertNotIn('FORBIDDEN',p.stdout+p.stderr)
+            self.assertEqual((claim.stat().st_ino,claim.read_bytes()),before)
+
+
 
 if __name__ == "__main__":
     unittest.main()
