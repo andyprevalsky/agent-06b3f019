@@ -37,6 +37,8 @@ links. A file pointer never substitutes for the diff.
   15 minutes of history instead of reusing a cached rate or warming flag.
   Timestamp milestones from their actual receipts; rereading old evidence
   must not create a new progress delta after an interruption.
+  For long batches, derive progress from fixed-cohort per-item receipt events;
+  preserve superseded estimates instead of mixing different percentage bases.
 - After publishing, atomically update the existing latest-card URL and fixed
   checkpoint fields together; do not create competing URL aliases.
   Refresh lifecycle labels from verified receipts; completed exports must not
