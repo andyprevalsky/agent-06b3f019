@@ -437,10 +437,33 @@ class AttemptCompletionBrowserTool(BaseModel):
     tool: Literal["attempt_completion"]
 
 
+class AuthRecipientAssessment(BaseModel):
+    method: Literal["email_otp", "sms_otp"]
+    recipient: str = Field(description="Exact supplied inbox address or phone number, not a guessed alias")
+    status: Literal["remaining", "exhausted", "not_applicable", "unavailable"]
+    evidence: str = Field(description="Recipient-specific observed outcome or task/page restriction; ownership alone does not prove a site account")
+    evidence_steps: List[int] = Field(default_factory=list, description="For exhausted, cite this recipient input action_step AND its later result/observation action_step. Typing success alone is not account rejection or code delivery.")
+
+
+class AuthAssistanceAssessment(BaseModel):
+    auth_realm: str = Field(description="Current Auth Options realm")
+    page_url: str = Field(description="Current observed page URL")
+    blocker: Literal["automated_options_exhausted", "user_only_verification", "account_locked"]
+    reason: str = Field(description="Evidence from the current page and actual goal; preserve a named account and accepted password/app verification")
+    attempted_recipient_options: List[AuthRecipientAssessment] = Field(
+        default_factory=list,
+        description="Previously attempted recipients, including an address/phone from the task rather than Auth Options. Cite actual input and result action_step receipts; these past observations do not authorize another identity."
+    )
+    recipient_options: List[AuthRecipientAssessment] = Field(
+        description="For automated_options_exhausted, assess EACH supplied email/phone separately. One recipient failure does not exhaust a method. Mark other accounts not_applicable when the goal names an account or the current verification cannot switch identities. Mark unreadable/unknown channels unavailable rather than assuming delivery. User-only verification and account lockout may use an empty list."
+    )
+
+
 class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
-    """Ask the user to sign in after all automated auth paths are exhausted."""
+    """Ask the user to sign in with an explicit current blocker assessment."""
 
     tool: Literal["request_user_assistance_for_authentication"]
+    auth_assessment: AuthAssistanceAssessment
 
 
 class RecoverFromChallengeBrowserTool(BaseModel):

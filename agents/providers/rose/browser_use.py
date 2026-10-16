@@ -1415,6 +1415,9 @@ def _normalize_action_params(
     first_action: Dict[str, Any],
     index: Any,
 ) -> Dict[str, Any]:
+    if normalized_action == "request_user_assistance_for_authentication":
+        return {"auth_assessment": params.get("auth_assessment")}
+
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
 

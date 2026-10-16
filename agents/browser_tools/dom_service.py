@@ -626,6 +626,10 @@ class ActionHistory:
 
         return entry
 
+    def last_action_step(self) -> Optional[int]:
+        """Return the latest recorded receipt ID without copying DOM history."""
+        return self._entries[-1].step if self._entries else None
+
     def get_entries(self) -> List[Dict[str, Any]]:
         """Get all entries as dicts for Rose API request."""
         return [entry.to_dict() for entry in self._entries]
