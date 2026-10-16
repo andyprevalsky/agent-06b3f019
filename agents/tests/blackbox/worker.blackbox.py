@@ -1439,9 +1439,82 @@ async def test_autoscaler_scale_down_never_stops_machines_with_in_flight_activit
 
 
 
+async def test_autoscaler_retained_generation_cannot_start_by_matching_rollback_hash():
+    """Only actual active pool custody may participate after a surface returns."""
+    import copy
+    from unittest.mock import patch
+    import httpx
+    import worker
+
+    def row(mid, state="stopped"):
+        return {
+            "id": mid,
+            "state": state,
+            "private_ip": "fdaa::1",
+            "config": {
+                "env": {
+                    "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                    "TEMPORAL_WORKER_BUILD_ID": "build",
+                    "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "attempt",
+                },
+                "metadata": {},
+            },
+        }
+
+    def marker(mid):
+        return dict(version=1, phase="active", app="app", id=mid, hash="A", build="build", token="attempt")
+
+    for phase in ("start", "stop"):
+        machines = [row("leader", "started")]
+        for mode in ("idle", "malformed", "foreign", "stale", "protected", "valid", "rolling", "wrong-intent", "legacy"):
+            value = row(mode, "stopped" if phase == "start" else "started")
+            pool = marker(mode)
+            if mode == "idle":
+                pool["phase"] = "idle"
+            if mode == "foreign":
+                pool["app"] = "foreign"
+            if mode == "stale":
+                pool["token"] = "earlier"
+            if mode in ("rolling", "wrong-intent"):
+                pool["token"] = "earlier"
+                pool["rolling"] = {"build": "build", "token": "attempt" if mode == "rolling" else "other"}
+            if mode == "protected":
+                value["config"]["metadata"]["rose_worker_reuse_protected"] = "true"
+            if mode != "legacy":
+                value["config"]["metadata"]["rose_cooperative_worker_pool"] = (
+                    "[]" if mode == "malformed" else json.dumps(pool)
+                )
+            machines.append(value)
+        original = copy.deepcopy(machines)
+        calls = []
+
+        def handler(request):
+            if request.url.host == "api.machines.dev":
+                if request.method == "GET":
+                    return httpx.Response(200, json=machines)
+                calls.append(request.url.path)
+                return httpx.Response(200, json={})
+            return httpx.Response(200, text="activity_slots_used 0\n")
+
+        with patch.dict(
+            os.environ,
+            {
+                "FLY_APP_NAME": "app",
+                "FLY_API_TOKEN": "fixture",
+                "FLY_MACHINE_ID": "leader",
+                "TEMPORAL_WORKER_SURFACE_HASH": "A",
+            },
+        ):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+                await worker._scale_fleet(20 if phase == "start" else 1, http)
+        assert calls == [f"/v1/apps/app/machines/{mid}/{phase}" for mid in ("valid", "rolling", "legacy")], calls
+        assert machines == original
+
+
 async def run_all_tests():
     print("worker blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("autoscaler_retained_pool_rollback_custody", test_autoscaler_retained_generation_cannot_start_by_matching_rollback_hash)
     r.record("worker_does_not_use_python_custom_activity_slots", test_worker_does_not_use_python_custom_activity_slots)
     r.record(
         "worker_activity_supplier_is_sdk_native_fixed_size", test_worker_activity_supplier_is_sdk_native_fixed_size
