@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import importlib
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from _test_utils import BlackboxResult, teardown_mock
 from temporalio.testing import ActivityEnvironment
 
@@ -96,6 +99,7 @@ async def test_one_pointer_read_per_worker_per_window() -> None:
         assert pointer.await_count == 2
     pointer_timeout = pointer.await_args.kwargs.get("timeout_seconds")
     assert pointer_timeout == drain.POINTER_READ_TIMEOUT_SECONDS, pointer_timeout
+    assert pointer.await_args.kwargs.get("observation_only") is True
 
 
 async def test_pointer_read_failure_fails_open() -> None:
@@ -106,6 +110,37 @@ async def test_pointer_read_failure_fails_open() -> None:
     reset_live_queue_cache()
     with patch.object(drain, "read_agent_queue_pointer", AsyncMock(return_value={"task_queue": "  "})):
         assert await _activity_env(OLD_QUEUE).run(_probe) is None
+
+
+async def test_pointer_activity_sends_native_source_run_identity() -> None:
+    pointer = importlib.import_module("helpers.fetch_queue_pointer")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"taskQueue": NEW_QUEUE, "surfaceHash": "new"})
+
+    original_client = httpx.AsyncClient
+
+    def client(**kwargs):
+        return original_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    env = _activity_env()
+    env.info = dataclasses.replace(env.info, workflow_id="chain-id", workflow_run_id="exact-run-id")
+    with (
+        patch.object(
+            pointer,
+            "config",
+            SimpleNamespace(backend=SimpleNamespace(api_url="http://localhost:43119", api_key="offline-key")),
+        ),
+        patch.object(pointer.httpx, "AsyncClient", client),
+    ):
+        value = await env.run(pointer.fetch_agent_queue_pointer)
+    assert value["task_queue"] == NEW_QUEUE
+    assert len(requests) == 1
+    assert requests[0].headers["X-Workflow-Id"] == "chain-id"
+    assert requests[0].headers["X-Workflow-Run-Id"] == "exact-run-id"
+    assert requests[0].headers["X-API-Key"] == "offline-key"
 
 
 async def run_all_tests() -> bool:
@@ -126,6 +161,9 @@ async def run_all_tests() -> bool:
     )
     await result.record_async("one_pointer_read_per_worker_per_window", test_one_pointer_read_per_worker_per_window)
     await result.record_async("pointer_read_failure_fails_open", test_pointer_read_failure_fails_open)
+    await result.record_async(
+        "pointer_activity_native_identity", test_pointer_activity_sends_native_source_run_identity
+    )
     reset_live_queue_cache()
     teardown_mock()
     return result.all_passed

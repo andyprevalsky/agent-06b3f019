@@ -2059,64 +2059,39 @@ else
   AGENT_DEPLOYMENT_TOKEN="${AGENT_DEPLOY_RUN_ID}-${AGENT_DEPLOY_RUN_ATTEMPT}"
   echo "✅ Agent deployment token: $AGENT_DEPLOYMENT_TOKEN"
 
-  # Cooperative cutover: deploy-agents.yml runs deploy-agents-cooperative-cutover.sh
-  # (overlap old+new gen fleets, flip pointer, drain up to 45m via continue_as_new
-  # handoff, force-migrate stragglers only after the SLO). Capture the pre-cutover
-  # generation queue so post-merge verification can report drain progress.
-  DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
+  APP=$(sed -nE 's/^app = "([a-z0-9-]+)"/\1/p' "$DEPLOY_ROOT/agents/fly.toml")
+  # The database FIFO owns both manual controllers and GitHub runs. A later
+  # run waits for its predecessor; it never steals that predecessor's bank.
   cd "$DEPLOY_ROOT/back-end" && source .env
   AGENT_SURFACE_HASH=$(python3 "$DEPLOY_ROOT/scripts/agent_workflow_surface_hash.py")
-  AGENT_OLD_POINTER=$(npx tsx scripts/set-agent-queue-pointer.ts --read 2>/dev/null || echo "null")
-  AGENT_OLD_QUEUE=$(printf '%s' "$AGENT_OLD_POINTER" | node -e '
-let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-  for (const l of s.split("\n").reverse()) {
-    const t=l.trim(); if (!t.startsWith("{")) continue;
-    try { const o=JSON.parse(t); process.stdout.write(String(o?.taskQueue||"")); return; } catch {}
-  }
-  process.stdout.write("");
-})')
-  AGENT_OLD_HASH=$(printf '%s' "$AGENT_OLD_POINTER" | node -e '
-let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-  for (const l of s.split("\n").reverse()) {
-    const t=l.trim(); if (!t.startsWith("{")) continue;
-    try { const o=JSON.parse(t); process.stdout.write(String(o?.surfaceHash||"")); return; } catch {}
-  }
-  process.stdout.write("");
-})')
-  if [ -n "$AGENT_OLD_HASH" ] && [ "$AGENT_OLD_HASH" != "$AGENT_SURFACE_HASH" ]; then
-    echo "Pre-cutover generation: hash=$AGENT_OLD_HASH queue=$AGENT_OLD_QUEUE"
-  else
-    AGENT_OLD_QUEUE=""
-    echo "Same-generation rolling deploy expected (hash=$AGENT_SURFACE_HASH)"
-  fi
-
-  python3 scripts/record_factory_event.py deploy stage-start cooperative-cutover
+  python3 "$DEPLOY_ROOT/scripts/record_factory_event.py" deploy stage-start cooperative-cutover
   AGENT_CUTOVER_CONCLUSION=""
-  for i in $(seq 1 390); do  # up to ~65m @ 10s (45m drain SLO + build/overlap)
+  for i in $(seq 1 540); do
     AGENT_DEPLOY_STATE=$(gh run view "$AGENT_DEPLOY_RUN_ID" \
-      --json status,conclusion \
-      --jq '[.status, (.conclusion // "none")] | join("|")')
+      --json status,conclusion --jq '[.status, (.conclusion // "none")] | join("|")')
     IFS='|' read -r AGENT_DEPLOY_STATUS AGENT_CUTOVER_CONCLUSION <<<"$AGENT_DEPLOY_STATE"
     if [ $((i % 6)) -eq 1 ]; then
-      echo "--- cooperative cutover handover progress (run $AGENT_DEPLOY_RUN_ID) ---"
-      npx tsx scripts/monitor-cooperative-cutover.ts \
-        --expected-hash "$AGENT_SURFACE_HASH" \
-        ${AGENT_OLD_QUEUE:+--old-queue "$AGENT_OLD_QUEUE"} || true
+      node --import tsx scripts/worker-deployment-queue.ts head --app "$APP"
     fi
-    case "$AGENT_DEPLOY_STATUS" in
-      completed)
-        case "$AGENT_CUTOVER_CONCLUSION" in
-          success) break ;;
-          *) echo "❌ deploy-agents cooperative cutover failed: $AGENT_CUTOVER_CONCLUSION"; exit 1 ;;
-        esac
-        ;;
-    esac
+    if [ "$AGENT_DEPLOY_STATUS" = completed ]; then break; fi
     sleep 10
   done
-  [ "$AGENT_CUTOVER_CONCLUSION" = "success" ] ||
-    { echo "❌ deploy-agents cooperative cutover did not complete within 65m"; exit 1; }
-  python3 scripts/record_factory_event.py deploy stage-finish cooperative-cutover
-  echo "✅ deploy-agents cooperative cutover workflow completed"
+  [ "$AGENT_DEPLOY_STATUS" = completed ] || {
+    echo "CI is still active; retain its job, clocks and Machines and continue observing"
+    exit 1
+  }
+  AGENT_DEPLOYMENT_JOB_ID=$(gh run view "$AGENT_DEPLOY_RUN_ID" --log | \
+    sed -nE 's/.*Queued production worker deployment ([a-f0-9]{64}).*/\1/p' | sort -u)
+  [[ "$AGENT_DEPLOYMENT_JOB_ID" =~ ^[a-f0-9]{64}$ ]] || {
+    echo "Exact deployment job was not recovered from this run's log"; exit 1;
+  }
+  if [ "$AGENT_CUTOVER_CONCLUSION" != success ]; then
+    echo "Original CI result remains $AGENT_CUTOVER_CONCLUSION; resuming its saved deployment"
+    node --import tsx scripts/worker-deployment-queue.ts run \
+      --job-id "$AGENT_DEPLOYMENT_JOB_ID" -- python3 ../scripts/worker_pool_cutover.py
+  fi
+  python3 "$DEPLOY_ROOT/scripts/record_factory_event.py" deploy stage-finish cooperative-cutover
+
 fi
 fi
 ```
@@ -2272,17 +2247,12 @@ python3 scripts/record_factory_event.py deploy production-finish backend-probes
 
 ## Step 13ab: Verify cooperative generation cutover (handover monitor)
 
-Skip only when `$AGENT_CUTOVER_REQUIRED` is `0`. This is the canonical cutover
-condition shared with Step 13 and Step 13ac: shipped runtime changes and edits
-to `.github/workflows/deploy-agents.yml` require cutover; test-only,
-benchmark-only, documentation-only, and history-ledger changes under `agents/`
-do not.
-
-Run this immediately after Step 13's `deploy-agents.yml` watch completes
-successfully. Step 13 already polled `monitor-cooperative-cutover.ts` during
-the CI run; this step is the **hard gate** that proves the handover finished
-cleanly: live pointer on the merged generation, old-generation queue drained
-(via cooperative `continue_as_new` handoff, not premature force-migrate).
+Skip only when `$AGENT_CUTOVER_REQUIRED` is `0`. Use the same immutable merged
+source and workflow attempt selected in Step 13. CI already cut over only when
+its durable job is `SUCCEEDED`; a green image build or an empty visibility query
+is insufficient. The managed monitor --verify is authoritative for the saved
+job, its exact pointer and retained bank evidence. Continue with the native
+production checks below; this database report does not replace those checks.
 
 ```bash
 DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
@@ -2291,170 +2261,102 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
     cd "$DEPLOY_ROOT/back-end"
     npx tsx scripts/deploy-existing-worker-processes.ts verify-live --execute \
       --plan "$WORKER_PROCESS_PLAN"
-    python3 scripts/record_factory_event.py deploy production-finish fly
-else
-  set -e
-  DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
-  cd "$DEPLOY_ROOT/back-end" && source .env
-  AGENT_SURFACE_HASH=$(python3 "$DEPLOY_ROOT/scripts/agent_workflow_surface_hash.py")
-  AGENT_CUTOVER_RELEASE_CONTEXT="agent-cutover/${AGENT_DEPLOYMENT_TOKEN}"
-
-  # Authoritative verify: pointer matches merged generation; old queue empty when known.
-  npx tsx scripts/monitor-cooperative-cutover.ts \
-    --expected-hash "$AGENT_SURFACE_HASH" \
-    ${AGENT_OLD_QUEUE:+--old-queue "$AGENT_OLD_QUEUE"} \
-    --verify
-
-  CUTOVER_STATUS=$(gh api "repos/{owner}/{repo}/commits/$DEPLOY_MERGED_SHA/status" \
-    --jq ".statuses[] | select(.context == \"$AGENT_CUTOVER_RELEASE_CONTEXT\") | .state" | head -1)
-  if [ "$CUTOVER_STATUS" != "success" ]; then
-    echo "⚠️ agent-cutover commit status=$CUTOVER_STATUS (continuing — monitor --verify is authoritative)"
   else
-    echo "✅ agent-cutover commit status=success"
+    cd "$DEPLOY_ROOT/back-end" && source .env
+    : "${AGENT_DEPLOYMENT_JOB_ID:?exact job from this workflow run required}"
+    node --import tsx scripts/worker-deployment-queue.ts read \
+      --job-id "$AGENT_DEPLOYMENT_JOB_ID" > /tmp/worker-deployment-verification.json
+    node --input-type=module - /tmp/worker-deployment-verification.json \
+      "$DEPLOY_MERGED_SHA" "$AGENT_DEPLOYMENT_TOKEN" <<'NODE'
+import { readFileSync } from 'node:fs';
+const job = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+if (job.identity.sourceCommit !== process.argv[3] || job.identity.attempt !== process.argv[4])
+  throw new Error('Job source or workflow attempt mismatch');
+NODE
+    node --import tsx scripts/monitor-cooperative-cutover.ts \
+      --job-id "$AGENT_DEPLOYMENT_JOB_ID" --expected-hash "$AGENT_SURFACE_HASH" --verify
   fi
-
-  python3 scripts/record_factory_event.py deploy production-finish fly
-fi
+  python3 "$DEPLOY_ROOT/scripts/record_factory_event.py" deploy production-finish fly
 fi
 ```
 
-**Happy path (default):** CI's `deploy-agents-cooperative-cutover.sh` already
-overlapped fleets, flipped the pointer, waited up to 45 minutes for cooperative
-handoff, force-migrated any stragglers, and retired old-gen machines. Step 13ab
-must NOT re-run `migrate-open-agent-workflows.ts` when the monitor reports
-`cooperative_drain_complete` or `same_generation`.
+The normal path leases an existing idle bank, starts all eight candidates on a
+new deployment queue, verifies them, and publishes the pointer with a database
+lease and pointer compare-and-swap. It never allocates Machines or destroys a
+bank. Every job gets a distinct queue, including same-code deployments. A
+managed predecessor is stopped and returned to the pool only after durable
+admission and exact native chain checks certify retirement. Long-running work
+continues on its bank; expiry of the 45-minute observation window retains the
+job and bank for another bounded observation rather than force-terminating it.
 
-**Break-glass fallback** — never use this for `existing-process` shared hosts. Only when Step 13's `deploy-agents.yml` run **failed**
-after the pointer flip but before drain completed. Do NOT use this on the happy
-path; it terminates workflows instead of waiting for activity-boundary handoff.
+Legacy workers whose producer coverage is unknown remain served. Their
+retention is an explicit first-deployment outcome, not a fabricated retirement
+certificate. Sixteen enrolled Machines supply the two managed banks in addition
+to the retained legacy cohort. The completed bank remains reserved as ACTIVE;
+only its positively retired predecessor can become spare capacity again.
+
+**First managed deployment:** keep automatic worker deployment disabled until
+the complete managed producer/continuation protocol is live on Render, the
+normal backend gates pass, and all old backend instances have drained. Bind this
+proof to the exact producer commit and Render deployment. The existing maximum
+shutdown window still applies:
 
 ```bash
-if [ "$AGENT_CUTOVER_REQUIRED" = "1" ] && [ "${AGENT_CUTOVER_CONCLUSION:-success}" != "success" ]; then
-  set -e
-  AGENT_CUTOVER_RELEASE_CONTEXT="agent-cutover/${AGENT_DEPLOYMENT_TOKEN}"
-  AGENT_CUTOVER_RELEASED=0
-  release_agent_cutover_lock() {
-    local state=$1 description=$2
-    gh api "repos/{owner}/{repo}/statuses/$DEPLOY_MERGED_SHA" \
-      -X POST \
-      -f state="$state" \
-      -f context="$AGENT_CUTOVER_RELEASE_CONTEXT" \
-      -f description="$description" >/dev/null
-    AGENT_CUTOVER_RELEASED=1
-  }
-  release_agent_cutover_lock_on_exit() {
-    local exit_code=$?
-    trap - EXIT
-    if [ "$AGENT_CUTOVER_RELEASED" != "1" ]; then
-      release_agent_cutover_lock error "Cooperative cutover fallback failed" || true
-    fi
-    exit "$exit_code"
-  }
-  trap release_agent_cutover_lock_on_exit EXIT
-
-  git fetch origin main
-  git cat-file -e "${DEPLOY_MERGED_SHA}^{commit}" ||
-    { echo "❌ Exact deploy merge commit is unavailable: $DEPLOY_MERGED_SHA"; exit 1; }
-  cd "$(git rev-parse --show-toplevel)/back-end" && source .env
-  AGENT_SURFACE_HASH=$(python3 "$(git rev-parse --show-toplevel)/scripts/agent_workflow_surface_hash.py")
-  AGENT_LIVE_GENERATION=$(npx tsx scripts/set-agent-queue-pointer.ts --read 2>/dev/null \
-    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.surfaceHash?o.surfaceHash:"")}catch{process.stdout.write("")}})' || true)
-  if [ "$AGENT_LIVE_GENERATION" = "$AGENT_SURFACE_HASH" ]; then
-    echo "✅ CI already cut over to generation $AGENT_SURFACE_HASH; verifying drain via monitor"
-    npx tsx scripts/monitor-cooperative-cutover.ts \
-      --expected-hash "$AGENT_SURFACE_HASH" \
-      ${AGENT_OLD_QUEUE:+--old-queue "$AGENT_OLD_QUEUE"} \
-      --verify || {
-        echo "⏰ Cooperative drain incomplete — force-migrating stragglers (break-glass only)"
-        TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-          TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
-          TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
-          WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
-          npx tsx scripts/migrate-open-agent-workflows.ts --execute
-      }
-    release_agent_cutover_lock success "Cutover verified after CI partial failure" || true
-    trap - EXIT
-    python3 scripts/record_factory_event.py deploy production-finish fly
-  else
-  # Render old-instance drain before any workflow tombstones (fallback path only).
-  RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE_DRAIN_SECONDS:-375}"
-  case "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" in
-    ''|*[!0-9]*) echo "❌ RENDER_OLD_INSTANCE_DRAIN_SECONDS must be an integer >= 375"; exit 1 ;;
-  esac
-  [ "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" -ge 375 ] ||
-    { echo "❌ Render old-instance drain cannot be weakened below 375s"; exit 1; }
-  RENDER_DEPLOY_FINISHED_AT=$(
-    curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
-      "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=20" |
-      DEPLOY_SHA="$DEPLOY_MERGED_SHA" python3 -c '
+RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE_DRAIN_SECONDS:-375}"
+case "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" in ''|*[!0-9]*) exit 1;; esac
+[ "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" -ge 375 ] || exit 1
+RENDER_DEPLOY_FINISHED_AT=$(curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
+  "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=20" | \
+  PRODUCER_SHA="$DEPLOY_MERGED_SHA" python3 -c '
 import json, os, sys
-deploy = next(
-    (
-        item["deploy"]
-        for item in json.load(sys.stdin)
-        if (item["deploy"].get("commit") or {}).get("id") == os.environ["DEPLOY_SHA"]
-        and item["deploy"].get("status") == "live"
-    ),
-    None,
-)
-if deploy is None or not deploy.get("finishedAt"):
-    raise SystemExit("exact live Render deploy timestamp was not found")
-print(deploy["finishedAt"])
-'
-  )
-  RENDER_DRAIN_REMAINING=$(
-    RENDER_DEPLOY_FINISHED_AT="$RENDER_DEPLOY_FINISHED_AT" \
-      RENDER_OLD_INSTANCE_DRAIN_SECONDS="$RENDER_OLD_INSTANCE_DRAIN_SECONDS" \
-      python3 -c '
+items = [x["deploy"] for x in json.load(sys.stdin)]
+match = next((x for x in items if (x.get("commit") or {}).get("id") == os.environ["PRODUCER_SHA"] and x.get("status") == "live"), None)
+if not match or not match.get("finishedAt"):
+    raise SystemExit("Exact live producer deployment not found")
+print(match["finishedAt"])
+')
+RENDER_DRAIN_REMAINING=$(RENDER_DEPLOY_FINISHED_AT="$RENDER_DEPLOY_FINISHED_AT" \
+  RENDER_OLD_INSTANCE_DRAIN_SECONDS="$RENDER_OLD_INSTANCE_DRAIN_SECONDS" python3 -c '
 from datetime import datetime, timezone
 import math, os
 finished = datetime.fromisoformat(os.environ["RENDER_DEPLOY_FINISHED_AT"].replace("Z", "+00:00"))
 elapsed = (datetime.now(timezone.utc) - finished).total_seconds()
-print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - elapsed)))
-'
-  )
-  while [ "$RENDER_DRAIN_REMAINING" -gt 0 ]; do
-    echo "Waiting for old Render instances/requests to drain: ${RENDER_DRAIN_REMAINING}s"
-    sleep "$([ "$RENDER_DRAIN_REMAINING" -lt 10 ] && echo "$RENDER_DRAIN_REMAINING" || echo 10)"
-    RENDER_DRAIN_REMAINING=$((RENDER_DRAIN_REMAINING - 10))
-  done
-  echo "✅ Old Render instance/request drain window elapsed"
-
-  AGENT_GENERATION_QUEUE="navi-agent-tasks@${AGENT_SURFACE_HASH}"
-  echo "Flipping agent queue pointer to generation ${AGENT_GENERATION_QUEUE}"
-  npx tsx scripts/set-agent-queue-pointer.ts \
-    --queue "$AGENT_GENERATION_QUEUE" \
-    --surface-hash "$AGENT_SURFACE_HASH" \
-    --by "deploy-${DEPLOY_MERGED_SHA}"
-  sleep 6
-
-  TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
-    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
-    WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
-    WORKFLOW_MIGRATION_CANARY_COUNT="${WORKFLOW_MIGRATION_CANARY_COUNT:-4}" \
-    WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS="${WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS:-120000}" \
-    WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS="${WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS:-300000}" \
-    WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS="${WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS:-120000}" \
-    WORKFLOW_MIGRATION_TERMINAL_CLEANUP_TIMEOUT_MS="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_TIMEOUT_MS:-900000}" \
-    WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY:-32}" \
-    npx tsx scripts/migrate-open-agent-workflows.ts --execute
-
-  release_agent_cutover_lock success "Production workflow cutover completed (fallback)" || true
-  trap - EXIT
-  python3 scripts/record_factory_event.py deploy production-finish fly
-  fi
-fi
+print(max(0, math.ceil(int(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - elapsed)))
+')
+while [ "$RENDER_DRAIN_REMAINING" -gt 0 ]; do
+  sleep "$([ "$RENDER_DRAIN_REMAINING" -lt 10 ] && echo "$RENDER_DRAIN_REMAINING" || echo 10)"
+  RENDER_DRAIN_REMAINING=$((RENDER_DRAIN_REMAINING - 10))
+done
+echo "Old Render instance/request drain window elapsed"
+# Retain the exact native deployment, protocol response and functional gate receipts.
 ```
 
-Under cooperative cutover, workers receive SIGTERM with the committed Fly
-`kill_timeout` (currently 5m), and workflows can hand off via `continue_as_new`
-at safe `run_agent` checkpoints. The grace timeout does not prove retirement
-safety: a long activity can exceed it. Keep protected work served until the
-exact admission and drain checks establish that stopping its workers is safe.
-Force-migrate runs only after the 45-minute SLO
-(break-glass). The monitor script is the authoritative post-merge proof that
-routing flipped and the old generation drained without leaving stragglers.
+An HTTP sample from one new process does not prove that all old producers have
+retired. Neither a queue name nor a zero workflow count can upgrade an UNKNOWN
+legacy admission certificate. Preserve the first-deployment proof before
+re-enabling automatic worker deployment.
+
+An interrupted deployment resumes **the same job** using the queue CLI `run`
+command and the original immutable image. Do not enqueue a replacement for a
+partially prepared job, release its reservations on a timer, roll the pointer
+back, or invoke forced workflow migration to make its status green. A queued job
+with no preparation may be explicitly aborted under the shared lease. A failed
+candidate that has never been published can be abandoned through the owned
+controller; it first closes and certifies the unused target queue, then returns
+only its unchanged reservations or stopped, verified candidates to the pool:
+
+```bash
+node --import tsx scripts/worker-deployment-queue.ts run \
+  --job-id "$AGENT_DEPLOYMENT_JOB_ID" --allow-abort -- \
+  python3 ../scripts/worker_pool_cutover.py --abort
+```
+
+This path refuses an ACTIVATED job or a changed/live target pointer. A failed
+retirement check retains every reservation. Abandonment records `ABORTED`, never
+changes the failed attempt to `SUCCEEDED`, and never destroys a Machine.
+Scheduled recovery runs only the existing FIFO head; it does not rebuild an
+image or enqueue another job. After a runner is interrupted, this observer
+continues the saved job under a fresh global lease.
 
 ## Step 13ac: Validate workflow replacement edge cases in production
 

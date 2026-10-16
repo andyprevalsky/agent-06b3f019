@@ -1,3 +1,6 @@
+import { CONTINUATION_OPERATION, type ContinuationTicket } from './workflowQueueContinuation';
+import { claimPhysicalRootStart, type RootTerminalWitness } from './workflowPhysicalStart';
+import { managedQueue } from './workflowManagedQueue';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { runTransactionWithRetry } from './database';
@@ -73,7 +76,9 @@ export async function claimWorkflowStart(
   requestedQueue: string,
   rejectDuplicate: boolean,
   deadlineAtMs: number,
-  transaction: AdmissionTransaction = runTransactionWithRetry
+  transaction: AdmissionTransaction = runTransactionWithRetry,
+  fingerprint = '',
+  terminalWitnesses?: ReadonlyMap<string, RootTerminalWitness>
 ): Promise<StartAdmission> {
   return transaction(
     async (tx) => {
@@ -101,18 +106,42 @@ export async function claimWorkflowStart(
           throw new WorkflowStartAdmissionPendingError('Current destination is not verified open');
         queue = pointer.taskQueue;
       }
+      if (managedQueue(queue)) {
+        const current = await tx.agentQueuePointer.findUnique({ where: { id: 'singleton' } });
+        if (
+          !gate ||
+          gate.phase !== 'OPEN' ||
+          gate.legacyCoverage !== 'QUALIFIED' ||
+          current?.taskQueue !== queue ||
+          current.surfaceHash !== gate.surfaceHash
+        )
+          throw new WorkflowStartAdmissionPendingError(
+            'Managed queue is not the published qualified destination'
+          );
+      }
+      let admittedWorkflowId = workflowId;
+      let immutable = rejectDuplicate;
+      if (managedQueue(queue) && !immutable) {
+        admittedWorkflowId = await claimPhysicalRootStart(
+          tx,
+          agentId,
+          fingerprint,
+          terminalWitnesses
+        );
+        immutable = true;
+      }
       const intent: StartAdmission = {
         version: 1,
         id: randomUUID(),
         agentId,
-        workflowId,
+        workflowId: admittedWorkflowId,
         requestedQueue,
         queue,
         incarnation: gate?.incarnation ?? 'legacy-unqualified',
-        rejectDuplicate,
+        rejectDuplicate: immutable,
         // ALLOW_DUPLICATE cannot be certified by a later ACK alone: a prior wire
         // attempt may still reopen a closed chain. Keep that uncertainty explicit.
-        wireCoverage: rejectDuplicate ? 'IMMUTABLE_ID' : 'UNKNOWN',
+        wireCoverage: immutable ? 'IMMUTABLE_ID' : 'UNKNOWN',
       };
       await tx.toolSideEffect.create({
         data: {
@@ -185,6 +214,7 @@ export async function beginQueueRetirement(
       incarnation: prior?.incarnation ?? randomUUID(),
       phase: prior?.phase === 'RETIRED' ? 'RETIRED' : 'RETIRING',
       legacyCoverage: prior?.legacyCoverage ?? 'UNKNOWN',
+      ...(prior?.surfaceHash ? { surfaceHash: prior.surfaceHash } : {}),
       ...(prior?.legacyCertificate ? { legacyCertificate: prior.legacyCertificate } : {}),
     };
     await tx.toolSideEffect.upsert({
@@ -206,7 +236,7 @@ export async function requireQueueRetirementReady(
   owner: string,
   reconcile: (
     execution: TemporalWorkflowExecutionRef
-  ) => Promise<{ firstExecutionRunId: string; queue: string; terminal: boolean }>,
+  ) => Promise<{ firstExecutionRunId: string; queue: string; terminal: boolean; runId?: string }>,
   transaction: AdmissionTransaction = runTransactionWithRetry
 ): Promise<void> {
   const snapshot = await transaction(async (tx) => {
@@ -238,7 +268,10 @@ export async function requireQueueRetirementReady(
           'Source start or native wire outcome remains unresolved'
         );
     }
-    return { gate, rows };
+    const tickets = await tx.toolSideEffect.findMany({
+      where: { operationType: CONTINUATION_OPERATION, request: { path: ['queue'], equals: queue } },
+    });
+    return { gate, rows, tickets };
   });
   // Native reconciliation runs outside every transaction/advisory lock.
   for (const row of snapshot.rows) {
@@ -255,6 +288,27 @@ export async function requireQueueRetirementReady(
         'Accepted native chain still needs the source queue'
       );
   }
+  for (const row of snapshot.tickets) {
+    const ticket = row.request as unknown as ContinuationTicket;
+    const current = await reconcile({
+      workflowId: ticket.workflowId,
+      firstExecutionRunId: ticket.firstExecutionRunId,
+    });
+    if (
+      ticket.incarnation !== snapshot.gate.incarnation ||
+      typeof ticket.workflowId !== 'string' ||
+      typeof ticket.runId !== 'string' ||
+      typeof current.terminal !== 'boolean' ||
+      typeof current.queue !== 'string' ||
+      current.queue.length === 0 ||
+      !current.runId ||
+      current.firstExecutionRunId !== ticket.firstExecutionRunId ||
+      (!current.terminal && (current.runId === ticket.runId || current.queue === queue))
+    )
+      throw new WorkflowStartAdmissionPendingError(
+        'Continuation source or destination chain remains unresolved'
+      );
+  }
   await transaction(async (tx) => {
     await lockQueueAdmission(tx);
     const gate = queueState(
@@ -268,8 +322,15 @@ export async function requireQueueRetirementReady(
         request: { path: ['queue'], equals: queue },
       },
     });
+    const tickets = await tx.toolSideEffect.findMany({
+      where: { operationType: CONTINUATION_OPERATION, request: { path: ['queue'], equals: queue } },
+    });
     const pointer = await tx.agentQueuePointer.findUnique({ where: { id: 'singleton' } });
     if (
+      JSON.stringify(tickets.map((row) => [row.operationKey, row.status, row.request]).sort()) !==
+        JSON.stringify(
+          snapshot.tickets.map((row) => [row.operationKey, row.status, row.request]).sort()
+        ) ||
       !pointer ||
       pointer.taskQueue === queue ||
       gate.owner !== owner ||

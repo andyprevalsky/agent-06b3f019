@@ -6463,3 +6463,6 @@
 {"task": "agent-payment-setup-resume", "duration_seconds": 179.2, "cost_cents": 0.0, "timestamp": "2026-10-16T16:08:50.768340+00:00", "agent_id": "4510de07-d047-4c03-85e2-c6efe5dc2b31"}
 {"task": "agent-payment-test-shop", "duration_seconds": 151.3, "cost_cents": 0.0, "timestamp": "2026-10-16T16:08:50.768340+00:00", "agent_id": "974f394d-0bd8-41ec-9a9d-eae77ef3e7ba"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 256.8, "cost_cents": 0.0, "timestamp": "2026-10-16T16:08:50.768340+00:00", "agent_id": "3eaba7d9-aa1d-4010-a91f-690069704633"}
+{"task": "lantern-people-discovery", "duration_seconds": 75.1, "cost_cents": 0.0, "timestamp": "2026-10-16T17:47:47.213070+00:00", "agent_id": "217a067b-41d8-4d70-8d7a-8023f0edb2fa"}
+{"task": "lantern-people-enrichment", "duration_seconds": 85.5, "cost_cents": 0.0, "timestamp": "2026-10-16T17:47:47.213070+00:00", "agent_id": "d288c4c1-005a-45aa-bc0c-3fc3cfb913e9"}
+{"task": "lantern-people-pagination", "duration_seconds": 89.6, "cost_cents": 0.0, "timestamp": "2026-10-16T17:47:47.213070+00:00", "agent_id": "9fcc2db4-8fad-4f4b-9146-ef2535947b12"}
