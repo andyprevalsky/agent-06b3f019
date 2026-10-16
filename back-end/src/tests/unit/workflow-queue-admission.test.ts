@@ -120,6 +120,38 @@ const params = {
 async function main() {
   const original = prisma.$transaction;
   try {
+    await test('synchronous argument preparation fails before admission and native start', async () => {
+      const { tx, rows } = storage();
+      prisma.$transaction = (async (fn: (tx: unknown) => unknown) => fn(tx)) as never;
+      const failure = new Error('actual argument preparation failed');
+      let nativeStarts = 0;
+      const client = {
+        withDeadline: async (_deadline: number, action: () => Promise<unknown>) => action(),
+        workflow: {
+          start: async () => {
+            nativeStarts++;
+            throw new Error('unexpected native call');
+          },
+        },
+      };
+      const invalid = {
+        ...params,
+        get verifier(): { type: string } {
+          throw failure;
+        },
+      };
+      await assert.rejects(
+        startAgentWorkflowExecutionWithClient(client as never, invalid),
+        (error) => error === failure
+      );
+      assert.equal(nativeStarts, 0);
+      assert.equal(
+        [...rows.values()].filter((row) => row.operationType === START_ADMISSION_OPERATION).length,
+        0,
+        'argument preparation created a false STARTED admission'
+      );
+      assert.equal(isWorkflowStartAdmissionPending(failure), false);
+    });
     await test('retired explicit destination is routed only to fresh verified OPEN target', async () => {
       const { tx, rows, gate } = storage();
       rows.get(queueAdmissionKey(oldQueue))!.request = gate(oldQueue, 'RETIRED');

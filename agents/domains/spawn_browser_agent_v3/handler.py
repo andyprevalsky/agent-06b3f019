@@ -178,7 +178,6 @@ from .service import (
 )
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
-    _get_base_domain,
     apply_user_write_lock_grant,
     execute_action,
     get_domain_from_url,
@@ -11159,9 +11158,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
                 if hasattr(dom_service, "model_visible_value"):
                     final_verifier_context = _model_visible_browser_verifier_context(final_verifier_context, dom_service, final_browser_state)
-                final_verifier_prompt = build_verifier_prompt(
-                    response_schema=transform_schema_for_remote_session(response_schema)
+                final_remote_schema = transform_schema_for_remote_session(
+                    _model_visible_browser_output_schema(response_schema, _redact_activity_value)
                 )
+                final_verifier_prompt = build_verifier_prompt(response_schema=final_remote_schema)
                 verification_instruction_count = len(user_instruction_messages)
                 final_progress = await call_temporal_activity_from_activity(
                     check_progress,
@@ -11169,7 +11169,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         final_verifier_context,
                         final_verifier_prompt,
                         VERIFIER_ULTRA_MODEL,
-                        transform_schema_for_remote_session(response_schema),
+                        final_remote_schema,
                         token_state.access_token,
                         "verifier_browser_max_steps",
                         agent_id,

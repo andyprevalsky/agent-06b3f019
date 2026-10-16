@@ -115,3 +115,13 @@ invented user feedback.
 
 A deployment certificate must bind its actual producer and native execution;
 caller-supplied labels and presence in a poller list do not establish either.
+
+### Backend review fixes — d34ff0b00321ae0c3198c9cd44273a2515bf4f85
+
+Exact parent 2bb1cd7583c710dae755c72b53489fc154395ff8. Findings 4293587146 and 4293587157. Prepare native workflow args before admission so a synchronous preparation error produces zero journal membership and zero native starts; preserve all existing actual native/ACK ambiguity handling. Backend service revision is independent of retained worker artifact revision; require valid actual backend 40hex provenance while preserving ACTIVE full-plan/service/database/auth/worker receipt checks. No runtime model or USER text change.
+
+Final unchanged owning fixtures, with only the two actual runtime owner files source-swapped: exact2bb has five target assertion failures (queue1/envelope3/deployment1) with all remaining controls passing; candidate has queue14/envelope7/deployment23 PASS. Additional unchanged replacement orchestration10 PASS. Full backend tsc, six-file ESLint, Prettier, diff and raw three approval guards PASS. No approval flags.
+
+Commands run from back-end with DATABASE_URL and DIRECT_URL deliberately disabled at localhost9: `node --import tsx src/tests/unit/{workflow-queue-admission,worker-process-envelope,worker-process-deployment,workflow-replacement-orchestration}.test.ts` (each actual named file separately). No real SQL proof. Actual PostgreSQL fixture requires root-owned DB verification; attempted replacement-state setup against disabled DB is preserved as a noncausal setup failure and not counted.
+
+Root owns final combined qualification, formal review and deployment. Source proposal only; 8940 cleanup decision remains independent.

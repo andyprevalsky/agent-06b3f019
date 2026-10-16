@@ -448,6 +448,7 @@ export async function startAgentWorkflowExecutionWithClient(
   deadlineAtMs?: number
 ): Promise<TemporalWorkflowExecutionRef> {
   const workflowId = params.workflowId ?? params.agentId;
+  const workflowArgs = buildAgentWorkflowArgs(params);
 
   let execution: TemporalWorkflowExecutionRef;
   let admission: StartAdmission | undefined;
@@ -476,7 +477,7 @@ export async function startAgentWorkflowExecutionWithClient(
         return client.workflow.start('AgentWorkflow', {
           taskQueue: admission!.queue,
           workflowId,
-          args: buildAgentWorkflowArgs(params),
+          args: workflowArgs,
           ...(params.rejectDuplicateWorkflowId === true
             ? {
                 workflowIdReusePolicy: 'REJECT_DUPLICATE' as const,

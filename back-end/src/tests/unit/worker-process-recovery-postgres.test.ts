@@ -213,9 +213,9 @@ async function main() {
       assert.equal((row.response as { identity: string }).identity, workerPlanIdentity(plan));
       await assert.rejects(requireBackendWorkerRecovery(plan), /backend recovery owner/);
     });
-    await test('backend proof is retained across CLI observation and rejects stale or foreign source', async () => {
+    await test('backend proof survives backend revision and CLI observation while rejecting stale or invalid provenance', async () => {
       process.env.RENDER_INSTANCE_ID = 'LOCAL-MOCK-INSTANCE-NOT-PRODUCTION';
-      process.env.RENDER_GIT_COMMIT = source;
+      process.env.RENDER_GIT_COMMIT = 'd'.repeat(40);
       process.env.RENDER = 'true';
       process.env.NODE_ENV = 'production';
       process.env.RENDER_SERVICE_ID = plan.controlPlane.serviceId;
@@ -225,6 +225,14 @@ async function main() {
       await assert.rejects(requireBackendWorkerRecovery(plan), /backend recovery owner/);
       await recoverConfiguredWorkerProcesses({ transport });
       await requireBackendWorkerRecovery(plan);
+      const published = await db.toolSideEffect.findUniqueOrThrow({
+        where: { operationKey: WORKER_PROCESS_DESIRED_KEY },
+      });
+      assert.equal(
+        (published.response as { backendRecovery: { backendSource: string } }).backendRecovery
+          .backendSource,
+        'd'.repeat(40)
+      );
       await assert.rejects(
         requireBackendWorkerRecovery(plan, 'RUNNING'),
         /All eight exact runtime processes/
@@ -239,7 +247,7 @@ async function main() {
       const response = row.response as {
         backendRecovery: { backendSource: string; observedAt: string };
       };
-      response.backendRecovery.backendSource = 'd'.repeat(40);
+      response.backendRecovery.backendSource = 'invalid';
       await db.toolSideEffect.update({
         where: { operationKey: WORKER_PROCESS_DESIRED_KEY },
         data: { response },

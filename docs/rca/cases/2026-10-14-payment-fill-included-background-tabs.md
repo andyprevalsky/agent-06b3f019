@@ -527,6 +527,119 @@ activation route is not an executable approval option. The separate admission
 prototype remains frozen and excluded; final review, merge and production
 verification remain distinct from these successful local results.
 
+## 2026-10-16 recurrence: max-steps verifier schema bypassed private-value redaction
+
+PR1518 review5546426503 on exact
+`2bb1cd7583c710dae755c72b53489fc154395ff8` identified the remaining schema
+boundary in [comment4293587139](https://github.com/Rose-Ai-Labs/rose/pull/1518#discussion_r4293587139).
+The completion path already applied `_model_visible_browser_output_schema`
+before remote-session transformation. The max-steps synthesis path transformed
+the raw schema twice, sending it separately to `build_verifier_prompt` and
+`check_progress`. Private resume hydration deliberately restores the exact
+schema, so a registered value in its descriptions could reach both model inputs.
+The first bad boundary is the max-steps consumer, not private storage hydration.
+
+Archive searches were `max steps verifier response_schema private` and
+`registered secret output schema redaction`. This is a recurrence of the
+private-boundary coverage gap in this case. The existing registered
+`private_browser_pause_urls_use_protected_continuity` case already exercised
+max steps but inspected verifier context and screenshots without inspecting
+the schema or rendered prompt. That incomplete consumer coverage allowed the
+earlier repair to miss this sibling boundary.
+
+The permanent case now exercises the real activity under `ActivityEnvironment`
+and retains the real prompt builder, private-value policy and remote schema
+transformation. For both max-steps scenarios, only the mocked private archive
+read supplies the raw schema; the caller supplies an already visible schema.
+It captures the actual prompt-builder input, rendered verifier prompt and
+`check_progress` schema argument, and requires the two schema consumers to
+share one object. Existing completion, pause, image and continuation checks
+remain. The numeric `minLength=234` must survive even when `234` is a registered
+CVV, proving structural schema mechanics are preserved while descriptions are
+redacted. The original private schema must remain exact.
+
+Identical owning-case command from `agents/`, with the reused matching venv
+activated:
+
+```bash
+/usr/bin/time -p python -c 'import asyncio, runpy, sys; sys.path.insert(0, "tests/blackbox"); asyncio.run(runpy.run_path("tests/blackbox/spawn_browser_agent_v3.blackbox.py")["test_private_browser_pause_urls_use_protected_continuity"]())'
+```
+
+Before: exit1 in3.15seconds. Both `max_steps` and `raster_max_steps` report
+`prompt-builder-unredacted-schema`, `check-progress-unredacted-schema`,
+`rendered-verifier-prompt-secret` and `verifier-schema-not-shared`; completion
+controls still pass. After: exit0 in2.82seconds with the identical test. An
+initial missing-env import failure is retained separately and receives no
+causal credit; the valid pair uses the existing authoritative env and an
+existing venv whose requirements match byte-for-byte.
+
+The canonical domain loader also executed the real registered case with a
+selection wrapper around `BlackboxResult`, rather than calling a copied test
+body. The first unchanged registered pair failed in2.9732seconds and passed
+in2.5686seconds. The final unchanged registration selection additionally runs
+the two existing redaction tests touched by mechanical Ruff cleanup:
+
+```bash
+agents/venv/bin/python .context/maxsteps-proof/registered-final-repro.py
+```
+
+With the exact baseline handler bytes transplanted into the isolated fixture
+checkout, the final selection reports the two controls PASS and the privacy
+case assertion FAIL, exit1 in2.7225seconds. Restoring the repaired handler and
+running that identical command reports all three registered cases PASS,
+exit0 in2.5197seconds. This is explicitly a source-scoped baseline replay with
+the same final fixtures, not a claim that the tests existed in the old commit.
+`.context/maxsteps-proof/final-causal.py` records both exact handler hashes,
+commands, raw logs and timings and restores the repaired source in `finally`.
+
+The repair computes one existing model-visible remote schema and reuses it
+for both consumers. It adds no prompt wording, schema policy, trajectory
+instruction, retry, timeout or benchmark change. All runtime literal constants
+match the baseline. Raw Ruff0.17.0 also exposed one unused handler import and
+two assigned lambdas in existing redaction tests; removing the unused binding
+and spelling the same callbacks as functions clears those three diagnostics
+without suppression. The affected existing registered controls pass in the
+final replay. Python compilation and `git diff --check` also pass.
+
+Golden references read for this mechanism: OpenClaw's
+`src/system-agent/config-redaction.ts:539` applies one shared sensitive-value
+policy to model-visible config, and Hermes `tools/browser_tool.py:184` delegates
+URL sanitization to a single policy. Claude Code's
+`src/services/teamMemorySync/secretScanner.ts:312` redacts outbound content
+while preserving surrounding boundaries. Codex's
+`codex-rs/app-server/src/request_processors/thread_resume_redaction.rs:17`
+handles response-only redaction and explicitly preserves model history, so it
+is a different consumer contract, not an equivalent verifier implementation.
+No direct browser max-steps schema analog was found in these searched surfaces.
+The repair converges on shared policy at the outbound consumer boundary rather
+than introducing another detector or authored instruction.
+
+The parent independently reviewed the immutable two-file first milestone
+`0b3b1f47c571ba387b22e78578587608a123afe6` and found no concrete gap in this
+bounded source/proof slice. The final static cleanup and archive update are
+handed back for integration review. This adds one per-call local schema value,
+replaces two remote transformations with one, and introduces no shared state,
+locks, extra RPCs or periodic work at10,000 agents. Full qualification,
+formal release review, production and the original merchant/auth continuation
+remain parent-owned and uncredited here. The overall case remains open; these
+offline assertions are not a new benchmark or production success claim.
+
 ## Reusable lesson
 
 Keep private credential resolution independent of the agent's tool and target choice. A credential reference must never trigger unrequested field selection, additional writes, or fabricated progress. Redact every downstream model boundary, including observations and fatal failures.
+
+### Resumed browser recording archive race — 08bc4b75440f09bc27c88af0fd76936aaba29fbe
+
+Actual2bb payment-abandonment a806/e10a passed its native task. Capture contained first replay saved10:22:50, resumed recording started10:23:03, terminal10:26:14; log capture stopped10:26:16. Canonical readiness incorrectly accepted any prior recording per task, while unchanged publisher correctly rejected the missing resumed episode even with all media probes mocked reachable. Root-owned actual worker log proves second replay saved/acknowledged10:26:34.785, after capture, and cleanup completed10:26:34.947. No provider runtime recording defect was established.
+
+Minimal capture fix tracks every started task/generation/native session recording part until its own FINISHED media and includes this condition in durable archive readiness. Earlier or foreign saved media cannot cover a missing resume. Existing capture deadline, task verdict, cancellation exemptions and publisher validation remain intact.
+
+Three additive normal benchmark-owner tests: unchanged final fixtures exact2bb runtime3assertionFAIL+4controlsPASS -> fixed7PASS. All515prior testfunctions AST-identical. Production helper compile/Ruff and diff/raw3guards PASS; actual full blackbox file has26 unchanged preexisting Ruff diagnostics (no new). Canonical publisher validation shell PASS and unchanged. Full funded benchmark domain not rerun by this source-only assignment. Root owns actual old recording recovery and future combined full qualification.
+
+### Fixture isolation correction
+
+Earlier privacy reproductions were functionally causal but their offline/isolation scope was overstated: the existing raster-completion fixture did not mock screenshot storage. Four canonical-selection logs contain actual-endpoint HTTP400 warnings and two earlier direct logs report69-byte upload success without transport proof. All old evidence is preserved with no-external-I/O claims withdrawn. The additive storage-mock fixture now verifies exact owned screenshot bytes and both old/new causal replays record zero HTTP sends under a deny-send guard, with2controlsPASS/1privacyFAIL before and3PASS after.
+
+A subsequent bounded read-only single-page search returned no matches; exact remote object ownership remains unresolved. No object deletion or absence claim is made.
+
+The 26 E701/E702 diagnostics surfaced in the benchmark owning file were repaired by splitting statements; full-file AST equivalence was checked and raw Ruff is rerun on the complete integration batch.

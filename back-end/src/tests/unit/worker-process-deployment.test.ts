@@ -574,6 +574,10 @@ async function main() {
       DATABASE_URL: 'postgresql://fixture:fixture@qualified.remote.test/production',
     };
     assert.equal(isBackendWorkerRecoveryOwner(env, plan), true);
+    assert.equal(
+      isBackendWorkerRecoveryOwner({ ...env, RENDER_GIT_COMMIT: 'd'.repeat(40) }, plan),
+      true
+    );
     for (const changes of [
       { RENDER: 'false' },
       { NODE_ENV: 'test' },
@@ -582,7 +586,7 @@ async function main() {
       { DATABASE_URL: 'postgresql://fixture:fixture@127.0.0.1/production' },
       { DATABASE_URL: 'postgresql://fixture:fixture@staging.remote.test/production' },
       { DATABASE_URL: 'postgresql://fixture:fixture@qualified.remote.test/copied' },
-      { RENDER_GIT_COMMIT: 'd'.repeat(40) },
+      { RENDER_GIT_COMMIT: 'invalid-backend-revision' },
     ]) {
       assert.equal(isBackendWorkerRecoveryOwner({ ...env, ...changes }, plan), false);
     }

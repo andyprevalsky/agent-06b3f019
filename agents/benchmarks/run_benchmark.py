@@ -6022,7 +6022,7 @@ def _recording_attachment_ready(metadata: dict) -> bool:
 def _agent_messages_have_browser_recording_ready(
     messages: Optional[List[dict]],
 ) -> bool:
-    """True when every browser task that started a recording has a playable one.
+    """True when every started browser recording part has its own playable media.
 
     Timeout cleanup posts ``session_paused`` / ``task_complete`` and finalizes
     Kernel replay asynchronously. Hub archives that snapshot as soon as the
@@ -6031,6 +6031,7 @@ def _agent_messages_have_browser_recording_ready(
     """
     started_task_ids: set[str] = set()
     ready_task_ids: set[str] = set()
+    pending_parts: set[tuple] = set()
     for message in messages or []:
         metadata = message.get("metadata") or {}
         if not isinstance(metadata, dict):
@@ -6043,11 +6044,29 @@ def _agent_messages_have_browser_recording_ready(
         if not isinstance(task_id, str) or not task_id:
             continue
         started_task_ids.add(task_id)
+        native = metadata.get("browser_session_metadata")
+        native = native if isinstance(native, dict) else {}
+        # A resumed activity records another part of the same task. Its start
+        # must be followed by its own saved media, not an earlier task replay.
+        part = (
+            task_id, metadata.get("workflowGeneration"), metadata.get("browser_url"),
+            native.get("provider") or metadata.get("provider"),
+            next((native.get(key) or metadata.get(key) for key in
+                  ("session_id", "browser_session_id", "kernel_session_id")
+                  if native.get(key) or metadata.get(key)), None),
+        )
+        if any(value is not None and not isinstance(value, str) for value in part):
+            return False
+        if metadata.get("toolStatus") == "IN_PROGRESS":
+            if part in pending_parts:
+                return False  # An earlier part never finished before another began.
+            pending_parts.add(part)
         if _recording_attachment_ready(metadata):
+            pending_parts.discard(part)
             ready_task_ids.add(task_id)
     if not started_task_ids:
         return True
-    return started_task_ids.issubset(ready_task_ids)
+    return not pending_parts and started_task_ids.issubset(ready_task_ids)
 
 
 def _agent_messages_ready_for_browser_hub_archive(
@@ -6095,7 +6114,7 @@ def _agent_messages_ready_for_durable_browser_evidence(
         state["complete"] |= action == "task_complete"
         # The durable publisher accepts this singular URL or an attached file.
         state["recording"] |= _recording_attachment_ready({**meta, "recording_view_urls": []})
-    return all(
+    return _agent_messages_have_browser_recording_ready(messages) and all(
         (state["code"] and not state["browser"])
         or (state["complete"] and (
             state["recording"] or task_id in (zero_session_task_ids or set())

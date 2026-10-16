@@ -105,8 +105,7 @@ export function isBackendWorkerRecoveryOwner(
       (!plan ||
         (environment.RENDER_SERVICE_ID === plan.controlPlane.serviceId &&
           database.hostname === plan.controlPlane.databaseHost &&
-          database.pathname.slice(1) === plan.controlPlane.databaseName &&
-          environment.RENDER_GIT_COMMIT === plan.artifact.sourceCommit))
+          database.pathname.slice(1) === plan.controlPlane.databaseName))
     );
   } catch {
     return false;
@@ -139,7 +138,7 @@ export async function requireBackendWorkerRecovery(
     !proof?.instanceId ||
     proof.serviceId !== plan.controlPlane.serviceId ||
     proof.identity !== workerPlanIdentity(plan) ||
-    proof.backendSource !== plan.artifact.sourceCommit ||
+    !/^[a-f0-9]{40}$/.test(proof.backendSource ?? '') ||
     !Number.isFinite(at) ||
     Date.now() - at > 120_000 ||
     at > Date.now() ||
