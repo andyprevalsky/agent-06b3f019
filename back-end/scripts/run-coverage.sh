@@ -291,7 +291,10 @@ if [[ "$PRINT_COVERAGE_PORT" == "1" ]]; then
   exit 0
 fi
 
-rm -rf "$COV_TMP"
+if [[ -d "$COV_TMP" ]] && [[ -n "$(find "$COV_TMP" -mindepth 1 -print -quit)" ]]; then
+  echo "❌ Unrecovered raw coverage remains at $COV_TMP; archive it before starting a new collection." >&2
+  exit 1
+fi
 mkdir -p "$COV_TMP"
 
 export TEST_BASE_URL="http://localhost:$COV_PORT"
@@ -598,7 +601,7 @@ BLACKBOX_PID=""
 UNIT_PID=""
 
 cleanup() {
-  local child_pid
+  local cleanup_exit=$? child_pid raw_evidence_dir raw_staging_dir=""
   for child_pid in "$UNIT_PID" "$BLACKBOX_PID" "$BACKEND_PID"; do
     [[ -n "$child_pid" ]] || continue
     kill -TERM -- "-$child_pid" >/dev/null 2>&1 || true
@@ -608,8 +611,24 @@ cleanup() {
   # releasing it so a long successful run cannot act on a recycled historical
   # PGID during normal cleanup.
   printf 'disarmed\n' >"$COVERAGE_PROCESS_GROUPS_FILE"
-  # These raw blobs are inputs to the report, not durable test evidence.
-  rm -rf "$COV_TMP"
+  # Archive after shutdown so late backend V8 flushes join the completed suites.
+  # Never overwrite or nest into an earlier archive; failed copies retain inputs.
+  if [[ "$cleanup_exit" -ne 0 && -d "$COV_TMP" ]]; then
+    raw_evidence_dir="${EVIDENCE_DIR:-$ROOT_DIR/.context/test-runs/backend-coverage-failed-$(date -u +%Y%m%d-%H%M%S)-$$}"
+    if mkdir -p "$raw_evidence_dir" &&
+      [[ ! -e "$raw_evidence_dir/raw-v8" ]] &&
+      raw_staging_dir="$(mktemp -d "$raw_evidence_dir/.raw-v8-incomplete.XXXXXX")" &&
+      cp -R "$COV_TMP/." "$raw_staging_dir/" &&
+      mv "$raw_staging_dir" "$raw_evidence_dir/raw-v8"; then
+      echo "    Raw V8 coverage: $raw_evidence_dir/raw-v8"
+      rm -rf "$COV_TMP"
+    else
+      if [[ -n "$raw_staging_dir" ]]; then rm -rf "$raw_staging_dir" || true; fi
+      echo "Could not archive raw V8 coverage; retained at $COV_TMP" >&2
+    fi
+  else
+    rm -rf "$COV_TMP"
+  fi
   release_coverage_reservations
 }
 trap cleanup EXIT

@@ -23,16 +23,16 @@
  * serves recordings keyed by the exact request: completions by the sha256 of
  * the provider request body, searches by query. The prod search query is
  * served the prod results (reconstructed byte-for-byte from the prod TOOL
- * row) and a Generator answering exactly that result gets the prod reply;
- * everything else is what qwen-3.8-27b and Parallel returned when recorded.
+ * row). The follow-up pins that same historical no-match snapshot for every
+ * query, explicitly modeling unavailable search evidence. Other queries use
+ * Parallel; every completed model response is recorded live from qwen-3.8-27b.
  * A prompt, schema or context change produces an unrecorded request and fails
  * the replay instead of replaying a stale answer. The Router, Rose client,
  * search loop, escalation and Temporal acceptance (in-memory client) run for real.
  *
  * CHAT_SEARCH_ESCALATION_RECORD=1 records the current code's requests live
- * through back-end/.env's providers and merges them into the fixture (run it
- * on the pre-fix revision too, so the pre-fix replay is also exact). It is not
- * a deploy probe.
+ * through back-end/.env's providers with the fixture's controlled UTC clock.
+ * It is not a deploy probe.
  */
 
 import 'dotenv/config';
@@ -43,6 +43,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { withCurrentTimeContext } from '../../providers/currentTimeContext';
 import { prisma } from '../../providers/database';
 import { postMessage } from '../../domains/agents/agentMessageService';
 import { CHAT_HANDLER_FAILURE_NOTICE } from '../../providers/chat/chatHandlerFailure';
@@ -78,6 +79,12 @@ interface SeedMessage {
 }
 
 interface Scenario {
+  /** Search evidence policy, independent of the real Router's decisions. */
+  searchPolicy: {
+    mode: 'live' | 'pinned_snapshot';
+    source: string;
+    purpose: string;
+  };
   priorMessages: SeedMessage[];
   userMessage: string;
   /** The prod search this turn ran; its query is always served these results. */
@@ -89,6 +96,8 @@ interface Scenario {
 interface Fixture {
   agentId: string;
   recordedAt: string;
+  /** Controlled instant sent to the provider when these calls were recorded. */
+  clockInstant: string;
   note: string;
   scenarios: Record<ScenarioName, Scenario>;
   searches: Record<string, { results: SearchResult[] }>;
@@ -132,8 +141,25 @@ function fingerprint(body: RequestBody): string {
   return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
 }
 
-function lastContent(body: RequestBody): string {
-  const content = body.messages.at(-1)?.content;
+/** Validate the entire runtime reminder before normalizing only its dynamic clock. */
+function controlledClockBody(body: RequestBody): RequestBody {
+  const reminder = body.messages.at(-1);
+  assert.equal(reminder?.role, 'user', 'runtime clock must remain a trailing user message');
+  assert.equal(typeof reminder.content, 'string');
+  const match = (reminder.content as string).match(/Current UTC time: ([^\n]+)/);
+  assert.ok(match, 'runtime reminder must contain its UTC instant');
+  const instant = new Date(match[1]);
+  assert.ok(Number.isFinite(instant.getTime()), 'runtime clock instant must parse');
+  const expected = JSON.parse(JSON.stringify(withCurrentTimeContext([], instant)[0]));
+  assert.deepEqual(reminder, expected, 'runtime reminder must exactly match the production helper');
+  assert.ok(Number.isFinite(new Date(fixture.clockInstant).getTime()), 'fixture clock is explicit');
+  const controlled = withCurrentTimeContext([], new Date(fixture.clockInstant))[0];
+  return { ...body, messages: [...body.messages.slice(0, -1), controlled] };
+}
+
+/** The runtime reminder follows the task/tool tail and is not itself task context. */
+function lastContent(body: Pick<RequestBody, 'messages'>): string {
+  const content = body.messages.at(-2)?.content;
   return typeof content === 'string' ? content : '';
 }
 
@@ -153,6 +179,7 @@ function installNetwork(scenario: Scenario, startedAt: number) {
   const realFetch = globalThis.fetch;
   const requests: ProviderRequest[] = [];
   const searched: string[] = [];
+  const servedSnapshots: Array<{ query: string; results: SearchResult[] }> = [];
   const unexpected: string[] = [];
   const unrecorded: string[] = [];
 
@@ -164,9 +191,18 @@ function installNetwork(scenario: Scenario, startedAt: number) {
     if (url === PARALLEL_SEARCH_URL) {
       const query = (JSON.parse(String(init?.body)) as { objective: string }).objective;
       searched.push(query);
+      if (scenario.searchPolicy.mode === 'pinned_snapshot') {
+        assert.ok(
+          scenario.prodSearch,
+          'a pinned search environment requires its production snapshot'
+        );
+        const results = scenario.prodSearch.results;
+        servedSnapshots.push({ query, results });
+        return Response.json({ results });
+      }
       const prod = scenario.prodSearch?.query === query ? scenario.prodSearch : null;
       const recorded = prod ? { results: prod.results } : fixture.searches[query];
-      if (recorded) {
+      if (recorded && (!RECORD || prod)) {
         if (RECORD) fixture.searches[query] = recorded;
         return Response.json(recorded);
       }
@@ -189,7 +225,7 @@ function installNetwork(scenario: Scenario, startedAt: number) {
       unexpected.push(url);
       throw new Error(`chat-search-escalation: unexpected outbound ${url}`);
     }
-    const body = JSON.parse(String(init?.body)) as RequestBody;
+    const body = controlledClockBody(JSON.parse(String(init?.body)) as RequestBody);
     const classified = classify(body);
     if (!classified) {
       unexpected.push(`${url} (unclassified completion)`);
@@ -211,25 +247,10 @@ function installNetwork(scenario: Scenario, startedAt: number) {
     const finished = () => {
       request.finishedAtMs = Date.now() - startedAt;
     };
-    const prodReply =
-      request.kind === 'generator' &&
-      scenario.prodSearch !== null &&
-      scenario.prodGeneratorContent !== null &&
-      lastContent(body) === `[Tool Result]\n${scenario.prodSearch.toolText}`
-        ? scenario.prodGeneratorContent
-        : null;
     if (RECORD) {
-      if (prodReply !== null) {
-        fixture.calls[request.fingerprint] = {
-          kind: request.kind,
-          model: CHAT_MODEL,
-          content: prodReply,
-        };
-        return replayCall({ model: CHAT_MODEL, content: prodReply }, init?.signal, finished);
-      }
       // Discarded speculation never completes; record that it was asked.
       fixture.calls[request.fingerprint] = { kind: request.kind, model: CHAT_MODEL, content: null };
-      return recordLiveCall(realFetch, input, init, (call) => {
+      return recordLiveCall(realFetch, input, { ...init, body: JSON.stringify(body) }, (call) => {
         finished();
         assert.equal(call.model, CHAT_MODEL, `${request.kind} must be served by ${CHAT_MODEL}`);
         fixture.calls[request.fingerprint] = { kind: request.kind, ...call };
@@ -247,6 +268,7 @@ function installNetwork(scenario: Scenario, startedAt: number) {
   return {
     requests,
     searched,
+    servedSnapshots,
     unexpected,
     unrecorded,
     restore: () => {
@@ -429,9 +451,32 @@ async function testFirstTurnFindsOrEscalates(): Promise<void> {
 }
 
 async function testFollowUpMissEscalatesAfterSearchingAgain(): Promise<void> {
-  const turn = await runTurn(fixture.scenarios.followUpTurn);
+  const scenario = fixture.scenarios.followUpTurn;
+  assert.equal(
+    scenario.searchPolicy.mode,
+    'pinned_snapshot',
+    'this case owns failed-lookup escalation'
+  );
+  assert.ok(
+    scenario.prodSearch,
+    'failed-lookup evidence comes from the production search snapshot'
+  );
+  const snapshot = scenario.prodSearch;
+  const turn = await runTurn(scenario);
   try {
     assertCleanNetwork(turn.network);
+    assert.ok(turn.network.searched.length >= 2, 'the failed lookup must search again');
+    assert.deepEqual(
+      turn.network.servedSnapshots,
+      turn.network.searched.map((query) => ({ query, results: snapshot.results })),
+      'every follow-up query receives the same original unrelated production results'
+    );
+    const snapshotBody = snapshot.toolText.slice(`Web search: "${snapshot.query}"`.length);
+    assert.deepEqual(
+      [...turn.searchResults].sort(),
+      turn.network.searched.map((query) => `Web search: "${query}"${snapshotBody}`).sort(),
+      'persisted tool results contain the production snapshot under each actual Router query'
+    );
     assert.equal(
       turn.outcome.kind,
       'escalated',
@@ -475,11 +520,10 @@ async function testMultiPartQuestionSearchesInParallel(): Promise<void> {
     const generators = turn.network.requests.filter(
       (request) => request.kind === 'generator' && request.provider === 'cerebras'
     );
-    const routeTail = lastRoute.messages.at(-1)?.content;
+    const routeTail = lastContent(lastRoute);
     const overlapped = generators.filter(
       (request) =>
-        request.messages.at(-1)?.content === routeTail &&
-        request.startedAtMs < lastRoute.finishedAtMs
+        lastContent(request) === routeTail && request.startedAtMs < lastRoute.finishedAtMs
     );
     assert.equal(overlapped.length, 1, 'one Generator overlaps the answering route');
     assert.ok(
@@ -535,6 +579,7 @@ async function main(): Promise<number> {
 
   try {
     if (RECORD) {
+      fixture.calls = {};
       for (const [name] of CASES) {
         const turn = await runTurn(fixture.scenarios[name]);
         await cleanup(turn.seeded);

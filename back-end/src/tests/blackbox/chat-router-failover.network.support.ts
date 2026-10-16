@@ -60,6 +60,8 @@ export interface ProviderRequest extends LiveObservation {
   schema: string;
   messageCount: number;
   transcriptChars: number;
+  /** Fresh runtime metadata added after the recorded conversation. */
+  runtimeClock: string;
   sessionId?: string;
   atMs: number;
   /** When, and why, the chat turn aborted this request. */
@@ -165,6 +167,10 @@ export function installNetwork(scenario: Scenario, startedAt: number) {
       session_id?: string;
     };
     const schema = body.response_format?.json_schema?.name ?? '';
+    const runtimeClock = body.messages.at(-1);
+    assert.equal(runtimeClock?.role, 'user', 'runtime metadata must follow the full transcript');
+    assert.equal(typeof runtimeClock?.content, 'string');
+    assert.match(String(runtimeClock?.content), /^<system-reminder>\nCurrent UTC time:/);
     const provider = url === CEREBRAS_API_URL ? 'cerebras' : 'openrouter';
     const request: ProviderRequest = {
       provider,
@@ -172,6 +178,7 @@ export function installNetwork(scenario: Scenario, startedAt: number) {
       schema,
       messageCount: body.messages.length,
       transcriptChars: transcriptChars(body.messages),
+      runtimeClock: String(runtimeClock?.content),
       sessionId: body.session_id,
       atMs: Date.now() - startedAt,
     };

@@ -31,6 +31,18 @@
 
 import type { CompletionMessage } from './types';
 
+// Enumerable symbols survive request projections but never enter provider JSON.
+// Keep volatile runtime suffixes beyond the stable history's cache breakpoint.
+const UNCACHED_RUNTIME_CONTEXT = Symbol('rose.uncachedRuntimeContext');
+
+export function markUncachedContext<T extends object>(message: T): T {
+  return { ...message, [UNCACHED_RUNTIME_CONTEXT]: true };
+}
+
+export function isUncachedContext(message: object): boolean {
+  return Reflect.get(message, UNCACHED_RUNTIME_CONTEXT) === true;
+}
+
 /**
  * Sentinel matched by `transformMessagesForAnthropic` (transforms.ts) to split
  * the system prompt into a globally-cacheable "static" prefix and a per-call
