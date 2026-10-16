@@ -15604,6 +15604,10 @@ p=json.load(open(sys.argv[1]));assert 'explicit_idle' in p and 'worker' in p['ex
 print(p['volume_id'])
 PY
 )" || continue
+        if [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ]; then
+            python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-staged-boot-return.py" worker-shape \
+                --proof "$proof" --size "$FLEET_WORKER_VM_SIZE" --memory "$FLEET_WORKER_VM_MEMORY" || continue
+        fi
         mkdir -p "$out/worker-borrowed" || return 1
         claim_owner="$(python3 -c 'import secrets;print(secrets.token_hex(16))')" || return 1
         FLEET_OWNER_TOKEN="$claim_owner"

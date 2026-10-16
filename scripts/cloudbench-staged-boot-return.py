@@ -229,18 +229,40 @@ def released(output, common, machine):
         output/'staged-boot/released.json',dict(receipt=value['receipt'],claim_sha256=receipt['claim_sha256']))
 
 
-def worker_stage(*args, **kwargs):
+def worker_shape_matches(proof_path, size, memory):
+    """Preselect a matching admitted shape without taking a Machine claim."""
+    proof_path=Path(proof_path);proof=json.loads(read(proof_path))
+    admission=H['described'](proof['explicit_idle']['admission'])
+    need('worker' in admission['allowed_future_roles'],'worker role not admitted')
+    state=H['returned_state'](proof_path)
+    shape=state['native']['config']['guest'] if state else admission['resource']['shape']
+    return shape==H['worker_profile'](size,memory)
+
+
+def worker_stage(assignment_path, source, node, python_fp, size, memory, api, *, seconds=120):
     # Preserve the original stage/shape/claim/API predicates, while letting a
     # released staged primary carry its verified reset policy into a worker.
     original = H['stage_worker'].__globals__['current_policy']
     H['stage_worker'].__globals__['current_policy'] = current_policy
     try:
-        return H['stage_worker'](*args, **kwargs)
+        if os.environ.get('CLOUDBENCH_BOOT_TRANSPORT') == 'staged':
+            target=H['worker_profile'](size,memory);original_api=api
+            def api(method,path,body=None,timeout=None):
+                need(method=='GET','staged worker cannot resize or mutate config')
+                value=original_api(method,path,body,timeout=timeout)
+                if path.startswith('/machines/'):
+                    need(value.get('config',{}).get('guest')==target,'staged worker requires exact native shape')
+                return value
+        return H['stage_worker'](assignment_path,source,node,python_fp,size,memory,api,seconds=seconds)
     finally:
         H['stage_worker'].__globals__['current_policy'] = original
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1]=='worker-shape':
+        p=argparse.ArgumentParser()
+        for name in ('proof','size','memory'):p.add_argument('--'+name,required=True)
+        a=p.parse_args(sys.argv[2:]);raise SystemExit(0 if worker_shape_matches(a.proof,a.size,a.memory) else 75)
     if len(sys.argv) > 1 and sys.argv[1] == 'worker-stage':
         H['main'].__globals__['stage_worker'] = worker_stage
         H['main']()

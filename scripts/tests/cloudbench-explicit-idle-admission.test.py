@@ -455,7 +455,7 @@ class Worker(unittest.TestCase):
         self.assertNotEqual(result.returncode,0);self.assertEqual(mod.sha(self.claim.read_bytes()),self.row['claim_sha256'])
 
 
-    def test_actual_worker_cli_claim_stage_return_and_next_claim(self):
+    def test_actual_worker_cli_claim_stage_return_and_next_claim(self,transport="config",size="performance-1x",memory="2048",expected_posts=1):
         self.prepare();self.claim.unlink();self.assignment.unlink()
         fixture=self.root/'api.json';fixture.write_text(json.dumps(dict(native=self.native,volume=self.volume)))
         runner=self.root/'stage-api.py'
@@ -505,12 +505,12 @@ return_reusable_worker "$OUT" "$mid"
 write_pool_claim "$POOL_CLAIMS_DIR/$mid" "$mid" vol_fixture
 printf '%s' "$mid"
 '''
-        env={**os.environ,'OUT':str(self.out),'MID':self.mid,'IDLE_HELPER':str(SCRIPT),'STAGED_HELPER':str(SCRIPT.with_name('cloudbench-staged-boot-return.py')),'VOLUME_HELPER':str(SCRIPT.with_name('cloudbench-original-volume-capture.py')),'RUNNER':str(runner),'API_FIXTURE':str(fixture),'GIT_COMMON_DIR':str(self.common),'POOL_IDS_FILE':self.request['consumer']['pool_ids_file'],'POOL_META_FILE':self.request['consumer']['pool_meta_file'],'POOL_CLAIMS_DIR':str(self.common/'cloudbench-pool-claims'),'POOL_COLD_BOOTSTRAP':'1','FLEET_OWNER_TOKEN':'e'*32,'FLEET_OWNER_HOST':mod.socket.gethostname(),'CURRENT_NODE_FP':self.dep['node'],'CURRENT_PY_FP':self.dep['python'],'BENCH_REF':self.request['consumer']['source_ref'],'FLEET_WORKER_VM_SIZE':'performance-1x','FLEET_WORKER_VM_MEMORY':'2048','APP':'app'}
+        env={**os.environ,'OUT':str(self.out),'MID':self.mid,'IDLE_HELPER':str(SCRIPT),'STAGED_HELPER':str(SCRIPT.with_name('cloudbench-staged-boot-return.py')),'VOLUME_HELPER':str(SCRIPT.with_name('cloudbench-original-volume-capture.py')),'RUNNER':str(runner),'API_FIXTURE':str(fixture),'GIT_COMMON_DIR':str(self.common),'POOL_IDS_FILE':self.request['consumer']['pool_ids_file'],'POOL_META_FILE':self.request['consumer']['pool_meta_file'],'POOL_CLAIMS_DIR':str(self.common/'cloudbench-pool-claims'),'POOL_COLD_BOOTSTRAP':'1','FLEET_OWNER_TOKEN':'e'*32,'FLEET_OWNER_HOST':mod.socket.gethostname(),'CURRENT_NODE_FP':self.dep['node'],'CURRENT_PY_FP':self.dep['python'],'BENCH_REF':self.request['consumer']['source_ref'],'FLEET_WORKER_VM_SIZE':size,'FLEET_WORKER_VM_MEMORY':memory,'APP':'app','CLOUDBENCH_BOOT_TRANSPORT':transport}
         result=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(result.stdout,self.mid)
-        calls=json.loads(fixture.with_suffix('.calls').read_text());self.assertEqual(sum(c[0]=='POST' for c in calls),1)
-        self.assertEqual(json.loads(fixture.read_text())['native']['config']['guest'],dict(cpu_kind='performance',cpus=1,memory_mb=2048))
-        self.assertEqual(mod.returned_state(self.proof)['native']['instance_id'],'worker-instance')
+        calls=json.loads(fixture.with_suffix('.calls').read_text());self.assertEqual(sum(c[0]=='POST' for c in calls),expected_posts)
+        self.assertEqual(json.loads(fixture.read_text())['native']['config']['guest'],mod.worker_profile(size,memory))
+        self.assertEqual(mod.returned_state(self.proof)['native']['instance_id'],'worker-instance' if expected_posts else 'instance')
         self.assertEqual((self.out/'worker-clones.ids').read_text(),self.mid+'\n')
         self.assertEqual(Path(self.request['consumer']['pool_ids_file']).read_text(),self.mid+'\n')
 
@@ -904,5 +904,48 @@ class StagedProbeReturn(unittest.TestCase):
         (self.out/'worker-clones.ids').write_text('some-worker\n')
         with self.assertRaises(ValueError):self.verify()
 
+
+
+@unittest.skipUnless(os.geteuid()==0,'root publication/claim boundary')
+class StagedWorkerShape(unittest.TestCase):
+    def setUp(self):
+        self.f=Worker();self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.h=runpy.run_path(str(SCRIPT.with_name('cloudbench-staged-boot-return.py')))
+    def stage(self,size='performance-1x',memory='2048',transport='staged'):
+        with mock.patch.dict(os.environ,CLOUDBENCH_BOOT_TRANSPORT=transport):
+            return self.h['worker_stage'](self.f.assignment,self.f.request['consumer']['source_ref'],self.f.dep['node'],self.f.dep['python'],size,memory,self.f.api)
+    def test_wrong_shape_refuses_before_any_post(self):
+        self.f.prepare()
+        with self.assertRaisesRegex(ValueError,'shape'):self.stage()
+        self.assertFalse(any(x[0]=='POST'for x in self.f.calls));self.assertTrue(self.f.claim.exists())
+    def test_exact_shape_preserves_stage_and_no_post(self):
+        self.f.prepare();value=self.stage('shared-cpu-4x','8192')
+        self.assertEqual(value['status'],'STOPPED_STAGED');self.assertFalse(any(x[0]=='POST'for x in self.f.calls))
+    def test_nonstaged_resize_unchanged(self):
+        self.f.prepare();self.stage(transport='config');self.assertEqual(sum(x[0]=='POST'for x in self.f.calls),1)
+    def test_exact_shape_metadata_filter(self):
+        self.f.prepare();self.assertFalse(self.h['worker_shape_matches'](self.f.proof,'performance-1x','2048'));self.assertTrue(self.h['worker_shape_matches'](self.f.proof,'shared-cpu-4x','8192'))
+    def test_actual_matching_claim_stage_return(self):
+        self.f.test_actual_worker_cli_claim_stage_return_and_next_claim(transport='staged',size='shared-cpu-4x',memory='8192',expected_posts=0)
+    def test_actual_wrong_shape_skipped_before_claim(self):
+        self.f.prepare();self.f.claim.unlink();self.f.assignment.unlink()
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+        fn=lambda n:re.search(r'^'+n+r'\(\).*?^}\n',fleet,re.M|re.S).group()
+        shell='\n'.join(fn(n)for n in ('pool_claim_fs_transaction','write_pool_claim','claim_explicit_idle_worker'))
+        shell+="""
+python3(){
+ if [ "$1" = "$STAGED_HELPER" ] && [ "$2" = worker-stage ]; then : > "$BAD_STAGE"; return 91; fi
+ command python3 "$@"
+}
+cloudbench_env_sha256(){ sha256sum "$1" | cut -d' ' -f1; }
+cloudbench_fsync_directory(){ return 0; }
+pool_claim_mark_cleanup_unconfirmed(){ return 0; }
+FLEET_OWNER_PID_START="$(command python3 -c 'import runpy,sys;h=runpy.run_path(sys.argv[1]);print(h["bash_lib"]("cloudbench-env.sh",["cloudbench_pid_start_time",sys.argv[2]]))' "$VOLUME_HELPER" "$$")"
+claim_explicit_idle_worker "$OUT" primary repo current-token ::1
+"""
+        bad=self.f.root/'bad-stage'
+        env=dict(os.environ,OUT=str(self.f.out),BAD_STAGE=str(bad),STAGED_HELPER=str(SCRIPT.with_name('cloudbench-staged-boot-return.py')),VOLUME_HELPER=str(SCRIPT.with_name('cloudbench-original-volume-capture.py')),GIT_COMMON_DIR=str(self.f.common),POOL_IDS_FILE=self.f.request['consumer']['pool_ids_file'],POOL_META_FILE=self.f.request['consumer']['pool_meta_file'],POOL_CLAIMS_DIR=str(self.f.common/'cloudbench-pool-claims'),POOL_COLD_BOOTSTRAP='1',FLEET_OWNER_TOKEN='e'*32,FLEET_OWNER_HOST=mod.socket.gethostname(),CURRENT_NODE_FP=self.f.dep['node'],CURRENT_PY_FP=self.f.dep['python'],BENCH_REF=self.f.request['consumer']['source_ref'],FLEET_WORKER_VM_SIZE='performance-1x',FLEET_WORKER_VM_MEMORY='2048',APP='app',CLOUDBENCH_BOOT_TRANSPORT='staged',CLOUDBENCH_SCRIPT_SNAPSHOT=str(SCRIPT.parent))
+        result=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(result.stdout,'');self.assertFalse(self.f.claim.exists());self.assertFalse(bad.exists())
 
 if __name__=='__main__':unittest.main()
