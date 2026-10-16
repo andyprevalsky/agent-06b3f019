@@ -46,6 +46,8 @@
 #                      paid fleet runs detach by default so EXIT cleanup survives it
 #   --wait             detach for lifecycle safety, but wait for and return the
 #                      controller's exact exit status (durable supervisors)
+#   --recover-unstaged-worker <32-hex-token>
+#                      release only the proven never-staged fixed worker claim
 #   --recover-stale-owner-to-pool <32-hex-token>
 #                      exact recovery, handing proven stopped primaries to this pool
 #   --recover-stale-owner <32-hex-token>
@@ -747,6 +749,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-staged-boot.py" \
        "$ROOT_DIR/scripts/cloudbench-staged-boot-return.py" \
        "$ROOT_DIR/scripts/cloudbench-staged-probe-recovery.py" \
+       "$ROOT_DIR/scripts/cloudbench-unstaged-worker-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-static-service-observation.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
@@ -1042,6 +1045,7 @@ EXPLICIT_IDLE_ARGS=()
 EXPLICIT_IDLE_HELPER=cloudbench-explicit-idle-admission.py
 RECOVER_STALE_ONLY="0"
 RECOVER_PRIMARY_TO_POOL="0"
+RECOVER_UNSTAGED_WORKER="0"
 RECOVER_OWNER_TOKEN=""
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
@@ -1226,6 +1230,10 @@ while [ $# -gt 0 ]; do
             COLD_HANDOFF_REQUEST="${2:-}"; COLD_HANDOFF_REQUEST_SHA="${3:-}"; RECOVER_STALE_ONLY=1; DETACH=0; shift 3 ;;
         --recover-stale-owner)
             RECOVER_STALE_ONLY="1"; DETACH="0"; WAIT_FOR_DETACHED="0"
+            RECOVER_OWNER_TOKEN="${2:-}"; shift 2
+            ;;
+        --recover-unstaged-worker)
+            RECOVER_STALE_ONLY="1"; RECOVER_UNSTAGED_WORKER="1"; DETACH="0"; WAIT_FOR_DETACHED="0"
             RECOVER_OWNER_TOKEN="${2:-}"; shift 2
             ;;
         --recover-stale-owner-to-pool)
@@ -11665,12 +11673,26 @@ PY
         echo "❌ exact stale-owner recovery requires a proven-dead same-host controller" >&2
         return 1
     }
-    release_cleanup_disk_reserve "$registry/cleanup-disk-reserve" || return 1
+    if [ "${RECOVER_UNSTAGED_WORKER:-0}" != 1 ]; then
+        release_cleanup_disk_reserve "$registry/cleanup-disk-reserve" || return 1
+    fi
     acquire_registry_recovery_lock "$registry"
     recovery_lock_status=$?
-    [ "$recovery_lock_status" -eq 2 ] && return 0
+    if [ "$recovery_lock_status" -eq 2 ]; then
+        [ "${RECOVER_UNSTAGED_WORKER:-0}" != 1 ] || return 1
+        return 0
+    fi
     [ "$recovery_lock_status" -eq 0 ] || return 1
     echo "🧭 force-recovering exact cancelled fleet owner $token"
+    if [ "${RECOVER_UNSTAGED_WORKER:-0}" = 1 ]; then
+        local unstaged_worker_status=0
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-unstaged-worker-recovery.py" \
+            --registry "$registry" --common "$GIT_COMMON_DIR" --source "$BENCH_REF" \
+            --guard-fd "$REGISTRY_RECOVERY_GUARD_FD" --recovery-pid "$$" \
+            --recovery-birth "$FLEET_OWNER_PID_START" || unstaged_worker_status=$?
+        release_registry_recovery_lock "$registry"
+        return "$unstaged_worker_status"
+    fi
     if [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ] && [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; then
         local staged_return_candidate=0 staged_recovery_status=0
         for _evidence_output in "$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)"/*; do
@@ -13473,7 +13495,11 @@ if [ "$RECOVER_STALE_ONLY" = "1" ]; then
     fi
     cloudbench_controller_lock_release "$LOCK_DIR"
     if [ "$recovery_status" = "0" ]; then
-        echo "✅ exact stale fleet ownership reconciled: $RECOVER_OWNER_TOKEN"
+        if [ "${RECOVER_UNSTAGED_WORKER:-0}" = 1 ]; then
+            echo "✅ exact unstaged worker claim reconciled; original fleet outcome retained: $RECOVER_OWNER_TOKEN"
+        else
+            echo "✅ exact stale fleet ownership reconciled: $RECOVER_OWNER_TOKEN"
+        fi
     else
         echo "❌ exact stale fleet ownership recovery failed: $RECOVER_OWNER_TOKEN" >&2
     fi
