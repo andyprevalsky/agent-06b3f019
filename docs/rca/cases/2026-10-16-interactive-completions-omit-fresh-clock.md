@@ -55,6 +55,18 @@ the static prompt plus transcript. SMS differs: `buildSmsContext` already puts
 an ISO timestamp and optional local clock in a run-local `get_environment`
 result. Its reaction/tool LLM can also receive a fresh common clock directly.
 
+Original-call provenance was independently checked in production `ToolUsage`
+and matching Render `llm.cache` events. Initial Router (`19:57:35.948Z`),
+post-search Router (`19:57:37.516Z`) and Generator (`19:57:37.968Z`) all record
+`qwen-3.8-27b` with `from_fast_cache=false`. The first Router reused 1,024
+provider input-cache tokens; that is prompt-prefix reuse, not output replay.
+Although the agent's Fast Mode flag was enabled, application replay admission
+is separately governed by `demoCacheAllowed`. The original winner records
+establish fresh completions. Read-only current app/cache-store queries found
+no goal rows; current absence alone would not establish historical absence.
+Private receipts: `original-cache-db-audit.json` and
+`original-cache-winning-events.json`. No invalidation or policy change is needed.
+
 The original full production model request is unavailable: the archive listed
 only a DB start fixture and two manifests, and backend `llmDump.ts` explicitly
 disables production dumps. We reconstructed the opening request from the stored
