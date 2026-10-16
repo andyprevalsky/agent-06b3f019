@@ -33,7 +33,7 @@ def bound_campaign(tmp_path):
     for name in ('run-bench', 'run-bench-campaign.py', 'cloudbench_catalog.py',
                  'cloudbench-production-only-tasks.py', 'cloudbench-campaign-seed.py',
                  'cloudbench-campaign-barrier.py', 'cloudbench-script-snapshot.py',
-                 'cloudbench_execution_provenance.py'):
+                 'cloudbench_execution_provenance.py', 'cloudbench-campaign-stop.py'):
         supplied = Path(os.environ['CLOUDBENCH_CAMPAIGN_UNDER_TEST']) if name == 'run-bench-campaign.py' and os.environ.get('CLOUDBENCH_CAMPAIGN_UNDER_TEST') else ROOT / 'scripts' / name
         shutil.copyfile(supplied, scripts / name)
     # The old consumer entry must not be used as executable control code.
@@ -160,3 +160,56 @@ def test_campaign_workspace_normal_cli_preserves_original600_shape(tmp_path):
     assert [v.removeprefix('--task=') for v in args if v.startswith('--task=')]==tasks
     assert all(v in args for v in ('--stress-defaults','--concurrency=600','--runs=3','--retry-infra=1','--e2e-timeout=5400','--e2e-started-at=1791410000','--forward-arg=--strict-barrier','--forward-arg=--timeout','--forward-arg=1200','--forward-arg=--reuse-pool-only','--forward-arg=--cold-primary-bootstrap','--forward-arg=--ref','--forward-arg='+'5'*40))
     assert '--forward-arg=--foreground' not in args
+
+
+@pytest.mark.parametrize('failed,signals',((29,0),(30,1)))
+def test_campaign_workspace_threshold_watcher_uses_consumer_and_control(bound_campaign,monkeypatch,failed,signals):
+    """Actual supervisor loop reads consumer records and fences control source."""
+    import hashlib
+    import runpy
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    source,workspace,snapshot,source_ref,task_ref,env=bound_campaign
+    for key,value in env.items():monkeypatch.setenv(key,value)
+    monkeypatch.setenv('REVIEWED_OPERATOR_SOURCE_REF',source_ref)
+    supplied=os.environ.get('CLOUDBENCH_CAMPAIGN_STOP_UNDER_TEST')
+    guard=runpy.run_path(supplied or str(source/'scripts/cloudbench-campaign-stop.py'))
+    namespace=guard['main'].__globals__
+    epoch=123.0;boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    digest=hashlib.sha256((float(epoch).hex()+':'+boot).encode()).hexdigest()[:24]
+    campaign_id=f'campaign-qualified600-{digest}-{os.getpid()}'
+    campaign=workspace/'.context/benchmarks/campaigns'/campaign_id
+    (workspace/'.context/stress200-host').mkdir(parents=True)
+    jobs=[{'job_id':f'j{i}','task':f'task{i}','attempts':[{'attempt':1,'status':'failed' if i<failed else 'passed','finished_at':'now','infra_failure':i<failed}]}for i in range(600)]
+    summary={'campaign_id':campaign_id,'e2e_started_at_epoch':epoch,'total_jobs':600,'concurrency':600,'jobs':jobs}
+    manifest={'cohort_id':'c001','e2e_deadline_monotonic':9999.0,'jobs':{j['job_id']:None for j in jobs}}
+    class Parent:
+        pid=12345
+        done=False
+        signals=[]
+        def poll(self):return 0 if self.done else None
+        def send_signal(self,sig):self.signals.append(sig)
+        def wait(self):return 0
+    parent=Parent();fences=[];iterations=[]
+    def launch(args,**kw):
+        assert kw['cwd']==source
+        assert args==['bash','scripts/run-bench','--ref',task_ref]
+        (campaign/'startup-cohorts/c001').mkdir(parents=True)
+        (campaign/'summary.json').write_text(json.dumps(summary));(campaign/'startup-cohorts/c001/manifest.json').write_text(json.dumps(manifest))
+        return parent
+    def advance(_seconds):
+        iterations.append(True)
+        if len(iterations)==3:parent.done=True
+    def fence(repo,_parent,_birth,ref,directory):
+        assert repo==source and ref==source_ref and directory==campaign
+        fences.append(True)
+    actual_path=Path
+    def paths(*args):return source if args==('/tmp/gate/repo',)else actual_path(*args)
+    with patch.dict(namespace,Path=paths,birth=lambda _: 'fixture-birth',fence=fence,subprocess=SimpleNamespace(Popen=launch,check_output=subprocess.check_output)),patch.object(namespace['signal'],'signal'),patch.object(namespace['time'],'sleep',side_effect=advance),patch.object(namespace['sys'],'argv',['stop',str(epoch),'--watcher-scope','fresh','bash','scripts/run-bench','--ref',task_ref]):
+        assert guard['main']()==0
+    destination=workspace/'.context/stress200-host/fresh'
+    assert len(parent.signals)==signals and fences
+    assert (destination/'infra-threshold-parent-term.safe.json').exists()==bool(signals)
+    receipt=json.loads((destination/'threshold-original-parent.private.json').read_text())
+    assert receipt['workspace_binding']['workspace_root']==str(workspace)
+    assert receipt['workspace_binding']['control_ref']==source_ref

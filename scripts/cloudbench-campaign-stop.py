@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import re
+import runpy
 import signal
 import stat
 import subprocess
@@ -158,7 +159,16 @@ def main():
         scope, args = args[1], args[2:]
     if not args or args[:2] != ['bash','scripts/run-bench']:
         raise ValueError('unexpected reviewed command')
-    destination = watcher_destination(repo, scope)
+    workspace = repo
+    binding = None
+    if os.environ.get('CLOUDBENCH_FLEET_ROOT') and Path(os.environ['CLOUDBENCH_FLEET_ROOT']).resolve() != repo.resolve():
+        control = Path(__file__).resolve().parent.parent
+        campaign_module = runpy.run_path(str(control/'scripts/run-bench-campaign.py'))
+        workspace, binding = campaign_module['campaign_workspace'](control, args[2:])
+        if binding is None or binding['control_ref'] != ref:
+            raise ValueError('watcher control/workspace binding differs')
+        repo = control
+    destination = watcher_destination(workspace, scope)
     watcher_files = ('threshold-original-parent.private.json',
                      'first-authentic-infra-summary.private.json',
                      'first-authentic-infra.private.json',
@@ -170,7 +180,7 @@ def main():
         raise ValueError('prior watcher evidence requires a fresh reviewed namespace')
     namespace = hashlib.sha256((float(epoch).hex()+':'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()).encode()).hexdigest()[:24]
     campaign_id = 'campaign-qualified600-'+namespace+'-'+str(os.getpid())
-    campaign = repo/'.context/benchmarks/campaigns'/campaign_id
+    campaign = workspace/'.context/benchmarks/campaigns'/campaign_id
     if campaign.exists():
         raise ValueError('new campaign destination exists')
     env = dict(os.environ, RUN_BENCH_CAMPAIGN_ID=campaign_id)
@@ -201,6 +211,7 @@ def main():
                 validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline)
                 save_once(destination/'threshold-original-parent.private.json',encode({
                     'parent_pid':parent.pid,'parent_birth':expected_birth,'source_ref':ref,
+                    **({'workspace_binding': binding} if binding else {}),
                     'original_epoch':epoch,'campaign_id':campaign_id,
                     'e2e_deadline_monotonic':original_deadline,'members':original_membership}))
             result = validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline)
