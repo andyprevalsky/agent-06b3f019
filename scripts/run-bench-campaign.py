@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import time
+import tempfile
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -508,6 +509,157 @@ def start_shared_inventory(
     return process, log, directory
 
 
+def archive_shared_relay(directory: Path, archive: Path) -> None:
+    """A crashed control socket is evidence metadata, not an exportable file."""
+    import stat
+    def non_records(parent: str, names: list[str]) -> list[str]:
+        return [name for name in names if not (stat.S_ISREG((Path(parent) / name).lstat().st_mode) or stat.S_ISDIR((Path(parent) / name).lstat().st_mode))]
+    shutil.copytree(directory, archive, dirs_exist_ok=True, ignore=non_records)
+
+
+def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
+                       inventory: Path, deadline: float | None) -> dict:
+    """Own one canonical Fly bootstrap and one relay until all children join."""
+    ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+    checked = {}
+    for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
+        raw = subprocess.check_output(['git', '-C', str(root), 'show', ref + ':' + relative])
+        if (root / relative).read_bytes() != raw:
+            raise ValueError('shared relay source differs from reviewed controller')
+        checked[relative] = raw
+    # Unix sockets have a short pathname limit; campaign identifiers can be long.
+    directory = Path(tempfile.mkdtemp(prefix='cb-relay-', dir='/tmp'))
+    archive = campaign_dir / 'shared-relay'
+    write_json_atomic(campaign_dir / 'shared-relay-location.json', {'directory': str(directory)})
+    owner = dict(line.split('=', 1) for line in (inventory / 'owner').read_text().splitlines())
+    app = owner['app']
+    identity = cleanup_ticket_module(root)
+    parent_start = identity.birth(os.getpid())
+    environment = os.environ.copy()
+    # Resolve the same complete bench-token precedence as existing native reads.
+    token = subprocess.check_output(['bash', '-c', 'source "$1"; resolve_fly_token',
+                                    'relay', str(root / 'scripts/lib/cloudbench-inventory.sh')],
+                                   cwd=workspace, env=environment, timeout=20, text=True).strip()
+    if not token: raise ValueError('missing shared transport credential')
+    environment['FLY_API_TOKEN'] = token
+    # One private agent belongs to the singleton bootstrap, never to a route.
+    # Official flyctl isolated mode ties its child agent to bootstrap stdin EOF.
+    agent_socket = directory / 'fly-agent.sock'
+    environment['FLY_AGENT_SOCKET_PATH'] = str(agent_socket)
+    environment['FLY_AGENT_ISOLATED'] = '1'
+    metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
+                              env=environment, capture_output=True, timeout=30)
+    metadata_path = directory / 'app-metadata.private.json'
+    metadata_path.write_bytes(metadata.stdout); metadata_path.chmod(0o600)
+    if metadata.returncode: raise ValueError('shared transport app metadata unavailable')
+    native = json.loads(metadata.stdout)
+    organization = native['Organization']
+    org = organization.get('Slug', organization.get('slug'))
+    network = native.get('Network', '')
+    if native.get('Name') != app or not isinstance(org, str) or not org or not isinstance(network, str):
+        raise ValueError('shared transport app metadata identity invalid')
+    if network == 'default': network = ''
+    ports = []
+    for relative, name in [('scripts/run-bench-cloud', 'REMOTE_STATUS_PORT'), ('scripts/run-bench-cloud', 'REMOTE_BACKEND_PORT'), ('scripts/run-bench-fleet', 'BOX_HEALTH_PORT')]:
+        import re
+        match = re.search(rb'^' + name.encode() + rb'="([0-9]+)"', checked[relative], re.M)
+        if not match or not 1 <= int(match[1]) <= 65535: raise ValueError('invalid configured relay port')
+        ports.append(int(match[1]))
+    authority = dict(schema='shared-relay-authority-v1', app=app, org_slug=org,
+                     network=network, parent_pid=os.getpid(), parent_start=parent_start,
+                     source_sha256=hashlib.sha256(checked['scripts/cloudbench-shared-relay.py']).hexdigest(),
+                     agent_socket=str(agent_socket), inventory_directory=str(inventory.resolve()),
+                     inventory_owner=owner, allowed_remote_ports=sorted(set(ports)), deadline=deadline if deadline is not None else sys.float_info.max)
+    authority_path = directory / 'authority.private.json'
+    authority_path.write_text(json.dumps(authority) + '\n'); authority_path.chmod(0o600)
+    log = (directory / 'broker.private.log').open('w'); os.chmod(log.name, 0o600)
+    bootstrap_log = (directory / 'bootstrap.private.log').open('w'); os.chmod(bootstrap_log.name, 0o600)
+    value = dict(directory=directory, archive=archive, authority=authority_path, parent_start=parent_start,
+                 module=root / 'scripts/cloudbench-shared-relay.py', log=log,
+                 bootstrap_log=bootstrap_log, process=None, bootstrap=None)
+    try:
+        value['bootstrap'] = subprocess.Popen(['flyctl', 'proxy', '0:1', '::1', '-a', app,
+                                               '--bind-addr', '127.0.0.1', '-q'],
+                                              cwd=workspace, env=environment, stdout=bootstrap_log,
+                                              stderr=subprocess.STDOUT, start_new_session=True)
+        write_json_atomic(directory / 'bootstrap-owner.json', {'pid': value['bootstrap'].pid, 'birth': identity.birth(value['bootstrap'].pid), 'parent_pid': os.getpid(), 'parent_start': parent_start})
+        bootstrap_deadline = min(deadline or math.inf, time.monotonic() + 180)
+        while True:
+            if value['bootstrap'].poll() is not None or time.monotonic() >= bootstrap_deadline:
+                raise ValueError('shared transport bootstrap did not initialize')
+            bootstrap_log.flush()
+            if agent_socket.is_socket() and 'Proxying localhost:' in Path(bootstrap_log.name).read_text(): break
+            time.sleep(.1)
+        value['process'] = subprocess.Popen([sys.executable, str(value['module']), 'serve',
+                                            '--authority', str(authority_path), '--directory', str(directory)],
+                                           cwd=workspace, env=environment, stdout=log,
+                                           stderr=subprocess.STDOUT, start_new_session=True)
+        write_json_atomic(directory / 'broker-owner.json', {'pid': value['process'].pid, 'birth': identity.birth(value['process'].pid), 'parent_pid': os.getpid(), 'parent_start': parent_start})
+        while not (directory / 'ready.json').is_file():
+            if value['process'].poll() is not None or time.monotonic() >= bootstrap_deadline:
+                raise ValueError('shared transport broker did not initialize')
+            time.sleep(.1)
+        ready = json.loads((directory / 'ready.json').read_text())
+        if ready['pid'] != value['process'].pid or identity.birth(ready['pid']) != ready['birth']:
+            raise ValueError('shared transport broker identity changed')
+        value['agent'] = ready['agent']
+        value['environment'] = dict(CLOUDBENCH_SHARED_RELAY_AUTHORITY=str(authority_path),
+                                    CLOUDBENCH_SHARED_RELAY_DIRECTORY=str(directory),
+                                    CLOUDBENCH_SHARED_RELAY_PID=str(ready['pid']),
+                                    CLOUDBENCH_SHARED_RELAY_BIRTH=ready['birth'],
+                                    CLOUDBENCH_SHARED_RELAY_AGENT_PID=str(ready['agent']['pid']),
+                                    CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH=ready['agent']['birth'])
+        return value
+    except BaseException:
+        # No task child has been dispatched yet; these exact local children
+        # cannot own a route. Join them before propagating the startup failure.
+        for name in ['process', 'bootstrap']:
+            process = value[name]
+            if process is not None:
+                if process.poll() is None: process.terminate()
+                process.wait()
+        # Joining the bootstrap delivers EOF to its private agent, but before
+        # broker readiness there is no sealed agent identity to verify retirement.
+        write_json_atomic(directory / 'startup-cleanup.json', {
+            'bootstrap_joined': value['bootstrap'] is not None and value['bootstrap'].returncode is not None,
+            'broker_joined': value['process'] is not None and value['process'].returncode is not None,
+            'agent_shutdown_verified': False, 'agent_retirement_pending': value['bootstrap'] is not None})
+        log.close(); bootstrap_log.close()
+        try: archive_shared_relay(directory, archive)
+        except OSError: pass  # Preserve the original startup failure and records.
+        raise
+
+
+def stop_shared_relay(value: dict) -> bool:
+    """Called only after all campaign task controllers have been joined."""
+    process = value['process']
+    acknowledged = False
+    while process.poll() is None:
+        result = subprocess.run([sys.executable, str(value['module']), 'shutdown',
+                                 '--authority', str(value['authority']), '--directory', str(value['directory']),
+                                 '--owner-pid', str(os.getpid()), '--owner-start', value['parent_start'],
+                                 '--token', 'campaign-shutdown'], stdout=value['log'], stderr=subprocess.STDOUT)
+        acknowledged = acknowledged or result.returncode == 0
+        try: process.wait(timeout=1)
+        except subprocess.TimeoutExpired: pass
+    process.wait()
+    bootstrap = value['bootstrap']
+    if bootstrap.poll() is None: bootstrap.terminate()
+    bootstrap.wait()
+    # The private agent is the bootstrap's own isolated child. Keep the parent
+    # alive through its EOF shutdown; never signal a shared/default daemon.
+    identity = cleanup_ticket_module(Path(value['module']).parent.parent)
+    agent = value['agent']
+    while identity.birth(agent['pid']) == agent['birth']:
+        try: state = Path('/proc', str(agent['pid']), 'stat').read_text().rsplit(') ', 1)[1].split()[0]
+        except FileNotFoundError: break
+        if state in ('Z', 'X'): break
+        time.sleep(.1)
+    value['log'].close(); value['bootstrap_log'].close()
+    archive_shared_relay(value['directory'], value['archive'])
+    return acknowledged and process.returncode == 0
+
+
 def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -> str:
     """Mint the expected feed identity in its actual owning campaign parent."""
     source_root = Path(__file__).resolve().parent.parent
@@ -953,6 +1105,7 @@ def main() -> int:
         if classified.returncode not in {0, 1}:
             raise SystemExit("campaign production-only classification failed")
         all_production_only = classified.returncode == 0
+    shared_relay = None
     inventory_process = None
     inventory_log = None
     inventory_directory = None
@@ -987,6 +1140,8 @@ def main() -> int:
                 print(
                     "Campaign inventory: one parent-owned native feed for all cloud controllers; capacity and resource mutation checks remain live"
                 )
+                if os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_RELAY", "1") == "1" and sys.platform.startswith("linux"):
+                    shared_relay = start_shared_relay(root, campaign_dir, workspace, inventory_directory, e2e_deadline)
                 state["shared_inventory"] = {
                     "directory": str(inventory_directory),
                     "publisher_pid": inventory_process.pid,
@@ -1180,6 +1335,8 @@ def main() -> int:
                     environment["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"] = mutation_authority
                 else:
                     environment.pop("CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY", None)
+                if shared_relay is not None:
+                    environment.update(shared_relay['environment'])
                 environment.pop("CLOUDBENCH_CAMPAIGN_SEED_PROOF", None)
                 if strict_start and not job.get("_independent_retry"):
                     if current_cohort.get("_seed_proof"):
@@ -1376,6 +1533,10 @@ def main() -> int:
             handle = job.get("_log_handle")
             if handle is not None:
                 handle.close()
+        if shared_relay is not None:
+            if not stop_shared_relay(shared_relay):
+                first_failure = first_failure or 1
+                state['shared_transport_cleanup_pending'] = True
         if inventory_process is not None:
             if not stop_shared_inventory(
                 inventory_process, inventory_log, inventory_directory

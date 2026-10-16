@@ -1330,7 +1330,85 @@ cloudbench_status_proxy_lifecycle_response_accepted() {
   esac
 }
 
+# Campaign transports use keyed broker leases, never a shared PID sentinel.
+cloudbench_shared_relay_enabled() {
+  [ -n "${CLOUDBENCH_SHARED_RELAY_AUTHORITY:-}${CLOUDBENCH_SHARED_RELAY_DIRECTORY:-}" ]
+}
+cloudbench_shared_relay_request() {  # action token [route arguments]
+  local action="$1" token="$2" start
+  shift 2
+  start="$(cloudbench_pid_start_time "$$")" || return 1
+  [ -n "$start" ] || return 1
+  python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-${CLOUDBENCH_RUNTIME_SCRIPT_ROOT:-$ROOT_DIR/scripts}}/cloudbench-shared-relay.py" \
+    "$action" --authority "${CLOUDBENCH_SHARED_RELAY_AUTHORITY:?}" \
+    --directory "${CLOUDBENCH_SHARED_RELAY_DIRECTORY:?}" \
+    --owner-pid "$$" --owner-start "$start" --token "$token" "$@"
+}
+cloudbench_proxy_alive() {  # PID variable name; shared mode has no route PID
+  local name="$1" lease_name="${1}_LEASE" live_name="${1}_LIVE" observed="" marker
+  if cloudbench_shared_relay_enabled; then
+    [ -n "${!lease_name:-}" ] && [ -n "${!live_name:-}" ] || return 1
+    cloudbench_pid_matches_start "${CLOUDBENCH_SHARED_RELAY_PID:?}" "${CLOUDBENCH_SHARED_RELAY_BIRTH:?}" || return 1
+    cloudbench_pid_matches_start "${CLOUDBENCH_SHARED_RELAY_AGENT_PID:?}" "${CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH:?}" || return 1
+    [ -S "$CLOUDBENCH_SHARED_RELAY_DIRECTORY/control.sock" ] && [ ! -L "$CLOUDBENCH_SHARED_RELAY_DIRECTORY/control.sock" ] || return 1
+    marker="$CLOUDBENCH_SHARED_RELAY_DIRECTORY/leases/${!lease_name}.live"
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    IFS= read -r observed < "$marker" || return 1
+    [ "$observed" = "${!live_name}" ]
+  else
+    [ -n "${!name:-}" ] && kill -0 "${!name}" 2>/dev/null
+  fi
+}
+cloudbench_proxy_stop() {  # exact route only; never signal the broker
+  local name="$1" lease_name="${1}_LEASE" token_name="${1}_TOKEN"
+  if cloudbench_shared_relay_enabled; then
+    if [ -n "${!lease_name:-}" ]; then
+      cloudbench_shared_relay_request release "${!token_name:-}" --lease "${!lease_name}" >/dev/null || return 1
+      printf -v "$lease_name" '%s' ''
+    fi
+  else
+    cloudbench_terminate_and_wait 5 "${!name:-}"
+  fi
+  printf -v "$name" '%s' ''
+}
+cloudbench_shared_proxy_start() {  # same signature as data-plane proxy
+  local port="$1" remote="$2" host="$3" log="$4" name="$5" label="$6"
+  local timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}" result lease started health live_path live_value rc
+  local lease_name="${5}_LEASE" token_name="${5}_TOKEN" live_name="${5}_LIVE"
+  local token="${RUN_LOG_TOKEN:-${RUN_ID:?}}-$label-$port"
+  started="$(date +%s)"
+  while :; do
+    rc=0
+    result="$(cloudbench_shared_relay_request acquire "$token" \
+      --mid "${mid:-${CLOUDBENCH_RELAY_MACHINE_ID:?}}" --remote-ip "$host" \
+      --remote-port "$remote" --local-port "$port")" || rc=$?
+    [ "$rc" != 0 ] || break
+    [ "$rc" != 98 ] || return 98
+    [ $(( $(date +%s) - started )) -lt "$timeout" ] || return 1
+    sleep 1
+  done
+  IFS="$(printf '\t')" read -r lease live_path live_value <<< "$(printf '%s' "$result" | python3 -c 'import json,re,sys;v=json.load(sys.stdin);s=v["lease"];assert isinstance(s,str) and re.fullmatch(r"[a-f0-9-]{32,36}",s);print(s,v["live_path"],v["live_value"],sep="\t")')"
+  [ "$live_path" = "$CLOUDBENCH_SHARED_RELAY_DIRECTORY/leases/$lease.live" ] && [ -n "$live_value" ] || return 1
+  printf -v "$name" '%s' ''
+  printf -v "$lease_name" '%s' "$lease"
+  printf -v "$token_name" '%s' "$token"
+  printf -v "$live_name" '%s' "$live_value"
+  printf 'shared relay lease %s: localhost:%s -> %s:%s\n' "$lease" "$port" "$host" "$remote" >> "$log"
+  [ "$label" = status ] || return 0
+  while [ $(( $(date +%s) - started )) -lt "$timeout" ]; do
+    cloudbench_proxy_alive "$name" || break
+    health="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/driver-health" 2>/dev/null || true)"
+    if cloudbench_status_proxy_lifecycle_response_accepted "$health"; then return 0; fi
+    sleep 1
+  done
+  cloudbench_proxy_stop "$name" || return 1
+  return 1
+}
+
 cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> <label> [timeout]
+  if cloudbench_shared_relay_enabled; then
+    cloudbench_shared_proxy_start "$@"; return $?
+  fi
   local local_port="$1" remote_port="$2" host="$3" log_file="$4"
   local pid_var="$5" label="$6" timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
   local started_at pid attempt=0 probe_path="/" health_code

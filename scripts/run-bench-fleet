@@ -759,6 +759,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-disposable-volume.py" \
        "$ROOT_DIR/scripts/cloudbench-cleanup-tickets.py" \
        "$ROOT_DIR/scripts/cloudbench-cohort-reconcile.py" \
+       "$ROOT_DIR/scripts/cloudbench-shared-relay.py" \
        "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
@@ -8657,6 +8658,9 @@ cloudbench_guest_shutdown_status() {  # <status-proxy-port>
 }
 
 start_data_plane_proxy() {
+    # Historical-owner recovery records and joins real proxy PIDs. Keep that
+    # separate legacy transport contract; campaign leases belong to new jobs.
+    local CLOUDBENCH_SHARED_RELAY_AUTHORITY="" CLOUDBENCH_SHARED_RELAY_DIRECTORY=""
     cloudbench_start_data_plane_proxy "$@"
 }
 
@@ -17228,7 +17232,7 @@ PY
 bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base> [exact-run-token]
     local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
     local runtime_run_token="${7:-}"
-    local pip="" metrics_proxy_pid="" metrics_port="" metrics_url=""
+    local pip="" metrics_proxy_pid="" metrics_proxy_pid_LEASE="" metrics_proxy_pid_TOKEN="" metrics_proxy_pid_LIVE="" metrics_port="" metrics_url=""
     local metrics_started_at scrape_failures=0 metrics_lease_owner_pid metrics_lease_token
     local ready_reconcile_rc=0 inventory_status=0
     local scale_down_target="" scale_down_since="" scale_down_now=""
@@ -17380,7 +17384,7 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             fi
         done < <(jobs -pr)
         cloudbench_terminate_and_wait 30 "${live_jobs[@]:-}"
-        cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"
+        cloudbench_proxy_stop metrics_proxy_pid || true
         if [ -n "${metrics_lease_owner_pid:-}" ] && [ -n "${metrics_lease_token:-}" ]; then
             release_autoscaler_metrics_owner \
                 "$metrics_lease_owner_pid" "$metrics_lease_token" || true
@@ -17429,6 +17433,7 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
     : > "$out/autoscaler-metrics-proxy.log"
     start_metrics_proxy() {  # start_metrics_proxy [timeout-seconds]
         local timeout="${1:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
+        if cloudbench_shared_relay_enabled; then cloudbench_proxy_stop metrics_proxy_pid || return 1; fi
         metrics_started_at="$(date +%s)"
         while [ $(( $(date +%s) - metrics_started_at )) -lt "$timeout" ]; do
             # Token-wide release also recovers a claim helper interrupted after
@@ -17440,6 +17445,12 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             claim_autoscaler_metrics_port metrics_port \
                 "$metrics_lease_owner_pid" "$metrics_lease_token" \
                 || { sleep 2; continue; }
+            if cloudbench_shared_relay_enabled; then
+                local mid="$cid"
+                cloudbench_shared_proxy_start "$metrics_port" "$BOX_HEALTH_PORT" "$pip" "$out/autoscaler-metrics-proxy.log" metrics_proxy_pid metrics "$timeout" || return 1
+                metrics_url="http://127.0.0.1:$metrics_port"
+                return 0
+            fi
             flyctl proxy "$metrics_port:$BOX_HEALTH_PORT" "$pip" \
                 -a "$APP" --bind-addr 127.0.0.1 -q \
                 >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
@@ -17540,7 +17551,7 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
         if [ -s "$out/autoscaler.failed" ]; then
             return 1
         fi
-        if ! fleet_job_running "$metrics_proxy_pid"; then
+        if { cloudbench_shared_relay_enabled && ! cloudbench_proxy_alive metrics_proxy_pid; } || { ! cloudbench_shared_relay_enabled && ! fleet_job_running "$metrics_proxy_pid"; }; then
             scale_down_target=""
             scale_down_since=""
             metrics_proxy_pid=""

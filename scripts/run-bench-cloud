@@ -3143,7 +3143,8 @@ stop_proxy() {
     # tunnel PIDs (not backgrounded FLY() wrapper subshells). Terminate and reap
     # them before releasing their port leases; otherwise an orphaned listener can
     # poison a later fleet with an address-in-use failure.
-    cloudbench_terminate_and_wait 5 "${PROXY_PID:-}" "${STATUS_PROXY_PID:-}"
+    cloudbench_proxy_stop PROXY_PID || true
+    cloudbench_proxy_stop STATUS_PROXY_PID || true
     STATUS_PROXY_PID=""
     [ -n "$DASHBOARD_MIRROR_PID" ] && kill "$DASHBOARD_MIRROR_PID" 2>/dev/null || true
     if [ -n "$IMESSAGE_RELAY_PID" ]; then
@@ -3718,7 +3719,7 @@ confirm_guest_shutdown() {
             return 1
             ;;
     esac
-    if [ -z "${STATUS_PROXY_PID:-}" ] || ! kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+    if ! cloudbench_proxy_alive STATUS_PROXY_PID; then
         echo "❌ guest cleanup unconfirmed: status proxy is not running" >&2
         return 1
     fi
@@ -4992,7 +4993,7 @@ start_leased_data_plane_proxy() {  # <preferred> <port-var> <remote-port> <host>
         if start_data_plane_proxy "$port" "$remote_port" "$host" "$log_file" "$pid_var" "$label" "$proxy_timeout"; then
             if [ "$label" = "status" ]; then
                 publish_status_proxy_port "$port" || {
-                    cloudbench_terminate_and_wait 5 "${!pid_var}"
+                    cloudbench_proxy_stop "$pid_var" || return 1
                     release_local_port_lease "$port"
                     return 1
                 }
@@ -5328,7 +5329,7 @@ read_bench_log() {
     local headers="${BENCH_LOG_HEADERS_FILE:-/dev/null}"
     BENCH_LOG_READ_EXIT=1
     BENCH_LOG_REQUEST_OFFSET="${offset:-0}"
-    [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null || return 1
+    cloudbench_proxy_alive STATUS_PROXY_PID || return 1
     if [ -z "$offset" ]; then
         offset="$(wc -c < "$SSH_LOG" | tr -d ' ')"
     fi
@@ -5548,7 +5549,7 @@ refresh_bench_log_to_eof() {
 }
 status_proxy_transport_healthy() {
     local health_code
-    [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null || return 1
+    cloudbench_proxy_alive STATUS_PROXY_PID || return 1
     # flyctl proxy can survive while its lazy DNS/GraphQL setup is wedged. PID
     # liveness alone is therefore not a transport contract. Both 204 (driver
     # alive) and 410 (server reachable, driver not yet/already gone) prove that
@@ -5560,7 +5561,7 @@ status_proxy_transport_healthy() {
 }
 ensure_status_proxy() {
     if ! status_proxy_transport_healthy; then
-        cloudbench_terminate_and_wait 5 "${STATUS_PROXY_PID:-}"
+        cloudbench_proxy_stop STATUS_PROXY_PID || return 1
         STATUS_PROXY_PID=""
         release_local_port_lease "$LOCAL_STATUS_PORT"
         start_leased_data_plane_proxy "$LOCAL_STATUS_PORT" LOCAL_STATUS_PORT \
@@ -5683,14 +5684,14 @@ while :; do
         && log_refresh_ok="1"
     if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] \
        && [ "${_start_ok:-1}" = "0" ] && [ "$log_refresh_ok" = "1" ] \
-       && [ -s "$SSH_LOG" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+       && [ -s "$SSH_LOG" ] && cloudbench_proxy_alive STATUS_PROXY_PID; then
         # refresh_bench_log accepted this exact RUNSTAMP with the bounded log
         # continuity protocol. A dead lifecycle never acknowledges boot.
         _start_health="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
             "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
         case "$_start_health" in
             204|425)
-                if kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+                if cloudbench_proxy_alive STATUS_PROXY_PID; then
                     printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
                     mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
                     _start_ok=1
@@ -5880,7 +5881,7 @@ while :; do
     # exists. This keeps dead-driver detection fast without killing valid quiet work.
     if [ $((now - last_change)) -ge "$DRIVER_STALL_SECONDS" ]; then
         driver_health="unknown"
-        if [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+        if cloudbench_proxy_alive STATUS_PROXY_PID; then
             for _health_attempt in $(seq 1 5); do
                 probe_driver_health; health_rc=$?
                 [ "$health_rc" = "0" ] && { driver_health="alive"; break; }
