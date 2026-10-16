@@ -59,7 +59,7 @@ Permanent backend discovery uses `back-end/src/tests/blackbox/run.ts` .blackbox.
 
 At 10k agents, new candidate reads and state are per-agent, bounded to 20 rows, with no global approval cache, polling loop or shared hot authorization row. Each eligible miss can add one logical classifier call per activity attempt, plus existing provider routing. No 10k capacity or latency campaign was run; input volume, provider quotas and transport retries remain operational limits. Existing lazy legacy fingerprint indexing is unchanged.
 
-Adversarial review identified and closed fresh-funding fallthrough, client-key binding and handled-error usage loss before the approval handoff. Full deploy gates and rollout are not claimed complete.
+Adversarial review identified and closed fresh-funding fallthrough, client-key binding and handled-error usage loss before the approval handoff. The isolated full deploy coverage run then caught a compatibility regression in the new lookup error wrapper: fingerprint-only legacy calls no longer preserved the original unknown card-provider error object. The unchanged `purchases.part3` observation assertion failed before a narrow receipt-absent/no-usage passthrough and passed afterward; the semantic reuse owning suite also passed with its billed parse/card-IO error checks unchanged. Receipt-scoped error transport and reuse-only funding guards remain intact. Full deploy gates and rollout are not claimed complete.
 
 ## Human feedback
 

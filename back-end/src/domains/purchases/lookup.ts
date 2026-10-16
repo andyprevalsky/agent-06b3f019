@@ -66,6 +66,9 @@ export async function lookupPurchase(
     );
     return { ...result, ...(usageItems.length > 0 ? { usageItems } : {}) };
   } catch (cause) {
+    // Legacy fingerprint-only lookups preserve the provider observation unchanged.
+    // Only receipt-scoped lookups need the usage-bearing transport error contract.
+    if (requested === undefined && usageItems.length === 0) throw cause;
     const error =
       cause instanceof PurchaseError
         ? cause
