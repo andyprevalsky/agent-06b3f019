@@ -1,8 +1,11 @@
-import type {
-  NativeWorkerHost,
-  ProcessReceipt,
-  RuntimeHostFacts,
-  WorkerProcessTransport,
+import { deflateSync } from 'node:zlib';
+import {
+  canonicalWorkerJSON,
+  workerSHA256,
+  type NativeWorkerHost,
+  type ProcessReceipt,
+  type RuntimeHostFacts,
+  type WorkerProcessTransport,
 } from './workerProcessDeployment';
 
 const FACTS_SCRIPT = [
@@ -32,9 +35,28 @@ interface ExecReply {
 }
 export function createWorkerProcessTransport(
   token: string,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  capsule?: { origin: string; planIdentity: string }
 ): WorkerProcessTransport {
   if (!token) throw new Error('Missing existing Fly API credential for runtime recovery');
+  const planIdentity = capsule?.planIdentity;
+  let origin: string | undefined;
+  if (capsule) {
+    const parsed = new URL(capsule.origin);
+    if (
+      parsed.protocol !== 'https:' ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.pathname !== '/' ||
+      !/^[a-f0-9]{64}$/.test(capsule.planIdentity)
+    )
+      throw new Error('Invalid retained runtime capsule identity');
+    origin = parsed.origin;
+  }
+  let pinnedSource: string | undefined;
+  let compressedSource: string | undefined;
   const exactURL = (app: string, id: string, exec = false) => {
     if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(app) || !/^[a-f0-9]{14}$/.test(id))
       throw new Error('Invalid exact existing Machine target');
@@ -58,17 +80,14 @@ export function createWorkerProcessTransport(
       throw new Error('Existing Machine observation is not JSON');
     }
   };
-  const run = async (
-    app: string,
-    id: string,
-    source: string,
-    envelope?: unknown
-  ): Promise<unknown> => {
-    const reply = (await request(exactURL(app, id, true), {
+  const run = async (app: string, id: string, source: string): Promise<unknown> => {
+    const command = {
       command: ['python', '-I', '-B', '-c', source],
       timeout: 30,
-      ...(envelope === undefined ? {} : { stdin: JSON.stringify(envelope) }),
-    })) as ExecReply;
+    };
+    if (Buffer.byteLength(JSON.stringify(command)) > 15 * 1024)
+      throw new Error('Existing Machine command exceeds supported transport bound');
+    const reply = (await request(exactURL(app, id, true), command)) as ExecReply;
     if (reply.exit_code !== 0 || reply.exit_signal || typeof reply.stdout !== 'string')
       throw new Error('Existing Machine command did not return a terminal successful receipt');
     try {
@@ -98,7 +117,63 @@ export function createWorkerProcessTransport(
       return (await run(app, id, FACTS_SCRIPT)) as RuntimeHostFacts;
     },
     async execBootstrap(app, id, source, envelope) {
-      return (await run(app, id, source, envelope)) as ProcessReceipt;
+      if (!capsule || !origin) throw new Error('Missing retained runtime capsule');
+      exactURL(app, id);
+      if (
+        !['status', 'ensure'].includes(String(envelope.action)) ||
+        envelope.app !== app ||
+        envelope.machineId !== id ||
+        typeof envelope.machineVersion !== 'string' ||
+        !envelope.machineVersion ||
+        typeof envelope.bootId !== 'string' ||
+        !envelope.bootId
+      )
+        throw new Error('Runtime envelope does not identify the exact existing host');
+      if (
+        !source ||
+        Buffer.byteLength(source) > 128 * 1024 ||
+        (pinnedSource !== undefined && pinnedSource !== source)
+      )
+        throw new Error('Runtime capsule bootstrap source changed');
+      if (pinnedSource === undefined) {
+        pinnedSource = source;
+        compressedSource = deflateSync(Buffer.from(source), { level: 9 }).toString('base64');
+      }
+      const envelopeSHA256 = workerSHA256(canonicalWorkerJSON(envelope));
+      const url = new URL('/api/worker-process-runtime', origin);
+      for (const [key, value] of Object.entries({
+        action: envelope.action,
+        app,
+        machineId: id,
+        machineVersion: envelope.machineVersion,
+        bootId: envelope.bootId,
+        planIdentity,
+        envelopeSHA256,
+      }))
+        url.searchParams.set(key, String(value));
+      const loader = [
+        'import base64,hashlib,io,json,os,signal,sys,urllib.request,zlib',
+        'class NoRedirect(urllib.request.HTTPRedirectHandler):',
+        " def redirect_request(self,*a,**k): raise ValueError('redirect denied')",
+        "key=os.environ.get('BACKEND_API_KEY')",
+        "if not key: raise ValueError('missing runtime credential')",
+        `req=urllib.request.Request(${JSON.stringify(url.href)},headers={'X-API-Key':key,'Accept':'application/json'})`,
+        'def expired(*a): raise TimeoutError()',
+        'previous=signal.signal(signal.SIGALRM,expired);signal.alarm(15)',
+        'try:',
+        ' with urllib.request.build_opener(NoRedirect()).open(req,timeout=15) as r:',
+        "  if r.status!=200 or int(r.headers.get('Content-Length','0'))>50331648: raise ValueError('invalid capsule response')",
+        '  body=r.read(50331649)',
+        'finally: signal.alarm(0);signal.signal(signal.SIGALRM,previous)',
+        "if len(body)>50331648: raise ValueError('capsule too large')",
+        "actual=hashlib.sha256(json.dumps(json.loads(body),sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()",
+        `if actual!=${JSON.stringify(envelopeSHA256)}: raise ValueError('capsule digest mismatch')`,
+        `source=zlib.decompress(base64.b64decode(${JSON.stringify(compressedSource)}))`,
+        `if len(source)>131072 or hashlib.sha256(source).hexdigest()!=${JSON.stringify(workerSHA256(source))}: raise ValueError('bootstrap digest mismatch')`,
+        "sys.stdin=io.TextIOWrapper(io.BytesIO(body),encoding='utf-8')",
+        "exec(compile(source,'<worker-bootstrap>','exec'),{'__name__':'__main__'})",
+      ].join('\n');
+      return (await run(app, id, loader)) as ProcessReceipt;
     },
   };
 }
