@@ -251,7 +251,10 @@ export async function testBoundary_directCallsSurgeApi() {
     call.requestHeaders['Content-Type'] === 'application/json',
     'Expected Content-Type: application/json'
   );
-  assert(call.requestHeaders['Authorization'] === '[redacted]', 'Expected captured authorization to be fully redacted');
+  assert(
+    call.requestHeaders['Authorization'] === '[redacted]',
+    'Expected captured authorization to be fully redacted'
+  );
   assert(call.requestBody !== null, 'Expected non-null request body');
   const body = JSON.parse(call.requestBody!);
   assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}, got to=${body.to}`);
@@ -313,7 +316,10 @@ export async function testBoundary_notifyCompletionCallsSurgeApi() {
       call.requestHeaders['Content-Type'] === 'application/json',
       'Expected JSON content type'
     );
-    assert(call.requestHeaders['Authorization'] === '[redacted]', 'Expected captured authorization to be fully redacted');
+    assert(
+      call.requestHeaders['Authorization'] === '[redacted]',
+      'Expected captured authorization to be fully redacted'
+    );
     assert(call.requestBody !== null, 'Expected non-null request body');
     const body = JSON.parse(call.requestBody!);
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}, got to=${body.to}`);
