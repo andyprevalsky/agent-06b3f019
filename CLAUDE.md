@@ -60,6 +60,16 @@ links. A file pointer never substitutes for the diff.
 - After each run, normally stop exact-owned terminal idle controllers once
   consumer/process guards pass. Retain data and warm capacity; credit compute
   savings only after actual STOPPED confirmation, never from a stop request.
+- Failed, cancelled or interrupted work must not leave unused Machines running.
+  Reconcile and stop verified idle owned task Machines as well as controllers;
+  preserve their IDs, volumes, evidence and explicitly protected warm services.
+  Reuse eligible existing Machines before any new allocation. Fresh-only flags
+  must not bypass reuse; creating more requires measured unmet need after reuse
+  and verified provider headroom. A limit error is not permission to retry creates.
+  Agents blocked by Fly limits must continue safe work on existing Machines or
+  local gates, coordinate supported reuse, and report the remaining allocation gap.
+- Refresh native running/stopped counts after material cleanup before presenting
+  them as current; keep older snapshots clearly dated and separate from live facts.
 - Infra stop means **5% of the original scheduled total: 30 of 600**. Display
   `infra jobs / scheduled jobs`; never use finished attempts as denominator.
   Earlier wrong 1/1 stops are erroneous early aborts, not valid threshold hits.
