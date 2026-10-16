@@ -168,6 +168,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-explicit-idle-admission.test.py"),
     ),
     Gate(
+        "cloudbench-protected-resources",
+        ("python3", "scripts/tests/cloudbench-protected-resources.test.py"),
+    ),
+    Gate(
         "cloudbench-pool-run-token",
         ("python3", "scripts/tests/cloudbench-pool-run-token.test.py"),
     ),
