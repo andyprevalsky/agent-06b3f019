@@ -305,9 +305,18 @@ def run_bounded(argv: list[str], seconds: float, env: dict[str, str]) -> tuple[i
         terminate()
         stdout, stderr = process.communicate()
         return 142, stdout, stderr
-    except BaseException:
+    except BaseException as error:
         # An interrupt must not strand a detached flyctl session.
         terminate()
+        # Preserve already captured private bytes on the original exception.
+        # The deadline has fired: do not wait again for inherited pipe handles.
+        try:
+            error.stdout, error.stderr = process.communicate(timeout=0)
+        except subprocess.TimeoutExpired as partial:
+            error.stdout, error.stderr = partial.output or b"", partial.stderr or b""
+        finally:
+            process.stdout.close()
+            process.stderr.close()
         raise
 
 

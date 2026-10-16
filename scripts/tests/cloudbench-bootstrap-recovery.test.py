@@ -1289,6 +1289,84 @@ class OriginalVolumeProcessScanTests(unittest.TestCase):
                 ))
 
 
+class BoundedProcessOutputTests(unittest.TestCase):
+    """Actual subprocess output survives interruption without being printed."""
+    def setUp(self):
+        self.run_bounded = runpy.run_path(
+            str(REPO / "scripts/cloudbench-original-volume-capture.py")
+        )["run_bounded"]
+
+    def interrupted(self, stdout, stderr):
+        import contextlib
+        import signal
+        with tempfile.TemporaryDirectory() as temporary:
+            ready = Path(temporary) / 'ready'
+            code = ('import os,pathlib,time;'
+                    f'os.write(1,{stdout!r});os.write(2,{stderr!r});'
+                    f'pathlib.Path({str(ready)!r}).touch();time.sleep(30)')
+            created = []
+            waits = []
+            popen = subprocess.Popen
+            alarm = TimeoutError('bounded process outer alarm')
+            def start(*args, **kwargs):
+                process = popen(*args, **kwargs)
+                created.append(process)
+                communicate = process.communicate
+                def observed_communicate(*args, **kwargs):
+                    waits.append(kwargs.get('timeout'))
+                    if len(waits) > 1:
+                        self.assertEqual(kwargs.get('timeout'), 0, 'interrupted drain must not wait')
+                    return communicate(*args, **kwargs)
+                process.communicate = observed_communicate
+                deadline = time.monotonic() + 5
+                while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.005)
+                self.assertTrue(ready.exists(), 'subprocess did not emit ready marker')
+                signal.setitimer(signal.ITIMER_REAL, .05)
+                return process
+            def expired(*unused):
+                raise alarm
+            old_handler = signal.signal(signal.SIGALRM, expired)
+            old_timer = signal.getitimer(signal.ITIMER_REAL)
+            self.assertEqual(old_timer, (0.0, 0.0))
+            printed_out, printed_err = io.StringIO(), io.StringIO()
+            try:
+                with patch('subprocess.Popen', side_effect=start), \
+                        contextlib.redirect_stdout(printed_out), contextlib.redirect_stderr(printed_err), \
+                        self.assertRaises(TimeoutError) as caught:
+                    self.run_bounded([sys.executable, '-I', '-c', code], 10, dict(os.environ))
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, old_handler)
+                for process in created:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=2)
+            self.assertIs(caught.exception, alarm)
+            self.assertEqual(waits, [10, 0])
+            self.assertIsNotNone(created[0].returncode, 'interrupted child was not reaped')
+            self.assertEqual(printed_out.getvalue(), '')
+            self.assertEqual(printed_err.getvalue(), '')
+            self.assertEqual(caught.exception.stdout, stdout)
+            self.assertEqual(caught.exception.stderr, stderr)
+
+    def test_outer_alarm_preserves_exact_private_partial_bytes(self):
+        self.interrupted(b'private stdout\x00\xff\n', b'private stderr\x00\xfe\n')
+
+    def test_outer_alarm_preserves_empty_byte_streams(self):
+        self.interrupted(b'', b'')
+
+    def test_normal_completion_contract_unchanged(self):
+        self.assertEqual(self.run_bounded(
+            [sys.executable, '-I', '-c', 'import os;os.write(1,b"out");os.write(2,b"err")'],
+            5, dict(os.environ)), (0, b'out', b'err'))
+
+    def test_subprocess_deadline_contract_unchanged(self):
+        self.assertEqual(self.run_bounded(
+            [sys.executable, '-I', '-c', 'import os,time;os.write(1,b"out");os.write(2,b"err");time.sleep(30)'],
+            .2, dict(os.environ)), (142, b'out', b'err'))
+
+
 class MachineExecDeliveryTests(unittest.TestCase):
     """Recorded machine-exec bodies are distinct from the CLI transport status."""
     def setUp(self):
