@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import runpy
 import stat
 import subprocess
 import sys
@@ -478,6 +479,10 @@ class BootstrapRecoveryTest(unittest.TestCase):
                 self.assertEqual(imported.returncode,0,imported.stderr)
                 self.assertEqual(reader.read_bytes(),(ROOT/'cloudbench-campaign-machines.py').read_bytes())
                 self.assertFalse(reader.is_symlink())
+                volume_reader=snapshots[0]/'cloudbench-original-volume-capture.py'
+                self.assertEqual(volume_reader.read_bytes(),(ROOT/'cloudbench-original-volume-capture.py').read_bytes())
+                module=runpy.run_path(str(volume_reader))
+                self.assertTrue(callable(module['Fly']))
                 manifest=json.loads((snapshots[0]/'cloudbench-controller-snapshot-manifest.json').read_text())
                 entry=next(row for row in manifest['files'] if row['path']==reader.name)
                 self.assertEqual(entry['sha256'],digest(reader.read_bytes()))
@@ -1519,6 +1524,346 @@ class ControllerExportContinuationTests(unittest.TestCase):
         self.launch.continuation=None
         with self.assertRaisesRegex(ValueError,'workspace ownership changed'):self.module.launch(self.launch)
 
+
+
+class CrossControllerColdHandoffTests(PreconfigStartupArchiveTests):
+    def setUp(self):
+        super().setUp()
+        self.source = self.base / 'source-common'; self.source.mkdir()
+        self.destination = self.base / 'destination-common'; self.destination.mkdir()
+        import runpy
+        contract=runpy.run_path(str(REPO/'scripts/cloudbench_execution_provenance.py'))
+        matrix=contract['build_task_matrix']([BENCH+'=real'])
+        config=contract['build_config'](contract['CONFIG_SCHEMA_VERSION'],['task_count=1','task_matrix_sha256='+matrix['sha256'],'node_dependency_fingerprint='+'b'*64,'python_dependency_fingerprint='+'c'*64])
+        provenance=dict(schema_version=contract['EXECUTION_SCHEMA_VERSION'],base_sha='a'*40,workspace_patch_sha256='none',controller_snapshot=dict(schema_version=contract['SNAPSHOT_SCHEMA_VERSION'],sha256='d'*64),config=config)
+        write(self.run/'execution-provenance.json',json.dumps(provenance))
+        write(self.run/'execution-task-matrix.json',json.dumps(matrix))
+        write(self.run/'_batch/run.json',json.dumps(dict(run_id=RUN,status='failed',controller_exit_code=1,execution_provenance=provenance)))
+        write(self.registry/'meta',(self.registry/'meta').read_bytes()+b'pid_start=proc-start:00000000-0000-0000-0000-000000000000:123\n')
+        self.native['state'] = 'stopped'
+        self.native['config']['guest'] = {'cpu_kind': 'shared', 'cpus': 2, 'memory_mb': 4096}
+        write(self.before, json.dumps(self.native)); write(self.after, json.dumps(self.native))
+        self.capture()
+        self.receipt = self.out / 'failed-preconfig-runtime-archive/consumed.json'
+        self.receipt.parent.mkdir()
+        self.helper['commit_preconfig'](self.registry,self.out,MACHINE,TOKEN,self.archive,self.before,self.after,self.receipt)
+        (self.out/'runtime-evidence.pending').unlink()
+        (self.registry/'runtime-evidence-unconfirmed').unlink()
+        self.target = dict(machine='d'*14, volume='vol_destination', workspace='/retained/destination', common=str(self.destination),
+                           source_ref='e'*40, ownership_sha256='f'*64, controller_config_sha256='1'*64,
+                           preservation='rootfs-always', pool_name='destination.cold.ids')
+        self.source_endpoint = dict(self.target,machine='4'*14,common=str(self.source),volume='vol_source')
+        self.nonce = '2'*32
+        self.packet = self.base / 'handoff.json'
+
+    def test_two_real_common_stores_require_committed_source_hold_before_admission(self):
+        original=(self.registry/'meta').read_bytes()
+        self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+             self.before,self.after,self.target,self.nonce,self.packet,source_endpoint=self.source_endpoint)
+        hold=self.source/'cloudbench-cold-handoffs/outgoing'/MACHINE
+        self.assertTrue(hold.exists())
+        self.assertEqual((self.registry/'meta').read_bytes(),original.replace(b'cleanup_policy=reap\n',b'cleanup_policy=retain\n'))
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        self.assertEqual((self.destination/'cloudbench-pools/destination.cold.ids').read_text(),MACHINE+'\n')
+        self.assertTrue(hold.exists(), 'source exclusion is permanent after destination admission')
+        self.assertFalse((self.destination/'cloudbench-pool-claims'/MACHINE).exists())
+        # Exact replay is idempotent and cannot enroll a second destination.
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        foreign=dict(self.target,machine='3'*14)
+        with self.assertRaises(ValueError):
+            self.helper['import_cold_handoff'](self.destination,foreign,self.packet,self.before,self.after)
+
+    def export(self, checkpoint=lambda stage: None):
+        return self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+            self.before,self.after,self.target,self.nonce,self.packet,checkpoint,source_endpoint=self.source_endpoint)
+
+    def test_six_source_destination_crash_boundaries_resume_without_dual_availability(self):
+        for stage in ('source-owner-held','source-native-held','source-sealed','destination-claimed','destination-ledger','destination-terminal'):
+            with self.subTest(stage=stage):
+                # Each case uses its own actual source/destination common roots.
+                case=type(self)('test_two_real_common_stores_require_committed_source_hold_before_admission');case.setUp()
+                try:
+                    def fail(actual):
+                        if actual==stage: raise RuntimeError('controlled durable boundary interruption')
+                    if stage.startswith('source'):
+                        with self.assertRaises(RuntimeError):case.export(fail)
+                        self.assertTrue((case.registry/'cold-handoff-outgoing').exists())
+                        self.assertFalse(case.packet.exists())
+                        case.export()
+                    else:
+                        case.export()
+                        with self.assertRaises(RuntimeError):case.helper['import_cold_handoff'](case.destination,case.target,case.packet,case.before,case.after,fail)
+                        self.assertTrue((case.destination/'cloudbench-pool-claims'/MACHINE).exists())
+                    case.helper['import_cold_handoff'](case.destination,case.target,case.packet,case.before,case.after)
+                    self.assertEqual((case.destination/'cloudbench-pools/destination.cold.ids').read_text(),MACHINE+'\n')
+                    self.assertTrue((case.source/'cloudbench-cold-handoffs/outgoing'/MACHINE).exists())
+                    self.assertFalse((case.destination/'cloudbench-pool-claims'/MACHINE).exists())
+                finally:case.doCleanups()
+
+    def test_source_negatives_preserve_originals_and_never_publish_packet(self):
+        for fault in ('retain','accepted','worker','source-pool','phase','native-version','native-volume','native-running','different-target'):
+            with self.subTest(fault=fault):
+                case=type(self)('test_two_real_common_stores_require_committed_source_hold_before_admission');case.setUp()
+                try:
+                    original=(case.registry/'meta').read_bytes()
+                    if fault=='retain':write(case.registry/'meta',original.replace(b'cleanup_policy=reap',b'cleanup_policy=retain'))
+                    if fault=='accepted':write(case.out/'post-config-start.accepted','admitted')
+                    if fault=='worker':write(case.out/'worker-clones.ids','c'*14+'\n')
+                    if fault=='source-pool':write(case.source/'cloudbench-pools/old.ids',MACHINE+'\n')
+                    if fault=='phase':write(case.receipt,'{}')
+                    if fault.startswith('native-'):
+                        changed=copy.deepcopy(case.native)
+                        if fault=='native-version':changed['instance_id']='foreign'
+                        if fault=='native-volume':changed['config']['mounts'][0]['volume']='vol_foreign'
+                        if fault=='native-running':changed['state']='started'
+                        write(case.after,json.dumps(changed))
+                    if fault=='different-target':
+                        case.export();case.target=dict(case.target,machine='5'*14)
+                    with self.assertRaises((ValueError,KeyError)):case.export()
+                    if fault!='different-target':self.assertFalse(case.packet.exists())
+                    self.assertTrue((case.registry/'clones'/CLONE).exists())
+                finally:case.doCleanups()
+
+    def test_import_rejects_foreign_paths_tamper_or_native_drift_without_ledger(self):
+        self.export()
+        original=self.packet.read_bytes()
+        for fault in ('phase-byte','missing-path','receipt-rewrite','native-instance','foreign-destination'):
+            with self.subTest(fault=fault):
+                packet=json.loads(original);target=dict(self.target)
+                if fault=='phase-byte':next(iter(packet['originals'].values()))['sha256']='0'*64
+                if fault=='missing-path':packet['originals'].pop(packet['receipt'])
+                if fault=='receipt-rewrite':packet['receipt']='/foreign/consumed.json'
+                if fault=='native-instance':
+                    changed=copy.deepcopy(self.native);changed['instance_id']='foreign';write(self.after,json.dumps(changed))
+                if fault=='foreign-destination':target['volume']='vol_foreign'
+                write(self.packet,json.dumps(packet))
+                with self.assertRaises((ValueError,KeyError)):
+                    self.helper['import_cold_handoff'](self.destination,target,self.packet,self.before,self.after)
+                self.assertFalse((self.destination/'cloudbench-pools/destination.cold.ids').exists())
+                write(self.after,json.dumps(self.native))
+        write(self.packet,original)
+        # Source receipt/archive paths may disappear on this destination; the
+        # sealed exact path resolver must not attempt a mutable local fallback.
+        self.archive.unlink();self.receipt.unlink()
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        self.assertEqual((self.destination/'cloudbench-pools/destination.cold.ids').read_text(),MACHINE+'\n')
+
+    def test_ledger_locked_crash_reclaims_only_same_host_dead_birth(self):
+        lock = self.destination / 'pool.ids.lock'
+        code = """import os,runpy,sys
+from pathlib import Path
+helper=runpy.run_path(sys.argv[1])
+with helper['cold_handoff_ledger_lock'](Path(sys.argv[2])):
+ print('LOCKED',flush=True)
+ sys.stdin.buffer.read(1)
+"""
+        child = subprocess.Popen([sys.executable,'-c',code,str(REPO/'scripts/cloudbench-startup-failure-archive.py'),str(lock)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(),'LOCKED')
+            live=(lock/'meta').read_bytes()
+            with self.assertRaisesRegex(ValueError,'live pool ledger lock'):
+                with self.helper['cold_handoff_ledger_lock'](lock):pass
+            self.assertEqual((lock/'meta').read_bytes(),live)
+            child.kill();child.wait(timeout=5)
+            with self.helper['cold_handoff_ledger_lock'](lock):
+                self.assertIn(('pid='+str(os.getpid())+'\n').encode(),(lock/'meta').read_bytes())
+            self.assertFalse(lock.exists())
+            lock.mkdir();write(lock/'meta',live.replace(('host='+os.uname().nodename).encode(),b'host=foreign-host'))
+            with self.assertRaisesRegex(ValueError,'foreign or malformed'):
+                with self.helper['cold_handoff_ledger_lock'](lock):pass
+            self.assertTrue(lock.exists())
+            (lock/'meta').unlink()
+            with self.assertRaises(FileNotFoundError):
+                with self.helper['cold_handoff_ledger_lock'](lock):pass
+            self.assertTrue(lock.exists(), 'missing owner is UNKNOWN, never blindly reclaimed')
+        finally:
+            if child.poll() is None:child.kill();child.wait(timeout=5)
+            child.stdin.close();child.stdout.close()
+
+    def test_new_directory_chain_is_fsynced_before_packet_publish(self):
+        root=self.destination/'new'/'sealed'/'packets'
+        expected=[str(self.destination),str(self.destination/'new'),str(self.destination/'new'/'sealed'),str(root)]
+        observed=[];real_fsync=os.fsync
+        def record(fd):
+            observed.append(os.readlink('/proc/self/fd/'+str(fd)))
+            return real_fsync(fd)
+        with patch('os.fsync',side_effect=record):
+            self.helper['durable_handoff_json'](root/'receipt.json',{'state':'committed'})
+        directories=[path for path in observed if path in expected]
+        self.assertEqual(directories[:3],expected[:3])
+        self.assertTrue(all(path in directories for path in expected))
+        self.assertLess(observed.index(str(self.destination/'new'/'sealed')),observed.index(str(root/'receipt.json')))
+        self.assertEqual(stat.S_IMODE(root.stat().st_mode),0o700)
+        observed.clear()
+        with patch('os.fsync',side_effect=record):
+            self.helper['durable_handoff_json'](root/'receipt.json',{'state':'committed'})
+        self.assertEqual(observed[-2:],[str(root/'receipt.json'),str(root)])
+        self.assertTrue(all(str(path) in observed for path in root.parents))
+
+    def test_retain_temporary_and_unflushed_directory_retry_are_exact(self):
+        original=(self.registry/'meta').read_bytes()
+        with patch('os.replace',side_effect=RuntimeError('after retained temp fsync, before rename')):
+            with self.assertRaises(RuntimeError):self.export()
+        temporary=self.registry/('.handoff-retain-'+self.nonce)
+        retained=temporary.read_bytes()
+        self.assertEqual((self.registry/'meta').read_bytes(),original)
+        temporary.write_bytes(b'foreign policy bytes')
+        with self.assertRaisesRegex(ValueError,'conflicting retained-policy'):self.export()
+        self.assertEqual((self.registry/'meta').read_bytes(),original)
+        temporary.write_bytes(retained)
+        self.export()
+        self.assertFalse(temporary.exists())
+        self.assertEqual((self.registry/'meta').read_bytes(),retained)
+        directory=self.destination/'unflushed'/'ancestor'
+        with patch('os.fsync',side_effect=RuntimeError('after mkdir, before parent flush')):
+            with self.assertRaises(RuntimeError):self.helper['handoff_directory'](directory)
+        self.assertTrue((self.destination/'unflushed').exists())
+        observed=[];real=os.fsync
+        def record(fd):observed.append(os.readlink('/proc/self/fd/'+str(fd)));return real(fd)
+        with patch('os.fsync',side_effect=record):self.helper['handoff_directory'](directory)
+        self.assertIn(str(self.destination),observed,'retry must fsync the already-existing unflushed ancestor entry')
+        self.assertIn(str(directory.parent),observed)
+
+    def test_endpoint_custody_requires_rootfs_always_or_real_retained_mount(self):
+        mount=self.base/'mount';mount.mkdir()
+        endpoint=copy.deepcopy(self.native)
+        endpoint.update(id=self.target['machine'],state='started')
+        endpoint['config']['init']={'exec':['/bin/sleep','180']}
+        endpoint['config']['rootfs']={'persist':'always','size_gb':50}
+        endpoint['config']['mounts']=[{'path':str(mount),'volume':self.target['volume']}]
+        write(self.before,json.dumps(endpoint));write(self.after,json.dumps(endpoint))
+        owner=self.base/'workspace-owner.json'
+        write(owner,json.dumps(dict(schema='cloudbench-controller-workspace-ownership-v1',app=APP,volume_id=self.target['volume'],mount_path=str(mount))))
+        with patch.dict(os.environ,FLY_MACHINE_ID=self.target['machine'],FLY_APP_NAME=APP), patch('subprocess.check_output',side_effect=[str(self.destination)+'\n',self.target['source_ref']+'\n']):
+            result=self.helper['capture_cold_handoff_target'](self.destination,self.destination,self.before,self.after,owner,self.target['source_ref'],self.target['pool_name'])
+        self.assertEqual(result['preservation'],'rootfs-always')
+        endpoint['config']['rootfs']={'persist':'never','size_gb':50}
+        write(self.before,json.dumps(endpoint));write(self.after,json.dumps(endpoint))
+        with patch.dict(os.environ,FLY_MACHINE_ID=self.target['machine'],FLY_APP_NAME=APP):
+            with self.assertRaisesRegex(ValueError,'no proven durable custody'):
+                self.helper['capture_cold_handoff_target'](self.destination,self.destination,self.before,self.after,owner,self.target['source_ref'],self.target['pool_name'])
+
+    def test_request_reader_is_bounded_private_regular_and_exact_sha(self):
+        request=self.base/'request.json'
+        raw=b'{"operation":"target"}'
+        write(request,raw);request.chmod(0o600)
+        self.assertEqual(self.helper['read_cold_handoff_request'](request,hashlib.sha256(raw).hexdigest()),{'operation':'target'})
+        with self.assertRaisesRegex(ValueError,'exact approved bytes'):
+            self.helper['read_cold_handoff_request'](request,'0'*64)
+        request.chmod(0o644)
+        with self.assertRaisesRegex(ValueError,'not private'):
+            self.helper['read_cold_handoff_request'](request,hashlib.sha256(raw).hexdigest())
+        request.chmod(0o600)
+        with request.open('r+b') as stream:stream.truncate(1048577)
+        with self.assertRaisesRegex(ValueError,'unsafe original evidence file'):
+            self.helper['read_cold_handoff_request'](request,'0'*64)
+        request.unlink();os.mkfifo(request,0o600)
+        with self.assertRaisesRegex(ValueError,'unsafe original evidence file'):
+            self.helper['read_cold_handoff_request'](request,'0'*64)
+
+    def test_real_fleet_handoff_parser_refuses_missing_operands_without_loop(self):
+        source=Path(os.environ.get('CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST',str(REPO/'scripts/run-bench-fleet'))).read_text()
+        start=source.index('        --cold-handoff-request)')
+        branch=source[start:source.index(';;',start)+2]
+        script='set -uo pipefail\nwhile [ "$#" -gt 0 ]; do\ncase "$1" in\n'+branch+'\n*) exit 99 ;;\nesac\ndone\n'
+        for operands,expected in (([],2),(['request'],2),(['request','a'*64],0)):
+            with self.subTest(operands=len(operands)):
+                result=subprocess.run(['bash','-c',script,'actual-fleet-parser','--cold-handoff-request',*operands],capture_output=True,text=True,timeout=1)
+                self.assertEqual(result.returncode,expected,result.stderr)
+
+    def test_older_cleanup_policy_consumer_keeps_source_retained(self):
+        self.export()
+        old_source=git_blob('scripts/run-bench-fleet').decode()
+        start=old_source.index('fleet_registry_cleanup_state() {')
+        end=old_source.index('\n}\n',start)+3
+        function=old_source[start:end]
+        # The older consumer already understands the durable RETAIN policy.
+        script='set -uo pipefail\nregistry_meta_value() { sed -n "s/^$2=//p" "$1/meta" | head -1; }\n'+function+'\nfleet_registry_cleanup_state "$1" retain\n'
+        result=subprocess.run(['bash','-c',script,'guard',str(self.registry)],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(result.stdout.strip(),'retain')
+        self.assertEqual(self.helper['fields'](self.registry/'meta')['cleanup_policy'],'retain')
+        self.export()
+
+    def test_actual_destination_pool_proof_rechecks_imported_originals_and_target(self):
+        self.export()
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        proof=self.destination/'cloudbench-pool-reuse'/ (MACHINE+'.json')
+        with patch.dict(os.environ,{'FLY_MACHINE_ID':self.target['machine']}):
+            self.helper['verify_imported_pool_proof'](proof,self.destination,self.before,self.after,self.target['source_ref'],native_volume=dict(id=VOLUME,attached_machine_id=MACHINE,state='created'))
+            with self.assertRaises(ValueError):
+                self.helper['verify_imported_pool_proof'](proof,self.destination,self.before,self.after,'0'*40,native_volume=dict(id=VOLUME,attached_machine_id=MACHINE,state='created'))
+        with patch.dict(os.environ,{'FLY_MACHINE_ID':'0'*14}):
+            with self.assertRaises(ValueError):
+                self.helper['verify_imported_pool_proof'](proof,self.destination,self.before,self.after,self.target['source_ref'],native_volume=dict(id=VOLUME,attached_machine_id=MACHINE,state='created'))
+        self.assertTrue((self.source/'cloudbench-cold-handoffs/outgoing'/MACHINE).exists())
+
+    def test_imported_primary_enters_real_claim_fsm_with_fresh_native_recheck(self):
+        import ast, re
+        self.export()
+        def interrupt(stage):
+            if stage=='destination-ledger':raise RuntimeError('ledger visible while exact migration claim is still held')
+        with self.assertRaises(RuntimeError):
+            self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after,interrupt)
+        source=(REPO/'scripts/run-bench-fleet').read_text()+'\n'+(REPO/'scripts/lib/cloudbench-inventory.sh').read_text()
+        # Reuse the existing heredoc-aware extractor from the registered fleet
+        # test family without importing its unrelated environment fixtures.
+        tree=ast.parse((REPO/'agents/benchmarks/cloudbench_dependency_sync_test.py').read_text())
+        extractor=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='_extract_fleet_function')
+        namespace={'re':re}
+        exec(compile(ast.Module(body=[extractor],type_ignores=[]),'registered-fleet-extractor','exec'),namespace)
+        def function(name):
+            if name=='pool_reuse_proof_file':return next(line for line in source.splitlines() if line.startswith(name+'() {'))
+            return namespace['_extract_fleet_function'](source,name+'() {')
+        functions='\n'.join(function(name) for name in ('registry_meta_value','pool_claim_fs_transaction',
+            'write_pool_claim','claim_pool_machine','pool_reuse_proof_file','pool_verify_reuse_proof',
+            'pool_claim_mark_cleanup_unconfirmed','pool_claim_cleanup_unconfirmed','pool_claim_release_exact','registry_owner_alive'))
+        script='''set -uo pipefail
+GIT_COMMON_DIR="$1"
+POOL_IDS_FILE="$1/cloudbench-pools/destination.cold.ids"
+POOL_META_FILE="$POOL_IDS_FILE.deps"
+POOL_CLAIMS_DIR="$1/cloudbench-pool-claims"
+FLEET_DIR="$1/run"; mkdir -p "$FLEET_DIR"
+CLAIMED_POOL_FILE="$FLEET_DIR/claimed.ids"
+FLEET_OWNERSHIP_ROOT="$1/cloudbench-fleet-ownership"
+FLEET_OWNER_TOKEN=33333333333333333333333333333333
+FLEET_OWNER_HOST="$(hostname)"
+FLEET_OWNER_PID_START="proc-start:$(cat /proc/sys/kernel/random/boot_id):$(awk '{print $22}' /proc/$$/stat)"
+POOL_COLD_BOOTSTRAP=1
+BENCH_REF="$2"
+STARTUP_FAILURE_ARCHIVE_HELPER="$3"
+APP="$4"
+POOL_INVENTORY_JSON='[]'
+UNAVAILABLE_POOL_IDS=()
+cloudbench_env_sha256() { sha256sum "$1" | cut -d' ' -f1; }
+machine_volume_id_from_json() { cat >/dev/null; printf '%s' "$VOLUME"; }
+fleet_audit_record_pool_machine() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$AUDIT"; }
+fleet_preconfig_native_read() { printf 'machine\n' >> "$READS"; cp "$NATIVE" "$2"; }
+fleet_cold_handoff_volume_read() { printf 'volume\n' >> "$READS"; printf '{"id":"%s","attached_machine_id":"%s","state":"created"}' "$1" "$MACHINE" > "$2"; }
+FLY() { printf FORBIDDEN >&2; return 99; }
+'''+functions+'''
+id="$(claim_pool_machine)" || exit 91
+if [ "$EXPECT_PENDING" = 1 ]; then [ -z "$id" ] || exit 97; exit 0; fi
+[ "$id" = "$MACHINE" ] || exit 92
+[ "$(cat "$CLAIMED_POOL_FILE")" = "$MACHINE" ] || exit 93
+[ "$(registry_meta_value "$POOL_CLAIMS_DIR/$MACHINE" fleet_owner_token)" = "$FLEET_OWNER_TOKEN" ] || exit 94
+second="$(claim_pool_machine)" || exit 95
+[ -z "$second" ] || exit 96
+'''
+        env=dict(os.environ,FLY_MACHINE_ID=self.target['machine'],VOLUME=VOLUME,MACHINE=MACHINE,
+            NATIVE=str(self.before),READS=str(self.base/'native-reads'),AUDIT=str(self.base/'claim-audit'),EXPECT_PENDING='1')
+        command=['bash','-c',script,'claim',str(self.destination),self.target['source_ref'],
+            str(REPO/'scripts/cloudbench-startup-failure-archive.py'),APP]
+        pending=subprocess.run(command,env=env,capture_output=True,text=True,timeout=10)
+        self.assertEqual(pending.returncode,0,pending.stderr)
+        self.assertFalse((self.base/'native-reads').exists(), 'ordinary claim cannot pass pending migration authority')
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        env['EXPECT_PENDING']='0'
+        result=subprocess.run(command,env=env,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual((self.base/'native-reads').read_text().splitlines(),['machine','machine','volume'])
+        self.assertNotIn('FORBIDDEN',result.stderr)
+        self.assertTrue((self.source/'cloudbench-cold-handoffs/outgoing'/MACHINE).exists())
 
 if __name__ == "__main__":
     unittest.main()

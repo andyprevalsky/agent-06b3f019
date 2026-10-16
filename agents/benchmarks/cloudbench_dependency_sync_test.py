@@ -34023,7 +34023,7 @@ recover_exact_stale_fleet_owner {owner}
     assert (registry / "meta").is_file(), "no proof failure may erase retained ownership"
 
 
-@pytest.mark.parametrize("args", [["fixture-task", "--reuse-pool-only"], ["--recover-stale-owner-to-pool", "a" * 32], ["fixture-task", "--reuse-pool-only", "--cold-primary-bootstrap"], ["--recover-stale-owner-to-pool", "a" * 32, "--cold-primary-bootstrap"]])
+@pytest.mark.parametrize("args", [["--cold-handoff-request", "/explicit/request.json", "a" * 64], ["fixture-task", "--reuse-pool-only"], ["--recover-stale-owner-to-pool", "a" * 32], ["fixture-task", "--reuse-pool-only", "--cold-primary-bootstrap"], ["--recover-stale-owner-to-pool", "a" * 32, "--cold-primary-bootstrap"]])
 def test_normal_cli_forwards_owned_pool_reuse_policy(tmp_path: Path, args: list[str]) -> None:
     """Exercise the ordinary launcher parser, never a provider subprocess."""
     root = tmp_path / "repo"
@@ -34640,3 +34640,41 @@ CLOUDBENCH_BOOT_LAUNCH={0 if case == 'nonboot' else 1}
 cold_primary_admission
 '''], text=True, capture_output=True)
     assert (result.returncode == 0) == (case in {'run', 'recover', 'default'}), result.stderr
+
+
+@pytest.mark.parametrize('operation', ['FLY','cloud-FLY','reap_machine','reap_volume','fleet_registry_cleanup_state','recover_registry_audit_only_fresh','recover_exact_stale_fleet_owner','fleet_reap_registry_record_native'])
+def test_permanent_outgoing_handoff_excludes_all_source_mutation_paths(tmp_path: Path, operation: str) -> None:
+    common=tmp_path/'common';outgoing=common/'cloudbench-cold-handoffs/outgoing';outgoing.mkdir(parents=True)
+    reg=common/'cloudbench-fleet-ownership'/('a'*32);reg.mkdir(parents=True)
+    (reg/'cold-handoff-outgoing').write_text('immutable destination-bound hold')
+    for identity in ('abcdef01234567','vol_owned'):(outgoing/identity).write_text('permanent hold')
+    calls=tmp_path/'forbidden'
+    fleet=fleet_source_text()
+    function=_extract_fleet_function(CLOUD_SCRIPT.read_text(),'FLY() {') if operation=='cloud-FLY' else _extract_fleet_function(fleet,operation+'() {')
+    invoke={
+      'FLY':'FLY machine start abcdef01234567',
+      'cloud-FLY':'FLY machine start abcdef01234567',
+      'reap_machine':'reap_machine abcdef01234567',
+      'reap_volume':'reap_volume vol_owned',
+      'fleet_registry_cleanup_state':'[ "$(fleet_registry_cleanup_state "$reg" reap)" = quarantined ]',
+      'recover_registry_audit_only_fresh':'recover_registry_audit_only_fresh "$reg" exact',
+      'recover_exact_stale_fleet_owner':'recover_exact_stale_fleet_owner '+ 'a'*32,
+      'fleet_reap_registry_record_native':'fleet_reap_registry_record_native "$reg" forced 2 0 "$reg/clones/owned"',
+    }[operation]
+    result=subprocess.run(['bash','-c',f'''set -uo pipefail
+GIT_COMMON_DIR={shlex.quote(str(common))}
+FLEET_OWNERSHIP_ROOT="$GIT_COMMON_DIR/cloudbench-fleet-ownership"
+FLEET_AUDIT_ROOT="$GIT_COMMON_DIR/cloudbench-fleet-audits"
+reg={shlex.quote(str(reg))}
+ROOT_DIR={shlex.quote(str(common))}
+git() {{ printf '%s' "$GIT_COMMON_DIR"; }}
+private_source_allows_provider_call() {{ return 0; }}
+registry_meta_value() {{ printf 2; }}
+flyctl() {{ printf forbidden >> {shlex.quote(str(calls))}; return 99; }}
+FLY() {{ flyctl "$@"; }}
+{function}
+{invoke}
+'''],capture_output=True,text=True,timeout=5)
+    assert (result.returncode==0)==(operation=='fleet_registry_cleanup_state'), result.stderr
+    assert not calls.exists(), 'source delegation cannot be reclaimed or started by ordinary cleanup'
+    assert (reg/'cold-handoff-outgoing').read_text()=='immutable destination-bound hold'

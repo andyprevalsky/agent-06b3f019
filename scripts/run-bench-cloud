@@ -366,7 +366,19 @@ if [ -z "${FLY_API_TOKEN:-}" ]; then
 fi
 export FLY_API_TOKEN
 
-FLY() { flyctl "$@"; }
+FLY() {
+    case "${1:-} ${2:-}" in
+        'machine update'|'machines update'|'machine start'|'machines start'|'machine stop'|'machines stop'|'machine destroy'|'machines destroy'|'machine restart'|'machines restart'|'volume destroy'|'volumes destroy')
+            local common arg
+            common="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)" || return 1
+            for arg in "$@"; do
+                if [ -e "$common/cloudbench-cold-handoffs/outgoing/$arg" ] || [ -L "$common/cloudbench-cold-handoffs/outgoing/$arg" ]; then
+                    echo "❌ outgoing cold handoff excludes this source allocation" >&2; return 1
+                fi
+            done ;;
+    esac
+    flyctl "$@"
+}
 
 request_machine_start() {  # request_machine_start <machine_id>
     local id="$1"

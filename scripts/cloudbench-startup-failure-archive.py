@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import runpy
 import stat
+import subprocess
 import tarfile
 import tempfile
 
@@ -193,8 +194,8 @@ def capture_preconfig(registry, output, machine, token, destination):
         raise ValueError("pre-config originals changed during capture")
 
 
-def read_preconfig_archive(archive_path):
-    raw = read(archive_path)
+def read_preconfig_archive(archive_path, reader=read):
+    raw = reader(archive_path)
     files, total = {}, 0
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
         for member in archive:
@@ -216,12 +217,12 @@ def read_preconfig_archive(archive_path):
     return raw, files, manifest
 
 
-def preconfig_native_proof(machine, original, native_before, native_after):
+def preconfig_native_proof(machine, original, native_before, native_after, reader=read):
     if native_before is None or native_after is None:
         raise ValueError("pre-config native proof requires both original reads")
-    if Path(native_before).samefile(native_after):
+    if (reader is read and Path(native_before).samefile(native_after)) or str(native_before) == str(native_after):
         raise ValueError("pre-config native proof reused the same read file")
-    before, after = read(native_before, 1048576), read(native_after, 1048576)
+    before, after = reader(native_before, 1048576), reader(native_after, 1048576)
     first, last = json.loads(before), json.loads(after)
     if not isinstance(first, dict) or not isinstance(last, dict):
         raise ValueError("invalid native pre-config Machine record")
@@ -348,12 +349,15 @@ def commit_preconfig(registry, output, machine, token, archive_path, native_befo
     return proof
 
 
-def verify_preconfig_receipt(registry, output, machine, token, receipt_path, native_before=None, native_after=None):
+def verify_preconfig_receipt(registry, output, machine, token, receipt_path, native_before=None, native_after=None, *, originals=None):
     """Historical phase evidence only; every native mutation still needs fresh guards."""
+    # Imported originals use an explicit sealed path->bytes resolver. No local
+    # path fallback or rewriting of the original receipt is permitted.
+    reader = read if originals is None else sealed_original_reader(originals)
     receipt_path = Path(receipt_path)
     if receipt_path.parent != Path(output) / "failed-preconfig-runtime-archive":
         raise ValueError("pre-config consumption receipt is outside exact output")
-    proof = json.loads(read(receipt_path, 1048576))
+    proof = json.loads(reader(receipt_path, 1048576))
     if (proof.get("schema") != PRECONFIG_SCHEMA or proof.get("phase") != "pre-config"
             or proof.get("consumption_ready") is not True or proof.get("preconfig_evidence_verified") is not True
             or proof.get("native_inert_verified") is not True or proof.get("no_guest_admission_verified") is not True
@@ -362,9 +366,9 @@ def verify_preconfig_receipt(registry, output, machine, token, receipt_path, nat
             or proof.get("fresh_native_required_for_mutation") is not True
             or type(proof.get("proof_credit")) is not int or proof["proof_credit"] != 0):
         raise ValueError("pre-config consumption receipt is not exact verified zero-credit evidence")
-    raw, files, manifest = read_preconfig_archive(proof["archive_path"])
+    raw, files, manifest = read_preconfig_archive(proof["archive_path"], reader)
     meta, original, source = archived_preconfig_identity(files, registry, output, machine, token)
-    native = preconfig_native_proof(machine, original, proof["native_before_path"], proof["native_after_path"])
+    native = preconfig_native_proof(machine, original, proof["native_before_path"], proof["native_after_path"], reader)
     expected = {"owner": meta["fleet_owner_token"], "run_id": meta["run_id"], "bench": Path(output).name,
                 "machine_id": machine, "volume_id": original["volume_id"], "run_token": token,
                 "archive_sha256": digest(raw), "archive_bytes": len(raw), "source_ref": source["base_sha"],
@@ -378,6 +382,450 @@ def verify_preconfig_receipt(registry, output, machine, token, receipt_path, nat
         if any(current[key] != proof[key] for key in ("instance_id", "config_sha256")):
             raise ValueError("current pre-config native identity changed after phase commitment")
     return proof
+
+
+HANDOFF_SCHEMA = "cloudbench-cold-controller-handoff-v1"
+
+
+def sealed_original_reader(originals):
+    if not isinstance(originals, dict) or not 1 <= len(originals) <= 8:
+        raise ValueError("unsafe imported original path map")
+    values, total = {}, 0
+    for path, item in originals.items():
+        if (not isinstance(path, str) or not Path(path).is_absolute()
+                or set(item) != {"sha256", "bytes", "data"}
+                or type(item["bytes"]) is not int or not 0 <= item["bytes"] <= MAXIMUM - total):
+            raise ValueError("unsafe imported original path identity")
+        data = base64.b64decode(item["data"], validate=True)
+        if len(data) != item["bytes"] or digest(data) != item["sha256"]:
+            raise ValueError("imported original bytes changed")
+        total += len(data); values[path] = data
+    def original(path, maximum=MAXIMUM):
+        data = values[str(path)]  # Missing path is fatal, never local fallback.
+        if len(data) > maximum:
+            raise ValueError("imported original exceeds original read bound")
+        return data
+    return original
+
+
+def handoff_directory(directory):
+    directory = Path(directory); missing = []; parent = directory
+    while not parent.exists(): missing.append(parent); parent = parent.parent
+    if parent.resolve(strict=True) != parent: raise ValueError("linked handoff ancestor")
+    for child in reversed(missing):
+        child.mkdir(mode=0o700)
+        fd = os.open(child.parent, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+    if directory.resolve(strict=True) != directory or not directory.is_dir():
+        raise ValueError("unsafe handoff directory")
+    # A previous attempt may have died after mkdir but before its parent fsync.
+    # Existing ancestors must become durable too before any COMMITTED packet.
+    for current in (directory, *directory.parents):
+        fd = os.open(current, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+
+
+def durable_handoff_json(path, value):
+    """Same no-clobber/fsync ordering as ownership receipts; exact retry only."""
+    path = Path(path)
+    handoff_directory(path.parent)
+    raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if path.exists() or path.is_symlink():
+        if read(path) != raw:
+            raise ValueError("conflicting immutable handoff identity")
+        # Complete durability after an interrupted file-fsync -> parent-fsync
+        # window; exact bytes permit retry, never a conflicting replacement.
+        fd = os.open(path.parent, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+        return digest(raw)
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as stream:
+        stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try: os.fsync(descriptor)
+    finally: os.close(descriptor)
+    return digest(raw)
+
+
+def handoff_target(target):
+    expected = {"machine", "volume", "workspace", "common", "source_ref", "ownership_sha256",
+                "controller_config_sha256", "preservation", "pool_name"}
+    if (not isinstance(target, dict) or set(target) != expected
+            or not re.fullmatch("[0-9a-f]{14}", target["machine"])
+            or not re.fullmatch("vol_[A-Za-z0-9_-]+", target["volume"])
+            or any(not Path(target[key]).is_absolute() for key in ("workspace", "common"))
+            or not re.fullmatch("[0-9a-f]{40}", target["source_ref"])
+            or any(not re.fullmatch("[0-9a-f]{64}", target[key]) for key in ("ownership_sha256", "controller_config_sha256"))
+            or target["preservation"] not in {"rootfs-always", "same-volume-device"}
+            or not re.fullmatch("[A-Za-z0-9._-]+\\.cold\\.ids", target["pool_name"])):
+        raise ValueError("unsafe explicit handoff destination")
+    return target
+
+
+def handoff_native_pair(before, after, machine, volume, name):
+    first, last = json.loads(read(before, 1048576)), json.loads(read(after, 1048576))
+    config = first.get("config", {})
+    if (first != last or first.get("id") != machine or first.get("name") != name
+            or first.get("state") != "stopped" or not first.get("instance_id")
+            or config.get("init") != {"cmd": ["sleep", "infinity"]}
+            or config.get("env") not in (None, {})
+            or config.get("mounts", [{}])[0].get("volume") != volume
+            or len(config.get("mounts", [])) != 1):
+        raise ValueError("handoff native identity/config is not stopped unchanged inert primary")
+    return first
+
+
+def export_cold_handoff(common, registry, output, machine, token, receipt, before, after,
+                        target, nonce, packet_path, checkpoint=lambda stage: None, *, source_endpoint):
+    """Caller holds exact source-owner recovery lock and proves dead REAP host.
+    Source originals remain intact; permanent outgoing tombstones delegate the
+    exact allocation and block every ordinary source recovery/claimer forever.
+    """
+    common, registry, output = Path(common), Path(registry), Path(output)
+    target = handoff_target(target); source_endpoint = handoff_target(source_endpoint)
+    if source_endpoint["common"] != str(common): raise ValueError("source endpoint common differs")
+    if common.resolve(strict=True) != common or not re.fullmatch("[0-9a-f]{32}", nonce):
+        raise ValueError("unsafe source common or handoff nonce")
+    meta = fields(registry / "meta")
+    prior_hold_path = registry / "cold-handoff-outgoing"
+    prior_hold = json.loads(read(prior_hold_path,1048576)) if prior_hold_path.exists() else None
+    if meta["cleanup_policy"] != "reap":
+        if not prior_hold or prior_hold['nonce'] != nonce or prior_hold['target'] != target or prior_hold['machine_id'] != machine:
+            raise ValueError("retained source cannot hand off")
+    old_birth = re.fullmatch(r"proc-start:([0-9a-f-]{36}):[0-9]+", meta.get("pid_start", ""))
+    if not old_birth or old_birth[1] == Path('/proc/sys/kernel/random/boot_id').read_text().strip():
+        raise ValueError("source maintenance boot does not prove original controller descendants gone")
+    if set(p.name for p in (registry / "clones").iterdir()) != {fields(registry / "clones" / p.name)["name"] for p in (registry / "clones").iterdir()}:
+        raise ValueError("malformed source cohort")
+    # Initial implementation is deliberately a singleton owner. No partial
+    # cohort may shed its latch while an unexamined sibling remains.
+    if len(list((registry / "clones").iterdir())) != 1:
+        raise ValueError("cross-controller handoff requires exact singleton cohort")
+    for ledger in (common / 'cloudbench-pools').glob('*.ids'):
+        if machine in read(ledger).decode().splitlines():
+            raise ValueError('source allocation already belongs to a local pool')
+    phase = verify_preconfig_receipt(registry, output, machine, token, receipt, before, after)
+    for path in (output / "runtime-evidence.pending", registry / "guest-cleanup-unconfirmed",
+                 registry / "runtime-evidence-unconfirmed", output / "post-config-start.accepted",
+                 output / "cloudbench-run.json", output / "worker-runtime-evidence",
+                 output / "status-proxy.port", output / "cloudbench-boot-start.log", output / "guest-shutdown.confirmed"):
+        if path.exists() or path.is_symlink():
+            raise ValueError("unconsumed, guest-quarantined or admitted handoff")
+    if (read(output / "benchmark-child.finished", 32).strip() != b"125"
+            or read(output / "boot-config-unapplied", 256).strip() != machine.encode()
+            or read(output / "worker-clones.ids", 65536)):
+        raise ValueError("current source phase changed after archival")
+    raw, files, manifest = read_preconfig_archive(phase["archive_path"])
+    _, original, provenance = archived_preconfig_identity(files, registry, output, machine, token)
+    native = handoff_native_pair(before, after, machine, original["volume_id"], original["clone_name"])
+    hold = {"schema": HANDOFF_SCHEMA, "nonce": nonce, "machine_id": machine,
+            "volume_id": original["volume_id"], "owner": registry.name, "target": target,
+            "phase_sha256": digest(read(receipt, 1048576)), "source_common": str(common), "source_endpoint": source_endpoint}
+    # Fsync source-wide owner exclusion first, then MID/Volume exclusions. No
+    # export packet can be published before every source guard is durable.
+    durable_handoff_json(registry / "cold-handoff-outgoing", hold)
+    checkpoint("source-owner-held")
+    for key in (machine, original["volume_id"]):
+        durable_handoff_json(common / "cloudbench-cold-handoffs/outgoing" / key, hold)
+    checkpoint("source-native-held")
+    # Existing older recovery tools understand retain even though they do not
+    # understand migration tombstones. Preserve original REAP bytes in the
+    # canonical archive; current meta policy becomes a permanent source fence.
+    if meta['cleanup_policy'] == 'reap':
+        raw_meta = read(registry/'meta',65536)
+        retained = raw_meta.replace(b'cleanup_policy=reap\n',b'cleanup_policy=retain\n')
+        if retained == raw_meta: raise ValueError('source policy line is not canonical')
+        temporary = registry / ('.handoff-retain-' + nonce)
+        if temporary.exists() or temporary.is_symlink():
+            info=temporary.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid()
+                    or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600 or read(temporary,65536)!=retained):
+                raise ValueError('conflicting retained-policy retry original')
+        else:
+            with os.fdopen(os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb') as stream:
+                stream.write(retained);stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary,registry/'meta')
+        fd=os.open(registry,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+    originals = {}; total = 0
+    for path in (receipt, phase["archive_path"], phase["native_before_path"], phase["native_after_path"]):
+        data = read(path, MAXIMUM - total); total += len(data)
+        originals[str(path)] = {"bytes": len(data), "sha256": digest(data), "data": base64.b64encode(data).decode()}
+    packet = {**hold, "state": "SOURCE_COMMITTED", "registry": str(registry), "output": str(output),
+              "run_token": token, "receipt": str(receipt), "originals": originals,
+              "native": native, "proof_credit": 0, "native_release_verified": False}
+    durable_handoff_json(common / "cloudbench-cold-handoffs/sealed" / (machine + ".json"), packet)
+    checkpoint("source-sealed")
+    durable_handoff_json(packet_path, packet)
+    return packet
+
+
+def verify_imported_cold_handoff(packet, target, before, after):
+    target = handoff_target(target)
+    if (set(packet) != {"schema", "nonce", "machine_id", "volume_id", "owner", "target", "phase_sha256",
+            "source_common", "source_endpoint", "state", "registry", "output", "run_token", "receipt", "originals", "native",
+            "proof_credit", "native_release_verified"} or packet["schema"] != HANDOFF_SCHEMA
+            or packet["state"] != "SOURCE_COMMITTED" or packet["target"] != target
+            or packet["proof_credit"] != 0 or packet["native_release_verified"] is not False
+            or not re.fullmatch("[0-9a-f]{32}", packet["nonce"])):
+        raise ValueError("source handoff is not destination-bound committed original")
+    source_endpoint = handoff_target(packet["source_endpoint"])
+    if source_endpoint["common"] != packet["source_common"]: raise ValueError("source endpoint mismatch")
+    reader = sealed_original_reader(packet["originals"])
+    if digest(reader(packet["receipt"], 1048576)) != packet["phase_sha256"]:
+        raise ValueError("handoff phase digest differs")
+    phase = verify_preconfig_receipt(packet["registry"], packet["output"], packet["machine_id"],
+             packet["run_token"], packet["receipt"], before, after, originals=packet["originals"])
+    native = handoff_native_pair(before, after, packet["machine_id"], packet["volume_id"], packet["native"]["name"])
+    if native != packet["native"] or phase["owner"] != packet["owner"]:
+        raise ValueError("current imported primary differs from committed allocation")
+    return phase
+
+
+def import_cold_handoff(common, target, packet_path, before, after, checkpoint=lambda stage: None):
+    """Verified source seal -> claim -> ledger -> audit -> terminal -> release last.
+    The source must be contacted only through its separately authenticated exact
+    export operation. This function never mutates it or rewrites its receipts.
+    """
+    import fcntl
+    common = Path(common); target = handoff_target(target)
+    if common.resolve(strict=True) != common or str(common) != target["common"]:
+        raise ValueError("handoff reached a different physical destination common")
+    packet_raw = read(packet_path); packet = json.loads(packet_raw)
+    if (common / 'cloudbench-cold-handoffs/outgoing' / packet['machine_id']).exists():
+        raise ValueError('destination already delegated this allocation outward')
+    phase = verify_imported_cold_handoff(packet, target, before, after)
+    machine, volume = packet["machine_id"], packet["volume_id"]
+    claims = common / "cloudbench-pool-claims"; handoff_directory(claims)
+    lockdir = claims / ".locks"; handoff_directory(lockdir)
+    if claims.resolve(strict=True) != claims or lockdir.resolve(strict=True) != lockdir: raise ValueError("linked claim directory")
+    with os.fdopen(os.open(lockdir / (machine + ".lock"), os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW, 0o600), "wb") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        authority = {"schema": HANDOFF_SCHEMA, "nonce": packet["nonce"], "packet_sha256": digest(packet_raw),
+                     "target": target, "machine_id": machine, "volume_id": volume}
+        terminal = common / "cloudbench-cold-handoffs/imported" / (machine + ".json")
+        if terminal.exists():
+            if json.loads(read(terminal)) != authority:
+                raise ValueError("different handoff already owns destination MID")
+            if (claims / machine).exists():
+                if json.loads(read(claims / machine)) != authority:
+                    raise ValueError("terminal handoff cannot release foreign claim")
+                (claims / machine).unlink()
+                fd = os.open(claims, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                try: os.fsync(fd)
+                finally: os.close(fd)
+            return authority
+        # This migration claim is never a dead ordinary local owner claim.
+        # Existing claimers/reconcilers must leave it unavailable until terminal.
+        durable_handoff_json(claims / machine, authority)
+        checkpoint("destination-claimed")
+        evidence = common / "cloudbench-cold-handoffs/evidence" / (machine + ".json")
+        durable_handoff_json(evidence, packet)
+        proof = {"version": 1, "app": phase["schema"], "machine_id": machine,
+                 "name": packet["native"]["name"], "volume_id": volume,
+                 "instance_id": packet["native"]["instance_id"],
+                 "config_sha256": phase["config_sha256"],
+                 "image_digest": packet["native"]["config"]["image"].rpartition("@")[2],
+                 "imported_cold": {"packet_path": str(evidence), "packet_sha256": digest(read(evidence)), "target": target}}
+        # Recover the real app from immutable source archive rather than its
+        # filesystem location or a fabricated destination source registry.
+        reader = sealed_original_reader(packet["originals"])
+        _, files, _ = read_preconfig_archive(phase["archive_path"], reader)
+        proof["app"] = fields_bytes(files["registry/meta"])["app"]
+        provenance = json.loads(files["run/execution-provenance.json"])
+        contract = runpy.run_path(str(Path(__file__).with_name("cloudbench_execution_provenance.py")))
+        matrix = json.loads(files["run/execution-task-matrix.json"])
+        if contract["validate_task_matrix_binding"](provenance, matrix):
+            raise ValueError("imported source dependency/task provenance invalid")
+        values = provenance["config"]["values"]
+        baseline = values["node_dependency_fingerprint"] + " " + values["python_dependency_fingerprint"] + " cold-image-bootstrap\n"
+        if not re.fullmatch(r"[0-9a-f]{64} [0-9a-f]{64} cold-image-bootstrap\n", baseline):
+            raise ValueError("cold image manifest baseline missing")
+        durable_handoff_json(common / "cloudbench-pool-reuse" / (machine + ".json"), proof)
+        ledger = common / "cloudbench-pools" / target["pool_name"]
+        handoff_directory(ledger.parent)
+        # Serialize with the existing pool ledger lock. Never replace another
+        # ID list or baseline, and fsync before publishing terminal import.
+        with cold_handoff_ledger_lock(Path(str(ledger) + ".lock")):
+            meta = Path(str(ledger) + ".deps")
+            if meta.exists() or meta.is_symlink():
+                if read(meta, 4096) != baseline.encode():
+                    raise ValueError("destination cold image dependency baseline differs")
+            else:
+                with os.fdopen(os.open(meta, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600), "wb") as stream:
+                    stream.write(baseline.encode()); stream.flush(); os.fsync(stream.fileno())
+            values = read(ledger, MAXIMUM).decode().splitlines() if ledger.exists() else []
+            if len(values) != len(set(values)) or any(not re.fullmatch('[0-9a-f]{14}', value) for value in values):
+                raise ValueError("destination pool ledger malformed")
+            if machine not in values:
+                with os.fdopen(os.open(ledger, os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW, 0o600), "w") as stream:
+                    stream.write(machine + "\n"); stream.flush(); os.fsync(stream.fileno())
+            fd = os.open(ledger.parent, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try: os.fsync(fd)
+            finally: os.close(fd)
+        checkpoint("destination-ledger")
+        durable_handoff_json(common / "cloudbench-cold-handoffs/audit" / (machine + ".json"), authority)
+        checkpoint("destination-audit")
+        durable_handoff_json(terminal, authority)
+        checkpoint("destination-terminal")
+        if json.loads(read(claims / machine)) != authority:
+            raise ValueError("import claim identity changed before release")
+        (claims / machine).unlink()
+        fd = os.open(claims, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+        return authority
+
+def cold_handoff_ledger_lock(lock):
+    # Use the EXISTING pool ledger mkdir/meta lock protocol. A SIGKILL leaves
+    # the exact host/PID/birth tuple for ordinary stale-lock recovery; never
+    # use a different flock inode beside the normal ledger writer.
+    from contextlib import contextmanager
+    @contextmanager
+    def held():
+        try: lock.mkdir(mode=0o700)
+        except FileExistsError:
+            previous = fields(lock/'meta')
+            birth = re.fullmatch(r'proc-start:([0-9a-f-]{36}):([0-9]+)',previous.get('pid_start',''))
+            if previous.get('host') != os.uname().nodename or not birth or not previous.get('pid','').isdigit():
+                raise ValueError('foreign or malformed pool ledger lock')
+            current_boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            process=Path('/proc')/previous['pid']/'stat'
+            try:
+                state=process.read_text().split(') ',1)[1].split()
+                dead=birth[1]!=current_boot or state[19]!=birth[2] or state[0]=='Z'
+            except FileNotFoundError: dead=True
+            if not dead: raise ValueError('live pool ledger lock')
+            # Re-read exact same owner bytes immediately before sanctioned stale
+            # lock retirement. The ordinary writer uses this same protocol.
+            if fields(lock/'meta') != previous: raise ValueError('pool lock owner changed')
+            (lock/'meta').unlink();lock.rmdir();lock.mkdir(mode=0o700)
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        ticks = Path('/proc/self/stat').read_text().split(') ',1)[1].split()[19]
+        raw = ('host=' + os.uname().nodename + '\npid=' + str(os.getpid()) + '\npid_start=proc-start:' + boot + ':' + ticks + '\n').encode()
+        with os.fdopen(os.open(lock/'meta',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb') as stream:
+            stream.write(raw);stream.flush();os.fsync(stream.fileno())
+        for directory in (lock,lock.parent):
+            fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:os.fsync(fd)
+            finally:os.close(fd)
+        try: yield
+        finally:
+            if read(lock/'meta',65536) != raw: raise ValueError('pool ledger lock ownership changed')
+            (lock/'meta').unlink();lock.rmdir()
+    return held()
+
+
+def capture_cold_handoff_target(workspace, common, before, after, ownership, source_ref, pool_name):
+    workspace, common = Path(workspace), Path(common)
+    if (workspace.resolve(strict=True) != workspace or common.resolve(strict=True) != common
+            or not workspace.is_dir() or not common.is_dir()):
+        raise ValueError("unsafe actual handoff endpoint paths")
+    first, last = json.loads(read(before, 1048576)), json.loads(read(after, 1048576))
+    config = first.get("config", {})
+    mounts = config.get("mounts", [])
+    if (first != last or first.get("id") != os.environ.get("FLY_MACHINE_ID")
+            or first.get("state") != "started" or not first.get("instance_id")
+            or len(mounts) != 1 or not config.get("init", {}).get("exec") == ["/bin/sleep", "180"]
+            or config.get("restart") != {"policy": "no"} or config.get("auto_destroy") not in (None, False)):
+        raise ValueError("handoff endpoint is not exact inert maintenance controller")
+    # Holds and claims must survive controller reboot. Rootfs-always is an
+    # explicit native preservation contract, not an inferred mount topology.
+    preservation = "rootfs-always" if config.get("rootfs") == {"persist": "always", "size_gb": 50} else "same-volume-device"
+    mount = Path(mounts[0]["path"])
+    if preservation == "same-volume-device" and (mount.resolve(strict=True) != mount
+            or not os.path.ismount(mount) or mount.stat().st_dev != common.stat().st_dev):
+        raise ValueError("handoff common has no proven durable custody")
+    owner_raw = read(ownership, 1048576)
+    owner = json.loads(owner_raw)
+    if (owner.get("schema") != "cloudbench-controller-workspace-ownership-v1"
+            or owner.get("volume_id") != mounts[0]["volume"] or owner.get("app") != os.environ.get("FLY_APP_NAME")
+            or owner.get("mount_path") != str(mount)):
+        raise ValueError("workspace ownership receipt differs from native controller")
+    actual_common = subprocess.check_output(['git','-C',str(workspace),'rev-parse','--path-format=absolute','--git-common-dir'],text=True).strip()
+    actual_ref = subprocess.check_output(['git','-C',str(workspace),'rev-parse','HEAD'],text=True).strip()
+    if Path(actual_common).resolve(strict=True) != common or actual_ref != source_ref:
+        raise ValueError("handoff tool source or Gitcommon differs")
+    return handoff_target(dict(machine=first["id"], volume=mounts[0]["volume"], workspace=str(workspace),
+        common=str(common), source_ref=source_ref, ownership_sha256=digest(owner_raw),
+        controller_config_sha256=digest(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()),
+        preservation=preservation, pool_name=pool_name))
+
+
+def verify_imported_pool_proof(path, common, before, after, expected_source, *, native_volume):
+    proof = json.loads(read(path, 65536)); imported = proof["imported_cold"]
+    if (str(Path(common).resolve(strict=True)) != imported["target"]["common"]
+            or imported["target"]["machine"] != os.environ.get("FLY_MACHINE_ID")
+            or imported["target"]["source_ref"] != expected_source):
+        raise ValueError("imported proof used in foreign controller/common/source")
+    raw = read(imported["packet_path"])
+    if digest(raw) != imported["packet_sha256"]:
+        raise ValueError("imported original packet changed")
+    packet = json.loads(raw)
+    if native_volume.get('id') != packet['volume_id'] or native_volume.get('attached_machine_id') != packet['machine_id'] or native_volume.get('state') != 'created':
+        raise ValueError('imported current Volume attachment/state differs')
+    phase = verify_imported_cold_handoff(packet, imported["target"], before, after)
+    if (proof["machine_id"] != packet["machine_id"] or proof["volume_id"] != packet["volume_id"]
+            or proof["image_digest"] != packet["native"]["config"]["image"].rpartition('@')[2]
+            or proof["instance_id"] != packet["native"]["instance_id"]
+            or proof["config_sha256"] != phase["config_sha256"]
+            or proof["name"] != packet["native"]["name"]):
+        raise ValueError("imported pool authority differs from source seal")
+    return proof
+
+
+def read_cold_handoff_request(request_path, expected_sha):
+    raw = read(request_path, 1048576)
+    info = Path(request_path).lstat()
+    if info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077:
+        raise ValueError('handoff request is not private exact-owner regular input')
+    if digest(raw) != expected_sha:
+        raise ValueError("handoff request differs from exact approved bytes")
+    request = json.loads(raw)
+    if not isinstance(request, dict) or request.get('operation') not in {'target','export','import'}:
+        raise ValueError('malformed handoff operation')
+    return request
+
+
+def cold_handoff_request(request_path, expected_sha, workspace, common):
+    """Internal maintenance CLI. Fresh native files were obtained by the
+    caller's canonical exact-Machine reader under normal process/once guards.
+    The exact request SHA is explicit parent disposition, not a new auth system.
+    """
+    request = read_cold_handoff_request(request_path, expected_sha)
+    endpoint = capture_cold_handoff_target(workspace, common, request["controller_before"],
+        request["controller_after"], request["workspace_ownership"], request["tool_ref"], request["pool_name"])
+    if endpoint != request["endpoint"]:
+        raise ValueError("actual endpoint differs from explicit handoff identity")
+    controller_volume = json.loads(read(request['controller_volume'],1048576))
+    if (controller_volume.get('id') != endpoint['volume'] or controller_volume.get('attached_machine_id') != endpoint['machine'] or controller_volume.get('state') != 'created'):
+        raise ValueError('actual controller Volume attachment differs')
+    operation = request["operation"]
+    if operation != 'target':
+        volume = json.loads(read(request['native_volume'],1048576))
+        if volume.get('id') != request['volume'] or volume.get('attached_machine_id') != request['machine'] or volume.get('state') != 'created':
+            raise ValueError('actual child Volume attachment differs')
+    if operation == "target":
+        durable_handoff_json(request["target_output"], endpoint)
+        return endpoint
+    if operation == "export":
+        registry = Path(request["registry"])
+        if registry.parent != Path(common) / "cloudbench-fleet-ownership":
+            raise ValueError("export registry is not this actual common")
+        return export_cold_handoff(common, registry, request["output"], request["machine"], request["run_token"],
+            request["receipt"], request["native_before"], request["native_after"], request["target"],
+            request["nonce"], request["packet_output"], source_endpoint=endpoint)
+    if operation == "import":
+        if request["target"] != endpoint:
+            raise ValueError("import target is not actual maintained endpoint")
+        if digest(read(request["packet"])) != request["packet_sha256"]:
+            raise ValueError("import packet differs from exact authorized seal")
+        return import_cold_handoff(common, endpoint, request["packet"], request["native_before"], request["native_after"])
+    raise ValueError("unsupported handoff operation")
+
 
 
 def original_names(token):

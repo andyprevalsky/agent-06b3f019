@@ -38,6 +38,7 @@
 #                      (default CONDUCTOR_PORT+5764 → 8765 on the standard 3001 workspace,
 #                       so concurrent workspaces get non-colliding hubs)
 #   --keep-clones      do NOT destroy the per-bench machines on exit (debugging)
+#   --cold-handoff-request <private-request> <sha256>  exact internal cold-only cross-controller handoff
 #   --cold-primary-bootstrap  opt into empty-checkout bootstrap for verified cold primaries
 #   --reuse-pool-only  claim existing authenticated stopped primary pool IDs only;
 #                      refuse misses, never clone primaries (autoscaler unchanged)
@@ -738,6 +739,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
+       "$ROOT_DIR/scripts/cloudbench-original-volume-capture.py" \
        "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
@@ -1020,6 +1022,8 @@ FRESH_VOLUMES_REQUESTED=0
 INFRA_PROBE="${CLOUDBENCH_INFRA_PROBE:-0}"
 SKIP_AUTOSCALER="${CLOUDBENCH_SKIP_AUTOSCALER:-0}"
 STRICT_BARRIER="${CLOUDBENCH_STRICT_BARRIER:-0}"
+COLD_HANDOFF_REQUEST=""
+COLD_HANDOFF_REQUEST_SHA=""
 RECOVER_STALE_ONLY="0"
 RECOVER_PRIMARY_TO_POOL="0"
 RECOVER_OWNER_TOKEN=""
@@ -1196,6 +1200,9 @@ while [ $# -gt 0 ]; do
         --detach)         DETACH="1"; shift ;;
         --wait)           DETACH="1"; WAIT_FOR_DETACHED="1"; shift ;;
         --foreground)     DETACH="0"; WAIT_FOR_DETACHED="0"; shift ;;
+        --cold-handoff-request)
+            [ "$#" -ge 3 ] || { echo "❌ --cold-handoff-request requires REQUEST SHA256" >&2; exit 2; }
+            COLD_HANDOFF_REQUEST="${2:-}"; COLD_HANDOFF_REQUEST_SHA="${3:-}"; RECOVER_STALE_ONLY=1; DETACH=0; shift 3 ;;
         --recover-stale-owner)
             RECOVER_STALE_ONLY="1"; DETACH="0"; WAIT_FOR_DETACHED="0"
             RECOVER_OWNER_TOKEN="${2:-}"; shift 2
@@ -1272,7 +1279,7 @@ if [ "${CLOUDBENCH_TEST_FLEET_OWNER_TOKEN+x}" != "x" ]; then
         *) echo "❌ fleet owner token must be exactly 32 lowercase hex characters" >&2; exit 2 ;;
     esac
 fi
-if [ "$RECOVER_STALE_ONLY" = "1" ]; then
+if [ "$RECOVER_STALE_ONLY" = "1" ] && [ -z "$COLD_HANDOFF_REQUEST" ]; then
     case "$RECOVER_OWNER_TOKEN" in
         [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
         *) echo "❌ --recover-stale-owner requires exactly 32 lowercase hex characters" >&2; exit 2 ;;
@@ -1659,6 +1666,16 @@ private_source_allows_provider_call() {
     esac
 }
 FLY() {
+    case "${1:-} ${2:-}" in
+        'machine update'|'machines update'|'machine start'|'machines start'|'machine stop'|'machines stop'|'machine destroy'|'machines destroy'|'machine restart'|'machines restart'|'volumes destroy'|'volume destroy')
+            if [ -n "${GIT_COMMON_DIR:-}" ]; then
+                for _handoff_id in "$@"; do
+                    if [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$_handoff_id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$_handoff_id" ]; then
+                        echo "❌ permanent outgoing ownership handoff excludes source native mutation" >&2; return 1
+                    fi
+                done
+            fi ;;
+    esac
     private_source_allows_provider_call "$@" || return $?
     case "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" in 0|1) ;; *) return 1 ;; esac
     if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ] \
@@ -1988,6 +2005,9 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
     local destroy_capture destroy_rc destroy_bytes destroy_excerpt destroy_suffix
     local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0
     [ -n "$vol" ] || return 0
+    if [ -n "${GIT_COMMON_DIR:-}" ] && { [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$vol" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$vol" ]; }; then
+        echo "❌ permanent outgoing handoff retains this source allocation" >&2; return 1
+    fi
     if { [ -n "${WARM_VOLUME_ID:-}" ] && [ "$vol" = "$WARM_VOLUME_ID" ]; } \
         || { [ -n "${SHARED_WARM_VOLUME_ID:-}" ] && [ "$vol" = "$SHARED_WARM_VOLUME_ID" ]; }; then
         echo "  ❌ refusing to destroy warm source volume $vol" >&2
@@ -2082,6 +2102,9 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
     local id="$1" diagnostic_log="${2:-}" vol="${3:-}" i details="" detail_status=2
     local state="" command_rc=0
     [ -n "$id" ] || return 0
+    if [ -n "${GIT_COMMON_DIR:-}" ] && { [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ]; }; then
+        echo "❌ permanent outgoing handoff retains this source allocation" >&2; return 1
+    fi
     if { [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; } \
         || { [ -n "${SHARED_WARM_ID:-}" ] && [ "$id" = "$SHARED_WARM_ID" ]; }; then
         echo "  ❌ refusing to destroy warm source machine $id" >&2
@@ -2480,6 +2503,9 @@ cloudbench_collect_remaining_runtime_evidence() {
 
 fleet_registry_cleanup_state() {  # <registry-dir> <cleanup-policy>
     local registry="${1%/}" policy="$2" guest_cleanup_unconfirmed=0
+    if [ -e "$registry/cold-handoff-outgoing" ] || [ -L "$registry/cold-handoff-outgoing" ]; then
+        printf 'quarantined\n'; return 0
+    fi
     if [ -e "$registry/guest-cleanup-unconfirmed" ] \
         || [ -L "$registry/guest-cleanup-unconfirmed" ] \
         || [ -e "$registry/runtime-evidence-unconfirmed" ] \
@@ -4967,6 +4993,7 @@ recover_registry_audit_only_fresh() {  # <v2-registry> [exact]; repair audit-bef
     local registry="$1" recovery_scope="${2:-}" owner="${1##*/}" meta="$1/meta" audit expected fresh
     local clone_name source_id disposition id volume_id resolved record
     [ "$(registry_meta_value "$meta" version)" = "2" ] || return 0
+    [ ! -e "$registry/cold-handoff-outgoing" ] && [ ! -L "$registry/cold-handoff-outgoing" ] || return 1
     if [ -e "$FLEET_AUDIT_ROOT/$owner/volume-migrations" ] \
         || [ -L "$FLEET_AUDIT_ROOT/$owner/volume-migrations" ]; then
         fleet_registry_resume_volume_migrations "$registry" || return 1
@@ -5482,6 +5509,7 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
     local registry="$1" mode="$2" registry_version="$3" legacy_batch_status="$4"
     local record clone_name id volume_id resolved details detail_status state
     local actual_name runner_count cleanup_status terminal_disposition unresolved=0
+    [ ! -e "$registry/cold-handoff-outgoing" ] && [ ! -L "$registry/cold-handoff-outgoing" ] || return 1
     for record in "$5"; do
         [ -f "$record" ] || continue
         clone_name="$(registry_meta_value "$record" name)"
@@ -6856,6 +6884,7 @@ recover_one_exact_pool_claim() {  # <claim> <owner-token> <host> <pid> <pid-star
     local expected_start="$5" id="${1##*/}" transfer_state volume_id ledger
     local st presence mounted claim_digest disposition recorded_baseline current_baseline
     local cleanup_status terminal_disposition
+    if [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ]; then return 1; fi
     case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ -f "$claim_path" ] && [ ! -L "$claim_path" ] || return 1
     claim_digest="$(cloudbench_env_sha256 "$claim_path")" || return 1
@@ -9269,6 +9298,24 @@ with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLO
 PYREAD
 }
 
+fleet_cold_handoff_volume_read() {  # exact read-only native Volume; original canonical client
+    python3 - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-original-volume-capture.py" "$APP" "$1" "$2" <<'PYVOLUME'
+import json,os,re,runpy,signal,sys
+from pathlib import Path
+helper,app,volume,destination=sys.argv[1:]
+assert re.fullmatch('vol_[A-Za-z0-9_-]+',volume)
+path=Path(destination);assert path.parent.resolve(strict=True)==path.parent and not path.parent.stat().st_mode&0o077
+client=runpy.run_path(helper)
+def expired(*unused):raise TimeoutError('exact Volume read20s')
+signal.signal(signal.SIGALRM,expired);signal.setitimer(signal.ITIMER_REAL,20)
+try:
+ value=client['Fly'](app,os.environ['FLY_API_TOKEN']).volume(volume)
+ with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w')as stream:
+  json.dump(value,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
+finally:signal.setitimer(signal.ITIMER_REAL,0)
+PYVOLUME
+}
+
 fleet_recovery_confirm_preconfig_cohort() {  # whole exact owner only; evidence, never benchmark credit
     local registry="$1" plan output machine token clone volume disposition base attempt
     plan="$(fleet_preconfig_recovery_plan "$registry")" || return 1
@@ -11045,7 +11092,7 @@ import json, os, re, stat, sys
 from pathlib import Path
 path = Path(sys.argv[1]); machine = sys.argv[2]; proof = json.loads(sys.argv[3])
 assert proof['machine_id'] == machine and re.fullmatch('[0-9a-f]+', machine)
-assert set(proof) - {'cold_bootstrap'} == {'version','app','machine_id','name','volume_id','instance_id','config_sha256','image_digest'}
+assert set(proof) - {'cold_bootstrap', 'imported_cold'} == {'version','app','machine_id','name','volume_id','instance_id','config_sha256','image_digest'}
 if 'cold_bootstrap' in proof: assert proof['cold_bootstrap']['policy'] == 'real-empty-bootstrap-v1'
 assert re.fullmatch('[0-9a-f]{64}', proof['config_sha256'])
 assert re.fullmatch('sha256:[0-9a-f]{64}', proof['image_digest'])
@@ -11067,8 +11114,24 @@ PYWRITE
 }
 
 pool_verify_reuse_proof() {  # <machine> <volume> [refresh after canonical return]
-    local id="$1" volume="$2" mode="${3:-verify}" path fields name image prior current cold
+    local id="$1" volume="$2" mode="${3:-verify}" path fields name image prior current cold imported_attempt
     path="$(pool_reuse_proof_file "$id")" || return 1
+    if [ "$mode" != refresh ] && [ -f "$path" ] && python3 - "$path" <<'PYIMPORTED'
+import json,sys
+raise SystemExit(0 if 'imported_cold' in json.load(open(sys.argv[1])) else 1)
+PYIMPORTED
+    then
+        [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] || return 1
+        imported_attempt="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-import-proof.XXXXXX")" || return 1
+        fleet_preconfig_native_read "$id" "$imported_attempt/before.json" \
+            && fleet_preconfig_native_read "$id" "$imported_attempt/after.json" || return 1
+        fleet_cold_handoff_volume_read "$volume" "$imported_attempt/volume.json" || return 1
+        python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$path" "$GIT_COMMON_DIR" "$imported_attempt/before.json" "$imported_attempt/after.json" "$BENCH_REF" "$imported_attempt/volume.json" <<'PYVERIFYIMPORT'
+import json,runpy,sys
+runpy.run_path(sys.argv[1])['verify_imported_pool_proof'](*sys.argv[2:7], native_volume=json.load(open(sys.argv[7])))
+PYVERIFYIMPORT
+        return $?
+    fi
     [ -e "$path" ] || { [ ! -L "$path" ]; return; }
     fields="$(python3 - "$path" "$id" "$volume" "$APP" <<'PYREAD'
 import json, os, stat, sys
@@ -11267,6 +11330,9 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
     local version app policy cleanup_state host owner_status recovery_lock_status
     local needs_guest_recovery=0 forensic_schema="" preconfig_candidate=0 preconfig_verified=0
+    [ ! -e "$registry/cold-handoff-outgoing" ] && [ ! -L "$registry/cold-handoff-outgoing" ] || {
+        echo "❌ outgoing cold handoff permanently excludes source owner recovery" >&2; return 1;
+    }
     case "$token" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#token}" -eq 32 ] || return 1
     if [ ! -d "$registry" ]; then
@@ -12472,6 +12538,7 @@ reconcile_pool() {
       [ -f "$pool_file" ] || continue
       while read -r id; do
         [ -n "$id" ] || continue
+        if [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ]; then continue; fi
         if [ -n "${PRIVATE_SOURCE_ID:-}" ]; then
             private_source_allows_provider_call machine stop "$id" || return 1
         fi
@@ -12702,6 +12769,7 @@ claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none 
     for shape_pass in exact fallback; do
     while read -r id; do
         [ -n "$id" ] || continue
+        if [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ]; then continue; fi
         if [ -n "$desired_cpus" ] && [ -f "$hints" ]; then
             candidate_shape="$(awk -v id="$id" '$1 == id { print $2, $3, $4; exit }' "$hints")"
             shape_matches=0
@@ -12843,11 +12911,11 @@ raw = read(proof_path); proof = json.loads(raw)
 tasks = json.loads(read(matrix))['tasks']
 ordinal = next(i for i, task in enumerate(tasks) if task['name'] == out.name)
 assert tasks[ordinal]['world_model_mode'] == 'real' and re.fullmatch('[0-9a-f]{40}', ref)
-expected = {'version': 1, 'policy': 'real-empty-bootstrap-v1' if 'cold_bootstrap' in proof else 'warm',
+expected = {'version': 1, 'policy': 'real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm',
             'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
             'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
 assert json.loads(read(out / 'cold-primary-bootstrap')) == expected
-print(1 if 'cold_bootstrap' in proof else 0)
+print(1 if 'cold_bootstrap' in proof or 'imported_cold' in proof else 0)
 PYINTENT
 }
 
@@ -12879,7 +12947,7 @@ tasks = json.loads(Path(matrix).read_text())['tasks']
 ordinal = next(i for i, task in enumerate(tasks) if task['name'] == bench)
 assert tasks[ordinal]['world_model_mode'] == 'real'
 if 'cold_bootstrap' in proof: assert proof['cold_bootstrap']['policy'] == 'real-empty-bootstrap-v1'
-intent = {'version': 1, 'policy': 'real-empty-bootstrap-v1' if 'cold_bootstrap' in proof else 'warm',
+intent = {'version': 1, 'policy': 'real-empty-bootstrap-v1' if 'cold_bootstrap' in proof or 'imported_cold' in proof else 'warm',
           'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
           'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
 with os.fdopen(os.open(destination, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600), 'w') as stream:
@@ -12908,6 +12976,52 @@ if ! cloudbench_controller_lock_acquire_wait \
     "$LOCK_DIR" "${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"; then
     echo "❌ Cloud benchmark controller lock failed." >&2
     exit 1
+fi
+
+if [ -n "$COLD_HANDOFF_REQUEST" ]; then
+    cold_handoff_status=0
+    cold_handoff_fields="$(python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$COLD_HANDOFF_REQUEST" "$COLD_HANDOFF_REQUEST_SHA" <<'PYREQUEST'
+import runpy,sys
+r=runpy.run_path(sys.argv[1])['read_cold_handoff_request'](*sys.argv[2:])
+print(r['operation'],r.get('registry','-'),r.get('machine','-'),r['controller_before'],r['controller_after'],r.get('native_before','-'),r.get('native_after','-'),sep='\t')
+PYREQUEST
+)" || exit 1
+    IFS=$'\t' read -r cold_operation cold_registry cold_machine cold_controller_before cold_controller_after cold_native_before cold_native_after <<< "$cold_handoff_fields"
+    if [ "$cold_operation" = export ]; then
+        [ "$cold_registry" = "$FLEET_OWNERSHIP_ROOT/${cold_registry##*/}" ] || exit 1
+        [ "$(registry_meta_value "$cold_registry/meta" host)" = "$FLEET_OWNER_HOST" ] || exit 1
+        registry_owner_alive "$cold_registry/meta"; [ "$?" -eq 1 ] || exit 1
+        acquire_registry_recovery_lock "$cold_registry" || exit 1
+        if [ ! -e "$cold_registry/cold-handoff-outgoing" ]; then
+            fleet_preconfig_recovery_plan "$cold_registry" >/dev/null || exit 1
+        fi
+    fi
+    # Canonical read-only exact GETs. O_EXCL private paths forbid stale-file
+    # reuse; errors preserve owner locks/holds and never trigger a retry.
+    fleet_preconfig_native_read "${FLY_MACHINE_ID:?}" "$cold_controller_before" \
+        && fleet_preconfig_native_read "${FLY_MACHINE_ID:?}" "$cold_controller_after" || exit 1
+    if [ "$cold_operation" != target ]; then
+        fleet_preconfig_native_read "$cold_machine" "$cold_native_before" \
+            && fleet_preconfig_native_read "$cold_machine" "$cold_native_after" || exit 1
+    fi
+    cold_volume_fields="$(python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$COLD_HANDOFF_REQUEST" "$COLD_HANDOFF_REQUEST_SHA" <<'PYVOLUMES'
+import runpy,sys
+r=runpy.run_path(sys.argv[1])['read_cold_handoff_request'](*sys.argv[2:]);v=[r['endpoint']['volume'],r['controller_volume']]
+if r['operation']!='target':v += [r['volume'],r['native_volume']]
+print(*v,sep='\t')
+PYVOLUMES
+)" || exit 1
+    IFS=$'\t' read -r cold_controller_volume cold_controller_volume_path cold_child_volume cold_child_volume_path <<< "$cold_volume_fields"
+    fleet_cold_handoff_volume_read "$cold_controller_volume" "$cold_controller_volume_path" || exit 1
+    if [ "$cold_operation" != target ]; then fleet_cold_handoff_volume_read "$cold_child_volume" "$cold_child_volume_path" || exit 1; fi
+    python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$COLD_HANDOFF_REQUEST" "$COLD_HANDOFF_REQUEST_SHA" "$ROOT_DIR" "$GIT_COMMON_DIR" <<'PYHANDOFF' || cold_handoff_status=$?
+import json,runpy,sys
+result=runpy.run_path(sys.argv[1])['cold_handoff_request'](*sys.argv[2:])
+print(json.dumps({'handoff_completed':True,'native_release_verified':False,'proof_credit':0}))
+PYHANDOFF
+    if [ "$cold_operation" = export ]; then release_registry_recovery_lock "$cold_registry" || exit 1; fi
+    cloudbench_controller_lock_release "$LOCK_DIR"
+    exit "$cold_handoff_status"
 fi
 
 if [ "$RECOVER_STALE_ONLY" = "1" ]; then

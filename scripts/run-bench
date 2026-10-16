@@ -256,6 +256,7 @@ Startup reuse:
   --provision-pool N  Prepare N stopped, reusable task Machines once. Ordinary
                       runs automatically claim and return this workspace pool.
                       Stopped Machines retain billable volume storage.
+  --cold-handoff-request REQUEST SHA256  Internal exact cold-controller handoff; no provisioning.
   --cold-primary-bootstrap  Explicit future empty-checkout policy for verified cold primaries.
   --reuse-pool-only  Use eligible owned stopped primary pool IDs only; no primary
                       cloning. Additional worker admission is unchanged.
@@ -345,6 +346,9 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
+        --cold-handoff-request)
+            [ "$#" -ge 3 ] || exit 2
+            INTERNAL_OPERATION=1; FLEET_ARGS+=("$1" "$2" "$3"); shift 3 ;;
         --recover-stale-owner|--recover-stale-owner-to-pool|--provision-pool)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
             INTERNAL_OPERATION=1
