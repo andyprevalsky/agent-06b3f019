@@ -15336,6 +15336,9 @@ if [ "${CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE+x}" = x ]; then
 fi
 if [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ]; then
     PROVENANCE_CONFIG_ARGS+=(--config-value "boot_transport=staged")
+    if [ "${INFRA_PROBE:-0}" = 1 ]; then
+        PROVENANCE_CONFIG_ARGS+=(--config-value "infra_probe=1")
+    fi
 fi
 if [ -n "$FRESH_TARGET_REGION" ]; then
     PROVENANCE_CONFIG_ARGS+=(--config-value "donor_region=$REGION")

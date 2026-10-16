@@ -59,6 +59,7 @@ _CONFIG_SCALAR_KEYS = {
     "start_barrier_wait_seconds",
     "boot_launch",
     "boot_transport",
+    "infra_probe",
     "boot_config_max_in_flight",
     "campaign_mutation_admission",
     "boot_update_capacity_wait_seconds",

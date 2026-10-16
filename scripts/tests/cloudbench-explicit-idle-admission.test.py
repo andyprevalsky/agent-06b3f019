@@ -726,6 +726,9 @@ class StagedPrimaryReturn(unittest.TestCase):
     def setUp(self):
         self.f=Worker();self.f.setUp();self.addCleanup(self.f.doCleanups);self.f.prepare()
         self.h=runpy.run_path(str(SCRIPT.with_name('cloudbench-staged-boot-return.py')))
+        if os.environ.get('STAGED_RETURN_TEST_SOURCE'):
+            self.h={'__file__':str(SCRIPT.with_name('cloudbench-staged-boot-return.py')),'__name__':'staged_return_old'}
+            exec(compile(Path(os.environ['STAGED_RETURN_TEST_SOURCE']).read_bytes(),'staged-return-old','exec'),self.h)
         self.transport=runpy.run_path(str(SCRIPT.with_name('cloudbench-staged-boot.py')))
         self.registry=self.f.common/'cloudbench-fleet-ownership'/self.f.owner;self.registry.mkdir(parents=True)
         self.run=self.f.root/'runs'/'current';self.out=self.run/'parallel-tool-calls';self.out.mkdir(parents=True)
@@ -840,6 +843,66 @@ fleet_verify_staged_primary_return "$MID" "$VOL" && printf released
         h=runpy.run_path(str(flat/'cloudbench-staged-boot-return.py'))
         result=h['verify'](self.out,self.registry,self.f.common,self.source,self.f.mid,self.f.vol,self.before,self.after,self.vol)
         self.assertEqual(result['status'],'STOPPED_RUNTIME_VERIFIED')
+
+
+@unittest.skipUnless(os.geteuid()==0,'real publication and typed probe ownership')
+class StagedProbeReturn(unittest.TestCase):
+    write=StagedPrimaryReturn.write
+    terminal=StagedPrimaryReturn.terminal
+    verify=StagedPrimaryReturn.verify
+    def setUp(self):
+        StagedPrimaryReturn.setUp(self)
+        (self.out/'runtime-evidence.owner.json').unlink();shutil.rmtree(self.out/'remote-logs')
+        intent=json.loads((self.stage/'intent.json').read_bytes());intent.pop('files');intent['evidence_kind']='infra-probe'
+        (self.stage/'boot.tar.gz').unlink()
+        payload={n:b'fixture source' for n in ('cloudbench-boot.sh','cloudbench-status-server.py','cloudbench-boot-payload.py','cloudbench-boot-payload.json.gz')}
+        archive_sha,intent=self.transport['bundle'](self.stage/'boot.tar.gz',dict(REF=self.source,CLOUDBENCH_RUN_TOKEN=self.token,CLOUDBENCH_BOOT='1',CLOUDBENCH_INFRA_PROBE='1'),payload,intent)
+        self.write(self.stage/'intent.json',intent);self.write(self.stage/'payload.json',dict(archive_sha256=archive_sha,bytes=(self.stage/'boot.tar.gz').stat().st_size))
+        self.ack.update(evidence_kind='infra-probe',archive_sha256=archive_sha,intent_sha256=mod.sha((self.stage/'intent.json').read_bytes()))
+        self.write(self.stage/'launch.ack.json',self.ack);self.terminal();term=json.loads((self.stage/'terminal.json').read_bytes());term['evidence_kind']='infra-probe';self.write(self.stage/'terminal.json',term)
+        self.write(self.out/'staged-probe.owner.json',dict(schema='cloudbench-staged-probe-owner-v1',app='app',machine_id=self.f.mid,run_token=self.token,source_ref=self.source,infra_probe=True,runtime_success=False))
+        c=runpy.run_path(str(SCRIPT.with_name('cloudbench_execution_provenance.py')));values=self.provenance['config']['values'];values['infra_probe']='1'
+        self.provenance['config']=c['build_config'](c['CONFIG_SCHEMA_VERSION'],[k+'='+v for k,v in values.items()]);self.write(self.run/'execution-provenance.json',self.provenance)
+        # Execute the actual existing probe artifact producer snippets.
+        source=SCRIPT.with_name('cloudbench-run.sh').read_text()
+        code=re.search(r"PROBE_TASKS_JSON=.*?python3 -c '\n(.*?)\n'\)",source,re.S).group(1)
+        env=dict(os.environ,PROBE_WMM='real',PROBE_TS='2026-10-16T00:00:00Z')
+        result=json.loads(subprocess.run(['python3','-c',code],input='parallel-tool-calls\n',text=True,capture_output=True,check=True,env=env).stdout)
+        self.write(self.out/'cloudbench-run.json',c['stamp_run_document'](result,self.provenance))
+        code=re.search(r"PROBE_CARD_JSON=.*?python3 -c '\n(.*?)\n'\)",source,re.S).group(1)
+        card=json.loads(subprocess.run(['python3','-c',code],input='parallel-tool-calls\n',text=True,capture_output=True,check=True).stdout);self.write(self.out/'cloudbench-report-card.json',card)
+        for name,value in [('benchmark-child.finished','0\n'),('barrier.ready.observed',''),('autoscaler.completed-after-child',''),('desired-worker-count','0\n')]:
+            (self.out/name).write_text(value)
+    def test_actual_probe_artifacts_return_without_real_task_credit(self):
+        value=self.verify();self.assertEqual(value['schema'],'cloudbench-staged-probe-return-v1');self.assertEqual(value['real_task_credit'],0);self.assertNotIn('runtime_manifest',value)
+        self.h['record'](value,self.f.common)
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text();fn=re.search(r'^pool_claim_fs_transaction\(\).*?^}\n',fleet,re.M|re.S).group();claim=dict(line.split('=',1) for line in self.f.claim.read_text().splitlines())
+        r=subprocess.run(['bash','-c',fn+'\npool_claim_fs_transaction release "$@"','release',str(self.f.claim),self.f.mid,value['claim_sha256'],claim['host'],claim['pid'],claim['pid_start'],claim['fleet_owner_token']],capture_output=True,text=True);self.assertEqual(r.returncode,0,r.stderr)
+        self.h['released'](self.out,self.f.common,self.f.mid);self.assertEqual(self.h['current_policy'](self.f.proof),'existing-git-reset-v1')
+        owner=json.loads((self.out/'staged-probe.owner.json').read_bytes());owner['runtime_success']=True;self.write(self.out/'staged-probe.owner.json',owner)
+        with self.assertRaises(ValueError):self.h['current_policy'](self.f.proof)
+    def test_probe_cannot_supply_fabricated_real_owner(self):
+        self.write(self.out/'runtime-evidence.owner.json',dict(version=1,machine_id=self.f.mid,run_token=self.token))
+        with self.assertRaises(ValueError):self.verify()
+    def test_missing_typed_owner_refuses(self):
+        (self.out/'staged-probe.owner.json').unlink()
+        with self.assertRaises(FileNotFoundError):self.verify()
+    def test_failed_probe_child_refuses(self):
+        (self.out/'benchmark-child.finished').write_text('125\n')
+        with self.assertRaises(ValueError):self.verify()
+    def test_missing_barrier_or_shutdown_refuses(self):
+        (self.out/'barrier.ready.observed').unlink()
+        with self.assertRaises(FileNotFoundError):self.verify()
+        (self.out/'barrier.ready.observed').write_bytes(b'');(self.out/'guest-shutdown.confirmed').unlink()
+        with self.assertRaises(FileNotFoundError):self.verify()
+    def test_real_or_foreign_result_cannot_be_probe(self):
+        path=self.out/'cloudbench-run.json';value=json.loads(path.read_bytes());value['infra_probe']=False;self.write(path,value)
+        with self.assertRaises(ValueError):self.verify()
+        value['infra_probe']=True;value['tasks'][0]['name']='foreign';self.write(path,value)
+        with self.assertRaises(ValueError):self.verify()
+    def test_probe_worker_allocation_refuses(self):
+        (self.out/'worker-clones.ids').write_text('some-worker\n')
+        with self.assertRaises(ValueError):self.verify()
 
 
 if __name__=='__main__':unittest.main()
