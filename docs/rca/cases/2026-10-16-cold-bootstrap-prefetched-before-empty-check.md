@@ -22,7 +22,7 @@ sources:
   - commit 6eea8703a81abe08989ab65657eeedf627da6b33
   - commit bcb06298c7c5d2820330ec4761e424a2e7229eed
 repro: python3 scripts/tests/cloudbench-bootstrap-recovery.test.py ColdBootstrapSingleOwnerTests
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -87,9 +87,9 @@ exception, retry or permissive guard. It prevents the same conflict for every
 cold primary task using this supervisor/driver pair. It does not accelerate the
 necessary fetch or checkout, and does not modify a running controller.
 
-Local causal proof establishes the code fix only. The RCA stays open until the
-root runs the unchanged canonical probe/task on the corrected source and retains
-its real outcome, cleanup and reuse evidence. REAL600 remains pending.
+Local causal proof initially established the code fix only. The native
+verification below subsequently supplied the probe/task outcome, cleanup and
+reuse evidence. REAL600 remains pending.
 
 ## Human feedback
 
@@ -101,3 +101,9 @@ mutation, timeout increases or fabricated successful return evidence.
 ## Reusable lesson
 
 Give one layer ownership of first initialization before enforcing a strict empty-destination contract.
+
+## Native verification
+
+Root's corrected native attempt 49 passed the first-checkout boundary on both original probe tasks; its later return-audit failure was a separate cause. Attempt 53 then passed the required N2 preflight and completed the real `parallel-tool-calls` task on control source `928e5326c1256d7466395151e2192b231b1cd000`, task ref `570830dbf17635e13d16a6f03b4d705f6b6443b1`. The task passed in 97.6 seconds, and the parent lifecycle ended verified with controller exit 0, immutable runtime return/release evidence and absent claims. Root also confirmed the exact Machines stopped. This closes the duplicate first-checkout defect, not the original600 goal or the extra-worker runtime path.
+
+The local immutable evidence is `real53-artifacts-1792142781475374527/{run.json,report-card.json,qualification.safe.json}` and the lifecycle/release packet `v41-command-605a63d4b33151e5/response.json` in the continuation directory. Run SHA256 is `8f3dc7a0419f8b6c09a862248c18abc95be017e93af60e1f8428f196033f5364`; report SHA256 is `c237f30e73f3dcb3b56d6f355884423b9e88f0c85210d2118ca13b48f916f633`. Previous failed packets remain intact.

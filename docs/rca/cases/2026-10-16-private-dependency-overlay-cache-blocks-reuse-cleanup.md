@@ -20,7 +20,7 @@ sources:
   - commit 307500bde96ec874b79d635ee282696299557e34
   - agent root experiment 52; retained v41-command-79b30368e248cc65/response.json
 repro: python3 scripts/tests/cloudbench-bootstrap-recovery.test.py DependencyOverlayCleanTests
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -46,3 +46,9 @@ Root requested an owning first-use dependency-overlay to next-cleanup regression
 ## Reusable lesson
 
 Private helper state inside a reusable checkout needs an explicit validated ownership boundary before an application-user cleaner traverses it.
+
+## Native verification
+
+On attempt 53, the reused real-task primary passed git cleanup and reused all five dependency overlays without the earlier permission failure. It advanced through the dependency, Prisma and PostgreSQL phases and completed `parallel-tool-calls` with PASS in 97.6 seconds. Control source was `928e5326c1256d7466395151e2192b231b1cd000`; task ref was `570830dbf17635e13d16a6f03b4d705f6b6443b1`. The final parent lifecycle was verified/exit0, runtime return and claim release succeeded, and the root confirmed stopped Machines and absent claims.
+
+The immutable task/report artifacts are in `real53-artifacts-1792142781475374527`; lifecycle and release evidence is in `v41-command-605a63d4b33151e5/response.json`. Run SHA256 `8f3dc7a0419f8b6c09a862248c18abc95be017e93af60e1f8428f196033f5364` and report SHA256 `c237f30e73f3dcb3b56d6f355884423b9e88f0c85210d2118ca13b48f916f633` were checked against the saved qualification. This closes the overlay cleanup defect. It does not qualify an extra worker or original600; attempt 52 and its failures remain untouched.

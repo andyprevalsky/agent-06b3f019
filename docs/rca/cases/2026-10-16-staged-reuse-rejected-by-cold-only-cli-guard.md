@@ -19,7 +19,7 @@ sources:
   - agent root experiment 51 report; v41-command-7d008dbd28ec9ff7/response.json
   - commit 9b037dcaf9515f5cc6d6b75495ded34155599334
 repro: python3 scripts/tests/cloudbench-staged-boot.test.py ReusableStagedBootstrap
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -43,3 +43,9 @@ Root requested the first-run to return to next-CLI sequence, preservation of nat
 ## Reusable lesson
 
 A transport-selection guard must not require a first-initialization flag after the lifecycle has legitimately advanced to reuse.
+
+## Native verification
+
+Attempt 53 reused an existing primary and crossed the formerly rejected staged cold=0 path. Its required N2 preflight passed, followed by a real `parallel-tool-calls` PASS in 97.6 seconds on control `928e5326c1256d7466395151e2192b231b1cd000` and task ref `570830dbf17635e13d16a6f03b4d705f6b6443b1`. The parent lifecycle was verified/exit0; the staged runtime return and claim release were recorded, with claims absent and Machines stopped.
+
+Evidence is retained in `real53-artifacts-1792142781475374527` and `v41-command-605a63d4b33151e5/response.json`. The run hash is `8f3dc7a0419f8b6c09a862248c18abc95be017e93af60e1f8428f196033f5364`; report hash is `c237f30e73f3dcb3b56d6f355884423b9e88f0c85210d2118ca13b48f916f633`. This verifies the reuse transition. No extra worker was launched, and original600 qualification remains pending. Failed attempt 51 is preserved.
