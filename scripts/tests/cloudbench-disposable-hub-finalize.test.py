@@ -38,6 +38,7 @@ class Finalize(unittest.TestCase):
   with self.assertRaises(ValueError):M['retire_disposable_hubs'](self.repo,self.out)
   self.assertIsNone(self.child.poll());self.assertFalse(list(self.out.iterdir()))
   self.child.terminate();self.child.wait(timeout=3)
+  self.path.chmod(0o600) # Incomplete dead starting receipts need no live-owner seal.
   M['retire_disposable_hubs'](self.repo,self.out)
   self.assertFalse(list(self.out.iterdir()))
  def test_rendered_disposable_gate_calls_finalizer_before_writer_check(self):
