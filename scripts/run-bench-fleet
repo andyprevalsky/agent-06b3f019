@@ -11080,7 +11080,7 @@ if registry_raw:
         receipt = out / 'failed-preconfig-runtime-archive/consumed.json'
         cold['receipt_sha256'] = hashlib.sha256(receipt.read_bytes()).hexdigest()
     else:
-        assert config['env'].get('CLOUDBENCH_BARRIER_TOKEN') == registry.name + '-' + str(matches[0])
+        assert config['env'].get('CLOUDBENCH_RUN_TOKEN') == registry.name + '-' + str(matches[0])
 second = json.loads(fetch(app, 20, machine))
 assert second.get('id') == machine and second.get('state') == 'stopped' and second.get('name') == name
 assert second.get('instance_id') == first['instance_id'] and digest(second['config']) == digest(config)

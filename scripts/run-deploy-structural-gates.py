@@ -164,6 +164,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-prestack-recovery.test.py"),
     ),
     Gate(
+        "cloudbench-pool-run-token",
+        ("python3", "scripts/tests/cloudbench-pool-run-token.test.py"),
+    ),
+    Gate(
         "cloudbench-live-primary-return",
         ("python3", "scripts/tests/cloudbench-live-primary-return.test.py"),
     ),

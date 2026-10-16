@@ -345,6 +345,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloud_batch_cleanup_test.py agents/benchmarks/cloudbench_dependency_sync_test.py agents/benchmarks/cloudbench_recovery_review_test.py agents/benchmarks/cloudbench_codex_auth_test.py
   run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
   run_suite "Cloud Benchmark GitHub Token" bash scripts/tests/cloudbench-github-token.test.sh
+  run_suite "Cloud Benchmark Pool Run Token" python3 scripts/tests/cloudbench-pool-run-token.test.py
   run_suite "Cloud Benchmark Live Primary Return" python3 scripts/tests/cloudbench-live-primary-return.test.py
   run_suite "Cloud Benchmark Exact Shape Reuse" python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py
   run_suite "Cloud Benchmark Maintenance Env" python3 scripts/tests/cloudbench-maintenance-env.test.py
