@@ -138,6 +138,18 @@ python3(){ cat >/dev/null; echo STAGED; }
   fly=self.fly();fly.flyctl=lambda*a:signal.raise_signal(signal.SIGTERM)
   with self.assertRaises(S.Cancelled):S.launch(fly,self.out,MID,TOKEN,self.env,self.files,'shared-cpu-2x','4096',PROBE,ready_seconds=2)
   self.assertEqual(json.loads((self.out/'terminal.json').read_text())['error_class'],'Cancelled')
+ def environment_entry(self,args):
+  repo=self.root/'fixture-repo';lib=repo/'scripts/lib';lib.mkdir(parents=True);(repo/'agents').mkdir();(repo/'back-end').mkdir()
+  for name in ('cloudbench-env.sh','cloudbench-app-env-lock.sh'):(lib/name).write_text('# fixture: no provider or credential operations\n')
+  (lib/'cloudbench-github-token.sh').write_text('cloudbench_export_controller_github_token(){ return 0; }\n')
+  binp=self.root/'fixture-bin';binp.mkdir();fly=binp/'flyctl';receipt=self.root/'fly-call.json'
+  fly.write_text('#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==["secrets","list","-a","navi-whisper-lux-bench","--json"]\nPath(os.environ["FIXTURE_FLY_CALL"]).write_text(json.dumps(sys.argv[1:]))\nprint(json.dumps([{"Name":n} for n in "AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN".split()]))\n');fly.chmod(0o755)
+  env={k:v for k,v in os.environ.items()if not k.startswith(('CLOUDBENCH_','FLY_'))};env.update(CLOUDBENCH_FLEET_ROOT=str(repo),CLOUDBENCH_BOOT_TRANSPORT='staged',FLY_BENCH_API_TOKEN='offline-fixture-selected-token',PATH=str(binp)+':'+os.environ['PATH'],HOME=str(self.root),FIXTURE_FLY_CALL=str(receipt))
+  return subprocess.run(['bash',str(ROOT/'run-bench-cloud'),*args],env=env,capture_output=True,text=True,timeout=5),receipt
+ def test_actual_verify_secrets_ignores_inherited_launch_transport(self):
+  result,receipt=self.environment_entry(['--verify-secrets']);self.assertEqual(result.returncode,0,result.stderr);self.assertTrue(receipt.exists());self.assertIn('verified (read-only)',result.stdout)
+ def test_actual_task_still_requires_explicit_staged_boot_flags(self):
+  result,receipt=self.environment_entry(['fixture-task','--machine',MID]);self.assertEqual(result.returncode,2);self.assertIn('requires explicitly admitted cold BOOT_LAUNCH',result.stderr);self.assertFalse(receipt.exists())
  @unittest.skipUnless(os.geteuid()==0,'actual guest file ownership contract requires root fixture')
  def test_actual_guest_installer_boot_supervisor_and_once(self):
   root=self.root/'guest';root.mkdir();data=root/'data';data.mkdir();binp=root/'bin';binp.mkdir()

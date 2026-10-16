@@ -246,6 +246,7 @@ done
 
 # Explicit transport selection is frozen before any provider mutation. Never
 # fall back to staged dispatch after an attempted config update.
+if [ "$MODE" != verify-secrets ]; then
 case "${CLOUDBENCH_BOOT_TRANSPORT:-config}" in
     config) ;;
     staged)
@@ -254,6 +255,7 @@ case "${CLOUDBENCH_BOOT_TRANSPORT:-config}" in
         ;;
     *) echo "invalid explicit boot transport" >&2; exit 2 ;;
 esac
+fi
 
 case "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" in 0|1) ;; *) exit 2 ;; esac
 if [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ]; then
