@@ -36,7 +36,7 @@ def available_snapshot(records, snapshot_id):
             if type(row['volume_size']) is not int or row['volume_size']<=0:
                 raise ValueError('snapshot volume size invalid')
             volume_sizes.add(row['volume_size'])
-        if all(value in {'running','pending','creating','queued'} for value in states):
+        if all(value in {'running','pending','creating','queued','waiting'} for value in states):
             if row['size']!=0 or row['digest']!='' or row['created_at']!='0001-01-01T00:00:00Z':
                 raise ValueError('snapshot pending representation has positive or conflicting data')
             continue

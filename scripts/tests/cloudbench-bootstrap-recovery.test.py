@@ -1659,6 +1659,27 @@ class SnapshotRepresentationTests(unittest.TestCase):
         for row in (dict(self.pending,size=1),dict(self.complete,size=True),dict(self.complete,digest='not-a-digest'),dict(self.complete,state='running'),dict(self.pending,status=None)):
             with self.subTest(row=row),self.assertRaises(ValueError):self.select([row],self.sid)
 
+    def test_actual_waiting_snapshot_responses_are_pending_not_failed(self):
+        for number in (1,2):
+            rows=json.loads((ROOT/'tests/fixtures'/f'snapshot-waiting-{number}.json').read_bytes())
+            sid=rows[0]['id']
+            with self.subTest(captured=number):
+                self.assertEqual(rows[0]['status'],'waiting')
+                self.assertIsNone(self.select(rows,sid))
+                complete=dict(self.complete,id=sid)
+                self.assertEqual(self.select(rows+[complete],sid),complete)
+                self.assertEqual(self.select([complete]+rows,sid),complete)
+
+    def test_waiting_never_waives_positive_conflicting_or_failed_evidence(self):
+        waiting=dict(self.pending,status='waiting')
+        for change in ({'size':1},{'digest':'a'*64},{'created_at':self.complete['created_at']},
+                       {'state':'created'},{'state':'failed'},{'status':'unrecognized'}):
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                self.select([dict(waiting,**change)],self.sid)
+        for failed in ('failed','error','cancelled','canceled'):
+            with self.subTest(failed=failed),self.assertRaises(ValueError):
+                self.select([waiting,dict(self.pending,status=failed),self.complete],self.sid)
+
 
 class AllocatedCurrentColdTests(PreconfigStartupArchiveTests):
     """New current-state custody never fabricates historical rejection evidence."""

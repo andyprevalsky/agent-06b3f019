@@ -10,6 +10,7 @@ first_bad_boundary: exact snapshot selector rejected repeated IDs before classif
 symptoms:
   - "duplicate snapshot identity"
   - "PENDING_OR_REFUSED"
+  - "snapshot representation state conflicts"
 tags:
   - cloudbench
   - snapshots
@@ -59,6 +60,37 @@ same Volume's snapshots and pass that full response through the exact-ID helper,
 then append a distinct receipt linked to the original request and failure. No
 snapshot creation retry, new snapshot, original-clock reset or whole-operation
 success claim follows from the parser fix.
+
+### Recurrence: waiting placeholders during the next34 snapshot acquisition
+
+The root-owned snapshot operations for Machines `891ed49f704998` and
+`8ed0d4f7d47128` each received a successful snapshot ACK. Their next exact-Volume
+GET returned a record with `status: waiting`, size0, an empty digest and the
+year0001 timestamp. The existing selector recognized running/pending/creating/
+queued placeholders but omitted this observed waiting state, raising
+`snapshot representation state conflicts` instead of returning pending `None`.
+Both attempts remain PENDING_NO_RETRY. No second POST is authorized by this fix.
+
+The two actual responses are retained byte-for-byte as
+`scripts/tests/fixtures/snapshot-waiting-1.json` and `snapshot-waiting-2.json`.
+The extended existing SnapshotRepresentationTests fails on6189 with the exact
+exception for both fixtures and passes after adding waiting to the pending set.
+It also verifies waiting alongside a completed record in either order, and
+rejects positive waiting payloads, mixed terminal/pending state, explicit
+failure, unknown state and all existing conflicting completion controls.
+The terminal-success predicate, selector bounds and snapshot transaction timers
+are unchanged. Four tests passed five consecutive unchanged runs in the isolated
+worktree. An initial fixture-directory setup error is retained separately and is
+not counted as causal RED evidence.
+
+Searches used `snapshot representation state conflicts` and `snapshot waiting
+pending completed placeholder`. This is a recurrence of the same representation
+classification boundary: prior coverage included only the running placeholder.
+No provider call, guest call or native reconciliation was performed by this RCA.
+The existing bootstrap-recovery structural gate already runs the test class.
+Root must reconcile the original acknowledged IDs using GET only. Successful
+local classification does not establish actual snapshot readiness, Machine
+reuse eligibility or REAL600 qualification.
 
 ## Human feedback
 
