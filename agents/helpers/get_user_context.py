@@ -521,7 +521,7 @@ def _format_user_context(
                 if name.lower() == "gmail" and isinstance(readable, list):
                     addresses = [email for email in readable if isinstance(email, str) and email]
                     integration_lines.append(
-                        f"  Readable inboxes: {', '.join(addresses) if addresses else 'none'}"
+                        f"  Configured OTP inboxes: {', '.join(addresses) if addresses else 'none'}"
                     )
         if integration_lines:
             sections.append(
