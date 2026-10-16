@@ -99,4 +99,17 @@ class StopAll(unittest.TestCase):
    calls=[]
    def api(self,m,p,body=None,**k):self.calls.append((m,body));return {}if m=='POST'else machine(state='stopped')
   a=Api();out=self.root/'kill';H['stop_one'](a,machine(),out,time.monotonic()+1,'SIGKILL');self.assertEqual(a.calls[0],('POST',{'signal':'SIGKILL','timeout':'1s'}));self.assertEqual(len([x for x in a.calls if x[0]=='POST']),1)
+ def test_forked_child_mkdir_inside_absolute_alarm(self):
+  import multiprocessing
+  original=Path.mkdir
+  class Api:
+   def api(self,*a,**k):raise AssertionError('mkdir must expire before provider')
+  def slow(path,*a,**k):time.sleep(.6);return original(path,*a,**k)
+  context=multiprocessing.get_context('fork')
+  with patch.object(Path,'mkdir',slow):
+   child=context.Process(target=H['stop_one'],args=(Api(),machine(),self.root/'slow-mkdir',time.monotonic()+.04));child.start()
+  try:
+   child.join(.25);self.assertFalse(child.is_alive(),'child mkdir escaped65s-equivalent alarm')
+  finally:child.join(2)
+  self.assertFalse((self.root/'slow-mkdir').exists())
 if __name__=='__main__':unittest.main()

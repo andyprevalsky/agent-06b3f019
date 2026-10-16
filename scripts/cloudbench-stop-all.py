@@ -78,11 +78,12 @@ def call(api, method, path, end, body=None):
         return api.api(method, path, body, timeout=max(.001, cap-time.monotonic()))
 
 def stop_one(api, row, out, end, stop_signal=None):
-    mid = row['id']; out.mkdir(mode=0o700)
+    mid = row['id']
     body = {'signal': stop_signal, 'timeout': '1s'} if stop_signal else {}
     result = dict(machine=mid, status='PENDING', stop_attempted=False)
     try:
         with until(end):
+            out.mkdir(mode=0o700)
             save(out/'before.json', row)
             # Durable once-only intent precedes dispatch. No retry, including ambiguous errors.
             save(out/'stop-intent.json', dict(method='POST', path='/machines/'+mid+'/stop', body=body))
