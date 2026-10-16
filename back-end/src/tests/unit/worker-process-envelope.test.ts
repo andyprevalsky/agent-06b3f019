@@ -108,13 +108,17 @@ async function withRecoveryRows(
       update: Partial<RecoveryRow>;
     }) {
       const next = rows.has(where.operationKey)
-        ? { ...rows.get(where.operationKey)!, ...update, updatedAt: new Date() }
-        : { ...create, updatedAt: new Date() };
+        ? { ...rows.get(where.operationKey)!, ...update, updatedAt: update.updatedAt ?? new Date() }
+        : { ...create, updatedAt: create.updatedAt ?? new Date() };
       rows.set(where.operationKey, structuredClone(next));
       return next;
     },
     async update({ where, data }: { where: { operationKey: string }; data: Partial<RecoveryRow> }) {
-      const next = { ...rows.get(where.operationKey)!, ...data, updatedAt: new Date() };
+      const next = {
+        ...rows.get(where.operationKey)!,
+        ...data,
+        updatedAt: data.updatedAt ?? new Date(),
+      };
       rows.set(where.operationKey, structuredClone(next));
       return next;
     },
@@ -122,17 +126,34 @@ async function withRecoveryRows(
       const row = rows.get(where.operationKey!);
       if (
         !row ||
-        Object.entries(where).some(([key, value]) => row[key as keyof RecoveryRow] !== value)
+        Object.entries(where).some(([key, value]) => {
+          const actual = row[key as keyof RecoveryRow];
+          if (value && typeof value === 'object' && 'gt' in value) {
+            return !(
+              value.gt instanceof Date &&
+              actual instanceof Date &&
+              actual.getTime() > value.gt.getTime()
+            );
+          }
+          return actual !== value;
+        })
       )
         return { count: 0 };
-      rows.set(row.operationKey, { ...row, ...data, updatedAt: new Date() });
+      rows.set(row.operationKey, { ...row, ...data, updatedAt: data.updatedAt ?? new Date() });
       return { count: 1 };
     },
   };
   const originalTransaction = prisma.$transaction,
     originalDelegate = prisma.toolSideEffect;
   prisma.$transaction = (async (fn: (tx: unknown) => unknown) =>
-    fn({ $executeRaw: async () => 1, toolSideEffect: delegate })) as never;
+    fn({
+      $executeRaw: async () => 1,
+      $queryRaw: async (query: TemplateStringsArray) => {
+        assert.equal(query.join(''), 'SELECT clock_timestamp() AS now');
+        return [{ now: new Date() }];
+      },
+      toolSideEffect: delegate,
+    })) as never;
   Object.defineProperty(prisma, 'toolSideEffect', { configurable: true, value: delegate });
   try {
     await run(rows);

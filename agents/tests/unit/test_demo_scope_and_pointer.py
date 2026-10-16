@@ -390,11 +390,17 @@ def test_fetch_agent_queue_pointer_parses_payload():
         async def get(self, url, headers=None):
             assert url.endswith("/api/agent-queue-pointer")
             assert headers["X-API-Key"] == "k"
+            assert headers["X-Workflow-Id"] == "workflow-1"
+            assert headers["X-Workflow-Run-Id"] == "run-1"
             return _Resp()
 
     fake_config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend/", api_key="k"))
     with (
         patch("helpers.fetch_queue_pointer.config", fake_config),
+        patch(
+            "helpers.fetch_queue_pointer.activity.info",
+            return_value=SimpleNamespace(workflow_id="workflow-1", workflow_run_id="run-1"),
+        ),
         patch("helpers.fetch_queue_pointer.httpx.AsyncClient", return_value=_Client()),
     ):
         result = asyncio.run(fetch_agent_queue_pointer())
@@ -422,11 +428,17 @@ def test_fetch_agent_queue_pointer_requires_key_and_queue():
             return False
 
         async def get(self, url, headers=None):
+            assert headers["X-Workflow-Id"] == "workflow-1"
+            assert headers["X-Workflow-Run-Id"] == "run-1"
             return _Resp()
 
     fake_config.backend.api_key = "k"
     with (
         patch("helpers.fetch_queue_pointer.config", fake_config),
+        patch(
+            "helpers.fetch_queue_pointer.activity.info",
+            return_value=SimpleNamespace(workflow_id="workflow-1", workflow_run_id="run-1"),
+        ),
         patch("helpers.fetch_queue_pointer.httpx.AsyncClient", return_value=_Client()),
     ):
         with pytest.raises(RuntimeError, match="missing taskQueue"):

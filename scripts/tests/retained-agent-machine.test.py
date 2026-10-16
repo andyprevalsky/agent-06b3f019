@@ -13,9 +13,7 @@ from unittest.mock import patch
 from urllib.error import URLError
 
 ROOT = Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location(
-    "retained_agent_machine", ROOT / "scripts/retained_agent_machine.py"
-)
+spec = importlib.util.spec_from_file_location("retained_agent_machine", ROOT / "scripts/retained_agent_machine.py")
 pool = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pool)
 
@@ -55,6 +53,7 @@ def args(action, **overrides):
         "token": "new-attempt",
         "image": "registry.fly.io/prod:new",
         "queue": "navi-agent-tasks@new",
+        "job": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -62,9 +61,7 @@ def args(action, **overrides):
 
 def custody(value):
     source = pool.record(value, "prod")
-    payload = {
-        key: source[key] for key in ("app", "id", "instance_id", "config_sha256")
-    }
+    payload = {key: source[key] for key in ("app", "id", "instance_id", "config_sha256")}
     payload.update(
         version=1,
         rootfs_disposition="archived",
@@ -91,9 +88,7 @@ class NativeHTTP:
                 json.loads(request.data) if request.data else None,
             )
         )
-        base = (
-            f"https://api.machines.dev/v1/apps/{self.app}/machines/{self.machine['id']}"
-        )
+        base = f"https://api.machines.dev/v1/apps/{self.app}/machines/{self.machine['id']}"
         suffix = request.full_url.removeprefix(base)
         assert request.full_url.startswith(base), "foreign app or ID"
         assert request.get_header("Authorization") == "Bearer " + self.token
@@ -104,22 +99,16 @@ class NativeHTTP:
             self.leased = True
             if self.on_lease:
                 self.on_lease(self.machine)
-            return io.BytesIO(
-                json.dumps({"data": {"nonce": "owned-native-nonce"}}).encode()
-            )
-        assert (
-            self.leased
-            and request.get_header("Fly-machine-lease-nonce") == "owned-native-nonce"
-        )
+            return io.BytesIO(json.dumps({"data": {"nonce": "owned-native-nonce"}}).encode())
+        assert self.leased and request.get_header("Fly-machine-lease-nonce") == "owned-native-nonce"
         if suffix == "/lease" and request.method == "DELETE":
             self.leased = False
             return io.BytesIO(b"{}")
         if request.method == "GET" and not suffix:
             return io.BytesIO(json.dumps(self.machine).encode())
-        if request.method == "POST" and suffix == "/metadata/" + pool.POOL_KEY:
-            self.machine["config"].setdefault("metadata", {})[pool.POOL_KEY] = data[
-                "value"
-            ]
+        if request.method == "POST" and suffix in ("/metadata/" + pool.POOL_KEY, "/metadata/" + pool.CUSTODY_KEY):
+            key = suffix.removeprefix("/metadata/")
+            self.machine["config"].setdefault("metadata", {})[key] = data["value"]
             return io.BytesIO(b"")
         if request.method == "POST" and not suffix:
             assert data["current_version"] == self.machine["instance_id"]
@@ -142,15 +131,11 @@ class RetainedWorkerTests(unittest.TestCase):
 
     def run_operation(self, native, parameters, expected):
         with patch.object(pool, "urlopen", native):
-            return pool.operate(
-                parameters, expected, pool.Fly(parameters.app, parameters.id)
-            )
+            return pool.operate(parameters, expected, pool.Fly(parameters.app, parameters.id))
 
     def retire(self, value):
         native = NativeHTTP(value)
-        self.run_operation(
-            native, args("retire", hash="old", queue="navi-agent-tasks@old"), value
-        )
+        self.run_operation(native, args("retire", hash="old", queue="navi-agent-tasks@old"), value)
         return native
 
     def released(self):
@@ -162,17 +147,10 @@ class RetainedWorkerTests(unittest.TestCase):
         value = machine()
         custody(value)
         native = self.retire(value)
-        self.assertEqual(
-            pool.record(native.machine, "prod"), pool.record(value, "prod")
-        )
+        self.assertEqual(pool.record(native.machine, "prod"), pool.record(value, "prod"))
         self.assertEqual(native.machine["state"], "stopped")
         self.assertTrue(pool.eligible(native.machine, "prod", "live"))
-        self.assertFalse(
-            any(
-                method == "POST" and url.endswith("/1234")
-                for method, url, _ in native.requests
-            )
-        )
+        self.assertFalse(any(method == "POST" and url.endswith("/1234") for method, url, _ in native.requests))
         self.assertFalse(native.leased)
 
     def test_without_bound_custody_retirement_preserves_machine_but_does_not_release_it(
@@ -193,9 +171,7 @@ class RetainedWorkerTests(unittest.TestCase):
             ("guest", "always"),
         ):
             value = machine()
-            value["config"][field][
-                "persist" if field == "rootfs" else "persist_rootfs"
-            ] = mode
+            value["config"][field]["persist" if field == "rootfs" else "persist_rootfs"] = mode
             custody(value)
             native = self.retire(value)
             self.assertFalse(pool.eligible(native.machine, "prod", "live"))
@@ -210,14 +186,163 @@ class RetainedWorkerTests(unittest.TestCase):
         for key in ("mounts", "rootfs", "services", "guest"):
             self.assertEqual(before[key], after[key])
         self.assertEqual(after["env"]["OTHER_SETTING"], "keep")
-        self.assertEqual(
-            after["env"]["TEMPORAL_WORKER_DEPLOYMENT_TOKEN"], "new-attempt"
-        )
+        self.assertEqual(after["env"]["TEMPORAL_WORKER_DEPLOYMENT_TOKEN"], "new-attempt")
         self.assertEqual(native.machine["state"], "stopped")
-        self.assertEqual(
-            pool.metadata(native.machine, pool.POOL_KEY)["phase"], "active"
-        )
+        self.assertEqual(pool.metadata(native.machine, pool.POOL_KEY)["phase"], "active")
         self.assertFalse(native.leased)
+
+    def test_stateless_pool_custody_survives_a_complete_generation_cycle(self):
+        value = machine()
+        custody(value)
+        proof = pool.metadata(value, pool.CUSTODY_KEY)
+        proof["rootfs_disposition"] = "stateless"
+        value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(proof)
+        native = self.retire(value)
+        self.run_operation(native, args("reuse"), native.machine)
+        native.machine["state"] = "stopped"
+        self.run_operation(
+            native,
+            args(
+                "retire",
+                live_hash="next",
+                hash="new",
+                build="next-build",
+                token="next-attempt",
+                queue="navi-agent-tasks@new",
+            ),
+            copy.deepcopy(native.machine),
+        )
+        self.assertTrue(
+            pool.eligible(native.machine, "prod", "next"),
+            "an explicitly stateless reusable machine must return to the spare pool",
+        )
+
+    def test_an_old_archive_does_not_certify_the_next_runtime(self):
+        value = self.released()
+        original_proof = pool.metadata(value, pool.CUSTODY_KEY)
+        native = NativeHTTP(value)
+        self.run_operation(native, args("reuse"), value)
+        self.assertEqual(pool.metadata(native.machine, pool.CUSTODY_KEY), original_proof)
+        self.assertFalse(pool.custody_ready(native.machine, "prod"))
+
+    def test_same_code_banks_can_be_reused_after_each_distinct_queue_retires(self):
+        value = machine()
+        value["config"]["env"]["TEMPORAL_WORKER_SURFACE_HASH"] = "same"
+        value["config"]["env"]["TEMPORAL_WORKER_POOL_QUEUE"] = "navi-agent-tasks-pool-first@same"
+        custody(value)
+        proof = pool.metadata(value, pool.CUSTODY_KEY)
+        proof["rootfs_disposition"] = "stateless"
+        value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(proof)
+        native = NativeHTTP(value)
+        for index in (2, 3):
+            prior_queue = native.machine["config"]["env"]["TEMPORAL_WORKER_POOL_QUEUE"]
+            current_queue = f"navi-agent-tasks-pool-{index}@same"
+            parameters = dict(
+                hash="same",
+                live_hash="same",
+                live_queue=current_queue,
+                queue=prior_queue,
+                build=f"build-{index}",
+                token=f"attempt-{index}",
+            )
+            self.run_operation(native, args("retire", **parameters), copy.deepcopy(native.machine))
+            self.assertFalse(pool.eligible(native.machine, "prod", "same", prior_queue))
+            self.assertTrue(pool.eligible(native.machine, "prod", "same", current_queue))
+            parameters.update(queue=current_queue, live_queue=f"navi-agent-tasks-pool-live-{index}@same")
+            self.run_operation(native, args("reserve", job=f"job-{index}", **parameters), copy.deepcopy(native.machine))
+            self.run_operation(native, args("reuse", job=f"job-{index}", **parameters), copy.deepcopy(native.machine))
+            self.assertTrue(pool.custody_ready(native.machine, "prod"))
+            self.assertEqual(native.machine["config"]["env"]["TEMPORAL_WORKER_POOL_QUEUE"], current_queue)
+            self.assertEqual(native.machine["config"]["env"]["AUTOSCALER_ACTUATE"], "0")
+            self.assertEqual(native.machine["config"]["mounts"], value["config"]["mounts"])
+
+    def test_reserved_machine_cannot_be_claimed_by_a_second_deployment(self):
+        value = self.released()
+        native = NativeHTTP(value)
+        parameters = args("reserve", job="deploy-one")
+        self.run_operation(native, parameters, value)
+        saved = copy.deepcopy(native.machine)
+        self.assertTrue(pool.reserved(saved, parameters))
+        self.assertFalse(pool.eligible(saved, "prod", "live"))
+        self.run_operation(native, parameters, value)
+        with self.assertRaises(ValueError):
+            self.run_operation(native, args("reserve", job="deploy-two"), saved)
+        with self.assertRaises(ValueError):
+            self.run_operation(native, args("reuse", job="deploy-two"), saved)
+        self.run_operation(native, args("reuse", job="deploy-one"), saved)
+        self.assertEqual(pool.metadata(native.machine, pool.POOL_KEY)["job"], "deploy-one")
+
+    def test_unmodified_reservation_returns_only_to_its_original_verified_idle_state(self):
+        value = self.released()
+        native = NativeHTTP(value)
+        self.run_operation(native, args("reserve", job="abandoned-job"), value)
+        reserved = copy.deepcopy(native.machine)
+        with self.assertRaises(ValueError):
+            self.run_operation(native, args("release-reservation", job="other-job"), reserved)
+        self.run_operation(native, args("release-reservation", job="abandoned-job"), reserved)
+        self.assertEqual(pool.record(native.machine, "prod"), pool.record(value, "prod"))
+        self.assertEqual(pool.metadata(native.machine, pool.POOL_KEY), pool.metadata(value, pool.POOL_KEY))
+        self.assertTrue(pool.eligible(native.machine, "prod", "live"))
+
+    def test_reserved_generation_and_native_identity_cannot_change_before_reuse(self):
+        value = self.released()
+        native = NativeHTTP(value)
+        self.run_operation(native, args("reserve", job="deploy-one"), value)
+        saved = copy.deepcopy(native.machine)
+        for updates in ({"hash": "other"}, {"token": "other"}):
+            with self.assertRaises(ValueError):
+                self.run_operation(native, args("reuse", job="deploy-one", **updates), saved)
+        native.machine["instance_id"] = "another-native-version"
+        with self.assertRaises(ValueError):
+            self.run_operation(native, args("reuse", job="deploy-one"), saved)
+
+    def test_explicit_preallocation_can_be_enrolled_without_booting_a_worker(self):
+        value = machine()
+        value["state"] = "created"
+        value["config"]["env"].update(
+            TEMPORAL_WORKER_SURFACE_HASH=pool.SPARE_SURFACE,
+            TEMPORAL_WORKER_POOL_SPARE="1",
+        )
+        custody(value)
+        proof = pool.metadata(value, pool.CUSTODY_KEY)
+        proof["rootfs_disposition"] = "stateless"
+        value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(proof)
+        native = NativeHTTP(value)
+        self.run_operation(native, args("enroll"), value)
+        self.assertTrue(pool.initial_spare(native.machine, "prod", "live"))
+        saved = copy.deepcopy(native.machine)
+        self.run_operation(native, args("reserve", job="first-deploy"), saved)
+        self.run_operation(native, args("reuse", job="first-deploy"), copy.deepcopy(native.machine))
+        self.assertNotIn("TEMPORAL_WORKER_POOL_SPARE", native.machine["config"]["env"])
+        self.assertFalse(any(url.endswith("/start") for _, url, _ in native.requests))
+
+    def test_preallocation_does_not_relabel_live_or_unknown_data_as_idle(self):
+        for mode in ("running", "archived", "old-surface", "unmarked", "persistent-overlay"):
+            value = machine()
+            value["config"]["env"].update(
+                TEMPORAL_WORKER_SURFACE_HASH=pool.SPARE_SURFACE,
+                TEMPORAL_WORKER_POOL_SPARE="1",
+            )
+            custody(value)
+            proof = pool.metadata(value, pool.CUSTODY_KEY)
+            proof["rootfs_disposition"] = "archived" if mode == "archived" else "stateless"
+            value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(proof)
+            if mode == "running":
+                value["state"] = "started"
+            if mode == "old-surface":
+                value["config"]["env"]["TEMPORAL_WORKER_SURFACE_HASH"] = "old"
+            if mode == "unmarked":
+                value["config"]["env"].pop("TEMPORAL_WORKER_POOL_SPARE")
+            if mode == "persistent-overlay":
+                value["config"]["rootfs"]["persist"] = "always"
+                custody(value)
+                proof = pool.metadata(value, pool.CUSTODY_KEY)
+                proof["rootfs_disposition"] = "stateless"
+                value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(proof)
+            native = NativeHTTP(value)
+            with self.assertRaises(ValueError):
+                self.run_operation(native, args("enroll"), value)
+            self.assertFalse(any("/metadata/" in url for _, url, _ in native.requests))
 
     def test_selection_refuses_busy_live_foreign_unmarked_protected_and_changed_data(
         self,
@@ -230,15 +355,9 @@ class RetainedWorkerTests(unittest.TestCase):
         for change in (
             lambda m: m.update(state="started"),
             lambda m: m.update(instance_id="replaced"),
-            lambda m: m["config"]["env"].update(
-                TEMPORAL_WORKER_DEPLOYMENT_TOKEN="foreign-attempt"
-            ),
-            lambda m: m["config"]["mounts"].append(
-                {"volume": "foreign", "path": "/foreign"}
-            ),
-            lambda m: m["config"]["metadata"].update(
-                rose_worker_reuse_protected="true"
-            ),
+            lambda m: m["config"]["env"].update(TEMPORAL_WORKER_DEPLOYMENT_TOKEN="foreign-attempt"),
+            lambda m: m["config"]["mounts"].append({"volume": "foreign", "path": "/foreign"}),
+            lambda m: m["config"]["metadata"].update(rose_worker_reuse_protected="true"),
         ):
             value = copy.deepcopy(good)
             change(value)
@@ -264,9 +383,7 @@ class RetainedWorkerTests(unittest.TestCase):
         custody(value)
         native = NativeHTTP(value)
         with self.assertRaises(ValueError):
-            self.run_operation(
-                native, args("retire", hash="old", queue="navi-agent-tasks@old"), value
-            )
+            self.run_operation(native, args("retire", hash="old", queue="navi-agent-tasks@old"), value)
         self.assertFalse(any("/metadata/" in url for _, url, _ in native.requests))
         marker = {
             "version": 1,
@@ -303,12 +420,7 @@ class RetainedWorkerTests(unittest.TestCase):
         native.on_lease = lambda current: current.update(instance_id="foreign-version")
         with self.assertRaises(ValueError):
             self.run_operation(native, args("reuse"), value)
-        self.assertFalse(
-            any(
-                method == "POST" and url.endswith("/1234")
-                for method, url, _ in native.requests
-            )
-        )
+        self.assertFalse(any(method == "POST" and url.endswith("/1234") for method, url, _ in native.requests))
         self.assertFalse(native.leased)
 
     def test_committed_update_with_lost_ack_reconciles_same_attempt_without_second_write(
@@ -321,10 +433,7 @@ class RetainedWorkerTests(unittest.TestCase):
             self.run_operation(native, args("reuse"), value)
         self.run_operation(native, args("reuse"), value)
         self.assertEqual(
-            sum(
-                method == "POST" and url.endswith("/1234")
-                for method, url, _ in native.requests
-            ),
+            sum(method == "POST" and url.endswith("/1234") for method, url, _ in native.requests),
             1,
         )
         self.assertFalse(native.leased)
@@ -349,18 +458,9 @@ class RetainedWorkerTests(unittest.TestCase):
             token="old-attempt",
         )
         self.run_operation(native, parameters, value)
-        self.assertEqual(
-            pool.record(native.machine, "prod"), pool.record(value, "prod")
-        )
-        self.assertEqual(
-            pool.metadata(native.machine, pool.POOL_KEY)["phase"], "active"
-        )
-        self.assertFalse(
-            any(
-                method == "POST" and url.endswith("/1234")
-                for method, url, _ in native.requests
-            )
-        )
+        self.assertEqual(pool.record(native.machine, "prod"), pool.record(value, "prod"))
+        self.assertEqual(pool.metadata(native.machine, pool.POOL_KEY)["phase"], "active")
+        self.assertFalse(any(method == "POST" and url.endswith("/1234") for method, url, _ in native.requests))
         self.assertFalse(native.leased)
 
     def test_rolling_intent_recovers_only_the_pinned_native_target(self):
@@ -375,9 +475,7 @@ class RetainedWorkerTests(unittest.TestCase):
             TEMPORAL_WORKER_DEPLOYMENT_TOKEN="foreign",
         )
         self.assertFalse(pool.active_owner(native.machine, "prod"))
-        native.machine["config"]["env"]["TEMPORAL_WORKER_DEPLOYMENT_TOKEN"] = (
-            "new-attempt"
-        )
+        native.machine["config"]["env"]["TEMPORAL_WORKER_DEPLOYMENT_TOKEN"] = "new-attempt"
         self.assertTrue(pool.active_owner(native.machine, "prod"))
         parameters.action = "activate"
         self.run_operation(native, parameters, copy.deepcopy(native.machine))
@@ -419,17 +517,13 @@ class RetainedWorkerTests(unittest.TestCase):
                     value["state"] = "stopped"
                 native = NativeHTTP(value)
                 if mode == "changed":
-                    native.on_lease = lambda m: m["config"]["env"].update(
-                        OTHER_SETTING="changed"
-                    )
+                    native.on_lease = lambda m: m["config"]["env"].update(OTHER_SETTING="changed")
                 call_args = copy.copy(parameters)
                 if mode == "wrong-attempt":
                     call_args.token = "foreign"
                 with self.assertRaises(ValueError):
                     self.run_operation(native, call_args, value)
-                self.assertFalse(
-                    any("/metadata/" in url for _, url, _ in native.requests)
-                )
+                self.assertFalse(any("/metadata/" in url for _, url, _ in native.requests))
                 self.assertFalse(native.leased)
 
     def test_retirement_refuses_busy_changed_or_live_generation(self):
@@ -440,14 +534,10 @@ class RetainedWorkerTests(unittest.TestCase):
             ),
             (
                 args("retire", hash="old", queue="navi-agent-tasks@old"),
-                lambda m: m["config"]["env"].update(
-                    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="foreign"
-                ),
+                lambda m: m["config"]["env"].update(TEMPORAL_WORKER_DEPLOYMENT_TOKEN="foreign"),
             ),
             (
-                args(
-                    "retire", hash="old", live_hash="old", queue="navi-agent-tasks@old"
-                ),
+                args("retire", hash="old", live_hash="old", queue="navi-agent-tasks@old"),
                 lambda m: None,
             ),
         ):

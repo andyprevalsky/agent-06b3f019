@@ -1666,13 +1666,12 @@ async def test_handler_live_explore_waits_full_depth_timeout():
 def test_explore_timeouts_drain_within_deploy_cutover():
     """Explores in flight at deploy end before their worker is retired.
 
-    A changed agent surface keeps old-generation workers polling until the
-    cooperative drain SLO, so the longest explore plus cancel grace must fit
-    inside it. A same-surface rolling deploy gives running activities the
-    worker shutdown grace before Fly kills the machine; an explore cut there
-    fails its heartbeat and recovers its evidence like any other timeout.
+    Each bank keeps old workers until qualified queue retirement. The longest
+    explore plus cancel grace must fit inside the driver's drain budget;
+    budget expiry retains the old bank instead of forcing retirement. Native
+    shutdown still gives running activities their configured worker grace.
     """
-    import re
+    import ast
     import tomllib
     from datetime import timedelta
     from pathlib import Path
@@ -1681,10 +1680,19 @@ def test_explore_timeouts_drain_within_deploy_cutover():
     from helpers.generation_handoff import parse_shutdown_grace_seconds
 
     root = Path(__file__).resolve().parents[3]
-    cutover = (root / "scripts" / "deploy-agents-cooperative-cutover.sh").read_text()
-    match = re.search(r'DRAIN_TIMEOUT_SECONDS="\$\{DRAIN_TIMEOUT_SECONDS:-(\d+)\}"', cutover)
-    assert match, "deploy-agents-cooperative-cutover.sh must default DRAIN_TIMEOUT_SECONDS"
-    drain_slo = timedelta(seconds=int(match.group(1)))
+    launcher = (root / "scripts" / "deploy-agents-cooperative-cutover.sh").read_text()
+    assert '"$ROOT/scripts/worker_pool_cutover.py"' in launcher, "deploy launcher must invoke the canonical bank driver"
+    driver = ast.parse((root / "scripts" / "worker_pool_cutover.py").read_text())
+    budgets = [
+        node.value.value
+        for node in driver.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "DRAIN_TIMEOUT_SECONDS" for target in node.targets)
+        and isinstance(node.value, ast.Constant)
+        and type(node.value.value) is int
+    ]
+    assert len(budgets) == 1, "canonical bank driver must declare one integer DRAIN_TIMEOUT_SECONDS"
+    drain_slo = timedelta(seconds=budgets[0])
     for depth, (_turns, activity_timeout) in EXPLORE_DEPTH_LIMITS.items():
         assert activity_timeout + EXPLORE_CANCEL_GRACE < drain_slo, (
             f"{depth} explore ({activity_timeout} + {EXPLORE_CANCEL_GRACE} grace) outlives the {drain_slo} cutover drain"

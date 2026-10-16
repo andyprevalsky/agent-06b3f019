@@ -48,7 +48,7 @@ async def _live_task_queue() -> str | None:
     # reuse the previous answer instead of all refreshing at once.
     _cached_at = now
     try:
-        pointer = await read_agent_queue_pointer(timeout_seconds=POINTER_READ_TIMEOUT_SECONDS)
+        pointer = await read_agent_queue_pointer(timeout_seconds=POINTER_READ_TIMEOUT_SECONDS, observation_only=True)
         live = pointer.get("task_queue")
         _cached_queue = live.strip() if isinstance(live, str) and live.strip() else None
     except Exception as exc:
