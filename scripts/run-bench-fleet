@@ -1295,7 +1295,7 @@ if [ "${CLOUDBENCH_TEST_FLEET_OWNER_TOKEN+x}" != "x" ]; then
         *) echo "❌ fleet owner token must be exactly 32 lowercase hex characters" >&2; exit 2 ;;
     esac
 fi
-if [ "$RECOVER_STALE_ONLY" = "1" ] && [ -z "$COLD_HANDOFF_REQUEST" ]; then
+if [ "$RECOVER_STALE_ONLY" = "1" ] && [ -z "$COLD_HANDOFF_REQUEST" ] && [ "${#EXPLICIT_IDLE_ARGS[@]}" -eq 0 ]; then
     case "$RECOVER_OWNER_TOKEN" in
         [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
         *) echo "❌ --recover-stale-owner requires exactly 32 lowercase hex characters" >&2; exit 2 ;;

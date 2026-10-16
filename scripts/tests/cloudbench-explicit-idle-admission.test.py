@@ -105,6 +105,41 @@ class Admission(unittest.TestCase):
         value=dict(schema='explicit-idle-authority-v1',consumer=self.request['consumer'],app='app',machine_id=self.mid,volume_id=self.vol,admission_nonce=self.nonce,request_sha256=mod.sha(req.read_bytes()),coordinator_thread='test-coordinator',custody_lock=str(lock),protected_overlay={k:self.request['protected_overlay'][k] for k in ('path','sha256')},sole_operator=True,old_actors_joined=True,historical_task_credit=0,allowed_operations=['observe','same-config-start','stop','publish-pool'])
         auth=self.root/'authority.json';auth.write_bytes(mod.canonical(value));auth.chmod(0o600)
         return req,auth,fd
+    def fleet_dispatch_fixture(self):
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+        start=fleet.index('while [ $# -gt 0 ]; do',fleet.index('CAPACITY_RESERVATION_ROOT='))
+        parser=fleet[start:fleet.index('\ndone\n',start)+6]
+        start=fleet.index('if [ "$RECOVER_STALE_ONLY" = "1" ] && [ -z "$COLD_HANDOFF_REQUEST" ]')
+        guard=fleet[start:fleet.index('\nfi\n',start)+4]
+        start=fleet.index('if [ "${#EXPLICIT_IDLE_ARGS[@]}" -gt 0 ]; then')
+        dispatch=fleet[start:fleet.index('\nfi\n',start)+4]
+        path=self.root/'actual-fleet-dispatch.sh'
+        path.write_text('''set -uo pipefail
+EXPLICIT_IDLE_ARGS=(); RECOVER_STALE_ONLY=0; RECOVER_OWNER_TOKEN=; COLD_HANDOFF_REQUEST=
+ROOT_DIR="$FIXTURE_REPO"; GIT_COMMON_DIR="$FIXTURE_COMMON"; APP=app
+POOL_IDS_FILE="$FIXTURE_POOL"; POOL_META_FILE="$FIXTURE_POOL.deps"
+LOCK_DIR="$FIXTURE_COMMON/fixture-controller-lock"
+cloudbench_controller_lock_release() { printf released > "$FIXTURE_COMMON/lock-released"; }
+'''+parser+'\n'+guard+'\n'+dispatch+'\nprintf recovery-token-accepted\n')
+        return path
+    @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')
+    def test_actual_cli_admission_dispatch_reaches_canonical_publisher(self):
+        request,authority,fd=self.authority();dispatch=self.fleet_dispatch_fixture()
+        env={**os.environ,'RUN_BENCH_FLEET_BIN_UNDER_TEST':str(dispatch),'FIXTURE_REPO':str(self.repo),'FIXTURE_COMMON':str(self.common),'FIXTURE_POOL':self.request['consumer']['pool_ids_file']}
+        result=subprocess.run(['bash',str(SCRIPT.with_name('run-bench')),'--admit-existing-idle',str(request),mod.sha(request.read_bytes()),str(authority),mod.sha(authority.read_bytes()),str(fd)],env=env,pass_fds=(fd,),capture_output=True,text=True,timeout=15)
+        if result.returncode:
+            self.assertFalse(Path(self.request['consumer']['pool_ids_file']).exists(),'refused CLI must not publish')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'],'COMPLETE')
+        self.assertEqual(Path(self.request['consumer']['pool_ids_file']).read_text(),self.mid+'\n')
+        self.assertEqual((self.common/'lock-released').read_text(),'released')
+    def test_actual_cli_invalid_recovery_token_still_refuses(self):
+        dispatch=self.fleet_dispatch_fixture()
+        env={**os.environ,'RUN_BENCH_FLEET_BIN_UNDER_TEST':str(dispatch),'FIXTURE_REPO':str(self.repo),'FIXTURE_COMMON':str(self.common),'FIXTURE_POOL':self.request['consumer']['pool_ids_file']}
+        result=subprocess.run(['bash',str(SCRIPT.with_name('run-bench')),'--recover-stale-owner','invalid'],env=env,capture_output=True,text=True,timeout=15)
+        self.assertEqual(result.returncode,2);self.assertIn('requires exactly 32 lowercase hex',result.stderr)
+        self.assertFalse(Path(self.request['consumer']['pool_ids_file']).exists())
+
     @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')
     def test_real_module_publish_verify_and_exclusive_repeat(self):
         req,auth,fd=self.authority()
