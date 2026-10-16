@@ -3701,5 +3701,94 @@ step(){ :; }
         r,log=self.invoke();self.assertNotEqual(r.returncode,0);self.assertIn('absent or empty unlinked destination',r.stdout+log)
         self.assertEqual((target/'preserve').read_text(),'prior data');self.assertFalse((target/'.git').exists())
 
+@unittest.skipUnless(os.geteuid() == 0, 'root-owned overlay / UID1001 cleanup boundary')
+class DependencyOverlayCleanTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name); self.root.chmod(0o755)
+        self.repo = self.root / 'repo'; self.donor = self.root / 'donor'
+        self.repo.mkdir(); self.donor.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.repo)], check=True)
+        (self.repo / '.gitignore').write_text('node_modules/\nvenv/\n')
+        subprocess.run(['git', '-C', str(self.repo), 'add', '.gitignore'], check=True)
+        subprocess.run(['git', '-C', str(self.repo), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'], check=True)
+        for path in [self.repo, *self.repo.rglob('*')]:
+            os.chown(path, 1001, 1001)
+        (self.repo / 'stale-task-output').write_text('remove me')
+        nested = self.repo / 'unrelated' / '.cloudbench-deps-overlays'; nested.mkdir(parents=True)
+        (nested / 'stale').write_text('remove nested lookalike')
+        for path in [self.repo / 'unrelated', nested, nested / 'stale']:
+            os.chown(path, 1001, 1001)
+        (self.repo / 'node_modules').mkdir(); (self.donor / 'node_modules').mkdir()
+        # Actual first-use producer; only the mount syscall is replaced locally.
+        text = (ROOT / 'cloudbench-sync-deps.sh').read_text()
+        import re
+        functions = '\n'.join(re.search(r'^' + name + r'\(\).*?^}\n', text, re.M | re.S).group() for name in ('overlay_state_dir', 'mount_fresh_dependency_overlay'))
+        shell = 'set -euo pipefail\n' + functions + '\nOVERLAY_TREES=(); REBUILD_DEPS=0\nmount(){ return 0; }\nmount_fresh_dependency_overlay "$DEPS_DIR/node_modules" "$REPO_DIR/node_modules"\n'
+        result = subprocess.run(['bash', '-c', shell], env={**os.environ, 'DEPS_DIR': str(self.donor), 'REPO_DIR': str(self.repo)}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.cache = self.repo / '.cloudbench-deps-overlays'; self.state = self.cache / 'node_modules'
+        (self.state / 'upper' / 'cached-package').write_text('preserve cached dependency')
+
+    def clean(self):
+        text = Path(os.environ.get('CLOUDBENCH_CLEAN_TEST_SOURCE', str(ROOT / 'cloudbench-run.sh'))).read_text()
+        start = text.index('# reset --hard does not remove untracked files')
+        end = text.index('log "checkout at ', start)
+        shell = '''set -euo pipefail
+APP_USER=1001
+log(){ printf '%s\\n' "$*"; }
+finish(){ exit "$1"; }
+gosu(){ shift; python3 -c 'import os,sys;os.setgid(1001);os.setuid(1001);os.execvp(sys.argv[1],sys.argv[1:])' "$@"; }
+''' + text[start:end]
+        before = {str(p.relative_to(self.cache)): (p.read_bytes() if p.is_file() and not p.is_symlink() else None, p.lstat().st_uid, p.lstat().st_mode) for p in ([self.cache, *self.cache.rglob('*')] if self.cache.exists() else [])}
+        result = subprocess.run(['bash', '-c', shell], env={**os.environ, 'REPO_DIR': str(self.repo), 'DEPS_DIR': str(self.donor), 'SYNC_DEPS_SCRIPT': str(ROOT / 'cloudbench-sync-deps.sh')}, capture_output=True, text=True)
+        after = {str(p.relative_to(self.cache)): (p.read_bytes() if p.is_file() and not p.is_symlink() else None, p.lstat().st_uid, p.lstat().st_mode) for p in ([self.cache, *self.cache.rglob('*')] if self.cache.exists() else [])}
+        self.assertEqual(before, after, 'cleanup must preserve cache bytes and ownership')
+        return result
+
+    def test_actual_overlay_producer_then_uid1001_clean(self):
+        result = self.clean()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.repo / 'stale-task-output').exists())
+        self.assertFalse((self.repo / 'unrelated').exists())
+        self.assertEqual((self.state / 'upper' / 'cached-package').read_text(), 'preserve cached dependency')
+
+    def test_wrong_owner_binding_refuses_before_clean(self):
+        (self.state / 'owner').write_text(str(self.donor / 'other') + '\n' + str(self.repo / 'node_modules') + '\n')
+        self.assertNotEqual(self.clean().returncode, 0)
+        self.assertTrue((self.repo / 'stale-task-output').exists())
+
+    def test_unknown_cache_entry_refuses_before_clean(self):
+        (self.cache / 'arbitrary-task-files').mkdir()
+        self.assertNotEqual(self.clean().returncode, 0)
+        self.assertTrue((self.repo / 'stale-task-output').exists())
+
+    def test_linked_state_refuses_before_clean(self):
+        target = self.root / 'original-state'; self.state.rename(target); self.state.symlink_to(target, target_is_directory=True)
+        self.assertNotEqual(self.clean().returncode, 0)
+        self.assertTrue((self.repo / 'stale-task-output').exists())
+
+    def test_cache_permissions_and_linked_owner_refuse(self):
+        self.cache.chmod(0o755)
+        self.assertNotEqual(self.clean().returncode, 0)
+        self.cache.chmod(0o700)
+        owner = self.state / 'owner'; copy = self.root / 'owner'; owner.rename(copy); owner.symlink_to(copy)
+        self.assertNotEqual(self.clean().returncode, 0)
+        self.assertTrue((self.repo / 'stale-task-output').exists())
+
+    def test_no_cache_keeps_ordinary_untracked_cleanup(self):
+        import shutil
+        shutil.rmtree(self.cache)
+        self.assertEqual(self.clean().returncode, 0)
+        self.assertFalse((self.repo / 'stale-task-output').exists())
+        self.assertFalse((self.repo / 'unrelated').exists())
+
+    def test_tracked_cache_namespace_refuses(self):
+        subprocess.run(['git', '-c', 'safe.directory=' + str(self.repo), '-C', str(self.repo), 'add', '-f', str(self.state / 'owner')], check=True)
+        self.assertNotEqual(self.clean().returncode, 0)
+        self.assertTrue((self.repo / 'stale-task-output').exists())
+
+
 if __name__ == "__main__":
     unittest.main()

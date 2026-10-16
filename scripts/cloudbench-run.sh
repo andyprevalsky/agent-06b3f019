@@ -733,7 +733,15 @@ unset CLOUDBENCH_GITHUB_TOKEN_B64
 # reset --hard does not remove untracked files created by an earlier uploaded
 # worktree patch. Remove only non-ignored untracked files; dependency/cache trees
 # are ignored and remain warm.
-if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -ffd 2>&1 | sed 's/^/   /'; then
+clean_exclusions=()
+if [ -e "$REPO_DIR/.cloudbench-deps-overlays" ] || [ -L "$REPO_DIR/.cloudbench-deps-overlays" ]; then
+    if ! bash "$SYNC_DEPS_SCRIPT" --verify-overlay-cache "$DEPS_DIR" "$REPO_DIR"; then
+        log "FATAL: invalid dependency overlay cache before worktree cleanup"
+        finish 1
+    fi
+    clean_exclusions=(-e '/.cloudbench-deps-overlays/')
+fi
+if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -ffd "${clean_exclusions[@]}" 2>&1 | sed 's/^/   /'; then
     log "FATAL: could not remove stale untracked worktree files"
     finish 1
 fi
