@@ -38,6 +38,7 @@ import { isOpeningRouterTurn, readRouterFastCache } from './routerFastCache';
 import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
 import type { ChatProviderRoute } from './phaseModels';
 import type { ChatCompletionParams } from './completionOptions';
+import { withCurrentTimeContext } from '../currentTimeContext';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import {
   ROUTER_JSON_SCHEMA,
@@ -185,7 +186,7 @@ export function buildRouterCompletionOptions(
 ): CompletionOptions {
   return {
     model: params.model,
-    messages: params.messages,
+    messages: withCurrentTimeContext(params.messages),
     temperature: ROUTER_TEMPERATURE,
     // Cerebras reserves the model's full sequence length when this is omitted,
     // exhausting the shared token quota even for a short routing decision.

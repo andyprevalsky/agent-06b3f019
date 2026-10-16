@@ -292,9 +292,13 @@ async function sendFollowUp(
 function assertExactProdRouterContext(network: FailoverNetwork): void {
   const [first] = network.routerRequests('cerebras');
   assert.ok(first, 'router must try direct Cerebras first');
-  assert.equal(first.messageCount, PROD_ROUTER_MESSAGE_COUNT, 'router message count drifted');
   assert.equal(
-    first.transcriptChars,
+    first.messageCount,
+    PROD_ROUTER_MESSAGE_COUNT + 1,
+    'original router context plus one runtime clock'
+  );
+  assert.equal(
+    first.transcriptChars - first.runtimeClock.length,
     PROD_ROUTER_TRANSCRIPT_CHARS,
     'router transcript must be the exact prod conversation (same-length PII scrub)'
   );

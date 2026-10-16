@@ -24,6 +24,7 @@ import {
 import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
 import type { SupervisorComputeToken } from './supervisorComputeToken';
 import type { ToolCall } from './supervisorTools';
+import { withCurrentTimeContext } from '../currentTimeContext';
 
 const log = createLogger('SmsSupervisor');
 
@@ -42,6 +43,7 @@ export async function callSupervisorLlm(
   reactionOnly = false
 ): Promise<SupervisorResponse> {
   const startTime = Date.now();
+  const groundedMessages = withCurrentTimeContext(messages);
   const claudeToken = computeToken?.type === 'claude' ? computeToken.accessToken : null;
   const gptToken = computeToken?.type === 'gpt' ? computeToken.accessToken : null;
   const gptAccountId = computeToken?.type === 'gpt' ? computeToken.accountId : undefined;
@@ -68,7 +70,7 @@ export async function callSupervisorLlm(
     mode: reactionOnly ? 'reaction' : 'tools',
     model: activeModel,
     providerRoute: providerRoute ?? 'pool-default',
-    messageCount: messages.length,
+    messageCount: groundedMessages.length,
     hasClaudeToken: !!claudeToken && providerRoute !== undefined,
     hasGptToken: !!gptToken && providerRoute !== undefined,
     systemPromptLength: messages[0]?.content
@@ -76,7 +78,7 @@ export async function callSupervisorLlm(
         ? messages[0].content.length
         : 0
       : 0,
-    messages: messages.map((m, i) => ({
+    messages: groundedMessages.map((m, i) => ({
       index: i,
       role: m.role,
       contentLength: typeof m.content === 'string' ? m.content.length : 0,
@@ -84,7 +86,11 @@ export async function callSupervisorLlm(
     })),
   });
 
-  const blackboxFixture = loadBlackboxSupervisorResponseFixture(userId, reactionOnly, messages);
+  const blackboxFixture = loadBlackboxSupervisorResponseFixture(
+    userId,
+    reactionOnly,
+    groundedMessages
+  );
   if (blackboxFixture) {
     if (blackboxFixture.delayMs > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, blackboxFixture.delayMs));
@@ -99,7 +105,7 @@ export async function callSupervisorLlm(
 
   const stream = await createStreamingCompletion({
     model: activeModel,
-    messages,
+    messages: groundedMessages,
     temperature: 0.3,
     response_model: reactionOnly ? SUPERVISOR_REACTION_MODEL : SUPERVISOR_RESPONSE_MODEL,
     ...(providerRoute !== undefined ? { provider_route: providerRoute } : {}),

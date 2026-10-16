@@ -6468,6 +6468,13 @@
 {"task": "agent-payment-setup-resume", "duration_seconds": 136.7, "cost_cents": 0.0, "timestamp": "2026-10-16T16:09:23.840748+00:00", "agent_id": "85c4302e-e6bb-4c39-8325-bbcab8dad98c"}
 {"task": "agent-payment-test-shop", "duration_seconds": 127.7, "cost_cents": 0.0, "timestamp": "2026-10-16T16:09:23.840748+00:00", "agent_id": "fb900b2e-575a-4a25-89ad-1cb2bb6ff80d"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 212.0, "cost_cents": 0.0, "timestamp": "2026-10-16T16:09:23.840748+00:00", "agent_id": "950305a0-1723-48fa-909a-caf3007bff54"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 225.7, "cost_cents": 80.0, "timestamp": "2026-10-16T21:07:32.411668+00:00", "agent_id": "563ff659-4818-4887-8bb0-fcd03659debd"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 139.2, "cost_cents": 0.0, "timestamp": "2026-10-16T21:07:32.411668+00:00", "agent_id": "ba51cf64-ee6a-423b-8d76-d875a155dbb6"}
+{"task": "spawn-sub-agents", "duration_seconds": 162.4, "cost_cents": 10.0, "timestamp": "2026-10-16T21:07:32.411668+00:00", "agent_id": "aa920c38-ffbf-456b-b16e-a336765bc84a"}
+{"task": "browser-smoke", "duration_seconds": 101.5, "cost_cents": 0.0, "timestamp": "2026-10-16T21:07:32.411668+00:00", "agent_id": "eca43770-adcd-4198-873a-3e8d1062225b"}
+{"task": "parallel-tool-calls", "duration_seconds": 137.6, "cost_cents": 26.0, "timestamp": "2026-10-16T21:07:32.411668+00:00", "agent_id": "1886275c-1c66-4a6e-9b5c-9d051703bfc3"}
+{"task": "claude-code-agent", "duration_seconds": 57.2, "cost_cents": 0.0, "timestamp": "2026-10-16T21:07:32.411668+00:00", "agent_id": "510b31ed-6950-4d2d-9ff0-438ce72d5931"}
+{"task": "chat-mode", "duration_seconds": 16.3, "cost_cents": 0.0, "timestamp": "2026-10-16T21:07:32.411668+00:00", "agent_id": "18eeb37f-2d5f-4c67-a289-d9324eba89f4"}
 {"task": "lantern-people-discovery", "duration_seconds": 75.1, "cost_cents": 0.0, "timestamp": "2026-10-16T17:47:47.213070+00:00", "agent_id": "217a067b-41d8-4d70-8d7a-8023f0edb2fa"}
 {"task": "lantern-people-enrichment", "duration_seconds": 85.5, "cost_cents": 0.0, "timestamp": "2026-10-16T17:47:47.213070+00:00", "agent_id": "d288c4c1-005a-45aa-bc0c-3fc3cfb913e9"}
 {"task": "lantern-people-pagination", "duration_seconds": 89.6, "cost_cents": 0.0, "timestamp": "2026-10-16T17:47:47.213070+00:00", "agent_id": "9fcc2db4-8fad-4f4b-9146-ef2535947b12"}
