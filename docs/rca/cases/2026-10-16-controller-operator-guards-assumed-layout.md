@@ -129,3 +129,13 @@ failures, not counted as operator-guard regressions or original REAL600 causes.
 The retry also logged recovered provider fallback and local archive connection
 errors; those logs remain retained and do not establish successful remote archive
 or original-run qualification. No additional paid full-suite retry was made.
+
+The two failed fixture families were subsequently corrected without changing
+assertions: extracted fixtures now include their actual inventory/reuse helper
+dependencies and physical Git-common-directory input. Re-running the identical
+registered families passed 168 private-fleet cases and 14 VM-shape cases. The
+original full-domain failure remains preserved; this is a targeted rerun of its
+only failures, not a replacement full-domain success claim. After integration,
+the ten new operator records and five runtime-latch cases each passed five
+consecutive runs with identical source and test hashes. Native adoption and the
+original REAL600 run remain separate, pending qualification steps.
