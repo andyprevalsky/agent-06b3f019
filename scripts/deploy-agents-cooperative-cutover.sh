@@ -29,6 +29,14 @@ SURFACE_HASH="${SURFACE_HASH:?SURFACE_HASH is required}"
 GENERATION_QUEUE="${GENERATION_QUEUE:?GENERATION_QUEUE is required}"
 BUILD_ID="${BUILD_ID:?BUILD_ID is required}"
 DEPLOYMENT_TOKEN="${DEPLOYMENT_TOKEN:?DEPLOYMENT_TOKEN is required}"
+# Reuse-only is the production default. An insufficient pool must never turn
+# into an implicit allocation; fresh provisioning needs a separate opt-in.
+DEPLOY_REUSE_ONLY="${DEPLOY_REUSE_ONLY:-1}"
+case "$DEPLOY_REUSE_ONLY" in
+  1) BUILD_LOCATION=--local-only ;; # Reuse the CI host, not a new Fly builder.
+  0) BUILD_LOCATION=--remote-only ;;
+  *) echo "DEPLOY_REUSE_ONLY must be 0 or 1" >&2; exit 2 ;;
+esac
 # 45 minutes cooperative drain SLO before force-migrate.
 DRAIN_TIMEOUT_SECONDS="${DRAIN_TIMEOUT_SECONDS:-2700}"
 DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-30}"
@@ -56,13 +64,31 @@ CURRENT_QUEUE="$(pointer_field "$POINTER_OUT" taskQueue)"
 echo "Live pointer hash='${CURRENT_HASH:-<none>}' queue='${CURRENT_QUEUE:-<none>}'"
 echo "Deploy hash='$SURFACE_HASH' queue='$GENERATION_QUEUE'"
 
+prepared_target_machines() {
+  flyctl machines list -a "$APP" --json | jq --arg app "$APP" --arg h "$SURFACE_HASH" \
+    --arg build "$BUILD_ID" --arg token "$DEPLOYMENT_TOKEN" '
+    [.[]
+    | (.config.metadata // {}) as $metadata
+    | ($metadata.rose_cooperative_worker_pool // "null" | try fromjson catch null |
+        if type == "object" then . else null end) as $pool
+    | select(.config.env.TEMPORAL_WORKER_SURFACE_HASH == $h and
+       .config.env.TEMPORAL_WORKER_BUILD_ID == $build and
+       .config.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN == $token)
+    | select(($metadata.rose_worker_reuse_protected // "") == "")
+    | select(($metadata | has("rose_cooperative_worker_pool") | not) or
+       ($pool.phase == "active" and $pool.app == $app and $pool.id == .id and
+        $pool.hash == $h and $pool.build == $build and $pool.token == $token))]
+  '
+}
+
 machine_ids_for_hash() {
   local hash="$1"
-  flyctl machines list -a "$APP" --json | jq -r --arg h "$hash" '
-    .[]
-    | select((.config.env.TEMPORAL_WORKER_SURFACE_HASH // "") == $h)
-    | .id
-  '
+  if [ "$hash" = "$SURFACE_HASH" ]; then
+    prepared_target_machines | jq -r '.[].id'
+  else
+    flyctl machines list -a "$APP" --json | jq -r --arg h "$hash" \
+      '.[] | select((.config.env.TEMPORAL_WORKER_SURFACE_HASH // "") == $h) | .id'
+  fi
 }
 
 # A prior clone can succeed on Fly while flyctl times out waiting for it to
@@ -70,11 +96,50 @@ machine_ids_for_hash() {
 # this generation's hash but be stopped with an earlier deployment token.
 candidate_ids_for_hash() {
   local hash="$1"
-  flyctl machines list -a "$APP" --json | jq -r --arg h "$hash" '
+  flyctl machines list -a "$APP" --json | jq -r --arg h "$hash" --arg app "$APP" '
     .[]
-    | select((.name // "") | startswith("gen-" + $h + "-"))
+    | select((.config.metadata.rose_worker_reuse_protected // "") == "")
+    | ((.config.metadata // {}) | has("rose_cooperative_worker_pool")) as $has_pool
+    | (.config.metadata.rose_cooperative_worker_pool // "null" | try fromjson catch null |
+        if type == "object" then . else null end) as $pool
+    | select((($has_pool | not) and ((.name // "") | startswith("gen-" + $h + "-"))) or
+      ($pool.phase == "active" and $pool.app == $app and $pool.id == .id and
+       $pool.hash == $h and .config.env.TEMPORAL_WORKER_SURFACE_HASH == $h and
+       $pool.build == .config.env.TEMPORAL_WORKER_BUILD_ID and
+       $pool.token == .config.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN))
     | .id
   '
+}
+
+count_open_on_queue() {
+  local raw status
+  raw="$(cd "$ROOT/back-end" && npx tsx scripts/count-open-workflows-on-queue.ts --queue "$1" 2>/dev/null)" && status=0 || status=$?
+  if [ "$status" -ne 0 ]; then
+    printf '?\n'
+    return 0
+  fi
+  printf '%s\n' "$raw" | awk '/^[0-9]+$/{n=$0} END{if (n == "") print "?"; else print n}'
+}
+
+update_generation_config() {
+  local id="$1" snapshot="${2:-}" marker
+  if [ -n "$snapshot" ]; then
+    printf '%s' "$snapshot" | python3 "$ROOT/scripts/retained_agent_machine.py" reuse \
+      --app "$APP" --id "$id" --live-hash "$CURRENT_HASH" \
+      --hash "$SURFACE_HASH" --build "$BUILD_ID" --token "$DEPLOYMENT_TOKEN" \
+      --image "$IMAGE_REF" --queue "$GENERATION_QUEUE"
+    return
+  fi
+  marker="$(jq -cn --arg app "$APP" --arg id "$id" --arg hash "$SURFACE_HASH" \
+    --arg build "$BUILD_ID" --arg token "$DEPLOYMENT_TOKEN" \
+    '{version:1,phase:"active",app:$app,id:$id,hash:$hash,build:$build,token:$token}')"
+  flyctl machine update "$id" -a "$APP" --image "$IMAGE_REF" --yes \
+    --skip-start --skip-health-checks \
+    --env "TEMPORAL_WORKER_BUILD_ID=$BUILD_ID" \
+    --env "TEMPORAL_WORKER_SURFACE_HASH=$SURFACE_HASH" \
+    --env "TEMPORAL_WORKER_DEPLOYMENT_TOKEN=$DEPLOYMENT_TOKEN" \
+    --env "TEMPORAL_WORKER_REQUIRE_ACTIVATION=0" \
+    --metadata "rose_cooperative_worker_pool=$marker"
 }
 
 # The Machines API intermittently answers an update with 408/5xx (run
@@ -82,14 +147,9 @@ candidate_ids_for_hash() {
 # rollout — so retry it in-run instead of failing the whole cutover.
 MACHINE_UPDATE_ATTEMPTS="${MACHINE_UPDATE_ATTEMPTS:-4}"
 configure_new_machine() {
-  local id="$1" attempt
+  local id="$1" snapshot="${2:-}" attempt
   for ((attempt = 1; attempt <= MACHINE_UPDATE_ATTEMPTS; attempt++)); do
-    if flyctl machine update "$id" -a "$APP" --image "$IMAGE_REF" --yes \
-      --skip-start --skip-health-checks \
-      --env "TEMPORAL_WORKER_BUILD_ID=$BUILD_ID" \
-      --env "TEMPORAL_WORKER_SURFACE_HASH=$SURFACE_HASH" \
-      --env "TEMPORAL_WORKER_DEPLOYMENT_TOKEN=$DEPLOYMENT_TOKEN" \
-      --env "TEMPORAL_WORKER_REQUIRE_ACTIVATION=0"; then
+    if update_generation_config "$id" "$snapshot"; then
       flyctl machines start "$id" -a "$APP" || true
       return 0
     fi
@@ -108,12 +168,52 @@ all_started_ids() {
 
 if [ "$CURRENT_HASH" = "$SURFACE_HASH" ]; then
   echo "Surface unchanged — rolling deploy with activity-boundary drain"
+  # App-wide deploy also selects stopped Machines. Retired spares must never
+  # enter a rolling deployment through that implicit selection path.
+  ROLLING_IDS="$(flyctl machines list -a "$APP" --json | jq -r --arg app "$APP" --arg h "$CURRENT_HASH" '
+    .[]
+    | (.config.metadata // {}) as $metadata
+    | ($metadata.rose_cooperative_worker_pool // "null" | try fromjson catch null |
+        if type == "object" then . else null end) as $pool
+    | select(.state == "started" and .config.env.TEMPORAL_WORKER_SURFACE_HASH == $h)
+    | select((.config.env.TEMPORAL_WORKER_BUILD_ID // "") != "" and
+       (.config.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN // "") != "")
+    | select(($metadata.rose_worker_reuse_protected // "") == "")
+    | select(($metadata | has("rose_cooperative_worker_pool") | not) or
+       ($pool.phase == "active" and $pool.app == $app and $pool.id == .id and
+        $pool.hash == $h and
+        (($pool.build == .config.env.TEMPORAL_WORKER_BUILD_ID and
+          $pool.token == .config.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN) or
+         ($pool.rolling.build == .config.env.TEMPORAL_WORKER_BUILD_ID and
+          $pool.rolling.token == .config.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN))))
+    | .id')"
+  ROLLING_COUNT="$(printf '%s\n' "$ROLLING_IDS" | awk 'NF {n++} END {print n+0}')"
+  if [ "$ROLLING_COUNT" -lt "$MIN" ]; then
+    echo "❌ fewer than $MIN live, owned workers are eligible for rolling deployment" >&2
+    exit 1
+  fi
+  ROLLING_CSV="$(printf '%s\n' "$ROLLING_IDS" | paste -sd, -)"
+  ROLLING_SNAPSHOT="$(flyctl machines list -a "$APP" --json)"
+  for ID in $ROLLING_IDS; do
+    SNAPSHOT="$(printf '%s' "$ROLLING_SNAPSHOT" | jq -ec --arg id "$ID" '.[] | select(.id == $id)')"
+    printf '%s' "$SNAPSHOT" | python3 "$ROOT/scripts/retained_agent_machine.py" prepare-roll \
+      --app "$APP" --id "$ID" --live-hash "$CURRENT_HASH" \
+      --hash "$SURFACE_HASH" --build "$BUILD_ID" --token "$DEPLOYMENT_TOKEN"
+  done
   cd "$ROOT/agents"
-  flyctl deploy --remote-only \
+  flyctl deploy "$BUILD_LOCATION" -a "$APP" --strategy rolling \
+    --only-machines "$ROLLING_CSV" --update-only --ha=false \
     --env TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
     --env TEMPORAL_WORKER_SURFACE_HASH="$SURFACE_HASH" \
     --env TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
     --env TEMPORAL_WORKER_REQUIRE_ACTIVATION="0"
+  ROLLED_SNAPSHOT="$(flyctl machines list -a "$APP" --json)"
+  for ID in $ROLLING_IDS; do
+    SNAPSHOT="$(printf '%s' "$ROLLED_SNAPSHOT" | jq -ec --arg id "$ID" '.[] | select(.id == $id)')"
+    printf '%s' "$SNAPSHOT" | python3 "$ROOT/scripts/retained_agent_machine.py" activate \
+      --app "$APP" --id "$ID" --live-hash "$CURRENT_HASH" \
+      --hash "$SURFACE_HASH" --build "$BUILD_ID" --token "$DEPLOYMENT_TOKEN"
+  done
   # Excess same-generation machines are left to the in-worker autoscaler,
   # which only stops peers reporting zero in-flight activities. Stopping them
   # here by position would SIGTERM machines mid-activity.
@@ -127,7 +227,7 @@ cd "$ROOT/agents"
 # Build+push only. Do NOT replace old-gen machines; they must keep serving the
 # old queue until agents hand off (or the 45m force-migrate fires).
 IMAGE_LABEL="cutover-${SURFACE_HASH}-${DEPLOYMENT_TOKEN}"
-if ! flyctl deploy --remote-only --build-only --push \
+if ! flyctl deploy "$BUILD_LOCATION" --build-only --push \
     --image-label "$IMAGE_LABEL" \
     -a "$APP" \
     --env TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
@@ -162,7 +262,31 @@ done
 EXISTING_NEW="$(machine_ids_for_hash "$SURFACE_HASH" | wc -l | tr -d ' ')"
 NEED=$((MIN - EXISTING_NEW))
 if [ "$NEED" -lt 0 ]; then NEED=0; fi
+
+# Reuse only explicitly released, stopped same-app Machines from a drained
+# generation. A stopped state or a familiar name alone is not a release.
+if [ "$NEED" -gt 0 ] && [ -n "$CURRENT_HASH" ]; then
+  POOL_SNAPSHOT="$(flyctl machines list -a "$APP" --json)"
+  for ID in $(printf '%s' "$POOL_SNAPSHOT" | python3 "$ROOT/scripts/retained_agent_machine.py" candidates \
+      --app "$APP" --live-hash "$CURRENT_HASH"); do
+    if [ "$NEED" -le 0 ]; then break; fi
+    SNAPSHOT="$(printf '%s' "$POOL_SNAPSHOT" | jq -c --arg id "$ID" '.[] | select(.id == $id)')"
+    SOURCE_HASH="$(printf '%s' "$SNAPSHOT" | jq -r '.config.env.TEMPORAL_WORKER_SURFACE_HASH')"
+    if [ "$(count_open_on_queue "navi-agent-tasks@$SOURCE_HASH")" != "0" ]; then
+      echo "Not reusing $ID: its source queue is not proven drained"
+      continue
+    fi
+    echo "Reusing released same-app Machine $ID before fresh allocation"
+    configure_new_machine "$ID" "$SNAPSHOT"
+    NEED=$((NEED - 1))
+  done
+fi
 echo "New-gen machines present=$EXISTING_NEW need_create=$NEED (min=$MIN)"
+
+if [ "$DEPLOY_REUSE_ONLY" = 1 ] && [ "$NEED" -gt 0 ]; then
+  echo "❌ reuse-only: $NEED more eligible existing worker IDs are required; refusing creation" >&2
+  exit 1
+fi
 
 for ((i = 1; i <= NEED; i++)); do
   NAME="gen-${SURFACE_HASH}-$(date +%s)-$i"
@@ -190,11 +314,7 @@ echo "Waiting for new-gen machines to pass /health..."
 deadline=$((SECONDS + 300))
 healthy=0
 while [ "$SECONDS" -lt "$deadline" ]; do
-  if ! NEW_GEN_STATES="$(flyctl machines list -a "$APP" --json | jq -r --arg h "$SURFACE_HASH" '
-    .[]
-    | select((.config.env.TEMPORAL_WORKER_SURFACE_HASH // "") == $h)
-    | "\(.id) \(.state)"
-  ')"; then
+  if ! NEW_GEN_STATES="$(prepared_target_machines | jq -r '.[] | "\(.id) \(.state)"')"; then
     echo "  ⚠️  machines list failed; retrying" >&2
     sleep 5
     continue
@@ -240,19 +360,6 @@ fi
 # the drain loop would burn the full 45m SLO even with an empty queue and
 # then lose the race with the GHA step timeout during machine retirement
 # (seen on run 33817062156: 0 open workflows the whole time, step killed at 60m).
-count_open_on_queue() {
-  # Capture status separately: the TS helper can print a count and still exit
-  # non-zero (e.g. prisma.$disconnect failure). Masking with `|| true` would
-  # let drain/post-clear treat that unknown state as a real integer (incl. 0).
-  local raw status
-  raw="$(npx tsx scripts/count-open-workflows-on-queue.ts --queue "$1" 2>/dev/null)" && status=0 || status=$?
-  if [ "$status" -ne 0 ]; then
-    printf '?\n'
-    return 0
-  fi
-  printf '%s\n' "$raw" | awk '/^[0-9]+$/{n=$0} END{if (n == "") print "?"; else print n}'
-}
-
 echo "Cooperative drain of $OLD_QUEUE (timeout=${DRAIN_TIMEOUT_SECONDS}s, force-migrate after SLO)"
 drain_deadline=$((SECONDS + DRAIN_TIMEOUT_SECONDS))
 while true; do
@@ -277,23 +384,51 @@ while true; do
   sleep "$DRAIN_POLL_SECONDS"
 done
 
-echo "Retiring old-generation machines (hash=${CURRENT_HASH:-unknown})"
+echo "Stopping and retaining drained old-generation machines (hash=${CURRENT_HASH:-unknown})"
 if [ -n "$CURRENT_HASH" ]; then
+  if [ "$(count_open_on_queue "$OLD_QUEUE")" != "0" ]; then
+    echo "❌ old queue is not proven empty; refusing to certify reusable workers" >&2
+    exit 1
+  fi
   # Cap total retire wall-clock so N serial machines cannot burn the GHA step
   # after drain already succeeded (12 machines × 240s would be 48m alone).
   retire_deadline=$((SECONDS + 900))
+  retirement_failed=0
   for ID in $(machine_ids_for_hash "$CURRENT_HASH"); do
     if [ "$SECONDS" -ge "$retire_deadline" ]; then
       echo "⚠️  old-gen retire budget (15m) exhausted — leftover machines deferred to next deploy"
+      retirement_failed=1
       break
     fi
-    echo "  stopping+destroying old-gen machine $ID"
+    echo "  stopping+retaining old-gen machine $ID"
+    if ! SNAPSHOT="$(flyctl machines list -a "$APP" --json | jq -ce --arg id "$ID" '.[] | select(.id == $id)')"; then
+      retirement_failed=1
+      continue
+    fi
+    if [ "$(printf '%s' "$SNAPSHOT" | jq -r '.config.metadata.rose_worker_reuse_protected // ""')" != "" ]; then
+      echo "  preserving protected old-generation Machine $ID; no stop or pool release"
+      retirement_failed=1
+      continue
+    fi
     # Bound each call — a hung stop/destroy previously burned the whole GHA
     # step after drain had already succeeded (pointer flipped, old queue=0).
     # --kill-after ensures flyctl cannot ignore SIGTERM and overrun the budget.
-    timeout --kill-after=30s 120 flyctl machines stop "$ID" -a "$APP" || true
-    timeout --kill-after=30s 120 flyctl machines destroy "$ID" -a "$APP" --force || true
+    if [ "$(printf '%s' "$SNAPSHOT" | jq -r '.state')" != "stopped" ]; then
+      if ! timeout --kill-after=30s 120 flyctl machines stop "$ID" -a "$APP"; then
+        retirement_failed=1
+        continue
+      fi
+    fi
+    if ! printf '%s' "$SNAPSHOT" | python3 "$ROOT/scripts/retained_agent_machine.py" retire \
+      --app "$APP" --id "$ID" --live-hash "$SURFACE_HASH" --hash "$CURRENT_HASH" \
+      --build "$BUILD_ID" --token "$DEPLOYMENT_TOKEN" --queue "$OLD_QUEUE"; then
+      retirement_failed=1
+    fi
   done
+  if [ "$retirement_failed" -ne 0 ]; then
+    echo "❌ some old workers lack confirmed stopped retention; preserving them for recovery" >&2
+    exit 1
+  fi
 fi
 
 echo "✅ Cooperative cutover complete for generation $SURFACE_HASH"

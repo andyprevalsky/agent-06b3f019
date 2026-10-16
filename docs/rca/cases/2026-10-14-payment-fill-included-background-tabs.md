@@ -180,10 +180,325 @@ observations; the original purchase has not been replayed or proven to
 complete. The documented production mint cutoff remains unchanged. Changing that
 configuration requires explicit approval.
 
+The user-directed follow-up removes automatic payment entry completely. The
+agent now chooses an ordinary action and target for each field. A shared action
+boundary copies the model's arguments, resolves explicit `{{secret:<ref>}}`
+placeholders privately in every browser tool, and safely escapes JavaScript
+literals. Legacy whole-value references remain accepted for paused tasks.
+The shared boundary masks all four card values and password bindings in results,
+history, and errors. Activity-scoped logging also covers already-running browser
+event handlers, and retained prior-realm bindings protect later observations.
+Private resume bindings always use verified encrypted storage. Screenshots and
+media are withheld after private entry because text masking cannot validate
+raster contents. Trusted routing and geometry remain exact; page-controlled
+readbacks are still redacted. This implements the requested credential contract
+without selecting fields or injecting fabricated progress messages.
+
+Three permanent public-dispatch regressions cover ordinary text/key/evaluate
+resolution without mutating model arguments, all-card result/history/error
+redaction, and real Chromium field/tab selection with hostile JavaScript
+literal values. The same final tests fail on the pinned pre-change
+`32947aee57006a63d9232f77daf7725af70f32ff` source and pass with the follow-up.
+Additional owning-domain tests cover the absence of handoff mutation before the
+model's first decision, formatted and serialized readbacks, prior-realm secrets,
+prestarted browser-event logging, numeric metadata collisions, password origins,
+and encrypted resume failures. The new archive searches were `secret_refs
+evaluate input_text runtime replacement` and `autofill payment handoff automatic
+secrets model`; this is a deeper repair to the same incident following explicit
+human feedback, rather than a separate incident.
+
+The pre-review public regressions use test-file SHA-256
+`1c4d5aab20b7fc262613d70ae40751411bcc154440d80ca7b4c2491f909e5f2e`:
+the pinned baseline fails all three in 1.790 seconds, while the repaired source
+passes all three in 1.890 seconds. Independent review also found a literal
+credential error could bypass ordinary results through credential-outcome
+classification and the Temporal failure delivered to the parent model. The
+unchanged full-activity regression fails against `235ff2cd6` in 0.570 seconds
+and passes with the additional boundary repair in 0.611 seconds. Propagation
+requests, responses, and diagnostics now redact private values, and sanitized
+Temporal failures retain their type and retry policy without retaining a raw
+cause chain. Activity-scoped fallback redaction also covers private hydration
+before DOM binding and errors raised during cleanup.
+The logging policy also preserves trusted agent/session/workflow identifiers:
+a synthetic CVV matching digits in an agent UUID previously detached its logs
+from their owner. The unchanged owning credential test fails against `66bd51637`
+and passes after preserving only those identity fields; nested payloads and
+exception text still redact the same digits.
+
+
+PR review found three additional contract edges. JavaScript literals naming
+card fields are selectors unless they contain explicit opaque references;
+legacy `pwd:` literals remain unambiguous. Purely numeric secret forms now
+match complete digit sequences, preserving a DOM index such as `[1234]` when
+the synthetic CVV is `234`, while still redacting `cvv234`, the exact numeric
+value, and encoded echoes. Non-numeric short passwords retain substring
+masking. Browser routing uses a private observed URL, independently of the
+redacted URL presented to the model, including when replaying an approved
+write action. Finally, the activity recognizes the advertised
+`{{secret:pwd:new}}` form when saving a successfully entered minted password.
+The unchanged full-activity persistence regression fails before that guard
+repair in 1.253 seconds and passes after it in 0.771 seconds. Registered owning
+credential regressions separately reproduce selector corruption, numeric
+collisions, and loss of the private URL across approved-action preparation.
+The requested all-tool resolution contract remains in place; restricting entry
+to an action allowlist would contradict the explicit human instruction and
+would not establish network-egress isolation for JavaScript evaluation.
+
+The combined coverage run also exposed a false positive in the new history
+assertions: they stringified the private `dom_service` dependency, including
+arbitrary mock memory addresses. Those digits are not serialized into an
+`ActionHistoryEntry`. A deterministic private metadata value of `17390`
+reproduces both failures with the synthetic CVV `739`; the assertions now
+exclude only that dependency, verify its object identity separately, and still
+inspect every supplied history payload field, returned value, and error/log
+argument. The three public-dispatch regressions pass in 1.308 seconds with that
+collision present. Runtime masking is unchanged by this test correction.
+The final test file has SHA-256
+`928b285a618c15e581f315681a373eb72843eafbf01d0684aa05f853b5082c56`;
+all three unchanged public-dispatch tests still fail on pinned baseline
+`32947aee57006a63d9232f77daf7725af70f32ff` in 1.846 seconds and pass on the
+repaired source in 2.082 seconds.
+
+### 2026-10-15: minted-password persistence across ordinary tools
+
+A focused audit of frozen `ca2a9fa6446a67b6753b34662ce7534efa0ea657`
+(runtime surface `c3a63eeb954c`) reproduced successful private `evaluate`
+execution with zero minted-password save calls. Archive searches were
+`minted password evaluate persistence` and
+`credential input_text only save minted account password`. The searches,
+`git log --all` and source inspection found the earlier canonical-reference
+repair, but no general successful-use persistence mechanism. Completed plans
+`browser-auth-credential-model`, `rotate-ip-tool` and `agentcard-integration`
+were checked for the credential, dispatch and target-ownership contracts.
+This is a relative extension of this case's all-tool credential contract;
+it does not establish another failure of the original merchant checkout.
+
+Critical path: advertised minted reference -> shared parameter/JavaScript
+resolver -> authorized native action -> action success -> minted-password
+save. The resolver already knew which registered references it actually
+consumed. The first incorrect boundary was the activity's save condition:
+it inspected only an `input_text` action's raw `text` value. Successful
+`evaluate` and other ordinary tools therefore never reached persistence.
+
+The public dispatcher now reports successful consumed reference names through
+an optional private per-action set. That set is cleared on entry and populated
+only after successful execution, never added to a tool result, history or model
+metadata. The activity's existing common action wrapper creates a new set for
+each invocation and saves the minted password when that exact reference was
+consumed. It captures the authorized source URL before execution: navigation
+or realm refresh must not save the old realm's password under the new realm.
+The existing idempotent backend save and warning-only save failure behavior
+remain; success means credential use, not confirmed account creation.
+There is no tool allowlist, field selection, raw-substring classifier, prompt,
+schema, timeout, provider or trajectory change.
+
+The existing permanently registered
+`test_activity_saves_minted_password_after_canonical_or_legacy_entry` now runs
+actual public dispatch and resolution, replacing its former mocked dispatcher.
+It preserves canonical and legacy input cases and exercises JavaScript entry
+and ordinary navigation. Controls cover ordinary text, another registered
+password, unresolved references, JavaScript comments, a CDP JavaScript failure,
+a native typing failure, and password-origin denial. All browser/provider,
+model and persistence transports are synthetic; no live signup is claimed.
+The common realm fixture's existing redirect, privacy, assistance and fatal
+error checks also pass unchanged.
+
+Exact red/green command, from the isolated repair checkout:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /home/boxes/rose/.context/deploy-private-browser-credentials/agents/venv/bin/python -B .context/run-minted-password-regression.py
+```
+
+The runner invokes the checked-in registered test directly using synthetic
+configuration and the existing Temporal activity environment. Final unchanged
+test-file SHA-256:
+`096980e9bca0f9ced85d06a80ece3a792bd25dad1f556406b71efff6684ab9c2`.
+On the frozen buggy runtime: exit 1, test wall time 1.554 seconds,
+`minted password persistence mismatch: action=evaluate, should_save=True, failure=False, denied=False, saves=[]`.
+On the repair: exit 0, `REGRESSION PASS wall_s 2.358`.
+These test wall clocks exclude module import. Original and final red/green
+logs are preserved in the repair checkout's ignored `.context` directory.
+Fourteen relevant existing credential/realm blackbox checks pass in 3.467
+seconds through `.context/run-minted-password-focused.py`. The original copied
+synthetic scratch reproduction also passes in 3.892 seconds, reporting
+`PRIVATE_EVALUATE_EXECUTION_CONFIRMED=True` and `MINTED_PASSWORD_SAVE_CALLS=1`.
+Its modified-fixture-source technique remains supplemental only; the permanent
+test uses normal fixture parameters and no source execution.
+
+Registration remains in `spawn_browser_agent_v3.blackbox.py::run_all_tests`,
+which `run_blackbox_tests.py` discovers as `spawn-browser-agent-v3` and the
+existing agent coverage/deploy lane invokes. Full coverage and deploy gates
+are parent-owned after integration; they were deliberately not rerun here.
+At 10,000 agents this adds one short-lived set per active action, containing
+reference names only, with no shared state, lock, subscription or periodic
+query. Only successful minted-reference use invokes the existing idempotent
+save once; unrelated, failed and denied actions add zero persistence requests.
+
 ## Human feedback
 
-None recorded.
+The user rejected the automatic payment-entry layer after the narrow tab
+ownership repair shipped. Their intended contract is ordinary agent-selected
+credential entry: the model receives obfuscated references, and the harness
+privately replaces them in any chosen browser tool, including JavaScript
+evaluation. The model must never receive the underlying credential values.
+
+This feedback changes the repair scope. Restricting automatic discovery to the
+focused page fixes one ownership bug but preserves the unwanted automatic
+actions. The follow-up removes the synthetic fill, retries, multi-field fill,
+and fabricated submit-this-page message. It moves resolution and output
+redaction to the shared action boundary, preserving the agent's chosen target.
+New observations also cover all four card fields, errors, history, earlier
+realm credentials, and secret-bearing screenshots. The original checkout loss
+and authentication observations remain unresolved.
+
+## Final verification stabilization
+
+Verification stabilization (2026-10-15): the second automated review found two masking transport defects. Registered numeric credentials could corrupt otherwise permitted PNG base64 before private entry and replace numeric targets in prior assistant tool calls. Both owning registered regressions failed unchanged before repair, then passed after cfa726852 (PNG 0.058s; prior target 0.091s). Only trusted screenshot action output transport and recognized action-schema numeric target metadata are restored; page text, nested/evaluate result data remain redacted, and media remains withheld after private entry. Nine neighboring credential cases and the full agent coverage gate passed. These repairs do not establish the original merchant/auth checkout loss or change the separate auth-decline exception into a passing verdict.
+
+The complete final-runtime verification passed agent/backend coverage, all twelve controller commands, live probes, eight UI checks, the real E2B smoke, ten effective smoke tasks, all four sandbox card lifecycles without skips, and all five latency tests. Only the separate auth-decline smoke case was excluded under the specific one-release user exception; its earlier native failures remain failures. All fourteen current benchmark roots have fresh canonical FE/recording and latest-whole-tree-call HTTPS evidence. Exact-owned test processes, ports and isolated databases retired; current-campaign payment cleanup is clear. This does not settle older release follow-ups or establish an original-merchant checkout repair.
+
+## Verification review and development stabilization
+
+The final verification review of `6c5a5c6fa5525669417849a9143c408a4c107a46`
+found two more valid boundary defects: private runtime URLs could escape in
+activity results and approval metadata, and a page-controlled JSON `type` list
+could crash post-entry media filtering. The review is retained at
+[review 5541171706](https://github.com/Rose-Ai-Labs/rose/pull/1518#pullrequestreview-5541171706).
+The deployment was recorded blocked / review-unstable at
+2026-10-15T23:34:00Z under its three-cycle limit. It was not merged; its review
+ledger and all previous attempts remain intact.
+
+Development stabilization keeps exact URL, realm, grant and pending-target
+state inside encrypted continuation. The manager transports the existing
+opaque archive reference and a nonsecret approval timestamp; the resumed
+activity applies the existing grant helper to the captured private destination.
+Outward pause, completion, iteration-limit and declined-auth payloads redact
+known credential values while preserving trusted target indices and request /
+archive identifiers. The registered full-activity regression exercises these
+seven outcomes and an approved write resume. Its identical checked-in case
+fails with the exact frozen reviewed handler and passes with the repair.
+
+The existing observation/history regression also reproduces the malformed
+media-type crash before a string-type guard and passes afterward. Actual media
+remains withheld and credential values remain masked. A separate owning auth
+binding regression exposed redacted `read_browser_state` URLs being reused as
+private destinations, producing false redirect failures and potentially wrong
+realms. Query-secret and hostname-collision cases now verify that auth binding
+uses the captured private URL while returned state and history stay redacted.
+Existing redirect and action-failure behavior remains covered.
+
+These development repairs require a fresh deployment lifecycle and complete
+applicable gates. The earlier fourteen passing benchmarks and published
+recordings prove their frozen checkpoint, not this later repair. Payment-flow
+success alone does not establish privacy at activity and approval boundaries.
+
+## Fresh deployment stabilization and resumed screenshot transport
+
+The fresh deployment's first review, on
+`e31330bd77ff8e0c3ad900c2b94d69114188de3e`, found three additional defects:
+rebuilding a DOM observation dropped recent-event and closed-popup notices;
+generic redaction changed trusted saved credential identifiers and cursor
+coordinates; and both verifier boundaries text-masked PNG base64. Review:
+[5541680195](https://github.com/Rose-Ai-Labs/rose/pull/1518#pullrequestreview-5541680195).
+The existing registered notice and full-activity cases were extended rather
+than replaced. Original assertions and registrations remain intact.
+
+The same checkpoint's canonical local campaign independently exposed an
+actor-resume variant. `agent-payment-new-user-journey`, root
+`bb1bb49d-26b0-44c8-9d1d-7ca9caefcac3`, failed after its subscription gate and
+payment approval resolved. The first resumed actor request contained a prior
+screenshot whose base64 had acquired two `{{secret:card_cvv}}` replacements.
+The original PNG decoded to 100,209 bytes; the resumed payload failed strict
+base64 decoding. Foundry and both OpenRouter fallback legs returned HTTP 400.
+After five failed model requests the browser stopped; a replacement browser
+requested another approval, violating the task's expected gate sequence.
+The provider status codes alone were not used to attribute an outage. The
+[failed native run](https://www.roselabs.ai/?agent-id=bb1bb49d-26b0-44c8-9d1d-7ca9caefcac3#benchmark-share=e92f8964-d7af-487b-8a57-ddebe9f7829c.1794705105.d10d660b5d28b7f882ab55f1b845ffd5dc456509597ab00be0ff00804c4a8d46)
+was published and verified in a fresh browser with its native failure retained.
+
+The upstream owned boundary was whole-transcript text redaction after private
+bindings were hydrated. The same mistake also affected continuation
+serialization. Earlier screenshot tests exercised action-result redaction,
+leaving the resumed actor transcript path uncovered. The extended existing
+`test_private_browser_pause_urls_use_protected_continuity` reaches the real
+activity and `_call_browser_use_with_rotation`, mocking only model transport.
+With its unchanged checked-in case and the exact frozen reviewed handler,
+the local reduction failed with `resumed screenshot transport was text-masked`
+in 0.671307 seconds. The initial repair passed that same method in 1.931278
+seconds. Isolated hydration, continuation, verifier and saved-metadata reverts
+each fail the corresponding assertion. These are causal regression results,
+not a claim that the complete benchmark is repaired.
+
+Exact owning-case command from the isolated deployment worktree:
+
+```bash
+agents/venv/bin/python .context/review-handler-repairs/run-checked.py baseline-handler.py
+agents/venv/bin/python .context/review-handler-repairs/run-checked.py
+```
+
+The repair preserves only native screenshot transport linked to its actual
+screenshot call and result, and the verifier builder's matching final image.
+Text and arbitrary page-provided media remain subject to redaction; all media
+remains withheld after private entry. A further independent check identified
+structural-token collisions, such as an unused password equal to `image_url`.
+The same owning case now covers these typed-envelope mechanics, native message
+roles and prior tool-call targets. A strict validator at the model and durable
+continuation boundaries also exposed a newly added fixture that had expected
+a placeholder inside malformed base64. That expectation was replaced with
+valid transport or native media omission, retaining the original privacy and
+activity assertions. The identical final case rejects the pre-transport repair
+with the base64 error and five native retries (8.711180 seconds), and passes
+after repair. A separate control preserves ordinary images when no private
+redaction applies. The exact unchanged new-user journey subsequently passed
+on the repaired checkpoint, as recorded below.
+
+The failed local campaign remains 12 passed / 1 failed actual tasks, with the
+shared-cache canary never launched after smoke aborted. Its four sandbox card
+tasks passed; those historical results do not qualify the later repair.
+
+The complete post-repair local campaign, on
+`be6341cc9bf9fe82e2462d9ef3a1639fd85dafa5` with runtime surface
+`5a946237d3f7`, passed all 14 unchanged requested tasks: ten effective canonical
+smoke tasks, including the new-user journey, and all four sandbox card tasks.
+The same task-definition file remains SHA-256
+`f9ac4792d7de8c0c8fce58828e8aca410e70391ef0f97c0c45d5e277c577710c`.
+The merged runtime passed 110 agents blackbox domains, 184 cache tests and
+134 unit tests at 83% coverage, mandatory type/structural/seed/live checks,
+eight semantic UI tests, the real E2B smoke and five isolated one-worker
+latency tests. All 20 measured lifecycle samples completed; path p50s were
+971/1990/641/788ms and each path had smoothness 1.000.
+
+The repaired [new-user journey](https://www.roselabs.ai/?agent-id=241ea593-a255-4204-93d5-ad6a3e52d053#benchmark-share=6d2d6b39-02eb-43c1-b679-6d471d156183.1794709220.0e5c78d12d2e082c08eb733f82fea24e9b668d1356c3eb9ba72db2fb2f1ec449)
+and its [latest recorded whole-tree LLM call](https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/241ea593-a255-4204-93d5-ad6a3e52d053/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261016%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261016T022021Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=493262e71aec11c5e1d1529d4ec562592875d39c18a4f02f1543fbd1f488b1cd)
+were verified through the canonical publisher. All 14 current roots have
+fresh-browser FE/recording and reachable HTTPS dump evidence. Every owned test
+and publication process joined; exact owned listeners and isolated databases
+were absent, with the shared Postgres preserved. All five current sandbox
+payment lifecycles were settled, including reclaimed/refunded abandonment,
+with no native pending payments, cleanup errors or warnings.
+
+The first semantic stack startup failed after 197.355207 seconds because its
+fixed SDK metrics port was occupied. Its original owner and raw artifacts were
+preserved and exact owned resources retired. A setup-only retry used the
+existing canonical port allocator outside the kernel ephemeral range; worker
+port validation and the frozen runtime were unchanged. The original competing
+socket owner was not captured and remains an observability gap.
+
+The second fresh review subsequently found a separate
+[stopped-worker build-provenance defect](2026-10-16-stopped-worker-rollout-provenance.md)
+in the retained-worker deployment repair. The credential campaign above stays
+native PASS with its immutable evidence, while the additional worker runtime
+repair requires full release requalification before the last review cycle.
+
+Final release review and production verification are separate. Production
+admission remains held: 999 Machine objects against cap 1000, with no verified
+eight-worker same-app spare pool for the required changed-generation overlap.
+The merged retained-worker reuse/STOP-retain repair prevents future repeated
+allocation but does not supply that initial capacity. No production rollout,
+protected worker reuse, object deletion or quota change was inferred. The
+specific auth-decline override and unresolved original merchant/authentication
+observations remain open.
 
 ## Reusable lesson
 
-Bind semantic secret-field discovery to the focused page's proven frame tree before interpreting a successful fill as current-page progress.
+Keep private credential resolution independent of the agent's tool and target choice. A credential reference must never trigger unrequested field selection, additional writes, or fabricated progress. Redact every downstream model boundary, including observations and fatal failures.
