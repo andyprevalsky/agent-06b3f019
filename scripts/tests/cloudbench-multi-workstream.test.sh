@@ -436,13 +436,24 @@ clone_source_read_rate_limit_contract() (
 
     fleet_registry_record_name() { return 0; }
     fleet_registry_record_id() { return 0; }
+    fleet_disable_disposable_volume_snapshots() {
+        [ -f "$TMP_ROOT/storage-ready-completed" ] || return 1
+        printf 'backup-disabled-after-ready\n' >> "$TMP_ROOT/backup-order"
+    }
     fleet_registry_release_name() { return 0; }
     fleet_audit_update_fresh_clone() { return 0; }
     registry_resolve_name() { return 1; }
     worker_ledger_lock_acquire() { return 0; }
     worker_ledger_lock_release() { return 0; }
     machine_volume_id() { printf 'vol_captured'; }
-    machine_storage_ready() { return 0; }
+    machine_storage_ready() {
+        if [ ! -e "$TMP_ROOT/storage-restoring-observed" ]; then
+            : > "$TMP_ROOT/storage-restoring-observed"
+            return 1
+        fi
+        : > "$TMP_ROOT/storage-ready-completed"
+        return 0
+    }
     machine_storage_failed() { return 1; }
     inventory_machine_field() { printf '1'; }
     inventory_machine_id_for_name() { return 1; }
@@ -468,6 +479,7 @@ clone_source_read_rate_limit_contract() (
 
     mkdir -p "$(dirname "$ledger")"
     clone_machine_target "$ledger" > "$clone_output" 2> "$clone_error" || status=$?
+    [ -s "$TMP_ROOT/backup-order" ] || { echo "FAIL: backup configuration did not follow storage readiness" >&2; return 1; }
     [ "$status" -eq 0 ] \
         || { echo "FAIL: captured source-read rejection did not reach the successful retry" >&2; return 1; }
     [ "$(cat "$clone_output")" = "abcdef12345678" ] \
@@ -1533,6 +1545,13 @@ elif args[:2] == ["volumes", "show"]:
                 volume for volume in state["volumes"]
                 if volume.get("id") != volume_id
             ]
+elif args[:2] == ["volumes", "update"]:
+    assert "--scheduled-snapshots=false" in args, args
+    with locked_state() as state:
+        found = find_volume(state, args[2])
+        assert found is not None and args[2] != "vol_aaaa0001", args
+        found["auto_backup_enabled"] = False
+        print(json.dumps(found))
 elif args[:2] == ["volumes", "destroy"]:
     volume_id = args[2]
     with locked_state() as state:
@@ -1599,7 +1618,7 @@ elif args[:2] == ["machine", "clone"]:
             "config": clone_config,
         })
         state["volumes"].append(
-            {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40})
+            {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40, "auto_backup_enabled": True, "snapshot_retention": 5, "attached_machine_id": machine_id})
         provider_machine = state["machines"][-1]
     # Retain the actual indexed row for assertions after normal teardown removes it.
     with open(os.path.join(machine_dir(machine_id), "provider-machine.json"), "w") as fh:
@@ -2423,7 +2442,7 @@ state["machines"].append({
     "config": {"mounts": [{"volume": volume_id, "size_gb": 40}]},
 })
 state["volumes"].append(
-    {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40}
+    {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40, "auto_backup_enabled": True, "snapshot_retention": 5, "attached_machine_id": os.environ["MACHINE_ID"]}
 )
 with open(path, "w") as fh:
     json.dump(state, fh)
@@ -3663,6 +3682,18 @@ assert len(state['volumes'])==1 and state['volumes'][0]['id']=='vol_aaaa0001',st
 journal=(root/'journal.log').read_text()
 assert 'machine clone ' in journal and 'machine destroy ' in journal and 'volumes destroy ' in journal,journal
 assert 'machine destroy --force aaaa0000000001' not in journal and 'volumes destroy vol_aaaa0001' not in journal,journal
+lines=journal.splitlines()
+updates=[line for line in lines if line.startswith('volumes update ')]
+assert updates and all('--scheduled-snapshots=false' in line and 'vol_aaaa0001' not in line for line in updates),updates
+for line in lines:
+    if line.startswith('machine update '):
+        # Each clone disables scheduled backups before its first BOOT update.
+        mid=line.split()[2]
+        if mid=='aaaa0000000001':continue
+        machine=json.loads((root/'machines'/mid/'provider-machine.json').read_text())
+        vid=machine['config']['mounts'][0]['volume']
+        assert any(x.startswith('volumes update '+vid+' ') for x in lines[:lines.index(line)]),(mid,vid,lines)
+assert len(state['snapshots'])==1,state['snapshots']
 PYDISPOSABLE
     }
     hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" || fail "disposable Hub A"

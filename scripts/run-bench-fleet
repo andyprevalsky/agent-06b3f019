@@ -756,6 +756,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-controller-export.py" \
        "$ROOT_DIR/scripts/cloudbench-retained-controller-endpoint.py" \
        "$ROOT_DIR/scripts/cloudbench-original-volume-capture.py" \
+       "$ROOT_DIR/scripts/cloudbench-disposable-volume.py" \
        "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
@@ -1716,7 +1717,7 @@ private_source_allows_provider_call() {
     [ -n "${PRIVATE_SOURCE_ID:-}" ] || return 0
     local verb="${1:-} ${2:-}" arg
     case "$verb" in
-        "machine update"|"machines update"|"machine start"|"machines start"|"machine stop"|"machines stop"|"machine destroy"|"machines destroy"|"machine restart"|"machines restart"|"volumes destroy"|"volume destroy"|"ssh console"|"ssh sftp")
+        "machine update"|"machines update"|"machine start"|"machines start"|"machine stop"|"machines stop"|"machine destroy"|"machines destroy"|"machine restart"|"machines restart"|"volumes destroy"|"volume destroy"|"volumes update"|"volume update"|"ssh console"|"ssh sftp")
             for arg in "$@"; do
                 case "$arg" in
                     "$PRIVATE_SOURCE_ID"|"$PRIVATE_SOURCE_VOLUME_ID"|"$SHARED_WARM_ID"|"$SHARED_WARM_VOLUME_ID")
@@ -1728,7 +1729,7 @@ private_source_allows_provider_call() {
 }
 FLY() {
     case "${1:-} ${2:-}" in
-        'machine update'|'machines update'|'machine start'|'machines start'|'machine stop'|'machines stop'|'machine destroy'|'machines destroy'|'machine restart'|'machines restart'|'volumes destroy'|'volume destroy')
+        'machine update'|'machines update'|'machine start'|'machines start'|'machine stop'|'machines stop'|'machine destroy'|'machines destroy'|'machine restart'|'machines restart'|'volumes destroy'|'volume destroy'|'volumes update'|'volume update')
             if [ -n "${GIT_COMMON_DIR:-}" ]; then
                 for _handoff_id in "$@"; do
                     if [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$_handoff_id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$_handoff_id" ]; then
@@ -5626,6 +5627,65 @@ finally:os.close(fd)
 PYONCE
 }
 
+fleet_disposable_resources_terminal() {
+    [ "${FLEET_REGISTRY_PUBLISHED:-0}" = 1 ] && [ "${KEEP_CLONES:-0}" != 1 ] \
+        && fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
+    python3 - "$FLEET_REGISTRY_DIR" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" "$APP" <<'PYDISPOSED'
+import re,stat,sys
+from pathlib import Path
+registry,audit=map(Path,sys.argv[1:3]);owner,run,app=sys.argv[3:]
+def physical(path):
+    assert path.resolve(strict=True)==path
+    return path
+def fields(path):
+    assert stat.S_ISREG(physical(path).lstat().st_mode)
+    pairs=[line.split('=',1) for line in path.read_text().splitlines()]
+    row=dict(pairs);assert len(row)==len(pairs);return row
+assert not list(physical(registry/'clones').iterdir())
+expected={p.name for p in physical(audit/'expected-fresh').iterdir()}
+assert expected=={p.name for p in physical(audit/'fresh').iterdir()}
+for name in expected:
+    source=fields(audit/'expected-fresh'/name)
+    assert set(source)=={'clone_name','source_machine_id'} and source['clone_name']==name
+    row=fields(audit/'fresh'/name)
+    assert set(row)=={'version','fleet_owner_token','run_id','app','clone_name','source','source_machine_id','machine_id','volume_id','disposition'}
+    assert row['version']=='1' and row['fleet_owner_token']==owner and row['run_id']==run and row['app']==app
+    assert row['clone_name']==name and row['source']=='fresh-clone' and row['source_machine_id']==source['source_machine_id']
+    assert row['disposition'] in ('destroyed-verified-absent','destroyed-provider-retained','not-allocated-verified')
+    if row['disposition']=='not-allocated-verified':assert not row['machine_id'] and not row['volume_id']
+    else:assert re.fullmatch('vol_[A-Za-z0-9_-]+',row['volume_id'])
+PYDISPOSED
+}
+
+fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume>
+    [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] || return 0
+    fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
+    # Pass the exact source-owned mutation guards to bounded child shells.
+    export -f FLY private_source_allows_provider_call
+    export APP GIT_COMMON_DIR PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID SHARED_WARM_ID SHARED_WARM_VOLUME_ID
+    python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-disposable-volume.py" \
+        --registry "$FLEET_REGISTRY_DIR" --owner "$FLEET_OWNER_TOKEN" --app "$APP" \
+        --audit "$FLEET_TEARDOWN_OWNERSHIP_DIR" --run "$RUN_ID" \
+        --name "$1" --machine "$2" --volume "$3" \
+        --protected "${WARM_ID:-}" --protected "${WARM_VOLUME_ID:-}" \
+        --protected "${SHARED_WARM_ID:-}" --protected "${SHARED_WARM_VOLUME_ID:-}" \
+        --protected "${PRIVATE_SOURCE_ID:-}" --protected "${PRIVATE_SOURCE_VOLUME_ID:-}"
+)
+
+fleet_release_cleanup_capacity() {
+    local guest_shutdown_failed="$1" runtime_evidence_failed="$2"
+    if { [ "$guest_shutdown_failed" = "1" ] || [ "$runtime_evidence_failed" = "1" ]; } \
+        && ! fleet_disposable_resources_terminal; then
+        echo "⚠️  retaining durable capacity reservation with the recoverable guest machines" >&2
+    else
+        if ! capacity_release_owner_reservations; then
+            echo "❌ could not release this controller's durable capacity reservations" >&2
+            return 1
+        fi
+        CAPACITY_RESERVATION_PUBLISHED=0
+    fi
+}
+
 fleet_record_disposable_cleanup_state() {
     python3 - "$FLEET_DIR" "$FLEET_OWNER_TOKEN" "$1" "$2" <<'PYDISPOSAL'
 import json,os,sys
@@ -5882,6 +5942,9 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
 }
 
 fleet_reap_registry_record() {
+    # Early sealed retirement and final teardown share the same once-only policy.
+    local DISPOSABLE_REAP=0
+    if [ "$2" = current ] && fleet_current_disposable_registry "$1"; then DISPOSABLE_REAP=1; fi
     fleet_with_native_reap_permit fleet_reap_registry_record_native "$@"
 }
 
@@ -12343,6 +12406,10 @@ Error: snapshot storage entered terminal failed state"
                     echo "❌ clone $target_id became storage-ready without durable volume ownership" >&2
                     return 1
                 fi
+                if ! fleet_disable_disposable_volume_snapshots "$target_name" "$target_id" "$target_volume"; then
+                    echo "❌ new disposable Volume backup setting was not verified; retaining exact ownership for teardown" >&2
+                    return 1
+                fi
                 printf '%s' "$target_id"
                 return 0
             fi
@@ -14446,15 +14513,9 @@ cleanup() {
     fi
     fleet_native_reap_close || { ec=1; teardown_failed=1; }
     [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
-    if [ "$guest_shutdown_failed" = "1" ] || [ "$runtime_evidence_failed" = "1" ]; then
-        echo "⚠️  retaining durable capacity reservation with the recoverable guest machines" >&2
-    else
-        if ! capacity_release_owner_reservations; then
-            echo "❌ could not release this controller's durable capacity reservations" >&2
-            ec=1
-            teardown_failed=1
-        fi
-        CAPACITY_RESERVATION_PUBLISHED=0
+    if ! fleet_release_cleanup_capacity "$guest_shutdown_failed" "$runtime_evidence_failed"; then
+        ec=1
+        teardown_failed=1
     fi
     if ! finalize_terminal_projection "$ec"; then
         echo "❌ could not finalize Cloud Fleet run/report-card projection" >&2

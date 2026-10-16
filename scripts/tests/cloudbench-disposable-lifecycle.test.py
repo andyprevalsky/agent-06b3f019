@@ -1,20 +1,46 @@
 #!/usr/bin/env python3
 """Owning create/retire decisions; provider boundaries are local filesystem fakes."""
 from pathlib import Path
-import os,re,subprocess,tempfile,unittest
+import json,os,re,subprocess,tempfile,unittest
 SOURCE=Path(__file__).resolve().parents[1]/'run-bench-fleet'
 def function(name):
- m=re.search(r'^'+re.escape(name)+r'\(\).*?^}\n',SOURCE.read_text(),re.M|re.S);assert m,name;return m.group()
+ override={'fleet_reap_registry_record':'CLOUDBENCH_TEST_OLD_REAPER','fleet_release_cleanup_capacity':'CLOUDBENCH_TEST_OLD_CAPACITY_SOURCE'}.get(name)
+ source=Path(os.environ[override]) if override and os.environ.get(override) else SOURCE
+ m=re.search(r'^'+re.escape(name)+r'\(\).*?^}\n',source.read_text(),re.M|re.S);assert m,name;return m.group()
 class Disposable(unittest.TestCase):
  def run_case(self,body,*,missing=False,disposable=True):
   with tempfile.TemporaryDirectory()as d:
-   p=Path(d);reg=p/'owners'/('a'*32);(reg/'clones').mkdir(parents=True);(reg/'meta').write_text('version=2\n');(reg/'disposable-resources-v1').write_text('a'*32+'\nfixture\n');(reg/'clones/clone-fixture').write_text('name=clone-fixture\nid=abcd1234\nvolume_id=vol_owned\n')
+   p=Path(d);reg=p/'owners'/('a'*32);(reg/'clones').mkdir(parents=True);(reg/'meta').write_text('version=2\n');(reg/'disposable-resources-v1').write_text('a'*32+'\nfixture\n');(reg/'clones/cloudbench-fixture').write_text('name=cloudbench-fixture\nid=abcd1234\nvolume_id=vol_owned\n')
+   audit=p/'audit';run=p/'run';out=run/'task';out.mkdir(parents=True)
+   for directory in ('fresh','expected-fresh','by-machine-id'):(audit/directory).mkdir(parents=True)
+   def write(path,value):
+    path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(value) if isinstance(value,dict) else value)
+   row=dict(version='1',fleet_owner_token='a'*32,run_id='run',app='fixture',clone_name='cloudbench-fixture',source='fresh-clone',source_machine_id='1234abcd',machine_id='abcd1234',volume_id='vol_owned',disposition='owned')
+   write(audit/'fresh/cloudbench-fixture',''.join(k+'='+v+'\n' for k,v in row.items()))
+   write(audit/'expected-fresh/cloudbench-fixture','clone_name=cloudbench-fixture\nsource_machine_id=1234abcd\n')
+   write(audit/'by-machine-id/abcd1234','cloudbench-fixture\n')
+   write(reg/'meta','version=2\nfleet_owner_token='+('a'*32)+'\nrun_id=run\napp=fixture\n')
+   write(out/'autoscaler.pid','123|proc-start:1\n');write(out/'benchmark-child.finished','0\n');write(out/'autoscaler.completed-after-child','0\n');write(out/'worker-clones.ids','');write(out/'worker-ready.ids','')
+   write(out/'.cid','clone abcd1234\n');write(out/'guest-shutdown.confirmed','run\n')
+   token='a'*32+'-0';write(out/'runtime-evidence.owner.json',dict(machine_id='abcd1234',run_token=token))
+   index=run/'.native-retirement-index'
+   write(index/'owner.json',dict(owner='a'*32,run_id='run',catalog_sha256='b'*64))
+   write(index/'ordinals/task',dict(name='task',ordinal=0,catalog_sha256='b'*64))
+   write(index/'clones/cloudbench-fixture',dict(source='1234abcd',machine='abcd1234',volume='vol_owned',child_count=0))
+   write(index/'machines/abcd1234','cloudbench-fixture\n');write(index/'volumes/vol_owned','cloudbench-fixture\n')
    for n in ('guest-cleanup-unconfirmed','runtime-evidence-unconfirmed'):
     if missing:(reg/n).touch()
-   script='set -u\n'+''.join(function(n)for n in ('fleet_current_disposable_registry','fleet_disposable_delete_intent','reap_volume','reap_machine','fleet_validate_reap_cohort','fleet_reap_registry_record_native','fleet_reap_registry_record','reap_registry_clones','machine_creation_admission','provision_primary_machine'))+r'''
+   script='set -u\n'+''.join(function(n)for n in ('fleet_current_disposable_registry','fleet_disposable_delete_intent','fleet_retire_sealed_primary','fleet_disposable_resources_terminal','fleet_release_cleanup_capacity','capacity_release_owner_reservations','capacity_reserve_slots','reap_volume','reap_machine','fleet_validate_reap_cohort','fleet_reap_registry_record_native','fleet_reap_registry_record','reap_registry_clones','machine_creation_admission','provision_primary_machine'))+r'''
 APP=fixture; FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 FLEET_OWNERSHIP_ROOT="$CASE/owners";FLEET_REGISTRY_DIR="$FLEET_OWNERSHIP_ROOT/$FLEET_OWNER_TOKEN"
 GIT_COMMON_DIR="$CASE/common";mkdir -p "$GIT_COMMON_DIR"
+RUN_ID=run;FLEET_DIR="$CASE/run";FLEET_TEARDOWN_OWNERSHIP_DIR="$CASE/audit"
+FLEET_REGISTRY_PUBLISHED=1;KEEP_CLONES=0;FLEET_OWNER_HOST=fixture
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^ *//;s/ *$//')"
+CAPACITY_RESERVATION_ROOT="$CASE/capacity";CAPACITY_RESERVATION_PUBLISHED=1
+CLOUDBENCH_FLEET_RUN_TOKEN="$FLEET_OWNER_TOKEN-0";AUTOSCALER_FINALIZATION_WAIT_SECONDS=1
+cloudbench_pid_birth_state(){ echo absent; }
+cloudbench_validate_primary_runtime_evidence(){ return 0; }
 POOL_REUSE_ONLY=0;DISPOSABLE_LIFECYCLE=MODE;DISPOSABLE_REAP=1
 WARM_ID=warm;WARM_VOLUME_ID=vol_warm;SHARED_WARM_ID=shared;SHARED_WARM_VOLUME_ID=vol_shared
 PROVISION_POOL=''; FRESH_TARGET_REGION='';POOL_COLD_BOOTSTRAP=0;SNAP_ID=snap
@@ -26,11 +52,11 @@ FLY(){
  'volumes destroy') printf "${SOFT:-absent}" > "$CASE/volume-state" ;;
  *) return 9;;esac
 }
-registry_machine_details(){ local s; s="$(cat "$CASE/machine-state")";[ "$s" != absent ]||return 1;printf '%s clone-fixture\n' "$s"; }
+registry_machine_details(){ local s; s="$(cat "$CASE/machine-state")";[ "$s" != absent ]||return 1;printf '%s cloudbench-fixture\n' "$s"; }
 volume_inventory_contains_id(){ local s;s="$(cat "$CASE/volume-state")";[ "$s" != absent ]||return 1;echo "$s"; }
 registry_meta_value(){ sed -n "s/^$2=//p" "$1"; }
 fleet_registry_reconcile_mounted_volume(){ echo vol_owned; }
-fleet_audit_update_registry_clone(){ printf 'audit %s\n' "$*" >> "$CASE/audit"; }
+fleet_audit_update_registry_clone(){ printf 'audit %s\n' "$*" >> "$CASE/audit-log"; }
 fleet_with_native_reap_permit(){ "$@"; }
 sleep(){ :; }
 primary_vm_size_for_bench(){ echo shared-cpu-4x; }
@@ -43,7 +69,7 @@ mkdir -p "$CASE/out"
 '''.replace('MODE','1'if disposable else'0')+body
    r=subprocess.run(['bash','-c',script],env=dict(os.environ,CASE=d),capture_output=True,text=True)
    read=lambda n:(p/n).read_text()if(p/n).exists()else''
-   return r,{n:read(n)for n in ('calls','audit','claims','creates','out/.cid')},list((reg/'clones').iterdir())
+   return r,{n:read(n)for n in ('calls','audit-log','claims','creates','out/.cid','capacity-result')},list((reg/'clones').iterdir())
  def test_disposable_start_creates_instead_of_borrowing(self):
   r,v,_=self.run_case('provision_primary_machine bench "$CASE/out"');self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(v['out/.cid'],'clone new123\n');self.assertEqual(v['claims'],'');self.assertEqual(v['creates'],'CREATE\n')
  def test_explicit_reuse_borrows_no_create(self):
@@ -63,6 +89,27 @@ mkdir -p "$CASE/out"
  def test_warm_whm_borrowed_no_mutation(self):
   for body in ['reap_machine warm "$CASE/log" vol_warm','reap_machine 820224f7e069e8 "$CASE/log" vol_whm','mkdir -p "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs";touch "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/abcd1234.json";reap_machine abcd1234 "$CASE/log" vol_owned','reap_volume vol_warm']:
    r,v,_=self.run_case(body);self.assertNotEqual(r.returncode,0);self.assertEqual(v['calls'],'')
+ def test_actual_early_sealed_retirement_then_final_never_replays_delete(self):
+  r,v,records=self.run_case('FLEET_NATIVE_REAP_ENABLED=1;DISPOSABLE_REAP=0;HOLD=1;AMBIGUOUS=1;fleet_retire_sealed_primary "$FLEET_DIR/task";test -f "$FLEET_REGISTRY_DIR/disposable-delete-machine-abcd1234.json" || exit 99;reap_registry_clones "$FLEET_REGISTRY_DIR" current')
+  self.assertNotEqual(r.returncode,0);self.assertEqual(v['calls'].splitlines(),['machine destroy --force abcd1234 -a fixture']);self.assertEqual(len(records),1)
+ def capacity_case(self,*,pending=False,foreign=False):
+  body=r'''
+capacity_reserve_slots "$FLEET_OWNER_TOKEN-primary" 1 1 1 1 0 0 primary > "$CASE/first-admission" || exit 90
+'''
+  if not pending:
+   body+='rm "$FLEET_REGISTRY_DIR/clones/cloudbench-fixture";sed -i s/disposition=owned/disposition=destroyed-verified-absent/ "$CASE/audit/fresh/cloudbench-fixture"\n'
+  if foreign:body+='sed -i s/app=fixture/app=foreign/ "$CASE/audit/fresh/cloudbench-fixture"\n'
+  body+=r'''
+fleet_release_cleanup_capacity 1 1 || exit 91
+capacity_reserve_slots "$FLEET_OWNER_TOKEN-next" 1 1 1 1 0 0 primary > "$CASE/capacity-result"
+'''
+  return self.run_case(body,missing=True)
+ def test_failed_evidence_all_resources_gone_releases_and_next_admission(self):
+  r,v,_=self.capacity_case();self.assertEqual(r.returncode,0,r.stderr);self.assertTrue(v['capacity-result'].startswith('OK '),v)
+ def test_pending_disposal_preserves_capacity_reservation(self):
+  r,v,_=self.capacity_case(pending=True);self.assertNotEqual(r.returncode,0);self.assertIn('DENY_MACHINE',v['capacity-result'])
+ def test_foreign_terminal_audit_cannot_release_capacity(self):
+  r,v,_=self.capacity_case(foreign=True);self.assertNotEqual(r.returncode,0);self.assertIn('DENY_MACHINE',v['capacity-result'])
  def test_explicit_keep_does_not_change_creation_policy(self):
   r,v,_=self.run_case('KEEP_CLONES=1;provision_primary_machine bench "$CASE/out"');self.assertEqual(r.returncode,0);self.assertEqual(v['claims'],'');self.assertEqual(v['creates'],'CREATE\n')
 if __name__=='__main__':unittest.main()
