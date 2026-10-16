@@ -22445,10 +22445,10 @@ async def test_private_browser_pause_urls_use_protected_continuity():
     assert ordinary_call["turn_messages"][0]["content"][1] == ordinary_image, "no-secret attachment lost vision"
     assert ordinary_call["browser_state"]["_extra_user_messages"][0]["content"][1] == ordinary_image
     failures = []
-    for scenario in ("actor_before", "actor_after", "drain", "write", "payment", "auth", "completed",
+    for scenario in ("actor_before", "actor_after", "drain", "write", "payment", "payment_alias", "auth", "completed",
                      "max_steps", "declined", "raster_completed", "raster_max_steps"):
         actor_resume = scenario.startswith("actor_")
-        pause = "drain" if actor_resume else scenario.removeprefix("raster_")
+        pause = "payment" if scenario == "payment_alias" else ("drain" if actor_resume else scenario.removeprefix("raster_"))
         private_entry = scenario != "actor_before" and not scenario.startswith("raster_")
         prior_messages = []
         if actor_resume:
@@ -22510,7 +22510,23 @@ async def test_private_browser_pause_urls_use_protected_continuity():
                         "message": secret}
             if pause == "write":
                 return {"status": "needs_write_approval", "approval_type": "purchase", "question": raw_url}
-            return {"status": "needs_payment_card_approval", "payment_request": {"url": raw_url}}
+            return {"status": "needs_payment_card_approval", "payment_request": {
+                "url": raw_url, "merchant": "Fixture Merchant", "currency": "USD",
+                "subtotal_cents": 1350, "total_cents": 1960,
+                "fees": [{"label": "Tax", "amount_cents": 111}, {"label": "Shipping", "amount_cents": 499}],
+                ("lineItems" if scenario == "payment_alias" else "line_items"): [
+                    {"name": "Canvas Tote", "image_url": "https://public.fixture/tote.png",
+                     "product_url": raw_url, "rating": "4.7 stars", "review_count": "212 reviews",
+                     "unit_price_cents": 450, "quantity": 1, "line_total_cents": 450, "note": secret,
+                     "screenshot": "data:image/png;base64," + screenshot},
+                    {"name": "Secret URL", "image_url": raw_url, "product_url": raw_url,
+                     "rating": "4.7 stars", "review_count": "212 reviews",
+                     "unit_price_cents": 450, "quantity": 1, "line_total_cents": 450},
+                    {"name": "Raster", "image_url": "data:image/png;base64," + screenshot,
+                     "product_url": raw_url, "rating": "4.7 stars", "review_count": "212 reviews",
+                     "unit_price_cents": 450, "quantity": 1, "line_total_cents": 450},
+                ],
+            }}
 
         action = ("request_user_assistance_for_authentication" if pause == "auth" else
                   "attempt_completion" if pause == "completed" else "scroll")
@@ -22684,6 +22700,13 @@ async def test_private_browser_pause_urls_use_protected_continuity():
                     "payment": "awaiting_payment_card_approval", "auth": "awaiting_auth_assistance",
                     "completed": "completed", "max_steps": "max_iterations", "declined": "completed"}[pause]
         assert result["status"] == expected
+        if pause == "payment":
+            items_key = "lineItems" if scenario == "payment_alias" else "line_items"
+            items = result["payment_request"][items_key]
+            assert items[0].get("image_url") == "https://public.fixture/tote.png", "typed receipt URL lost at owning activity return"
+            assert items[1].get("image_url") == visible_url, "receipt URL leaked private credential"
+            assert items[0]["product_url"] == visible_url and items[0]["note"] == "{{secret:pwd:url}}"
+            assert "screenshot" not in items[0] and "image_url" not in items[2], "private raster escaped suppression"
         if scenario == "raster_completed":
             screenshot_upload.assert_awaited_once_with(
                 user_id="u1", file_content=base64.b64decode(screenshot, validate=True),

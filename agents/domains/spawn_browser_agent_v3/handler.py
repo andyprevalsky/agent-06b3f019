@@ -6978,12 +6978,28 @@ async def _spawn_browser_agent_activity_v3_real(
     def _visible_activity_result(result: Dict[str, Any]) -> Dict[str, Any]:
         # Archive references and routing IDs remain exact protocol values.
         auth_response = result.get("auth_assistance_request")
+        payment_response = result.get("payment_request")
         for key in ("current_url", "question", "write_lock_notification", "payment_request",
                     "auth_assistance_request", "write_lock_approvals", "auth_realm", "base_site",
                     "message", "structured_response", "best_effort_response",
                     "browser_error_message"):
             if key in result:
                 result[key] = _redact_activity_value(result[key])
+        # Receipt image URLs are typed text, not raster attachments. Preserve
+        # only their HTTP(S) strings through the same secret-value redactor;
+        # arbitrary nested media and data-image payloads remain suppressed.
+        visible_payment = result.get("payment_request")
+        if isinstance(payment_response, dict) and isinstance(visible_payment, dict):
+            items_key = "line_items" if "line_items" in payment_response else "lineItems"
+            original_items = payment_response.get(items_key)
+            visible_items = visible_payment.get(items_key)
+            if isinstance(original_items, list) and isinstance(visible_items, list):
+                for original_item, visible_item in zip(original_items, visible_items):
+                    if not isinstance(original_item, dict) or not isinstance(visible_item, dict):
+                        continue
+                    image_url = original_item.get("image_url")
+                    if isinstance(image_url, str) and image_url.startswith(("https://", "http://")):
+                        visible_item["image_url"] = _redact_activity_value(image_url)
         if "browser_output_schema" in result:
             result["browser_output_schema"] = _model_visible_browser_output_schema(
                 result["browser_output_schema"], _redact_activity_value
