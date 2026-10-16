@@ -379,6 +379,12 @@ def retire_disposable_hubs(repo, directory, *, timeout=10):
             if len(pairs) != len(owner): raise ValueError('duplicate Hub ownership fields')
             pid = int(owner['pid'])
             if pid <= 1: raise ValueError('unsafe Hub PID')
+            if path.stat().st_mode & 0o222: raise ValueError('mutable Hub owner receipt')
+            stamp = owner['pid_start']
+            if not isinstance(stamp, str) or not stamp.strip(): raise ValueError('invalid Hub birth')
+            current = birth(pid)
+            if current is None or current != stamp: continue
+            if Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[0] == 'Z': continue
             expected = repo / 'agents/benchmarks/agent_link_server.py'
             if (owner['repo_root'] != str(repo) or owner['root'] != str(runs)
                     or owner['runs_root'] != str(runs) or owner['context_dir'] != str(hub)
@@ -387,10 +393,6 @@ def retire_disposable_hubs(repo, directory, *, timeout=10):
                     or not re.fullmatch('[0-9a-f]{32}', owner['owner_token'])
                     or path.name != f"agent-link-server.{owner['port']}.{owner['owner_token']}.owner"):
                 raise ValueError('foreign local Hub ownership')
-            if path.stat().st_mode & 0o222: raise ValueError('mutable Hub owner receipt')
-            current = birth(pid)
-            if current is None or current != owner['pid_start']: continue
-            if Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[0] == 'Z': continue
             if path.stat().st_uid != Path(f'/proc/{pid}').stat().st_uid:
                 raise ValueError('Hub receipt owner differs')
             fd = os.pidfd_open(pid)

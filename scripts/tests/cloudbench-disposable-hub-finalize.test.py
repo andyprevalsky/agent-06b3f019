@@ -33,6 +33,13 @@ class Finalize(unittest.TestCase):
    self.assertIsNone(self.child.poll());self.assertFalse(list(self.out.iterdir()));self.owner[key]=old;self.write()
  def test_reused_birth_never_signals_replacement(self):
   self.owner['pid_start']='proc-start:foreign:1';self.write();M['retire_disposable_hubs'](self.repo,self.out);self.assertIsNone(self.child.poll());self.assertFalse(list(self.out.iterdir()))
+ def test_dead_starting_owner_skips_without_signal_but_live_foreign_refuses(self):
+  self.owner['status']='starting';self.owner['repo_root']='foreign';self.write()
+  with self.assertRaises(ValueError):M['retire_disposable_hubs'](self.repo,self.out)
+  self.assertIsNone(self.child.poll());self.assertFalse(list(self.out.iterdir()))
+  self.child.terminate();self.child.wait(timeout=3)
+  M['retire_disposable_hubs'](self.repo,self.out)
+  self.assertFalse(list(self.out.iterdir()))
  def test_rendered_disposable_gate_calls_finalizer_before_writer_check(self):
   gate=Path(os.environ.get('HUB_GATE_SOURCE',ROOT/'scripts/run-cloudbench-controller-gate')).read_text()
   start=gate.index('  if [ "$EXPORT_HOST" = 1 ]; then',gate.index('GATE_FAILED_STEPS${failed_steps}'))
