@@ -1004,6 +1004,42 @@ def test_is_auth_cookie():
     assert _is_auth_cookie({"name": "lang"}) is False
 
 
+async def test_readable_inbox_scope_transport_and_formatter():
+    from types import SimpleNamespace
+    from helpers.get_user_context import _fetch_integrations_and_auth_domains, _format_user_context
+
+    captured = []
+
+    class Client:
+        async def get(self, url, **kwargs):
+            captured.append((url, kwargs))
+            return httpx.Response(200, request=httpx.Request("GET", url), json={
+                "integrations": [{"name": "gmail", "status": "CONNECTED", "emailCredentials": [],
+                                  "config": {"connectedEmails": ["configured@example.test"]},
+                                  "readableInboxEmails": []}],
+                "authenticatedDomains": [],
+            })
+
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.invalid", api_key="offline-unused"))
+    integrations, domains = await _fetch_integrations_and_auth_domains(Client(), config, "user-owned")
+    assert captured[0][1]["headers"]["X-User-Id"] == "user-owned"
+    assert integrations[0]["readableInboxEmails"] == []
+    def formatted(rows):
+        return _format_user_context([], {}, [], [], integrations=rows)
+    result = formatted(integrations)
+    assert "gmail: configured@example.test" in result
+    assert "Readable inboxes: none" in result, "connected flag must not hide an explicitly empty readable set"
+    integrations[0]["readableInboxEmails"] = ["readable@example.test"]
+    result = formatted(integrations)
+    assert "Readable inboxes: readable@example.test" in result
+    assert "Readable inboxes: configured@example.test" not in result
+    del integrations[0]["readableInboxEmails"]
+    assert "Readable inboxes:" not in formatted(integrations), "legacy absent is unknown, not empty"
+    integrations[0]["readableInboxEmails"] = None
+    assert "Readable inboxes:" not in formatted(integrations)
+    assert domains == []
+
+
 async def run_all_tests():
     print("get-user-context blackbox tests:")
     r = BlackboxResult()
@@ -1065,6 +1101,7 @@ async def run_all_tests():
     r.record("get_base_domain", test_get_base_domain)
     r.record("is_false_positive_cookie", test_is_false_positive_cookie)
     r.record("is_auth_cookie", test_is_auth_cookie)
+    await r.record_async("readable_inbox_scope_transport_formatter", test_readable_inbox_scope_transport_and_formatter)
     teardown_mock()
     return r.all_passed
 

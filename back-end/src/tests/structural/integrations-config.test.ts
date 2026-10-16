@@ -2,6 +2,7 @@ import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { stripTypeScriptTypes } from 'node:module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const backendDir = path.resolve(__dirname, '../../..');
@@ -52,18 +53,80 @@ function testPlaidProductionProductsMatchApprovedAccess() {
   );
 }
 
-function main() {
+async function testReadableInboxProjection() {
+  const service = fs.readFileSync(path.join(backendDir, 'src/domains/integrations/service.ts'), 'utf8');
+  const listing = fs.readFileSync(path.join(backendDir, 'src/domains/integrations/repo.integrationsList.ts'), 'utf8');
+  const store = fs.readFileSync(path.join(backendDir, 'src/providers/authOptionsStore.ts'), 'utf8');
+  function extract(source: string, name: string) {
+    const start = source.indexOf(`function ${name}`);
+    assert(start >= 0);
+    const asyncPrefix = source.slice(start - 6, start) === 'async ' ? 'async ' : '';
+    const end = source.indexOf('\n}', start) + 2;
+    return stripTypeScriptTypes(asyncPrefix + source.slice(start, end));
+  }
+  const queries: Array<Record<string, any>> = [];
+  const rows = [
+    { userId: 'one', email: 'ONE@example.test', accessToken: 'secret-access', refreshToken: 'secret-refresh' },
+    { userId: 'one', email: 'one@example.test', accessToken: 'a', refreshToken: 'r' },
+    { userId: 'one', email: 'stale@example.test', accessToken: '', refreshToken: 'r' },
+    { userId: 'foreign', email: 'foreign@example.test', accessToken: 'a', refreshToken: 'r' },
+  ];
+  const prisma = { emailIntegrationCredential: { findMany: async (query: Record<string, any>) => {
+    queries.push(query);
+    assert.equal(query.where.provider, 'GMAIL');
+    assert.deepEqual(query.where.integration, { name: 'gmail', status: 'CONNECTED' });
+    assert.deepEqual(query.where.state, { not: 'needs_reconnect' });
+    return rows.filter(row => row.userId === query.where.userId);
+  } } };
+  const readable = Function('prisma', `return (${extract(store, 'findReadableInboxEmails')});`)(prisma);
+  const derive = Function('isEmailProviderSlug', `return (${extract(service, 'withDerivedConnectedEmails')});`)((name: string) => name === 'gmail');
+  const integrationQueries: any[] = [];
+  let healthCalls = 0;
+  const list = Function('prisma', 'withGoogleScopeHealth', 'findReadableInboxEmails',
+    `return (${extract(listing, 'findIntegrationsByUser')});`)(
+      { integration: { findMany: async (query: any) => {
+        integrationQueries.push(query);
+        return [
+          { name: 'gmail', status: 'CONNECTED', config: {}, emailCredentials: [] },
+          { name: 'whatsapp', status: 'CONNECTED', config: {}, emailCredentials: [] },
+          { name: 'gmail', status: 'CONNECTED', config: {}, emailCredentials: [] },
+        ];
+      } } },
+      (rows: any[]) => { healthCalls += 1; return rows; }, readable);
+  const repo = {
+    isAuthDomainsCached: () => true,
+    findIntegrationsByUser: list,
+    getAuthenticatedDomains: async () => [],
+  };
+  const get = Function('repo', 'log', 'withDerivedConnectedEmails', 'findReadableInboxEmails',
+    `return (${extract(service, 'getIntegrations')});`)(repo, { info() {} }, derive, readable);
+  const one = await get('one');
+  assert.deepEqual(one.integrations[0].readableInboxEmails, ['one@example.test'], 'missing user-scoped readable inbox binding');
+  assert.equal(integrationQueries.length, 1);
+  assert.deepEqual(integrationQueries[0].where, { userId: 'one' });
+  assert.equal(healthCalls, 1, 'scope-health projection remains applied');
+  assert.equal(queries.length, 1, 'one shared predicate query, not one query per integration');
+  assert.equal('readableInboxEmails' in one.integrations[1], false);
+  assert.deepEqual(one.integrations[2].readableInboxEmails, ['one@example.test'], 'multiple Gmail rows share the same user-scoped receiving set');
+  assert(!JSON.stringify(one).includes('secret-access'));
+  assert(!JSON.stringify(one).includes('secret-refresh'));
+  const empty = await get('empty');
+  assert.deepEqual(empty.integrations[0].readableInboxEmails, []);
+  const foreign = await get('foreign');
+  assert.deepEqual(foreign.integrations[0].readableInboxEmails, ['foreign@example.test']);
+  assert(!JSON.stringify(one).includes('foreign@example.test'));
+}
+
+async function main() {
   testProductionRequiresPublicBackendUrl();
   testBackendBaseUrlUsesProductionEnv();
   testPlaidProductionProductsMatchApprovedAccess();
+  await testReadableInboxProjection();
 }
 
-try {
-  main();
+main().then(() => {
   process.stdout.write('integrations config structural tests passed\n');
-} catch (error: unknown) {
-  process.stderr.write(
-    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
-  );
+}).catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
   process.exit(1);
-}
+});

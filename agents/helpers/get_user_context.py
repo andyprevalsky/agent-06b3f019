@@ -517,6 +517,12 @@ def _format_user_context(
                     integration_lines.append(f"- {name}: {', '.join(emails)}")
                 else:
                     integration_lines.append(f"- {name}")
+                readable = integ.get("readableInboxEmails")
+                if name.lower() == "gmail" and isinstance(readable, list):
+                    addresses = [email for email in readable if isinstance(email, str) and email]
+                    integration_lines.append(
+                        f"  Readable inboxes: {', '.join(addresses) if addresses else 'none'}"
+                    )
         if integration_lines:
             sections.append(
                 "## Connected Integrations\n"
