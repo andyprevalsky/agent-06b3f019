@@ -48,13 +48,10 @@ fi
 if grep -Fq 'MERGED_SHA=$(git rev-parse origin/main)' "$DEPLOY"; then
   fail "/deploy must not classify whichever commit happens to be latest on origin/main"
 fi
-require_text "$DEPLOY" 'npx tsx scripts/migrate-open-agent-workflows.ts --execute' "/deploy must execute the open-workflow migration"
-require_text "$DEPLOY" 'TEMPORAL_TASK_QUEUE=navi-agent-tasks' "/deploy must pin migration to the production queue"
-require_text "$DEPLOY" 'TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA"' "/deploy must activate the exact merged worker build"
-require_text "$DEPLOY" 'AGENT_DEPLOYMENT_TOKEN="${AGENT_DEPLOY_RUN_ID}-${AGENT_DEPLOY_RUN_ATTEMPT}"' "/deploy must scope activation to the exact GitHub run attempt"
-require_text "$DEPLOY" 'TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN"' "/deploy must pass the exact deployment token to migration"
-require_text "$DEPLOY" 'WORKFLOW_MIGRATION_CONCURRENCY=' "/deploy must bound migration concurrency"
-require_text "$DEPLOY" 'WORKFLOW_MIGRATION_CANARY_COUNT=' "/deploy must canary workflow cutover before bulk replacement"
+require_text "$DEPLOY" 'AGENT_DEPLOYMENT_JOB_ID' "/deploy must bind its verification to the durable job"
+require_text "$DEPLOY" 'AGENT_DEPLOYMENT_TOKEN="${AGENT_DEPLOY_RUN_ID}-${AGENT_DEPLOY_RUN_ATTEMPT}"' "/deploy must scope the job to its GitHub run attempt"
+require_text "$DEPLOY" 'job.identity.sourceCommit !== process.argv[3]' "/deploy must verify the merged source of the job"
+require_text "$DEPLOY" 'job.identity.attempt !== process.argv[4]' "/deploy must verify the exact workflow attempt"
 # Live-at-boot (REQUIRE_ACTIVATION=0): workers never poll navi-agent-candidate-*,
 # so validate-candidate-workflow-image / verify-agent-candidate-fleet hang. Cooperative
 # cutover proof is monitor --verify (pointer + old-queue drain), not standby seals.
@@ -68,15 +65,11 @@ require_text "$DEPLOY" 'monitor --verify is authoritative' \
   "/deploy must treat monitor --verify as the cooperative cutover proof"
 require_text "$DEPLOY" 'monitor-cooperative-cutover.ts' \
   "/deploy must use monitor-cooperative-cutover.ts for handover verification"
-require_text "$DEPLOY" 'WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS=' "/deploy must bound candidate bootstrap acknowledgement"
-require_text "$DEPLOY" 'WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS=' "/deploy must bound each complete candidate replacement"
-require_text "$DEPLOY" 'WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS=' "/deploy must bound ambiguous descendant start draining"
-require_text "$DEPLOY" 'WORKFLOW_MIGRATION_TERMINAL_CLEANUP_TIMEOUT_MS=' "/deploy must bound terminal/deleted workflow cleanup"
 require_text "$DEPLOY" 'RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE_DRAIN_SECONDS:-375}"' "/deploy must wait through Render's maximum old-instance shutdown window plus margin"
 require_text "$DEPLOY" '"$RENDER_OLD_INSTANCE_DRAIN_SECONDS" -ge 375' "/deploy must reject unsafe low drain overrides"
 require_text "$DEPLOY" 'RENDER_DEPLOY_FINISHED_AT=' "/deploy drain must be based on the exact live deploy timestamp"
 require_text "$DEPLOY" 'Old Render instance/request drain window elapsed' "/deploy must complete the old-backend drain before cutover"
-require_text "$DEPLOY" 'activity-boundary handoff' "/deploy must document cooperative activity-boundary handoff semantics"
+require_text "$DEPLOY" 'Long-running work' "/deploy must document cooperative activity-boundary handoff semantics"
 require_text "$DEPLOY" '## Step 13ac: Validate workflow replacement edge cases in production' "/deploy must include the production replacement matrix"
 require_text "$DEPLOY" 'PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1' "/deploy must explicitly opt in to production validation"
 require_text "$DEPLOY" 'TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA"' "/deploy production matrix must identify the exact candidate build"
@@ -208,23 +201,13 @@ marker_line=$(grep -n 'activateTemporalWorkerBuild' "$SCRIPT" | tail -1 | cut -d
 [[ $drain_line -lt $terminal_cleanup_line && $terminal_cleanup_line -lt $terminal_assert_line && $terminal_assert_line -lt $assert_descendant_line && $assert_descendant_line -lt $marker_line ]] || \
   fail "activation must drain starts → clean terminal/deleted executions → assert gates → activate exact deployment"
 
-render_drain_line=$(grep -n 'Old Render instance/request drain window elapsed' "$DEPLOY" | cut -d: -f1)
-migration_command_line=$(grep -n 'npx tsx scripts/migrate-open-agent-workflows.ts --execute' "$DEPLOY" | tail -1 | cut -d: -f1)
-[[ $render_drain_line -lt $migration_command_line ]] || \
-  fail "old Render instances and in-flight requests must drain before workflow tombstones"
-# Live-at-boot fallback driver order (break-glass only): Render drain → pointer flip →
-# migrate → release. Primary path uses monitor --verify after CI cooperative cutover.
-monitor_line=$(grep -n 'monitor-cooperative-cutover.ts' "$DEPLOY" | head -1 | cut -d: -f1)
-pointer_flip_cutover_line=$(grep -n 'set-agent-queue-pointer.ts' "$DEPLOY" | tail -1 | cut -d: -f1)
-release_line=$(grep -n 'release_agent_cutover_lock success' "$DEPLOY" | tail -1 | cut -d: -f1)
-[[ -n "$monitor_line" ]] ||
-  fail "/deploy must monitor cooperative cutover handover progress"
-[[ -n "$pointer_flip_cutover_line" ]] ||
-  fail "fallback cutover must flip the queue pointer"
-[[ $render_drain_line -lt $pointer_flip_cutover_line &&
-   $pointer_flip_cutover_line -lt $migration_command_line &&
-   $migration_command_line -lt $release_line ]] ||
-  fail "fallback pre-migrate order must be Render drain → pointer flip → migrate → release"
+require_text "$DEPLOY" 'keep automatic worker deployment disabled' "first managed deployment requires complete producer rollout"
+require_text "$DEPLOY" 'all old backend instances have drained' "first publication cannot race legacy producers"
+require_text "$DEPLOY" 'prepared' "interrupted preparation must retain its ownership"
+require_text "$DEPLOY" 'monitor-cooperative-cutover.ts' "post-merge verification must read the durable job"
+if grep -Fq 'npx tsx scripts/migrate-open-agent-workflows.ts --execute' "$DEPLOY"; then
+  fail "routine cutover must not force-migrate unfinished production work"
+fi
 
 WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
 COOP="$ROOT/scripts/deploy-agents-cooperative-cutover.sh"
@@ -276,26 +259,25 @@ for ref, expected, allowed in [
 PY
 require_text "$WORKFLOW" 'BUILD_ID: ${{ github.sha }}' "Fly deploy must identify the exact candidate SHA"
 require_text "$WORKFLOW" 'DEPLOYMENT_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}' "Fly deploy must identify the exact deployment attempt"
-require_text "$WORKFLOW" 'bash scripts/classify-agent-runtime-changes.sh' "Fly deploy must classify shipped runtime changes"
 require_text "$WORKFLOW" 'deploy-agents-cooperative-cutover.sh' "Fly deploy must run the cooperative cutover script"
-require_text "$COOP" 'TEMPORAL_WORKER_REQUIRE_ACTIVATION=0' "Fly workers must be live-at-boot (require_activation=0), never parked in standby"
-require_text "$COOP" 'TEMPORAL_WORKER_BUILD_ID' "cooperative cutover must stamp the candidate build on new-gen machines"
-require_text "$COOP" 'TEMPORAL_WORKER_DEPLOYMENT_TOKEN' "cooperative cutover must stamp the deployment attempt on new-gen machines"
-if grep -q 'TEMPORAL_WORKER_REQUIRE_ACTIVATION="\${REQUIRE_ACTIVATION}"' "$WORKFLOW" "$COOP"; then
-  fail "Fly deploy must NOT gate workers on require_activation (standby stranded prod on every deploy)"
+POOL_DRIVER="$ROOT/scripts/worker_pool_cutover.py"
+POOL_HELPER="$ROOT/scripts/retained_agent_machine.py"
+require_text "$POOL_HELPER" '"TEMPORAL_WORKER_REQUIRE_ACTIVATION": "0"' "prepared workers must be live before pointer publication"
+require_text "$POOL_HELPER" '"TEMPORAL_WORKER_BUILD_ID": args.build' "pool reuse must stamp the exact build"
+require_text "$POOL_HELPER" '"TEMPORAL_WORKER_DEPLOYMENT_TOKEN": args.token' "pool reuse must stamp the exact attempt"
+require_text "$POOL_HELPER" '"AUTOSCALER_ACTUATE": "0"' "the controller exclusively owns pool Machine lifecycles"
+if grep -qE '^concurrency:|group: deploy-agents-production' "$WORKFLOW"; then
+  fail "GitHub pending-run replacement cannot implement the durable FIFO"
 fi
-require_text "$WORKFLOW" 'group: deploy-agents-production' "agent deploys must share one production concurrency group"
+require_text "$COOP" 'worker-deployment-queue.ts run' "all deployers must use the durable lease-owning runner"
 require_text "$WORKFLOW" 'Resolve Fly app name from fly.toml' "deploy must read Fly app from fly.toml (not a missing secret)"
 require_text "$WORKFLOW" 'steps.flyapp.outputs.name' "cutover step must use fly.toml-resolved app name"
 if grep -qE 'secrets\.FLY_APP_NAME \|\| secrets\.FAS_APP_NAME' "$WORKFLOW"; then
   fail "deploy must not use unsupported secret || fallback for APP (GitHub Actions leaves it empty)"
 fi
 require_text "$COOP" 'agents/fly.toml' "cutover script must fall back to fly.toml when APP is unset"
-require_text "$WORKFLOW" 'cancel-in-progress: false' "a later agent deploy must queue without canceling the validated fleet"
 require_text "$WORKFLOW" 'Cooperative Fly deploy + generation cutover' "agent deploy workflow must hold serialization through cooperative cutover"
 require_text "$WORKFLOW" 'RELEASE_CONTEXT: agent-cutover/${{ github.run_id }}-${{ github.run_attempt }}' "deploy lock release must be scoped to the exact run attempt"
-require_text "$WORKFLOW" 'if [ -z "$CHANGED_RUNTIME$CHANGED_DEPLOY_WORKFLOW" ]; then REQUIRE_ACTIVATION=0; fi' "test-only agent deploys must not require cutover activation"
-require_text "$WORKFLOW" 'CHANGED_DEPLOY_WORKFLOW=' "deploy workflow changes must conservatively require activation"
 DOCKERIGNORE="$ROOT/agents/.dockerignore"
 require_text "$DOCKERIGNORE" $'\nbenchmarks/\n' "Fly build context must exclude benchmarks/ (ledger history blew past 100MB and timed out Depot)"
 require_text "$DOCKERIGNORE" $'\ntests/\n' "Fly build context must exclude tests/ (not shipped in the Temporal worker image)"
@@ -400,7 +382,7 @@ DEPLOY_AGENTS_WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
 
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'scripts/agent_workflow_surface_hash.py' \
   "deploy-agents workflow must compute the replay-surface generation hash"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'TEMPORAL_WORKER_SURFACE_HASH' \
+require_text "$POOL_HELPER" '"TEMPORAL_WORKER_SURFACE_HASH": args.hash' \
   "deploy-agents cutover must pass the surface hash so workers poll their generation queue"
 
 require_text "$WORKER_GENERATION" 'def resolve_production_task_queue' \
@@ -409,38 +391,17 @@ require_text "$WORKER_GENERATION" 'def resolve_production_task_queue' \
 require_text "$TEMPORAL" 'getCurrentAgentQueue' \
   "workflow start must resolve the routing pointer (so respawns land on the current generation)"
 
-require_text "$DEPLOY" 'set-agent-queue-pointer.ts' \
-  "cutover must flip the agent queue pointer to the new generation"
-require_text "$DEPLOY" 'agent_workflow_surface_hash.py' \
-  "cutover must compute the generation hash it flips the pointer to"
-# The pointer flip must happen BEFORE the workflow migration so every respawn
-# (which resolves its queue through the pointer) lands on the new generation.
-pointer_flip_line=$(grep -n 'set-agent-queue-pointer.ts' "$DEPLOY" | tail -1 | cut -d: -f1)
-migrate_exec_line=$(grep -n 'migrate-open-agent-workflows.ts --execute' "$DEPLOY" | tail -1 | cut -d: -f1)
-[[ -n "$pointer_flip_line" && -n "$migrate_exec_line" && $pointer_flip_line -lt $migrate_exec_line ]] || \
-  fail "cutover must flip the routing pointer BEFORE respawning open workflows"
-
-# Self-driving CI cutover: the deploy workflow drives its own validate → flip →
-# migrate so a bare `gh pr merge` can never strand the fleet in standby (the
-# incident this redesign fixes). No external-driver hold, and a fail-safe rollback.
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'set-agent-queue-pointer.ts' \
-  "deploy workflow must self-drive the routing-pointer flip via cooperative cutover"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clear-generation-queue.ts' \
-  "force-clear remains available after the 45m cooperative drain SLO"
-require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' \
-  "self-driving cutover must use the prod DB secret"
-# Cooperative cutover keeps old-gen workers until drain/SLO. Pointer stays on the
-# live new generation; force-migrate never rolls routing back to the drained gen.
-if grep -q 'rollback-' "$DEPLOY_AGENTS_WORKFLOW" "$ROOT/scripts/deploy-agents-cooperative-cutover.sh"; then
-  fail "cutover must NOT roll the routing pointer back to a drained generation on migrate failure"
+require_text "$POOL_DRIVER" 'set-agent-queue-pointer.ts' "controller must publish routing only after readiness"
+require_text "$POOL_DRIVER" '"--expected-current-queue"' "pointer publication must compare the prior generation"
+require_text "$POOL_DRIVER" 'ledger.assert_owned()' "native mutations must retain shared lease ownership"
+require_text "$POOL_DRIVER" 'initialize-managed-worker-queue.ts' "fresh queues require producer coverage before use"
+require_text "$POOL_DRIVER" '"--verify-retired"' "recycled banks require their exact queue retirement certificate"
+require_text "$POOL_DRIVER" '"RETIRED" if managed else "RETAINED_LEGACY"' "legacy retention must not pretend retirement"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' "shared control plane must use the production DB"
+if grep -qE 'force-clear-generation-queue.ts|migrate-open-agent-workflows.ts' "$POOL_DRIVER" "$COOP"; then
+  fail "routine pool cutover must not terminate unfinished work"
 fi
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clearing stragglers' \
-  "after the 45m SLO, cutover force-clears stragglers while routing stays on the new generation"
-if grep -Fq 'timeout-minutes: 125' "$DEPLOY_AGENTS_WORKFLOW"; then
-  fail "the 125-minute external-driver hold must be gone (replaced by a self-driving cutover)"
-fi
-require_text "$DEPLOY" 'CI already cut over' \
-  "skill cutover must short-circuit when CI already rolled over (no double-drive)"
+require_text "$DEPLOY" 'CI already cut over' "verification must not independently redrive a completed job"
 
 # The self-driving cutover installs back-end deps in CI. back-end is an npm
 # workspace and the root lockfile is not committed, so a plain `npm ci` in the
@@ -454,41 +415,23 @@ fi
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'statuses: write' \
   "deploy-agents must grant statuses: write so the self-driving cutover can post its release status"
 
-# Live-at-boot: a surface-unchanged (no-op) deploy needs NO activation and NO
-# Temporal work — the workers are already serving their generation queue. The
-# no-op path must exit success on a pure DB pointer read, never seal/respawn.
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'Surface unchanged' \
-  "no-op (surface-unchanged) path must rolling-deploy without generation rollover"
+# Same replay hash still receives a new job queue; every physical bank must be drainable.
+require_text "$POOL_DRIVER" 'sha256(job_id.encode())' "queue identity must bind each immutable deployment"
+if grep -q 'Surface unchanged' "$COOP"; then
+  fail "same-code deploy cannot bypass the bank lifecycle with an untracked rolling update"
+fi
 if grep -q 'activate-agent-worker-build.ts' "$DEPLOY_AGENTS_WORKFLOW"; then
-  fail "live-at-boot workers need no activation; the cutover must not post an activation marker"
+  fail "managed banks must not depend on an unrelated standby activation marker"
 fi
-
-# Live-at-boot needs NO Render-wait before flipping: the AgentQueuePointer table is
-# permanent (created by an earlier migration) and the pointer-reading backend code
-# is already deployed, so the flip is safe even while the old backend serves. A
-# Render-wait would also hang forever on a surface-change deploy that ships no
-# back-end change (Render never redeploys that commit).
-if grep -q 'waiting for Render live' "$DEPLOY_AGENTS_WORKFLOW"; then
-  fail "live-at-boot cutover must not block on a Render-live wait before flipping the pointer"
-fi
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'Flipping AgentQueuePointer' \
-  "surface-change cutover must flip routing to the already-live new generation"
 
 echo "workflow deployment migration structural tests: PASS"
 
-
-
-# ── Cooperative generation cutover (activity-boundary + 45m force SLO) ────────
+# ── Reusable bank cutover: exact native retirement, never timeout-based destruction ──
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'deploy-agents-cooperative-cutover.sh' \
-  "deploy-agents must drive cutover via the cooperative overlap/drain script"
-require_text "$DEPLOY_AGENTS_WORKFLOW" 'DRAIN_TIMEOUT_SECONDS: "2700"' \
-  "deploy-agents must wait 45 minutes for cooperative handoff before force-migrate"
-require_file "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" \
-  "cooperative cutover script must exist"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'DRAIN_TIMEOUT_SECONDS' \
-  "cooperative cutover script must honor the drain SLO"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clear-generation-queue.ts' \
-  "generation cutover must force-clear stragglers on the old queue (not deployment migrate)"
+  "deploy-agents must use the durable controller entry point"
+require_text "$POOL_DRIVER" 'DRAIN_TIMEOUT_SECONDS = 2700' \
+  "a bounded observation window must retain unfinished work for resumption"
+# Keep the explicit, separate recovery tools validated; the normal path never calls them.
 require_text "$ROOT/back-end/scripts/force-clear-generation-queue.ts" '--execute' \
   "generation force-clear must require --execute"
 require_text "$ROOT/back-end/scripts/force-clear-generation-queue.ts" 'clearSupersededGenerationWorkflow' \
@@ -499,20 +442,15 @@ if grep -n "status: 'FAILED'" "$ROOT/back-end/scripts/force-clear-generation-que
   | grep -v 'summary.failed' >/dev/null; then
   fail "force-clear must not mark owned agents FAILED"
 fi
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'count-open-workflows-on-queue.ts' \
-  "cooperative cutover must poll open workflows on the old generation queue"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--image-label' \
-  "cutover build must tag the pushed image for registry.fly.io resolution"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'registry.fly.io' \
-  "cutover must construct image ref from app + image label (flyctl deploy has no --json)"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--build-only' \
-  "surface-change cutover must build/push without replacing old-gen machines first"
+require_text "$COOP" '--image-label' "worker builds must resolve their registry image"
+require_text "$COOP" 'registry.fly.io' "worker image must be in the production registry"
+require_text "$COOP" '--build-only' "build must not replace an existing Machine"
+require_text "$COOP" '--local-only' "build must not allocate a Fly builder Machine"
+require_text "$COOP" '@${IMAGE_DIGEST}' "queued images must be pinned to an immutable digest"
 require_text "$ROOT/agents/fly.toml" 'kill_timeout = "5m"' \
   "Fly kill_timeout must stay within the Machines 5m stop_config.timeout cap"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'timeout --kill-after=30s 120' \
-  "old-gen retire must bound stop/destroy with SIGKILL follow-up so a hung flyctl cannot burn the GHA step"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'retire_deadline' \
-  "old-gen retire must bound total wall-clock across all machines"
+require_text "$POOL_DRIVER" 'MACHINE_STOP_TIMEOUT_SECONDS = 120' "native stop observation must be bounded"
+require_text "$POOL_DRIVER" '"--retire"' "native stop requires qualified queue retirement first"
 require_text "$ROOT/agents/worker.py" 'graceful_shutdown_timeout' \
   "Temporal worker must wait for in-flight activities on shutdown"
 require_text "$ROOT/agents/loop/run_agent.py" 'generation_handoff' \
@@ -529,6 +467,9 @@ require_file "$ROOT/back-end/src/domains/agent-queue-pointer/routes.ts" \
 # Behavioral: run the real cutover script against Fly fakes (clone adoption,
 # fresh provisioning, transient Machines API update failures).
 bash "$ROOT/scripts/tests/deploy-agent-clone-recovery.test.sh" ||
-  fail "cooperative cutover must recover clones and retry transient Fly machine-update failures"
+  fail "pool entry must enqueue an immutable image without allocating Machines"
 python3 "$ROOT/scripts/tests/retained-agent-machine.test.py" ||
   fail "retained worker reuse must preserve native ownership, custody, config and leases"
+
+python3 "$ROOT/scripts/tests/worker-pool-cutover.test.py" ||
+  fail "pool cutover must preserve ownership, readiness and positive retirement across resumption"

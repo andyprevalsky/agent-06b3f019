@@ -235,3 +235,51 @@ existing permanent `cleanup_releases_emergency_disk` deploy selection already
 owns this control. The original full-gate failure and initial private import
 setup failure remain recorded separately; neither is converted into a passing
 receipt. Final normal affected qualification remains mandatory.
+
+
+## October 16 local fetch-capacity refusal (related operational boundary)
+
+At unchanged source `db99e0f616848a0a65fe5aedc3a62264158c9af2`, the normal
+agents coverage command ran all 110 blackbox domains and returned 109 passes
+and one benchmark failure. Six authenticated boot-payload fetch controls were
+refused by the real `cloudbench-fetch-ref.sh` free-space guard: required
+2,097,152 KiB, observed approximately 1,796,220 down to 1,618,060 KiB. This is
+a correct admission refusal, not evidence that the concurrent reserve race
+above recurred or that the guard should be weakened.
+
+The root coordinator reported removing only duplicate tracked history working
+copies in two positively retired worktrees after matching their retained Git
+objects and checking for live cwd/file descriptors. Source, dirty patches,
+evidence and Git history were retained. That operation reported reclaiming
+4,671,488,593 bytes. The next attempt independently recorded 5,910,945,792
+available bytes before launch. Freedom and other protected assets were not
+part of this correction.
+
+Both attempts used the same command, source, fixtures and assertions:
+
+```bash
+cd agents
+source venv/bin/activate
+bash ../scripts/run-deploy-stage agents-coverage-blackbox --reuse-passed -- \
+  env AGENTS_COVERAGE_CONCURRENCY=6 bash scripts/run-coverage.sh
+```
+
+The unchanged benchmark domain passed in 210.59 seconds on the second attempt;
+all 110 blackbox domains and 184 fast-cache tests passed. The complete command
+still exited 1 because the later unit phase reported 132 passes and two pointer
+activity fixture failures (`Not in activity context`). Those failures have a
+separate boundary and repair owner. Neither original full command is relabeled
+PASS, and no final qualification success is claimed here.
+
+Private evidence is under
+`.context/deploy-runs/reusable-pool-cutover-r2-20261016/`:
+`A-FINAL-CAPACITY-FAILURE.json`, `A-CAPACITY-CORRECTED-ATTEMPT-START.json`,
+and `A-FINAL-UNIT-CONTEXT-FAILURE.json`. Both normal stage logs and domain logs
+remain retained. Known owned wrapper/pool/benchmark/unit PIDs retired normally.
+No runtime, dependency, fixture, deadline, capacity threshold or policy changed
+for this operational correction. Archive searches used the literal
+`cloudbench-fetch-ref insufficient free space` and behavioral
+`retired worktree duplicate history disk capacity`; the reserve-admission case
+is related capacity context, not the diagnosed mechanism of this refusal.
+
+No additional human feedback was recorded for this operational incident.
