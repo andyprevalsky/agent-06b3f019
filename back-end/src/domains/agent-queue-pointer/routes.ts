@@ -1,3 +1,4 @@
+import { WorkflowStartAdmissionPendingError } from '../../providers/workflowQueueAdmission';
 /**
  * Internal AgentQueuePointer read for cooperative Temporal cutover.
  *
@@ -23,7 +24,24 @@ router.get(
       return;
     }
 
-    res.json(await getAgentQueuePointerPayload());
+    const workflowId = req.get('X-Workflow-Id');
+    const runId = req.get('X-Workflow-Run-Id');
+    try {
+      res.json(
+        await getAgentQueuePointerPayload(
+          workflowId !== undefined &&
+            workflowId.length > 0 &&
+            runId !== undefined &&
+            runId.length > 0
+            ? { workflowId, runId }
+            : undefined,
+          req.get('X-Queue-Pointer-Observe') === '1'
+        )
+      );
+    } catch (error) {
+      if (!(error instanceof WorkflowStartAdmissionPendingError)) throw error;
+      res.status(409).json({ error: error.message });
+    }
   })
 );
 

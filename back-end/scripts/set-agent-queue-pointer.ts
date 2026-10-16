@@ -34,6 +34,9 @@ async function main(): Promise<void> {
   const queue = argValue('--queue');
   const surfaceHash = argValue('--surface-hash');
   const updatedBy = argValue('--by');
+  const expectedCurrentQueue = argValue('--expected-current-queue');
+  if (process.argv.includes('--expected-current-queue') && !expectedCurrentQueue)
+    throw new Error('Missing --expected-current-queue value');
   if (!queue || !surfaceHash) {
     process.stderr.write(
       'Usage: set-agent-queue-pointer.ts --queue <name> --surface-hash <hash> [--by <ctx>]\n' +
@@ -50,7 +53,14 @@ async function main(): Promise<void> {
     );
     process.exit(2);
   }
-  await setCurrentAgentQueue(queue, surfaceHash, updatedBy);
+  await setCurrentAgentQueue(
+    queue,
+    surfaceHash,
+    updatedBy,
+    expectedCurrentQueue
+      ? { expectedCurrentQueue, deploymentOwnerId: process.env.WORKER_DEPLOYMENT_OWNER_ID }
+      : undefined
+  );
   const row = await readAgentQueuePointer();
   process.stdout.write(`Agent queue pointer set: ${JSON.stringify(row)}\n`);
 }

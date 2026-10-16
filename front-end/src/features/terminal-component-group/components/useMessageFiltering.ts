@@ -9,6 +9,10 @@
  * [LEGACY CHILD ROW] -> synthesize busId/subAgentIds from root id + subAgentId -> [LIVE TREE]
  * [FOR_EACH TERMINAL] -> use emitted child ids or infer legacy rows -> [AGGREGATE TREE]
  * [NO TERMINAL YET] -> keep live child tree rows visible
+ *
+ * ANSWER STREAM STATES:
+ * [LIVE ONLY] -> render attention -> [MATCHING SAVED REPLY] -> render canonical only
+ * [SAVED REPLY] + late matching stream -> canonical remains authoritative
  */
 import { useMemo } from 'react';
 import { userFacingMessageText } from '@/lib/userFacingMessage';
@@ -179,6 +183,21 @@ export function coalesceStreamingTools(
   );
 }
 
+function coalesceStreamingAttention(
+  attention: StreamingAttention | null,
+  persistedMessages: Message[],
+  target: string | null,
+): StreamingAttention | null {
+  if (!attention || (attention.subAgentId ?? null) !== target) return null;
+  const hasCanonicalAnswer = persistedMessages.some(
+    (message) =>
+      message.role === 'TOOL' &&
+      message.metadata?.toolName === 'send_message_to_user' &&
+      message.metadata?.toolCallId === attention.tool_call_id,
+  );
+  return hasCanonicalAnswer ? null : attention;
+}
+
 export function useFilteredStreaming({
   subAgentId,
   persistedMessages,
@@ -188,12 +207,12 @@ export function useFilteredStreaming({
   streamingTools,
 }: UseFilteredStreamingOptions): FilteredStreamingState {
   const target = subAgentId ?? null;
-  const exploreTaskIds = new Set(
-    persistedMessages
-      .map((message) => message.metadata?.taskId)
-      .filter((taskId): taskId is string => typeof taskId === 'string'),
-  );
   return useMemo(() => {
+    const exploreTaskIds = new Set(
+      persistedMessages
+        .map((message) => message.metadata?.taskId)
+        .filter((taskId): taskId is string => typeof taskId === 'string'),
+    );
     const bubbles = new Map(
       [...streamingBubbles].filter(
         ([, b]) =>
@@ -204,10 +223,7 @@ export function useFilteredStreaming({
     const tools = coalesceStreamingTools(streamingTools, persistedMessages, target);
     const plan =
       streamingPlan && (streamingPlan.subAgentId ?? null) === target ? streamingPlan : null;
-    const attention =
-      streamingAttention && (streamingAttention.subAgentId ?? null) === target
-        ? streamingAttention
-        : null;
+    const attention = coalesceStreamingAttention(streamingAttention, persistedMessages, target);
 
     let charCount = 0;
     let streamStartedAtMs: number | undefined;

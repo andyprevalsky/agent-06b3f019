@@ -219,3 +219,22 @@ that without making it take forever.
 A test that waits on a shared third-party ledger needs to log the provider's
 own record of the object it waits on. A summary of a few fields cannot tell a
 slow provider from a concurrent consumer.
+
+## October 16 overdue observation during reusable cutover qualification
+
+The backend coverage run on
+`8171b24d0f934b38a5b932f836b8726f40b07a96` failed before creating a new treasury
+mint. The earlier `card_c04e65b7f4cc375dfbf9a0eb`, minted October 15 at
+18:35:22.233 UTC, was 24.4 hours old and absent from the observed provider pages.
+The provider row was null; this does not prove either consumption or recovery.
+The original failure remains in
+`.context/lantern-deploy-preflight/.context/test-runs/backend-coverage-failed-20261016-190204-816376/`.
+
+The existing `checkPendingUnusedMints` policy records every non-waiting verdict
+before the caller reports a failed run. Its normal ledger writer recorded this
+overdue outcome at 18:59:19.996 UTC. That terminal test-ledger entry is not a
+refund, successful financial cleanup, or a manual gate override. No ledger row
+was edited to remove the failure. A separate earlier mint,
+`card_d3f0c6a6b4aaaebc920d8e8b`, was still pending within its original deadline.
+Later test runs must retain these financial limitations even when the one-time
+overdue assertion no longer repeats. No provider or treasury policy changed.
