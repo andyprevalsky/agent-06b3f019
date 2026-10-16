@@ -21,6 +21,50 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+function purchaseInput(body: Record<string, unknown>, userId: string): MintPurchaseInput {
+  return {
+    userId,
+    fingerprint: asString(body.fingerprint) ?? '',
+    merchant: asString(body.merchant) ?? '',
+    agentId: asString(body.agentId),
+    reusePurchaseId: asString(body.reusePurchaseId),
+    currency: asString(body.currency) ?? 'USD',
+    lineItems: Array.isArray(body.lineItems)
+      ? (body.lineItems as MintPurchaseInput['lineItems'])
+      : [],
+    fees: Array.isArray(body.fees) ? (body.fees as MintPurchaseInput['fees']) : [],
+    subtotalCents: asNumber(body.subtotalCents) ?? 0,
+    totalCents: asNumber(body.totalCents) ?? 0,
+  };
+}
+
+router.post(
+  '/lookup',
+  asyncHandler(hybridAuth),
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+    if (userId === undefined) {
+      res.status(401).json({ error: 'Authenticated user required' });
+      return;
+    }
+    const input = purchaseInput(req.body as Record<string, unknown>, userId);
+    if (input.fingerprint === '' || input.agentId === undefined) {
+      res.status(400).json({ error: 'fingerprint and agentId are required' });
+      return;
+    }
+    try {
+      res.json(
+        await service.lookupPurchase(userId, input.fingerprint, undefined, new Date(), input)
+      );
+    } catch (error) {
+      if (!(error instanceof service.PurchaseError)) throw error;
+      res
+        .status(error.statusCode)
+        .json({ error: error.message, code: error.code, ...error.details });
+    }
+  })
+);
+
 router.get(
   '/lookup',
   asyncHandler(hybridAuth),
@@ -52,19 +96,7 @@ router.post(
     }
 
     const body = req.body as Record<string, unknown>;
-    const input: MintPurchaseInput = {
-      userId,
-      fingerprint: asString(body.fingerprint) ?? '',
-      merchant: asString(body.merchant) ?? '',
-      agentId: asString(body.agentId),
-      currency: asString(body.currency) ?? 'USD',
-      lineItems: Array.isArray(body.lineItems)
-        ? (body.lineItems as MintPurchaseInput['lineItems'])
-        : [],
-      fees: Array.isArray(body.fees) ? (body.fees as MintPurchaseInput['fees']) : [],
-      subtotalCents: asNumber(body.subtotalCents) ?? 0,
-      totalCents: asNumber(body.totalCents) ?? 0,
-    };
+    const input = purchaseInput(body, userId);
 
     try {
       const result = await service.mintPurchaseCard(input);

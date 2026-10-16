@@ -102,7 +102,11 @@ function useApprovalHandlers({
       onApprovalHandled?.();
     } catch (error) {
       console.error('Failed to approve:', error);
-      toast({ title: 'Error', description: 'Failed to send approval', variant: 'destructive' });
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to send approval',
+        variant: 'destructive',
+      });
     } finally {
       setActionState(null);
     }

@@ -76,6 +76,7 @@ from utils.payment_card import (
     MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
     build_payment_question,
     normalize_payment_payload,
+    reuse_payment_approval,
 )
 from utils.prompts import build_verifier_prompt
 
@@ -336,12 +337,15 @@ async def _lookup_payment_purchase(
     """Look up the canonical key and retain a matched pre-canonicalization key for mint."""
     fingerprint = str(payment_payload.get("fingerprint") or "")
     activity_args = [user_id, fingerprint]
-    if world_model_mode not in {None, "real"}:
+    scoped_receipt = bool(payment_payload.get("agentId"))
+    if scoped_receipt:
+        activity_args.extend([world_model_mode, payment_payload])
+    elif world_model_mode not in {None, "real"}:
         activity_args.append(world_model_mode)
     result = await workflow.execute_activity(
         "lookup_purchase_activity",
         args=activity_args,
-        start_to_close_timeout=timedelta(seconds=30),
+        start_to_close_timeout=timedelta(seconds=90 if scoped_receipt else 30),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
     purchase = result.get("purchase")
@@ -12120,6 +12124,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         payment_payload,
                         getattr(workflow_instance, "world_model_mode", "real"),
                     )
+                    if lookup_result.get("usageItems"):
+                        yield ToolEvent(
+                            type=EventType.USAGE,
+                            data={"usage": browser_usage_items_to_tool_usage(lookup_result["usageItems"])},
+                        )
+                    if lookup_result.get("error"):
+                        raise RuntimeError(str(lookup_result["error"]))
                     # Mint uses the same fingerprint as lookup. When a held
                     # purchase was created before canonicalization shipped,
                     # retain its legacy key so the backend returns that card.
@@ -12132,15 +12143,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         reusable=lookup_result.get("reusable"),
                     )
 
-                    # Always surface payment_approval attention — even when a held
-                    # purchase is reusable. Skipping it left fleets with
-                    # attentionRequestId=null, so Place-order write_lock became the
-                    # first observed attention ("Expected payment_approval, observed
-                    # write_lock") and H-06 site unlock was never gated on a real
-                    # approval. Reuse still applies at mint; this only restores the
-                    # approval UX / benchmark contract.
                     approval_resume, parked_approval = parked_approval, None
-                    approval_response = await _request_browser_write_approval_until_paused(
+                    approval_response = reuse_payment_approval(
+                        lookup_result, payment_payload, workflow_instance.agent_id, approval_resume
+                    ) or await _request_browser_write_approval_until_paused(
                         workflow_instance,
                         pause_sequence=payment_pause_sequence,
                         question=build_payment_question(payment_payload),
