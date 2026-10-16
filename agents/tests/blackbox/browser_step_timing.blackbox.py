@@ -290,6 +290,7 @@ async def test_slow_otp_poll_does_not_block_steps_and_codes_land_later():
 
 
 def test_browser_loop_never_awaits_otp_poll():
+    import ast
     import inspect
 
     from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
@@ -301,7 +302,9 @@ def test_browser_loop_never_awaits_otp_poll():
     harvest = loop.index("otp_poll_task = _harvest_otp_poll(otp_poll_task)")
     assert harvest < loop.index("browser_turn_messages.extend(otp_user_messages[otp_history_count:])")
     assert harvest < loop.index('step_timer.mark("llm_decision")')
-    teardown = source[source.rindex("finally:") :]
+    activity = ast.parse(source).body[0]
+    cleanup = next(node.finalbody for node in reversed(activity.body) if isinstance(node, ast.Try) and node.finalbody)
+    teardown = ast.unparse(ast.Module(body=cleanup, type_ignores=[]))
     assert "await _drain_otp_poll(otp_poll_task)" in teardown
 
 
@@ -547,7 +550,7 @@ def test_resumed_transcript_observe_wired_once_per_activity():
     source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     setup, loop = source.split("while iteration < MAX_ITERATIONS:", 1)
     assert "restored_transcript_unobserved = bool(browser_turn_messages)" in setup
-    assert setup.index("browser_turn_messages.extend(resume_user_messages)") < setup.index(
+    assert setup.index("user_instruction_messages = _append_browser_user_instructions(") < setup.index(
         "restored_transcript_unobserved = bool(browser_turn_messages)"
     )
     observe = loop[loop.index("observe_needs_dom = _step_observe_needs_dom(") :]
@@ -830,6 +833,7 @@ async def test_speculative_state_rejected_when_page_or_session_changed():
 
 
 def test_speculative_state_wired_after_step_start_mutations():
+    import ast
     import inspect
 
     from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
@@ -849,7 +853,9 @@ def test_speculative_state_wired_after_step_start_mutations():
     assert 'action_name == "read_browser_state"' in pre_action
     assert "state_prefetch.discard()" in pre_action
     assert loop.index('step_timer.mark("execute_action")') < loop.index("state_prefetch.arm(")
-    teardown = source[source.rindex("finally:") :]
+    activity = ast.parse(source).body[0]
+    cleanup = next(node.finalbody for node in reversed(activity.body) if isinstance(node, ast.Try) and node.finalbody)
+    teardown = ast.unparse(ast.Module(body=cleanup, type_ignores=[]))
     assert "state_prefetch.discard()" in teardown
 
 

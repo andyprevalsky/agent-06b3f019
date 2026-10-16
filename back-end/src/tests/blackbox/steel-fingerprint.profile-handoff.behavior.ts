@@ -197,6 +197,7 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
     steel.sessions.retrieve = inspectSession as typeof steel.sessions.retrieve;
     const dependencies = {
       inspectSession,
+      retrieveProfile: async () => ({ status: 'READY' }),
       releaseSession: async (sessionId: string) => {
         if (sessionId !== sourceId) {
           assert(candidates.has(sessionId), 'released unrelated session');

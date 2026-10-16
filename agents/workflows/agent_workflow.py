@@ -18,6 +18,7 @@ import structlog
 import structlog.contextvars
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 # Import pass-through for workflow context:
@@ -69,6 +70,7 @@ with workflow.unsafe.imports_passed_through():
         call_llm_activity,
         fetch_compute_token_activity,
         mark_compute_token_rate_limited_activity,
+        persist_response_schema_activity,
         release_compute_token_lineage_activity,
         set_response_schema_activity,
     )
@@ -85,7 +87,12 @@ with workflow.unsafe.imports_passed_through():
         latest_real_user_instruction,
         plan_superseded_by_new_user_instruction,
     )
-    from loop.run_agent import _run_verifier, run_agent
+    from loop.run_agent import (
+        _real_user_requirement_keys,
+        _run_verifier,
+        _verifier_superseded_by_user_feedback,
+        run_agent,
+    )
     from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from tools.attempt_completion import attempt_completion
@@ -98,10 +105,10 @@ with workflow.unsafe.imports_passed_through():
         mint_subscription_checkout_activity,
         raise_gate_direct,
     )
+    from tools.google_oauth_demo import google_oauth_demo
 
     # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
-    from tools.google_oauth_demo import google_oauth_demo
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
@@ -116,13 +123,13 @@ with workflow.unsafe.imports_passed_through():
     from tools.wait_for import wait_for
     from tools.web_fetch import web_fetch
     from tools.web_search import web_search
-    from utils.error_utils import extract_error_message
+    from utils.attention_requests import REJECTION_SENTINEL
+    from utils.error_utils import error_chain_has_type, extract_error_message
     from utils.format_tool_display import format_tool_display
-    from utils.llm_timeouts import SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS
+    from utils.llm_timeouts import SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS, STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
     from utils.prompts import (
         build_system_prompt,
         build_verifier_prompt,
-        format_required_output_schema_user_message,
     )
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
 
@@ -153,7 +160,10 @@ CLOUD_AGENT_IN_PROGRESS_TITLES = {
     STARTING_REASONING_TITLE,
 }
 FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
-RESPONSE_SCHEMA_UPDATE_PREFIX = "Output schema revised from user feedback."
+# Reserved responses emitted by auth completion and gate-resolution providers.
+ATTENTION_CONTROL_RESPONSES = frozenset(
+    {REJECTION_SENTINEL, "__AUTH_ASSISTANCE_COMPLETED__", "RESOLVED", "SOURCE_CONNECTED", "SUBSCRIPTION_ACTIVE"}
+)
 
 
 def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> str:
@@ -764,16 +774,24 @@ class AgentWorkflow:
         # per accepted batch while still catching feedback that arrives during
         # the schema-generation activity.
         self._response_schema_feedback: List[str] = []
+        self._response_schema_feedback_sources: List[Optional[Tuple[str, ...]]] = []
+        self._response_schema_feedback_rows: Set[Tuple[str, ...]] = set()
+        self._response_schema_task_base: Optional[str] = None
+        self._response_schema_task_baseline_rows: Set[Tuple[str, ...]] = set()
+        self._response_schema_attention_events: Dict[str, str] = {}
+        self._response_schema_pending_signals: Dict[str, int] = {}
+        self._response_schema_baseline_initialized = False
         self._response_schema_revision: int = 0
         self._response_schema_applied_revision: int = 0
+        self._response_schema_accepted_revision: int = 0
         self._response_schema_initialized: bool = False
         self._response_schema_refresh_task: Optional[asyncio.Task[Any]] = None
         self._response_schema_refresh_failed_revision: int = 0
         self._response_schema_refresh_error: Optional[str] = None
-        self._response_schema_internal_signal_keys: Set[str] = set()
-        # Keep the main-agent system prefix stable for provider prompt caching.
-        # Later schema revisions are delivered as USER context messages instead.
-        self._system_prompt_output_schema: Optional[Dict] = None
+        self._response_schema_refresh_failure_reason: Optional[str] = None
+        # Live exception identity is only for the normal LLM retry boundary;
+        # continuation state stores the existing error text, never an exception.
+        self._response_schema_refresh_exception: Optional[Exception] = None
         self._has_credits: bool = True  # Cached credit status
         self._last_credit_check: int = 0  # Iteration count at last check
         self.write_lock_enabled: bool = True  # Write lock for browser agent actions
@@ -993,9 +1011,17 @@ class AgentWorkflow:
             runtime.get("pending_approval_resume")
         )
         if isinstance(runtime.get("response_schema_feedback"), list):
-            self._response_schema_feedback = [
-                value for value in runtime["response_schema_feedback"] if isinstance(value, str)
-            ]
+            source_rows = runtime.get("response_schema_feedback_sources")
+            self._response_schema_feedback = []
+            self._response_schema_feedback_sources = []
+            for index, value in enumerate(runtime["response_schema_feedback"]):
+                if not isinstance(value, str):
+                    continue
+                source = source_rows[index] if isinstance(source_rows, list) and index < len(source_rows) else None
+                self._response_schema_feedback.append(value)
+                self._response_schema_feedback_sources.append(
+                    tuple(source) if isinstance(source, list) and source and all(isinstance(part, str) for part in source) else None
+                )
         self._response_schema_revision = int(runtime.get("response_schema_revision", 0))
         self._response_schema_applied_revision = int(runtime.get("response_schema_applied_revision", 0))
         self._response_schema_initialized = runtime.get("response_schema_initialized") is True
@@ -1005,12 +1031,50 @@ class AgentWorkflow:
             if isinstance(runtime.get("response_schema_refresh_error"), str)
             else None
         )
-        if isinstance(runtime.get("response_schema_internal_signal_keys"), list):
-            self._response_schema_internal_signal_keys = {
-                value for value in runtime["response_schema_internal_signal_keys"] if isinstance(value, str)
+        accepted_revision = runtime.get("response_schema_accepted_revision")
+        if isinstance(accepted_revision, int) and accepted_revision >= 0:
+            self._response_schema_accepted_revision = accepted_revision
+        elif self._response_schema_refresh_failed_revision == 0 and self._response_schema_refresh_error is None:
+            # Legacy successful processing included adoption. A consumed failure
+            # cannot prove which input revision the native contract covers.
+            self._response_schema_accepted_revision = self._response_schema_applied_revision
+        else:
+            self._response_schema_accepted_revision = 0
+        if (
+            self._response_schema_accepted_revision < self._response_schema_applied_revision
+            and self._response_schema_refresh_failed_revision >= self._response_schema_applied_revision
+        ):
+            # Older snapshots acknowledged failed generation as processed.
+            # Reopen that input for the existing retry owner after deployment.
+            self._response_schema_applied_revision = self._response_schema_accepted_revision
+        self._response_schema_refresh_exception = None
+        failure_reason = runtime.get("response_schema_refresh_failure_reason")
+        self._response_schema_refresh_failure_reason = (
+            failure_reason if isinstance(failure_reason, str) else self._response_schema_refresh_error
+        )
+        if isinstance(runtime.get("response_schema_feedback_rows"), list):
+            self._response_schema_feedback_rows = {
+                tuple(value) for value in runtime["response_schema_feedback_rows"]
+                if isinstance(value, list) and all(isinstance(part, str) for part in value)
             }
-        if isinstance(runtime.get("system_prompt_output_schema"), dict):
-            self._system_prompt_output_schema = runtime["system_prompt_output_schema"]
+        if isinstance(runtime.get("response_schema_task_base"), str):
+            self._response_schema_task_base = runtime["response_schema_task_base"]
+        if isinstance(runtime.get("response_schema_task_baseline_rows"), list):
+            self._response_schema_task_baseline_rows = {
+                tuple(value) for value in runtime["response_schema_task_baseline_rows"]
+                if isinstance(value, list) and all(isinstance(part, str) for part in value)
+            }
+        if isinstance(runtime.get("response_schema_attention_events"), dict):
+            self._response_schema_attention_events = {
+                key: value for key, value in runtime["response_schema_attention_events"].items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+        if isinstance(runtime.get("response_schema_pending_signals"), dict):
+            self._response_schema_pending_signals = {
+                key: value for key, value in runtime["response_schema_pending_signals"].items()
+                if isinstance(key, str) and isinstance(value, int) and value > 0
+            }
+        self._response_schema_baseline_initialized = runtime.get("response_schema_baseline_initialized") is True
         self._has_credits = runtime.get("has_credits", self._has_credits) is True
         self._last_credit_check = int(runtime.get("last_credit_check", 0))
         self.write_lock_enabled = runtime.get("write_lock_enabled", True) is True
@@ -1215,13 +1279,25 @@ class AgentWorkflow:
                     self._pending_approval_resume
                 ),
                 "response_schema_feedback": list(self._response_schema_feedback),
+                "response_schema_feedback_sources": [
+                    list(self._response_schema_feedback_sources[index])
+                    if index < len(self._response_schema_feedback_sources) and self._response_schema_feedback_sources[index] is not None
+                    else None
+                    for index in range(len(self._response_schema_feedback))
+                ],
+                "response_schema_feedback_rows": [list(key) for key in sorted(self._response_schema_feedback_rows)],
+                "response_schema_task_base": self._response_schema_task_base,
+                "response_schema_task_baseline_rows": [list(key) for key in sorted(self._response_schema_task_baseline_rows)],
+                "response_schema_attention_events": dict(self._response_schema_attention_events),
+                "response_schema_pending_signals": dict(self._response_schema_pending_signals),
+                "response_schema_baseline_initialized": self._response_schema_baseline_initialized,
                 "response_schema_revision": self._response_schema_revision,
                 "response_schema_applied_revision": self._response_schema_applied_revision,
+                "response_schema_accepted_revision": self._response_schema_accepted_revision,
                 "response_schema_initialized": self._response_schema_initialized,
                 "response_schema_refresh_failed_revision": (self._response_schema_refresh_failed_revision),
                 "response_schema_refresh_error": self._response_schema_refresh_error,
-                "response_schema_internal_signal_keys": sorted(self._response_schema_internal_signal_keys),
-                "system_prompt_output_schema": self._system_prompt_output_schema,
+                "response_schema_refresh_failure_reason": self._response_schema_refresh_failure_reason,
                 "has_credits": self._has_credits,
                 "last_credit_check": self._last_credit_check,
                 "write_lock_enabled": self.write_lock_enabled,
@@ -1370,22 +1446,18 @@ class AgentWorkflow:
         # Try to parse as JSON with request_id (from attention request endpoints)
         try:
             data = _json.loads(response)
-            internal_schema_key = data.get("idempotency_key") if isinstance(data, dict) else None
-            if (
-                isinstance(data, dict)
-                and data.get("internal_type") == "response_schema_update"
-                and isinstance(internal_schema_key, str)
-                and internal_schema_key in self._response_schema_internal_signal_keys
-            ):
-                # The hidden USER row is already durable. Wake the main loop so
-                # its next poll picks up the new tail context without treating
-                # the generated message as fresh user feedback.
-                self._has_new_messages = True
-                workflow.logger.info("Waking main loop for generated response-schema context message")
-                return
             if isinstance(data, dict) and "request_id" in data:
                 req_id = data["request_id"]
                 actual_response = data.get("response", "")
+                # Explicit authored provenance is separate from the gate protocol.
+                if "user_message" in data:
+                    self._record_response_schema_feedback(data["user_message"], request_id=req_id, authored=True)
+                else:
+                    if isinstance(actual_response, str) and actual_response.strip() == REJECTION_SENTINEL:
+                        await self._receive_rejection_schema_feedback()
+                    self._record_response_schema_feedback(actual_response)
+                # Publish only after intake: request-scoped waiters may run while
+                # legacy rejection feedback awaits its durable poll.
                 self._signal_responses[req_id] = actual_response
                 workflow.logger.info(f"💬 Stored response for request {req_id}")
                 return
@@ -1393,11 +1465,141 @@ class AgentWorkflow:
             pass
         # Legacy: plain string (from chat messages, SMS, etc.)
         self._last_signal_response = response
-        self._response_schema_feedback.append(response)
+        self._has_new_messages = True
+        self._record_response_schema_feedback(response)
+
+    @staticmethod
+    def _response_schema_attention_event_id(message: Dict) -> Optional[str]:
+        metadata = message.get("metadata") or {}
+        request_id = metadata.get("attentionRequestId")
+        if metadata.get("source") == "attention_response" and isinstance(request_id, str) and request_id:
+            return request_id
+        return None
+
+    def _record_response_schema_feedback(
+        self, response: Any, *, request_id: Optional[str] = None, authored: bool = False,
+    ) -> None:
+        """Queue one authored event, independently of its signal/row delivery order."""
+        if not isinstance(response, str):
+            return
+        normalized = response.strip()
+        if not normalized or (not authored and (
+            normalized in ATTENTION_CONTROL_RESPONSES
+            or normalized.casefold() in {"approve", "approved"}
+        )):
+            return
+        if request_id is not None:
+            if request_id in self._response_schema_attention_events:
+                return
+            self._response_schema_attention_events[request_id] = response
+        self._append_response_schema_feedback(
+            response, ("attention_response", request_id) if request_id is not None else None,
+        )
+        text = response.strip()
+        if text:
+            if request_id is None:
+                self._response_schema_pending_signals[text] = self._response_schema_pending_signals.get(text, 0) + 1
+            self._bind_response_schema_feedback_rows(self.context)
         self._response_schema_revision += 1
         self._response_schema_refresh_error = None
         self._has_new_messages = True
         self._start_response_schema_refresh()
+
+    def _append_response_schema_feedback(self, response: str, source: Optional[Tuple[str, ...]] = None) -> None:
+        """Keep authored text paired with proven source identity; legacy text stays unknown."""
+        count = len(self._response_schema_feedback)
+        self._response_schema_feedback_sources = self._response_schema_feedback_sources[:count]
+        self._response_schema_feedback_sources.extend([None] * (count - len(self._response_schema_feedback_sources)))
+        self._response_schema_feedback.append(response)
+        self._response_schema_feedback_sources.append(source)
+
+    def _establish_response_schema_task_boundary(self, messages: List[Dict]) -> None:
+        """A fresh task consumes the observed USER prefix, not future source IDs."""
+        latest_index = next((index for index in range(len(messages) - 1, -1, -1)
+                             if latest_real_user_instruction([messages[index]]) is not None), None)
+        if latest_index is None:
+            return
+        self._response_schema_task_base = messages[latest_index]["text"]
+        for message in messages[:latest_index + 1]:
+            keys = _real_user_requirement_keys([message])
+            self._response_schema_task_baseline_rows.update(keys)
+            self._response_schema_feedback_rows.update(keys)
+            event_id = self._response_schema_attention_event_id(message)
+            if keys and event_id is not None and isinstance(message.get("text"), str):
+                self._response_schema_attention_events.setdefault(event_id, message["text"])
+        self._response_schema_baseline_initialized = True
+
+    def _bind_response_schema_feedback_rows(self, messages: List[Dict]) -> None:
+        """Associate accepted plain-signal occurrences with durable USER identities."""
+        if not self._response_schema_baseline_initialized:
+            first_user = next((message for message in messages if _real_user_requirement_keys([message])), None)
+            if first_user is not None:
+                if first_user.get("text") in (self.goal, self.fast_cache_goal):
+                    self._response_schema_feedback_rows.update(_real_user_requirement_keys([first_user]))
+                self._response_schema_baseline_initialized = True
+        for message in messages:
+            keys = _real_user_requirement_keys([message])
+            if not keys or not isinstance(message.get("text"), str):
+                continue
+            event_id = self._response_schema_attention_event_id(message)
+            if event_id is not None:
+                if event_id in self._response_schema_attention_events:
+                    self._response_schema_feedback_rows.update(keys)
+                # Canonical attention rows never consume another event's legacy
+                # text occurrence, even when two authors wrote the same text.
+                continue
+            key = next(iter(keys))
+            text = message["text"].strip()
+            if key in self._response_schema_feedback_rows or not self._response_schema_pending_signals.get(text, 0):
+                continue
+            self._response_schema_feedback_rows.add(key)
+            self._response_schema_pending_signals[text] -= 1
+            if self._response_schema_pending_signals[text] == 0:
+                del self._response_schema_pending_signals[text]
+    def _admit_durable_response_schema_feedback(self) -> None:
+        """Queue real USER rows once, including rows polled before their signal."""
+        self._bind_response_schema_feedback_rows(self.context)
+        for message in self.context:
+            keys = _real_user_requirement_keys([message])
+            text = message.get("text")
+            event_id = self._response_schema_attention_event_id(message)
+            if not keys or not (keys - self._response_schema_feedback_rows) or not isinstance(text, str) or (
+                event_id is None and text.strip() in ATTENTION_CONTROL_RESPONSES
+            ):
+                continue
+            self._response_schema_feedback_rows.update(keys)
+            if event_id is not None:
+                if event_id in self._response_schema_attention_events:
+                    continue
+                self._response_schema_attention_events[event_id] = text
+            self._append_response_schema_feedback(text, next(iter(keys)))
+            self._response_schema_revision += 1
+            self._response_schema_refresh_error = None
+            self._has_new_messages = True
+        self._start_response_schema_refresh()
+
+    async def _receive_rejection_schema_feedback(self) -> None:
+        """Accept durable rejection text before releasing the request-scoped wait."""
+        self._bind_response_schema_feedback_rows(self.context)
+        timestamps = [self._restored_datetime(message.get("timestamp")) for message in self.context]
+        last_checked = max(
+            (
+                value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+                for value in timestamps
+                if value is not None
+            ),
+            default=datetime.fromtimestamp(0, tz=timezone.utc),
+        )
+        last_checked = max(datetime.fromtimestamp(0, tz=timezone.utc), last_checked - timedelta(milliseconds=1))
+        try:
+            await self._poll_messages(last_checked)
+        except ActivityError as error:
+            if any(error_chain_has_type(error, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
+            workflow.logger.warning(f"Rejection feedback poll failed; retaining received input: {error}")
+        self._admit_durable_response_schema_feedback()
 
     @workflow.signal
     async def child_progress(self, data: dict):
@@ -1711,7 +1913,7 @@ class AgentWorkflow:
                 # bounded pause polling before reaching a durable wait. Consume no
                 # workflow timers or activities until a valid signal unpauses us.
                 handoff_queue = await self._wait_for_unpause_or_handoff()
-                await self._wait_for_response_schema_refresh()
+                await self._prepare_response_schema_continuation()
                 await self._flush_pending_messages()
                 if handoff_queue:
                     workflow.continue_as_new(
@@ -1970,7 +2172,10 @@ class AgentWorkflow:
         response_schema = self.output_schema
         fetched_parent_agent_id = None
         if agent_config:
-            response_schema = agent_config.get("response_schema") or response_schema
+            # Continuation state owns the accepted contract. The database may
+            # lag if its write failed or its acknowledgement was lost.
+            if not (self._deployment_resume and isinstance(response_schema, dict) and response_schema.get("fields")):
+                response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
             self.output_schema = response_schema
             self.write_lock_enabled = agent_config.get("write_lock_enabled", True)
@@ -1980,8 +2185,8 @@ class AgentWorkflow:
 
         # If no schema was provided at create time, generate one synchronously NOW.
         # The schema appears in the initial main/verifier system prompts. Awaiting
-        # startup generation keeps that initial cache prefix stable; later user
-        # feedback revisions take the non-blocking context-message path below.
+        # startup generation establishes the initial contract; later genuine user
+        # feedback refreshes the accepted native schema asynchronously.
         is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
         startup_execute_context: Optional[List[Dict[str, Any]]] = None
         # Chat re-escalation after a terminal run starts a new workflow with
@@ -2000,6 +2205,7 @@ class AgentWorkflow:
             startup_execute_context = filter_internal_subagent_messages(startup_execute_context)
             prior_run_superseded = plan_superseded_by_new_user_instruction(startup_execute_context)
             if prior_run_superseded:
+                self._establish_response_schema_task_boundary(startup_execute_context)
                 # A completed or followed-up run's schema is not live. Chat
                 # persist has already moved Agent.goal to the router task;
                 # still skip generate-from-row here so a stale leftover cannot
@@ -2026,7 +2232,7 @@ class AgentWorkflow:
                         self.fast_mode_cache_enabled,
                         True,
                     ],
-                    start_to_close_timeout=timedelta(seconds=90),
+                    start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
                 if isinstance(generated, dict) and generated.get("schema"):
@@ -2037,6 +2243,10 @@ class AgentWorkflow:
                         f"{len(self.output_schema.get('fields', []))} field(s)"
                     )
             except Exception as e:
+                if any(error_chain_has_type(e, kind) for kind in (
+                    "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                )):
+                    raise
                 workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
         elif response_schema is None and is_sub_agent:
             workflow.logger.info("Skipping response_schema generation for sub-agent")
@@ -2045,10 +2255,7 @@ class AgentWorkflow:
             await self._regenerate_output_schema_for_new_instruction(startup_execute_context)
             response_schema = self.output_schema
 
-        # Freeze the schema used in the main-agent system prompt. Any later
-        # feedback-driven revision is appended at the conversation tail so the
-        # provider can reuse the existing system/message cache prefix.
-        self._system_prompt_output_schema = self.output_schema
+        # Later feedback updates this native contract for actor and verifier.
         self._response_schema_initialized = True
         self._start_response_schema_refresh()
 
@@ -2178,6 +2385,11 @@ class AgentWorkflow:
             )
 
             await self._track_tokens_and_cost(plan_result)
+            if plan_result["status"] == "completed" and _verifier_superseded_by_user_feedback(plan_result, self.context, requirement_revision=self._response_schema_revision):
+                await self._prepare_response_schema_continuation()
+                await self._flush_pending_messages()
+                workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="plan"))
+                return plan_result
 
             if plan_result["status"] != "completed":
                 return await self._handle_incomplete(plan_result, "PLAN")
@@ -2290,15 +2502,26 @@ class AgentWorkflow:
                             user_id=user_id,
                             model=model,
                         )
-                        if post_dag_result and post_dag_result.get("score", 0.0) >= 1.0:
-                            workflow.logger.info(
-                                f"✓ Post-DAG verifier passed (score={post_dag_result['score']}) — marking complete"
-                            )
-                            await self._mark_complete(
-                                execute_context,
-                                post_dag_result.get("structured_response"),
-                            )
-                            return {"status": "completed", "goal": goal}
+                        if post_dag_result and post_dag_result.get("score", 0.0) >= 1.0 and not post_dag_result.get("superseded_by_user_feedback"):
+                            completion_revision = self._response_schema_revision
+                            await self._await_deferred_startup()
+                            await self._drain_fast_mode_explores()
+                            await self._prepare_response_schema_continuation()
+                            if (
+                                completion_revision == self._response_schema_revision
+                                and self._response_schema_accepted_revision >= self._response_schema_revision
+                                and not _verifier_superseded_by_user_feedback(
+                                    post_dag_result, self.context, requirement_revision=self._response_schema_revision,
+                                )
+                            ):
+                                workflow.logger.info(
+                                    f"✓ Post-DAG verifier passed (score={post_dag_result['score']}) — marking complete"
+                                )
+                                await self._mark_complete(
+                                    execute_context,
+                                    post_dag_result.get("structured_response"),
+                                )
+                                return {"status": "completed", "goal": goal}
                         if post_dag_result and post_dag_result.get("verifier_error"):
                             message = post_dag_result.get("reasoning") or "Post-DAG verifier failed"
                             workflow.logger.warning(f"[DAG] Post-DAG attempt_completion errored: {message}")
@@ -2387,6 +2610,22 @@ class AgentWorkflow:
         await self._track_tokens_and_cost(execute_result)
 
         if execute_result["status"] == "completed":
+            # Finish native startup/child awaits before deciding whether this
+            # verdict still belongs to the current user requirements.
+            completion_revision = self._response_schema_revision
+            await self._await_deferred_startup()
+            await self._drain_fast_mode_explores()
+            await self._prepare_response_schema_continuation()
+            if (
+                completion_revision != self._response_schema_revision
+                or _verifier_superseded_by_user_feedback(
+                    execute_result, self.context, requirement_revision=self._response_schema_revision,
+                )
+            ):
+                await self._flush_pending_messages()
+                workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="execute_continued"))
+                return execute_result
+            self._require_current_response_schema_acceptance()
             await self._mark_complete(execute_result.get("context", []), execute_result.get("structured_response"))
             return {"status": "completed", "goal": goal}
 
@@ -2442,6 +2681,8 @@ class AgentWorkflow:
                 post_message=self._post_message,
                 response_schema=self.output_schema,
                 get_response_schema=self._make_response_schema_getter(),
+                get_requirement_revision=lambda: self._response_schema_revision,
+                poll_messages=self._poll_messages,
                 claude_token=self._active_claude_token(),
                 claude_token_source=self._active_claude_source(),
                 claude_token_pool_id=self._active_claude_pool_id(),
@@ -2486,8 +2727,16 @@ class AgentWorkflow:
                 except Exception as e:
                     workflow.logger.warning(f"[DAG] _on_tokens failed for post-DAG verifier: {e}")
 
+            _verifier_superseded_by_user_feedback(result, self.context, requirement_revision=self._response_schema_revision)
             return result
         except Exception as e:
+            if any(error_chain_has_type(e, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
+            if self._response_schema_accepted_revision < self._response_schema_revision:
+                workflow.logger.warning(f"Post-DAG schema prerequisite remains retryable: {extract_error_message(e)}")
+                return None
             message = f"Post-DAG attempt_completion verifier failed: {extract_error_message(e)}"
             workflow.logger.warning(f"[DAG] {message}")
             await self._handle_tool_event(
@@ -2522,6 +2771,7 @@ class AgentWorkflow:
 
         async def generate() -> str:
             await self._wait_for_response_schema_refresh()
+            self._require_current_response_schema_acceptance()
             return build_verifier_prompt(response_schema=self.output_schema)
 
         return generate
@@ -2535,24 +2785,27 @@ class AgentWorkflow:
 
         async def get_schema() -> Optional[Dict]:
             await self._wait_for_response_schema_refresh()
+            self._require_current_response_schema_acceptance()
             return self.output_schema
 
         return get_schema
 
+    def _require_current_response_schema_acceptance(self) -> None:
+        """Do not certify a processed failure as acceptance of new requirements."""
+        if self._response_schema_accepted_revision < self._response_schema_revision:
+            raise RuntimeError(
+                self._response_schema_refresh_failure_reason
+                or "No output schema has been accepted for the current user requirements"
+            )
+
     async def _response_schema_user_messages(self) -> List[str]:
         """Return durable, ordered user requirements for schema generation."""
         messages: List[str] = []
-
-        def append_message(value: Any) -> None:
-            if not isinstance(value, str):
-                return
-            text = value.strip()
-            if text and text not in messages:
-                messages.append(text)
-
-        append_message(self.fast_cache_goal or self.goal)
+        goal = self._response_schema_task_base or (self.fast_cache_goal or self.goal or "").strip()
+        if goal:
+            messages.append(goal)
         if isinstance(self.output_schema, dict) and self.output_schema.get("fields"):
-            append_message(
+            messages.append(
                 "Current output schema (preserve fields unless later user feedback changes them):\n"
                 + _json.dumps(self.output_schema, sort_keys=True, separators=(",", ":"))
             )
@@ -2568,26 +2821,58 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except Exception as e:
+            if any(error_chain_has_type(e, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
             workflow.logger.warning(f"Failed to reload durable feedback for response_schema refresh: {e}")
             persisted_messages = []
 
-        for message in persisted_messages or []:
+        seen_rows: Set[Tuple[str, ...]] = set()
+        covered_feedback: Dict[str, int] = {}
+        requirements = list(persisted_messages or []) + list(self.context)
+        requirements.sort(key=lambda message: str(message.get("timestamp") or ""))
+        first_user_row = True
+        for message in requirements:
             if (message.get("role") or "").upper() != "USER":
                 continue
-            metadata = message.get("metadata") or {}
-            if metadata.get("hidden"):
+            if (message.get("metadata") or {}).get("hidden"):
                 continue
-            append_message(message.get("text"))
+            text = message.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            message_id = message.get("message_id") or message.get("id")
+            event_id = self._response_schema_attention_event_id(message)
+            key = ("attention_response", event_id) if event_id is not None else (
+                ("id", str(message_id)) if message_id else ("legacy", str(message.get("timestamp") or ""), text)
+            )
+            if key in self._response_schema_task_baseline_rows:
+                continue
+            if key in seen_rows:
+                continue
+            seen_rows.add(key)
+            # The initial goal is already the first requirement. A later real
+            # USER row can repeat it intentionally to restore the original task.
+            is_initial_goal = self._response_schema_task_base is None and event_id is None and text.strip() == goal and (first_user_row or (key[0] == "legacy" and not key[1]))
+            first_user_row = False
+            if is_initial_goal:
+                continue
+            messages.append(text)
+            covered_feedback[text] = covered_feedback.get(text, 0) + 1
 
-        for message in self.context:
-            if (message.get("role") or "").upper() != "USER":
+        # Plain signals may precede their durable poll. Match occurrences rather
+        # than unique text so A -> B -> A keeps the user's final correction.
+        for index, feedback in enumerate(self._response_schema_feedback):
+            source = self._response_schema_feedback_sources[index] if index < len(self._response_schema_feedback_sources) else None
+            if source is not None and source in self._response_schema_task_baseline_rows:
                 continue
-            metadata = message.get("metadata") or {}
-            if metadata.get("hidden"):
+            text = feedback
+            if not text.strip():
                 continue
-            append_message(message.get("text"))
-        for feedback in self._response_schema_feedback:
-            append_message(feedback)
+            if covered_feedback.get(text, 0):
+                covered_feedback[text] -= 1
+            else:
+                messages.append(text)
 
         return messages
 
@@ -2602,130 +2887,126 @@ class AgentWorkflow:
             and self._response_schema_refresh_failed_revision >= self._response_schema_revision
         ):
             return
-        if self._response_schema_refresh_task is not None and not self._response_schema_refresh_task.done():
+        if self._response_schema_refresh_task is not None:
             return
         self._response_schema_refresh_task = asyncio.create_task(self._run_response_schema_refreshes())
 
-    def _record_response_schema_refresh_failure(self, revision: int, error: str) -> None:
-        """Record a terminal background failure without accepting a stale schema."""
+    def _record_response_schema_refresh_failure(self, revision: int, error: Exception) -> None:
+        """Leave failed input pending for the existing LLM retry owner."""
+        reason = extract_error_message(error)
         self._response_schema_refresh_failed_revision = revision
-        self._response_schema_refresh_error = error
-        workflow.logger.error(f"Response schema refresh failed at revision {revision}: {error}")
+        self._response_schema_refresh_error = reason
+        self._response_schema_refresh_failure_reason = reason
+        self._response_schema_refresh_exception = error
+        workflow.logger.warning(f"Response schema refresh failed at revision {revision}: {reason}")
 
     async def _run_response_schema_refreshes(self) -> None:
-        """Apply the newest feedback revision and append changed schemas to context."""
+        """Apply the newest feedback revision through the normal activity retry policy."""
+        restart_pending = True
         try:
             while self._response_schema_applied_revision < self._response_schema_revision:
                 target_revision = self._response_schema_revision
-                user_messages = await self._response_schema_user_messages()
+                if self._response_schema_accepted_revision >= target_revision:
+                    # A lost persistence acknowledgement retries the accepted
+                    # write, without making another model call.
+                    schema = self.output_schema
+                else:
+                    user_messages = await self._response_schema_user_messages()
+                    try:
+                        generated = await workflow.start_activity(
+                            set_response_schema_activity,
+                            args=[self.agent_id, user_messages, self._active_compute_token_payload(),
+                                  self.fast_mode_cache_enabled, False, False],
+                            start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
+                            retry_policy=RetryPolicy(maximum_attempts=3),
+                        )
+                    except Exception as error:
+                        if any(error_chain_has_type(error, kind) for kind in (
+                            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                        )):
+                            raise
+                        if target_revision < self._response_schema_revision:
+                            self._response_schema_applied_revision = target_revision
+                            continue
+                        self._record_response_schema_refresh_failure(target_revision, error)
+                        return
+                    if target_revision < self._response_schema_revision:
+                        self._response_schema_applied_revision = target_revision
+                        continue
+                    schema = generated.get("schema") if isinstance(generated, dict) else None
+                    if not (isinstance(schema, dict) and schema.get("fields")):
+                        self._record_response_schema_refresh_failure(
+                            target_revision, ValueError("schema generation returned no fields"),
+                        )
+                        return
+                    if schema != self.output_schema:
+                        self.output_schema = schema
+                    self._response_schema_accepted_revision = target_revision
+                    self._response_schema_refresh_failure_reason = None
 
                 try:
-                    activity_handle = workflow.start_activity(
-                        set_response_schema_activity,
-                        args=[
-                            self.agent_id,
-                            user_messages,
-                            self._active_compute_token_payload(),
-                            self.fast_mode_cache_enabled,
-                        ],
-                        start_to_close_timeout=timedelta(seconds=90),
+                    await workflow.execute_activity(
+                        persist_response_schema_activity,
+                        args=[self.agent_id, schema],
+                        start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )
-                    generated = await activity_handle
-                except Exception as e:
-                    self._record_response_schema_refresh_failure(target_revision, str(e))
+                except Exception as error:
+                    if any(error_chain_has_type(error, kind) for kind in (
+                        "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                    )):
+                        raise
+                    self._record_response_schema_refresh_failure(target_revision, error)
                     return
-
-                # More feedback arrived while this activity was running. Its
-                # persisted result is immediately superseded by the next pass,
-                # so do not inject an obsolete schema into model context.
-                if target_revision < self._response_schema_revision:
-                    self._response_schema_applied_revision = target_revision
-                    continue
-
-                schema = generated.get("schema") if isinstance(generated, dict) else None
-                if isinstance(schema, dict) and schema.get("fields"):
-                    if schema != self.output_schema:
-                        schema_message = format_required_output_schema_user_message(schema)
-                        idempotency_key = str(workflow.uuid4())
-                        self._response_schema_internal_signal_keys.add(idempotency_key)
-                        try:
-                            await workflow.execute_activity(
-                                post_agent_message,
-                                args=[
-                                    self.agent_id,
-                                    (
-                                        f"{RESPONSE_SCHEMA_UPDATE_PREFIX}\n"
-                                        "This replaces every earlier output-schema requirement.\n\n"
-                                        f"{schema_message}"
-                                    ),
-                                    "USER",
-                                    {
-                                        "hidden": True,
-                                        "isResponseSchemaUpdate": True,
-                                        "responseSchemaRevision": target_revision,
-                                        "idempotencyKey": idempotency_key,
-                                    },
-                                ],
-                                start_to_close_timeout=timedelta(seconds=30),
-                                retry_policy=RetryPolicy(maximum_attempts=3),
-                            )
-                        except Exception as e:
-                            self._record_response_schema_refresh_failure(
-                                target_revision,
-                                f"failed to persist schema context message: {e}",
-                            )
-                            return
-
-                        self.output_schema = schema
-                        self.message_count += 1
-                        workflow.logger.info(
-                            f"Updated output_schema from user feedback revision {target_revision} "
-                            f"with {len(schema['fields'])} field(s)"
-                        )
-                    else:
-                        workflow.logger.info(f"Feedback revision {target_revision} left output_schema unchanged")
-                else:
-                    self._record_response_schema_refresh_failure(
-                        target_revision,
-                        "schema generation returned no fields",
-                    )
-                    return
-
                 self._response_schema_applied_revision = target_revision
                 self._response_schema_refresh_failed_revision = 0
                 self._response_schema_refresh_error = None
+                self._response_schema_refresh_exception = None
+        except BaseException:
+            restart_pending = False
+            raise
         finally:
-            self._response_schema_refresh_task = None
-            # Close the race where feedback arrives after the loop condition is
-            # checked but before this task clears itself.
-            self._start_response_schema_refresh()
+            if restart_pending:
+                self._response_schema_refresh_task = None
+                self._start_response_schema_refresh()
 
     async def _wait_for_response_schema_refresh(self) -> None:
-        """Wait for the latest revision only at correctness/continuation boundaries."""
+        """Expose failed calls to the normal LLM retry owner without acknowledging input."""
         while self._response_schema_applied_revision < self._response_schema_revision:
             if (
                 self._response_schema_refresh_error is not None
                 and self._response_schema_refresh_failed_revision >= self._response_schema_revision
             ):
-                failed_revision = self._response_schema_refresh_failed_revision
-                workflow.logger.error(
-                    f"Response schema refresh failed at revision {failed_revision}: "
-                    f"{self._response_schema_refresh_error}. Continuing with the last accepted output_schema."
-                )
-                # Consume only the failed revision. Later feedback increments
-                # _response_schema_revision and starts a fresh refresh.
-                self._response_schema_applied_revision = max(
-                    self._response_schema_applied_revision,
-                    failed_revision,
+                error = getattr(self, "_response_schema_refresh_exception", None) or RuntimeError(
+                    self._response_schema_refresh_error
                 )
                 self._response_schema_refresh_error = None
-                return
+                self._response_schema_refresh_exception = None
+                if self._response_schema_accepted_revision >= self._response_schema_revision:
+                    # Native acceptance survives a failed DB write; the next
+                    # boundary retries persistence, carrying the accepted schema.
+                    return
+                raise error
             self._start_response_schema_refresh()
             task = self._response_schema_refresh_task
             if task is None:
                 raise RuntimeError("Response schema refresh did not start")
-            await task
+            try:
+                await task
+            finally:
+                if task.done() and self._response_schema_refresh_task is task:
+                    self._response_schema_refresh_task = None
+
+    async def _prepare_response_schema_continuation(self) -> None:
+        """Settle an in-flight call, preserving failed input for the resumed loop."""
+        try:
+            await self._wait_for_response_schema_refresh()
+        except Exception as error:
+            if any(error_chain_has_type(error, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
+            workflow.logger.warning(f"Schema refresh remains pending across continuation: {extract_error_message(error)}")
 
     async def _regenerate_output_schema_for_new_instruction(self, context: List[Dict[str, Any]]) -> None:
         """Replace a completed-run schema with one generated from the latest USER.
@@ -2737,6 +3018,12 @@ class AgentWorkflow:
         latest = latest_real_user_instruction(context)
         if not latest:
             return
+        pending_feedback = self._response_schema_applied_revision < self._response_schema_revision
+        self._response_schema_revision += 1
+        target_revision = self._response_schema_revision
+        if pending_feedback:
+            # The coalescing worker owns input already queued before this snapshot.
+            return
         try:
             generated = await workflow.execute_activity(
                 set_response_schema_activity,
@@ -2746,51 +3033,51 @@ class AgentWorkflow:
                     self._active_compute_token_payload(),
                     self.fast_mode_cache_enabled,
                     False,
+                    False,
                 ],
-                start_to_close_timeout=timedelta(seconds=90),
+                start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except Exception as e:
-            workflow.logger.warning(f"Failed to regenerate output_schema after superseded plan: {e}")
+            if any(error_chain_has_type(e, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
+            self._record_response_schema_refresh_failure(target_revision, e)
+            return
+        if target_revision < self._response_schema_revision:
+            self._response_schema_applied_revision = target_revision
             return
         schema = generated.get("schema") if isinstance(generated, dict) else None
         if not (isinstance(schema, dict) and schema.get("fields")):
+            self._record_response_schema_refresh_failure(target_revision, ValueError("schema generation returned no fields"))
             return
-        if schema == self.output_schema:
-            return
-        schema_message = format_required_output_schema_user_message(schema)
-        idempotency_key = str(workflow.uuid4())
-        self._response_schema_internal_signal_keys.add(idempotency_key)
+        if schema != self.output_schema:
+            self.output_schema = schema
+        self._response_schema_accepted_revision = target_revision
+        self._response_schema_refresh_failure_reason = None
+        workflow.logger.info(
+            f"Regenerated output_schema from latest USER instruction with {len(schema['fields'])} field(s)"
+        )
+        # As with mid-run feedback, accept in native state before persistence.
+        # A failed write acknowledgement must not restore a completed task's schema.
         try:
             await workflow.execute_activity(
-                post_agent_message,
-                args=[
-                    self.agent_id,
-                    (
-                        f"{RESPONSE_SCHEMA_UPDATE_PREFIX}\n"
-                        "This replaces every earlier output-schema requirement.\n\n"
-                        f"{schema_message}"
-                    ),
-                    "USER",
-                    {
-                        "hidden": True,
-                        "isResponseSchemaUpdate": True,
-                        "responseSchemaRevision": self._response_schema_revision,
-                        "idempotencyKey": idempotency_key,
-                    },
-                ],
+                persist_response_schema_activity,
+                args=[self.agent_id, schema],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except Exception as e:
-            workflow.logger.warning(f"Failed to persist regenerated output_schema context message: {e}")
+            if any(error_chain_has_type(e, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
+            self._record_response_schema_refresh_failure(target_revision, e)
             return
-        self.output_schema = schema
-        self._system_prompt_output_schema = schema
-        self.message_count += 1
-        workflow.logger.info(
-            f"Regenerated output_schema from latest USER instruction with {len(schema['fields'])} field(s)"
-        )
+        self._response_schema_applied_revision = target_revision
+        self._response_schema_refresh_failed_revision = 0
+        self._response_schema_refresh_error = None
 
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.
@@ -2803,7 +3090,7 @@ class AgentWorkflow:
             enabled_tools=self._current_tools,
             disabled_tools=self._disabled_tools,
             user_context_section=self.user_context_section,
-            response_schema=self._system_prompt_output_schema,
+            response_schema=self.output_schema,
             tool_prompts=TOOL_PROMPTS,
         )
 
@@ -2824,10 +3111,9 @@ class AgentWorkflow:
         """Handle context overflow via continue_as_new."""
         workflow.logger.info("Context overflow → continue_as_new")
 
-        # A new workflow instance does not inherit signal-only revision state.
-        # Persist any pending feedback-derived schema before crossing that
-        # boundary so the continued run fetches the current schema from DB.
-        await self._wait_for_response_schema_refresh()
+        # The native continuation snapshot carries accepted and pending input;
+        # failed generation is retried by the resumed LLM loop.
+        await self._prepare_response_schema_continuation()
 
         # Post a visible tool message so the user sees the context reset
         with contextlib.suppress(Exception):
@@ -2979,6 +3265,7 @@ class AgentWorkflow:
                     "handoff_task_queue": handoff_queue,
                     "context": list(self.context),
                 }
+            run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
             return await run_agent(**run_agent_kwargs)
         finally:
             self._tool_parking_enabled = False
@@ -3469,6 +3756,7 @@ class AgentWorkflow:
                         seen_message_keys.add(message_key)
                     self.context.append(msg)
                 self.context.sort(key=lambda x: x.get("timestamp", ""))
+                self._admit_durable_response_schema_feedback()
 
             return messages
         except Exception as e:
@@ -4899,7 +5187,7 @@ class AgentWorkflow:
             handoff_queue = await self._wait_for_unpause_or_handoff()
             # Preserve feedback received while paused before continue-as-new
             # resets this workflow instance's revision counters.
-            await self._wait_for_response_schema_refresh()
+            await self._prepare_response_schema_continuation()
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
             await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
@@ -4922,7 +5210,7 @@ class AgentWorkflow:
             if not isinstance(handoff_queue, str) or not handoff_queue.strip():
                 workflow.logger.error("generation_handoff missing handoff_task_queue; failing open")
                 return result
-            await self._wait_for_response_schema_refresh()
+            await self._prepare_response_schema_continuation()
             await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
             workflow.logger.info(
@@ -4952,11 +5240,24 @@ class AgentWorkflow:
             return {"status": "failed", "reason": "orphaned", "goal": self.goal}
 
         if result["status"] == "max_iterations":
-            await self._wait_for_response_schema_refresh()
+            completion_revision = self._response_schema_revision
+            if bool(getattr(self, "fast_mode_cache_enabled", False)) and is_oai_demo_mass_agent_task(self):
+                await self._await_deferred_startup()
+                await self._drain_fast_mode_explores()
+            await self._prepare_response_schema_continuation()
+            if (
+                completion_revision != self._response_schema_revision
+                or _verifier_superseded_by_user_feedback(
+                    result, self.context, requirement_revision=self._response_schema_revision,
+                )
+            ):
+                result["verifier_superseded_by_user_feedback"] = True
             verifier_progress = float(result.get("verifier_progress", 0.0) or 0.0)
             verifier_reasoning = str(result.get("verifier_reasoning") or "")
             fm_trajectory_complete = (
                 bool(getattr(self, "fast_mode_cache_enabled", False))
+                and self._response_schema_accepted_revision >= self._response_schema_revision
+                and not result.get("verifier_superseded_by_user_feedback")
                 and is_oai_demo_mass_agent_task(self)
                 and (
                     verifier_progress >= 1.0
@@ -4964,6 +5265,7 @@ class AgentWorkflow:
                 )
             )
             if fm_trajectory_complete:
+                self._require_current_response_schema_acceptance()
                 # Fast Mode replay hit the step cap after the verifier already
                 # accepted the cached work (100% / trajectory-end). Mark
                 # COMPLETED so the parent for_each does not ERROR the child.
@@ -4983,7 +5285,6 @@ class AgentWorkflow:
             return {"status": "failed", "reason": "max_iterations", "goal": self.goal}
 
         if result["status"] == "error":
-            await self._wait_for_response_schema_refresh()
             await self._mark_failed(
                 context=result.get("context", []),
                 reason="error",
@@ -5317,6 +5618,7 @@ class AgentWorkflow:
         7. Save blueprint (fire-and-forget, no UI)
         """
         await self._await_deferred_startup()
+        self._require_current_response_schema_acceptance()
         workflow.logger.info("✓ Marking task complete")
         # Leftover-safe drain (no-op when Fast Mode waited like live).
         await self._drain_fast_mode_explores()

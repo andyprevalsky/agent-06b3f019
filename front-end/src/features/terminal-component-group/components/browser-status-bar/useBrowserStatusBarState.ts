@@ -122,7 +122,7 @@ function extractPendingAuthAssistance(
 }
 
 export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewModel {
-  const { messages } = useAgentContext();
+  const { messages, inspectionContext, selectedAgentId, isLoadingAgent } = useAgentContext();
 
   const browserMessages = useMemo(
     () => messages.filter((m) => m.metadata?.task_id === taskId),
@@ -161,7 +161,7 @@ export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewMo
   }, [browserMessages]);
 
   const outputSchema = useMemo<OutputSchemaRef | undefined>(() => {
-    const initMessage = browserMessages.find((m) => m.metadata?.output_schema);
+    const initMessage = [...browserMessages].reverse().find((m) => m.metadata?.output_schema);
     const raw = initMessage?.metadata?.output_schema;
     if (raw && typeof raw === 'object') {
       return raw as OutputSchemaRef;
@@ -181,6 +181,7 @@ export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewMo
   );
 
   return {
+    readOnly: inspectionContext != null || (selectedAgentId !== null && isLoadingAgent),
     browserMessages,
     lastActionType,
     lastActionTitle,

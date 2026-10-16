@@ -348,10 +348,7 @@ async function run(): Promise<void> {
     assert.strictEqual(all.captures[4].url, 'https://api.onkernel.com/profiles');
     assert.strictEqual(all.captures[4].cached, false);
     assert.strictEqual(all.captures[5].error, 'e2b unavailable');
-    assert.strictEqual(
-      all.captures[6].requestHeaders.Authorization,
-      'Bearer surge-sec...[redacted]'
-    );
+    assert.strictEqual(all.captures[6].requestHeaders.Authorization, '[redacted]');
     assert.strictEqual(
       all.captures[6].responseBody,
       JSON.stringify({ id: mockSurgeMessageId('capture:{"to":"+15555550100","body":"hello"}') })
@@ -365,11 +362,11 @@ async function run(): Promise<void> {
     assert.strictEqual(all.captures[9].responseStatus, 503);
     const requestHeaderCapture = all.captures[10];
     assert.strictEqual(requestHeaderCapture.url, 'https://api.example.com/request-headers');
-    assert.match(
+    assert.strictEqual(
       requestHeaderCapture.requestHeaders.authorization ??
         requestHeaderCapture.requestHeaders.Authorization ??
         '',
-      /Bearer request-o\.\.\.\[redacted\]|Bearer request-only-secret/
+      '[redacted]'
     );
     assert.strictEqual(
       requestHeaderCapture.requestHeaders['content-type'] ??
@@ -378,11 +375,11 @@ async function run(): Promise<void> {
     );
     const overrideCapture = all.captures[11];
     assert.strictEqual(overrideCapture.url, 'https://api.example.com/request-headers-override');
-    assert.match(
+    assert.strictEqual(
       overrideCapture.requestHeaders.authorization ??
         overrideCapture.requestHeaders.Authorization ??
         '',
-      /Bearer init-over\.\.\.\[redacted\]|Bearer init-override-secret/
+      '[redacted]'
     );
     assert.strictEqual(
       overrideCapture.requestHeaders['content-type'] ??
@@ -395,10 +392,7 @@ async function run(): Promise<void> {
     );
     assert.strictEqual(all.captures[12].cached, false);
     assert.strictEqual(all.captures[13].cached, false);
-    assert.strictEqual(
-      all.captures[12].requestHeaders.Authorization,
-      'Bearer agentcard...[redacted]'
-    );
+    assert.strictEqual(all.captures[12].requestHeaders.Authorization, '[redacted]');
     assert.deepStrictEqual(
       upstreamCalls.map((call) => call.bodyType),
       ['none', 'none', 'FormData', 'none', 'none', 'none', 'String', 'String', 'String', 'String']

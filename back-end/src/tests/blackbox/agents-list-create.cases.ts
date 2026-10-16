@@ -332,6 +332,127 @@ test('GET /:id — happy path — full schema', async () => {
   await deleteTestAgent(agentId, session.user.id);
 });
 
+test('GET /:id — browser feedback projection preserves USER bytes and late commits', async () => {
+  const session = await createAnonymousSession('browser-projection');
+  const other = await createAnonymousSession('browser-projection-other');
+  const agentId = randomUUID();
+  await prisma.agent.create({
+    data: {
+      id: agentId,
+      userId: session.user.id,
+      goal: 'Browser feedback projection',
+      busId: agentId,
+    },
+  });
+  trackedAgentIds.add(agentId);
+  const headers = apiKeyHeaders(session.user.id);
+  const floor = new Date('2026-10-14T00:00:00Z');
+  const timestamp = new Date(floor.getTime() + 1_000);
+  const toolCallId = randomUUID();
+  const metadata = { toolCallId, toolName: 'spawn_browser_agent', action_type: 'session_starting' };
+  const text = '  Return only venue_prices\nExact bytes: 🦋  ';
+  try {
+    const user = await prisma.message.create({
+      data: {
+        agentId,
+        role: 'USER',
+        text,
+        timestamp,
+        metadata: { browserTaskId: randomUUID() },
+      },
+    });
+    const manager = await prisma.message.create({
+      data: {
+        agentId,
+        role: 'TOOL',
+        text: 'Actual browser manager',
+        timestamp,
+        metadata,
+      },
+    });
+    const excluded = [
+      { ...metadata, toolCallId: `${toolCallId}-other` },
+      { ...metadata, toolName: 'other_tool' },
+      { ...metadata, action_type: 'step' },
+    ];
+    for (const candidate of excluded)
+      await prisma.message.create({
+        data: {
+          agentId,
+          role: 'TOOL',
+          text: 'large browser transcript '.repeat(20_000),
+          timestamp,
+          metadata: candidate,
+        },
+      });
+    await prisma.message.create({
+      data: {
+        agentId,
+        role: 'ASSISTANT',
+        text: 'not USER or manager',
+        timestamp,
+        metadata,
+      },
+    });
+    await prisma.message.create({
+      data: {
+        agentId,
+        role: 'USER',
+        text: 'at floor',
+        timestamp: floor,
+      },
+    });
+    const url = `${BASE_URL}/api/agents/${agentId}?since=${floor.toISOString()}&browserToolCallId=${toolCallId}`;
+    const projected = await request(url, { headers });
+    assertStatus(projected.status, 200, projected.data);
+    const body = assertSchema(GetAgentResponse, projected.data, 'browser projection');
+    assert(body.messages.length === 2, 'Only USER and exact browser manager TOOL are returned');
+    const authored = body.messages.find((row) => row.message_id === user.id);
+    assert(authored?.text === text, 'USER bytes must survive projection');
+    assert(
+      JSON.stringify(authored?.metadata) === JSON.stringify(user.metadata),
+      'USER metadata unchanged'
+    );
+    assert(
+      body.messages.some((row) => row.message_id === manager.id),
+      'Exact manager retained'
+    );
+    assert(JSON.stringify(projected.data).length < 20_000, 'Huge irrelevant transcript omitted');
+    const ordinary = await request(
+      `${BASE_URL}/api/agents/${agentId}?since=${floor.toISOString()}`,
+      { headers }
+    );
+    assertStatus(ordinary.status, 200, ordinary.data);
+    assert(
+      assertSchema(GetAgentResponse, ordinary.data, 'ordinary detail').messages.length === 6,
+      'Ordinary GET still returns its complete transcript'
+    );
+    // Committed after the first GET, but older than its newest row: keep the immutable floor.
+    const late = await prisma.message.create({
+      data: {
+        agentId,
+        role: 'USER',
+        text: 'late committed instruction',
+        timestamp: new Date(floor.getTime() + 500),
+      },
+    });
+    const again = await request(url, { headers });
+    assertStatus(again.status, 200, again.data);
+    assert(
+      assertSchema(GetAgentResponse, again.data, 'late feedback').messages.some(
+        (row) => row.message_id === late.id
+      ),
+      'Late committed USER remains discoverable'
+    );
+    const foreign = await request(url, { headers: authHeaders(other.session.access_token) });
+    assertStatus(foreign.status, 404, foreign.data);
+    const unauthenticated = await request(url);
+    assertStatus(unauthenticated.status, 401, unauthenticated.data);
+  } finally {
+    await deleteTestAgent(agentId, session.user.id);
+  }
+});
+
 test('GET /:id — tenant isolation: user B cannot see user A agent → 404', async () => {
   const sessionA = await createAnonymousSession('get-iso-a');
   const sessionB = await createAnonymousSession('get-iso-b');

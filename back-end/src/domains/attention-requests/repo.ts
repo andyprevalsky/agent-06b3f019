@@ -1,6 +1,16 @@
 import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import type { CreateAttentionRequestInput } from './types';
+import {
+  broadcastAttentionUserMessages,
+  persistAttentionUserMessages,
+  attentionRequestWorkflowTargets,
+} from '../../providers/attentionUserMessages';
+import { assertAttentionWorkflowTargets } from '../../providers/attentionWorkflowTargets';
+
+export async function validateCreateOwnership(data: CreateAttentionRequestInput): Promise<void> {
+  await assertAttentionWorkflowTargets(prisma, data.userId, attentionRequestWorkflowTargets(data));
+}
 
 export async function create(data: CreateAttentionRequestInput) {
   return prisma.agentAttentionRequest.create({
@@ -47,41 +57,62 @@ export async function appendGateWaiter(
   id: string,
   workflowId: string,
   agentId: string
-): Promise<{ pending: boolean; response: string | null }> {
-  return runTransactionWithRetry(async (tx) => {
+): Promise<{ pending: boolean; response: string | null; userMessage?: string }> {
+  const result = await runTransactionWithRetry(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM "AgentAttentionRequest" WHERE id = ${id} FOR UPDATE`;
     if (locked.length === 0) return { pending: false, response: null };
 
     const row = await tx.agentAttentionRequest.findUnique({
       where: { id },
-      select: { userResponse: true, workflowId: true, metadata: true },
+      select: { userId: true, userResponse: true, workflowId: true, agentId: true, metadata: true },
     });
     if (row === null) return { pending: false, response: null };
-    if (row.userResponse !== null) return { pending: false, response: row.userResponse };
-    if (row.workflowId === workflowId) return { pending: true, response: null };
-
-    const base =
-      row.metadata !== null && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
-        ? { ...(row.metadata as Record<string, unknown>) }
-        : {};
-    const waiters = Array.isArray(base.gateWaiters) ? [...(base.gateWaiters as unknown[])] : [];
-    const already = waiters.some(
-      (w) =>
-        w !== null &&
-        typeof w === 'object' &&
-        (w as { workflowId?: unknown }).workflowId === workflowId
-    );
-    if (!already) {
-      waiters.push({ workflowId, agentId });
-      base.gateWaiters = waiters;
-      await tx.agentAttentionRequest.update({
-        where: { id },
-        data: { metadata: base as Prisma.InputJsonValue },
+    await assertAttentionWorkflowTargets(tx, row.userId, [
+      ...attentionRequestWorkflowTargets(row),
+      { agentId, workflowId },
+    ]);
+    // A protocol-only resolution can precede its first authored reply. Keep
+    // late waiters registered so that later input reaches the same fan-out.
+    if (row.workflowId !== workflowId) {
+      const base =
+        row.metadata !== null && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+          ? { ...(row.metadata as Record<string, unknown>) }
+          : {};
+      const waiters = Array.isArray(base.gateWaiters) ? [...(base.gateWaiters as unknown[])] : [];
+      const already = waiters.some(
+        (w) =>
+          w !== null &&
+          typeof w === 'object' &&
+          (w as { workflowId?: unknown }).workflowId === workflowId
+      );
+      if (!already) {
+        waiters.push({ workflowId, agentId });
+        base.gateWaiters = waiters;
+        await tx.agentAttentionRequest.update({
+          where: { id },
+          data: { metadata: base as Prisma.InputJsonValue },
+        });
+      }
+    }
+    if (row.userResponse !== null) {
+      // Resolution may win after findPendingByGateKey but before this row lock.
+      // Fan the same committed authored row into the late waiter's durable stream.
+      const authored = await persistAttentionUserMessages(tx, {
+        requestId: id,
+        agentId: row.agentId,
+        targetAgentIds: [agentId],
       });
+      return { pending: false, response: row.userResponse, ...authored };
     }
     return { pending: true, response: null };
   });
+  if ('userMessages' in result && result.userMessages !== undefined)
+    broadcastAttentionUserMessages(result.userMessages);
+  return {
+    ...result,
+    userMessage: 'userMessage' in result ? (result.userMessage ?? undefined) : undefined,
+  };
 }
 
 /** Source of the agent that raised a request (SMS agents get a gate SMS). */

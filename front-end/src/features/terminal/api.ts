@@ -63,7 +63,7 @@ export async function pauseAgent(agentId: string) {
 // ── Attention requests ────────────────────────────────────────────────────
 
 export async function checkAndRespondToAttention(agentId: string, message: string) {
-  return checkAttentionAPI(agentId, message);
+  return checkAttentionAPI(agentId, message, message);
 }
 
 // ── Ancestors ─────────────────────────────────────────────────────────────

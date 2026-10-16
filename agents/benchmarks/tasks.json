@@ -7580,6 +7580,425 @@
     "group": "rose-bench"
   },
   {
+    "name": "lantern-people-discovery",
+    "title": "Lantern People \u2014 Indexed Discovery with Native Provenance",
+    "description": "Requires live Lantern tool evidence and final outputs matching native source records; generic web answers cannot pass.",
+    "prompt": "From Lantern's indexed people data, return five distinct source profiles using people_search mode=\"discover\", query=\"engineer\", titles=[\"Software Engineer\"], and limit=5. Keep the role constraint in titles rather than adding it to the keyword query. Return the five records from a successful Lantern response, preserving each source.record_id, source.retrieved_at, and the response generation. Use an explore agent and only the people_search tool for research. Do not use generic web search, web fetching, a browser, an API request, deep research, code tools, or your own contacts. Pass array parameters as JSON arrays, not strings containing JSON. Use provider=\"lantern\". Do not invent IDs, timestamps, cursors, or missing profile fields. If Lantern cannot supply the requested records, report the shortfall honestly; a web-derived substitute does not satisfy this task. Return the requested records in a structured people list with name, profile_url, current_title, current_company, source_record_id, retrieved_at, and generation. Copy native values exactly; current_title and current_company may be null. Do not reveal contacts or run outreach.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["DAILY", "research", "people-search", "lantern"],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "people",
+          "type": "list[object]",
+          "required": true,
+          "minItems": 5,
+          "maxItems": 5,
+          "properties": [
+            {
+              "name": "name",
+              "type": "str",
+              "required": true,
+              "description": "Exact name from the successful Lantern result."
+            },
+            {
+              "name": "profile_url",
+              "type": "str",
+              "required": true,
+              "description": "Exact native profile_url from the successful Lantern result."
+            },
+            {
+              "name": "current_title",
+              "type": "str",
+              "required": true,
+              "nullable": true,
+              "description": "Exact title from the successful Lantern result; null if unavailable."
+            },
+            {
+              "name": "current_company",
+              "type": "str",
+              "required": true,
+              "nullable": true,
+              "description": "Exact company from the successful Lantern result; null if unavailable."
+            },
+            {
+              "name": "source_record_id",
+              "type": "str",
+              "required": true,
+              "description": "Opaque source.record_id returned by Lantern, never a fabricated value or profile URL."
+            },
+            {
+              "name": "retrieved_at",
+              "type": "str",
+              "required": true,
+              "description": "Exact source.retrieved_at timestamp from the successful Lantern result."
+            },
+            {
+              "name": "generation",
+              "type": "str",
+              "required": true,
+              "description": "Exact generation returned with the corresponding Lantern result."
+            }
+          ]
+        }
+      ]
+    },
+    "min_tool_counts": {
+      "people_search": 1
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "web_fetch_download",
+      "api_request",
+      "google_workspace_run",
+      "grep",
+      "message_person",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "spawn_code_agent",
+      "deep_research"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "world_model_mode": "real",
+    "fast_cache": "off",
+    "enforce_declared_evaluators": true,
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": ["https://people.lantern.md"],
+      "context_notes": "Requires a configured Lantern workspace through the worker bearer credential or Rose protected credential broker. Owned index reads and source-profile retrieval only; no contact reveals, paid research, or outreach."
+    },
+    "evaluators": [
+      {
+        "id": "lantern-people-discovery-source-contract",
+        "method": "static_check",
+        "criteria": [
+          "Successful Lantern results and their native provenance are required. Final people records must match those results. Generic web research, empty results, fabricated identifiers, and an answer supported only by narration cannot pass."
+        ],
+        "checks": [
+          {
+            "type": "lantern_people_trace",
+            "scenario": "discovery",
+            "query": "engineer",
+            "min_records": 5,
+            "page_size": 5,
+            "required_titles": ["Software Engineer"],
+            "forbidden_tools": [
+              "web_search",
+              "web_fetch",
+              "web_fetch_download",
+              "api_request",
+              "google_workspace_run",
+              "grep",
+              "message_person",
+              "spawn_browser_agent",
+              "spawn_claude_code_agent",
+              "spawn_code_agent",
+              "deep_research"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "lantern-people-enrichment",
+    "title": "Lantern People \u2014 Exact Source Record Enrichment",
+    "description": "Requires live Lantern tool evidence and final outputs matching native source records; generic web answers cannot pass.",
+    "prompt": "Discover a profile in Lantern using people_search mode=\"discover\", query=\"engineer\", titles=[\"Software Engineer\"], and limit=1. Select the returned source.record_id and generation, then call people_search mode=\"enrich\" for that exact ID and generation with fields=[\"current_title\",\"current_company\",\"linkedin_url\"]. Enrichment must succeed with one matching source profile; an empty response is not completion. Return one people record whose title, company, profile URL, source ID, retrieval timestamp, and generation come from that enrichment response, not the earlier discovery or a public web page. The enrichment query is only display context; do not send discovery filters in enrich mode. Use an explore agent and only the people_search tool for research. Do not use generic web search, web fetching, a browser, an API request, deep research, code tools, or your own contacts. Pass array parameters as JSON arrays, not strings containing JSON. Use provider=\"lantern\". Do not invent IDs, timestamps, cursors, or missing profile fields. If Lantern cannot supply the requested records, report the shortfall honestly; a web-derived substitute does not satisfy this task. Return the requested records in a structured people list with name, profile_url, current_title, current_company, source_record_id, retrieved_at, and generation. Copy native values exactly; current_title and current_company may be null. Do not reveal contacts or run outreach.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["DAILY", "research", "people-search", "lantern"],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "people",
+          "type": "list[object]",
+          "required": true,
+          "minItems": 1,
+          "maxItems": 1,
+          "properties": [
+            {
+              "name": "name",
+              "type": "str",
+              "required": true,
+              "description": "Exact name from the successful Lantern result."
+            },
+            {
+              "name": "profile_url",
+              "type": "str",
+              "required": true,
+              "description": "Exact native profile_url from the successful Lantern result."
+            },
+            {
+              "name": "current_title",
+              "type": "str",
+              "required": true,
+              "nullable": true,
+              "description": "Exact title from the successful Lantern result; null if unavailable."
+            },
+            {
+              "name": "current_company",
+              "type": "str",
+              "required": true,
+              "nullable": true,
+              "description": "Exact company from the successful Lantern result; null if unavailable."
+            },
+            {
+              "name": "source_record_id",
+              "type": "str",
+              "required": true,
+              "description": "Opaque source.record_id returned by Lantern, never a fabricated value or profile URL."
+            },
+            {
+              "name": "retrieved_at",
+              "type": "str",
+              "required": true,
+              "description": "Exact source.retrieved_at timestamp from the successful Lantern result."
+            },
+            {
+              "name": "generation",
+              "type": "str",
+              "required": true,
+              "description": "Exact generation returned with the corresponding Lantern result."
+            }
+          ]
+        }
+      ]
+    },
+    "min_tool_counts": {
+      "people_search": 2
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "web_fetch_download",
+      "api_request",
+      "google_workspace_run",
+      "grep",
+      "message_person",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "spawn_code_agent",
+      "deep_research"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "world_model_mode": "real",
+    "fast_cache": "off",
+    "enforce_declared_evaluators": true,
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": ["https://people.lantern.md"],
+      "context_notes": "Requires a configured Lantern workspace through the worker bearer credential or Rose protected credential broker. Owned index reads and source-profile retrieval only; no contact reveals, paid research, or outreach."
+    },
+    "evaluators": [
+      {
+        "id": "lantern-people-enrichment-source-contract",
+        "method": "static_check",
+        "criteria": [
+          "Successful Lantern results and their native provenance are required. Final people records must match those results. Generic web research, empty results, fabricated identifiers, and an answer supported only by narration cannot pass."
+        ],
+        "checks": [
+          {
+            "type": "lantern_people_trace",
+            "scenario": "enrichment",
+            "query": "engineer",
+            "min_records": 1,
+            "page_size": 1,
+            "required_titles": ["Software Engineer"],
+            "required_fields": [
+              "current_title",
+              "current_company",
+              "linkedin_url"
+            ],
+            "forbidden_tools": [
+              "web_search",
+              "web_fetch",
+              "web_fetch_download",
+              "api_request",
+              "google_workspace_run",
+              "grep",
+              "message_person",
+              "spawn_browser_agent",
+              "spawn_claude_code_agent",
+              "spawn_code_agent",
+              "deep_research"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "lantern-people-pagination",
+    "title": "Lantern People \u2014 Cursor Continuation and Distinct Records",
+    "description": "Requires live Lantern tool evidence and final outputs matching native source records; generic web answers cannot pass.",
+    "prompt": "Retrieve four distinct Lantern source profiles across two pages. First call people_search mode=\"discover\", query=\"engineer\", titles=[\"Software Engineer\"], and limit=2 with no cursor. Then use the exact next_cursor from that response in another discover call, keeping the query, titles, and limit identical. Do not invent an offset or repeat the first page. Return the four distinct source records from these two successful pages, copying their source.record_id and source.retrieved_at; both pages must share the returned generation. If a next_cursor or the second page is unavailable, report that failure rather than replacing the records with a new search or web results. Use an explore agent and only the people_search tool for research. Do not use generic web search, web fetching, a browser, an API request, deep research, code tools, or your own contacts. Pass array parameters as JSON arrays, not strings containing JSON. Use provider=\"lantern\". Do not invent IDs, timestamps, cursors, or missing profile fields. If Lantern cannot supply the requested records, report the shortfall honestly; a web-derived substitute does not satisfy this task. Return the requested records in a structured people list with name, profile_url, current_title, current_company, source_record_id, retrieved_at, and generation. Copy native values exactly; current_title and current_company may be null. Do not reveal contacts or run outreach.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["DAILY", "research", "people-search", "lantern"],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "people",
+          "type": "list[object]",
+          "required": true,
+          "minItems": 4,
+          "maxItems": 4,
+          "properties": [
+            {
+              "name": "name",
+              "type": "str",
+              "required": true,
+              "description": "Exact name from the successful Lantern result."
+            },
+            {
+              "name": "profile_url",
+              "type": "str",
+              "required": true,
+              "description": "Exact native profile_url from the successful Lantern result."
+            },
+            {
+              "name": "current_title",
+              "type": "str",
+              "required": true,
+              "nullable": true,
+              "description": "Exact title from the successful Lantern result; null if unavailable."
+            },
+            {
+              "name": "current_company",
+              "type": "str",
+              "required": true,
+              "nullable": true,
+              "description": "Exact company from the successful Lantern result; null if unavailable."
+            },
+            {
+              "name": "source_record_id",
+              "type": "str",
+              "required": true,
+              "description": "Opaque source.record_id returned by Lantern, never a fabricated value or profile URL."
+            },
+            {
+              "name": "retrieved_at",
+              "type": "str",
+              "required": true,
+              "description": "Exact source.retrieved_at timestamp from the successful Lantern result."
+            },
+            {
+              "name": "generation",
+              "type": "str",
+              "required": true,
+              "description": "Exact generation returned with the corresponding Lantern result."
+            }
+          ]
+        }
+      ]
+    },
+    "min_tool_counts": {
+      "people_search": 2
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "web_fetch_download",
+      "api_request",
+      "google_workspace_run",
+      "grep",
+      "message_person",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "spawn_code_agent",
+      "deep_research"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "world_model_mode": "real",
+    "fast_cache": "off",
+    "enforce_declared_evaluators": true,
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": ["https://people.lantern.md"],
+      "context_notes": "Requires a configured Lantern workspace through the worker bearer credential or Rose protected credential broker. Owned index reads and source-profile retrieval only; no contact reveals, paid research, or outreach."
+    },
+    "evaluators": [
+      {
+        "id": "lantern-people-pagination-source-contract",
+        "method": "static_check",
+        "criteria": [
+          "Successful Lantern results and their native provenance are required. Final people records must match those results. Generic web research, empty results, fabricated identifiers, and an answer supported only by narration cannot pass."
+        ],
+        "checks": [
+          {
+            "type": "lantern_people_trace",
+            "scenario": "pagination",
+            "query": "engineer",
+            "min_records": 4,
+            "page_size": 2,
+            "required_titles": ["Software Engineer"],
+            "forbidden_tools": [
+              "web_search",
+              "web_fetch",
+              "web_fetch_download",
+              "api_request",
+              "google_workspace_run",
+              "grep",
+              "message_person",
+              "spawn_browser_agent",
+              "spawn_claude_code_agent",
+              "spawn_code_agent",
+              "deep_research"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
     "name": "people-search-criteria",
     "title": "People Search \u2014 Criteria Discovery via Explore Agent",
     "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery \u2014 do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web. The explore agent must call the dedicated people_search tool with mode=\"discover\" for the broad criteria search; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",

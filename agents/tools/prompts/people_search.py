@@ -1,7 +1,9 @@
-"""Prompt for people_search tool."""
+"""Prompt for the Lantern-backed people_search tool."""
 
-PROMPT = """Finds or enriches real people on the public web via dedicated people-search providers (Exa and Parallel), returning normalized profiles with provenance and confidence.
+PROMPT = """Finds people and retrieves source profiles through Lantern People, returning normalized profiles, source record IDs, retrieval dates and the original source evidence.
 
-Reach for this when web_search is insufficient for a people goal: when you need depth (a field-level profile for a specific person, via mode="enrich") or comprehensiveness (a broad list of people matching a role, company, geography, or seniority, via mode="discover"). For a quick one-off people fact, web_search is fine.
+Use mode="discover" for a list and mode="enrich" for one profile. Query supplies literal profile keywords, not a semantic instruction: put job titles, employers and geography in titles, companies and location. Supply location_kind and country_code when geography is known. Verify compound requirements against the returned evidence; title or keyword matches alone do not establish qualification.
 
-Pick the provider explicitly: Exa is strongest for depth/enrichment (structured work and education history); Parallel is strongest for broad discovery (high recall). If the chosen provider returns insufficient data, re-call with the other provider. On a provider rate-limit or error the tool auto-retries the other provider. For mode="enrich", pass fields to define exactly which attributes you want back. Use grep source="network" instead when the answer is in the user's OWN contacts. Results are best-effort with provenance, so verify load-bearing facts before acting on them."""
+To enrich a selected person, source_record_id is required: pass their source.record_id and the returned generation when available. Enrichment retrieves that exact source profile and does not accept discovery constraints. Keyword matches do not establish exact identity. Fields defines the requested attributes; unavailable values stay null. Profile retrieval does not reveal email addresses or phone numbers automatically.
+
+Lantern is the default and executes every request; legacy provider names also route to Lantern. There is no provider fallback. Correct ambiguous company/location input using the returned error details. Honor rate-limit retryAfterSeconds; a plan error needs an account action. Continue a discover request only with the exact returned next_cursor and the same query and constraints. Use grep source="network" when the answer is in the user's own contacts. For quick public-web facts, web_search is sufficient."""

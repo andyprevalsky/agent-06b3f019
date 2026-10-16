@@ -2001,6 +2001,16 @@ status. For an activation-gated Fly deploy, the finish marker belongs after the
 exact cutover releases its lock and the workflow completes in Step 13ab. These
 are telemetry calls, not extra gates.
 
+For an explicitly selected `AGENT_DEPLOY_MODE=existing-process`, use the
+[existing-Machine process route](../../docs/existing-worker-process-deployment.md).
+It requires the same exact merged source, MIN8, native candidate validation and
+activation-before-pointer proof, plus durable backend recovery and native resource
+qualification. Its old workers remain served; it never invokes Machine retirement
+or the classic force-migration fallback. A held automatic workflow is not a passed
+CI run: record the actual controller receipts and lane lifecycle below. All other
+production gates remain mandatory. This is an operational deployment mode, not a
+waiver of a failed gate.
+
 Resolve and retain the exact agent deployment attempt whenever the canonical
 cutover condition is true. The run ID plus run attempt is the
 deployment-scoped Temporal activation token; a prior rollout of the same Git
@@ -2018,7 +2028,18 @@ if [ -n "$CHANGED_AGENT_RUNTIME$CHANGED_DEPLOY_AGENTS_WORKFLOW" ]; then
   AGENT_CUTOVER_REQUIRED=1
 fi
 
+DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
 if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  if [ "${AGENT_DEPLOY_MODE:-cooperative}" = "existing-process" ]; then
+    python3 scripts/record_factory_event.py deploy production-start fly
+    # Complete the signed staging and canonical validation sequence in the route
+    # guide first. These retained exact-intent receipts survive interruptions.
+    : "${WORKER_PROCESS_PLAN:?exact saved existing-host plan required}"
+    : "${WORKER_PROCESS_VALIDATION:?canonical native candidate receipt required}"
+    cd "$DEPLOY_ROOT/back-end"
+    npx tsx scripts/deploy-existing-worker-processes.ts activate --execute \
+      --plan "$WORKER_PROCESS_PLAN" --validation-receipt "$WORKER_PROCESS_VALIDATION"
+else
   python3 scripts/record_factory_event.py deploy production-start fly
   AGENT_DEPLOY_RUN_ID=""
   for i in $(seq 1 120); do
@@ -2097,6 +2118,7 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
     { echo "❌ deploy-agents cooperative cutover did not complete within 65m"; exit 1; }
   python3 scripts/record_factory_event.py deploy stage-finish cooperative-cutover
   echo "✅ deploy-agents cooperative cutover workflow completed"
+fi
 fi
 ```
 
@@ -2264,7 +2286,14 @@ cleanly: live pointer on the merged generation, old-generation queue drained
 (via cooperative `continue_as_new` handoff, not premature force-migrate).
 
 ```bash
+DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
 if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  if [ "${AGENT_DEPLOY_MODE:-cooperative}" = "existing-process" ]; then
+    cd "$DEPLOY_ROOT/back-end"
+    npx tsx scripts/deploy-existing-worker-processes.ts verify-live --execute \
+      --plan "$WORKER_PROCESS_PLAN"
+    python3 scripts/record_factory_event.py deploy production-finish fly
+else
   set -e
   DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
   cd "$DEPLOY_ROOT/back-end" && source .env
@@ -2287,6 +2316,7 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
 
   python3 scripts/record_factory_event.py deploy production-finish fly
 fi
+fi
 ```
 
 **Happy path (default):** CI's `deploy-agents-cooperative-cutover.sh` already
@@ -2295,7 +2325,7 @@ handoff, force-migrated any stragglers, and retired old-gen machines. Step 13ab
 must NOT re-run `migrate-open-agent-workflows.ts` when the monitor reports
 `cooperative_drain_complete` or `same_generation`.
 
-**Break-glass fallback** — only when Step 13's `deploy-agents.yml` run **failed**
+**Break-glass fallback** — never use this for `existing-process` shared hosts. Only when Step 13's `deploy-agents.yml` run **failed**
 after the pointer flip but before drain completed. Do NOT use this on the happy
 path; it terminates workflows instead of waiting for activity-boundary handoff.
 
@@ -2418,9 +2448,12 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
 fi
 ```
 
-Under cooperative cutover, workers drain at activity boundaries (SIGTERM +
-35m `kill_timeout`) and workflows hand off via `continue_as_new` at safe
-`run_agent` checkpoints. Force-migrate runs only after the 45-minute SLO
+Under cooperative cutover, workers receive SIGTERM with the committed Fly
+`kill_timeout` (currently 5m), and workflows can hand off via `continue_as_new`
+at safe `run_agent` checkpoints. The grace timeout does not prove retirement
+safety: a long activity can exceed it. Keep protected work served until the
+exact admission and drain checks establish that stopping its workers is safe.
+Force-migrate runs only after the 45-minute SLO
 (break-glass). The monitor script is the authoritative post-merge proof that
 routing flipped and the old generation drained without leaving stragglers.
 

@@ -585,50 +585,7 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
     return []
 
 
-def _is_masked_secret_ref(ref: str) -> bool:
-    """Saved passwords and the card number; short or public refs (cvv, name) are left alone."""
-    return ref.startswith("pwd:") or ref == "card_number"
-
-
-def mask_secret_values(value: Any, secret_refs: Optional[Dict[str, str]]) -> Any:
-    """Return ``value`` with any secret plaintext replaced by the ref that names it.
-
-    Secrets are typed into the page by the browser tool, never by the model. A
-    tool result that reads the page back (``evaluate`` on a form, a network
-    capture of the sign-in request) would otherwise hand the model the
-    plaintext, which then lands in its reasoning and the saved transcript.
-    """
-    secrets = sorted(
-        (
-            (plaintext, ref)
-            for ref, plaintext in (secret_refs or {}).items()
-            if _is_masked_secret_ref(ref) and isinstance(plaintext, str) and plaintext
-        ),
-        key=lambda pair: -len(pair[0]),
-    )
-    if not secrets:
-        return value
-
-    def mask(item: Any) -> Any:
-        if isinstance(item, str):
-            for plaintext, ref in secrets:
-                if plaintext in item:
-                    item = item.replace(plaintext, ref)
-            return item
-        if isinstance(item, dict):
-            # Keys can carry a secret too ({"entered-<password>": true}).
-            return {mask(key): mask(entry) for key, entry in item.items()}
-        if isinstance(item, list):
-            return [mask(entry) for entry in item]
-        return item
-
-    if isinstance(value, dict):
-        # The result's own field names (`success`, `status`) are the tool's
-        # protocol and are read after masking, so they are never rewritten: a
-        # password that happens to be the word `success` must not rename the
-        # field. What the page supplied sits beneath them and is masked whole.
-        return {key: mask(entry) for key, entry in value.items()}
-    return mask(value)
+from browser_tools.secret_refs import _is_masked_secret_ref, mask_secret_values, secret_placeholder  # noqa: E402, F401
 
 
 # ========================================
@@ -885,7 +842,7 @@ def build_auth_options_prompt_section(
                 password_origins[ref] = origin_for_ref
             credential_refs_by_secret_ref[ref] = {"kind": "password", "id": str(credential_id)}
 
-            lines.append(f"  - {display_origin} | {username} | ref: {ref} | {_disabled_label(pwd)}")
+            lines.append(f"  - {display_origin} | {username} | ref: {secret_placeholder(ref)} | {_disabled_label(pwd)}")
         if unavailable_password_count:
             lines.append(
                 f"  - {unavailable_password_count} saved password(s) were omitted as refs because this session "
@@ -943,7 +900,7 @@ def build_auth_options_prompt_section(
                     "id": str(minted_id or minted_email),
                 }
                 # "Sign-up": a first run typed the ref into sign-in forms when it read "New password".
-                password_clause = f" | Sign-up password ref (new accounts only): {new_password_ref}"
+                password_clause = f" | Sign-up password ref (new accounts only): {secret_placeholder(new_password_ref)}"
             lines.append(
                 f"- Minted account: Email -> {minted_email} (codes mailed here reach you automatically)"
                 f"{phone_clause}{password_clause} | {_disabled_label(minted)}"
@@ -1038,11 +995,13 @@ def build_payment_card_resume_prompt_section(payment_card_refs: Dict[str, Any]) 
 ## One-Time Payment Card
 Payment approval is complete and the one-time card is ready. Do not call request_payment_card again for this checkout.
 
-Type only these secret refs into the payment fields:
-- Card number field: card_number
-- Cardholder name field: card_name
-- Expiry field: card_expiry
-- CVV field: card_cvv
+Use these private credential placeholders with your chosen browser action and target:
+- Card number field: {{secret:card_number}}
+- Cardholder name field: {{secret:card_name}}
+- Expiry field: {{secret:card_expiry}}
+- CVV field: {{secret:card_cvv}}
+
+The runtime resolves placeholders privately in any browser tool, including input_text and evaluate. Enter each field explicitly; no fields are filled automatically.
 
 After filling the payment fields, submit the checkout form and continue until the merchant confirmation page is shown."""
 
@@ -1055,8 +1014,10 @@ def payment_card_ready_tool_result(last4: Optional[str] = None) -> Dict[str, Any
         "status": "payment_card_ready",
         "message": (
             "Payment approval is complete and the one-time card is ready. "
-            "Do not call request_payment_card again. Type secret refs "
-            "card_number, card_name, card_expiry, and card_cvv into the payment fields."
+            "Do not call request_payment_card again. Use the private placeholders "
+            "{{secret:card_number}}, {{secret:card_name}}, {{secret:card_expiry}}, and "
+            "{{secret:card_cvv}} with your chosen browser action and target. "
+            "The runtime resolves them privately; enter each field explicitly."
         ),
     }
     if safe_last4 is not None:

@@ -17,6 +17,7 @@
  * [DESKTOP_ACTIVE|WAITING|DISCONNECTED] -> controls overlay the browser
  * [MOBILE_ACTIVE|WAITING|DISCONNECTED] -> controls render in the footer below it
  * [USER_CONTROL] -> interactive iframe + Hand back control on both form factors
+ * [READ_ONLY] -> passive iframe and task progress, no agent control actions
  *
  * VIEWPORT STATE:
  * [DESKTOP|MOBILE] -> letterbox the 1280x800 content viewport into the leftover
@@ -52,6 +53,7 @@ import type {
 } from './types';
 
 interface FullscreenProps {
+  readOnly?: boolean;
   agentId?: string | null;
   taskId: string;
   browserUrl: string;
@@ -154,6 +156,7 @@ type PaneProps = Pick<
   | 'isResuming'
   | 'isUserControlling'
   | 'onResume'
+  | 'readOnly'
 > & {
   isMobile: boolean;
   controlState: BrowserControlState;
@@ -172,6 +175,7 @@ function BrowserPaneBody({
   isUserControlling,
   isMobile,
   onResume,
+  readOnly = false,
 }: PaneProps) {
   const glowTone = resolveBrowserBorderGlowTone(messages, taskId);
   return (
@@ -179,7 +183,7 @@ function BrowserPaneBody({
       url={browserUrl}
       live={browserLive}
       title="Browser"
-      interactive={isUserControlling || controlState === 'waiting'}
+      interactive={!readOnly && (isUserControlling || controlState === 'waiting')}
       iframeKey={`${taskId}:${browserUrl}`}
       className={cn('flex min-h-0 flex-col bg-white', isMobile ? 'w-full flex-none' : 'flex-1')}
       style={isMobile ? { aspectRatio: '8 / 5' } : undefined}
@@ -188,14 +192,14 @@ function BrowserPaneBody({
       {controlState === 'active' && !isUserControlling && (
         <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
       )}
-      {!isMobile && controlState === 'active' && (
+      {!readOnly && !isMobile && controlState === 'active' && (
         <TakeControlChip
           onResume={onResume}
           isResuming={isResuming}
           isUserControlling={isUserControlling}
         />
       )}
-      {!isMobile && controlState === 'waiting' && (
+      {!readOnly && !isMobile && controlState === 'waiting' && (
         <WaitingForAssistanceChip
           onResume={onResume}
           isResuming={isResuming}
@@ -203,7 +207,7 @@ function BrowserPaneBody({
           isMobile={isMobile}
         />
       )}
-      {!isMobile && controlState === 'disconnected' && (
+      {!readOnly && !isMobile && controlState === 'disconnected' && (
         <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />
       )}
     </LiveViewFrame>
@@ -230,13 +234,15 @@ function MobileFullscreen({
       />
       <div className="flex min-h-0 flex-1 flex-col">
         {pane}
-        <MobileBrowserControlFooter
-          onResume={props.onResume}
-          isResuming={props.isResuming}
-          controlState={controlState}
-          request={props.authAssistanceRequest}
-          isUserControlling={props.isUserControlling}
-        />
+        {!props.readOnly && (
+          <MobileBrowserControlFooter
+            onResume={props.onResume}
+            isResuming={props.isResuming}
+            controlState={controlState}
+            request={props.authAssistanceRequest}
+            isUserControlling={props.isUserControlling}
+          />
+        )}
         <div className="min-h-0 flex-1 border-t border-border bg-background">{progressPanel}</div>
       </div>
     </div>,
@@ -280,6 +286,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
 
   const pane = (
     <BrowserPaneBody
+      readOnly={props.readOnly}
       agentId={props.agentId}
       taskId={props.taskId}
       browserUrl={props.browserUrl}

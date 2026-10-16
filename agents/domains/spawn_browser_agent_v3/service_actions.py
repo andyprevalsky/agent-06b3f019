@@ -31,6 +31,15 @@ from browser_tools.schemas import (
     normalize_browser_wait_ms,
     normalize_evaluate_timeout_seconds,
 )
+from browser_tools.secret_refs import (
+    mask_secret_values,
+    referenced_evaluate_secret_refs,
+    referenced_secret_refs,
+    resolve_evaluate_secret_refs,
+    resolve_secret_values,
+    secret_logging_context,
+    secret_placeholder,
+)
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
 from domains.spawn_browser_agent_v3.service_crypto import (
     PAYMENT_CARD_SECRET_REFS,
@@ -709,6 +718,7 @@ class _ActionContext:
     current_auth_realm: str
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
     prefetched_browser_state: Optional[Dict[str, Any]] = None
+    model_params: Optional[Dict[str, Any]] = None
 
 
 async def _refuse_navigation(
@@ -931,6 +941,8 @@ def _browser_state_action_result(state: Dict[str, Any]) -> Dict[str, Any]:
         "page_stats": state.get("page_stats"),
         "tabs": state.get("tabs"),
         "dom_tree": state.get("dom_tree", ""),
+        "recent_events": state.get("recent_events"),
+        "closed_popups": state.get("closed_popups"),
     }
 
 
@@ -1122,6 +1134,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             write_lock_enabled=context.write_lock_enabled,
             write_lock_approvals=context.write_lock_approvals,
             system_name=context.system_name,
+            model_params=context.model_params,
         )
     if context.action_name == "press_key":
         key = context.params.get("key", "")
@@ -1531,7 +1544,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
                 )
                 return {"success": False, "error": dom_patch_reason}
         timeout_s = normalize_evaluate_timeout_seconds(context.params.get("timeout"))
-        fingerprint = _evaluate_code_fingerprint(code)
+        fingerprint = _evaluate_code_fingerprint((context.model_params or context.params).get("code", ""))
         logger.info(
             "Browser evaluate starting",
             session_id=context.session_id,
@@ -1679,6 +1692,127 @@ async def execute_action(
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
+    successful_secret_refs: Optional[set[str]] = None,
+) -> Dict[str, Any]:
+    """Resolve private values and report successful use privately to the caller."""
+    execution = locals().copy()
+    execution.pop("successful_secret_refs")
+    if successful_secret_refs is not None:
+        successful_secret_refs.clear()
+    refs = dict(secret_refs or {})
+    register = getattr(dom_service, "register_secret_refs", None)
+    if callable(register):
+        register(refs)
+    model_params = action.get("params") or {}
+    action_name = action.get("action", "")
+    used_credential = None
+
+    def visible(value: Any) -> Any:
+        # Keep the public boundary safe for adapters without DOMService policy.
+        action_policy = getattr(type(dom_service), "model_visible_action_result", None)
+        if isinstance(value, dict) and callable(action_policy):
+            return action_policy(dom_service, action_name, value)
+        policy = getattr(type(dom_service), "model_visible_value", None)
+        return policy(dom_service, value) if callable(policy) else mask_secret_values(value, refs)
+
+    try:
+        if action_name == "evaluate":
+            other_params = {key: value for key, value in model_params.items() if key != "code"}
+            used = referenced_secret_refs(other_params, refs)
+            used.update(referenced_evaluate_secret_refs(model_params.get("code", ""), refs))
+            params = resolve_secret_values(other_params, refs)
+            params["code"] = resolve_evaluate_secret_refs(model_params.get("code", ""), refs)
+        else:
+            used = referenced_secret_refs(model_params, refs)
+            params = resolve_secret_values(model_params, refs)
+        # Password origin checks apply to every tool, including evaluate.
+        for ref in used:
+            expected_origin = (password_origins or {}).get(ref)
+            if expected_origin:
+                current_domain = urlparse(current_url or "").netloc.lower()
+                expected_domain = urlparse(expected_origin).netloc.lower()
+                if _get_base_domain(current_domain) != _get_base_domain(expected_domain):
+                    return {"success": False, "error": visible(
+                        f"Password origin mismatch: expected {expected_domain}, got {current_domain}"
+                    )}
+        if used:
+            mark_used = getattr(dom_service, "mark_secret_used", None)
+            if callable(mark_used):
+                mark_used()
+        execution["action"] = {**action, "params": params}
+        execution["model_params"] = model_params
+        execution["action_history"] = _PrivateActionHistory(action_history, refs)
+        with secret_logging_context(refs):
+            result = await _execute_resolved_action(**execution)
+        if result.get("success") and len(used) == 1:
+            used_credential = (credential_refs_by_secret_ref or {}).get(next(iter(used)))
+        if result.get("success") and used_credential is None:
+            original_text = model_params.get("text")
+            if isinstance(original_text, str):
+                used_credential = (credential_refs_by_secret_ref or {}).get(original_text)
+    except asyncio.TimeoutError:
+        raise
+    except Exception as error:
+        error_text = visible(str(error))
+        logger.error("Browser action failed", action=action_name, error=error_text)
+        result = {"success": False, "error": error_text}
+    if result.get("success") and successful_secret_refs is not None:
+        successful_secret_refs.update(used)
+    safe_result = visible(result)
+    if used_credential:
+        # Credential bookkeeping comes from the private binding inventory,
+        # rather than page data. Preserve its exact routing identity even if
+        # a short secret happens to occur in the credential's public ID.
+        safe_result["credential_ref"] = dict(used_credential)
+    return safe_result
+
+
+class _PrivateActionHistory:
+    """Prevent execution-only arguments reaching history, including test adapters."""
+
+    def __init__(self, history: Any, refs: Dict[str, str]):
+        self._history = history
+        self._refs = refs
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._history, name)
+
+    async def record_action(self, **kwargs: Any) -> Any:
+        safe = mask_secret_values(kwargs, self._refs)
+        # These are execution metadata supplied by the harness. A CVV equal to
+        # an element index must not turn the chosen target into a reference.
+        for key in ("dom_service", "action", "index", "coordinates"):
+            if key in kwargs:
+                safe[key] = kwargs[key]
+        for key in ("params", "result"):
+            if isinstance(kwargs.get(key), dict):
+                safe[key] = mask_secret_values(kwargs[key], self._refs)
+        return await self._history.record_action(**safe)
+
+
+async def _execute_resolved_action(
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    action: Dict[str, Any],
+    available_file_paths: Optional[Dict[str, str]] = None,
+    session_id: Optional[str] = None,
+    config: Any = None,
+    humanizer: Optional[BrowserHumanizer] = None,
+    secret_refs: Optional[Dict[str, str]] = None,
+    password_origins: Optional[Dict[str, str]] = None,
+    credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
+    user_id: str = "",
+    current_url: str = "",
+    trusted_page_urls: Optional[List[str]] = None,
+    write_lock_enabled: bool = True,
+    write_lock_approvals: Optional[Dict[str, Dict]] = None,
+    system_name: str = "Rose",
+    browser_network_recorder: Optional[Any] = None,
+    current_auth_realm: str = "",
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
+    prefetched_browser_state: Optional[Dict[str, Any]] = None,
+    model_params: Optional[Dict[str, Any]] = None,
+    auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1717,15 +1851,7 @@ async def execute_action(
         if index is not None:
             element = dom_service.selector_map.get(index)
             if not element:
-                # Payment inputs inside open shadow roots can be visible in the
-                # browser state without a selector-map entry. Let the approved
-                # card-ref path locate the field semantically across roots and
-                # frames instead of rejecting its stale index up front.
-                payment_ref = params.get("text") if action_name == "input_text" else None
-                if payment_ref in PAYMENT_CARD_SECRET_REFS and has_payment_card_secret_refs(secret_refs):
-                    index = None
-                else:
-                    return {"success": False, "error": f"Element with index {index} not found"}
+                return {"success": False, "error": f"Element with index {index} not found"}
 
         context = _ActionContext(
             dom_service=dom_service,
@@ -1754,6 +1880,7 @@ async def execute_action(
             current_auth_realm=current_auth_realm,
             prepare_credentials_for_url=prepare_credentials_for_url,
             prefetched_browser_state=prefetched_browser_state,
+            model_params=model_params,
         )
         if action_name in _INTERACTION_ACTIONS:
             result = await _execute_interaction_action(context)
@@ -1762,7 +1889,7 @@ async def execute_action(
         elif action_name in _INSPECTION_ACTIONS:
             result = await _execute_inspection_action(context)
         elif action_name in _TERMINAL_ACTIONS:
-            return await _execute_terminal_action(context)
+            result = await _execute_terminal_action(context)
         else:
             return {"success": False, "error": f"Unknown action: {action_name}"}
 
@@ -1772,7 +1899,8 @@ async def execute_action(
         # action error (which leaves the page wedged).
         raise
     except Exception as error:
-        logger.error(f"Action {action_name} failed: {error}")
+        error_text = mask_secret_values(str(error), secret_refs)
+        logger.error("Browser action failed", action=action_name, error=error_text)
         await action_history.record_action(
             dom_service=dom_service,
             action=action_name,
@@ -1780,9 +1908,9 @@ async def execute_action(
             index=index,
             coordinates=coords,
             params=params,
-            result={"success": False, "error": str(error)},
+            result={"success": False, "error": error_text},
         )
-        result = {"success": False, "error": str(error)}
+        result = {"success": False, "error": error_text}
 
     if auth_context_for_url is not None and (
         action_name in _INTERACTION_ACTIONS
@@ -1810,11 +1938,19 @@ async def _attach_observed_auth_context(
     result = dict(result)
     result.pop("auth_realm", None)
     result.pop("credentials_prepared", None)
+
+    def captured_state_url(state: Dict[str, Any]) -> str:
+        fallback = str(state.get("url") or "")
+        accessor = inspect.getattr_static(dom_service, "runtime_current_url", None)
+        if callable(accessor):
+            return str(dom_service.runtime_current_url(fallback=fallback) or fallback)
+        return fallback
+
     try:
         # Page-state already captured its URL with its DOM; other actions must
         # observe the destination rather than echoing their requested URL.
         destination_url = (
-            str(result.get("url") or "") if action_name == "read_browser_state"
+            captured_state_url(result) if action_name == "read_browser_state"
             else str((await dom_service.get_page_identity()).get("url") or "")
         )
         if (
@@ -1837,7 +1973,7 @@ async def _attach_observed_auth_context(
             if action_name == "read_browser_state":
                 state = await dom_service.get_browser_state(include_screenshot=False)
                 result = _browser_state_action_result(state)
-                destination_url = str(state.get("url") or "")
+                destination_url = captured_state_url(state)
             else:
                 destination_url = live_url
         error = "Page changed during credential preparation"
@@ -3455,108 +3591,6 @@ async def _payment_input_write_lock_error(
     }
 
 
-async def _try_direct_payment_ref_fill(
-    *,
-    session: Any,
-    dom_service: DOMService,
-    action_history: ActionHistory,
-    index: Any,
-    thinking: Any,
-    clear_before_typing: bool,
-    secret_refs: Dict[str, str],
-    secret_ref_name: str,
-    text: str,
-    display_text: str,
-    credential_ref: Optional[Dict[str, str]],
-    current_url: str,
-    humanizer: Optional[BrowserHumanizer] = None,
-) -> Optional[Dict[str, Any]]:
-    input_page = _humanizer_input_page(humanizer)
-    # Hosted widgets mount payment inputs in child frames after the document URL
-    # settles — wait for a semantic field before the first fill attempt.
-    await wait_for_payment_ref_fields(
-        session,
-        ref_names=["card_number", secret_ref_name],
-        input_page=input_page,
-        timeout_seconds=12.0,
-    )
-    fill_result = await _fill_payment_ref_directly(
-        session,
-        secret_ref_name,
-        text,
-        input_page=input_page,
-        humanizer=humanizer,
-    )
-    if not fill_result:
-        readiness = await wait_for_navigation_ready(
-            dom_service,
-            url=current_url,
-            timeout_seconds=3.0,
-            reload_blank_spa_once=True,
-        )
-        logger.debug(
-            "Retried approved payment card direct fill after page readiness",
-            ref_name=secret_ref_name,
-            readiness=readiness,
-        )
-        await wait_for_payment_ref_fields(
-            session,
-            ref_names=["card_number", secret_ref_name],
-            input_page=input_page,
-            timeout_seconds=8.0,
-        )
-        fill_result = await _fill_payment_ref_directly(
-            session,
-            secret_ref_name,
-            text,
-            input_page=input_page,
-            humanizer=humanizer,
-        )
-    if not fill_result:
-        return None
-
-    filled_refs = [secret_ref_name]
-    for other_ref in PAYMENT_CARD_SECRET_REFS:
-        other_value = secret_refs.get(other_ref)
-        if other_ref == secret_ref_name or not other_value:
-            continue
-        if await _fill_payment_ref_directly(
-            session,
-            other_ref,
-            other_value,
-            input_page=input_page,
-            humanizer=humanizer,
-        ):
-            filled_refs.append(other_ref)
-
-    element_coords = None
-    if isinstance(fill_result.get("x"), (int, float)) and isinstance(fill_result.get("y"), (int, float)):
-        element_coords = {"x": int(fill_result["x"]), "y": int(fill_result["y"])}
-    await action_history.record_action(
-        dom_service=dom_service,
-        action="input_text",
-        thinking=thinking,
-        index=index,
-        coordinates=element_coords,
-        params={"text": display_text, "clear": clear_before_typing},
-        result={
-            "success": True,
-            "payment_ref_direct_fill": True,
-            "payment_refs_filled": filled_refs,
-            "selector": fill_result.get("selector"),
-        },
-    )
-    logger.info(
-        "Filled approved payment card secret ref directly",
-        ref_name=secret_ref_name,
-        filled_refs=filled_refs,
-        selector=fill_result.get("selector"),
-    )
-    result = _input_success_result(display_text, credential_ref)
-    result.update({"payment_ref_direct_fill": True, "payment_refs_filled": filled_refs})
-    return result
-
-
 async def _clear_input_with_events(session: Any) -> None:
     from browser_use.browser.events import SendKeysEvent
 
@@ -3654,12 +3688,6 @@ async def _execute_indexed_input_text(
     coord_tuple = await dom_service.get_element_coordinates(index)
     if humanizer and not coord_tuple:
         coord_tuple = await _refresh_element_coordinates(dom_service, index)
-    if humanizer and not coord_tuple and is_payment_card_secret_ref:
-        coord_tuple = await _resolve_payment_ref_coordinates(
-            session,
-            secret_ref_name or "",
-            input_page=_humanizer_input_page(humanizer),
-        )
     is_password_credential = bool(credential_ref and str(credential_ref.get("kind") or "") == "password")
     if humanizer and not coord_tuple and is_password_credential:
         attrs = getattr(element, "attributes", None) or {}
@@ -3698,7 +3726,9 @@ async def _execute_indexed_input_text(
         logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use TypeTextEvent")
         if clear_before_typing:
             await _clear_input_with_events(session)
-        event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text, clear=clear_before_typing))
+        event = session.event_bus.dispatch(TypeTextEvent(
+            node=element, text=text, clear=clear_before_typing, is_sensitive=display_text != text,
+        ))
         await event
         await event.event_result(raise_if_any=True, raise_if_none=False)
 
@@ -3822,33 +3852,18 @@ async def _execute_input_text(
     write_lock_enabled: bool,
     write_lock_approvals: Optional[Dict],
     system_name: str,
+    model_params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Execute an input_text action with secret decryption and write lock checks."""
+    """Enter the privately resolved text into the agent's chosen target."""
     text = params.get("text", "")
     clear_before_typing = params.get("clear", True) is not False
-    display_text = text
-    credential_ref = (credential_refs_by_secret_ref or {}).get(text)
-    secret_ref_name = text if secret_refs and text in secret_refs else None
+    original_text = (model_params or params).get("text", "")
+    secret_ref_name = next(
+        (ref for ref in secret_refs or {} if original_text in (ref, secret_placeholder(ref))), None
+    )
+    credential_ref = (credential_refs_by_secret_ref or {}).get(secret_ref_name or original_text)
     is_payment_card_secret_ref = secret_ref_name in PAYMENT_CARD_SECRET_REFS
-
-    # Check if this is a password or card reference that needs decryption
-    if secret_ref_name:
-        display_text = "[encrypted_data]"
-
-        if password_origins and secret_ref_name in password_origins:
-            expected_origin = password_origins[secret_ref_name]
-            current_domain = urlparse(current_url).netloc.lower() if current_url else ""
-            expected_domain = urlparse(expected_origin).netloc.lower() if expected_origin else ""
-
-            if _get_base_domain(current_domain) != _get_base_domain(expected_domain):
-                logger.warning("\U0001f510 Password origin mismatch", expected=expected_domain, got=current_domain)
-                return {
-                    "success": False,
-                    "error": f"Password origin mismatch: expected {expected_domain}, got {current_domain}",
-                }
-
-        text = secret_refs[secret_ref_name]
-        logger.info("\U0001f510 Typing encrypted credential (password/card)", redacted=True)
+    display_text = mask_secret_values(text, secret_refs)
 
     write_lock_error = await _payment_input_write_lock_error(
         session=session,
@@ -3876,34 +3891,6 @@ async def _execute_input_text(
         )
         if typed_enter_lock:
             return typed_enter_lock
-
-    if is_payment_card_secret_ref and has_payment_card_secret_refs(secret_refs):
-        direct_fill_result = await _try_direct_payment_ref_fill(
-            session=session,
-            dom_service=dom_service,
-            action_history=action_history,
-            index=index,
-            thinking=thinking,
-            clear_before_typing=clear_before_typing,
-            secret_refs=secret_refs or {},
-            secret_ref_name=secret_ref_name or "",
-            text=text,
-            display_text=display_text,
-            credential_ref=credential_ref,
-            current_url=current_url,
-            humanizer=humanizer,
-        )
-        if direct_fill_result:
-            return direct_fill_result
-        # Auto-fill / secret-ref typing without an element index must not fall
-        # through to "type into whatever is focused" — that reports success
-        # without payment_refs_filled and hides the real field_not_found miss.
-        if not element and not coords:
-            return {
-                "success": False,
-                "error": "field_not_found",
-                "payment_refs_filled": [],
-            }
 
     if element:
         return await _execute_indexed_input_text(
@@ -4228,6 +4215,12 @@ async def _execute_screenshot(
     config: Any,
 ) -> Dict[str, Any]:
     """Execute a screenshot action using the active provider's browser-window capture."""
+    if getattr(dom_service, "secret_values_used", False) is True:
+        return {
+            "success": False,
+            "error": "Screenshot withheld because this browser contains private credentials. Use read_browser_state or evaluate for redacted page details.",
+        }
+
     from domains.spawn_browser_agent_v3.repo import (
         take_browser_computer_screenshot,
         upload_file_to_session,

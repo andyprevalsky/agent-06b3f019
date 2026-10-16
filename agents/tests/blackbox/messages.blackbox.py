@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -417,9 +419,17 @@ async def test_poll_messages_keeps_explore_chips_when_include_internal():
         "a week with hooks that pair a lab name and a concrete capability claim. "
         "Audience promise is stay-current AI for builders."
     )
-    thinking = {"role": "TOOL", "message": "", "timestamp": "2026-04-05T12:00:30Z",
-                "metadata": {"toolName": "spawn_agent", "title": "Explore agent thinking",
-                             "subAgentId": "explore-wes", "toolStatus": "FINISHED"}}
+    thinking = {
+        "role": "TOOL",
+        "message": "",
+        "timestamp": "2026-04-05T12:00:30Z",
+        "metadata": {
+            "toolName": "spawn_agent",
+            "title": "Explore agent thinking",
+            "subAgentId": "explore-wes",
+            "toolStatus": "FINISHED",
+        },
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "/api/agents/" in str(request.url) and request.method == "GET":
@@ -561,9 +571,7 @@ async def test_update_agent_tree_state_stamps_workflow_generation():
         )
 
     patch_call = assert_captured_call(url_contains="/api/agents/agent-tree", method="PATCH")
-    assert patch_call["requestHeaders"]["x-agent-workflow-generation"] == (
-        "agent-tree:replacement:generation-2"
-    )
+    assert patch_call["requestHeaders"]["x-agent-workflow-generation"] == ("agent-tree:replacement:generation-2")
 
 
 async def test_update_agent_tree_state_no_broadcast():
@@ -986,9 +994,166 @@ async def test_broadcast_to_bus_logs_non_success():
     await _flush_broadcasts()
 
 
+def test_broadcast_shutdown_does_not_spawn_an_unowned_drainer():
+    """Runner shutdown must cancel the sender without starting a new batch."""
+    code = """
+import asyncio
+from types import SimpleNamespace
+from helpers import messages
+
+entered = asyncio.Event()
+class Client:
+    async def post(self, *args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+messages._get_broadcast_client = lambda: Client()
+messages.load_config = lambda: SimpleNamespace(supabase=SimpleNamespace(
+    service_role_key="test", anon_key="", url="https://example.invalid"))
+async def main():
+    await messages._queue_realtime_record("test", "TEST", {"id": 1})
+    messages._schedule_broadcast_flush(0)
+    await entered.wait()
+    await messages._queue_realtime_record("test", "TEST", {"id": 2})
+asyncio.run(main())
+assert messages._broadcast_flush_task is None, "shutdown spawned an unowned drainer"
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "different Context" not in result.stderr, result.stderr
+    assert "closing of asynchronous generator" not in result.stderr, result.stderr
+    assert "Task was destroyed" not in result.stderr, result.stderr
+
+
+def test_broadcast_flush_preserves_owner_and_recovers_cancelled_queue():
+    """A live flush retains its sender; a cancelled sender wakes existing flushers."""
+    code = """
+import asyncio
+import sys
+from types import SimpleNamespace
+from helpers import messages
+
+entered = asyncio.Event()
+release = asyncio.Event()
+sent = []
+class Client:
+    async def post(self, *args, **kwargs):
+        ids = [item["payload"]["record"]["id"] for item in kwargs["json"]["messages"]]
+        if ids == [1]:
+            entered.set()
+            await release.wait()
+        sent.extend(ids)
+        return SimpleNamespace(status_code=200)
+messages._get_broadcast_client = lambda: Client()
+messages.load_config = lambda: SimpleNamespace(supabase=SimpleNamespace(
+    service_role_key="test", anon_key="", url="https://example.invalid"))
+async def main():
+    await messages._queue_realtime_record("test", "TEST", {"id": 1})
+    messages._schedule_broadcast_flush(0)
+    await entered.wait()
+    owner = messages._broadcast_flush_task
+    await messages._queue_realtime_record("test", "TEST", {"id": 2})
+    flusher = asyncio.create_task(messages.flush_realtime_broadcasts_for_tests())
+    await asyncio.sleep(0)
+    if sys.argv[1] == "live":
+        assert not owner.cancelling(), "flush cancelled its active sender"
+        assert messages._broadcast_flush_task is owner, "flush replaced its active sender"
+        release.set()
+    else:
+        owner.cancel()
+        try:
+            await owner
+        except asyncio.CancelledError:
+            pass
+    await asyncio.wait_for(flusher, 0.5)
+    assert sent == ([1, 2] if sys.argv[1] == "live" else [2]), sent
+    assert not messages._broadcast_queue
+    assert not messages._broadcast_idle_waiters
+    assert messages._broadcast_flush_task is None
+asyncio.run(main())
+"""
+    for mode in ("live", "cancelled"):
+        result = subprocess.run([sys.executable, "-c", code, mode], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, mode + "\n" + result.stdout + result.stderr
+
+
+
+async def test_browser_instruction_poll_retains_only_user_sources_and_exact_task_start():
+    from unittest.mock import AsyncMock, patch
+    from helpers.messages import poll_new_messages
+    from datetime import datetime, timezone
+
+    from _test_utils import native_browser_start_source
+    user = {"id": "user", "role": "USER", "text": "Actual authored correction", "metadata": None}
+    start = await native_browser_start_source("2026-10-14T00:00:00+00:00", tool_call_id="tool-1")
+    other = {"id": "other", "role": "TOOL", "text": "Other task", "metadata": {"task_id": "task-2", "subAgentId": "task-2", "action_type": "task_started"}}
+    internal = {"id": "internal", "role": "TOOL", "text": "Large browser state", "metadata": {"task_id": "task-1", "subAgentId": "task-1", "action_type": "read_browser_state"}}
+    # Execute the actual OTP credential writer. Its USER role is internal
+    # machine context, distinguished by native subAgentId provenance.
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3.repo import save_browser_credential_ref_message
+    post = AsyncMock(return_value=SimpleNamespace(status_code=200, is_error=False))
+    with (
+        patch("config.load_config", return_value=SimpleNamespace(backend=SimpleNamespace(api_url="http://fixture", api_key="fixture"))),
+        patch("domains.spawn_browser_agent_v3.repo.get_http_client", return_value=SimpleNamespace(post=post)),
+    ):
+        assert await save_browser_credential_ref_message(agent_id="agent-1", task_id="other-browser", message="OTP fixture context", role="USER", credential_ref={"kind": "otp", "id": "fixture"})
+    payload = post.await_args.kwargs["json"]
+    otp = {"id": "otp", "role": payload["role"], "text": payload["message"], "metadata": payload["metadata"]}
+    with (
+        patch("helpers.messages._fetch_agent_data_impl", AsyncMock(return_value={"messages": [user, start, other, internal, otp]})) as fetch,
+        patch("helpers.messages.activity.heartbeat"),
+    ):
+        rows = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool-1")
+    assert rows == [user, start], "native start was filtered or unrelated internal work became user input"
+    fetch.assert_awaited_once_with("agent-1", since="2026-10-14T00:00:00+00:00", browser_tool_call_id="tool-1")
+
+
+async def test_browser_instruction_poll_projects_at_http_boundary():
+    """The existing GET carries the role projection before any large response."""
+    observed = []
+    def respond(request):
+        observed.append(request)
+        return httpx.Response(200, json={"messages": []})
+    setup_mock_fn(respond)
+    try:
+        from helpers.messages import poll_new_messages
+        with patch("helpers.messages.activity.heartbeat"):
+            await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool/&1")
+            await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc))
+        assert len(observed) == 2
+        assert observed[0].url.params.get("browserToolCallId") == "tool/&1", "browser read still downloads the full root transcript"
+        assert observed[0].url.params.get("since") == "2026-10-14T00:00:00+00:00"
+        assert "browserToolCallId" not in observed[1].url.params, "ordinary root replay was narrowed"
+    finally:
+        teardown_mock()
+
+
+async def test_browser_attention_feedback_is_task_scoped_and_root_input_is_global():
+    from unittest.mock import AsyncMock
+    from helpers.messages import poll_new_messages
+    rows = [
+        {"id": "global", "role": "USER", "text": "  Global correction\n", "metadata": None},
+        {"id": "a", "role": "USER", "text": "  Only browser A\n", "metadata": {"source": "attention_response", "attentionRequestId": "req-a", "browserTaskId": "task-a"}},
+        {"id": "b", "role": "USER", "text": "  Only browser B\n", "metadata": {"source": "attention_response", "attentionRequestId": "req-b", "browserTaskId": "task-b"}},
+    ]
+    with patch("helpers.messages._fetch_agent_data_impl", AsyncMock(return_value={"messages": rows})), patch("helpers.messages.activity.heartbeat"):
+        a = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool-a", browser_task_id="task-a")
+        b = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool-b", browser_task_id="task-b")
+        root = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc))
+    assert a == rows[:2], "browser A consumed a sibling's authored reply"
+    assert b == [rows[0], rows[2]], "browser B consumed a sibling's authored reply"
+    assert root == rows, "parent lost actual authored feedback"
+
 async def run_all_tests():
     print("messages blackbox tests:")
     r = BlackboxResult()
+    r.record("broadcast_shutdown_owns_drainer", test_broadcast_shutdown_does_not_spawn_an_unowned_drainer)
+    r.record(
+        "broadcast_flush_owner_and_cancelled_queue", test_broadcast_flush_preserves_owner_and_recovers_cancelled_queue
+    )
+    await r.record_async("browser_instruction_poll_projects_at_http_boundary", test_browser_instruction_poll_projects_at_http_boundary)
+    await r.record_async("browser_attention_feedback_is_task_scoped_and_root_input_is_global", test_browser_attention_feedback_is_task_scoped_and_root_input_is_global)
+    await r.record_async("browser_instruction_poll_retains_only_user_sources_and_exact_task_start", test_browser_instruction_poll_retains_only_user_sources_and_exact_task_start)
     await r.record_async("post_message_happy_path", test_post_message_happy_path)
     await r.record_async("post_message_boundary", test_post_message_boundary)
     await r.record_async("post_message_stamps_workflow_generation", test_post_message_stamps_workflow_generation)

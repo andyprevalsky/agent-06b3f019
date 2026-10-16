@@ -17,7 +17,7 @@ import httpx  # Used with instructor
 import instructor  # Import at module level for Temporal workflow sandbox compatibility
 import structlog
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, create_model, model_validator
+from pydantic import BaseModel, Field, ValidationError, create_model, model_validator
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -73,6 +73,7 @@ from providers.rose import (
     gpt_auth_from_token,
     pool_for_model,
 )
+from providers.rose.errors import RoseAllFailed
 from providers.rose.policy import anthropic_family_excluded, benchmark_compute_token_type
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
@@ -80,7 +81,8 @@ from providers.rose.schema import (
 )
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import reconstruct_agent_response
-from utils.error_utils import extract_error_message
+from providers.rose.truncation import model_key
+from utils.error_utils import error_chain_has_type, extract_error_message
 from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
@@ -423,8 +425,12 @@ _SchemaNestedFieldType = Literal[
 class _GeneratedResponseSchemaNestedField(BaseModel):
     name: str = Field(description="Nested field name in snake_case.")
     type: _SchemaNestedFieldType = Field(description="Nested field type.")
-    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings.")
+    constraints: List[ResponseSchemaBound] = Field(
+        default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings."
+    )
     required: bool = Field(default=True, description="Defaults to true; false allows omission.")
+    description: Optional[str] = None
+    nullable: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -444,8 +450,12 @@ class _GeneratedResponseSchemaField(BaseModel):
         default=None,
         description="Required for object/list[object]. Explicit nested fields; do not encode subfields in prose.",
     )
-    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings.")
+    constraints: List[ResponseSchemaBound] = Field(
+        default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings."
+    )
     required: bool = Field(default=True, description="Defaults to true; false allows omission.")
+    description: Optional[str] = None
+    nullable: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -703,13 +713,15 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
             "required": field.required,
         }
         item.update(bounds_from_entries(field.type, field.constraints))
-        if field.type in ("object", "list[object]") and field.properties:
+        item.update({key: getattr(field, key) for key in ("description", "nullable") if getattr(field, key) is not None})
+        if field.properties is not None:
             item["properties"] = [
                 {
                     "name": prop.name,
                     "type": prop.type,
                     "required": prop.required,
                     **bounds_from_entries(prop.type, prop.constraints),
+                    **{key: getattr(prop, key) for key in ("description", "nullable") if getattr(prop, key) is not None},
                 }
                 for prop in field.properties
             ]
@@ -731,7 +743,7 @@ async def _generate_response_schema_with_rose(
     agent_id: str,
     compute_auth: Optional[Dict[str, Any]] = None,
     include_title: bool = False,
-) -> Tuple[Dict[str, Any], Optional[str], Dict[str, int]]:
+) -> Tuple[Dict[str, Any], Optional[str], Dict[str, Any]]:
     claude_auth_context, gpt_auth_context = _build_compute_auth_context_from_payload(compute_auth)
     response_model = _GeneratedResponseSchemaWithTitle if include_title else _GeneratedResponseSchema
     system_prompt = _RESPONSE_SCHEMA_SYSTEM_PROMPT + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else "")
@@ -796,14 +808,20 @@ async def _generate_response_schema_with_rose(
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": total_tokens or prompt_tokens + completion_tokens,
+                        "actual_model": usage.get("actual_model"),
+                        "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+                        "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                        "from_fast_cache": bool(usage.get("from_fast_cache")),
+                        "cache_sequence_id": usage.get("cache_sequence_id"),
                     },
                 )
-            except RoseError as exc:
-                last_error = exc
-                break
             except Exception as exc:
+                if any(error_chain_has_type(exc, kind) for kind in (
+                    "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                )):
+                    raise
                 last_error = exc
-                if max_tokens < 4000 and "finish_reason=length" in str(exc):
+                if not isinstance(exc, RoseError) and max_tokens < 4000 and "finish_reason=length" in str(exc):
                     continue
                 break
 
@@ -987,7 +1005,7 @@ def build_verifier_context_messages(
         text = _self_close_trailing_message_reference(msg.get("text", ""))
         metadata = msg.get("metadata", {}) or {}
 
-        if is_internal_subagent_message(msg):
+        if is_excluded_from_model(msg) or is_internal_subagent_message(msg):
             continue
         if role == "SYSTEM":
             continue
@@ -1370,9 +1388,7 @@ async def _resolve_verifier_file_evidence(
                     try:
                         text_content = file_content.decode("utf-8")
                         filename = fp.original_filename or ""
-                        is_deliverable = bool(
-                            _VERIFIER_DELIVERABLE_FILENAME_RE.search(filename)
-                        )
+                        is_deliverable = bool(_VERIFIER_DELIVERABLE_FILENAME_RE.search(filename))
                         per_file_cap = (
                             VERIFIER_MAX_INLINE_FILE_CHARS
                             if is_deliverable
@@ -2495,9 +2511,7 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
 
             if orphan_ids:
                 repaired = True
-                remaining = [
-                    tc for tc in (assistant_msg.get("tool_calls") or []) if tc.get("id") not in orphan_ids
-                ]
+                remaining = [tc for tc in (assistant_msg.get("tool_calls") or []) if tc.get("id") not in orphan_ids]
                 if remaining:
                     assistant_msg["tool_calls"] = remaining
                 else:
@@ -2664,6 +2678,9 @@ async def call_llm_structured_streaming(
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
     _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
+    _parse_failed_model: Optional[str] = None,
+    _parse_failed_count: int = 0,
+    _skip_models: frozenset[str] = frozenset(),
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -2780,12 +2797,7 @@ async def call_llm_structured_streaming(
             return reasoning or text_buffer
 
         def _total_stream_bytes() -> int:
-            return (
-                len(accumulated_reasoning)
-                + len(accumulated_json)
-                + len(text_buffer)
-                + hidden_stream_bytes
-            )
+            return len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer) + hidden_stream_bytes
 
         async def _emit_raw_progress() -> None:
             if not on_raw_progress:
@@ -2796,6 +2808,8 @@ async def call_llm_structured_streaming(
             _prof_calls["raw_progress"] += 1
 
         rose_kwargs: Dict[str, Any] = {}
+        if _skip_models:
+            rose_kwargs["_skip_models"] = _skip_models
         if deadline_s is not None:
             rose_kwargs["deadline_s"] = deadline_s
         if ttft_timeout_s is not None:
@@ -3159,6 +3173,17 @@ async def call_llm_structured_streaming(
             raise
         except RoseError as exc:
             logger.error(f"❌ [{request_id}] [{call_site}] Rose streaming failed: {type(exc).__name__}: {exc}")
+            if (
+                isinstance(exc, RoseAllFailed)
+                and not exc.step_errors
+                and _parse_failed_count >= 2
+                and _parse_failed_model in _skip_models
+            ):
+                # Validation excluded the remaining candidate. Preserve the typed
+                # output failure without retrying or changing pool eligibility.
+                raise LLMStructuredOutputError(
+                    f"No eligible Rose candidate remains after invalid {response_model.__name__} output"
+                ) from exc
             raise ValueError(f"Rose streaming failed: {exc}") from exc
         finally:
             with contextlib.suppress(Exception):
@@ -3219,9 +3244,7 @@ async def call_llm_structured_streaming(
             # empty stream becomes "" and can salvage JSON from reasoning.
             # Multiple final_answer items stay empty so the parse-retry
             # regenerates instead of accepting one competing blob.
-            accumulated_json = (
-                "" if structured_output.is_ambiguous() else structured_output.current_text()
-            )
+            accumulated_json = "" if structured_output.is_ambiguous() else structured_output.current_text()
 
         logger.info(
             f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
@@ -3277,6 +3300,10 @@ async def call_llm_structured_streaming(
                 context_tools=context_tools,
                 _exclude_anthropic_family=_exclude_anthropic_family,
                 _is_escalation=True,
+                _parse_retry_attempt=_parse_retry_attempt,
+                _parse_failed_model=_parse_failed_model,
+                _parse_failed_count=_parse_failed_count,
+                _skip_models=_skip_models,
             )
         elif final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed >= 180:
             logger.warning(
@@ -3300,11 +3327,7 @@ async def call_llm_structured_streaming(
         # Rose models output: [explanation text]```json\n{...}\n```
         # We need to extract the JSON from within the markdown code block
         try:
-            if (
-                not accumulated_json
-                and accumulated_reasoning
-                and not structured_output.is_ambiguous()
-            ):
+            if not accumulated_json and accumulated_reasoning and not structured_output.is_ambiguous():
                 # Thinking models (GPT-5.2, Kimi-K2.5) may put structured JSON
                 # in reasoning tokens instead of content tokens.
                 # Use balanced-brace extraction with JSON validation to skip
@@ -3493,6 +3516,26 @@ async def call_llm_structured_streaming(
                     f"{_parse_retry_attempt + 1}/{MAX_STRUCTURED_PARSE_RETRIES + 1}); "
                     f"re-generating. error={error_message}",
                 )
+                failed_model = (
+                    model_key(actual_model)
+                    if isinstance(e, (json.JSONDecodeError, ValidationError))
+                    and actual_model
+                    and actual_model
+                    not in {"unknown", "fast-cache", "fast-mode-soft-complete", "fast-mode-scrape-passthrough"}
+                    and not (stream_usage or {}).get("from_fast_cache")
+                    else None
+                )
+                failed_count = _parse_failed_count + 1 if failed_model and failed_model == _parse_failed_model else 1
+                retry_exclusions = _skip_models
+                if failed_model and failed_count >= 2:
+                    retry_exclusions = _skip_models | {failed_model}
+                    logger.warning(
+                        "llm.structured_candidate_excluded",
+                        actual_model=actual_model,
+                        candidate_key=failed_model,
+                        failed_responses=failed_count,
+                        remaining_attempts=MAX_STRUCTURED_PARSE_RETRIES - _parse_retry_attempt,
+                    )
                 retry_messages = _build_structured_retry_messages(
                     messages,
                     error_message=error_message,
@@ -3533,13 +3576,16 @@ async def call_llm_structured_streaming(
                     thinking=thinking,
                     effort=effort,
                     tool_choice=tool_choice,
-                context_tools=context_tools,
+                    context_tools=context_tools,
                     deadline_s=deadline_s,
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
                     _exclude_anthropic_family=_exclude_anthropic_family,
                     _is_escalation=_is_escalation,
                     _parse_retry_attempt=_parse_retry_attempt + 1,
+                    _parse_failed_model=failed_model,
+                    _parse_failed_count=failed_count,
+                    _skip_models=retry_exclusions,
                 )
             logger.error(
                 f"Failed to parse streaming Rose response: json={accumulated_json[:500]}",
@@ -4092,10 +4138,7 @@ async def call_llm(
             # SMS approval (incident eab955b6 / "Please share the"). Escalate
             # before caching so we never persist a truncated draft.
             if result.get("finish_reason") == "length" and max_tokens < 32768 and not _is_escalation:
-                logger.warning(
-                    f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, "
-                    "retrying with 32768"
-                )
+                logger.warning(f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768")
                 return await call_llm(
                     messages=messages,
                     model=model,
@@ -4222,8 +4265,7 @@ async def call_llm(
 
         if result.get("finish_reason") == "length" and max_tokens < 32768 and not _is_escalation:
             logger.warning(
-                f"⚠️ [{call_site}] OpenRouter response truncated at max_tokens={max_tokens}, "
-                "retrying with 32768"
+                f"⚠️ [{call_site}] OpenRouter response truncated at max_tokens={max_tokens}, retrying with 32768"
             )
             return await call_llm(
                 messages=messages,
@@ -4545,9 +4587,7 @@ async def _call_llm_verifier(
         # check_progress retry loop regenerates on the ValueError below.
         # Ambiguous multi-item streams stay empty so we do not salvage
         # one competing blob from reasoning.
-        accumulated_json = (
-            "" if structured_output.is_ambiguous() else structured_output.current_text()
-        )
+        accumulated_json = "" if structured_output.is_ambiguous() else structured_output.current_text()
 
     # llm.cache event is emitted from RoseClient.complete (single source).
     # Still need these locally for the returned usage dict consumed by callers.
@@ -4745,11 +4785,7 @@ def _iter_trusted_verifier_tool_evidences(
                 if tool_name not in _VERIFIER_TRUSTED_TOOL_NAMES:
                     continue
                 raw_call_id = payload.get("tool_call_id")
-                call_id = (
-                    raw_call_id.strip()
-                    if isinstance(raw_call_id, str) and raw_call_id.strip()
-                    else None
-                )
+                call_id = raw_call_id.strip() if isinstance(raw_call_id, str) and raw_call_id.strip() else None
                 result = payload.get("result")
                 if isinstance(result, str):
                     result_text = result
@@ -4853,8 +4889,7 @@ def _extract_payment_card_last4_from_verifier_messages(messages: List[Dict[str, 
         # Avoid double-counting the same raw TOOL message text that
         # `_iter_trusted_verifier_tool_evidences` also yields.
         if tool_call_id is None and any(
-            _is_trusted_tool_role_message(message)
-            and text in _iter_verifier_message_text_parts(message)
+            _is_trusted_tool_role_message(message) and text in _iter_verifier_message_text_parts(message)
             for message in messages
         ):
             continue
@@ -5036,9 +5071,7 @@ def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
     if normalized in ("list[object]", "list[dict]"):
         # Empty {} placeholders must not satisfy object-list deliverables.
         return (
-            isinstance(value, list)
-            and len(value) > 0
-            and all(isinstance(item, dict) and bool(item) for item in value)
+            isinstance(value, list) and len(value) > 0 and all(isinstance(item, dict) and bool(item) for item in value)
         )
     if normalized == "object":
         return isinstance(value, dict) and bool(value)
@@ -5159,10 +5192,7 @@ def _synthetic_completion_handoff_identity(tool_call_id: Any) -> Optional[str]:
 
 
 def _is_rejected_completion_feedback(metadata: Dict[str, Any]) -> bool:
-    if (
-        metadata.get("toolName") != "attempt_completion"
-        or metadata.get("toolStatus") != "FINISHED"
-    ):
+    if metadata.get("toolName") != "attempt_completion" or metadata.get("toolStatus") != "FINISHED":
         return False
     title = str(metadata.get("title") or "")
     if "Verifier rejected" in title:
@@ -5267,15 +5297,20 @@ def _build_verifier_response_model(
     if response_schema and response_schema.get("fields"):
         output_fields: Dict[str, Any] = {}
         for field in response_schema["fields"]:
-            if field.get("required", True) is False or any(
-                nested.get("required", True) is False for nested in _nested_fields_for_object_field(field)
-            ) or (field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field)):
+            if (
+                field.get("required", True) is False
+                or any(nested.get("required", True) is False for nested in _nested_fields_for_object_field(field))
+                or (field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field))
+            ):
                 openai_strict = False
             annotation = _verifier_field_annotation_for_field(field)
             output_fields[field["name"]] = (
                 annotation,
-                Field(... if field.get("required", True) else None,
-                      description=field.get("description", ""), **_pydantic_field_bounds(field)),
+                Field(
+                    ... if field.get("required", True) else None,
+                    description=field.get("description", ""),
+                    **_pydantic_field_bounds(field),
+                ),
             )
         output_model = create_model("VerifierOutput", **output_fields)
         fields["output"] = (output_model, ...)
@@ -5332,8 +5367,11 @@ def _build_nested_verifier_model(name: str, nested_fields: List[Dict[str, Any]])
             continue
         model_fields[nested_name] = (
             _verifier_field_annotation_for_field(nested),
-            Field(... if nested.get("required", True) else None,
-                  description=nested.get("description", ""), **_pydantic_field_bounds(nested)),
+            Field(
+                ... if nested.get("required", True) else None,
+                description=nested.get("description", ""),
+                **_pydantic_field_bounds(nested),
+            ),
         )
     return create_model(f"Verifier{safe_name.title().replace('_', '')}", **model_fields)
 
@@ -5579,11 +5617,14 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
             # schema contains an open-object field (`object` / `list[object]`),
             # we drop strict so the open shape is accepted. Anthropic +
             # claudeAuth paths are unaffected (they always accept open shapes).
-            "strict": not has_open_object and all(
-                field.get("required", True) and all(
-                    nested.get("required", True) for nested in _nested_fields_for_object_field(field)
-                ) for field in response_schema.get("fields", [])
-            ) if response_schema else not has_open_object,
+            "strict": not has_open_object
+            and all(
+                field.get("required", True)
+                and all(nested.get("required", True) for nested in _nested_fields_for_object_field(field))
+                for field in response_schema.get("fields", [])
+            )
+            if response_schema
+            else not has_open_object,
         },
     }
 
@@ -5608,6 +5649,8 @@ def max_tokens_for_verifier_call_site(call_site: str) -> int:
     if str(call_site or "") == "benchmark_declared_evaluator":
         return DECLARED_EVALUATOR_MAX_TOKENS
     return VERIFIER_MAX_TOKENS
+
+
 # A verifier is advisory and must never outlive the agent benchmark/activity
 # that requested it. Bound each provider attempt, and fence the retry loop so
 # individually bounded attempts cannot accumulate into a multi-minute zombie.
@@ -6010,19 +6053,12 @@ async def check_progress(
         # agent loops until the activity times out (verify18 leaves). Promote
         # any from_fast_cache reject to a soft-pass so the tree can finish at
         # 100% hits / ~$0 instead of hanging ACTIVE.
-        if (
-            fast_mode_cache_enabled
-            and float(score or 0) < 1.0
-            and bool((usage or {}).get("from_fast_cache"))
-        ):
+        if fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
             from providers.fast_cache.context import current_context as _fm_ctx
             from providers.fast_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
             _ctx = _fm_ctx()
-            if (
-                _fm_soft(call_site) is not None
-                and (_ctx.soft_complete_allowed if _ctx is not None else False)
-            ):
+            if _fm_soft(call_site) is not None and (_ctx.soft_complete_allowed if _ctx is not None else False):
                 logger.warning(
                     "Verifier Fast Mode soft-pass after cached reject",
                     call_site=call_site,
@@ -6075,8 +6111,7 @@ async def check_progress(
             return {
                 "score": 1.0,
                 "reasoning": (
-                    "Fast Mode cache trajectory ended; prior tool evidence is "
-                    "sufficient to treat the goal as complete."
+                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient to treat the goal as complete."
                 ),
                 "message": (
                     "Fast Mode cache trajectory ended; prior tool evidence is "
@@ -6552,6 +6587,47 @@ async def _persist_mass_agent_root_title(
         )
 
 
+async def _persist_response_schema(
+    client: httpx.AsyncClient,
+    agent_id: str,
+    schema: Dict[str, Any],
+    backend_url: str,
+    api_key: str,
+    title: Optional[str] = None,
+) -> None:
+    """Save an accepted schema through the existing generation-fenced API."""
+    try:
+        response = await client.patch(
+            f"{backend_url}/api/agents/{agent_id}",
+            headers={**backend_api_headers(api_key), **workflow_generation_headers()},
+            json={"response_schema": schema, **({"generated_title": title} if title else {})},
+        )
+    except httpx.HTTPError as e:
+        raise ResponseSchemaPersistenceError(
+            f"Failed to save response schema for agent {agent_id}: {extract_error_message(e)}"
+        ) from e
+    if not response.is_success:
+        raise ResponseSchemaPersistenceError(
+            f"Failed to save response schema for agent {agent_id}: HTTP {response.status_code}"
+        )
+    logger.info("Saved response schema to agent", agent_id=agent_id)
+
+
+@activity.defn
+@traced("persist_response_schema_activity")
+async def persist_response_schema_activity(agent_id: str, schema: Dict[str, Any]) -> None:
+    """Persist a schema after the owning workflow has accepted its revision."""
+    config = load_config()
+    api_key = config.backend.api_key
+    if not api_key or not isinstance(schema, dict) or not schema.get("fields"):
+        raise ResponseSchemaPersistenceError("Cannot persist response schema without credentials and fields")
+    _safe_heartbeat("Saving accepted response schema")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        await _persist_response_schema(
+            client, agent_id, schema, config.backend.api_url.rstrip("/"), api_key
+        )
+
+
 @activity.defn
 @traced("set_response_schema_activity")
 async def set_response_schema_activity(
@@ -6560,6 +6636,7 @@ async def set_response_schema_activity(
     compute_auth: Optional[Dict[str, Any]] = None,
     fast_mode_cache_enabled: bool = False,
     include_title: bool = False,
+    persist: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """
     Generate and save a structured response schema for an agent.
@@ -6573,9 +6650,12 @@ async def set_response_schema_activity(
         compute_auth: Optional selected compute token from the workflow cache
         include_title: Generate a sidebar title in the same LLM response. This is
             true only for the initial schema of a top-level agent.
+        persist: Save immediately for startup callers. Background refreshes
+            defer persistence until the workflow accepts the generated revision.
 
     Returns:
-        The generated schema dict with 'fields' array, or None on failure
+        The generated schema dict with 'fields' array. Generation errors are
+        raised so the existing activity retry policy can retry the call.
     """
     import time
 
@@ -6627,18 +6707,13 @@ async def set_response_schema_activity(
         # mass-agent T7 fails with "Root task title is missing").
         _fc_material = {
             "pool": "rose-1-flash",
-            "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT
-            + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
+            "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
             "user": f"Goal: {goal}",
-            "response_model": (
-                "_GeneratedResponseSchemaWithTitle" if include_title else "_GeneratedResponseSchema"
-            ),
+            "response_model": ("_GeneratedResponseSchemaWithTitle" if include_title else "_GeneratedResponseSchema"),
             "temperature": 0.3,
             "max_tokens": [2000, 4000],
         }
-        _fc_lookup_keys = _fc_norm.content_lookup_keys_with_pool_aliases(
-            goal, "response_schema", _fc_material
-        )
+        _fc_lookup_keys = _fc_norm.content_lookup_keys_with_pool_aliases(goal, "response_schema", _fc_material)
         _fc_key = _fc_lookup_keys[0]
         if fast_mode_cache_enabled:
             try:
@@ -6704,36 +6779,11 @@ async def set_response_schema_activity(
             if not schema.get("fields"):
                 raise ValueError("LLM returned no response schema content")
 
-            # 2. Save schema to agent record
-            save_start = time.perf_counter()
-            try:
-                save_response = await client.patch(
-                    f"{backend_url}/api/agents/{agent_id}",
-                    headers={
-                        **backend_api_headers(api_key),
-                        **workflow_generation_headers(),
-                    },
-                    json={
-                        "response_schema": schema,
-                        **({"generated_title": title} if title else {}),
-                    },
-                )
-            except httpx.HTTPError as e:
-                raise ResponseSchemaPersistenceError(
-                    f"Failed to save response schema for agent {agent_id}: {extract_error_message(e)}"
-                ) from e
-            save_elapsed = time.perf_counter() - save_start
-            logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
-
-            if not save_response.is_success:
-                logger.warning(
-                    "Failed to save response schema", agent_id=agent_id, status_code=save_response.status_code
-                )
-                raise ResponseSchemaPersistenceError(
-                    f"Failed to save response schema for agent {agent_id}: HTTP {save_response.status_code}"
-                )
-
-            logger.info("Saved response schema to agent", agent_id=agent_id)
+            if persist:
+                save_start = time.perf_counter()
+                await _persist_response_schema(client, agent_id, schema, backend_url, api_key, title)
+                save_elapsed = time.perf_counter() - save_start
+                logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
 
             activity_elapsed = time.perf_counter() - activity_start
             logger.info(
@@ -6756,14 +6806,20 @@ async def set_response_schema_activity(
             status_code=e.response.status_code,
             response_text=e.response.text[:500],
         )
-        await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
-        return None
+        if persist:
+            await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
+        raise
     except ResponseSchemaPersistenceError:
         raise
     except Exception as e:
+        if any(error_chain_has_type(e, kind) for kind in (
+            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+        )):
+            raise
         logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
-        await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
-        return None
+        if persist:
+            await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
+        raise
 
 
 async def fetch_claude_max_token(user_id: str) -> Optional[Dict[str, Any]]:
@@ -6873,11 +6929,7 @@ async def fetch_compute_token_activity(
     pinned_benchmark_type = benchmark_compute_token_type()
     _safe_heartbeat("Fetching compute token")
 
-    if (
-        pinned_benchmark_type
-        and token_type in ("claude", "gpt")
-        and token_type != pinned_benchmark_type
-    ):
+    if pinned_benchmark_type and token_type in ("claude", "gpt") and token_type != pinned_benchmark_type:
         logger.info(
             "Skipping compute token fetch: rotation asked for %s but "
             "BENCHMARK_COMPUTE_TOKEN_TYPE=%s (keep waterfall affinity)",
@@ -6920,8 +6972,7 @@ async def fetch_compute_token_activity(
                 if token and provider_type in ("claude", "gpt"):
                     if pinned_benchmark_type and provider_type != pinned_benchmark_type:
                         logger.warning(
-                            "Rejecting compute token type=%s under "
-                            "BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
+                            "Rejecting compute token type=%s under BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
                             provider_type,
                             pinned_benchmark_type,
                         )

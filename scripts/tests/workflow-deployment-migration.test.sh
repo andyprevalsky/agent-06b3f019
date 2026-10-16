@@ -229,6 +229,40 @@ release_line=$(grep -n 'release_agent_cutover_lock success' "$DEPLOY" | tail -1 
 WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
 COOP="$ROOT/scripts/deploy-agents-cooperative-cutover.sh"
 WORKER="$ROOT/agents/worker.py"
+python3 - "$WORKFLOW" <<'PY'
+import os
+import re
+import subprocess
+import sys
+import textwrap
+
+with open(sys.argv[1]) as source:
+    workflow = source.read()
+dispatch = re.search(r"(?ms)^  workflow_dispatch:\n(.*?)^  push:", workflow)
+assert dispatch, "worker deployment needs a manual recovery entry point"
+assert "      expected_sha:" in dispatch[1] and "        required: true" in dispatch[1]
+guard = re.search(
+    r"(?ms)^    steps:\n      - name: Verify manual deployment source\n(.*?)^      - uses:",
+    workflow,
+)
+assert guard, "dispatch source guard must precede checkout and all deployment steps"
+assert "if: github.event_name == 'workflow_dispatch'" in guard[1]
+assert "EXPECTED_SHA: ${{ inputs.expected_sha }}" in guard[1]
+body = re.search(r"run: \|\n((?:          .*\n)+)", guard[1])
+assert body, "manual source guard must have an executable shell body"
+sha = "a" * 40
+for ref, expected, allowed in [
+    ("refs/heads/main", sha, True),
+    ("refs/heads/main", "b" * 40, False),
+    ("refs/heads/feature", sha, False),
+]:
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", textwrap.dedent(body[1])],
+        env={**os.environ, "GITHUB_REF": ref, "GITHUB_SHA": sha, "EXPECTED_SHA": expected},
+        capture_output=True, text=True,
+    )
+    assert (result.returncode == 0) is allowed, (ref, expected, result)
+PY
 require_text "$WORKFLOW" 'BUILD_ID: ${{ github.sha }}' "Fly deploy must identify the exact candidate SHA"
 require_text "$WORKFLOW" 'DEPLOYMENT_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}' "Fly deploy must identify the exact deployment attempt"
 require_text "$WORKFLOW" 'bash scripts/classify-agent-runtime-changes.sh' "Fly deploy must classify shipped runtime changes"
@@ -487,5 +521,5 @@ require_file "$ROOT/back-end/src/domains/agent-queue-pointer/routes.ts" \
 # fresh provisioning, transient Machines API update failures).
 bash "$ROOT/scripts/tests/deploy-agent-clone-recovery.test.sh" ||
   fail "cooperative cutover must recover clones and retry transient Fly machine-update failures"
-
-
+python3 "$ROOT/scripts/tests/retained-agent-machine.test.py" ||
+  fail "retained worker reuse must preserve native ownership, custody, config and leases"

@@ -31,7 +31,9 @@ Categories
 import ast
 import asyncio
 import re
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from _test_utils import BlackboxResult, teardown_mock
 
@@ -215,9 +217,7 @@ def test_explore_agent_system_prompt_is_static_across_calls():
         "message, not in this template."
     )
     # Sanity: per-call time must not bleed into the static prefix.
-    assert "Current timestamp:" not in a, (
-        "Current timestamp leaked into EXPLORE_AGENT_SYSTEM_PROMPT static prefix"
-    )
+    assert "Current timestamp:" not in a, "Current timestamp leaked into EXPLORE_AGENT_SYSTEM_PROMPT static prefix"
 
 
 def test_get_browser_system_prompt_is_static_across_calls():
@@ -236,12 +236,8 @@ def test_get_browser_system_prompt_is_static_across_calls():
         "call inside this function breaks the cache."
     )
     # Sanity: per-step state must not bleed into the static prefix.
-    assert "Current time:" not in a, (
-        "Current time leaked into get_browser_system_prompt static prefix"
-    )
-    assert "CURRENT URL:" not in a, (
-        "Current URL leaked into get_browser_system_prompt static prefix"
-    )
+    assert "Current time:" not in a, "Current time leaked into get_browser_system_prompt static prefix"
+    assert "CURRENT URL:" not in a, "Current URL leaked into get_browser_system_prompt static prefix"
 
 
 # ============================================================================
@@ -280,12 +276,7 @@ def test_every_tool_model_appears_in_at_least_one_phase_list():
         TOOL_MODELS,
     )
 
-    union = (
-        set(PLAN_PHASE_TOOLS)
-        | set(EXECUTE_PHASE_TOOLS)
-        | set(EXPLORE_AGENT_TOOLS)
-        | set(PLANNER_ASSIGNABLE_TOOLS)
-    )
+    union = set(PLAN_PHASE_TOOLS) | set(EXECUTE_PHASE_TOOLS) | set(EXPLORE_AGENT_TOOLS) | set(PLANNER_ASSIGNABLE_TOOLS)
 
     # This exact-goal benchmark tool is injected into the root workflow's
     # execute list only for the Google OAuth video task. Adding it to a shared
@@ -312,12 +303,7 @@ def test_every_phase_list_entry_exists_in_tool_models_or_is_alias():
         TOOL_MODELS,
     )
 
-    union = (
-        set(PLAN_PHASE_TOOLS)
-        | set(EXECUTE_PHASE_TOOLS)
-        | set(EXPLORE_AGENT_TOOLS)
-        | set(PLANNER_ASSIGNABLE_TOOLS)
-    )
+    union = set(PLAN_PHASE_TOOLS) | set(EXECUTE_PHASE_TOOLS) | set(EXPLORE_AGENT_TOOLS) | set(PLANNER_ASSIGNABLE_TOOLS)
 
     missing = union - set(TOOL_MODELS.keys()) - _PLANNER_ALIASES
     assert not missing, (
@@ -353,16 +339,16 @@ def test_spawn_agent_subtype_params_use_required_optional_ignored_taxonomy():
     from utils.tool_schemas import SpawnAgentTool
 
     fields = SpawnAgentTool.model_fields
-    descriptions = {
-        name: field.description or ""
-        for name, field in fields.items()
-    }
+    descriptions = {name: field.description or "" for name, field in fields.items()}
     combined = "\n".join(descriptions.values())
 
     assert "Required for type" not in combined
     assert "Required when type='browser'" in descriptions["start_url"]
     assert "Required when type='general_purpose' or type='for_each'" in descriptions["start_phase"]
-    assert "Required when type='browser', type='code', type='general_purpose', or type='for_each'" in descriptions["output_schema"]
+    assert (
+        "Required when type='browser', type='code', type='general_purpose', or type='for_each'"
+        in descriptions["output_schema"]
+    )
     assert "Optional alternative when type='for_each'" in descriptions["items"]
     assert "Optional alternative when type='for_each'" in descriptions["items_csv"]
     assert "Optional when type='code'" in descriptions["github_repo_link"]
@@ -453,8 +439,7 @@ def test_attempt_completion_result_schema_is_skip_verification_variant():
 
     fields = set(AttemptCompletionWithResultTool.model_fields.keys())
     assert fields == {"tool", "result"}, (
-        f"AttemptCompletionWithResultTool.model_fields = {fields}, "
-        f"expected {{'tool', 'result'}}."
+        f"AttemptCompletionWithResultTool.model_fields = {fields}, expected {{'tool', 'result'}}."
     )
     # The sub-agent handoff payload MUST be required — an empty result means
     # the parent receives no evidence and either hallucinates or re-spawns.
@@ -504,9 +489,7 @@ def test_verifier_schema_with_response_schema_field_order():
     """With response_schema: keys must be ['output', 'reasoning', 'score'] in order."""
     from helpers.llm import _build_verifier_json_schema
 
-    schema = _build_verifier_json_schema(
-        {"fields": [{"name": "address", "type": "str", "description": "Address"}]}
-    )
+    schema = _build_verifier_json_schema({"fields": [{"name": "address", "type": "str", "description": "Address"}]})
     keys = list(schema["json_schema"]["schema"]["properties"].keys())
     assert keys == ["output", "reasoning", "score"], (
         f"Verifier schema (with response_schema) keys are {keys}, expected "
@@ -642,6 +625,53 @@ _DELETED_TOOLS_UNAMBIGUOUS = (
 )
 
 
+def _inert_forbidden_literal_spans(text: str) -> set[tuple[int, int, int, int]]:
+    """Recognize only a top-level immutable literal deny-list declaration."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    nodes = list(ast.walk(tree))
+    if any(
+        isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Store)
+        and node.id == "frozenset"
+        or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.name == "frozenset"
+        or isinstance(node, ast.alias)
+        and (node.asname or node.name) == "frozenset"
+        for node in nodes
+    ):
+        return set()
+    bindings = [
+        node
+        for node in nodes
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == "DEFAULT_FORBIDDEN"
+    ]
+    if len(bindings) != 1:
+        return set()
+    for statement in tree.body:
+        if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == "DEFAULT_FORBIDDEN"
+        ):
+            continue
+        value = statement.value
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "frozenset"
+            and not value.keywords
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Set)
+            and all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in value.args[0].elts)
+        ):
+            return {(item.lineno, item.col_offset, item.end_lineno, item.end_col_offset) for item in value.args[0].elts}
+    return set()
+
+
 def test_no_deleted_tool_names_as_string_literals_in_production_code():
     """No unambiguous deleted tool name should appear as a string literal in code.
 
@@ -651,10 +681,7 @@ def test_no_deleted_tool_names_as_string_literals_in_production_code():
     avoid false positives on common English words that overlap with deleted
     tools (e.g. "monitor", "enrich", "find_all").
     """
-    patterns = {
-        name: re.compile(rf"""['"`]{re.escape(name)}['"`]""")
-        for name in _DELETED_TOOLS_UNAMBIGUOUS
-    }
+    patterns = {name: re.compile(rf"""['"`]{re.escape(name)}['"`]""") for name in _DELETED_TOOLS_UNAMBIGUOUS}
 
     offenders: list[str] = []
     for path in _iter_production_py_files():
@@ -663,6 +690,7 @@ def test_no_deleted_tool_names_as_string_literals_in_production_code():
         except OSError:
             continue
         rel = str(path.relative_to(AGENTS_ROOT))
+        inert_spans = _inert_forbidden_literal_spans(text)
         for lineno, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()
             # Skip pure-comment lines — referencing deleted names in comments
@@ -670,16 +698,61 @@ def test_no_deleted_tool_names_as_string_literals_in_production_code():
             if stripped.startswith("#"):
                 continue
             for name, pat in patterns.items():
-                if pat.search(line):
+                if any(
+                    not any(
+                        (start_line, start_col) <= (lineno, len(line[: match.start()].encode("utf-8")))
+                        and (lineno, len(line[: match.end()].encode("utf-8"))) <= (end_line, end_col)
+                        for start_line, start_col, end_line, end_col in inert_spans
+                    )
+                    for match in pat.finditer(line)
+                ):
                     offenders.append(f"{rel}:{lineno}: {name!r} -> {stripped}")
 
     assert not offenders, (
         "Found deleted tool name(s) referenced as string literals in "
         "production code. These tools were intentionally removed (see prompt "
         "audit plan). If you genuinely need the behaviour, route it through "
-        "spawn_agent or the surviving tool. Offending lines:\n  "
-        + "\n  ".join(offenders)
+        "spawn_agent or the surviving tool. Offending lines:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_deleted_tool_scanner_distinguishes_inert_denylists_from_dispatch():
+    """Offline deny-list data is allowed; dispatch and dynamic data stay guarded."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        evaluator = root / "benchmarks" / "offline_evaluator.py"
+        evaluator.parent.mkdir()
+        inert = 'DEFAULT_FORBIDDEN = frozenset({"deep_research"})\n'
+        with patch.dict(globals(), {"AGENTS_ROOT": root}):
+            evaluator.write_text(inert)
+            test_no_deleted_tool_names_as_string_literals_in_production_code()
+            for relative in ("tools/runtime.py", "benchmarks/runner.py", "benchmarks/offline_evaluator.py"):
+                candidate = root / relative
+                candidate.parent.mkdir(exist_ok=True)
+                candidate.write_text(inert + 'dispatch("deep_research")\n')
+                try:
+                    test_no_deleted_tool_names_as_string_literals_in_production_code()
+                except AssertionError as error:
+                    assert relative in str(error)
+                else:
+                    raise AssertionError(f"Dispatch escaped scanner: {relative}")
+                candidate.unlink()
+            for declaration in (
+                'DEFAULT_FORBIDDEN = {"deep_research"}\n',
+                'DEFAULT_FORBIDDEN = frozenset({dispatch("deep_research")})\n',
+                'DEFAULT_FORBIDDEN = frozenset({"deep_research"}, dynamic=True)\n',
+                'DEFAULT_FORBIDDEN = frozenset({"deep_research"}) +\n',
+                'DEFAULT_FORBIDDEN = frozenset({"deep_research"}); dispatch("deep_research")\n',
+                'frozenset = dispatch\nDEFAULT_FORBIDDEN = frozenset({"deep_research"})\n',
+                'DEFAULT_FORBIDDEN = frozenset({"deep_research"})\nDEFAULT_FORBIDDEN = dispatch\n',
+            ):
+                evaluator.write_text(declaration)
+                try:
+                    test_no_deleted_tool_names_as_string_literals_in_production_code()
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError(f"Unsafe declaration escaped scanner: {declaration}")
 
 
 def test_no_check_progress_tool_name_in_production_code():
@@ -743,8 +816,7 @@ def test_check_progress_is_canonical_verifier_entrypoint():
         "Found production code referencing `_call_llm_verifier` outside "
         "helpers/llm.py. The canonical entrypoint is `check_progress` — it "
         "forces rose-1-ultra + telemetry. Direct `_call_llm_verifier` calls "
-        "bypass both. Migrate to `check_progress` activity calls.\n  "
-        + "\n  ".join(offenders)
+        "bypass both. Migrate to `check_progress` activity calls.\n  " + "\n  ".join(offenders)
     )
 
 
@@ -818,8 +890,7 @@ def test_browser_use_prompt_requires_native_tool_call():
     for legacy in forbidden:
         legacy_key_pat = re.compile(rf'"{re.escape(legacy)}"\s*:')
         assert not legacy_key_pat.search(prompt), (
-            f"Browser-use prompt advertises legacy required field '{legacy}'. "
-            "Browser-use now uses native tools."
+            f"Browser-use prompt advertises legacy required field '{legacy}'. Browser-use now uses native tools."
         )
 
 
@@ -1066,8 +1137,7 @@ def test_ts_prompt_files_have_no_dynamic_dates_in_system_blocks():
     assert not bad, (
         "Found dynamic dates inside static system-prompt template literals "
         "in TS prompt files. Same rule as the Python side — timestamps belong "
-        "on per-call USER messages, not in the cacheable system prefix.\n  "
-        + "\n  ".join(bad)
+        "on per-call USER messages, not in the cacheable system prefix.\n  " + "\n  ".join(bad)
     )
 
 
@@ -1254,8 +1324,7 @@ def test_no_em_dashes_in_prompt_strings():
         "Em-dashes (— or –) found in prompt-source string literals. "
         "The main agent system prompt bans em-dashes in output; the ban only "
         "holds if the prompt sources themselves use hyphens or commas. "
-        "Replace each em-dash with ' - ' or ', '. Offenders:\n  "
-        + "\n  ".join(bad[:40])
+        "Replace each em-dash with ' - ' or ', '. Offenders:\n  " + "\n  ".join(bad[:40])
     )
 
 
@@ -1302,12 +1371,8 @@ def test_no_banned_phrases_in_prompt_strings():
     """
     # Hedge / brand: simple substring (case-insensitive) is fine because
     # they don't have natural compound forms.
-    hedge_pats = [
-        (re.compile(re.escape(p), re.IGNORECASE), p) for p in _BANNED_HEDGE_PHRASES
-    ]
-    brand_pats = [
-        (re.compile(re.escape(p), re.IGNORECASE), p) for p in _BANNED_BRAND_TERMS
-    ]
+    hedge_pats = [(re.compile(re.escape(p), re.IGNORECASE), p) for p in _BANNED_HEDGE_PHRASES]
+    brand_pats = [(re.compile(re.escape(p), re.IGNORECASE), p) for p in _BANNED_BRAND_TERMS]
     # Marketing adjectives: require word-boundary that EXCLUDES hyphens, so
     # "non-comprehensive" / "high-performance" doesn't trip the check. The
     # boundary chars are whitespace, punctuation, or string start/end —
@@ -1398,8 +1463,7 @@ def test_no_differs_from_spawn_agent_cross_refs():
         "Planner-alias prompts reference 'DIFFERS FROM spawn_agent' but the "
         "planner audience never sees the unified spawn_agent prompt. The "
         "cross-reference is broken. Either drop the section or move the "
-        "differentiating content into the alias prompt directly.\n  "
-        + "\n  ".join(bad)
+        "differentiating content into the alias prompt directly.\n  " + "\n  ".join(bad)
     )
 
 
@@ -1443,9 +1507,7 @@ def test_no_all_caps_underlined_section_labels_in_prompts():
         "verifier": build_verifier_prompt(),
         "explore": EXPLORE_AGENT_SYSTEM_PROMPT,
         "browser_use": build_browser_use_system_prompt(["click"]),
-        "browser_v3": get_browser_system_prompt(
-            "a" * 60, custom_instructions="", available_files=[]
-        ),
+        "browser_v3": get_browser_system_prompt("a" * 60, custom_instructions="", available_files=[]),
     }
     for name, prompt in rendered.items():
         lines = prompt.splitlines()
@@ -1562,9 +1624,7 @@ def test_system_prompt_boundary_marker_present():
         "main_plan": build_system_prompt("PLAN", ["set_plan"]),
         "planner": build_planner_system_prompt("desc"),
         "verifier": build_verifier_prompt(),
-        "browser_v3": get_browser_system_prompt(
-            "a" * 60, custom_instructions="", available_files=[]
-        ),
+        "browser_v3": get_browser_system_prompt("a" * 60, custom_instructions="", available_files=[]),
     }
     missing = [name for name, p in must_have_boundary.items() if boundary not in p]
     assert not missing, (
@@ -1633,9 +1693,7 @@ def test_all_caps_marker_count_under_limit():
         "verifier": build_verifier_prompt(),
         "explore": EXPLORE_AGENT_SYSTEM_PROMPT,
         "browser_use": build_browser_use_system_prompt(["click"]),
-        "browser_v3": get_browser_system_prompt(
-            "a" * 60, custom_instructions="", available_files=[]
-        ),
+        "browser_v3": get_browser_system_prompt("a" * 60, custom_instructions="", available_files=[]),
     }
     too_many = []
     for name, prompt in rendered.items():
@@ -1647,8 +1705,7 @@ def test_all_caps_marker_count_under_limit():
         f"Rendered prompts have >{LIMIT} ALL-CAPS markers (IMPORTANT, CRITICAL, "
         f"MUST, NEVER, ALWAYS). Caps are a scarce attention resource — reserve "
         f"them for true correctness gates. Either rewrite the bullet without "
-        f"a marker, or fold related rules into a single bullet.\n  "
-        + "\n  ".join(too_many)
+        f"a marker, or fold related rules into a single bullet.\n  " + "\n  ".join(too_many)
     )
 
 
@@ -1696,15 +1753,11 @@ def test_planner_routes_retrieval_before_stateful_execution():
     from utils.prompts import build_planner_system_prompt
 
     prompt = build_planner_system_prompt(SPAWN_AGENT_PROMPT)
-    assert (
-        "Plan information retrieval and discovery in spawn_explore_agent before dependent execution."
-        in prompt
-    )
+    assert "Plan information retrieval and discovery in spawn_explore_agent before dependent execution." in prompt
     assert "spawn_browser_agent may read pages only while executing a known stateful trajectory" in prompt
     assert (
         "Step 0 spawn_explore_agent retrieves the public target or route; "
-        "Step 1 spawn_browser_agent executes the complete stateful flow"
-        in prompt
+        "Step 1 spawn_browser_agent executes the complete stateful flow" in prompt
     )
     assert "explore: The agent for information retrieval and discovery." in prompt
     assert "Public research, target discovery, and route discovery belong in explore first." in prompt
@@ -1740,20 +1793,13 @@ def test_tool_prompts_open_with_declarative_sentence():
             bad.append(f"{name}: empty first line")
             continue
         if first_line.startswith("You "):
-            bad.append(
-                f"{name}: opens with second-person 'You ': {first_line[:80]!r}"
-            )
+            bad.append(f"{name}: opens with second-person 'You ': {first_line[:80]!r}")
             continue
         if not first_line.endswith("."):
-            bad.append(
-                f"{name}: opening line not declarative (no period): "
-                f"{first_line[:80]!r}"
-            )
+            bad.append(f"{name}: opening line not declarative (no period): {first_line[:80]!r}")
             continue
         if len(first_line.split()) < 3:
-            bad.append(
-                f"{name}: opening line too short (<3 words): {first_line!r}"
-            )
+            bad.append(f"{name}: opening line too short (<3 words): {first_line!r}")
 
     assert not bad, (
         "Tool prompts must open with a declarative third-person sentence. "
@@ -1814,8 +1860,7 @@ def test_tool_prompt_length_budget():
         n = len(prompt)
         if n < _TOOL_PROMPT_CHAR_FLOOR:
             bad.append(
-                f"{name}: {n} chars below floor {_TOOL_PROMPT_CHAR_FLOOR}; "
-                f"add 'when to use' / 'do not use' guidance"
+                f"{name}: {n} chars below floor {_TOOL_PROMPT_CHAR_FLOOR}; add 'when to use' / 'do not use' guidance"
             )
         elif n > cap:
             bad.append(
@@ -1827,8 +1872,7 @@ def test_tool_prompt_length_budget():
         "Tool prompts outside the per-call char budget. Either trim the prose "
         "or, if the size is intentional (e.g. inlines a load-bearing rule "
         "block like VERIFICATION_RULES), add an override in "
-        "_TOOL_PROMPT_CHAR_CAP_OVERRIDES with a comment.\n  "
-        + "\n  ".join(bad)
+        "_TOOL_PROMPT_CHAR_CAP_OVERRIDES with a comment.\n  " + "\n  ".join(bad)
     )
 
 
@@ -1851,11 +1895,7 @@ def test_output_schema_states_attempt_completion_takes_no_arguments():
     """
     from utils.prompts import format_required_output_schema_user_message
 
-    schema = {
-        "fields": [
-            {"name": "order_confirmation_id", "type": "str", "required": True, "description": "id"}
-        ]
-    }
+    schema = {"fields": [{"name": "order_confirmation_id", "type": "str", "required": True, "description": "id"}]}
     rendered = format_required_output_schema_user_message(schema)
 
     assert "takes no arguments" in rendered, (
@@ -1870,8 +1910,7 @@ def test_output_schema_states_attempt_completion_takes_no_arguments():
         "accepts a payload, does not find one, and stalls."
     )
     assert "Gather this data before calling attempt_completion:" not in rendered, (
-        "The ambiguous pre-fix wording is back; it reads as a list of tool "
-        "arguments for a tool that accepts none."
+        "The ambiguous pre-fix wording is back; it reads as a list of tool arguments for a tool that accepts none."
     )
 
 
@@ -2037,6 +2076,10 @@ async def run_all_tests():
     r.record(
         "no_deleted_tool_names_as_string_literals_in_production_code",
         test_no_deleted_tool_names_as_string_literals_in_production_code,
+    )
+    r.record(
+        "deleted_tool_scanner_distinguishes_inert_denylists_from_dispatch",
+        test_deleted_tool_scanner_distinguishes_inert_denylists_from_dispatch,
     )
     r.record(
         "no_check_progress_tool_name_in_production_code",

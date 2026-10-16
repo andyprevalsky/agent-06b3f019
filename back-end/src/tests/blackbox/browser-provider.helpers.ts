@@ -266,6 +266,14 @@ export function withProvider(value: string | undefined, test: () => void): void 
 
 /** Exercise actual Steel replacement/facade with offline native and DB boundaries. */
 export async function assertSteelSameProfileReplacement(retryReleased: boolean): Promise<void> {
+  await assertSteelSameProfileReplacementState(retryReleased, true);
+  if (retryReleased) await assertSteelSameProfileReplacementState(true, false);
+}
+
+async function assertSteelSameProfileReplacementState(
+  retryReleased: boolean,
+  inspectReleased: boolean
+): Promise<void> {
   const originals = {
     find: prisma.browserSession.findUnique,
     fingerprint: prisma.integration.findUnique,
@@ -275,6 +283,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     create: steel.sessions.create,
     inspect: steel.sessions.retrieve,
     release: steel.sessions.release,
+    get: steel.get,
     connect: chromium.connectOverCDP,
     query: prisma.$queryRaw,
     transaction: prisma.$transaction,
@@ -317,6 +326,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
   const allocated = new Set<string>();
   const requested = new Set<string>();
   let ready = false;
+  let profileReads = 0;
   let releases = 0;
   let failCreate = retryReleased;
   let createAttempts = 0;
@@ -336,7 +346,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
       return effect[key as keyof Effect] === expected;
     });
   try {
-    process.env.CONDUCTOR_WORKSPACE_NAME = `offline-steel-same-profile-${retryReleased}`;
+    process.env.CONDUCTOR_WORKSPACE_NAME = `offline-steel-same-profile-${retryReleased}-${inspectReleased}`;
     globalThis.fetch = (async () => {
       externalCalls++;
       throw new Error('unexpected external request in same-profile fixture');
@@ -431,18 +441,26 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     prisma.browserContext.update = (async () => ({})) as typeof originals.contextUpdate;
     steel.sessions.retrieve = (async (id: string) => {
       nodeAssert.strictEqual(id, 'offline-source', 'unexpected foreign/native inspection');
-      const status = ready ? 'released' : 'live';
+      const status = ready && inspectReleased ? 'released' : 'live';
       inspectedSourceStates.push(status);
       return { id, profileId: 'offline-profile', persistProfile: true, status };
     }) as typeof originals.inspect;
     steel.sessions.release = (async (id: string) => {
       nodeAssert.strictEqual(id, 'offline-source', 'released unallocated/foreign candidate');
       nodeAssert.strictEqual(row.status, 'PAUSED', 'source release must retain recovery custody');
-      nodeAssert(!ready, 'exact released proof forbids a duplicate native release');
+      if (inspectReleased) nodeAssert(!ready, 'exact released proof forbids a duplicate native release');
       releases++;
+      if (ready) throw Object.assign(new Error('already released'), { status: 404 });
       ready = true;
       return {};
     }) as typeof originals.release;
+    steel.get = (async (path: string) => {
+      nodeAssert.strictEqual(path, '/v1/profiles/offline-profile');
+      nodeAssert(ready, 'profile readiness must follow acknowledged source release');
+      nodeAssert.strictEqual(row.status, 'PAUSED', 'readiness must retain recovery custody');
+      profileReads++;
+      return { status: 'READY' };
+    }) as typeof originals.get;
     steel.sessions.create = (async (input: {
       sessionId: string;
       profileId?: string;
@@ -451,6 +469,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     }) => {
       createAttempts++;
       nodeAssert(ready, 'same-profile attach preceded source release');
+      nodeAssert(profileReads > 0, 'replacement create requires native profile readiness');
       nodeAssert.strictEqual(row.status, 'PAUSED');
       nodeAssert.strictEqual(row.closedAt, null);
       nodeAssert.strictEqual(input.profileId, 'offline-profile');
@@ -496,9 +515,19 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
       failCreate = false;
       const recovered = await recreateSession('offline-task', { forceManagedRotation: true });
       nodeAssert.strictEqual(recovered.previousSessionReleased, true);
-      // The second exact native inspection proves released; no release404 is required.
-      nodeAssert.deepStrictEqual(inspectedSourceStates, ['live', 'released']);
-      nodeAssert.strictEqual(releases, 1, 'already released writer was released again');
+      if (inspectReleased) {
+        // The second exact native inspection proves released; no release404 is required.
+        nodeAssert.deepStrictEqual(inspectedSourceStates, ['live', 'released']);
+        nodeAssert.strictEqual(releases, 1, 'already released writer was released again');
+      } else {
+        // Stale/live inspection cannot prove release; retain the SDK's idempotent 404 path.
+        nodeAssert.deepStrictEqual(inspectedSourceStates, ['live', 'live']);
+        nodeAssert.strictEqual(
+          releases,
+          2,
+          'second invocation must use the existing idempotent release404 contract'
+        );
+      }
     } else {
       const result = await rotateProxy('offline-task', {
         provider: 'steel',
@@ -534,6 +563,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     steel.sessions.create = originals.create;
     steel.sessions.retrieve = originals.inspect;
     steel.sessions.release = originals.release;
+    steel.get = originals.get;
     chromium.connectOverCDP = originals.connect;
     prisma.$queryRaw = originals.query;
     prisma.$transaction = originals.transaction;

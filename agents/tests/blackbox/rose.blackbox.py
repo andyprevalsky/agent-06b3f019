@@ -10,18 +10,14 @@ Covers the units that aren't already exercised end-to-end via llm.blackbox.py:
   - pools (registry lookup, all_pool_names)
 """
 
+import argparse
 import asyncio
 import json
 import os
-import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from _test_utils import BlackboxResult, set_mock_handler, setup_mock, teardown_mock
+from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 from _rose_stream_progress_fixture import single_step_waterfall
 
 import httpx
@@ -93,7 +89,7 @@ from utils.tool_schemas import ALL_PHASE_TOOLS, create_agent_action_model
 
 # Speed-pool tests opt back in with patch.dict. A live CEREBRAS_API_KEY would
 # make every flash complete() hit Cerebras before OpenRouter.
-os.environ.pop("CEREBRAS_API_KEY", None)
+_LIVE_CEREBRAS_API_KEY = os.environ.pop("CEREBRAS_API_KEY", "")
 
 
 # =====================================================================
@@ -272,6 +268,388 @@ def test_pool_registry_lookup():
         "input_cents_per_1k": 0.015,
         "output_cents_per_1k": 0.08,
     }
+
+
+def test_cerebras_native_tools_enforce_representable_shapes():
+    """The actual request builder must enforce native types without mutating schemas."""
+    from copy import deepcopy
+    from typing import Literal
+
+    from pydantic import BaseModel, Field, ValidationError
+    from providers.rose.cerebras import build_cerebras_body
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1, max_length=3)
+        count: int = Field(ge=1, le=5)
+        note: str | None = Field(default=None, min_length=2, max_length=12)
+
+    model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    tools = build_anthropic_tools_from_response_model(model)
+    original = deepcopy(tools)
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=tools,
+        tool_choice="any",
+        response_format=None,
+        temperature=1,
+        max_tokens=128,
+        effort="high",
+    )
+    function = body["tools"][0]["function"]
+    assert function.get("strict") is True, "Representable native types lack constrained decoding"
+    params = function["parameters"]
+    assert params["additionalProperties"] is False
+    assert params["properties"]["labels"]["type"] == "array"
+    assert params["properties"]["labels"]["items"]["type"] == "string"
+    assert "minItems" not in params["properties"]["labels"]
+    assert params["properties"]["count"]["minimum"] == 1
+    assert params["properties"]["count"]["maximum"] == 5
+    assert params["properties"]["note"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert body["tool_choice"] == "required"
+    assert "response_format" not in body
+    assert tools == original
+    for payload in (
+        {"tool": "typed_lookup", "labels": '["a"]', "count": 2},
+        {"tool": "typed_lookup", "labels": [], "count": 2},
+        {"tool": "typed_lookup", "labels": ["a"], "count": 6},
+        {"tool": "typed_lookup", "labels": ["a"], "count": 2, "note": "x"},
+    ):
+        try:
+            TypedTool.model_validate(payload)
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError("Original local constraints were weakened")
+    assert TypedTool.model_validate({"tool": "typed_lookup", "labels": ["a"], "count": 2}).note is None
+
+
+def test_cerebras_native_tools_keep_incompatible_schemas_visible():
+    """Mixed toolsets must never close maps, invent types, or mutate fallback schemas."""
+    from copy import deepcopy
+
+    from providers.rose.cerebras import build_cerebras_body
+
+    schemas = [
+        {
+            "type": "object",
+            "properties": {"values": {"type": "object", "additionalProperties": {"type": "string"}}},
+            "additionalProperties": False,
+        },
+        {"type": "object", "properties": {"anything": {}}, "additionalProperties": False},
+        {
+            "type": "object",
+            "properties": {"value": {"oneOf": [{"type": "string"}, {"type": "null"}]}},
+            "additionalProperties": False,
+        },
+        {"type": "object", "properties": {"values": {"type": "array", "items": True}}, "additionalProperties": False},
+        {
+            "type": "object",
+            "properties": {"value": {"$ref": "https://example.invalid/schema"}},
+            "additionalProperties": False,
+        },
+    ]
+    schemas.append(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"x": {"type": "integer"}},
+            "required": ["x", "x"],
+        }
+    )
+    invalid_bounds = [
+        {"minimum": "invalid"},
+        {"maximum": True},
+        {"exclusiveMinimum": float("nan")},
+        {"exclusiveMaximum": float("inf")},
+        {"multipleOf": 0},
+        {"multipleOf": -1},
+        {"multipleOf": False},
+        {"minimum": 5, "maximum": 4},
+        {"minimum": 2, "exclusiveMaximum": 2},
+        {"exclusiveMinimum": 2, "maximum": 2},
+        {"exclusiveMinimum": 3, "exclusiveMaximum": 2},
+    ]
+    schemas.extend(
+        {"type": "object", "additionalProperties": False, "properties": {"value": {"type": "number", **bounds}}}
+        for bounds in invalid_bounds
+    )
+    # Raw Python-built tool schemas reach this builder without JSON roundtrip.
+    # Invalid names must decline strict projection rather than throw TypeError.
+    for key in (1, True, None, ("tuple",)):
+        schemas.extend(
+            [
+                {"type": "object", "additionalProperties": False, "properties": {key: {"type": "string"}}},
+                {"type": "object", "additionalProperties": False, "properties": {}, key: 1, "unknown": True},
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"nested": {"type": "string", key: 1, "unknown": True}},
+                },
+            ]
+        )
+    supported = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "pattern": {"type": "string", "pattern": "^a", "format": "email", "minLength": 1},
+            "nested": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "value": {"anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}]},
+                    "flag": {"type": "boolean"},
+                },
+                "required": ["flag"],
+            },
+        },
+        "required": ["pattern"],
+    }
+    tools = [{"name": f"generic_{i}", "input_schema": schema} for i, schema in enumerate([supported, *schemas])]
+    original = deepcopy(tools)
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=tools,
+        tool_choice="any",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        effort=None,
+    )
+    functions = [tool["function"] for tool in body["tools"]]
+    for function, schema in zip(functions, [supported, *schemas], strict=True):
+        assert function["strict"] is False
+        assert function["parameters"] == schema
+    # Test each incompatible schema alone too: a different open-map tool must
+    # not conceal a numeric/required validation regression in the mixed set.
+    for tool in tools[1:]:
+        isolated = build_cerebras_body(
+            model="qwen-3.8-27b",
+            messages=[],
+            tools=[tool],
+            tool_choice="any",
+            response_format=None,
+            temperature=None,
+            max_tokens=None,
+            effort=None,
+        )
+        assert isolated["tools"][0]["function"]["strict"] is False
+        assert isolated["tools"][0]["function"]["parameters"] == tool["input_schema"]
+    supported_body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=tools[:1],
+        tool_choice="any",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        effort=None,
+    )
+    function = supported_body["tools"][0]["function"]
+    assert function["strict"] is True
+    assert function["parameters"]["properties"]["pattern"] == {"type": "string"}
+    assert function["parameters"]["required"] == ["pattern"]
+    assert function["parameters"]["properties"]["nested"] == supported["properties"]["nested"]
+    assert tools == original
+
+
+async def test_cerebras_raw_schema_keys_reach_native_client():
+    """Public complete accepts raw nested dictionaries; canonical models remain valid."""
+    from copy import deepcopy
+
+    tools = [
+        {
+            "name": "raw_lookup",
+            "input_schema": {"type": "object", "properties": {1: {"type": "string"}}, "additionalProperties": False},
+        }
+    ]
+    original = deepcopy(tools)
+    requests = []
+
+    def handler(request):
+        assert request.url.host == "api.cerebras.ai", "No route fallthrough is expected"
+        body = json.loads(request.content)
+        requests.append(body)
+        assert body["tools"][0]["function"]["strict"] is False
+        # Ordinary HTTP JSON serialization already stringifies integer keys;
+        # the adapter must preserve the Python caller input, not normalize it.
+        assert body["tools"][0]["function"]["parameters"] == json.loads(json.dumps(original[0]["input_schema"]))
+        return httpx.Response(
+            200,
+            text="\n".join(_openai_sse([{"choices": [{"delta": {"content": "native"}, "finish_reason": "stop"}]}])),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    set_mock_handler(handler)
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-key-shape", "ROSE_FAST_CACHE_MODE": "off"}):
+        chunks = await _drain(
+            RoseClient(openrouter_key="offline-unused").complete(
+                pool="rose-1-flash",
+                messages=[{"role": "user", "content": "lookup"}],
+                tools=tools,
+            )
+        )
+    assert len(requests) == 1
+    assert any(chunk.kind == "content" and chunk.data.get("text") == "native" for chunk in chunks)
+    assert tools == original
+
+
+async def test_cerebras_mixed_toolset_uses_valid_request_contract():
+    """Replay the actual Cerebras 400 contract through builder and transport."""
+    from providers.rose.cerebras import build_cerebras_body
+    from providers.rose.transport import get_error_body, post_cerebras_stream
+
+    tools = [
+        {
+            "name": "typed",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"labels": {"type": "array", "items": {"type": "string"}}},
+            },
+        },
+        {
+            "name": "open_map",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"filters": {"type": "object", "additionalProperties": {"type": "string"}}},
+            },
+        },
+    ]
+    captured_error = {
+        "message": "Tools with mixed values for 'strict' are not allowed. Please set all tools to 'strict: true' or 'strict: false'",
+        "type": "invalid_request_error",
+        "param": "tools",
+        "code": "wrong_api_format",
+        "id": "",
+    }
+
+    def handler(request):
+        body = json.loads(request.content)
+        assert [tool["function"]["name"] for tool in body["tools"]] == ["typed", "open_map"]
+        if len({tool["function"]["strict"] for tool in body["tools"]}) > 1:
+            return httpx.Response(400, json=captured_error)
+        assert all(tool["function"]["strict"] is False for tool in body["tools"])
+        assert [tool["function"]["parameters"] for tool in body["tools"]] == [tool["input_schema"] for tool in tools]
+        return httpx.Response(200, text="data: [DONE]\n", headers={"content-type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=tools,
+        tool_choice="any",
+        response_format=None,
+        temperature=None,
+        max_tokens=128,
+        effort=None,
+    )
+    async with post_cerebras_stream(
+        body=body, cerebras_key="offline-placeholder", request_id="captured-mixed-contract"
+    ) as response:
+        assert response.status_code == 200, get_error_body(response)
+
+
+async def test_cerebras_strict_native_response_retains_parser_retry():
+    """Real HTTP builder + native stream + structured parser still reject captured bad types."""
+    from typing import Literal
+
+    from helpers.llm import call_llm_structured_streaming
+    from pydantic import BaseModel, Field
+    from utils.tool_schemas import create_agent_action_model
+
+    class GenericTool(BaseModel):
+        tool: Literal["generic_lookup"]
+        labels: list[str] = Field(min_length=1)
+        count: int = Field(ge=1, le=5)
+
+    model = create_agent_action_model(["generic_lookup"], tool_registry={"generic_lookup": GenericTool})
+    requests = []
+    corrected = False
+
+    def handler(request):
+        if request.url.host not in {"api.cerebras.ai", "openrouter.ai"}:
+            return httpx.Response(200, json={})
+        body = json.loads(request.content)
+        requests.append(body)
+        function = body["tools"][0]["function"]
+        assert function["name"] == "generic_lookup"
+        if request.url.host == "api.cerebras.ai":
+            assert function["strict"] is True
+        assert function["parameters"]["properties"]["labels"]["type"] == "array"
+        assert body["model"] == ("qwen-3.8-27b" if request.url.host == "api.cerebras.ai" else "google/gemini-3.8-flash")
+        assert body["tool_choice"] == "required"
+        assert "response_format" not in body
+        # Exact observed malformed encoding: a JSON array encoded as a string.
+        arguments = {"labels": ["Software Engineer"] if corrected else '["Software Engineer"]', "count": 5}
+        payloads = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "captured-local",
+                                    "type": "function",
+                                    "function": {"name": "generic_lookup", "arguments": json.dumps(arguments)},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return httpx.Response(200, text="\n".join(_openai_sse(payloads)), headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    async def on_chunk(*args):
+        pass
+
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-test-placeholder", "ROSE_FAST_CACHE_MODE": "off"}):
+        try:
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "offline replay"}],
+                model="rose-labs/rose-1-flash",
+                temperature=1,
+                max_tokens=128,
+                response_model=model,
+                on_chunk=on_chunk,
+                call_site="test",
+                skip_cache_write=True,
+            )
+        except Exception as exc:
+            assert type(exc).__name__ == "LLMStructuredOutputError"
+            assert "valid list" in str(exc)
+        else:
+            raise AssertionError("Malformed native arrays were silently coerced")
+        assert len(requests) == 3
+        assert [body["model"] for body in requests] == ["qwen-3.8-27b", "qwen-3.8-27b", "google/gemini-3.8-flash"]
+        assert all(
+            any(row.get("role") == "tool" and "valid list" in str(row.get("content")) for row in body["messages"])
+            for body in requests[1:]
+        )
+        corrected = True
+        response, _, _ = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "offline replay"}],
+            model="rose-labs/rose-1-flash",
+            temperature=1,
+            max_tokens=128,
+            response_model=model,
+            on_chunk=on_chunk,
+            call_site="test",
+            skip_cache_write=True,
+        )
+        assert len(requests) == 4
+        assert response.tool_calls[0].labels == ["Software Engineer"]
+        assert response.tool_calls[0].count == 5
 
 
 def test_build_cerebras_body_strips_cache_control():
@@ -1611,7 +1989,7 @@ def test_build_anthropic_body_message_cache_breakpoint():
     for msg in msgs[:-1]:
         if isinstance(msg.get("content"), list):
             for block in msg["content"]:
-                assert "cache_control" not in block, f"Unexpected cache_control in non-last message"
+                assert "cache_control" not in block, "Unexpected cache_control in non-last message"
 
 
 def test_build_anthropic_body_skip_cache_write_keeps_system_markers():
@@ -2703,7 +3081,7 @@ async def test_parse_responses_sse_in_band_credit_exhaustion_is_payment_required
         )
     except RosePaymentRequiredError:
         return
-    assert False, "in-band credit exhaustion must trigger the shared API-key cooldown"
+    raise AssertionError("in-band credit exhaustion must trigger the shared API-key cooldown")
 
 
 def test_build_codex_responses_body_contract():
@@ -3914,7 +4292,6 @@ async def test_waterfall_falls_through_then_succeeds():
     def handler(req):
         call_log.append(str(req.url))
         body = json.loads(req.content.decode())
-        model = body.get("model", "")
         efforts.append(body.get("reasoning", {}).get("effort"))
         i = state["i"]
         state["i"] += 1
@@ -5698,10 +6075,15 @@ async def test_client_foundry_stream_exit_closes_http_owner():
         requests = []
 
         class Body(httpx.AsyncByteStream):
+            def __init__(self, waiting=waiting, release=release, closed=closed):
+                self.waiting = waiting
+                self.release = release
+                self.closed = closed
+
             async def __aiter__(self):
                 yield b'data: {"type":"response.output_text.delta","delta":"ready"}\n\n'
-                waiting.set()
-                await release.wait()
+                self.waiting.set()
+                await self.release.wait()
                 yield (
                     b'data: {"type":"response.completed","response":{"usage":'
                     b'{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
@@ -5709,20 +6091,20 @@ async def test_client_foundry_stream_exit_closes_http_owner():
                 )
 
             async def aclose(self):
-                closed.set()
+                self.closed.set()
 
-        def handler(request):
+        def handler(request, requests=requests, responses=responses, body_type=Body):
             assert request.url.host == "foundry.invalid", "unexpected model route"
             requests.append(request)
-            response = httpx.Response(200, stream=Body(), headers={"content-type": "text/event-stream"})
+            response = httpx.Response(200, stream=body_type(), headers={"content-type": "text/event-stream"})
             responses.append(response)
             return response
 
         real_client = httpx.AsyncClient
 
-        def offline_client(*args, **kwargs):
-            client = real_client(transport=httpx.MockTransport(handler), trust_env=False)
-            clients.append(client)
+        def offline_client(*args, _real_client=real_client, _handler=handler, _clients=clients, **kwargs):
+            client = _real_client(transport=httpx.MockTransport(_handler), trust_env=False)
+            _clients.append(client)
             return client
 
         with (
@@ -7386,8 +7768,6 @@ async def test_claude_auth_stream_reports_cache_hit_rate():
     """
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
-    spec = get_pool("rose-1-flash")
-
     # Simulate a second-turn call where most of the prompt is cached.
     # 500 input tokens, 4500 cache_read, 100 cache_creation → 90% hit rate.
     sse_lines = []
@@ -7540,7 +7920,7 @@ def test_build_anthropic_body_cache_structure_from_real_prompt():
     if isinstance(last_content, list):
         assert "cache_control" in last_content[-1]
     else:
-        assert False, "Expected last message content to be list with cache_control"
+        raise AssertionError("Expected last message content to be list with cache_control")
 
 
 def test_build_anthropic_body_native_tools_force_any_with_parallel():
@@ -7975,9 +8355,81 @@ async def test_rose_client_preserves_native_tools_for_waterfall():
 # =====================================================================
 
 
+async def test_direct_auth_honors_candidate_exclusions():
+    from types import SimpleNamespace
+    from providers.rose.truncation import model_key
+
+    for kind in ("claude", "gpt"):
+        pool = get_pool("rose-1-ultra")
+        excluded = pool.claude_auth_model if kind == "claude" else pool.gpt_auth_model
+        hosts = []
+
+        def handler(request, hosts=hosts):
+            hosts.append(request.url.host)
+            assert request.url.host == "openrouter.ai", "Excluded direct candidate was requested"
+            return httpx.Response(
+                200,
+                text="\n".join(
+                    _openai_sse(
+                        [
+                            {"choices": [{"delta": {"content": "eligible"}, "finish_reason": "stop"}]},
+                            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+                        ]
+                    )
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        set_mock_handler(handler)
+        with patch(
+            "providers.rose.client.load_config", return_value=SimpleNamespace(anthropic=SimpleNamespace(api_key=""))
+        ):
+            chunks = await _drain(
+                RoseClient(openrouter_key="offline").complete(
+                    pool=pool.name,
+                    messages=[{"role": "user", "content": "offline exclusion"}],
+                    claude_auth=ClaudeAuthContext(token="offline", source="user", user_id="offline")
+                    if kind == "claude"
+                    else None,
+                    gpt_auth=gpt_auth_from_token("offline", "offline") if kind == "gpt" else None,
+                    _skip_models=frozenset({model_key(excluded)}),
+                    dump_context=False,
+                )
+            )
+        assert hosts == ["openrouter.ai"]
+        assert any(c.kind == "content" and c.data.get("text") == "eligible" for c in chunks)
+
+
+async def test_truncation_retains_incoming_candidate_exclusions():
+    from providers.rose.truncation import recover_truncated
+
+    seen = []
+
+    async def attempt(**kwargs):
+        seen.append(kwargs.get("_skip_models"))
+        yield StreamChunk(kind="metadata", data={"actual_model": "candidate-b-gpt"})
+        yield StreamChunk(
+            kind="usage", data={"finish_reason": "length" if len(seen) == 1 else "stop", "completion_tokens": 1}
+        )
+        yield StreamChunk(kind="done", data={})
+
+    await _drain(
+        recover_truncated(
+            attempt,
+            {"messages": [], "response_model": object, "max_tokens": 100, "_skip_models": frozenset({"candidatea"})},
+        )
+    )
+    assert len(seen) == 2
+    assert all("candidatea" in excluded for excluded in seen)
+
+
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "truncation_preserves_candidate_exclusions", test_truncation_retains_incoming_candidate_exclusions
+    )
+    await r.record_async("direct_auth_candidate_exclusions", test_direct_auth_honors_candidate_exclusions)
 
     r.record("is_rose_model_variants", test_is_rose_model_variants)
     r.record("build_anthropic_body_no_input_mutation", test_build_anthropic_body_does_not_mutate_caller_messages)
@@ -7989,6 +8441,13 @@ async def run_all_tests():
     r.record("classify_claude_token_error", test_classify_claude_token_error_each_branch)
 
     r.record("pool_registry_lookup", test_pool_registry_lookup)
+    r.record("cerebras_native_tools_enforce_shapes", test_cerebras_native_tools_enforce_representable_shapes)
+    r.record("cerebras_native_tools_incompatible_visible", test_cerebras_native_tools_keep_incompatible_schemas_visible)
+    await r.record_async("cerebras_raw_schema_keys_native_client", test_cerebras_raw_schema_keys_reach_native_client)
+    await r.record_async("cerebras_mixed_toolset_contract", test_cerebras_mixed_toolset_uses_valid_request_contract)
+    await r.record_async(
+        "cerebras_strict_native_parser_retry", test_cerebras_strict_native_response_retains_parser_retry
+    )
     r.record("cerebras_body_strips_cache_control", test_build_cerebras_body_strips_cache_control)
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
@@ -8521,5 +8980,116 @@ async def run_all_tests():
     return r.summary()
 
 
+async def probe_cerebras_native_contract(dump_path: str, protocol: str = "native", max_tokens: int = 128) -> None:
+    """Explicit paid opt-in: one bounded native request, never a waterfall."""
+    from helpers.httpx_capture import install_capture, uninstall_capture
+    from providers.rose.cerebras import build_cerebras_body
+    from providers.rose.transport import get_error_body, post_cerebras_stream
+
+    if not _LIVE_CEREBRAS_API_KEY:
+        raise RuntimeError("Configured Cerebras credential is missing")
+    dump = json.loads(Path(dump_path).read_text())
+    response_model = create_agent_action_model([tool["name"] for tool in dump["tools"]])
+    assert build_anthropic_tools_from_response_model(response_model) == dump["tools"], "Captured model schema differs"
+    response_format = (
+        None
+        if protocol == "native"
+        else {
+            "type": "json_schema",
+            "json_schema": {
+                "name": response_model.__name__,
+                "strict": False,
+                "schema": response_model.model_json_schema(),
+            },
+        }
+    )
+    body = build_cerebras_body(
+        model=get_pool("rose-1-flash").cerebras_model,
+        messages=dump["messages"],
+        tools=dump["tools"] if protocol == "native" else None,
+        tool_choice="any",
+        response_format=response_format,
+        temperature=1,
+        max_tokens=max_tokens,
+        effort="high",
+    )
+    print(
+        "PROBE_TOOL_CONTRACT",
+        protocol,
+        [(t["function"]["name"], t["function"]["strict"]) for t in body.get("tools", [])],
+    )
+    uninstall_capture()
+    try:
+        async with asyncio.timeout(30):
+            async with post_cerebras_stream(
+                body=body,
+                cerebras_key=_LIVE_CEREBRAS_API_KEY,
+                request_id="offline-owner-opt-in-native-contract",
+                call_site="native_contract_probe",
+            ) as response:
+                print("PROBE_STATUS", response.status_code)
+                if response.status_code >= 400:
+                    error = json.loads(get_error_body(response))
+                    print("PROBE_ERROR", json.dumps(error))
+                    return
+                chunks = [chunk async for chunk in parse_openai_sse(response, request_id="native-contract-probe")]
+                print(
+                    "PROBE_RESULT", [(c.kind, c.data.get("name")) for c in chunks if c.kind in {"tool_call", "usage"}]
+                )
+                print("PROBE_FINISH", [c.data.get("finish_reason") for c in chunks if c.kind == "done"])
+                if protocol == "json":
+                    text = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+                    try:
+                        parsed = response_model.model_validate_json(text)
+                    except Exception as exc:
+                        print("PROBE_TYPED_RESULT", "INVALID", type(exc).__name__, "content_chars", len(text))
+                        if hasattr(exc, "errors"):
+                            print("PROBE_VALIDATION", [{"loc": e["loc"], "type": e["type"]} for e in exc.errors()])
+                        try:
+                            raw = json.loads(text)
+                        except json.JSONDecodeError:
+                            print("PROBE_JSON", "INVALID")
+                        else:
+                            print("PROBE_JSON_ROOT_TYPE", type(raw).__name__)
+                            print(
+                                "PROBE_ARGUMENT_TYPES",
+                                [
+                                    {
+                                        "tool": t.get("tool"),
+                                        "argument_types": {k: type(v).__name__ for k, v in t.items()},
+                                    }
+                                    for t in (raw.get("tool_calls", []) if isinstance(raw, dict) else [])
+                                    if isinstance(t, dict)
+                                ],
+                            )
+                    else:
+                        print(
+                            "PROBE_TYPED_RESULT",
+                            "VALID",
+                            [
+                                {
+                                    "tool": t.tool,
+                                    "argument_types": {k: type(v).__name__ for k, v in t.model_dump().items()},
+                                }
+                                for t in parsed.tool_calls
+                            ],
+                        )
+
+    finally:
+        install_capture()
+
+
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cerebras-native-contract-probe")
+    parser.add_argument("--cerebras-protocol", choices=["native", "json"], default="native")
+    parser.add_argument("--probe-max-tokens", type=int, choices=[128, 1024], default=128)
+    args = parser.parse_args()
+    if args.cerebras_native_contract_probe:
+        asyncio.run(
+            probe_cerebras_native_contract(
+                args.cerebras_native_contract_probe, args.cerebras_protocol, args.probe_max_tokens
+            )
+        )
+    else:
+        asyncio.run(run_all_tests())

@@ -795,7 +795,9 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
         )
         assert rejected.returncode == 2, rejected.stdout + rejected.stderr
         assert "zero-live-spend tasks" in rejected.stderr
-        ordinary = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS)
+        ordinary = subprocess.run(
+            command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
+        )
         assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
         assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["test-mass-agent-run-0"]
         # A DEMO-bound child can replay without a zero-spend evaluator or DEMO
@@ -812,7 +814,9 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             )
             assert rejected_child.returncode == 2, rejected_child.stdout + rejected_child.stderr
             assert "DEMO-replay tasks" in rejected_child.stderr
-        ordinary_child = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS)
+        ordinary_child = subprocess.run(
+            command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
+        )
         assert ordinary_child.returncode == 0, ordinary_child.stdout + ordinary_child.stderr
         assert json.loads(ordinary_child.stdout)["slices"][0]["names"] == ["single-creator-arm"]
         sampled = subprocess.run(
@@ -868,7 +872,11 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
         }.intersection(full.stdout.splitlines())
         pool.write_text(json.dumps(["polar-bu-070"]))
         live = subprocess.run(
-            command + ["--min-successful-llm", "3"], cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
+            command + ["--min-successful-llm", "3"],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
         )
         assert live.returncode == 0, live.stdout + live.stderr
         assert json.loads(live.stdout)["slices"][0]["names"] == ["polar-bu-070"]
@@ -1246,26 +1254,46 @@ def _live_report_producer_harness(tasks, executor, max_concurrency):
     from benchmarks.report_card import build_report_card
 
     main = ast.parse(inspect.getsource(bench.main_async)).body[0]
-    start = next(i for i, node in enumerate(main.body)
-                 if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card")
-    end = next(i for i, node in enumerate(main.body)
-               if isinstance(node, ast.Assign) and any(
-                   isinstance(target, ast.Name) and target.id == "owned_batch_cleanup"
-                   for target in node.targets))
+    start = next(
+        i
+        for i, node in enumerate(main.body)
+        if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card"
+    )
+    end = next(
+        i
+        for i, node in enumerate(main.body)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "owned_batch_cleanup" for target in node.targets)
+    )
     report_nodes = main.body[start:end]
-    ticker = next(node for node in report_nodes
-                  if isinstance(node, ast.AsyncFunctionDef) and node.name == "_report_ticker")
-    emit = next(node for node in ast.walk(ticker) if isinstance(node, ast.Expr)
-                and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
-                and node.value.func.id == "_emit_report")
-    parallel = next(node for node in ast.walk(main) if isinstance(node, ast.If)
-                    and isinstance(node.test, ast.Attribute) and node.test.attr == "parallel")
-    drive = ast.AsyncFunctionDef(name="_drive_parallel", args=ast.arguments(
-        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-        body=parallel.body, decorator_list=[])
-    tick = ast.FunctionDef(name="_tick_report_once", args=ast.arguments(
-        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-        body=[emit], decorator_list=[])
+    ticker = next(
+        node for node in report_nodes if isinstance(node, ast.AsyncFunctionDef) and node.name == "_report_ticker"
+    )
+    emit = next(
+        node
+        for node in ast.walk(ticker)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_emit_report"
+    )
+    parallel = next(
+        node
+        for node in ast.walk(main)
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Attribute) and node.test.attr == "parallel"
+    )
+    drive = ast.AsyncFunctionDef(
+        name="_drive_parallel",
+        args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=parallel.body,
+        decorator_list=[],
+    )
+    tick = ast.FunctionDef(
+        name="_tick_report_once",
+        args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[emit],
+        decorator_list=[],
+    )
     cards = []
 
     class CaptureEmitter:
@@ -1276,14 +1304,24 @@ def _live_report_producer_harness(tasks, executor, max_concurrency):
             cards.append(build_report_card(state))
 
     namespace = dict(vars(bench))
-    namespace.update(tasks=tasks, skipped_claude_tasks=[], base_url="unused",
-                     run=bench.BenchmarkRun(run_id="report-admission-control"),
-                     args=SimpleNamespace(max_concurrency=max_concurrency, prod=False,
-                                          keep_failed_agents=False),
-                     run_single_task=executor, _fetch_wmh_usage=lambda: None)
+    namespace.update(
+        tasks=tasks,
+        skipped_claude_tasks=[],
+        base_url="unused",
+        run=bench.BenchmarkRun(run_id="report-admission-control"),
+        args=SimpleNamespace(max_concurrency=max_concurrency, prod=False, keep_failed_agents=False),
+        run_single_task=executor,
+        _fetch_wmh_usage=lambda: None,
+    )
     with patch("benchmarks.report_card.ReportCardEmitter", CaptureEmitter):
-        exec(compile(ast.fix_missing_locations(ast.Module(
-            body=[*report_nodes, drive, tick], type_ignores=[])), "<live-report-producer>", "exec"), namespace)
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[*report_nodes, drive, tick], type_ignores=[])),
+                "<live-report-producer>",
+                "exec",
+            ),
+            namespace,
+        )
     return namespace, cards
 
 
@@ -1292,8 +1330,10 @@ async def test_live_report_counts_executor_admission_and_drains_cancellation():
     from types import SimpleNamespace
     from benchmarks import run_benchmark as bench
 
-    tasks = [SimpleNamespace(name="chat-mode", requires_browser_agent=False,
-                             world_model_mode=None, tags=[]) for _ in range(3)]
+    tasks = [
+        SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+        for _ in range(3)
+    ]
     entered = asyncio.Event()
     held = asyncio.Event()
 
@@ -1325,8 +1365,10 @@ async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_li
     from types import SimpleNamespace
     from benchmarks import run_benchmark as bench
 
-    tasks = [SimpleNamespace(name="chat-mode", index=index, requires_browser_agent=False,
-                             world_model_mode=None, tags=[]) for index in range(3)]
+    tasks = [
+        SimpleNamespace(name="chat-mode", index=index, requires_browser_agent=False, world_model_mode=None, tags=[])
+        for index in range(3)
+    ]
     entered = [asyncio.Event() for _ in tasks]
     evaluate = [asyncio.Event() for _ in tasks]
     cleanup = [asyncio.Event() for _ in tasks]
@@ -1335,12 +1377,20 @@ async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_li
     async def executor(_base_url, task, *, on_agent_created, on_task_evaluated, **_kwargs):
         async def agent_child():
             on_agent_created(task.name, f"report-test-{task.index}")
+
         await asyncio.create_task(agent_child())
         entered[task.index].set()
         await evaluate[task.index].wait()
-        result = bench.TaskResult(name=task.name, passed=task.index != 2,
-            agent_id=f"report-test-{task.index}", status="COMPLETED", progress_score=1,
-            duration_seconds=1, cost_cents=0, message_count=0)
+        result = bench.TaskResult(
+            name=task.name,
+            passed=task.index != 2,
+            agent_id=f"report-test-{task.index}",
+            status="COMPLETED",
+            progress_score=1,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+        )
         await on_task_evaluated(result)
         evaluated[task.index].set()
         await cleanup[task.index].wait()
@@ -1365,7 +1415,9 @@ async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_li
             namespace["_tick_report_once"]()
             assert cards[-1]["tasks"] == {"total": 3, "running": 1, "completed": 2, "queued": 0}, cards[-1]["tasks"]
             assert cards[-1]["results"]["passed"] == 1 and cards[-1]["results"]["failed"] == 1
-            assert [row["agent_url"] for row in cards[-1]["per_task"] if row["status"] == "running"][0].endswith("=report-test-0")
+            assert [row["agent_url"] for row in cards[-1]["per_task"] if row["status"] == "running"][0].endswith(
+                "=report-test-0"
+            )
             for event in [*evaluate, *cleanup]:
                 event.set()
             await asyncio.wait_for(coordinator, timeout=10)
@@ -1385,29 +1437,36 @@ async def test_live_report_keeps_all_created_roots_for_batch_finalization():
     from unittest.mock import AsyncMock
     from benchmarks import run_benchmark as bench
 
-    root_ids = ["00000000-0000-4000-8000-000000000011",
-                "00000000-0000-4000-8000-000000000012"]
+    root_ids = ["00000000-0000-4000-8000-000000000011", "00000000-0000-4000-8000-000000000012"]
     for exit_path in ("exception", "cancellation", "composite"):
         entered = asyncio.Event()
-        task = SimpleNamespace(name="chat-mode", requires_browser_agent=False,
-                               world_model_mode=None, tags=[])
+        task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
 
         async def executor(_base_url, task, *, on_agent_created, **_kwargs):
             async def child_callbacks():
                 for root_id in root_ids:
                     on_agent_created(task.name, root_id)
+
             await asyncio.create_task(child_callbacks())
             entered.set()
             if exit_path == "cancellation":
                 await asyncio.Event().wait()
             if exit_path == "exception":
                 raise RuntimeError("test-owned failure after root callbacks")
-            return bench.TaskResult(name=task.name, passed=False,
-                agent_id=",".join(root_ids), status="COMPLETED", progress_score=0,
-                duration_seconds=1, cost_cents=0, message_count=0,
-                logs={str(index): {"tree": {root_id: {}},
-                    "worker_logs": [json.dumps({"agent_id": root_id})]}
-                    for index, root_id in enumerate(root_ids)})
+            return bench.TaskResult(
+                name=task.name,
+                passed=False,
+                agent_id=",".join(root_ids),
+                status="COMPLETED",
+                progress_score=0,
+                duration_seconds=1,
+                cost_cents=0,
+                message_count=0,
+                logs={
+                    str(index): {"tree": {root_id: {}}, "worker_logs": [json.dumps({"agent_id": root_id})]}
+                    for index, root_id in enumerate(root_ids)
+                },
+            )
 
         namespace, _cards = _live_report_producer_harness([task], executor, 1)
         with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
@@ -1432,8 +1491,7 @@ async def test_live_report_keeps_all_created_roots_for_batch_finalization():
 
         def exact_root_sessions(_base_url, root_id):
             prepared.append(root_id)
-            return {"root_user_id": "test-owned-user", "tree_agent_ids": [root_id],
-                    "browser_sessions": []}
+            return {"root_user_id": "test-owned-user", "tree_agent_ids": [root_id], "browser_sessions": []}
 
         def close_exact_root_sessions(_base_url, root_id, _before, **_kwargs):
             released.append(root_id)
@@ -1441,26 +1499,33 @@ async def test_live_report_keeps_all_created_roots_for_batch_finalization():
 
         # Force the archive boundary to fail: exact provider/payment release
         # must still run, while incomplete evidence remains a failed verdict.
-        with patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", exact_root_sessions), \
-             patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", close_exact_root_sessions), \
-             patch.object(bench, "pause_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "delete_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "_refresh_browser_archive_snapshot",
-                          AsyncMock(side_effect=RuntimeError("test-owned archive failure"))), \
-             patch.object(bench, "_finalize_owned_root_payments", AsyncMock(return_value={})), \
-             patch.object(bench, "fetch_local_worker_logs", return_value=[]):
+        with (
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", exact_root_sessions),
+            patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", close_exact_root_sessions),
+            patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+            patch.object(
+                bench,
+                "_refresh_browser_archive_snapshot",
+                AsyncMock(side_effect=RuntimeError("test-owned archive failure")),
+            ),
+            patch.object(bench, "_finalize_owned_root_payments", AsyncMock(return_value={})),
+            patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+        ):
             try:
-                await asyncio.wait_for(bench._finalize_owned_cloud_batch(
-                    "test-owned-no-network", namespace["run"].task_results,
-                    namespace["_live_task_agent_ids"]), timeout=10)
+                await asyncio.wait_for(
+                    bench._finalize_owned_cloud_batch(
+                        "test-owned-no-network", namespace["run"].task_results, namespace["_live_task_agent_ids"]
+                    ),
+                    timeout=10,
+                )
             except RuntimeError:
                 pass
             else:
                 assert exit_path == "composite", "missing evaluator identity unexpectedly accepted"
         assert set(prepared) == set(root_ids), exit_path
         assert set(released) == set(root_ids), exit_path
-        retained = {root_id for ids in namespace["_live_task_agent_ids"].values()
-                    for root_id in ids}
+        retained = {root_id for ids in namespace["_live_task_agent_ids"].values() for root_id in ids}
         assert retained == set(root_ids), exit_path
         assert all(not result.passed for result in namespace["run"].task_results)
 
@@ -2712,74 +2777,138 @@ async def _exercise_failure_evidence_exit(phase, refresh, logger_fails=False, ar
     from copy import deepcopy
     from benchmarks import run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
+
     root, task_id = "11111111-1111-4111-8111-111111111111", "owned-browser-task"
-    meta = dict(task_id=task_id, toolName="spawn_browser_agent", agentType="browser",
-                workflowGeneration=root)
-    data = {"agent": {"agent_id": root, "status": "ACTIVE"}, "messages": [
-        {"role": "TOOL", "text": "recorded", "metadata": dict(meta, action_type="recording",
-         toolStatus="FINISHED", recording_view_url="https://fixture.invalid/recording")},
-        {"role": "TOOL", "text": "terminal", "metadata": dict(meta, action_type="task_complete",
-         toolStatus="FINISHED")},
-    ], "_benchmark": {"payment_lifecycle": {"purchase": {"id": "owned-purchase", "status": "HELD"}}}}
+    meta = dict(task_id=task_id, toolName="spawn_browser_agent", agentType="browser", workflowGeneration=root)
+    data = {
+        "agent": {"agent_id": root, "status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "recorded",
+                "metadata": dict(
+                    meta,
+                    action_type="recording",
+                    toolStatus="FINISHED",
+                    recording_view_url="https://fixture.invalid/recording",
+                ),
+            },
+            {
+                "role": "TOOL",
+                "text": "terminal",
+                "metadata": dict(meta, action_type="task_complete", toolStatus="FINISHED"),
+            },
+        ],
+        "_benchmark": {"payment_lifecycle": {"purchase": {"id": "owned-purchase", "status": "HELD"}}},
+    }
     if phase == "cleanup-stall":
-        native = json.loads((Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text())["lifecycle"]
+        native = json.loads(
+            (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
+        )["lifecycle"]
         data["_benchmark"]["payment_lifecycle"] = native
     task = deepcopy(get_task_by_name("agent-payment-abandonment"))
-    task.name = "agent-payment-production-abandonment"; task.tags = []; task.production_only = True
+    task.name = "agent-payment-production-abandonment"
+    task.tags = []
+    task.production_only = True
+
     async def poll(_base, _agent, _task, _monitor, snapshot):
         snapshot.update(deepcopy(data))
-        if phase == "cancel": raise asyncio.CancelledError()
-        if phase == "poll": raise RuntimeError("actual payment reconciliation release pending")
+        if phase == "cancel":
+            raise asyncio.CancelledError()
+        if phase == "poll":
+            raise RuntimeError("actual payment reconciliation release pending")
         return deepcopy(data), 0, 0, None
-    async def execute(_base, _agent, callback, **_kwargs): return await callback({})
+
+    async def execute(_base, _agent, callback, **_kwargs):
+        return await callback({})
+
     async def get(_base, aid):
         assert aid == root
-        if refresh == "unavailable": raise RuntimeError("authoritative read unavailable")
-        if refresh == "empty": return {"agent": {"agent_id": root, "model": "benchmark-hub"}, "messages": []}
+        if refresh == "unavailable":
+            raise RuntimeError("authoritative read unavailable")
+        if refresh == "empty":
+            return {"agent": {"agent_id": root, "model": "benchmark-hub"}, "messages": []}
         result = deepcopy(data)
-        if refresh == "foreign": result["agent"]["agent_id"] = "foreign-agent"
-        if refresh == "shorter": result["messages"] = result["messages"][:1]
+        if refresh == "foreign":
+            result["agent"]["agent_id"] = "foreign-agent"
+        if refresh == "shorter":
+            result["messages"] = result["messages"][:1]
         return result
+
     async def collect(_agent, snapshot, _start):
-        if logger_fails: raise RuntimeError("log transport unavailable")
+        if logger_fails:
+            raise RuntimeError("log transport unavailable")
         return {"messages": bench.extract_message_transcript(snapshot)}
+
     async def cleanup(*_args, **_kwargs):
-        if phase == "cleanup": raise RuntimeError("actual payment reconciliation release pending")
+        if phase == "cleanup":
+            raise RuntimeError("actual payment reconciliation release pending")
         if phase == "cleanup-stall":
-            raise bench._payment_reconciliation_timeout("actual payment reconciliation release pending", native, task_name=task.name)
+            raise bench._payment_reconciliation_timeout(
+                "actual payment reconciliation release pending", native, task_name=task.name
+            )
         return None
-    async_names = ["prepare_sandbox_payment_residual", "_preflight_production_payment_identity",
-                   "_apply_live_fixtures", "_apply_memory_fixtures", "_apply_auth_test_site",
-                   "_restore_live_fixture_scenarios_async", "_release_auth_test_site",
-                   "subscribe_supabase_realtime_agent", "post_world_model_update_events", "archive_agent_start"]
+
+    async_names = [
+        "prepare_sandbox_payment_residual",
+        "_preflight_production_payment_identity",
+        "_apply_live_fixtures",
+        "_apply_memory_fixtures",
+        "_apply_auth_test_site",
+        "_restore_live_fixture_scenarios_async",
+        "_release_auth_test_site",
+        "subscribe_supabase_realtime_agent",
+        "post_world_model_update_events",
+        "archive_agent_start",
+    ]
     with contextlib.ExitStack() as stack:
-        for name in async_names: stack.enter_context(patch.object(bench, name, AsyncMock(return_value=None if name.endswith("auth_test_site") else [])))
+        for name in async_names:
+            stack.enter_context(
+                patch.object(bench, name, AsyncMock(return_value=None if name.endswith("auth_test_site") else []))
+            )
         for name, replacement in {
-            "create_agent": AsyncMock(return_value=root), "_poll_agent": poll,
-            "_run_with_agent_execution_backstop": execute, "get_agent": get,
+            "create_agent": AsyncMock(return_value=root),
+            "_poll_agent": poll,
+            "_run_with_agent_execution_backstop": execute,
+            "get_agent": get,
             "get_agent_tree": AsyncMock(return_value=[{"agent_id": root, "status": "ACTIVE"}]),
-            "_get_settled_tool_usage": AsyncMock(return_value={}), "_fetch_tree_stats": AsyncMock(return_value={}),
+            "_get_settled_tool_usage": AsyncMock(return_value={}),
+            "_fetch_tree_stats": AsyncMock(return_value={}),
             "get_llm_usage_details": AsyncMock(return_value=({}, {})),
-            "_get_initial_payment_lifecycle_with_retry": AsyncMock(return_value=deepcopy(data["_benchmark"]["payment_lifecycle"])),
-            "evaluate_task": lambda *_args: (False, "Independent wrong output" if phase == "cleanup-stall" else "payment remains pending"),
-            "collect_logs": collect, "ensure_payment_lifecycle_cleanup": cleanup,
+            "_get_initial_payment_lifecycle_with_retry": AsyncMock(
+                return_value=deepcopy(data["_benchmark"]["payment_lifecycle"])
+            ),
+            "evaluate_task": lambda *_args: (
+                False,
+                "Independent wrong output" if phase == "cleanup-stall" else "payment remains pending",
+            ),
+            "collect_logs": collect,
+            "ensure_payment_lifecycle_cleanup": cleanup,
             "finalize_archive_and_score_world_model": AsyncMock(
-                return_value=(None, None), side_effect=RuntimeError("archive unavailable") if archive_fails else None),
+                return_value=(None, None), side_effect=RuntimeError("archive unavailable") if archive_fails else None
+            ),
             "_begin_interrupt_cleanup": lambda: False,
             "delete_agent": AsyncMock(),
-        }.items(): stack.enter_context(patch.object(bench, name, replacement))
+        }.items():
+            stack.enter_context(patch.object(bench, name, replacement))
         result = await bench._run_single_task_as_run_user(
-            "https://fixture.invalid", task, True, None, "", None, None, None)
+            "https://fixture.invalid", task, True, None, "", None, None, None
+        )
     assert not result.passed
     assert result.benchmark_status == ("CANCELLED" if phase == "cancel" else "ERROR")
     assert result.logs["messages"] == bench.extract_message_transcript(data), "exception discarded the owned transcript"
     assert result.message_count == 2
     assert result.logs["failure_evidence"]["agent_id"] == root
-    assert result.logs["failure_evidence"]["benchmark_state"]["payment_lifecycle"]["purchase"]["id"] == (native["purchase"]["id"] if phase == "cleanup-stall" else "owned-purchase")
+    assert result.logs["failure_evidence"]["benchmark_state"]["payment_lifecycle"]["purchase"]["id"] == (
+        native["purchase"]["id"] if phase == "cleanup-stall" else "owned-purchase"
+    )
     assert result.logs["tree"][root]["messages"] == bench.extract_message_transcript(data)
-    if phase != "cancel": assert "actual payment reconciliation release pending" in result.failure_reason
-    if refresh == "foreign": assert any("another agent" in e for e in result.logs["failure_evidence"]["errors"])
-    if archive_fails: assert any("archive unavailable" in e for e in result.logs["failure_evidence"]["errors"])
+    if phase != "cancel":
+        assert "actual payment reconciliation release pending" in result.failure_reason
+    if refresh == "foreign":
+        assert any("another agent" in e for e in result.logs["failure_evidence"]["errors"])
+    if archive_fails:
+        assert any("archive unavailable" in e for e in result.logs["failure_evidence"]["errors"])
     return result
 
 
@@ -2800,10 +2929,15 @@ async def test_agentcard_release_stall_cannot_replace_an_independent_task_failur
 
 async def test_payment_browser_seal_rejects_empty_declared_browser_evidence():
     from benchmarks import run_benchmark as bench
+
     empty = {"agent": {"agent_id": "owned-root", "status": "FAILED", "model": "benchmark-hub"}, "messages": []}
-    with patch.object(bench, "get_agent", AsyncMock(return_value=empty)), patch.object(bench, "pause_agent", AsyncMock()) as pause:
+    with (
+        patch.object(bench, "get_agent", AsyncMock(return_value=empty)),
+        patch.object(bench, "pause_agent", AsyncMock()) as pause,
+    ):
         _sealed, error = await bench._seal_payment_abandonment_browser_for_archive(
-            "https://fixture.invalid", "owned-root", empty)
+            "https://fixture.invalid", "owned-root", empty
+        )
     assert error, "empty Hub snapshot falsely authorized a declared browser as sealed"
     pause.assert_not_called()
 
@@ -2828,20 +2962,37 @@ async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_
         "task_actions_started": False,
     }
     metadata = {
-        "toolName": "spawn_browser_agent", "action_type": "task_complete",
-        "toolStatus": "FINISHED", "task_id": task, "toolCallId": "call-preparation",
-        "excludeFromModel": True, "browser_preparation_cancellation": receipt,
+        "toolName": "spawn_browser_agent",
+        "action_type": "task_complete",
+        "toolStatus": "FINISHED",
+        "task_id": task,
+        "toolCallId": "call-preparation",
+        "excludeFromModel": True,
+        "browser_preparation_cancellation": receipt,
     }
     messages = [
-        {"metadata": {"toolName": "spawn_browser_agent", "task_id": "earlier-task",
-                      "action_type": "task_complete", "toolStatus": "FINISHED"}},
-        {"metadata": {"toolName": "spawn_browser_agent", "task_id": "earlier-task",
-                      "action_type": "recording", "toolStatus": "FINISHED",
-                      "recording_view_url": "https://recording.example/earlier"}},
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "task_id": "earlier-task",
+                "action_type": "task_complete",
+                "toolStatus": "FINISHED",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "task_id": "earlier-task",
+                "action_type": "recording",
+                "toolStatus": "FINISHED",
+                "recording_view_url": "https://recording.example/earlier",
+            }
+        },
         {"metadata": metadata},
     ]
     owner = {
-        "root_exists": True, "tree_agent_ids": [root],
+        "root_exists": True,
+        "tree_agent_ids": [root],
         "browser_sessions": [{"agent_id": root, "provider": "steel", "session_id": session}],
     }
 
@@ -2864,24 +3015,45 @@ async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_
             patch.object(bench.asyncio, "to_thread", mocked_owner_read),
         ):
             await bench._refresh_browser_archive_snapshot(
-                "http://localhost:1", root, {}, logs, expected_agent_ids={root},
-                ownership_before=owner, timeout_seconds=0.05,
+                "http://localhost:1",
+                root,
+                {},
+                logs,
+                expected_agent_ids={root},
+                ownership_before=owner,
+                timeout_seconds=0.05,
             )
         return logs
 
     logs = await refresh(messages)
     assert task in logs["browser_preparation_cancellation_receipt"]["task_ids_by_agent"][root]
-    assert [row["metadata"] for row in logs["tree"][root]["messages"]] == [
-        row["metadata"] for row in messages
-    ]
+    assert [row["metadata"] for row in logs["tree"][root]["messages"]] == [row["metadata"] for row in messages]
 
     for poisoned in [
-        messages + [{"metadata": {"toolName": "spawn_browser_agent", "task_id": task,
-                                  "action_type": "read_browser_state", "toolStatus": "FINISHED"}}],
+        messages
+        + [
+            {
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "task_id": task,
+                    "action_type": "read_browser_state",
+                    "toolStatus": "FINISHED",
+                }
+            }
+        ],
         messages + [{"metadata": {"task_id": task, "action_type": "task_started"}}],
-        messages[:-1] + [{"metadata": {**metadata, "browser_preparation_cancellation": {
-            **receipt, "init_acknowledged": False,
-        }}}],
+        messages[:-1]
+        + [
+            {
+                "metadata": {
+                    **metadata,
+                    "browser_preparation_cancellation": {
+                        **receipt,
+                        "init_acknowledged": False,
+                    },
+                }
+            }
+        ],
     ]:
         with pytest.raises(TimeoutError):
             await refresh(poisoned)
@@ -3084,6 +3256,136 @@ def test_agent_messages_ready_for_browser_hub_archive_waits_for_recording():
     paused_with_recording = [recording_started, recording_finished, session_paused]
     assert bench._agent_messages_ready_for_browser_hub_archive(paused_with_recording)
     assert bench._agent_messages_ready_for_browser_hub_archive([])
+
+
+def _resumed_recording_archive_rows():
+    # Captured a806f2a9: saved first part, resumed the SAME browser task, then
+    # paused before the resumed part was attached. No real media is fabricated.
+    identity = dict(
+        toolName="spawn_browser_agent",
+        task_id="owned-resumed-browser",
+        workflowGeneration="owned-root-generation",
+        browser_url="https://fixture.kernel.sh/browser/live/owned-session",
+        browser_session_metadata={"provider": "kernel"},
+    )
+
+    def row(action, status, **extra):
+        return {
+            "metadata": dict(identity, action_type=action, toolStatus=status, **extra)
+        }
+
+    first = row("recording", "IN_PROGRESS", toolCallId="first-start")
+    saved = row(
+        "recording",
+        "FINISHED",
+        toolCallId="first-saved",
+        recording_view_url="https://fixture.invalid/first-part",
+    )
+    resumed = row("recording", "IN_PROGRESS", toolCallId="resumed-start")
+    terminal = row("task_complete", "ERROR", toolCallId="owned-tool")
+    latest = row(
+        "recording",
+        "FINISHED",
+        toolCallId="resumed-saved",
+        recording_view_url="https://fixture.invalid/resumed-part",
+    )
+    return [first, saved, resumed, terminal], latest
+
+
+def test_browser_archive_requires_each_resumed_recording_part():
+    from copy import deepcopy
+    import benchmarks.run_benchmark as bench
+
+    rows, latest = _resumed_recording_archive_rows()
+    before = deepcopy(rows)
+    assert not bench._agent_messages_have_browser_recording_ready(rows), (
+        "earlier task recording concealed missing resumed part"
+    )
+    assert not bench._agent_messages_ready_for_browser_hub_archive(rows)
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(rows)
+    assert rows == before, "readiness mutated captured transcript"
+    complete = rows + [latest]
+    assert bench._agent_messages_ready_for_browser_hub_archive(complete)
+    assert bench._agent_messages_ready_for_durable_browser_evidence(complete)
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(
+        [rows[0], rows[2], latest, rows[3]]
+    ), "a later saved part concealed an earlier missing part"
+    for field, value in (
+        ("workflowGeneration", "foreign-generation"),
+        ("browser_url", "https://fixture.kernel.sh/browser/live/foreign-session"),
+    ):
+        foreign = deepcopy(latest)
+        foreign["metadata"][field] = value
+        assert not bench._agent_messages_ready_for_durable_browser_evidence(
+            rows + [foreign]
+        ), field
+    empty = deepcopy(latest)
+    empty["metadata"].pop("recording_view_url")
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(rows + [empty])
+
+
+async def test_browser_archive_refresh_waits_for_resumed_recording_part():
+    from copy import deepcopy
+    import benchmarks.run_benchmark as bench
+
+    rows, latest = _resumed_recording_archive_rows()
+    root = "owned-root-generation"
+    incomplete = {"agent": {"status": "PAUSED"}, "messages": rows}
+    complete = {"agent": {"status": "PAUSED"}, "messages": rows + [latest]}
+    logs = {}
+    with (
+        patch.object(
+            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
+        ) as tree,
+        patch.object(
+            bench,
+            "get_agent",
+            AsyncMock(side_effect=[deepcopy(incomplete), deepcopy(complete)]),
+        ) as get,
+        patch.object(bench.asyncio, "sleep", AsyncMock()),
+    ):
+        observed = await bench._refresh_browser_archive_snapshot(
+            "https://fixture.invalid", root, {}, logs, expected_agent_ids={root}
+        )
+    assert get.await_count == tree.await_count == 2, (
+        "archive owner returned before resumed recording was attached"
+    )
+    assert observed["messages"] == complete["messages"]
+    assert len(logs["tree"][root]["messages"]) == len(complete["messages"])
+
+
+async def test_browser_archive_missing_resumed_part_preserves_existing_deadline():
+    import benchmarks.run_benchmark as bench
+
+    rows, _ = _resumed_recording_archive_rows()
+    root = "owned-root-generation"
+    logs = {}
+    with (
+        patch.object(
+            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
+        ),
+        patch.object(
+            bench,
+            "get_agent",
+            AsyncMock(return_value={"agent": {"status": "PAUSED"}, "messages": rows}),
+        ),
+    ):
+        try:
+            await bench._refresh_browser_archive_snapshot(
+                "https://fixture.invalid",
+                root,
+                {},
+                logs,
+                expected_agent_ids={root},
+                timeout_seconds=0.02,
+            )
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError(
+                "missing resumed recording bypassed the archive deadline"
+            )
+    assert logs["browser_archive_observation"]["ready"] is False
 
 
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
@@ -3576,7 +3878,9 @@ async def _exercise_owned_payment_reconciliation_caller(
             if caller == "cleanup":
                 result = await bench.ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             else:
-                data, _triggered, _resolved, failure = await bench._poll_agent(base_url, agent_id, task, timeout_snapshot=snapshot)
+                data, _triggered, _resolved, failure = await bench._poll_agent(
+                    base_url, agent_id, task, timeout_snapshot=snapshot
+                )
                 assert failure is None
                 result = data["_benchmark"]["payment_lifecycle"]
         except (RuntimeError, TimeoutError, asyncio.CancelledError) as caught:
@@ -3587,8 +3891,7 @@ async def _exercise_owned_payment_reconciliation_caller(
         assert snapshot["messages"] == ready["messages"]
         assert snapshot["_benchmark"]["payment_lifecycle"]["purchase"]["id"] == purchase_id
     assert all(
-        path in {"/api/test-payment/lifecycle", "/api/test-payment/lifecycle/abandon"}
-        for _, path, _ in requests
+        path in {"/api/test-payment/lifecycle", "/api/test-payment/lifecycle/abandon"} for _, path, _ in requests
     )
     assert terminal["integrity"]["cardCount"] == 1
     assert terminal["integrity"]["purchaseCount"] == 1
@@ -3652,9 +3955,7 @@ async def test_owned_payment_recovery_rejects_a_late_terminal_callback():
 
 
 async def test_payment_card_ready_recovery_preserves_the_outer_task_deadline():
-    observed = await _exercise_owned_payment_reconciliation_caller(
-        "poll", "terminal", card_ready_at_seconds=800
-    )
+    observed = await _exercise_owned_payment_reconciliation_caller("poll", "terminal", card_ready_at_seconds=800)
     assert observed.result is None, (
         "card-ready settlement must not report success after the unchanged900s task deadline; "
         f"posts={observed.posts}, elapsed={observed.elapsed}"
@@ -3732,8 +4033,11 @@ async def test_owned_payment_sleep_deadline_preserves_the_last_observed_state():
         "walletFunding": {"status": "RECLAIMING"},
         "agentCard": {"status": "CLOSED", "balanceCents": 0},
         "orgTransfer": {
-            "id": "local-timer-transfer", "cardId": "local-timer-card",
-            "status": "consumed", "transferredCents": 4396, "releasedCents": 0,
+            "id": "local-timer-transfer",
+            "cardId": "local-timer-card",
+            "status": "consumed",
+            "transferredCents": 4396,
+            "releasedCents": 0,
         },
     }
     calls = {"reads": 0, "recoveries": 0}
@@ -3749,12 +4053,17 @@ async def test_owned_payment_sleep_deadline_preserves_the_last_observed_state():
     try:
         await asyncio.wait_for(
             _wait_for_expected_payment_lifecycle(
-                "http://benchmark.invalid", "local-timer-agent",
-                get_task_by_name("agent-payment-abandonment"), lifecycle,
-                timeout_seconds=0.025, poll_interval_seconds=0.1,
-                fetch_lifecycle=fetch_lifecycle, recover_lifecycle=recover_lifecycle,
+                "http://benchmark.invalid",
+                "local-timer-agent",
+                get_task_by_name("agent-payment-abandonment"),
+                lifecycle,
+                timeout_seconds=0.025,
+                poll_interval_seconds=0.1,
+                fetch_lifecycle=fetch_lifecycle,
+                recover_lifecycle=recover_lifecycle,
                 resume_pending_after_seconds=120,
-            ), timeout=0.5,
+            ),
+            timeout=0.5,
         )
     except RuntimeError as error:
         message = str(error)
@@ -3764,10 +4073,14 @@ async def test_owned_payment_sleep_deadline_preserves_the_last_observed_state():
     assert "remained unavailable" not in message, f"zero requests were made: {message}"
     assert "did not reach the expected terminal state before timeout" in message
     for marker in (
-        "purchase.status='HELD'", "walletFunding.status='RECLAIMING'",
+        "purchase.status='HELD'",
+        "walletFunding.status='RECLAIMING'",
         'agentCard={"status": "CLOSED", "balanceCents": 0}',
-        '"id": "local-timer-transfer"', '"cardId": "local-timer-card"',
-        '"status": "consumed"', '"transferredCents": 4396', '"releasedCents": 0',
+        '"id": "local-timer-transfer"',
+        '"cardId": "local-timer-card"',
+        '"status": "consumed"',
+        '"transferredCents": 4396',
+        '"releasedCents": 0',
     ):
         assert marker in message, message
 
@@ -3778,7 +4091,8 @@ async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
     lifecycle = {
-        "purchase": {"status": "HELD"}, "walletFunding": {"status": "RECLAIMING"},
+        "purchase": {"status": "HELD"},
+        "walletFunding": {"status": "RECLAIMING"},
         "agentCard": {"status": "CLOSED", "balanceCents": 0},
         "orgTransfer": {"status": "consumed", "transferredCents": 4396, "releasedCents": 0},
     }
@@ -3793,11 +4107,15 @@ async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
     try:
         await asyncio.wait_for(
             _wait_for_expected_payment_lifecycle(
-                "http://benchmark.invalid", "local-fetch-agent",
-                get_task_by_name("agent-payment-abandonment"), lifecycle,
-                timeout_seconds=0.025, poll_interval_seconds=0,
+                "http://benchmark.invalid",
+                "local-fetch-agent",
+                get_task_by_name("agent-payment-abandonment"),
+                lifecycle,
+                timeout_seconds=0.025,
+                poll_interval_seconds=0,
                 fetch_lifecycle=fetch_lifecycle,
-            ), timeout=0.5,
+            ),
+            timeout=0.5,
         )
     except RuntimeError as error:
         message = str(error)
@@ -3806,7 +4124,13 @@ async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
     assert reads == 1
     assert "remained unavailable" in message
     assert "after 1 consecutive reads: local provider read unavailable" in message
-    for marker in ("purchase.status='HELD'", "walletFunding.status='RECLAIMING'", '"status": "CLOSED"', '"status": "consumed"', '"releasedCents": 0'):
+    for marker in (
+        "purchase.status='HELD'",
+        "walletFunding.status='RECLAIMING'",
+        '"status": "CLOSED"',
+        '"status": "consumed"',
+        '"releasedCents": 0',
+    ):
         assert marker in message, message
 
 
@@ -3816,7 +4140,9 @@ async def test_production_agentcard_release_stall_is_skippable_by_default():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
 
-    captured = json.loads((Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text())
+    captured = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
+    )
     lifecycle = captured["lifecycle"]
     original = json.dumps(lifecycle, sort_keys=True)
     task = get_task_by_name("agent-payment-production-abandonment")
@@ -3825,14 +4151,25 @@ async def test_production_agentcard_release_stall_is_skippable_by_default():
             os.environ.pop(bench.AGENTCARD_RELEASE_SKIP_ENV, None)
             with pytest.raises(bench.AgentCardReleaseStall) as caught:
                 await bench._wait_for_expected_payment_lifecycle(
-                    "http://benchmark.invalid", lifecycle["agentId"], task, lifecycle,
-                    timeout_seconds=0.01 if owned else 0, poll_interval_seconds=0.1,
+                    "http://benchmark.invalid",
+                    lifecycle["agentId"],
+                    task,
+                    lifecycle,
+                    timeout_seconds=0.01 if owned else 0,
+                    poll_interval_seconds=0.1,
                     recover_lifecycle=AsyncMock() if owned else None,
                 )
             result = bench.TaskResult(
-                name=task.name, passed=False, agent_id=lifecycle["agentId"], status="SKIPPED",
-                benchmark_status="SKIPPED", progress_score=0, duration_seconds=1, cost_cents=0,
-                message_count=0, failure_reason=f"{bench.AGENTCARD_RELEASE_SKIP_REASON}: {caught.value}",
+                name=task.name,
+                passed=False,
+                agent_id=lifecycle["agentId"],
+                status="SKIPPED",
+                benchmark_status="SKIPPED",
+                progress_score=0,
+                duration_seconds=1,
+                cost_cents=0,
+                message_count=0,
+                failure_reason=f"{bench.AGENTCARD_RELEASE_SKIP_REASON}: {caught.value}",
             )
             assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
     assert json.dumps(lifecycle, sort_keys=True) == original, "a waiver must not fabricate release or refund"
@@ -3843,7 +4180,9 @@ def test_agentcard_release_skip_rejects_independent_lifecycle_failures():
     from copy import deepcopy
     from benchmarks import run_benchmark as bench
 
-    lifecycle = json.loads((Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text())["lifecycle"]
+    lifecycle = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
+    )["lifecycle"]
     for section, field, value in (
         ("integrity", "cardCount", 2),
         ("attention", "openKinds", ["payment_approval"]),
@@ -3854,7 +4193,9 @@ def test_agentcard_release_skip_rejects_independent_lifecycle_failures():
         broken = deepcopy(lifecycle)
         broken[section][field] = value
         with patch.dict(os.environ, {bench.AGENTCARD_RELEASE_SKIP_ENV: "1"}):
-            error = bench._payment_reconciliation_timeout("pending", broken, task_name="agent-payment-production-abandonment")
+            error = bench._payment_reconciliation_timeout(
+                "pending", broken, task_name="agent-payment-production-abandonment"
+            )
         assert not isinstance(error, bench.AgentCardReleaseStall), (section, field, value)
 
 
@@ -3863,11 +4204,23 @@ async def test_agentcard_cleanup_preserves_the_typed_release_skip():
     from benchmarks import run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    lifecycle = json.loads((Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text())["lifecycle"]
-    with patch.object(bench, "_start_payment_abandonment_with_recovery", AsyncMock(return_value=lifecycle)), \
-         patch.object(bench, "_wait_for_expected_payment_lifecycle", AsyncMock(side_effect=bench.AgentCardReleaseStall("known release stall"))):
+    lifecycle = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
+    )["lifecycle"]
+    with (
+        patch.object(bench, "_start_payment_abandonment_with_recovery", AsyncMock(return_value=lifecycle)),
+        patch.object(
+            bench,
+            "_wait_for_expected_payment_lifecycle",
+            AsyncMock(side_effect=bench.AgentCardReleaseStall("known release stall")),
+        ),
+    ):
         with pytest.raises(bench.AgentCardReleaseStall):
-            await bench.ensure_payment_lifecycle_cleanup("http://benchmark.invalid", lifecycle["agentId"], get_task_by_name("agent-payment-production-abandonment"))
+            await bench.ensure_payment_lifecycle_cleanup(
+                "http://benchmark.invalid",
+                lifecycle["agentId"],
+                get_task_by_name("agent-payment-production-abandonment"),
+            )
 
 
 async def test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup():
@@ -3875,7 +4228,9 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
     from benchmarks import run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    lifecycle = json.loads((Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text())["lifecycle"]
+    lifecycle = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
+    )["lifecycle"]
     task = get_task_by_name("agent-payment-production-abandonment")
     for failure in (None, "delete", "archive", "seal"):
         cleanup = AsyncMock(side_effect=ConnectionError("a second financial cleanup must not run"))
@@ -3883,23 +4238,40 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
         logs = {"failure_evidence": {"errors": ["browser did not seal"] if failure == "seal" else []}}
         stall = bench._payment_reconciliation_timeout("pending", lifecycle, task_name=task.name)
         with contextlib.ExitStack() as stack:
-            for name in ("prepare_sandbox_payment_residual", "_preflight_production_payment_identity", "_apply_live_fixtures", "_apply_memory_fixtures", "_apply_auth_test_site", "_restore_live_fixture_scenarios_async", "_release_auth_test_site"):
+            for name in (
+                "prepare_sandbox_payment_residual",
+                "_preflight_production_payment_identity",
+                "_apply_live_fixtures",
+                "_apply_memory_fixtures",
+                "_apply_auth_test_site",
+                "_restore_live_fixture_scenarios_async",
+                "_release_auth_test_site",
+            ):
                 stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
             for name, replacement in {
                 "create_agent": AsyncMock(return_value=lifecycle["agentId"]),
                 "_run_with_agent_execution_backstop": AsyncMock(side_effect=stall),
-                "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": [], "_benchmark": {"payment_lifecycle": deepcopy(lifecycle)}}, logs)),
-                "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None), side_effect=ConnectionError("archive unavailable") if failure == "archive" else None),
+                "_capture_task_failure_evidence": AsyncMock(
+                    return_value=({"messages": [], "_benchmark": {"payment_lifecycle": deepcopy(lifecycle)}}, logs)
+                ),
+                "finalize_archive_and_score_world_model": AsyncMock(
+                    return_value=(None, None),
+                    side_effect=ConnectionError("archive unavailable") if failure == "archive" else None,
+                ),
                 "ensure_payment_lifecycle_cleanup": cleanup,
                 "delete_agent": delete,
             }.items():
                 stack.enter_context(patch.object(bench, name, replacement))
-            result = await bench._run_single_task_as_run_user("https://fixture.invalid", task, False, None, "", None, None, None)
+            result = await bench._run_single_task_as_run_user(
+                "https://fixture.invalid", task, False, None, "", None, None, None
+            )
         cleanup.assert_not_awaited()
         delete.assert_awaited_once()
         expected = "ERROR" if failure else "SKIPPED"
         assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False)
-        assert bench._ci_should_fail({"failed": int(bool(failure)), "skipped": int(not failure)}, [result]) is bool(failure)
+        assert bench._ci_should_fail({"failed": int(bool(failure)), "skipped": int(not failure)}, [result]) is bool(
+            failure
+        )
 
 
 def test_ci_permits_only_the_opt_in_agentcard_release_skip():
@@ -3908,9 +4280,17 @@ def test_ci_permits_only_the_opt_in_agentcard_release_skip():
     from benchmarks.run_benchmark import AGENTCARD_RELEASE_SKIP_REASON, _ci_should_fail
 
     def skipped(reason: str) -> TaskResult:
-        return TaskResult(name="agent-payment-abandonment", passed=False, agent_id="agent-123",
-                          status="SKIPPED", progress_score=0, duration_seconds=1, cost_cents=0,
-                          message_count=0, failure_reason=reason)
+        return TaskResult(
+            name="agent-payment-abandonment",
+            passed=False,
+            agent_id="agent-123",
+            status="SKIPPED",
+            progress_score=0,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            failure_reason=reason,
+        )
 
     summary = {"failed": 0, "skipped": 1}
     stall = skipped(f"{AGENTCARD_RELEASE_SKIP_REASON}: owt_1 consumed")
@@ -3927,15 +4307,25 @@ def _agentcard_release_stall_lifecycle(**transfer) -> dict:
     from copy import deepcopy
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    task_name = "agent-payment-production-abandonment" if transfer.get("livemode") is True else "agent-payment-abandonment"
+    task_name = (
+        "agent-payment-production-abandonment" if transfer.get("livemode") is True else "agent-payment-abandonment"
+    )
     lifecycle = deepcopy(get_task_by_name(task_name).expected_payment_lifecycle)
     card_id = "card_b2e87905c62c34ba8abff4d4"
     transfer_id = "owt_ff135698c18b095f3a40a249"
     lifecycle["agentId"] = "00000000-0000-4000-8000-000000000021"
-    lifecycle["purchase"].update(id="571cab13-0531-4173-85ef-d0709227fcd8", status="HELD", cardId=card_id, stripePaymentIntentId="pi_test")
+    lifecycle["purchase"].update(
+        id="571cab13-0531-4173-85ef-d0709227fcd8", status="HELD", cardId=card_id, stripePaymentIntentId="pi_test"
+    )
     lifecycle["walletFunding"].update(status="RECLAIMING", providerTransferId=transfer_id)
     lifecycle["agentCard"].update(id=card_id, status="CLOSED", balanceCents=0)
-    lifecycle["orgTransfer"].update(id=transfer_id, status="consumed", transferredCents=lifecycle["purchase"]["totalCents"], releasedCents=0, cardId=card_id)
+    lifecycle["orgTransfer"].update(
+        id=transfer_id,
+        status="consumed",
+        transferredCents=lifecycle["purchase"]["totalCents"],
+        releasedCents=0,
+        cardId=card_id,
+    )
     lifecycle["orgTransfer"].update(transfer)
     lifecycle["stripeRefund"] = None
     return lifecycle
@@ -3951,8 +4341,13 @@ async def test_abandonment_timeout_classifies_only_the_sandbox_release_stall():
     async def wait(lifecycle: dict) -> None:
         with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
             await _wait_for_expected_payment_lifecycle(
-                "http://localhost:55120", "agent-123", get_task_by_name("agent-payment-abandonment"),
-                lifecycle, timeout_seconds=0, poll_interval_seconds=0)
+                "http://localhost:55120",
+                "agent-123",
+                get_task_by_name("agent-payment-abandonment"),
+                lifecycle,
+                timeout_seconds=0,
+                poll_interval_seconds=0,
+            )
 
     with pytest.raises(AgentCardReleaseStall, match="expected 'VOIDED', got 'HELD'"):
         await wait(_agentcard_release_stall_lifecycle())
@@ -3974,30 +4369,47 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
     from benchmarks import run_benchmark as bench
 
     root = "00000000-0000-4000-8000-000000000021"
-    row = {"purchase_id": "571cab13-0531-4173-85ef-d0709227fcd8", "agent_id": root, "status": "HELD",
-           "card_id": "card_b2e87905c62c34ba8abff4d4", "stripe_payment_intent_id": "pi_test",
-           "total_cents": 4396, "funding_status": "RECLAIMING",
-           "provider_transfer_id": "owt_ff135698c18b095f3a40a249", "reclaim_provider_transfer_id": None}
+    row = {
+        "purchase_id": "571cab13-0531-4173-85ef-d0709227fcd8",
+        "agent_id": root,
+        "status": "HELD",
+        "card_id": "card_b2e87905c62c34ba8abff4d4",
+        "stripe_payment_intent_id": "pi_test",
+        "total_cents": 4396,
+        "funding_status": "RECLAIMING",
+        "provider_transfer_id": "owt_ff135698c18b095f3a40a249",
+        "reclaim_provider_transfer_id": None,
+    }
 
     async def stalled_payments(_base_url, _root_id, evidence):
         evidence["payment_snapshot"] = {"tree_agent_ids": [root], "purchase_cleanup": [row]}
         raise TimeoutError()
 
     async def finalize(env: dict, lifecycle: dict) -> tuple:
-        result = bench.TaskResult(name="agent-payment-test-shop", passed=True, agent_id=root,
-                                  status="COMPLETED", progress_score=1, duration_seconds=1, cost_cents=0,
-                                  message_count=0, logs={"tree": {root: {}}})
+        result = bench.TaskResult(
+            name="agent-payment-test-shop",
+            passed=True,
+            agent_id=root,
+            status="COMPLETED",
+            progress_score=1,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            logs={"tree": {root: {}}},
+        )
         before = {"root_user_id": "test-owned-user", "tree_agent_ids": [root], "browser_sessions": []}
-        with patch.dict(os.environ, env), \
-             patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=before), \
-             patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}), \
-             patch.object(bench, "pause_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "delete_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})), \
-             patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))), \
-             patch.object(bench, "_finalize_owned_root_payments", stalled_payments), \
-             patch.object(bench, "get_test_payment_lifecycle", AsyncMock(return_value=lifecycle)), \
-             patch.object(bench, "fetch_local_worker_logs", return_value=[]):
+        with (
+            patch.dict(os.environ, env),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=before),
+            patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}),
+            patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})),
+            patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))),
+            patch.object(bench, "_finalize_owned_root_payments", stalled_payments),
+            patch.object(bench, "get_test_payment_lifecycle", AsyncMock(return_value=lifecycle)),
+            patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+        ):
             try:
                 await bench._finalize_owned_cloud_batch("test-owned-no-network", [result], {})
             except RuntimeError as error:
@@ -4025,20 +4437,30 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
         assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
 
 
-
 def test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state():
     from copy import deepcopy
     from benchmarks.run_benchmark import _agentcard_release_stalled
+
     good = _agentcard_release_stall_lifecycle()
     assert _agentcard_release_stalled(good)
     variants = []
     for field, value in (("id", "card_other"), ("balanceCents", 1), ("balanceCents", False)):
-        row = deepcopy(good); row["agentCard"][field] = value; variants.append(row)
+        row = deepcopy(good)
+        row["agentCard"][field] = value
+        variants.append(row)
     for field in ("id", "balanceCents"):
-        row = deepcopy(good); row["agentCard"].pop(field); variants.append(row)
-    row = deepcopy(good); row["orgTransfer"].pop("cardId"); variants.append(row)
-    row = deepcopy(good); row["orgTransfer"]["livemode"] = True; variants.append(row)
-    row = deepcopy(good); row["orgTransfer"]["releasedCents"] = False; variants.append(row)
+        row = deepcopy(good)
+        row["agentCard"].pop(field)
+        variants.append(row)
+    row = deepcopy(good)
+    row["orgTransfer"].pop("cardId")
+    variants.append(row)
+    row = deepcopy(good)
+    row["orgTransfer"]["livemode"] = True
+    variants.append(row)
+    row = deepcopy(good)
+    row["orgTransfer"]["releasedCents"] = False
+    variants.append(row)
     for row in variants:
         assert not _agentcard_release_stalled(row), row
 
@@ -4047,26 +4469,36 @@ async def test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_o
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
+
     task = get_task_by_name("agent-payment-abandonment")
     calls = {"reads": 0, "recoveries": 0}
+
     async def read(_base, _aid):
         calls["reads"] += 1
         raise AssertionError("owned timer expired before the read")
+
     async def recover(_base, _aid):
         calls["recoveries"] += 1
         raise AssertionError("owned timer expired before recovery")
+
     for flag in ("0", "1"):
         for owned in (False, True):
             with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": flag}):
                 with pytest.raises(RuntimeError) as caught:
-                    await asyncio.wait_for(bench._wait_for_expected_payment_lifecycle(
-                        "http://benchmark.invalid", "exact-owned-agent", task,
-                        _agentcard_release_stall_lifecycle(),
-                        timeout_seconds=0.025 if owned else 0,
-                        poll_interval_seconds=0.1 if owned else 0,
-                        fetch_lifecycle=read, recover_lifecycle=recover if owned else None,
-                        resume_pending_after_seconds=120 if owned else None,
-                    ), timeout=0.5)
+                    await asyncio.wait_for(
+                        bench._wait_for_expected_payment_lifecycle(
+                            "http://benchmark.invalid",
+                            "exact-owned-agent",
+                            task,
+                            _agentcard_release_stall_lifecycle(),
+                            timeout_seconds=0.025 if owned else 0,
+                            poll_interval_seconds=0.1 if owned else 0,
+                            fetch_lifecycle=read,
+                            recover_lifecycle=recover if owned else None,
+                            resume_pending_after_seconds=120 if owned else None,
+                        ),
+                        timeout=0.5,
+                    )
             assert isinstance(caught.value, bench.AgentCardReleaseStall) == (flag == "1")
             assert "last observed" in str(caught.value)
     assert calls == {"reads": 0, "recoveries": 0}
@@ -4076,25 +4508,40 @@ async def test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_can
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
+
     task = get_task_by_name("agent-payment-abandonment")
+
     async def failed(_base, _aid):
         await asyncio.sleep(0.035)
         raise ConnectionError("unrelated actual read failure")
+
     with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
         with pytest.raises(RuntimeError) as caught:
             await bench._wait_for_expected_payment_lifecycle(
-                "http://benchmark.invalid", "exact-owned-agent", task,
-                _agentcard_release_stall_lifecycle(), timeout_seconds=0.025,
-                poll_interval_seconds=0, fetch_lifecycle=failed)
+                "http://benchmark.invalid",
+                "exact-owned-agent",
+                task,
+                _agentcard_release_stall_lifecycle(),
+                timeout_seconds=0.025,
+                poll_interval_seconds=0,
+                fetch_lifecycle=failed,
+            )
         assert not isinstance(caught.value, bench.AgentCardReleaseStall)
         assert "remained unavailable" in str(caught.value)
+
         async def cancelled(_base, _aid):
             raise asyncio.CancelledError()
+
         with pytest.raises(asyncio.CancelledError):
             await bench._wait_for_expected_payment_lifecycle(
-                "http://benchmark.invalid", "exact-owned-agent", task,
-                _agentcard_release_stall_lifecycle(), timeout_seconds=1,
-                poll_interval_seconds=0, recover_lifecycle=cancelled)
+                "http://benchmark.invalid",
+                "exact-owned-agent",
+                task,
+                _agentcard_release_stall_lifecycle(),
+                timeout_seconds=1,
+                poll_interval_seconds=0,
+                recover_lifecycle=cancelled,
+            )
 
 
 async def test_abandonment_waits_for_cron_reconciliation():
@@ -7604,12 +8051,8 @@ def test_in_progress_phone_call_counts_as_live_stall_activity():
     hold = get_task_by_name("phone-call-hold-queue")
     chat = get_task_by_name("chat-mode")
 
-    assert has_in_progress_phone_call(
-        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "IN_PROGRESS"}}]
-    )
-    assert not has_in_progress_phone_call(
-        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "FINISHED"}}]
-    )
+    assert has_in_progress_phone_call([{"metadata": {"toolName": "call_phone_number", "toolStatus": "IN_PROGRESS"}}])
+    assert not has_in_progress_phone_call([{"metadata": {"toolName": "call_phone_number", "toolStatus": "FINISHED"}}])
     assert not has_in_progress_phone_call([{"metadata": {"toolName": "web_search", "toolStatus": "IN_PROGRESS"}}])
     assert not has_in_progress_phone_call([])
     # Keep the default fail-fast budget for hold-queue tasks that never place a
@@ -21859,6 +22302,7 @@ async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknow
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
+
     for name in ("agent-payment-production-abandonment", "unregistered-agentcard-task"):
         task = deepcopy(get_task_by_name("agent-payment-abandonment"))
         task.name = name
@@ -21867,8 +22311,11 @@ async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknow
             with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
                 with pytest.raises(RuntimeError) as raised:
                     await bench._wait_for_expected_payment_lifecycle(
-                        "http://localhost:55120", "agent-123", task,
-                        _agentcard_release_stall_lifecycle(), timeout_seconds=0.01 if owned else 0,
+                        "http://localhost:55120",
+                        "agent-123",
+                        task,
+                        _agentcard_release_stall_lifecycle(),
+                        timeout_seconds=0.01 if owned else 0,
                         poll_interval_seconds=0.1,
                         recover_lifecycle=AsyncMock() if owned else None,
                     )
@@ -21877,12 +22324,23 @@ async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknow
 
 async def test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown():
     from benchmarks import run_benchmark as bench
+
     for name in ("agent-payment-production-abandonment", "unregistered-agentcard-task"):
-        result = bench.TaskResult(name=name, passed=False, agent_id="agent-123", status="SKIPPED",
-            progress_score=0, duration_seconds=1, cost_cents=0, message_count=0,
-            failure_reason=bench.AGENTCARD_RELEASE_SKIP_REASON)
+        result = bench.TaskResult(
+            name=name,
+            passed=False,
+            agent_id="agent-123",
+            status="SKIPPED",
+            progress_score=0,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            failure_reason=bench.AGENTCARD_RELEASE_SKIP_REASON,
+        )
         with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
-            assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) == (name == "unregistered-agentcard-task"), name
+            assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) == (
+                name == "unregistered-agentcard-task"
+            ), name
 
 
 async def test_agentcard_release_skip_catalog_task_catch_stays_strict():
@@ -21890,14 +22348,35 @@ async def test_agentcard_release_skip_catalog_task_catch_stays_strict():
     from unittest.mock import AsyncMock
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
-    for name in ("agent-payment-production-abandonment", "unregistered-agentcard-task", "agent-payment-test-shop", "agent-payment-abandonment"):
-        task = deepcopy(get_task_by_name("agent-payment-abandonment")); task.name = name
-        with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}), \
-             patch.object(bench, "prepare_sandbox_payment_residual", AsyncMock(side_effect=bench.AgentCardReleaseStall("injected typed stall", lifecycle=_agentcard_release_stall_lifecycle(livemode=name == "agent-payment-production-abandonment")))), \
-             patch.object(bench, "_restore_live_fixture_scenarios_async", AsyncMock()), \
-             patch.object(bench, "_release_auth_test_site", AsyncMock()):
+
+    for name in (
+        "agent-payment-production-abandonment",
+        "unregistered-agentcard-task",
+        "agent-payment-test-shop",
+        "agent-payment-abandonment",
+    ):
+        task = deepcopy(get_task_by_name("agent-payment-abandonment"))
+        task.name = name
+        with (
+            patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}),
+            patch.object(
+                bench,
+                "prepare_sandbox_payment_residual",
+                AsyncMock(
+                    side_effect=bench.AgentCardReleaseStall(
+                        "injected typed stall",
+                        lifecycle=_agentcard_release_stall_lifecycle(
+                            livemode=name == "agent-payment-production-abandonment"
+                        ),
+                    )
+                ),
+            ),
+            patch.object(bench, "_restore_live_fixture_scenarios_async", AsyncMock()),
+            patch.object(bench, "_release_auth_test_site", AsyncMock()),
+        ):
             result = await bench._run_single_task_as_run_user(
-                "http://localhost:55120", task, True, None, "", None, None, None)
+                "http://localhost:55120", task, True, None, "", None, None, None
+            )
         expected = "ERROR" if name == "unregistered-agentcard-task" else "SKIPPED"
         assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False), name
 
@@ -21909,30 +22388,47 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
     from benchmarks import run_benchmark as bench
 
     root = "00000000-0000-4000-8000-000000000021"
-    row = {"purchase_id": "571cab13-0531-4173-85ef-d0709227fcd8", "agent_id": root, "status": "HELD",
-           "card_id": "card_b2e87905c62c34ba8abff4d4", "stripe_payment_intent_id": "pi_test",
-           "total_cents": 4396, "funding_status": "RECLAIMING",
-           "provider_transfer_id": "owt_ff135698c18b095f3a40a249", "reclaim_provider_transfer_id": None}
+    row = {
+        "purchase_id": "571cab13-0531-4173-85ef-d0709227fcd8",
+        "agent_id": root,
+        "status": "HELD",
+        "card_id": "card_b2e87905c62c34ba8abff4d4",
+        "stripe_payment_intent_id": "pi_test",
+        "total_cents": 4396,
+        "funding_status": "RECLAIMING",
+        "provider_transfer_id": "owt_ff135698c18b095f3a40a249",
+        "reclaim_provider_transfer_id": None,
+    }
 
     async def stalled_payments(_base_url, _root_id, evidence):
         evidence["payment_snapshot"] = {"tree_agent_ids": [root], "purchase_cleanup": [row]}
         raise TimeoutError()
 
     async def finalize(env: dict, lifecycle: dict, task_name: str = "agent-payment-test-shop") -> tuple:
-        result = bench.TaskResult(name=task_name, passed=True, agent_id=root,
-                                  status="COMPLETED", progress_score=1, duration_seconds=1, cost_cents=0,
-                                  message_count=0, logs={"tree": {root: {}}})
+        result = bench.TaskResult(
+            name=task_name,
+            passed=True,
+            agent_id=root,
+            status="COMPLETED",
+            progress_score=1,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            logs={"tree": {root: {}}},
+        )
         before = {"root_user_id": "test-owned-user", "tree_agent_ids": [root], "browser_sessions": []}
-        with patch.dict(os.environ, env), \
-             patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=before), \
-             patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}), \
-             patch.object(bench, "pause_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "delete_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})), \
-             patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))), \
-             patch.object(bench, "_finalize_owned_root_payments", stalled_payments), \
-             patch.object(bench, "get_test_payment_lifecycle", AsyncMock(return_value=lifecycle)), \
-             patch.object(bench, "fetch_local_worker_logs", return_value=[]):
+        with (
+            patch.dict(os.environ, env),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=before),
+            patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}),
+            patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})),
+            patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))),
+            patch.object(bench, "_finalize_owned_root_payments", stalled_payments),
+            patch.object(bench, "get_test_payment_lifecycle", AsyncMock(return_value=lifecycle)),
+            patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+        ):
             try:
                 await bench._finalize_owned_cloud_batch("test-owned-no-network", [result], {})
             except RuntimeError as error:
@@ -21957,7 +22453,9 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
             assert error is None, (name, error)
             assert (result.passed, result.status, result.benchmark_status) == (False, "SKIPPED", "SKIPPED"), name
             assert result.logs["cloud_cleanup_evidence"]["errors"] == []
-            assert result.logs["cloud_cleanup_evidence"]["warnings"] == [f"payment: {bench.AGENTCARD_RELEASE_SKIP_REASON}"]
+            assert result.logs["cloud_cleanup_evidence"]["warnings"] == [
+                f"payment: {bench.AGENTCARD_RELEASE_SKIP_REASON}"
+            ]
             assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
         row["total_cents"] = 4396
 
@@ -21971,7 +22469,6 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
         assert (result.passed, result.benchmark_status) == (False, "ERROR")
         assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
 
-
     for name in ("agent-payment-production-abandonment", "unregistered-agentcard-task"):
         result, error = await finalize(flag, _agentcard_release_stall_lifecycle(), name)
         assert error is not None and "owned cloud evidence finalization failed" in str(error), name
@@ -21983,21 +22480,70 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
-    await r.record_async("production_agentcard_release_stall_default_skip", test_production_agentcard_release_stall_is_skippable_by_default)
-    r.record("agentcard_release_skip_rejects_independent_failures", test_agentcard_release_skip_rejects_independent_lifecycle_failures)
-    await r.record_async("agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip)
-    await r.record_async("agentcard_release_skip_execution_cleanup", test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup)
-    await r.record_async("agentcard_release_skip_preserves_task_failure", test_agentcard_release_stall_cannot_replace_an_independent_task_failure)
-    await r.record_async("agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown)
-    await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown)
-    await r.record_async("agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict)
-    await r.record_async("agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict)
+    from benchmarks import lantern_people_trace_tests
+
+    for name in (
+        "test_lantern_native_scenarios_and_final_grounding",
+        "test_lantern_discovery_constraint_and_provenance_rejections",
+        "test_lantern_enrichment_requires_native_lineage_and_fresh_values",
+        "test_lantern_pagination_requires_exact_native_cursor_and_constraints",
+        "test_lantern_config_missing_final_and_null_native_fields",
+        "test_lantern_reviewer_owner_constraint_and_native_counterexamples",
+        "test_lantern_latest_completion_and_cache_evidence_are_strict",
+    ):
+        r.record(name, getattr(lantern_people_trace_tests, name))
+    await r.record_async(
+        "production_agentcard_release_stall_default_skip",
+        test_production_agentcard_release_stall_is_skippable_by_default,
+    )
+    r.record(
+        "agentcard_release_skip_rejects_independent_failures",
+        test_agentcard_release_skip_rejects_independent_lifecycle_failures,
+    )
+    await r.record_async(
+        "agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip
+    )
+    await r.record_async(
+        "agentcard_release_skip_execution_cleanup",
+        test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup,
+    )
+    await r.record_async(
+        "agentcard_release_skip_preserves_task_failure",
+        test_agentcard_release_stall_cannot_replace_an_independent_task_failure,
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_ci",
+        test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown,
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict
+    )
     r.record("ci_permits_only_opt_in_agentcard_release_skip", test_ci_permits_only_the_opt_in_agentcard_release_skip)
-    r.record("agentcard_release_policy_rejects_incomplete_foreign_state", test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state)
-    await r.record_async("abandonment_timeout_classifies_sandbox_release_stall", test_abandonment_timeout_classifies_only_the_sandbox_release_stall)
-    await r.record_async("owned_payment_release_stall_warn_skip", test_owned_payment_release_stall_warns_instead_of_failing_cleanup)
-    await r.record_async("agentcard_release_policy_owned_legacy_deadlines", test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_opted_in)
-    await r.record_async("agentcard_release_policy_fetch_cancel_strict", test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation)
+    r.record(
+        "agentcard_release_policy_rejects_incomplete_foreign_state",
+        test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state,
+    )
+    await r.record_async(
+        "abandonment_timeout_classifies_sandbox_release_stall",
+        test_abandonment_timeout_classifies_only_the_sandbox_release_stall,
+    )
+    await r.record_async(
+        "owned_payment_release_stall_warn_skip", test_owned_payment_release_stall_warns_instead_of_failing_cleanup
+    )
+    await r.record_async(
+        "agentcard_release_policy_owned_legacy_deadlines",
+        test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_opted_in,
+    )
+    await r.record_async(
+        "agentcard_release_policy_fetch_cancel_strict",
+        test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation,
+    )
 
     await r.record_async(
         "benchmark_native_checks_overlap_judges_without_losing_ownership",
@@ -22146,7 +22692,9 @@ async def run_all_tests():
     )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_call_ivr_dtmf_task", test_phone_call_ivr_dtmf_task_defines_call_tree_verification)
-    r.record("phone_call_hold_queue_task", test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credit)
+    r.record(
+        "phone_call_hold_queue_task", test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credit
+    )
     r.record(
         "phone_call_parked_on_hold_static_check",
         test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card,
@@ -22157,7 +22705,9 @@ async def run_all_tests():
         for name in sorted(dir(module)):
             if name.startswith("test_"):
                 case = getattr(module, name)
-                await r.record_async(prefix + name[5:], lambda case=case: asyncio.to_thread(_run_pytest_style_case, case))
+                await r.record_async(
+                    prefix + name[5:], lambda case=case: asyncio.to_thread(_run_pytest_style_case, case)
+                )
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record(
         "phone_callee_session_number_name_contract",
@@ -23489,8 +24039,12 @@ async def run_all_tests():
         "post_pause_refreshes_retain_observed_harness_evidence",
         test_post_pause_refreshes_retain_observed_harness_evidence,
     )
-    await r.record_async("task_failure_preserves_owned_snapshot", test_task_failure_preserves_owned_snapshot_on_all_error_exits)
-    await r.record_async("payment_browser_seal_rejects_empty_evidence", test_payment_browser_seal_rejects_empty_declared_browser_evidence)
+    await r.record_async(
+        "task_failure_preserves_owned_snapshot", test_task_failure_preserves_owned_snapshot_on_all_error_exits
+    )
+    await r.record_async(
+        "payment_browser_seal_rejects_empty_evidence", test_payment_browser_seal_rejects_empty_declared_browser_evidence
+    )
     await r.record_async(
         "payment_abandonment_seals_browser_before_hub_archive",
         test_payment_abandonment_seals_browser_before_hub_archive,
@@ -23664,6 +24218,15 @@ async def run_all_tests():
     r.record(
         "payment_setup_resume_stays_exclusive_beside_event_ticket",
         test_payment_setup_resume_stays_exclusive_beside_event_ticket,
+    )
+    r.record(
+        "browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part
+    )
+    await r.record_async(
+        "browser_archive_waits_resumed_recording_part", test_browser_archive_refresh_waits_for_resumed_recording_part
+    )
+    await r.record_async(
+        "browser_archive_missing_resumed_part_deadline", test_browser_archive_missing_resumed_part_preserves_existing_deadline
     )
     r.record(
         "agent_messages_ready_for_browser_hub_archive_waits_for_recording",

@@ -12,7 +12,7 @@ symptoms:
   - "every GET /api/agents returns 500 while /health returns 200"
   - 'component Agents logs "Failed to fetch agents"; dashboard fully broken'
   - 'prod migration-declared GIN trigram indexes ("Agent_title_trgm_idx", "Message_text_trgm_idx") missing while _prisma_migrations records them applied'
-  - "a table from an unmerged branch exists in prod without RLS before its migration was deployed"
+  - "local DATABASE_URL override left production DIRECT_URL selected; Credit_userId_fkey failed during Prisma AddForeignKey"
 tags:
   - prisma
   - db-push
@@ -23,8 +23,9 @@ tags:
 sources:
   - memory:project_prod_agents_500_fastmodecache_jun2026
   - PR #1417
+  - PR #1511
 repro: back-end/scripts/prisma-local-push.test.sh
-status: fixed
+status: mitigated
 ---
 
 ## Problem
@@ -138,3 +139,61 @@ in `npm run test:structural`, now also fails when CLAUDE.md, AGENTS.md or any
 instruction doc under `.claude/` or `docs/` contains an `npx prisma db push`
 without both URLs scoped to localhost. It failed on the previous CLAUDE.md and
 passes on the corrected one.
+
+## Recurrence: a local URL override bypassed the guarded entry point (2026-10-14)
+
+During PR #1511 integration tests, a direct Prisma schema-push command from an
+isolated worktree overrode only `DATABASE_URL`. From `back-end/`, Prisma 5.22
+loaded the linked backend `.env` and selected its production `DIRECT_URL`.
+The existing local-only wrapper and canonical coverage/setup scripts already
+pin both URLs; the direct executable bypassed those guards. This recurrence
+therefore exposes an operational bypass of the existing protection, rather
+than a demonstrated failure of the guarded wrapper.
+
+There were two failed commands, but only the second is proven to have reached
+production. The first ran from the worktree root with an explicit schema path;
+its redirected output was overwritten. Its root/schema-directory dotenv
+candidates were absent and no `DIRECT_URL` was inherited. A subsequent
+configuration-only `prisma validate` under those equivalent lookup conditions
+failed with P1012 (`Environment variable not found: DIRECT_URL`), without a
+schema push or database connection. This supports a pre-connection failure for
+the first command; it does not recover the original stderr.
+
+Independent Supabase logs record the second command's attempted
+`Credit_userId_fkey` addition at 2026-10-14 22:56:56.061 UTC and SQLSTATE 23503
+at 22:56:56.068. A bounded, untruncated provider query covering
+22:56:30–22:57:15 returned five events: that statement/error pair and three
+unrelated cache statements before the first command's earliest filesystem
+time bound. No successful incident DDL was confirmed. The installed Prisma
+engine (`605197351a3c8bdd595af2d2a9bc3025bca48ea2`) submits rendered SQL
+statements separately, without one transaction around the complete push, so
+failure alone cannot establish that no earlier DDL committed.
+
+All remote schema operations stopped. The subsequent audit verified both
+session and transaction read-only protection before querying the catalog.
+No canonical application tables or columns were missing, no recently changed
+cluster of surviving catalog rows was found, and `/health` and `/health/deep`
+returned 200. The currently absent Credit foreign key, orphan Credit rows and
+other schema drift cannot be dated to this incident from a local seed or live
+catalog. Provider ingestion completeness is not certified, and dropped catalog
+rows are not visible. The conclusion remains **no confirmed successful
+incident DDL**, with incomplete before/after attribution; it is not proof of
+zero impact. No repair, inferred drift cleanup, index rebuild or production
+restore was attempted or justified by these findings.
+
+The original output, command receipt and independent log/catalog evidence are
+retained under `.context/rca-main-integration/.context/db-push-incident.json`
+and `.context/rca-ae17b024/production-db-impact-readonly/`. The archive searches
+`Credit_userId_fkey` and `local DATABASE_URL directUrl production` found this
+existing failure class; the former had no exact match. No user instruction
+requested production schema work. The user was informed of the mistake and
+attribution limits while the audit ran.
+
+Testing resumed only through the canonical local coverage runner with a
+validated loopback `victoria_<workspace>` target. Its actual runner/backend
+children were independently checked to carry matching local `DATABASE_URL`
+and `DIRECT_URL`. The existing `prisma-local-push.test.sh` also passed: either
+remote URL is rejected and the both-local dry-run is accepted. These checks do
+not imply that a bare Prisma executable is guarded. Preserve the receipts,
+use the guarded local entry points, and obtain a trustworthy production
+before-image before attributing or repairing unrelated catalog drift.

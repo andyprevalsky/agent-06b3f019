@@ -21,6 +21,7 @@ Usage in tests:
 """
 
 import os
+import re
 import threading
 import time
 import warnings
@@ -45,6 +46,8 @@ _REDACT_HEADERS = frozenset(
         "x-api-key",
         "x-supermemory-api-key",
         "x-perplexity-key",
+        "cookie",
+        "set-cookie",
     }
 )
 
@@ -106,7 +109,7 @@ def install_capture() -> None:
                 stacklevel=2,
             )
 
-    httpx.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    setattr(httpx.AsyncClient, "__init__", patched_init)
     _installed = True
 
 
@@ -115,7 +118,7 @@ def uninstall_capture() -> None:
     global _installed, _original_init
     if not _installed or _original_init is None:
         return
-    httpx.AsyncClient.__init__ = _original_init  # type: ignore[assignment]
+    setattr(httpx.AsyncClient, "__init__", _original_init)
     _original_init = None
     _installed = False
 
@@ -177,12 +180,25 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         global _next_id
         url = str(request.url)
+        credential_exchange = request.url.path.rstrip("/") in {"/oauth/token", "/v1/oauth/token"} or bool(
+            re.fullmatch(
+                r"/api/integrations/(lantern-people|claude-code|gpt-code|compute-code)/credentials/(token|upload)",
+                request.url.path.rstrip("/"),
+            )
+        )
+        if credential_exchange:
+            url = str(request.url.copy_with(query=None, fragment=None, username="", password=""))
 
         # Skip localhost/loopback capture when NOT using a mock handler
         # (avoids capturing calls to test infrastructure like health checks).
+        # Credential exchanges still need the metadata-only audit path above.
         # When a mock handler IS active, all calls should be captured since
         # they are test-controlled.
-        if _mock_handler is None and ("localhost" in url or "127.0.0.1" in url or "0.0.0.0" in url):
+        if (
+            _mock_handler is None
+            and not credential_exchange
+            and ("localhost" in url or "127.0.0.1" in url or "0.0.0.0" in url)
+        ):
             return await self._wrapped.handle_async_request(request)
 
         with _lock:
@@ -193,13 +209,15 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
         # Serialize request
         method = request.method
         headers = dict(request.headers)
-        redacted_headers = {k: _redact_header(k, v) for k, v in headers.items()}
+        redacted_headers = {} if credential_exchange else {k: _redact_header(k, v) for k, v in headers.items()}
 
         request_body: str | None = None
-        try:
-            body_bytes = request.content
-        except httpx.RequestNotRead:
-            body_bytes = await request.aread()
+        body_bytes = b""
+        if not credential_exchange:
+            try:
+                body_bytes = request.content
+            except httpx.RequestNotRead:
+                body_bytes = await request.aread()
         if body_bytes:
             try:
                 request_body = body_bytes.decode("utf-8")
@@ -227,6 +245,12 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
             # a process-wide singleton requires the dynamic check.)
             active = httpx.MockTransport(_mock_handler) if _mock_handler is not None else self._wrapped
             response = await active.handle_async_request(request)
+            if credential_exchange:
+                entry["durationMs"] = int((time.monotonic() - start) * 1000)
+                entry["responseStatus"] = response.status_code
+                with _lock:
+                    _captures.append(entry)
+                return response
 
             # Buffer the response stream so we can capture the body
             body_bytes = b""
@@ -263,7 +287,7 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
 
         except Exception as e:
             entry["durationMs"] = int((time.monotonic() - start) * 1000)
-            entry["error"] = str(e)
+            entry["error"] = "Credential exchange failed" if credential_exchange else str(e)
             with _lock:
                 _captures.append(entry)
             raise

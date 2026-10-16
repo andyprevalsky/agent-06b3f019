@@ -145,6 +145,18 @@ class _Backend:
         path = request.url.path
         if path == "/api/agent-queue-pointer":
             return httpx.Response(200, json={"taskQueue": self.live_queue, "surfaceHash": "deploy-e2e"})
+        if request.method == "GET" and path.startswith("/api/agents/"):
+            agent_id = path.removeprefix("/api/agents/")
+            if agent_id in wf.CUTOVER_MESSAGES:
+                raw_since = request.url.params.get("since")
+                since = datetime.fromisoformat(raw_since.replace("Z", "+00:00")) if raw_since else None
+                rows = [
+                    {key: value for key, value in row.items() if key != "task_queue"}
+                    for row in wf.CUTOVER_MESSAGES[agent_id]
+                    if since is None or datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00")) > since
+                ]
+                rows.sort(key=lambda row: (row["timestamp"], row["id"]))
+                return httpx.Response(200, json={"agent": {"id": agent_id}, "messages": rows})
         if request.method == "GET" and path.startswith("/api/browser-session/task/") and path.endswith("/control"):
             return httpx.Response(200, json={"state": "agent"})
         if request.method == "POST" and path == "/realtime/v1/api/broadcast":

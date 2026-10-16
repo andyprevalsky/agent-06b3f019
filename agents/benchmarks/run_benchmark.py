@@ -2052,9 +2052,7 @@ async def _evaluate_phone_call_task(
         return False, f"final output missing expected returned findings: {final_missing}"
     if task.callee_checks:
         try:
-            structured = await callee.fetch_callee_structured_data(
-                timeout_seconds=callee.analysis_timeout_seconds()
-            )
+            structured = await callee.fetch_callee_structured_data(timeout_seconds=callee.analysis_timeout_seconds())
         except Exception as exc:
             return False, f"failed to fetch callee-side call analysis: {exc}"
         failures = callee_check_failures(task.callee_checks, structured)
@@ -2151,7 +2149,10 @@ def resolve_task_execution_timeout(task: BenchmarkTask, *, bootstrap: bool = Fal
     floor = get_timeout_floor(task.name)
     history_timeout = max(history_timeout, floor) if floor else history_timeout
     if history_timeout > seconds:
-        return history_timeout, f"history extends the {seconds}s benchmark timeout; recent_p95={s['recent_p95']}s, n={s['count']}"
+        return (
+            history_timeout,
+            f"history extends the {seconds}s benchmark timeout; recent_p95={s['recent_p95']}s, n={s['count']}",
+        )
     return seconds, note
 
 
@@ -3143,13 +3144,17 @@ async def _wait_for_expected_payment_lifecycle(
                         candidate = await fetch_lifecycle(base_url, agent_id)
                         now = time.monotonic()
                         if now >= deadline:
-                            raise _PaymentReconciliationDeadline("Payment reconciliation deadline reached after observation")
+                            raise _PaymentReconciliationDeadline(
+                                "Payment reconciliation deadline reached after observation"
+                            )
                         candidate_error = _validate_payment_lifecycle(
                             task, {"_benchmark": {"payment_lifecycle": candidate}}
                         )
                         candidate_purchase = candidate.get("purchase") if isinstance(candidate, dict) else None
                         candidate_funding = candidate.get("walletFunding") if isinstance(candidate, dict) else None
-                        candidate_status = candidate_purchase.get("status") if isinstance(candidate_purchase, dict) else None
+                        candidate_status = (
+                            candidate_purchase.get("status") if isinstance(candidate_purchase, dict) else None
+                        )
                         resumable = candidate_status in retryable_statuses or (
                             candidate_status == "HELD"
                             and isinstance(candidate_funding, dict)
@@ -3157,7 +3162,9 @@ async def _wait_for_expected_payment_lifecycle(
                         )
                         if candidate_error is not None and resumable and now >= next_resume_at:
                             if time.monotonic() >= deadline:
-                                raise _PaymentReconciliationDeadline("Payment reconciliation deadline reached before resuming cleanup")
+                                raise _PaymentReconciliationDeadline(
+                                    "Payment reconciliation deadline reached before resuming cleanup"
+                                )
                             # The backend still applies its stale-lease CAS and
                             # purchase fencing. This resumes the same allocation.
                             next_resume_at = now + resume_pending_after_seconds
@@ -4645,9 +4652,7 @@ async def _poll_agent(
                 for message in messages
             )
         ):
-            remaining_task_budget = (
-                None if wall_clock_disabled else max(0, resolved_timeout - (time.time() - start))
-            )
+            remaining_task_budget = None if wall_clock_disabled else max(0, resolved_timeout - (time.time() - start))
             if remaining_task_budget is not None and remaining_task_budget <= 0:
                 raise RuntimeError(f"Payment reconciliation started after the task timeout ({resolved_timeout}s)")
             try:
@@ -4669,9 +4674,7 @@ async def _poll_agent(
                         agent_id,
                         task,
                         lifecycle,
-                        timeout_seconds=(
-                            420 if remaining_task_budget is None else min(420, remaining_task_budget)
-                        ),
+                        timeout_seconds=(420 if remaining_task_budget is None else min(420, remaining_task_budget)),
                         recover_lifecycle=abandon_test_payment,
                         resume_pending_after_seconds=PAYMENT_RECLAIM_RETRY_AFTER_SECONDS,
                     )
@@ -5222,7 +5225,9 @@ async def _poll_agent(
                                     await _respond_as_user_to_auth_assistance(base_url, agent_id, req, user_response)
                                 except Exception as user_error:
                                     return (
-                                        data, approvals_triggered, approvals_resolved,
+                                        data,
+                                        approvals_triggered,
+                                        approvals_resolved,
                                         f"Stand-in user could not {user_response}: {user_error}",
                                     )
                                 approvals_resolved += 1
@@ -6034,7 +6039,7 @@ def _recording_attachment_ready(metadata: dict) -> bool:
 def _agent_messages_have_browser_recording_ready(
     messages: Optional[List[dict]],
 ) -> bool:
-    """True when every browser task that started a recording has a playable one.
+    """True when every started browser recording part has its own playable media.
 
     Timeout cleanup posts ``session_paused`` / ``task_complete`` and finalizes
     Kernel replay asynchronously. Hub archives that snapshot as soon as the
@@ -6043,6 +6048,7 @@ def _agent_messages_have_browser_recording_ready(
     """
     started_task_ids: set[str] = set()
     ready_task_ids: set[str] = set()
+    pending_parts: set[tuple] = set()
     for message in messages or []:
         metadata = message.get("metadata") or {}
         if not isinstance(metadata, dict):
@@ -6055,11 +6061,29 @@ def _agent_messages_have_browser_recording_ready(
         if not isinstance(task_id, str) or not task_id:
             continue
         started_task_ids.add(task_id)
+        native = metadata.get("browser_session_metadata")
+        native = native if isinstance(native, dict) else {}
+        # A resumed activity records another part of the same task. Its start
+        # must be followed by its own saved media, not an earlier task replay.
+        part = (
+            task_id, metadata.get("workflowGeneration"), metadata.get("browser_url"),
+            native.get("provider") or metadata.get("provider"),
+            next((native.get(key) or metadata.get(key) for key in
+                  ("session_id", "browser_session_id", "kernel_session_id")
+                  if native.get(key) or metadata.get(key)), None),
+        )
+        if any(value is not None and not isinstance(value, str) for value in part):
+            return False
+        if metadata.get("toolStatus") == "IN_PROGRESS":
+            if part in pending_parts:
+                return False  # An earlier part never finished before another began.
+            pending_parts.add(part)
         if _recording_attachment_ready(metadata):
+            pending_parts.discard(part)
             ready_task_ids.add(task_id)
     if not started_task_ids:
         return True
-    return started_task_ids.issubset(ready_task_ids)
+    return not pending_parts and started_task_ids.issubset(ready_task_ids)
 
 
 def _agent_messages_ready_for_browser_hub_archive(
@@ -6107,12 +6131,16 @@ def _agent_messages_ready_for_durable_browser_evidence(
         state["complete"] |= action == "task_complete"
         # The durable publisher accepts this singular URL or an attached file.
         state["recording"] |= _recording_attachment_ready({**meta, "recording_view_urls": []})
-    return all(
+    return _agent_messages_have_browser_recording_ready(messages) and all(
         (state["code"] and not state["browser"])
-        or (state["complete"] and (
-            state["recording"] or task_id in (zero_session_task_ids or set())
-            or task_id in (preparation_cancelled_task_ids or set())
-        ))
+        or (
+            state["complete"]
+            and (
+                state["recording"]
+                or task_id in (zero_session_task_ids or set())
+                or task_id in (preparation_cancelled_task_ids or set())
+            )
+        )
         for task_id, state in states.items()
     )
 
@@ -6224,9 +6252,9 @@ async def _refresh_browser_archive_snapshot(
                 preparation_cancelled_task_receipts,
                 preparation_receipts_match_sessions,
             )
+
             preparation_by_agent = {
-                aid: preparation_cancelled_task_receipts(value.get("messages"), aid)
-                for aid, value in snapshots.items()
+                aid: preparation_cancelled_task_receipts(value.get("messages"), aid) for aid, value in snapshots.items()
             }
             preparation_receipts = {
                 task_id: receipt for tasks in preparation_by_agent.values() for task_id, receipt in tasks.items()
@@ -6236,10 +6264,9 @@ async def _refresh_browser_archive_snapshot(
                 preparation_snapshot = await asyncio.to_thread(
                     cloud_batch_cleanup.exact_root_sessions, base_url, agent_id
                 )
-                if (
-                    set(preparation_snapshot.get("tree_agent_ids") or []) != ids
-                    or not preparation_receipts_match_sessions(preparation_receipts, preparation_snapshot)
-                ):
+                if set(
+                    preparation_snapshot.get("tree_agent_ids") or []
+                ) != ids or not preparation_receipts_match_sessions(preparation_receipts, preparation_snapshot):
                     preparation_by_agent = {}
                     preparation_receipts = {}
             if (
@@ -6366,7 +6393,6 @@ async def _owned_payments_release_stalled(base_url: str, evidence: dict, *, task
         and lifecycles[row["agent_id"]]["orgTransfer"].get("cardId") == row["card_id"]
         for row in pending
     )
-
 
 
 async def _wait_for_owned_root_seal(
@@ -13037,6 +13063,13 @@ def _run_declared_static_check(
     benchmark_state = data.get("_benchmark", {})
     for check in evaluator.get("checks", []):
         check_type = check.get("type")
+        if check_type == "lantern_people_trace":
+            from benchmarks.lantern_people_trace import check_lantern_people_trace
+
+            ok, reason = check_lantern_people_trace(data, check)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "google_oauth_demo_trace":
             from benchmarks.google_oauth_demo_check import check_google_oauth_demo_trace
 
