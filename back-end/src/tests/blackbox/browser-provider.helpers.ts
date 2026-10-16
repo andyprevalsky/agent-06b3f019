@@ -289,6 +289,8 @@ async function assertSteelSameProfileReplacementState(
     transaction: prisma.$transaction,
     intentCreate: prisma.toolSideEffect.create,
     effectFind: prisma.toolSideEffect.findUnique,
+    effectUpsert: prisma.toolSideEffect.upsert,
+    execute: prisma.$executeRaw,
     effectList: prisma.toolSideEffect.findMany,
     effectUpdate: prisma.toolSideEffect.updateMany,
     fetch: globalThis.fetch,
@@ -320,6 +322,7 @@ async function assertSteelSameProfileReplacementState(
   };
   const claims = new Map<string, Effect>();
   const candidates = new Map<string, Effect>();
+  const leases = new Map<string, Effect>();
   const claimOwners: string[] = [];
   const releasedOwners: string[] = [];
   const inspectedSourceStates: string[] = [];
@@ -343,7 +346,15 @@ async function assertSteelSameProfileReplacementState(
           ) === filter.equals
         );
       }
-      return effect[key as keyof Effect] === expected;
+      const actual = effect[key as keyof Effect];
+      if (typeof expected === 'object' && expected !== null && 'gt' in expected) {
+        return (
+          expected.gt instanceof Date &&
+          actual instanceof Date &&
+          actual.getTime() > expected.gt.getTime()
+        );
+      }
+      return actual === expected;
     });
   try {
     process.env.CONDUCTOR_WORKSPACE_NAME = `offline-steel-same-profile-${retryReleased}-${inspectReleased}`;
@@ -353,20 +364,28 @@ async function assertSteelSameProfileReplacementState(
     }) as typeof fetch;
     prisma.$transaction = (async (callback: (tx: typeof prisma) => Promise<unknown>) =>
       callback(prisma)) as typeof originals.transaction;
-    prisma.$queryRaw = (async (query: { strings: string[]; values: unknown[] }) => {
-      if (query.strings[0].includes('SELECT')) {
-        nodeAssert(query.strings.join('').includes('FOR UPDATE'), 'missing atomic claim row lock');
-        const effect = claims.get(String(query.values[0]));
+    prisma.$executeRaw = (async () => 0) as typeof originals.execute;
+    prisma.$queryRaw = (async (
+      query: { strings: string[]; values: unknown[] } | TemplateStringsArray
+    ) => {
+      if (Array.isArray(query)) {
+        nodeAssert.strictEqual(query.join(''), 'SELECT clock_timestamp() AS now');
+        return [{ now: new Date() }];
+      }
+      const sql = query as { strings: string[]; values: unknown[] };
+      if (sql.strings[0].includes('SELECT')) {
+        nodeAssert(sql.strings.join('').includes('FOR UPDATE'), 'missing atomic claim row lock');
+        const effect = claims.get(String(sql.values[0]));
         return effect ? [{ ...effect, request: { ...effect.request } }] : [];
       }
-      const key = String(query.values[1]);
+      const key = String(sql.values[1]);
       nodeAssert(
         [
           'steel-browser-task-lifecycle:offline-task',
           'steel-browser-task-lifecycle:profile:offline-profile',
         ].includes(key)
       );
-      const now = query.values[5] as Date;
+      const now = sql.values[5] as Date;
       const previous = claims.get(key);
       if (
         previous?.status === 'STARTED' &&
@@ -374,9 +393,9 @@ async function assertSteelSameProfileReplacementState(
           previous.request.nativeOutstanding === true)
       )
         return [];
-      const owner = String(query.values[3]);
-      const request = JSON.parse(String(query.values[4]));
-      nodeAssert.strictEqual(query.values[2], 'steel_browser_task_lifecycle');
+      const owner = String(sql.values[3]);
+      const request = JSON.parse(String(sql.values[4]));
+      nodeAssert.strictEqual(sql.values[2], 'steel_browser_task_lifecycle');
       claimOwners.push(`${key}:${owner}`);
       claims.set(key, {
         operationKey: key,
@@ -398,9 +417,22 @@ async function assertSteelSameProfileReplacementState(
       candidates.set(data.operationKey, data);
       return data;
     }) as typeof originals.intentCreate;
+    prisma.toolSideEffect.upsert = (async (args: {
+      where: { operationKey: string };
+      create: Effect;
+      update: Partial<Effect>;
+    }) => {
+      const existing = leases.get(args.where.operationKey);
+      const next = existing ? { ...existing, ...args.update } : { ...args.create };
+      nodeAssert(next.updatedAt instanceof Date, 'lease must retain database timestamp');
+      nodeAssert(typeof next.request.leaseMs === 'number', 'lease duration missing from request');
+      leases.set(args.where.operationKey, next);
+      return next;
+    }) as typeof originals.effectUpsert;
     prisma.toolSideEffect.findUnique = (async ({ where }: { where: { operationKey: string } }) =>
       claims.get(where.operationKey) ??
       candidates.get(where.operationKey) ??
+      leases.get(where.operationKey) ??
       null) as typeof originals.effectFind;
     prisma.toolSideEffect.findMany = (async () =>
       [...candidates.values()].filter(
@@ -410,7 +442,12 @@ async function assertSteelSameProfileReplacementState(
       where: Record<string, unknown>;
       data: Partial<Effect>;
     }) => {
-      const table = args.where.operationType === 'steel_candidate_cleanup' ? candidates : claims;
+      const table =
+        args.where.operationType === 'steel_candidate_cleanup'
+          ? candidates
+          : leases.has(String(args.where.operationKey))
+            ? leases
+            : claims;
       const effect = table.get(String(args.where.operationKey));
       if (!effect || !matches(effect, args.where)) return { count: 0 };
       if (table === claims && args.data.status === 'RELEASED') {
@@ -570,6 +607,8 @@ async function assertSteelSameProfileReplacementState(
     prisma.$transaction = originals.transaction;
     prisma.toolSideEffect.create = originals.intentCreate;
     prisma.toolSideEffect.findUnique = originals.effectFind;
+    prisma.toolSideEffect.upsert = originals.effectUpsert;
+    prisma.$executeRaw = originals.execute;
     prisma.toolSideEffect.findMany = originals.effectList;
     prisma.toolSideEffect.updateMany = originals.effectUpdate;
     globalThis.fetch = originals.fetch;

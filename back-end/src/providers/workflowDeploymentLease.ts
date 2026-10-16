@@ -24,18 +24,35 @@ export async function acquireWorkflowDeploymentLease(
   const operationType = options.operationType ?? LEASE_OPERATION_TYPE;
   const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
-  if (leaseMs < 1_000 || heartbeatMs < 100 || heartbeatMs >= leaseMs) {
+  if (
+    !Number.isFinite(leaseMs) ||
+    !Number.isFinite(heartbeatMs) ||
+    leaseMs < 1_000 ||
+    heartbeatMs < 100 ||
+    heartbeatMs >= leaseMs
+  ) {
     throw new Error('Workflow deployment lease timings are invalid');
   }
   const ownerId = randomUUID();
   const acquired = await runTransactionWithRetry(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${operationKey}))`;
-    const cutoff = new Date(Date.now() - leaseMs);
+    const databaseTime = (
+      await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`
+    )[0].now;
     const existing = await tx.toolSideEffect.findUnique({
       where: { operationKey },
-      select: { status: true, externalId: true, updatedAt: true },
+      select: { status: true, externalId: true, updatedAt: true, request: true },
     });
-    if (existing?.status === 'STARTED' && existing.updatedAt >= cutoff) return false;
+    if (existing?.status === 'STARTED') {
+      const currentDuration = (existing.request as { leaseMs?: unknown } | null)?.leaseMs;
+      if (
+        typeof currentDuration !== 'number' ||
+        !Number.isFinite(currentDuration) ||
+        currentDuration <= 0
+      )
+        throw new Error('Current lease duration is unqualified');
+      if (existing.updatedAt.getTime() + currentDuration > databaseTime.getTime()) return false;
+    }
     await tx.toolSideEffect.upsert({
       where: { operationKey },
       create: {
@@ -44,6 +61,7 @@ export async function acquireWorkflowDeploymentLease(
         status: 'STARTED',
         externalId: ownerId,
         request: { leaseMs },
+        updatedAt: databaseTime,
       },
       update: {
         operationType,
@@ -52,6 +70,7 @@ export async function acquireWorkflowDeploymentLease(
         request: { leaseMs },
         response: undefined,
         error: null,
+        updatedAt: databaseTime,
       },
     });
     return true;
@@ -68,14 +87,24 @@ export async function acquireWorkflowDeploymentLease(
   let leaseLost = false;
   const renew = async (): Promise<boolean> => {
     if (released || leaseLost) return false;
-    const renewed = await prisma.toolSideEffect.updateMany({
-      where: {
-        operationKey,
-        operationType,
-        status: 'STARTED',
-        externalId: ownerId,
-      },
-      data: { request: { leaseMs, renewedAt: new Date().toISOString() } },
+    const renewed = await runTransactionWithRetry(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${operationKey}))`;
+      const databaseTime = (
+        await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`
+      )[0].now;
+      return tx.toolSideEffect.updateMany({
+        where: {
+          operationKey,
+          operationType,
+          status: 'STARTED',
+          externalId: ownerId,
+          updatedAt: { gt: new Date(databaseTime.getTime() - leaseMs) },
+        },
+        data: {
+          request: { leaseMs, renewedAt: databaseTime.toISOString() },
+          updatedAt: databaseTime,
+        },
+      });
     });
     if (renewed.count !== 1) leaseLost = true;
     return renewed.count === 1;

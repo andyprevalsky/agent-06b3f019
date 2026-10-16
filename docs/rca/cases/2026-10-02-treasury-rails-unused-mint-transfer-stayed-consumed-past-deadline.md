@@ -230,3 +230,22 @@ At2026-10-15T22:01:07.931Z, the unchanged current checker returned overdue, "not
 checkPendingUnusedMints automatically appended resolved with verdict OVERDUE and detail "not listed (could be consumed)". That is acknowledgement of the failed check, NOT repayment. No manual ledger write, deletion, reset or skip flag was applied. The permanent treasury-rails-pending-mints domain passed on this source and explicitly asserts that overdue verdicts fail one run and disappear from later open checks while foreign-credential entries stay untouched. Therefore a later ordinary TestLoop follows the existing admission contract; it is not a code repair, consumed-release exception, financial waiver or proof the1300sandbox cents returned. Preserve both ledger events, original failed gate and the1300c unverified sandbox return exposure in the deployment report. No real-dollar loss is asserted. Case remains open and production rollout remains independently gated.
 
 Evidence: deployment preview `.context/final-b547/treasury-custody-proof.json`, `treasury-native-owned-card.json`, and failed coverage archive `.context/test-runs/backend-coverage-failed-20261015-220330-298660/`. The original owned receipt remains `/home/boxes/rose-backend-verification/back-end/coverage/blackbox-run/treasury-rails.log`. Archive searches used "earlier mint still not listed reclaim deadline" and "treasury rails pending mints consumed card"; the existing consumed-stall case is a historical relative/continuation, while the current projection has an explicit observation gap and is not misreported as a newly proven consumed stall.
+
+## October 16 overdue observation during reusable cutover qualification
+
+The backend coverage run on
+`8171b24d0f934b38a5b932f836b8726f40b07a96` failed before creating a new treasury
+mint. The earlier `card_c04e65b7f4cc375dfbf9a0eb`, minted October 15 at
+18:35:22.233 UTC, was 24.4 hours old and absent from the observed provider pages.
+The provider row was null; this does not prove either consumption or recovery.
+The original failure remains in
+`.context/lantern-deploy-preflight/.context/test-runs/backend-coverage-failed-20261016-190204-816376/`.
+
+The existing `checkPendingUnusedMints` policy records every non-waiting verdict
+before the caller reports a failed run. Its normal ledger writer recorded this
+overdue outcome at 18:59:19.996 UTC. That terminal test-ledger entry is not a
+refund, successful financial cleanup, or a manual gate override. No ledger row
+was edited to remove the failure. A separate earlier mint,
+`card_d3f0c6a6b4aaaebc920d8e8b`, was still pending within its original deadline.
+Later test runs must retain these financial limitations even when the one-time
+overdue assertion no longer repeats. No provider or treasury policy changed.

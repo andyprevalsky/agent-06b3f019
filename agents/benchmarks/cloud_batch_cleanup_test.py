@@ -221,6 +221,7 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "base_url": "http://fixture.invalid",
         "run_single_task": delegate,
         "cloud_batch_cleanup": SimpleNamespace(contract=lambda: (tmp_path / "contract.json", "owned-token")),
+        "_task_root_custody": bench._task_root_custody,
         "_admitted_tasks": admitted,
         "_admitted_agent_ids": agents,
         "_evaluated_task_results": evaluated,
@@ -1435,3 +1436,132 @@ async def test_disconnected_delete_seal_wait_rejects_owner_drift_and_has_a_deadl
             await bench._wait_for_owned_root_seal("http://localhost:1", ROOT, before, evidence, timeout_seconds=0.02)
     assert all(not call.kwargs.get("require_deleted") for call in read.call_args_list)
     assert evidence["delete_seal_observation"]["snapshot"]["unsealed_tree_agent_ids"] == [CHILD]
+
+@async_case
+async def test_fixture_root_custody_refuses_unknown_foreign_and_duplicate_bindings():
+    custody={"task_name":"owned-task","roots":[],"callback":None,"graded_creation":"not_started"}
+    token=bench._task_root_custody.set(custody)
+    try:
+        for bad in (None,"","not-a-root"):
+            with pytest.raises(RuntimeError,match="unknown or duplicate"):
+                bench._register_task_root("owned-task",bad,"fixture_first_run")
+        with pytest.raises(RuntimeError,match="foreign"):
+            bench._register_task_root("foreign-task",ROOT,"fixture_first_run")
+        bench._register_task_root("owned-task",ROOT,"fixture_first_run")
+        with pytest.raises(RuntimeError,match="unknown or duplicate"):
+            bench._register_task_root("owned-task",ROOT,"fixture_first_run")
+        assert len(custody["roots"])==1
+    finally:bench._task_root_custody.reset(token)
+    for corruption in ("foreign","foreign_stage","duplicate","missing_provider","missing_seal"):
+        row=result("");row.name="owned-task";row.graded_root_creation_outcome="not_started"
+        record={"root_agent_id":ROOT,"task_name":row.name,"role":"fixture_first_run",
+                "creation":{"source":"create_agent_return","root_agent_id":ROOT},"stage_outcome":"failed","logs":{}}
+        row.owned_roots=[copy.deepcopy(record)]
+        if corruption=="foreign":row.owned_roots[0]["task_name"]="foreign-task"
+        if corruption=="foreign_stage":row.owned_roots[0]["logs"]["fixture_snapshot"]={"agent":{"id":CHILD}}
+        if corruption=="duplicate":row.owned_roots.append(copy.deepcopy(record))
+        sealed=False
+        def query(*args,**kwargs):
+            return {"root_user_id":ROOT,"tree_agent_ids":[ROOT],"browser_sessions":[],"purchase_cleanup":[],"root_deleted":sealed,"unsealed_tree_agent_ids":[] if sealed else[ROOT]}
+        async def delete(*args):
+            nonlocal sealed
+            sealed=True
+        def provider(*args,**kwargs):
+            if corruption=="missing_provider":raise RuntimeError("provider proof unavailable")
+            if corruption=="missing_seal":raise RuntimeError("exact seal unavailable")
+            return {}
+        with (
+            patch.object(cleanup,"exact_root_sessions",query),patch.object(cleanup,"close_exact_root_sessions",provider),
+            patch.object(bench,"pause_agent",AsyncMock(return_value=True)),patch.object(bench,"delete_agent",delete),
+            patch.object(bench,"_refresh_browser_archive_snapshot",AsyncMock(return_value={"messages":[]})),
+            patch.object(bench,"archive_agent_finalize",AsyncMock(return_value="fixture-archive")),
+            patch.object(bench,"finalize_archive_and_score_world_model",AsyncMock(return_value=("archive",{}))),
+            patch.object(bench,"_finalize_owned_root_payments",AsyncMock(return_value={})),
+            patch.object(bench,"fetch_local_worker_logs",return_value=[]),
+        ):
+            with pytest.raises(RuntimeError):await bench._finalize_owned_cloud_batch("http://localhost:1",[row],{row.name:[ROOT]})
+            if corruption in {"missing_provider","missing_seal"}:
+                assert row.benchmark_status=="ERROR"
+                assert row.owned_roots[0]["logs"]["cloud_cleanup_evidence"]["errors"]
+
+@async_case
+async def test_actual_task_runner_exports_fixture_custody_without_graded_root():
+    """No synthetic result: actual runner catches fixture failure/cancellation."""
+    from dataclasses import asdict
+    for mode in ("early","raise","cancel","foreign_snapshot","graded_unknown","both"):
+        task=bench.BenchmarkTask(name="owned-real-fixture",title="Owned fixture",prompt="Read owned result",timeout_seconds=10,is_chat_mode=False,expected_tools=[],tags=[],price_limit_cents=0,requires_browser_agent=True,requires_claude_code=False,attachment=None,approval_handling=None,start_phase="execute")
+        owned=[]
+        async def poll(*args):
+            assert owned==[ROOT], "real task runner lost created fixture root before polling"
+            if mode=="raise":raise RuntimeError("fixture poll error")
+            if mode=="cancel":raise asyncio.CancelledError()
+            return {"agent":{"id":CHILD if mode=="foreign_snapshot" else ROOT,"status":"COMPLETED" if mode in {"graded_unknown","both"} else "ACTIVE"}},0,0,None
+        async def apply(*args):
+            manifest={"siteId":"owned-site"}
+            await bench._run_auth_test_site_first_run(task,"http://localhost:1",manifest,"Create account")
+            return manifest
+        async def create(*args):
+            if owned:
+                if mode=="both":return CHILD
+                raise RuntimeError("graded create response unknown")
+            return ROOT
+        async def empty(*args,**kwargs):return []
+        from contextlib import ExitStack
+        targets = [
+            patch.object(bench,"_validate_task_target"),patch.object(bench,"_effective_harness",return_value="rose"),
+            patch.object(bench,"_run_user_id_override_for_task",return_value=None),
+            patch.object(bench,"_apply_live_fixtures",empty),patch.object(bench,"_apply_memory_fixtures",empty),
+            patch.object(bench,"prepare_sandbox_payment_residual",AsyncMock()),patch.object(bench,"_agentcard_setup_fixture_action",return_value=None),
+            patch.object(bench,"_apply_auth_test_site",apply),patch.object(bench,"_release_auth_test_site",AsyncMock()),
+            patch.object(bench,"_restore_live_fixture_scenarios_async",empty),
+            patch.object(bench,"create_agent",create),patch.object(bench,"poll_agent",poll),
+            patch.object(bench,"_api_headers",AsyncMock(return_value={})),patch.object(bench.auth_test_site,"mark_run",AsyncMock()),
+            patch.object(bench,"subscribe_supabase_realtime_agent",empty),patch.object(bench,"get_agent_tree",empty),
+            patch.object(bench,"post_world_model_update_events",empty),patch.object(bench,"archive_agent_start",empty),
+            patch.object(bench,"_poll_agent",AsyncMock(return_value=({"agent":{"id":CHILD,"status":"COMPLETED"},"messages":[]},0,0,None))),
+            patch.object(bench,"_get_settled_tool_usage",AsyncMock(return_value={})),patch.object(bench,"_fetch_tree_stats",AsyncMock(return_value={})),
+            patch.object(bench,"get_llm_usage_details",AsyncMock(return_value=({},{"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_hit_pct":0}))),patch.object(bench,"evaluate_task",return_value=(True,None)),
+            patch.object(bench,"ensure_payment_lifecycle_cleanup",AsyncMock(return_value=None)),
+            patch.object(bench,"collect_logs",AsyncMock(return_value={"messages":[]})),
+            patch.object(bench,"finalize_archive_and_score_world_model",AsyncMock(return_value=("archive",None))),
+            patch.object(bench,"_should_delete_agent_after_run",return_value=False),
+        ]
+        with ExitStack() as stack:
+            for target in targets:stack.enter_context(target)
+            row=await bench.run_single_task("http://localhost:1",task,on_agent_created=lambda name,aid:owned.append(aid))
+        assert row.agent_id==(CHILD if mode=="both" else "") and row.passed is (mode=="both")
+        assert row.benchmark_status==("PASSED" if mode=="both" else "CANCELLED" if mode=="cancel" else "ERROR")
+        assert row.owned_roots[0]["root_agent_id"]==ROOT and row.owned_roots[0]["role"]=="fixture_first_run"
+        assert row.graded_root_creation_outcome==("allocated" if mode=="both" else "unknown" if mode=="graded_unknown" else "not_started")
+        exported=asdict(row)
+        assert exported["agent_id"]==(CHILD if mode=="both" else "") and exported["owned_roots"][0]["root_agent_id"]==ROOT
+        calls=[];sealed=False
+        def query(*args,**kwargs):
+            return {"root_user_id":ROOT,"tree_agent_ids":[ROOT],"browser_sessions":[],"purchase_cleanup":[],"root_deleted":sealed,"unsealed_tree_agent_ids":[] if sealed else [ROOT]}
+        async def delete(*args):
+            nonlocal sealed
+            sealed=True;calls.append(("delete",args[1]))
+        def close(*args,**kwargs):
+            assert sealed
+            calls.append(("provider",args[1]));return {}
+        with (
+            patch.object(cleanup,"exact_root_sessions",query),patch.object(cleanup,"close_exact_root_sessions",close),
+            patch.object(bench,"pause_agent",AsyncMock(return_value=True)),patch.object(bench,"delete_agent",delete),
+            patch.object(bench,"_refresh_browser_archive_snapshot",AsyncMock(return_value={"messages":[]})),
+            patch.object(bench,"archive_agent_finalize",AsyncMock(return_value="fixture-archive")) as fixture_archive,
+            patch.object(bench,"finalize_archive_and_score_world_model",AsyncMock(return_value=("archive",{}))) as archive,
+            patch.object(bench,"_finalize_owned_root_payments",AsyncMock(return_value={})),patch.object(bench,"fetch_local_worker_logs",return_value=[]),
+        ):
+            if mode=="graded_unknown":
+                with pytest.raises(RuntimeError,match="unknown root creation outcome"):
+                    await bench._finalize_owned_cloud_batch("http://localhost:1",[row],{task.name:owned})
+            else:await bench._finalize_owned_cloud_batch("http://localhost:1",[row],{task.name:owned})
+            fixture_archive.assert_awaited_once_with("http://localhost:1",ROOT,task.name,force=True)
+            assert archive.await_count==(1 if mode=="both" else 0)
+            if mode=="both":
+                assert archive.await_args.args[1]==CHILD and archive.await_args.kwargs["benchmark_passed"] is True
+                assert archive.await_args.kwargs["benchmark_status"]=="PASSED"
+        for aid in ([ROOT,CHILD] if mode=="both" else [ROOT]):
+            assert calls.count(("delete",aid))==1 and calls.count(("provider",aid))==1
+        assert row.owned_roots[0]["logs"]["cloud_cleanup_evidence"]["root_agent_id"]==ROOT
+        assert row.benchmark_status==("PASSED" if mode=="both" else "CANCELLED" if mode=="cancel" else "ERROR")

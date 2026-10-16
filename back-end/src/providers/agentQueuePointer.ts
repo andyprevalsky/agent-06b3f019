@@ -25,6 +25,9 @@ import {
   WorkflowStartAdmissionPendingError,
   type QueueAdmission,
 } from './workflowQueueAdmission';
+import { WORKFLOW_DEPLOYMENT_LEASE_KEY } from './workflowDeploymentLease';
+import { managedQueue, MANAGED_PRODUCER_PROTOCOL } from './workflowManagedQueue';
+import { workerDeploymentQueueName } from './workerDeploymentQueue';
 
 const SINGLETON_ID = 'singleton';
 
@@ -76,9 +79,68 @@ export async function setCurrentAgentQueue(
   taskQueue: string,
   surfaceHash: string,
   updatedBy?: string,
-  options?: { expectedCurrentQueue: string }
+  options?: { expectedCurrentQueue: string; deploymentOwnerId?: string }
 ): Promise<void> {
+  if (managedQueue(taskQueue) && (!options?.deploymentOwnerId || !updatedBy))
+    throw new Error('Managed queue publication requires its deployment job and lease owner');
   await runTransactionWithRetry(async (tx) => {
+    let managedSource: string | undefined;
+    if (options?.deploymentOwnerId) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${WORKFLOW_DEPLOYMENT_LEASE_KEY}))`;
+      const lease = await tx.toolSideEffect.findUnique({
+        where: { operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY },
+      });
+      const databaseTime = (
+        await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`
+      )[0].now;
+      const duration = (lease?.request as { leaseMs?: unknown } | null)?.leaseMs;
+      if (
+        lease?.status !== 'STARTED' ||
+        lease.operationType !== 'TEMPORAL_WORKFLOW_DEPLOYMENT_LEASE' ||
+        lease.externalId !== options.deploymentOwnerId ||
+        typeof duration !== 'number' ||
+        !Number.isFinite(duration) ||
+        duration <= 0 ||
+        lease.updatedAt.getTime() + duration <= databaseTime.getTime()
+      )
+        throw new Error('Deployment no longer owns the production cutover lease');
+    }
+    if (managedQueue(taskQueue)) {
+      const row = await tx.toolSideEffect.findUnique({
+        where: { operationKey: `deployment:worker-job:${updatedBy}` },
+      });
+      const job = row?.request as
+        | {
+            jobId?: string;
+            ownerId?: string;
+            stage?: string;
+            identity?: { surfaceHash?: string; sourceCommit?: string };
+            candidateMachineIds?: string[];
+            evidence?: { READY?: { healthyMachineIds?: string[] } };
+          }
+        | undefined;
+      const candidates = job?.candidateMachineIds;
+      const healthy = job?.evidence?.READY?.healthyMachineIds;
+      if (
+        row?.operationType !== 'WORKER_DEPLOYMENT_JOB' ||
+        !job ||
+        job.jobId !== updatedBy ||
+        job.ownerId !== options?.deploymentOwnerId ||
+        taskQueue !== workerDeploymentQueueName(updatedBy!, surfaceHash) ||
+        job.stage !== 'READY' ||
+        job.identity?.surfaceHash !== surfaceHash ||
+        !/^[a-f0-9]{40}$/.test(job.identity.sourceCommit ?? '') ||
+        !Array.isArray(candidates) ||
+        candidates.length !== 8 ||
+        new Set(candidates).size !== 8 ||
+        !Array.isArray(healthy) ||
+        healthy.length !== 8 ||
+        new Set(healthy).size !== 8 ||
+        !healthy.every((id) => candidates.includes(id))
+      )
+        throw new Error('Managed queue publication requires the exact ready candidate bank');
+      managedSource = job.identity.sourceCommit;
+    }
     await lockQueueAdmission(tx);
     if (options) {
       const current = await tx.agentQueuePointer.findUnique({ where: { id: SINGLETON_ID } });
@@ -92,6 +154,18 @@ export async function setCurrentAgentQueue(
     const key = queueAdmissionKey(taskQueue);
     const prior = await tx.toolSideEffect.findUnique({ where: { operationKey: key } });
     const saved = prior?.request as unknown as QueueAdmission | undefined;
+    if (
+      managedQueue(taskQueue) &&
+      (prior?.operationType !== QUEUE_ADMISSION_OPERATION ||
+        saved?.legacyCoverage !== 'QUALIFIED' ||
+        saved.legacyCertificate?.cohortManifest !== `fresh:${updatedBy}` ||
+        saved.legacyCertificate.producerTransition !==
+          `${MANAGED_PRODUCER_PROTOCOL}:${managedSource}` ||
+        saved.legacyCertificate.unresolved !== 0)
+    )
+      throw new WorkflowStartAdmissionPendingError(
+        'Managed queue producer admission is unqualified'
+      );
     if (
       saved &&
       (saved.version !== 1 ||

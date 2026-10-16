@@ -54,6 +54,7 @@ async function main() {
       throw new Error('Exact native chain/queue reconciliation is incomplete');
     return {
       firstExecutionRunId: info.firstRunId,
+      runId: info.execution?.runId ?? undefined,
       queue: info.taskQueue,
       terminal: nativeWorkflowTerminal(description.status.name),
     };

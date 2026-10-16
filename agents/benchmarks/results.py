@@ -55,6 +55,8 @@ class TaskResult:
     duration_seconds: float
     cost_cents: float
     message_count: int
+    owned_roots: list[dict] = field(default_factory=list)
+    graded_root_creation_outcome: Optional[str] = None
     failure_reason: Optional[str] = None
     approvals_triggered: int = 0
     approvals_resolved: int = 0

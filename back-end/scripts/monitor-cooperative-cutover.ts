@@ -19,6 +19,11 @@ import { config } from 'dotenv';
 import { readAgentQueuePointer } from '../src/providers/agentQueuePointer';
 import { prisma } from '../src/providers/database';
 import { getTemporalClient } from '../src/providers/temporal';
+import {
+  readWorkerDeployment,
+  workerDeploymentQueueName,
+} from '../src/providers/workerDeploymentQueue';
+import { queueAdmissionKey, type QueueAdmission } from '../src/providers/workflowQueueAdmission';
 
 config();
 
@@ -28,7 +33,9 @@ type CutoverPhase =
   | 'awaiting_pointer_flip'
   | 'draining_old_generation'
   | 'cooperative_drain_complete'
-  | 'same_generation';
+  | 'same_generation'
+  | 'managed_deployment_pending'
+  | 'retained_legacy_generation';
 
 type CutoverReport = {
   phase: CutoverPhase;
@@ -45,6 +52,7 @@ type CutoverReport = {
   oldQueueOpenCount: number | null;
   verifyOk: boolean;
   messages: string[];
+  deploymentJobId?: string;
 };
 
 function argValue(flag: string): string | undefined {
@@ -57,7 +65,8 @@ async function countOpenOnQueue(queue: string): Promise<number> {
     const client = await getTemporalClient();
     const query = `TaskQueue = "${queue}" AND ExecutionStatus = "Running"`;
     let count = 0;
-    for await (const _execution of client.workflow.list({ query })) {
+    for await (const execution of client.workflow.list({ query })) {
+      void execution;
       count += 1;
     }
     return count;
@@ -93,7 +102,9 @@ async function buildReport(expectedHash: string, oldQueue: string | null): Promi
   if (!oldQueue || oldQueue === expectedQueue) {
     phase = pointerMatchesExpected ? 'same_generation' : 'awaiting_pointer_flip';
     if (pointerMatchesExpected) {
-      messages.push(`Live pointer on expected generation ${expectedHash} (rolling/same-hash deploy).`);
+      messages.push(
+        `Live pointer on expected generation ${expectedHash} (rolling/same-hash deploy).`
+      );
     } else {
       messages.push(
         `Waiting for pointer flip: live=${livePointer.surfaceHash ?? '<none>'} expected=${expectedHash}`
@@ -122,7 +133,9 @@ async function buildReport(expectedHash: string, oldQueue: string | null): Promi
     oldQueueOpenCount ??= await countOpenOnQueue(oldQueue);
     verifyOk = oldQueueOpenCount === 0;
     if (!verifyOk) {
-      messages.push(`VERIFY FAILED: old queue ${oldQueue} still has ${oldQueueOpenCount} open workflow(s).`);
+      messages.push(
+        `VERIFY FAILED: old queue ${oldQueue} still has ${oldQueueOpenCount} open workflow(s).`
+      );
     }
   }
   if (verifyOk && !pointerMatchesExpected) {
@@ -140,6 +153,67 @@ async function buildReport(expectedHash: string, oldQueue: string | null): Promi
     oldQueueOpenCount,
     verifyOk,
     messages,
+  };
+}
+
+async function buildManagedReport(jobId: string, expectedHash?: string): Promise<CutoverReport> {
+  const job = await readWorkerDeployment(jobId);
+  if (expectedHash && expectedHash !== job.identity.surfaceHash)
+    throw new Error('Deployment job does not match the expected source surface');
+  const expectedQueue = workerDeploymentQueueName(jobId, job.identity.surfaceHash);
+  const row = await readAgentQueuePointer();
+  const livePointer = {
+    taskQueue: row?.taskQueue ?? null,
+    surfaceHash: row?.surfaceHash ?? null,
+    updatedBy: row?.updatedBy ?? null,
+    updatedAt: row?.updatedAt.toISOString() ?? null,
+  };
+  const pointerMatchesExpected =
+    livePointer.taskQueue === expectedQueue && livePointer.surfaceHash === job.identity.surfaceHash;
+  const evidence = job.evidence.SUCCEEDED as Record<string, unknown> | undefined;
+  const active = evidence?.activeMachineIds;
+  const sameBank =
+    Array.isArray(active) &&
+    active.length === 8 &&
+    new Set(active).size === 8 &&
+    job.candidateMachineIds.length === 8 &&
+    active.every((id) => typeof id === 'string' && job.candidateMachineIds.includes(id));
+  let retired = false;
+  if (evidence?.priorDisposition === 'RETIRED' && job.priorPointer) {
+    const certificate = await prisma.toolSideEffect.findUnique({
+      where: { operationKey: queueAdmissionKey(job.priorPointer.taskQueue) },
+    });
+    const gate = certificate?.request as unknown as QueueAdmission | undefined;
+    retired = gate?.phase === 'RETIRED' && gate.legacyCoverage === 'QUALIFIED';
+  }
+  const retained = evidence?.priorDisposition === 'RETAINED_LEGACY';
+  const verifyOk =
+    job.stage === 'SUCCEEDED' &&
+    !job.failure &&
+    pointerMatchesExpected &&
+    sameBank &&
+    evidence?.candidateHealthy === true &&
+    (retired || retained);
+  return {
+    phase: verifyOk
+      ? retained
+        ? 'retained_legacy_generation'
+        : 'cooperative_drain_complete'
+      : 'managed_deployment_pending',
+    deploymentJobId: jobId,
+    expectedSurfaceHash: job.identity.surfaceHash,
+    expectedQueue,
+    livePointer,
+    pointerMatchesExpected,
+    oldQueue: job.priorPointer?.taskQueue ?? null,
+    oldQueueOpenCount: null,
+    verifyOk,
+    messages: [
+      `Durable job ${jobId}: ${job.stage}${job.failure ? ` (${job.failure.message})` : ''}.`,
+      retained
+        ? 'Legacy workers and their unfinished work remain served; no retirement certificate is claimed.'
+        : 'A managed predecessor requires its durable qualified retirement certificate.',
+    ],
   };
 }
 
@@ -163,18 +237,21 @@ function printHuman(report: CutoverReport): void {
 
 async function main(): Promise<void> {
   const expectedHash = argValue('--expected-hash');
+  const jobId = argValue('--job-id');
   const oldQueue = argValue('--old-queue') ?? null;
   const verify = process.argv.includes('--verify');
   const asJson = process.argv.includes('--json');
 
-  if (!expectedHash?.trim()) {
+  if (!expectedHash?.trim() && !jobId?.trim()) {
     process.stderr.write(
-      'Usage: monitor-cooperative-cutover.ts --expected-hash <surfaceHash> [--old-queue <queue>] [--verify] [--json]\n'
+      'Usage: monitor-cooperative-cutover.ts --job-id <id> [--expected-hash <surfaceHash>] [--verify] [--json]\n'
     );
     process.exit(2);
   }
 
-  const report = await buildReport(expectedHash.trim(), oldQueue?.trim() || null);
+  const report = jobId
+    ? await buildManagedReport(jobId.trim(), expectedHash?.trim())
+    : await buildReport(expectedHash!.trim(), oldQueue?.trim() || null);
 
   if (asJson) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -190,7 +267,7 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (err) => {
-  process.stderr.write(`${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+  process.stderr.write(`${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
   try {
     await prisma.$disconnect();
   } catch {

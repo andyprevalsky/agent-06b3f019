@@ -14,25 +14,34 @@ logger = structlog.get_logger()
 config = load_config()
 
 
-async def read_agent_queue_pointer(timeout_seconds: float = 15.0) -> Dict[str, Any]:
+async def read_agent_queue_pointer(
+    timeout_seconds: float = 15.0, *, source_identity: bool = False, observation_only: bool = False
+) -> Dict[str, Any]:
     """Read the live routing pointer ``{task_queue, surface_hash}`` from the backend."""
     backend_url = config.backend.api_url.rstrip("/")
     backend_api_key = config.backend.api_key
     if not backend_api_key:
         raise RuntimeError("BACKEND_API_KEY not configured")
 
+    headers = {"X-API-Key": backend_api_key, "Content-Type": "application/json"}
+    if observation_only:
+        headers["X-Queue-Pointer-Observe"] = "1"
+    if source_identity:
+        info = activity.info()
+        if not info.workflow_id or not info.workflow_run_id:
+            raise RuntimeError("Continuation source identity unavailable")
+        headers.update({"X-Workflow-Id": info.workflow_id, "X-Workflow-Run-Id": info.workflow_run_id})
     url = f"{backend_url}/api/agent-queue-pointer"
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         response = await client.get(
             url,
-            headers={
-                "X-API-Key": backend_api_key,
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
         response.raise_for_status()
         payload = response.json()
 
+    if source_identity and payload.get("managedQueue") and payload.get("continuationAdmitted") is not True:
+        raise RuntimeError("Managed pointer response has no continuation admission")
     task_queue = payload.get("taskQueue") or payload.get("task_queue")
     surface_hash = payload.get("surfaceHash") or payload.get("surface_hash")
     if not isinstance(task_queue, str) or not task_queue.strip():
@@ -52,7 +61,7 @@ async def fetch_agent_queue_pointer() -> Dict[str, Any]:
     so a workflow can cooperatively ``continue_as_new`` onto a new generation
     queue after the current tool/LLM/browser activity has finished.
     """
-    result = await read_agent_queue_pointer()
+    result = await read_agent_queue_pointer(source_identity=True)
     logger.info(
         "Fetched agent queue pointer",
         task_queue=result["task_queue"],
