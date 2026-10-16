@@ -35,6 +35,10 @@ status: open
 
 ## Problem
 
+The frontmatter classification and first-bad boundary describe the historical
+October 9 investigation. The October 16 recurrence below remains unresolved;
+that earlier model-intelligence classification is not evidence for its cause.
+
 The run was found in the Render backend logs: SmsSupervisor, 2026-10-07T02:53:07Z, WhatsApp,
 user 43c2f6ae (Tamara Chayo), mySeq 8. She replied "Filled it for me". Earlier turns had
 established that she wanted a Canada eTA and held a US visa.
@@ -250,3 +254,84 @@ Actual Python `call_llm_structured_streaming` rejects malformed native arguments
 Controlled provider requests isolated the tool-schema representation. The same body produced a string budget with both the TS version header and Python's omitted header. Reusing the existing TS Anthropic native projection, while retaining tool descriptions, names, strict flags and all non-tool request fields, produced a numeric budget. A separate matched Grep request produced a typed boolean and omitted unused nullable fields. Raw provider SSE was independently parsed before the TS adapter, so the observed type difference precedes that adapter. This establishes a compatibility difference in these requests; the provider's internal mechanism is unproved, no projected object filter was observed, and these diagnostic requests do not prove the three task outcomes.
 
 The actual nine SMS tool schemas contain 27 nullable fields. Existing projection makes those optional and non-null; their bounds and closed-object flags have no further change because no bound keys or open objects exist. The proposed wiring affects all automatically derived Cerebras tool envelopes, where the full existing projection can additionally strip bounds, close open objects, and remove nullable array/map branches. It is TypeScript Rose code reuse, not literal Python native projection parity. Exact runtime snapshot `69f8742a0139b126707e506e59217a735211b1daf1caba276ca72eeb352b9741` is unapplied and awaiting the user's schema-scope decision `TAMY-CEREBRAS-1`. The existing owning native-schema domain has an additive regression that fails on original runtime and passes in private scratch, including explicit-tool precedence and native IDs; independent review found no blocking revised runtime defect. Raw requests, responses, dumps and test captures remain private with verified persistent SHA256 read-back. This case remains open until the unchanged real benchmarks pass on the applied source and applicable deploy lanes are verified.
+
+
+### 2026-10-16 Lok Lak rerun and retrieved-fact decision investigation — OPEN
+
+The user explicitly approved replacing “lum lok” with “lok lak” in the paired
+restaurant inputs, preserving their identical-input invariant and every fixture,
+evaluator, budget and deadline. Commit 6f4dfbaa changes only four catalog strings
+and the owning exact-input literal. All 135 SMS owning tests pass. MENU and
+USE-RETRIEVED-FACTS remain separate, unapplied pending proposals; neither is
+approved by this instruction.
+
+The first rerun failed in setup before any webhook/model call because scoped
+credential sync cleared the frozen user's phone. The separate October 16 scoped
+seed-profile case records its deterministic red/green proof and c43bcc497 fix.
+This first attempt has no TaskResult and provides no SMS outcome evidence.
+
+The fresh canonical local CLOSED rerun on c43 reached the real Qwen path and
+FAILED in 38.9 task seconds (98.8225 owning-stage seconds): five successful
+web_search calls returned the closed-store fixture, then round 4 called
+start_new_agent and send_user_message, followed by accepted attempt_completion
+in round 5. One agent and 100 cents of authorized budget violated the unchanged
+no-spawn/no-spend evaluator. Its goal acknowledged closure and sought further
+verification. This is evidence that the spelling change did not fix the outcome,
+not proof of a deterministic regression or an invalid evaluator. The root was
+canonically cleaned, independently terminal and durably archived; zero browser
+sessions/profiles were allocated, outboxes discharged, exact stack stop exited
+zero, the exact database and all 189 observed births were absent.
+
+The earlier frozen-runtime FILL failure remains primary evidence: four successful
+grep calls returned the Travel docs note; actual saved final requests contain
+its complete text with the matching native tool-call ID. The model asked for
+known facts and started zero agents. Executing the unchanged Cerebras projection
+offline preserves those bytes, role and call ID. Post-serialization wire capture
+from that original run is unavailable; no missing-facts or parser claim follows.
+
+Controlled decision replay is still incomplete. An older private replay helper
+incorrectly compared the Cerebras compatibility schemas to the raw authored tool
+schemas, throwing before the provider fetch. The product's ordinary waterfall
+then served GPT Luna in five trials. Those trials are explicitly excluded from
+same-model repeatability and causality evidence; their raw captures are private
+and retained. An initial attribution to env loading was incorrect: the active
+supervisor alias is a source constant, and the helper assertion caused fallback.
+
+A corrected private observer accepts the exact current approved projection and
+requires actual direct Cerebras/Qwen identity before network I/O. Its first
+Qwen FILL trial returned grep, rather than the original send_user_message choice.
+The old helper's whole-envelope validator additionally rejects omitted nullable
+fields that the runtime dispatcher deliberately permits; this diagnostic is not
+reported as a runtime parser failure. A CLOSED trial received HTTP429 and has no
+behavioral result; attempted fallback was blocked before network. The retry due
+is 2026-10-16T21:49:17Z. No replay executes business tools or creates an agent.
+
+Both SMS causes remain unresolved. There is no controlled main-versus-PR
+comparison, no model-only capability proof, no prompt fix applied and no passing
+post-fix canonical task. The original historical model-limitation classification
+above is not adopted for these new observations. The proposed prompt wording is
+not a verified causal repair; further identical original-model replays and a
+reviewed, unchanged-outcome reproduction remain necessary before closing RCA.
+
+At 21:49:46 UTC, direct Cerebras/Qwen returned HTTP200 for the exact CLOSED
+prefix; its chosen tool was web_search instead of the captured spawn/send.
+At 21:50:50, a second verified FILL decision returned grep. Both private observers
+require the original model, approved provider tool projection, exact projected
+messages, temperature 0.3 and high reasoning effort before network I/O. These
+samples show decision variability (CLOSED one observed sample, FILL two), not a
+passing task or permission to waive either evaluator. No business tool executes
+in these observers. A local launcher attempt before the CLOSED sample omitted
+the authoritative dotenv and failed before network; its zero-request receipt is
+retained and excluded from behavioral evidence. The child launcher now loads the
+existing complete backend dotenv without changing any environment file.
+
+A private source/evidence snapshot at 21:43:15 UTC has full gzip read-back of
+675/675 members and all 323 source copies verified before and after capture.
+Archive SHA256 is
+`75364ddb939c34fd754cc2da8ceb17cf784351b3f4688715c925bfc1261bd043`;
+root independently verified it. Replay capture in that snapshot is explicitly
+partial. The original 418 timing entries remain an exact prefix; the two new
+owning stages add two failures, yielding 420 entries (337 passed, 83 failed).
+Their ledger-rounded duration is 127.8 seconds; the nested 38.9-second task is
+not counted as an additional stage. Raw dumps, profiles and database archives
+remain private. Formal deploy eligibility remains false.
