@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 import assert from 'node:assert/strict';
 import { Connection, type ConnectionLike } from '@temporalio/client';
 import { prisma } from '../../providers/database';
@@ -59,10 +58,14 @@ async function main() {
   const originalConnect = Connection.connect;
   const originalAddress = process.env.TEMPORAL_ADDRESS;
   const originalNamespace = process.env.TEMPORAL_NAMESPACE;
+  const originalFakeTemporal = process.env.BLACKBOX_TEST_FAKE_TEMPORAL;
   const originalFetch = globalThis.fetch;
   Connection.connect = async () => connection as Connection;
   process.env.TEMPORAL_ADDRESS = '127.0.0.1:9';
   process.env.TEMPORAL_NAMESPACE = 'actual-sdk-test';
+  // Coverage uses an in-memory Temporal client for route contracts. These
+  // caller cases instead own the actual SDK/native-service boundary above.
+  process.env.BLACKBOX_TEST_FAKE_TEMPORAL = '0';
   globalThis.fetch = async (input) => {
     assert(String(input).endsWith('/realtime/v1/api/broadcast'));
     return new Response('{}', { status: 202 });
@@ -395,11 +398,15 @@ async function main() {
     else process.env.TEMPORAL_ADDRESS = originalAddress;
     if (originalNamespace === undefined) delete process.env.TEMPORAL_NAMESPACE;
     else process.env.TEMPORAL_NAMESPACE = originalNamespace;
+    if (originalFakeTemporal === undefined) delete process.env.BLACKBOX_TEST_FAKE_TEMPORAL;
+    else process.env.BLACKBOX_TEST_FAKE_TEMPORAL = originalFakeTemporal;
     await prisma.$disconnect();
   }
   finish();
 }
 main().catch((error) => {
-  console.error(error);
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
   process.exitCode = 1;
 });
