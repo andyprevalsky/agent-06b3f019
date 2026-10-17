@@ -425,7 +425,30 @@ def prepare(run, inventory_path):
         row["id"]: row
         for row in json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))
     }
-    groups = collect(closed, result["held_reservations"], inputs)
+    selected = {row["machine_id"] for row in request["candidates"]}
+    omitted = {
+        row["machine_id"]: row
+        for row in (reservation_context["held_rows"] if reservation_context else [])
+    }
+    held_ids = {row["machine_id"] for row in result["held_reservations"]}
+    need(
+        not selected & omitted.keys() and omitted.keys() <= held_ids,
+        "recovered held partition changed",
+    )
+    claim_holds = []
+    for row in result["held_reservations"]:
+        mid = row["machine_id"]
+        if mid in omitted:
+            need(
+                row["capacity_credit"] == 0
+                and row["reuse_credit"] is False
+                and all(row.get(key) == value for key, value in omitted[mid].items()),
+                "recovered omitted hold changed",
+            )
+            continue
+        need(mid in selected, "unexplained held reservation")
+        claim_holds.append(row)
+    groups = collect(closed, claim_holds, inputs)
     by_mid = {}
     for group in groups.values():
         by_mid.setdefault(group["machine_id"], []).append(group)

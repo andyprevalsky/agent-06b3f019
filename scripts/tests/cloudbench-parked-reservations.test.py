@@ -101,6 +101,60 @@ class Parked(unittest.TestCase):
         self.assertEqual(result["held_machine_ids"], [])
         self.assertFalse(f.request_path.exists())
 
+        omitted = copy.deepcopy(f.original["candidates"][0])
+        omitted.update(machine_id="bbbbccccddddee", volume_id="vol_held")
+        omitted["predecessor"].update(
+            id=omitted["machine_id"], volume_id=omitted["volume_id"]
+        )
+        f.original["candidates"].append(omitted)
+        OLD["write"](
+            f.outer / "archived-reuse-original.private.json",
+            {
+                "schema": "original600-archived-admission-request-v1",
+                "request": f.original,
+                "sha256": H["sha"](
+                    json.dumps(f.original, sort_keys=True, allow_nan=False).encode()
+                ),
+            },
+        )
+        context["held_rows"] = [
+            {
+                "machine_id": omitted["machine_id"],
+                "volume_id": omitted["volume_id"],
+                "reason": "original_recovery_unknown",
+                "capacity_credit": 0,
+                "reuse_credit": False,
+            }
+        ]
+        with mock.patch.dict(
+            M["U"]["prepare"].__globals__, recovered_reader=lambda: reader
+        ):
+            result = self.prepare()
+        self.assertEqual([row["machine_id"] for row in result["candidates"]], [f.mid])
+        self.assertEqual(result["held_machine_ids"], [omitted["machine_id"]])
+        held = result["held_reservations"][0]
+        self.assertEqual(held["capacity_credit"], 0)
+        self.assertFalse(held["reuse_credit"])
+        self.assertEqual(held["reason"], "original_recovery_unknown")
+        self.assertNotIn("claim_evidence", held)
+        original_prepare = M["U"]["prepare"]
+
+        def missing_selected_evidence(*args):
+            value = original_prepare(*args)
+            for row in value["held_reservations"]:
+                if row["machine_id"] == f.mid:
+                    row.pop("claim_evidence")
+            return value
+
+        with (
+            mock.patch.dict(
+                M["U"]["prepare"].__globals__, recovered_reader=lambda: reader
+            ),
+            mock.patch.dict(M["U"], prepare=missing_selected_evidence),
+        ):
+            with self.assertRaises(KeyError):
+                self.prepare()
+
     def add_exclusion(self):
         self.put(
             "archived-reuse-journal/source-exclusion.json",
