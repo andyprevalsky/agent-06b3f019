@@ -25,12 +25,26 @@ SUCCESSOR_CLI_SHA256 = (
 )
 
 
-def closed_host(ref, cli_sha256=None):
+CONFIG75_HOST_HASHES = {
+    "cloudbench-incomplete-reservations.py": "269721aadf5770db34923c151af9994f8da4a82261e5d60305b0f894a4aff5db",
+    "run-original600-controller.py": "fde608cdb6ca14cc39829b6de635bd48c4ce950ceab2c49ab9985b1d27eb33a7",
+}
+
+
+def closed_host(ref, cli_sha256=None, workload=None):
+    workload = I["CLOSED_SOURCE"] if workload is None else workload
+    need(
+        workload in (I["CLOSED_SOURCE"], I["CLOSED75_SOURCE"]),
+        "unknown recovered workload family",
+    )
+    bindings = (
+        CONFIG75_HOST_HASHES if workload == I["CLOSED75_SOURCE"] else CLOSED_HOST_HASHES
+    )
     need(
         isinstance(ref, str) and re.fullmatch("[0-9a-f]{40}", ref),
         "invalid recovered operator",
     )
-    for name, expected in CLOSED_HOST_HASHES.items():
+    for name, expected in bindings.items():
         if name == "run-original600-controller.py" and cli_sha256 is not None:
             expected = cli_sha256
         raw = subprocess.check_output(
@@ -44,7 +58,7 @@ def closed_host(ref, cli_sha256=None):
             ]
         )
         need(sha(raw) == expected, "unknown closed admission host protocol")
-    need(CLOSED_HOST_HASHES, "closed host source bindings missing")
+    need(bindings, "closed host source bindings missing")
 
     def source(revision, name):
         return subprocess.check_output(
@@ -58,7 +72,7 @@ def closed_host(ref, cli_sha256=None):
             ]
         )
 
-    old_cli = ast.parse(source(I["CLOSED_SOURCE"], "run-original600-controller.py"))
+    old_cli = ast.parse(source(workload, "run-original600-controller.py"))
     pins = next(
         ast.literal_eval(node.value)
         for node in old_cli.body
@@ -69,12 +83,9 @@ def closed_host(ref, cli_sha256=None):
         )
     )
     for name in pins:
-        if (
-            name not in CLOSED_HOST_HASHES
-            and name != "cloudbench-recovered-reservations.py"
-        ):
+        if name not in bindings and name != "cloudbench-recovered-reservations.py":
             need(
-                source(ref, name) == source(I["CLOSED_SOURCE"], name),
+                source(ref, name) == source(workload, name),
                 "recovered host dependency changed",
             )
 
@@ -90,7 +101,7 @@ def closed_host(ref, cli_sha256=None):
 
     need(
         observer(source(ref, "cloudbench-recovered-reservations.py"))
-        == observer(source(I["CLOSED_SOURCE"], "cloudbench-recovered-reservations.py")),
+        == observer(source(workload, "cloudbench-recovered-reservations.py")),
         "recovered observation protocol changed",
     )
     return ref
@@ -384,7 +395,8 @@ def load(outer, closed, config, closure, inputs):
     need(
         closure.get("schema") == "cloudbench-archived-owner-stop-plan-v1"
         and closure["source_ref"] == config["source_ref"]
-        and config["source_ref"] in (I["SOURCE"], I["CLOSED_SOURCE"])
+        and config["source_ref"]
+        in (I["SOURCE"], I["CLOSED_SOURCE"], I["CLOSED75_SOURCE"])
         and closure.get("no_delete") is True,
         "full closed controller context required",
     )
@@ -415,8 +427,14 @@ def load(outer, closed, config, closure, inputs):
     # replaces its authority and host provenance; it never rewrites that history.
     config = recovery_config
     provenance = config["host_operator_provenance"]
-    typed_closed = config["source_ref"] == I["CLOSED_SOURCE"]
-    host = closed_host(provenance["host_operator_source_ref"]) if typed_closed else HOST
+    typed_closed = config["source_ref"] in (I["CLOSED_SOURCE"], I["CLOSED75_SOURCE"])
+    host = (
+        closed_host(
+            provenance["host_operator_source_ref"], workload=config["source_ref"]
+        )
+        if typed_closed
+        else HOST
+    )
     need(
         provenance["host_operator_source_ref"] == host
         and provenance["workload_source_ref"] == config["source_ref"],

@@ -241,6 +241,50 @@ class Incomplete(unittest.TestCase):
             with self.assertRaises(ValueError):
                 M["plan"](root, failure)
 
+    def test_typed75_incomplete_config_failure_keeps_closed_rows_and_exact_stack(self):
+        root, failure_path, closed, other = self.closed_fixture()
+        write = OLD["OLD"]["write"]
+        failure = json.loads(failure_path.read_bytes())
+        log_path = Path(failure["log_path"])
+        prefix = "\n".join(log_path.read_text().splitlines()[:-1])
+        trace = (
+            'File "'
+            + str(ROOT / "scripts/run-original600-controller.py")
+            + '", line 178, in verify_reuse_images\n'
+            "    if current is None or image_identity(current['config'].get('image')) != identity:\n"
+            "AttributeError: 'NoneType' object has no attribute 'get'\n"
+        )
+        log_path.write_text(prefix + "\n" + trace)
+        failure.update(
+            observed_error="AttributeError: 'NoneType' object has no attribute 'get' at verify_reuse_images current['config']",
+            log_sha256=M["sha"](log_path.read_bytes()),
+        )
+        write(failure_path, failure)
+        with (
+            mock.patch.dict(
+                M["closed_plan"].__globals__,
+                CLOSED75_SOURCE="a" * 40,
+                protocol=lambda *_: {},
+            ),
+            mock.patch.object(M["subprocess"], "check_output", return_value="a" * 40),
+        ):
+            plan = M["plan"](root, failure_path)
+            self.assertEqual(plan["source_ref"], "a" * 40)
+            self.assertEqual(plan["retained_request"], closed)
+            self.assertEqual(
+                plan["classifications"][0]["machine_id"], other["machine_id"]
+            )
+            self.assertEqual(plan["deadline"], plan["started_at"] + 5400)
+            log_path.write_text(
+                prefix + "\nAttributeError: 'NoneType' object has no attribute 'get'\n"
+            )
+            failure["log_sha256"] = M["sha"](log_path.read_bytes())
+            write(failure_path, failure)
+            with self.assertRaisesRegex(
+                ValueError, "known incomplete-config image frame"
+            ):
+                M["plan"](root, failure_path)
+
     def test_positive_ack_survives_only_source_proven_unsent_partial_call(self):
         folder = self.partial()
         result = M["classify"](self.directory, self.fixture.row, self.f.request, {})

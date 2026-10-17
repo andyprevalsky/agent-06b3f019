@@ -175,11 +175,174 @@ def verify_reuse_images(request, inventory, expected):
     machines={machine['id']:machine for machine in inventory}
     for row in request['candidates']:
         current=machines.get(row['machine_id'])
-        if current is None or image_identity(current['config'].get('image')) != identity:
+        if current is None or not isinstance(current.get('config'), dict) or image_identity(current['config'].get('image')) != identity:
             raise ValueError('archived candidate image differs from the admitted immutable image')
         resolved=current.get('image_ref')
         if isinstance(resolved,dict) and resolved.get('digest') and resolved['digest'] != identity[1]:
             raise ValueError('resolved native image digest differs from the admitted image')
+
+
+def observe_reuse_configs(
+    api_factory, request, inventory, directory, runner, deadline, *, proof=None
+):
+    """Observe selected incomplete rows with bounded current GETs; never infer config."""
+    rows = {row["machine_id"]: row for row in request["candidates"]}
+    machines = {row["id"]: row for row in inventory}
+    if len(machines) != len(inventory) or len(rows) != len(request["candidates"]):
+        raise ValueError("duplicate native or candidate identity")
+    missing = [
+        mid
+        for mid in rows
+        if mid in machines and not isinstance(machines[mid].get("config"), dict)
+    ]
+    if not missing:
+        return inventory
+    if not 0 < deadline - time.time() <= 5400:
+        raise ValueError("original config observation deadline expired")
+    directory = Path(directory)
+    directory.mkdir(mode=0o700)
+    observed = {}
+    phase_remaining = min(110, deadline - time.time())
+    if phase_remaining <= 0:
+        raise ValueError("original config observation deadline expired")
+    phase_end = time.monotonic() + phase_remaining
+    phase_deadline = time.time() + phase_remaining
+    attempts = {mid: 0 for mid in missing}
+    pending = list(missing)
+    try:
+        with runner["bounded"](phase_remaining):
+            runner["save"](
+                directory / "intent.json",
+                {
+                    "schema": "original600-selected-full-config-observation-v1",
+                    "request_sha256": digest(
+                        json.dumps(request, sort_keys=True, allow_nan=False).encode()
+                    ),
+                    "inventory_sha256": digest(
+                        json.dumps(inventory, sort_keys=True, allow_nan=False).encode()
+                    ),
+                    "machine_ids": missing,
+                    "original_deadline": deadline,
+                    "observation_deadline": phase_deadline,
+                    "observation_monotonic_end": phase_end,
+                    "identity_encoding": "json-sort-keys-default-spaces",
+                    "config_writes": 0,
+                    "capacity_credit": 0,
+                },
+            )
+            helper = reuse_module()
+            while pending:
+                if time.monotonic() >= phase_end or time.time() >= deadline:
+                    raise ValueError(
+                        "full native config observation remains unknown at original phase deadline"
+                    )
+                mid = pending.pop(0)
+                listed = machines[mid]
+                if listed.get("instance_id") != rows[mid][
+                    "source_instance_id"
+                ] or listed.get("state") not in ("created", "stopped"):
+                    raise ValueError("incomplete list row version/state differs")
+                out = directory / mid
+                out.mkdir(mode=0o700, exist_ok=True)
+                attempts[mid] += 1
+                attempt = out / ("attempt-%06d" % attempts[mid])
+                attempt.mkdir(mode=0o700)
+                # The canonical adapter saves request/raw bytes before parsing.
+                # Main-thread direct GET owns no helper subprocess to abandon.
+                try:
+                    with runner["bounded"](
+                        min(20, phase_end - time.monotonic(), deadline - time.time())
+                    ):
+                        current = api_factory(attempt).request(
+                            "GET", "/machines/" + mid, timeout=20, direct=True
+                        )
+                except runner["Deadline"]:
+                    runner["save"](
+                        attempt / "read-pending.json",
+                        {
+                            "machine_id": mid,
+                            "error_type": "Deadline",
+                            "operation": "GET",
+                            "original_deadline": deadline,
+                            "observation_deadline": phase_deadline,
+                            "capacity_credit": 0,
+                            "config_writes": 0,
+                        },
+                    )
+                    if time.monotonic() >= phase_end or time.time() >= deadline:
+                        raise ValueError(
+                            "full native config observation remains unknown at original phase deadline"
+                        )
+                    pending.append(mid)
+                    continue
+                if time.monotonic() >= phase_end or time.time() >= deadline:
+                    raise ValueError("late full native config observation")
+                if (
+                    not isinstance(current, dict)
+                    or not isinstance(current.get("config"), dict)
+                    or current.get("id") != listed["id"]
+                    or current.get("instance_id") != listed["instance_id"]
+                ):
+                    raise ValueError(
+                        "exact full native config remains unknown or changed"
+                    )
+                helper["same_source"](rows[mid], current)
+                verify_reuse_images(
+                    dict(request, candidates=[rows[mid]]),
+                    [current],
+                    request["image_ref"],
+                )
+                runner["save"](out / "observed.json", current)
+                observed[mid] = current
+            if time.monotonic() >= phase_end or time.time() >= deadline:
+                raise ValueError("late full native config observation completion")
+            runner["save"](
+                directory / "complete.json",
+                {
+                    "schema": "original600-selected-full-config-observation-v1",
+                    "machine_ids": missing,
+                    "original_deadline": deadline,
+                    "intent_sha256": digest(runner["read"](directory / "intent.json")),
+                    "observed": {
+                        mid: digest(runner["read"](directory / mid / "observed.json"))
+                        for mid in observed
+                    },
+                    "config_writes": 0,
+                    "capacity_credit": 0,
+                },
+            )
+            completion_metadata = {
+                "directory": str(directory),
+                "intent_sha256": digest(runner["read"](directory / "intent.json")),
+                "complete_sha256": digest(runner["read"](directory / "complete.json")),
+                "observed": {
+                    mid: digest(runner["read"](directory / mid / "observed.json"))
+                    for mid in observed
+                },
+                "original_deadline": deadline,
+                "config_writes": 0,
+                "capacity_credit": 0,
+            }
+    except BaseException as error:
+        runner["save"](
+            directory / "failure.json",
+            {
+                "error_type": type(error).__name__,
+                "observed_machine_ids": list(observed),
+                "original_deadline": deadline,
+                "config_writes": 0,
+                "capacity_credit": 0,
+                "unknown_rows_not_credited": True,
+                "no_write_retry": True,
+                "observation_deadline": phase_deadline,
+            },
+        )
+        raise
+    if time.monotonic() >= phase_end or time.time() >= deadline:
+        raise ValueError("original config observation deadline expired")
+    if proof is not None:
+        proof["selected_full_config_observation"] = completion_metadata
+    return [observed.get(row["id"], row) for row in inventory]
 
 
 def capacity_snapshot(api, token, org, directory, extra):
@@ -436,6 +599,7 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
         final=capacity_snapshot(api,token,args.org,refreshed,args.extra_destroying_count)
     inventory=json.loads(read_inventory(refreshed/'navi-whisper-lux-bench.private.json'))
     facts=facts_from(runner['read'](args.facts))
+    inventory=observe_reuse_configs(adapter,reserved,inventory,refreshed/'selected-full-config-observation',runner,(started_at or 0)+5400,proof=final)
     verify_reuse_images(reserved,inventory,facts['image_ref'])
     demand=helper['capacity_demand'](reserved,inventory,set(facts['protected_machines']),require_reserved=True)
     final.update(demand,admission='RESERVED_NATIVE_READBACK',reservation_mutations_separate=True)
@@ -1150,6 +1314,12 @@ def resume_incomplete_admission(args, root, runner, github):
             initial=capacity_snapshot(capture['Fly'],token,args.org,before,args.extra_destroying_count)
         inventory=json.loads(read_inventory(before/'navi-whisper-lux-bench.private.json'))
         request=plan['request']
+        helper=reuse_module()
+        connection=capture['Fly']('navi-whisper-lux-bench',token)
+        def adapter(journal):return helper['NativeAdapter'](connection,journal/'wire')
+        retained={row['machine_id']:row for row in plan.get('retained_request',{}).get('candidates',[])}
+        current_request=dict(request,candidates=[retained.get(row['machine_id'],row) for row in request['candidates']])
+        inventory=observe_reuse_configs(adapter,current_request,inventory,before/'selected-full-config-observation',runner,deadline,proof=initial)
         verify_reuse_images(request,inventory,facts_from(runner['read'](args.facts))['image_ref'])
         reservation_disk_headroom(directory,request,inventory,before)
         retained_count = len(plan.get('retained_request', {}).get('candidates', []))
@@ -1158,9 +1328,6 @@ def resume_incomplete_admission(args, root, runner, github):
         if incomplete_admission_plan(args,runner)[1]!=plan:
             raise ValueError('incomplete admission evidence changed before native effect')
         remaining()
-        helper=reuse_module()
-        connection=capture['Fly']('navi-whisper-lux-bench',token)
-        def adapter(journal):return helper['NativeAdapter'](connection,journal/'wire')
         with joined_admission_signals():
             reserved=module['reconcile'](adapter,plan,directory/'incomplete-admission-recovery',deadline)
         after=directory/('capacity-after-recovery-'+str(time.time_ns()));after.mkdir(mode=0o700)
@@ -1168,6 +1335,7 @@ def resume_incomplete_admission(args, root, runner, github):
             final=capacity_snapshot(capture['Fly'],token,args.org,after,args.extra_destroying_count)
         inventory=json.loads(read_inventory(after/'navi-whisper-lux-bench.private.json'))
         facts=facts_from(runner['read'](args.facts))
+        inventory=observe_reuse_configs(adapter,reserved,inventory,after/'selected-full-config-observation',runner,deadline,proof=final)
         verify_reuse_images(reserved,inventory,facts['image_ref'])
         final.update(helper['capacity_demand'](reserved,inventory,set(facts['protected_machines']),require_reserved=True))
         if final['available_slots_conservative']<final['new_machine_demand']:
@@ -1183,6 +1351,9 @@ def resume_incomplete_admission(args, root, runner, github):
             'original_started_at_epoch':plan['started_at'], 'incomplete_admission':operator,
             'host_runner_sha256':digest((root/'scripts/cloudbench-original600-runner.py').read_bytes()),
             'host_gate_sha256':digest((root/'scripts/run-cloudbench-controller-gate').read_bytes())}
+        config_observations={name:value['selected_full_config_observation'] for name,value in (('before',initial),('after',final)) if 'selected_full_config_observation' in value}
+        if config_observations:
+            provenance['selected_full_config_observations']=config_observations
         oldargs=copy.copy(args);oldargs.source_ref=plan['source_ref']
         config=prepare(oldargs,Path(plan['source_root']),oldpins,runner,launch,final,
                        started_at=plan['started_at'],host_operator_provenance=provenance)

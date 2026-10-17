@@ -20,6 +20,7 @@ H, R = C["H"], C["R"]
 need, sha, canonical = (H[k] for k in ("need", "sha", "canonical"))
 SOURCE = "724ae71f5bd8756be01ea237de0c2742e4f94b77"
 CLOSED_SOURCE = "49b792dcc2ea983325c6a25801da6c982f29c206"
+CLOSED75_SOURCE = "1cec8c1cb20c85e66e10cd49446b44c5e85101f1"
 
 
 class CancelledAdmission(BaseException):
@@ -302,7 +303,7 @@ def retained_native(root, original, reserved, lane, inputs):
             reserved["row"],
             native,
             reserved["_request"]["cohort"],
-            CLOSED_SOURCE,
+            reserved["_request"]["harness_ref"],
             inputs,
         )
         need(
@@ -366,7 +367,20 @@ def closed_classification(directory, row, request, inputs):
     return entry
 
 
-def closed_plan(directory, failure_path, *, historical=False):
+def closed_plan(directory, failure_path, *, historical=False, source=None):
+    source = CLOSED_SOURCE if source is None else source
+    need(source in (CLOSED_SOURCE, CLOSED75_SOURCE), "unknown closed admission source")
+    typed75 = source == CLOSED75_SOURCE
+    expected_error = (
+        "AttributeError: 'NoneType' object has no attribute 'get' at verify_reuse_images current['config']"
+        if typed75
+        else "fresh capacity after reserved native readback is insufficient"
+    )
+    expected_last = (
+        "AttributeError: 'NoneType' object has no attribute 'get'"
+        if typed75
+        else "ValueError: fresh capacity after reserved native readback is insufficient"
+    )
     root = Path(directory).absolute()
     need(
         root.resolve(strict=True) == root and root.is_dir(),
@@ -376,12 +390,12 @@ def closed_plan(directory, failure_path, *, historical=False):
     admission = C["obj"](root / "admission-intent.private.json", inputs)
     saved = C["obj"](root / "archived-reuse-original.private.json", inputs)
     request = saved["request"]
-    H["validate_request"](request, CLOSED_SOURCE)
+    H["validate_request"](request, source)
     need(
         saved["schema"] == "original600-archived-admission-request-v1"
         and saved["sha256"]
         == sha(json.dumps(request, sort_keys=True, allow_nan=False).encode())
-        and admission["binding"]["source_ref"] == CLOSED_SOURCE
+        and admission["binding"]["source_ref"] == source
         and admission["deadline_epoch"] == admission["started_at_epoch"] + 5400,
         "closed source/request/clock differs",
     )
@@ -389,7 +403,7 @@ def closed_plan(directory, failure_path, *, historical=False):
     need(
         Path(failure_path).absolute() == root / "observed-admission-failure.safe.json"
         and failure["schema"] == "original600-observed-admission-failure-v1"
-        and failure["source_ref"] == CLOSED_SOURCE
+        and failure["source_ref"] == source
         and failure["capture_kind"] == "original-process-stream"
         and failure["admission_directory"] == str(root)
         and failure["admission_intent_sha256"]
@@ -401,8 +415,7 @@ def closed_plan(directory, failure_path, *, historical=False):
         and failure["controller_created"] is False
         and failure["request_output_absent"] is True
         and failure["launch_directories_absent"] is True
-        and failure["observed_error"]
-        == "fresh capacity after reserved native readback is insufficient",
+        and failure["observed_error"] == expected_error,
         "typed joined capacity failure differs",
     )
     source_root = Path(failure["source_root"])
@@ -418,7 +431,7 @@ def closed_plan(directory, failure_path, *, historical=False):
             ],
             text=True,
         ).strip()
-        == CLOSED_SOURCE,
+        == source,
         "original closed operator changed",
     )
     log_path = Path(failure["log_path"])
@@ -428,11 +441,10 @@ def closed_plan(directory, failure_path, *, historical=False):
     events = [json.loads(line) for line in lines if line.startswith("{")]
     need(
         sha(log) == failure["log_sha256"]
-        and lines[-1]
-        == "ValueError: fresh capacity after reserved native readback is insufficient"
+        and lines[-1] == expected_last
         and any(
             e.get("status") == "ADMISSION_STARTED"
-            and e.get("source_ref") == CLOSED_SOURCE
+            and e.get("source_ref") == source
             and e.get("directory") == str(root)
             for e in events
         )
@@ -444,6 +456,18 @@ def closed_plan(directory, failure_path, *, historical=False):
         ),
         "closed capacity stream differs",
     )
+    if typed75:
+        need(
+            (
+                'File "'
+                + str(source_root / "scripts/run-original600-controller.py")
+                + '", line 178, in verify_reuse_images'
+            )
+            in log.decode()
+            and "if current is None or image_identity(current['config'].get('image')) != identity:"
+            in log.decode(),
+            "known incomplete-config image frame required",
+        )
     bound = admission["binding"]["inputs"]
     need(
         set(bound)
@@ -513,8 +537,8 @@ def closed_plan(directory, failure_path, *, historical=False):
         "completed original observation differs",
     )
     initial = {r["machine_id"]: r for r in request["candidates"]}
-    H["validate_request"](closed, CLOSED_SOURCE)
-    H["validate_request"](observed, CLOSED_SOURCE)
+    H["validate_request"](closed, source)
+    H["validate_request"](observed, source)
     for pool in (closed, observed):
         need(
             all(pool.get(k) == v for k, v in request.items() if k != "candidates"),
@@ -599,7 +623,7 @@ def closed_plan(directory, failure_path, *, historical=False):
     return {
         "schema": "closed-admission-continuation-v1",
         "directory": str(root),
-        "source_ref": CLOSED_SOURCE,
+        "source_ref": source,
         "source_root": str(source_root),
         "started_at": admission["started_at_epoch"],
         "deadline": admission["deadline_epoch"],
@@ -611,7 +635,7 @@ def closed_plan(directory, failure_path, *, historical=False):
         "held": held,
         "inputs": inputs,
         "membership": membership,
-        "protocol_hashes": protocol(CLOSED_SOURCE),
+        "protocol_hashes": protocol(source),
         "failure_path": str(Path(failure_path).absolute()),
     }
 
@@ -621,8 +645,13 @@ def _plan(directory, failure_path, *, historical=False):
     need(root.resolve(strict=True) == root, "physical admission required")
     inputs = {}
     admission = C["obj"](root / "admission-intent.private.json", inputs)
-    if admission["binding"]["source_ref"] == CLOSED_SOURCE:
-        return closed_plan(root, failure_path, historical=historical)
+    if admission["binding"]["source_ref"] in (CLOSED_SOURCE, CLOSED75_SOURCE):
+        return closed_plan(
+            root,
+            failure_path,
+            historical=historical,
+            source=admission["binding"]["source_ref"],
+        )
     saved = C["obj"](root / "archived-reuse-original.private.json", inputs)
     request = saved["request"]
     H["validate_request"](request, SOURCE)

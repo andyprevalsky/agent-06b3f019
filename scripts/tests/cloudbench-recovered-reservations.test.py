@@ -167,7 +167,13 @@ class Recovered(unittest.TestCase):
         def git(command):
             revision, name = command[-1].split(":scripts/", 1)
             if revision == newref:
-                return altered.get(name, (ROOT / "scripts" / name).read_bytes())
+                if name in altered:
+                    return altered[name]
+                if name in expected or name == "cloudbench-recovered-reservations.py":
+                    return (ROOT / "scripts" / name).read_bytes()
+                fixed = list(command)
+                fixed[-1] = oldref + ":scripts/" + name
+                return read(fixed)
             return read(command)
 
         expected = {
@@ -182,6 +188,12 @@ class Recovered(unittest.TestCase):
             mock.patch.object(M["subprocess"], "check_output", side_effect=git),
         ):
             self.assertEqual(M["closed_host"](newref), newref)
+            oldref = M["I"]["CLOSED75_SOURCE"]
+            with mock.patch.dict(
+                M["closed_host"].__globals__, CONFIG75_HOST_HASHES=expected
+            ):
+                self.assertEqual(M["closed_host"](newref, workload=oldref), newref)
+            oldref = M["I"]["CLOSED_SOURCE"]
             for name in (
                 "cloudbench-incomplete-reservations.py",
                 "cloudbench-archived-reuse-effects.py",
@@ -206,6 +218,9 @@ class Recovered(unittest.TestCase):
     def test_typed_closed_admission_reconstructs_retained_rows_after_full_closure(self):
         self.load_fixture(typed=True)
 
+    def test_typed75_closed_family_reconstructs_retained_native_rows(self):
+        self.load_fixture(typed=True, typed75=True)
+
     def test_load_binds_both_plan_serializations_request_partition_and_closed_config(
         self,
     ):
@@ -228,7 +243,7 @@ class Recovered(unittest.TestCase):
     def test_released_workspace_successor_preserves_full_recovery(self):
         self.load_fixture(typed=True, successor=True)
 
-    def load_fixture(self, typed, successor=False):
+    def load_fixture(self, typed, successor=False, typed75=False):
         plan = {
             "request": self.f.original,
             "classifications": [
@@ -548,10 +563,15 @@ class Recovered(unittest.TestCase):
             mock.patch.dict(
                 M["I"],
                 SOURCE="a" * 40,
-                CLOSED_SOURCE="a" * 40 if typed else M["I"]["CLOSED_SOURCE"],
+                CLOSED_SOURCE="a" * 40
+                if typed and not typed75
+                else M["I"]["CLOSED_SOURCE"],
+                CLOSED75_SOURCE="a" * 40 if typed75 else M["I"]["CLOSED75_SOURCE"],
                 historical_plan=lambda *_args: plan,
             ),
-            mock.patch.dict(M["load"].__globals__, closed_host=lambda ref, *_args: ref),
+            mock.patch.dict(
+                M["load"].__globals__, closed_host=lambda ref, *_args, **_kwargs: ref
+            ),
         ):
             tracemalloc.start()
             try:

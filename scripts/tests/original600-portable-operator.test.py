@@ -449,6 +449,222 @@ class Portable(unittest.TestCase):
         evidence = private(out / "observed-closure.safe.json", receipt)
         return out, config, evidence
 
+    def test_selected_null_config_requires_one_full_current_get_and_preserves_raw_list(
+        self,
+    ):
+        old = runpy.run_path(
+            str(ROOT / "scripts/tests/cloudbench-reconcile-reservations.test.py")
+        )
+        fixture = old["Reconcile"]()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        request = fixture.f.request
+        expected = fixture.f.current
+        incomplete = dict(
+            expected, config=None, incomplete_config={"image": "not-authoritative"}
+        )
+        inventory = [incomplete, {"id": "unselected", "config": None}]
+        original = json.dumps(inventory, sort_keys=True).encode()
+        helper = CLI.reuse_module()
+        calls = []
+        current = json.loads(json.dumps(expected))
+        clock = [None]
+
+        class Client:
+            app = "navi-whisper-lux-bench"
+
+            def api(self, method, url, body, *, timeout, headers, observer):
+                calls.append((method, url, body, timeout))
+                self_test.assertEqual(method, "GET")
+                self_test.assertEqual(timeout, 20)
+                outcome = current.pop(0) if isinstance(current, list) else current
+                if isinstance(outcome, BaseException):
+                    if clock[0] is not None:
+                        clock[0] += 20
+                    raise outcome
+                raw = json.dumps(outcome, sort_keys=True).encode()
+                observer(method, url, 200, raw)
+                return json.loads(raw)
+
+        self_test = self
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            raw_path = private(root / "native.private.json", inventory)
+            raw_before = raw_path.read_bytes()
+            proof = {}
+            bounds = []
+
+            @contextmanager
+            def bounded(seconds):
+                bounds.append(seconds)
+                with RUNNER["bounded"](seconds):
+                    yield
+
+            runner = dict(RUNNER, bounded=bounded)
+            observed = CLI.observe_reuse_configs(
+                lambda out: helper["NativeAdapter"](Client(), out / "wire"),
+                request,
+                inventory,
+                root / "observation",
+                runner,
+                time.time() + 500,
+                proof=proof,
+            )
+            self.assertEqual(observed[0], expected)
+            self.assertIsNone(observed[1]["config"])
+            self.assertEqual(json.dumps(inventory, sort_keys=True).encode(), original)
+            self.assertEqual(raw_path.read_bytes(), raw_before)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(bounds, [110, 20])
+            binding = proof["selected_full_config_observation"]
+            self.assertEqual(
+                binding["intent_sha256"],
+                CLI.digest((root / "observation/intent.json").read_bytes()),
+            )
+            self.assertEqual(
+                binding["complete_sha256"],
+                CLI.digest((root / "observation/complete.json").read_bytes()),
+            )
+            self.assertEqual(
+                binding["observed"][expected["id"]],
+                CLI.digest(
+                    (
+                        root / "observation" / expected["id"] / "observed.json"
+                    ).read_bytes()
+                ),
+            )
+            wire = list((root / "observation" / expected["id"]).rglob("*-wire.json"))
+            self.assertEqual(len(wire), 1)
+            old_path = root / "old-operator.py"
+            old_path.write_bytes(
+                subprocess.check_output(
+                    [
+                        "git",
+                        "--no-replace-objects",
+                        "-C",
+                        str(ROOT),
+                        "show",
+                        "1cec8c1cb20c85e66e10cd49446b44c5e85101f1:scripts/run-original600-controller.py",
+                    ]
+                )
+            )
+            old = runpy.run_path(str(old_path))
+            with self.assertRaises(AttributeError):
+                old["verify_reuse_images"](request, inventory, request["image_ref"])
+            with self.assertRaisesRegex(ValueError, "image differs"):
+                CLI.verify_reuse_images(request, inventory, request["image_ref"])
+            for label, mutation in [
+                ("missing-config", {"config": None}),
+                ("wrong-id", {"id": "foreign"}),
+                ("new-version", {"instance_id": "foreign"}),
+                ("running", {"state": "started"}),
+                ("wrong-config", {"config": {}}),
+            ]:
+                current = dict(expected, **mutation)
+                before = len(calls)
+                with self.assertRaises(ValueError):
+                    CLI.observe_reuse_configs(
+                        lambda out: helper["NativeAdapter"](Client(), out / "wire"),
+                        request,
+                        inventory,
+                        root / label,
+                        runner,
+                        time.time() + 500,
+                    )
+                self.assertEqual(len(calls), before + 1)
+                self.assertFalse((root / label / "complete.json").exists())
+                self.assertTrue((root / label / "failure.json").exists())
+            # A transient read gets another read under the SAME phase clock,
+            # with distinct raw custody; no config/lease operation is possible.
+            clock[0] = time.time()
+            current = [RUNNER["Deadline"]("first20s unknown"), expected]
+            before = len(calls)
+            with (
+                patch.object(CLI.time, "time", side_effect=lambda: clock[0]),
+                patch.object(CLI.time, "monotonic", side_effect=lambda: clock[0]),
+            ):
+                retried = CLI.observe_reuse_configs(
+                    lambda out: helper["NativeAdapter"](Client(), out / "wire"),
+                    request,
+                    inventory,
+                    root / "transient",
+                    runner,
+                    clock[0] + 500,
+                )
+            self.assertEqual(retried[0], expected)
+            self.assertEqual(len(calls), before + 2)
+            self.assertEqual(
+                len(list((root / "transient").rglob("read-pending.json"))), 1
+            )
+            current = RUNNER["Deadline"]("exact20s observation timed out")
+            clock[0] = time.time()
+            before = len(calls)
+            backward_start = clock[0]
+            with (
+                patch.object(
+                    CLI.time,
+                    "time",
+                    side_effect=lambda: backward_start - (clock[0] - backward_start),
+                ),
+                patch.object(CLI.time, "monotonic", side_effect=lambda: clock[0]),
+                self.assertRaisesRegex(ValueError, "original phase deadline"),
+            ):
+                CLI.observe_reuse_configs(
+                    lambda out: helper["NativeAdapter"](Client(), out / "wire"),
+                    request,
+                    inventory,
+                    root / "timeout",
+                    runner,
+                    clock[0] + 500,
+                )
+            self.assertEqual(len(calls), before + 6)
+            self.assertFalse(list((root / "timeout").rglob("*-wire.json")))
+            self.assertFalse((root / "timeout/complete.json").exists())
+            self.assertTrue(
+                json.loads((root / "timeout/failure.json").read_bytes())[
+                    "unknown_rows_not_credited"
+                ]
+            )
+            after = len(calls)
+            with self.assertRaises(FileExistsError):
+                CLI.observe_reuse_configs(
+                    lambda out: helper["NativeAdapter"](Client(), out / "wire"),
+                    request,
+                    inventory,
+                    root / "timeout",
+                    runner,
+                    time.time() + 500,
+                )
+            self.assertEqual(len(calls), after)
+            current = CLI.AdmissionInterrupted(signal.SIGTERM)
+            clock[0] = None
+            before = len(calls)
+            with self.assertRaises(CLI.AdmissionInterrupted):
+                CLI.observe_reuse_configs(
+                    lambda out: helper["NativeAdapter"](Client(), out / "wire"),
+                    request,
+                    inventory,
+                    root / "cancelled",
+                    runner,
+                    time.time() + 500,
+                )
+            self.assertEqual(len(calls), before + 1)
+            self.assertFalse((root / "cancelled/complete.json").exists())
+            before = len(calls)
+            self.assertEqual(
+                CLI.observe_reuse_configs(
+                    None,
+                    request,
+                    [expected],
+                    root / "unneeded",
+                    runner,
+                    time.time() + 500,
+                ),
+                [expected],
+            )
+            self.assertEqual(len(calls), before)
+            self.assertFalse((root / "unneeded").exists())
+
     def test_canonical_released_workspace_continues_once_without_regrading_unknown_create(
         self,
     ):
