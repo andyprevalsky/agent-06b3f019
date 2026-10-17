@@ -10796,8 +10796,7 @@ Based on this feedback, I need to continue working on the task and address the i
             step_timer.mark("pre_action_bookkeeping")
             step_timer.annotate(action=action_name)
             browser_activity_checkpoint(f"Step {iteration} - executing {action_name}")
-            try:
-                result = await asyncio.wait_for(
+            action_task = asyncio.create_task(
                     _execute_action(
                         dom_service,
                         action_history,
@@ -10820,10 +10819,30 @@ Based on this feedback, I need to continue working on the task and address the i
                         prepare_credentials_for_url=_prepare_credentials_for_url,
                         prefetched_browser_state=prefetched_browser_state,
                         auth_context_for_url=_auth_context_for_url,
-                    ),
+                    )
+            )
+            try:
+                result = await asyncio.wait_for(
+                    action_task,
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
+                from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
+
+                timeout_error = sys.exception()
+                action_timeout_seconds = (
+                    timeout_error.timeout_seconds
+                    if isinstance(timeout_error, BrowserEvaluateDeadlineExceeded)
+                    else BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS if action_task.cancelled() else None
+                )
+                timeout_description = (
+                    f"after {action_timeout_seconds:g}s"
+                    if action_timeout_seconds is not None
+                    else f"with unknown timeout source (configured supervisor cap {BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS:g}s)"
+                )
+                timeout_reason = (
+                    f"{action_timeout_seconds:g}s" if action_timeout_seconds is not None else "unknown_source"
+                )
                 # Any action can hang on a frozen renderer (Momence Konva waiver:
                 # evaluate OR click). Classify via browser-process CDP before soft
                 # recovery; soft bring_to_front alone cannot reclaim the page.
@@ -10855,7 +10874,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
                 renderer_frozen = stall.get("verdict") == "renderer_main_thread_blocked"
                 await _recover_browser_step(
-                    f"action_timeout_{action_name}_{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s",
+                    f"action_timeout_{action_name}_{timeout_reason}",
                     reload_page=renderer_frozen,
                 )
                 if renderer_frozen:
@@ -10912,8 +10931,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 result = {
                     "success": False,
                     "error": (
-                        f"Browser action '{action_name}' timed out after "
-                        f"{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s; "
+                        f"Browser action '{action_name}' timed out {timeout_description}; "
                         + (
                             "hard renderer recovery ran after CDP classified "
                             "renderer_main_thread_blocked."

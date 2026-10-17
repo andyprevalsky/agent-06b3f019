@@ -13775,6 +13775,73 @@ def test_normalize_evaluate_timeout_seconds_default_and_clamp():
     assert omitted.timeout is None
 
 
+
+async def test_nested_action_timeout_keeps_actual_deadline_owner():
+    """Real executor timeout crosses the real supervisor catch without becoming330s."""
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    async def hang(*args, **kwargs):
+        await asyncio.Future()
+    dom = MagicMock()
+    cdp = MagicMock()
+    cdp.session_id = "owned-cdp"
+    cdp.cdp_client.send.Runtime.evaluate = hang
+    dom.session.get_or_create_cdp_session = AsyncMock(return_value=cdp)
+    history = MagicMock()
+    history.record_action = AsyncMock()
+    from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
+    cdp.cdp_client.send.Runtime.evaluate = AsyncMock(side_effect=TimeoutError("transport deadline"))
+    with pytest.raises(TimeoutError) as transport_error:
+        await execute_action(dom, history, {"action": "evaluate", "params": {"code": "1+1"}})
+    assert not isinstance(transport_error.value, BrowserEvaluateDeadlineExceeded), "foreign transport timeout acquired local deadline ownership"
+    assert str(transport_error.value) == "transport deadline"
+    cdp.cdp_client.send.Runtime.evaluate = hang
+    with patch("domains.spawn_browser_agent_v3.service_actions.normalize_evaluate_timeout_seconds", return_value=0.01):
+        with pytest.raises(asyncio.TimeoutError) as caught:
+            await execute_action(dom, history, {"action": "evaluate", "params": {"code": "1+1"}})
+    tree = ast.parse(Path(handler.__file__).read_text())
+    catch = next(node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)
+                 and any(isinstance(child, ast.Constant) and child.value == "Browser action timed out; CDP stall classification" for child in ast.walk(node)))
+    recover = AsyncMock()
+    classify = AsyncMock(return_value={"verdict": "renderer_responsive_after_timeout"})
+    namespace = dict(handler.__dict__, error=None, action_task=asyncio.current_task(), input_page=None, playwright_browser=None,
+                     agent_id="owned", task_id="owned-task", session_id="owned-session", iteration=1,
+                     current_url="https://example.com", action_name="evaluate", unified_action={"params": {"code": "1+1"}},
+                     _recover_browser_step=recover)
+    body = ast.Try(body=[ast.Raise(exc=ast.Name(id="error", ctx=ast.Load()))], handlers=[copy.deepcopy(catch)], orelse=[], finalbody=[])
+    fn = ast.AsyncFunctionDef(name="cross_supervisor", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=[ast.Global(names=["input_page", "humanizer"]), body, ast.Return(value=ast.Name(id="result", ctx=ast.Load()))], decorator_list=[])
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), "actual-supervisor-timeout-catch", "exec"), namespace)
+    with patch("domains.spawn_browser_agent_v3.service_actions.classify_evaluate_cdp_stall", classify):
+        namespace["error"] = caught.value
+        result = await namespace["cross_supervisor"]()
+        assert result["success"] is False
+        assert "0.01s" in result["error"] and "330s" not in result["error"], (type(caught.value).__name__, result["error"])
+        assert recover.await_args.args[0] == "action_timeout_evaluate_0.01s"
+        assert caught.value.elapsed_seconds >= 0.01
+        for error in (asyncio.TimeoutError(), TimeoutError("untyped inner failure")):
+            namespace["error"] = error
+            result = await namespace["cross_supervisor"]()
+            assert result["success"] is False and "unknown timeout source" in result["error"]
+            assert "after 330s" not in result["error"] and "configured supervisor cap 330s" in result["error"]
+        outer_task = asyncio.create_task(hang())
+        with pytest.raises(asyncio.TimeoutError) as outer_error:
+            await asyncio.wait_for(outer_task, timeout=0.01)
+        assert outer_task.cancelled()
+        namespace["error"] = outer_error.value
+        namespace["action_task"] = outer_task
+        result = await namespace["cross_supervisor"]()
+        assert result["success"] is False and "after 330s" in result["error"]
+        assert recover.await_args.args[0] == "action_timeout_evaluate_330s"
+        for error in (asyncio.CancelledError(), WorkflowGenerationSealed("sealed")):
+            namespace["error"] = error
+            before = recover.await_count
+            with pytest.raises(type(error)):
+                await namespace["cross_supervisor"]()
+            assert recover.await_count == before
+
+
 async def test_execute_action_evaluate_honors_llm_timeout():
     """Hanging Runtime.evaluate fails at the LLM-set bound, not the 330s outer cap."""
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -29753,6 +29820,7 @@ async def run_all_tests():
         "normalize_evaluate_timeout_seconds_default_and_clamp",
         test_normalize_evaluate_timeout_seconds_default_and_clamp,
     )
+    await r.record_async("nested_action_timeout_keeps_actual_deadline_owner", test_nested_action_timeout_keeps_actual_deadline_owner)
     await r.record_async(
         "execute_action_evaluate_honors_llm_timeout",
         test_execute_action_evaluate_honors_llm_timeout,

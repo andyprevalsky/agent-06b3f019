@@ -200,6 +200,15 @@ def get_element_description(element: Any, max_length: int = 40) -> str:
 # ========================================
 
 
+class BrowserEvaluateDeadlineExceeded(asyncio.TimeoutError):
+    """The owned Runtime.evaluate deadline expired, before its outer supervisor."""
+
+    def __init__(self, timeout_seconds: float, elapsed_seconds: float):
+        super().__init__("Runtime.evaluate deadline exceeded")
+        self.timeout_seconds = timeout_seconds
+        self.elapsed_seconds = elapsed_seconds
+
+
 async def move_visual_cursor(dom_service: DOMService, x: int, y: int) -> None:
     """Move the injected visual cursor to coordinates."""
     try:
@@ -1555,15 +1564,16 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         session_acquire_ms = round((time_module.monotonic() - started) * 1000)
         eval_started = time_module.monotonic()
+        evaluate_deadline = asyncio.timeout(timeout_s)
         try:
-            result = await asyncio.wait_for(
-                cdp_session.cdp_client.send.Runtime.evaluate(
+            async with evaluate_deadline:
+                result = await cdp_session.cdp_client.send.Runtime.evaluate(
                     params={"expression": code, "returnByValue": True, "awaitPromise": True},
                     session_id=cdp_session.session_id,
-                ),
-                timeout=timeout_s,
-            )
+                )
         except asyncio.TimeoutError:
+            if not evaluate_deadline.expired():
+                raise
             eval_ms = round((time_module.monotonic() - eval_started) * 1000)
             logger.warning(
                 "Browser evaluate timed out waiting for Runtime.evaluate",
@@ -1575,7 +1585,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             )
             # Propagate so the outer supervisor classify + hard-recover path
             # runs instead of burning the full action budget on a wedged CDP.
-            raise
+            raise BrowserEvaluateDeadlineExceeded(timeout_s, eval_ms / 1000) from None
         eval_ms = round((time_module.monotonic() - eval_started) * 1000)
         from .service_crypto import mask_secret_values
 
