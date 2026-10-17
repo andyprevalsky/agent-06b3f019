@@ -403,7 +403,11 @@ def remote(fly, value, journal, action, *, allow_pending=False):
             "local_transport_joined": True,
         },
     )
-    if allow_pending and action == "check" and rc == 75:
+    pending_exit = rc == 75 or (
+        rc == 1
+        and stderr.rstrip().endswith("Error: ssh shell: Process exited with status 75")
+    )
+    if allow_pending and action == "check" and pending_exit:
         pending = json.loads(stdout)
         need(
             pending.get("status") == "PENDING_WRITERS"

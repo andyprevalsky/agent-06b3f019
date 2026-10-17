@@ -28,6 +28,45 @@ def write(path, value):
 
 
 class ExportResume(unittest.TestCase):
+    def test_ssh_wrapped_pending_exit_requires_bound_readonly_result(self):
+        pending = {
+            "status": "PENDING_WRITERS",
+            "machine": self.mid,
+            "launch_sha256": self.binding["launch_sha256"],
+            "non_hub_writers": [{"pid": 123, "birth": "fixture-birth"}],
+        }
+        stderr = "EXPORT_PHASE WRITERS_DONE 123\nError: ssh shell: Process exited with status 75\n"
+
+        class API:
+            def flyctl(inner, *_):
+                return 1, json.dumps(pending), stderr
+
+        journal = self.out / "ssh-wrapped-pending"
+        journal.mkdir()
+        result = M["remote"](API(), self.value, journal, "check", allow_pending=True)
+        self.assertEqual(result, pending)
+        self.assertEqual(
+            json.loads((journal / "check.response.json").read_bytes())["exit_code"], 1
+        )
+        for index, (action, allowed, error, wrong_launch) in enumerate(
+            [
+                ("check", False, stderr, False),
+                ("export", True, stderr, False),
+                ("check", True, "Error: transport failed\n", False),
+                ("check", True, stderr, True),
+            ]
+        ):
+            with self.subTest(index=index):
+                directory = self.out / f"ssh-wrapped-negative-{index}"
+                directory.mkdir()
+                stderr = error
+                if wrong_launch:
+                    pending["launch_sha256"] = "0" * 64
+                with self.assertRaises(ValueError):
+                    M["remote"](
+                        API(), self.value, directory, action, allow_pending=allowed
+                    )
+
     def test_remote_command_is_an_executable_without_an_implicit_shell(self):
         journal = self.out / "remote-command"
         journal.mkdir()
