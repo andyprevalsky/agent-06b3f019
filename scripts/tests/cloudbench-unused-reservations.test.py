@@ -244,6 +244,9 @@ class Unused(unittest.TestCase):
                 reuse_credit=False,
             )
         ]
+        historical = dict(archive_sha256="f6bf27e51320b26578339dc57e687a617509dcab5b666cfddb8008d29ebf6a2f", machine_ids=["2862594a567538", "80e90dec34e118", "845037f2d321e8", "876d20f01e46e8", "8911000c6397d8", "897915b66010d8", "8d2020fe1d5648"], reuse_credit=False)
+        self.assertNotIn(historical["archive_sha256"], {a["archive_sha256"] for a in self.original["archives"]})
+        scopes.append(historical)
         self.original["held_prior_reservations"] = copy.deepcopy(scopes)
         self.request["held_prior_reservations"] = copy.deepcopy(scopes)
         failure = dict(
@@ -312,6 +315,13 @@ class Unused(unittest.TestCase):
         previous = runpy.run_path(str(old))["prepare"](self.outer, self.inventory)
         self.assertEqual(previous["held_machine_ids"], [])
         self.assertNotIn("inherited_held_scopes", previous)
+        old.write_bytes(subprocess.check_output(["git", "show", "52ce8fb026e92075cf8fd1a2fb95a769e8e5b07f:scripts/cloudbench-unused-reservations.py"], cwd=ROOT))
+        with self.assertRaisesRegex(ValueError, "inherited normal hold"):
+            runpy.run_path(str(old))["prepare"](self.outer, self.inventory)
+        malformed = copy.deepcopy(self.original)
+        malformed["held_prior_reservations"][-1]["archive_sha256"] = "not-a-hash"
+        with self.assertRaisesRegex(ValueError, "inherited normal hold"):
+            M["normal_hold_partition"](self.outer, malformed, self.request, {})
         bad = copy.deepcopy(self.request)
         bad["held_native_reservations"] = []
         with self.assertRaisesRegex(ValueError, "partition differs"):

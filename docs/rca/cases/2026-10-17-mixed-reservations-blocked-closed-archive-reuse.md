@@ -77,6 +77,15 @@ original archive hashes, with no release or eligibility inferred from their
 presence. This restores required exclusions without weakening the native
 ownership comparison.
 
+Historical hold scopes can outlive their archive's membership in the current
+owner-archive list. The request builder deliberately preserves those liabilities
+while rebuilding the current owner list. The ordinary reader must validate and
+retain each hash-bound historical scope independently of that list. Run73's
+seven-ID historical scope exposed this distinction during next-run preparation;
+requiring its origin to remain a current owner archive rejected valid retained
+history. The regression preserves that scope and rejects malformed origin
+hashes or any claimed reuse credit.
+
 ## Human feedback
 
 Keep fixes in the normal CLI. Never manufacture an unused-reservation proof,

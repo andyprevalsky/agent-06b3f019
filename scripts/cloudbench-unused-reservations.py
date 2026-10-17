@@ -481,12 +481,12 @@ def normal_hold_partition(outer, original, request, inputs):
             )
         )
     inherited = copy.deepcopy(original.get("held_prior_reservations", []))
-    origins = {entry["archive_sha256"] for entry in original["archives"]}
     seen = set()
     for scope in inherited:
         ids = scope["machine_ids"]
         need(
-            scope["archive_sha256"] in origins
+            isinstance(scope["archive_sha256"], str)
+            and re.fullmatch("[0-9a-f]{64}", scope["archive_sha256"])
             and scope["archive_sha256"] not in seen
             and scope.get("reuse_credit") is False
             and len(ids) == len(set(ids))
