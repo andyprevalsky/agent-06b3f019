@@ -15821,7 +15821,7 @@ release_capacity_reservation_after_primary_start_accounted() {
     # committed.  Keep the shared-unit reservation until Fly inventory itself
     # shows each accepted primary start as non-stopped; releasing on the local
     # barrier alone would let a neighbor admit during provider-state lag.
-    local deadline accounted out
+    local deadline accounted out remaining
     [ "$CAPACITY_RESERVATION_PUBLISHED" = "1" ] || return 0
     [ "${CHILD_MACHINE[0]+set}" = "set" ] || return 1
     if [ "${#CHILD_MACHINE[@]}" -ne "${#BENCHES[@]}" ] \
@@ -15836,28 +15836,46 @@ release_capacity_reservation_after_primary_start_accounted() {
             [ -s "$out/post-config-start.accepted" ] || { accounted=0; break; }
         done
         if [ "$accounted" = "1" ]; then
-            accounted="$({ FLY machines list -a "$APP" --json 2>/dev/null || true; } \
-                | MACHINE_IDS="${CHILD_MACHINE[*]}" python3 -c '
+            remaining=$((deadline - SECONDS))
+            [ "$remaining" -gt 0 ] || break
+            accounted="$(python3 -S - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-machines.py" \
+                "$APP" "$remaining" "${CHILD_MACHINE[@]}" <<'PYACCOUNT'
 import json
-import os
+import runpy
+import signal
 import sys
+import time
+
+helper, app, seconds, *ids = sys.argv[1:]
+deadline = time.monotonic() + float(seconds)
+def expired(signum, frame):
+    raise TimeoutError('original start accounting deadline')
 
 try:
-    machines = json.load(sys.stdin)
-    if not isinstance(machines, list):
-        raise ValueError
-    states = dict(
-        (machine.get("id"), machine.get("state"))
-        for machine in machines
-        if isinstance(machine, dict) and machine.get("id")
-    )
-    ids = os.environ["MACHINE_IDS"].split()
-    print(1 if ids and all(states.get(machine_id) not in (None, "stopped") for machine_id in ids) else 0)
-except (TypeError, ValueError, json.JSONDecodeError):
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline - time.monotonic()))
+    fetch = runpy.run_path(helper)['fetch']
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError('invalid owned primary identities')
+    for machine_id in ids:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('original start accounting deadline')
+        raw = fetch(app, remaining, machine_id)
+        # fetch owns and clears its I/O alarm; restore this same outer clock
+        # before parsing or loading the next selected response.
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline - time.monotonic()))
+        machine = json.loads(raw)
+        if machine.get('id') != machine_id or not machine.get('state') or machine['state'] == 'stopped':
+            raise ValueError('primary start not yet provider visible')
+    print(1 if time.monotonic() < deadline else 0)
+except Exception:
     print(0)
-'
-)"
-            if [ "$accounted" = "1" ]; then
+finally:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+PYACCOUNT
+)" || accounted=0
+            if [ "$accounted" = "1" ] && [ "$SECONDS" -lt "$deadline" ]; then
                 if capacity_release_reservation "$CAPACITY_RESERVATION_TOKEN"; then
                     CAPACITY_RESERVATION_PUBLISHED=0
                     echo "🧵 released startup capacity reservation after all primary starts became provider-visible"
