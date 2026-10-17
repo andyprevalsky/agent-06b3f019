@@ -148,7 +148,9 @@ class Startup(unittest.TestCase):
             M["archive_proof"](self.state)
 
     def test_release_requires_truthful_failure_closure(self):
+        self.state["source_pins"] = {"/exact/source": (1, 2, 3, 4, 5)}
         proof = M["archive_proof"](self.state)
+        self.assertEqual(proof["source_pins"]["/exact/source"], [1, 2, 3, 4, 5])
         proof_path = self.out / "failure-proof.json"
         self.put(proof_path, proof)
         self.put(

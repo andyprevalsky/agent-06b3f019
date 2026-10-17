@@ -116,7 +116,7 @@ def archive_proof(state):
         ),
         "exact remote gate export completion required",
     )
-    return {
+    proof = {
         "schema": "expired-before-supervisor-proof-v1",
         "source_ref": SOURCE,
         "config_sha256": state["config_sha256"],
@@ -146,6 +146,7 @@ def archive_proof(state):
         "remote_gate_log_sha256": sha(remote_log),
         "remote_gate_log_path": state["remote_gate_log_path"],
     }
+    return json.loads(json.dumps(proof, sort_keys=True, allow_nan=False))
 
 
 def check(args):
