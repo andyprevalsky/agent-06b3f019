@@ -3773,6 +3773,9 @@ async def _exercise_owned_payment_reconciliation_caller(
     card_id = "local-owned-card"
     transfer_id = "local-owned-transfer"
     terminal = deepcopy(task.expected_payment_lifecycle)
+    # Synthetic production response: native hold and linked-refund PI modes are explicit.
+    terminal["stripeHold"]["livemode"] = True
+    terminal["stripeRefund"]["paymentIntentLivemode"] = True
     terminal["agentId"] = agent_id
     terminal["purchase"]["id"] = purchase_id
     terminal["agentCard"].update({"id": card_id, "status": "CLOSED"})
@@ -4119,7 +4122,7 @@ async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
 
 
 async def test_production_agentcard_release_stall_is_skippable_by_default():
-    """Replay the retained live allocation through both deadline owners and CI, without an opt-in."""
+    """Replay a synthetic live allocation through both deadline owners and CI, without an opt-in."""
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
@@ -4127,7 +4130,13 @@ async def test_production_agentcard_release_stall_is_skippable_by_default():
     captured = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
     )
-    lifecycle = captured["lifecycle"]
+    # The historical mixed-mode allocation remains immutable and cannot earn a live waiver.
+    historical = captured["lifecycle"]
+    assert not isinstance(
+        bench._payment_reconciliation_timeout("pending", historical, task_name="agent-payment-production-abandonment"),
+        bench.AgentCardReleaseStall,
+    )
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
     original = json.dumps(lifecycle, sort_keys=True)
     task = get_task_by_name("agent-payment-production-abandonment")
     for owned in (False, True):
@@ -4164,10 +4173,13 @@ def test_agentcard_release_skip_rejects_independent_lifecycle_failures():
     from copy import deepcopy
     from benchmarks import run_benchmark as bench
 
-    lifecycle = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
-    )["lifecycle"]
+    # Start valid so each independent corruption, rather than missing provenance, owns rejection.
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
     for section, field, value in (
+        ("stripeHold", "livemode", False),
+        ("stripeHold", "livemode", None),
+        ("stripeHold", "livemode", 1),
+        ("stripeHold", "livemode", "true"),
         ("integrity", "cardCount", 2),
         ("attention", "openKinds", ["payment_approval"]),
         ("stripeHold", "amountReceivedCents", 0),
@@ -4212,9 +4224,8 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
     from benchmarks import run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    lifecycle = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
-    )["lifecycle"]
+    # Synthetic live response; the archived allocation has no live Stripe provenance.
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
     task = get_task_by_name("agent-payment-production-abandonment")
     for failure in (None, "delete", "archive", "seal"):
         cleanup = AsyncMock(side_effect=ConnectionError("a second financial cleanup must not run"))
@@ -4311,6 +4322,9 @@ def _agentcard_release_stall_lifecycle(**transfer) -> dict:
         cardId=card_id,
     )
     lifecycle["orgTransfer"].update(transfer)
+    if transfer.get("livemode") is True:
+        # Synthetic response, not provenance inferred from the AgentCard transfer.
+        lifecycle["stripeHold"]["livemode"] = True
     lifecycle["stripeRefund"] = None
     return lifecycle
 
@@ -22563,7 +22577,8 @@ async def test_agentcard_release_skip_rejects_independent_native_retirement_fail
     import uuid
     from benchmarks import run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
-    lifecycle = json.loads((Path(__file__).parents[1] / 'fixtures' / 'agentcard-production-release-stall.json').read_text())['lifecycle']
+    # Synthetic live response; the archived allocation has no live Stripe provenance.
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
     for native in ('none', 'joined', 'failed'):
         task = deepcopy(get_task_by_name('agent-payment-production-abandonment'))
         calls = []

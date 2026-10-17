@@ -181,3 +181,35 @@ This supersedes the incomplete first-batch stop above. It remains a LOCAL draft:
 normal parent review/gates, migration approval/application and any separately
 authorized production acceptance remain outstanding. No production DB writes,
 provider calls, paid benchmarks, commits, pushes or deployment occurred here.
+
+## October 17: stale hermetic fixtures after Stripe provenance enforcement
+
+The normal agents coverage run at `c9ff323c3633` exposed six benchmark blackbox
+callbacks whose positive fixtures omitted the native hold mode or linked-refund
+PaymentIntent mode required by `e1cce5103`. Three controls also treated the
+retained mixed-mode allocation above as a valid live release-stall example.
+The runtime correctly rejected those inputs. This is related test-fixture
+drift, not evidence that the original allocation acquired live provenance.
+
+The same registered callbacks failed on the original test setup and passed with
+explicitly synthetic live response fixtures. The historical JSON remains
+byte-identical and now supplies a fail-closed control. Independent corruption
+controls start with an otherwise valid fixture and reject missing, false,
+numeric and string hold modes. Existing financial, cancellation, deadline,
+foreign-ownership and native-retirement assertions remain unchanged.
+
+The same coverage run exposed a separate fixture lifecycle mismatch: the fleet
+publication control executed the complete publisher heredoc after `201226d3c`
+made its owner loop persistent. Publication succeeded, but the subprocess could
+never finish within its unchanged 30-second guard. The control now invokes the
+actual `aggregate_tick` once and retains its publication, deduplication,
+failure, teardown and release assertions. Production loop behavior is unchanged.
+
+Paired owning evidence records seven failures before and seven passes after,
+plus 16 neighboring controls passing. All 5,652 original assertions remain;
+one historical rejection assertion was added. The private causal packet is
+`c12-benchmark-fixture-rca-local1745`, manifest SHA256
+`6bc3bb41093f511ccd345e8344f0d5c698dd79d9aa08a7998e7d19a1c812f0c6`.
+These are hermetic fixture proofs. Full deploy coverage requalification remains
+required; no live financial result, refund, release or fundraiser success is
+established by this repair.

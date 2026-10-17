@@ -29435,6 +29435,8 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         )
     source = fleet_source_text().split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    # Exercise one real publication tick; the controller owns the persistent loop.
+    aggregate = aggregate.split("\nwhile True:\n", 1)[0] + "\naggregate_tick()\n"
     assert fleet_source_text().index("# ── ONE aggregated batch dashboard") < fleet_source_text().index(
         "# ── Phase 1: provision"
     ), "live publisher begins after allocation"
