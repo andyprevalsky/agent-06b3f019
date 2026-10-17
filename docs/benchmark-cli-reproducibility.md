@@ -55,14 +55,14 @@ Do not delete one consumer's browser to make room for the other.
 
 The original600 harness is versioned separately so its disposable controller,
 ticket accounting and shared relay are not replaced with older main versions.
-The portable operator commit is `79a79d60524de09f351e76fd7990bf4ee53e028a`, with
+The portable operator commit is `2fe5c77fb42196b9d9e8f7fe5e6a46fc9ac77eaf`, with
 immutable parent `b0fbd7742dde51446288c22601825a85981c1d0b`. Fetch the published
 `fix/original600-portable-operator` branch, create a separate worktree at that
 exact commit, and follow its `docs/original600-operator-cli.md`:
 
 ```bash
 git fetch origin fix/original600-portable-operator
-git worktree add --detach "$OPERATOR_CHECKOUT" 79a79d60524de09f351e76fd7990bf4ee53e028a
+git worktree add --detach "$OPERATOR_CHECKOUT" 2fe5c77fb42196b9d9e8f7fe5e6a46fc9ac77eaf
 cd "$OPERATOR_CHECKOUT"
 python3 scripts/run-original600-controller.py --help
 ```
