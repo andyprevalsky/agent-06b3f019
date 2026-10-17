@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """External owner of one original600 disposable controller. No gate/VM kill on cancellation."""
-import argparse,base64,hashlib,json,os,re,secrets,shlex,signal,stat,subprocess,sys,time
+import argparse,base64,errno,gzip,hashlib,json,os,re,secrets,shlex,signal,stat,subprocess,sys,time
 from contextlib import contextmanager
 from pathlib import Path
 TASK_REF='570830dbf17635e13d16a6f03b4d705f6b6443b1'
@@ -42,9 +42,15 @@ def campaign_argv(tasks,epoch):
 # Stage bound inputs, publish this PID/birth, then exec the canonical supervisor.
 # Its owned-parent finally writes the terminal receipt after campaign join.
 REMOTE_LAUNCH=r'''
-import base64,hashlib,json,os,subprocess,sys
+import base64,hashlib,io,json,os,stat,subprocess,sys,gzip
 from pathlib import Path
-v=json.loads(base64.b64decode(sys.argv[1]));root=Path('/tmp/gate/repo')
+p=Path(sys.argv[1]);assert p==Path('/tmp/controller-launch-payload.json.gz') and p.resolve(strict=True)==p
+with os.fdopen(os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as f:
+ s=os.fstat(f.fileno());assert stat.S_ISREG(s.st_mode) and 0<s.st_size<256*1024
+ raw=f.read(s.st_size+1);assert len(raw)==s.st_size and hashlib.sha256(raw).hexdigest()==sys.argv[2]
+with gzip.GzipFile(fileobj=io.BytesIO(raw)) as f:payload=f.read(16*1024*1024)
+assert len(payload)<16*1024*1024 and hashlib.sha256(payload).hexdigest()==sys.argv[3]
+v=json.loads(payload);root=Path('/tmp/gate/repo')
 assert subprocess.check_output(['git','-c','safe.directory=/tmp/gate/repo','-C',str(root),'rev-parse','HEAD'],text=True).strip()==v['source_ref']
 script=root/'scripts/cloudbench-original600-supervisor.py';assert hashlib.sha256(script.read_bytes()).hexdigest()==v['supervisor_sha256']
 def save(p,raw):
@@ -165,6 +171,45 @@ def validate_source_members(root,ref,pins):
   data=path.read_bytes();need(sha(data)==digest and data==subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',ref+':scripts/'+name]),'source bytes changed: '+name)
 
 
+def launch_handoff(out,remote):
+ raw=(json.dumps(remote,sort_keys=True,allow_nan=False)+'\n').encode();need(len(raw)<16*1024*1024,'launch payload exceeds bounded decoded size')
+ packed=gzip.compress(raw,mtime=0);need(len(packed)<256*1024,'compressed launch payload too large for config transport')
+ path=out/'controller-launch-payload.private.json.gz'
+ fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ with os.fdopen(fd,'wb')as f:f.write(packed);f.flush();os.fsync(f.fileno())
+ fd=os.open(out,os.O_RDONLY|os.O_DIRECTORY)
+ try:os.fsync(fd)
+ finally:os.close(fd)
+ digest=sha(read(path))
+ return path,digest,['python3','-c',REMOTE_LAUNCH,'/tmp/controller-launch-payload.json.gz',digest,sha(raw)]
+
+
+def host_gate(root,v):
+ path=Path(__file__).absolute().with_name('run-cloudbench-controller-gate')
+ if path==root/'scripts/run-cloudbench-controller-gate':return path
+ provenance=v.get('host_operator_provenance',{})
+ ref=provenance.get('host_operator_source_ref','')
+ need(re.fullmatch('[0-9a-f]{40}',ref),'separate host gate source required')
+ need(path.resolve(strict=True)==path,'physical host gate required')
+ host_root=path.parent.parent
+ need(subprocess.check_output(['git','-C',str(host_root),'rev-parse','HEAD'],text=True).strip()==ref,'host gate HEAD changed')
+ raw=path.read_bytes()
+ need(sha(raw)==provenance.get('host_gate_sha256') and raw==subprocess.check_output(['git','--no-replace-objects','-C',str(host_root),'show',ref+':scripts/run-cloudbench-controller-gate']),'host gate bytes changed')
+ return path
+
+
+def spawn_gate(command,root,env,stream,out,config_path,config_sha,authority):
+ try:return subprocess.Popen(command,cwd=root,env=env,stdout=stream,stderr=subprocess.STDOUT)
+ except OSError as error:
+  # Popen reports exec failure only after joining its failed child; no gate ran.
+  if error.errno==errno.E2BIG:
+   save(out/'gate-start-failure.json',dict(schema='original600-host-popen-failure-v1',errno=error.errno,
+        reason='argument-list-too-long',gate_created=False,config_path=str(config_path),config_sha256=config_sha,
+        output_directory=str(out),authority_sha256=sha(read(authority)),
+        host_runner_sha256=sha(Path(__file__).read_bytes()),owner_pid=os.getpid(),owner_birth=birth(os.getpid())))
+  raise
+
+
 def run(config_path,config_sha,out,*,github_token=None):
  os.umask(0o077);raw=read(config_path);need(sha(raw)==config_sha,'root config bytes changed');v=json.loads(raw)
  need(v['schema']=='original600-controller-runner-v1'and v['allowed']is True,'explicit root operation config required')
@@ -188,12 +233,14 @@ def run(config_path,config_sha,out,*,github_token=None):
  snapshot=next((i for i in files if i['relative_path']==snapshot_name),None);need(snapshot is not None,'authentic selected warm snapshot inventory required')
  remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']
  identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote=dict(source_ref=ref,supervisor_sha256=v['source_files']['cloudbench-original600-supervisor.py'],identity_name=identity_name,tasks=tasks,epoch=epoch,campaign_argv=argv,remote_env=remote_env,remote_files=files)
- export=out/'export';log=out/'gate.private.log';command=['bash',str(root/'scripts/run-cloudbench-controller-gate'),'--disposable-controller',str(authority),'--','python3','-c',REMOTE_LAUNCH,base64.b64encode(json.dumps(remote,sort_keys=True).encode()).decode()]
+ payload,payload_sha,remote_command=launch_handoff(out,remote)
+ export=out/'export';log=out/'gate.private.log';command=['bash',str(host_gate(root,v)),'--disposable-controller',str(authority),'--',*remote_command]
  env=dict(os.environ,**v.get('gate_env',{}))
  if github_token is not None:
   need(isinstance(github_token,str)and re.fullmatch(r'[A-Za-z0-9_./+=:\-]+',github_token),'invalid owned gate GitHub credential')
   env['GITHUB_TOKEN']=github_token
  env['CLOUDBENCH_GATE_NO_EFFECT_RECEIPT']=str(out/'gate.preallocation-failure.json')
+ env.update(CLOUDBENCH_GATE_ROOT_DIR=str(root),CLOUDBENCH_GATE_PAYLOAD_FILE=str(payload),CLOUDBENCH_GATE_PAYLOAD_SHA256=payload_sha)
  env.update(CLOUDBENCH_GATE_REF=ref,CLOUDBENCH_GATE_EXPORT_DIR=str(export),CLOUDBENCH_GATE_RETAIN_HOST='1',CLOUDBENCH_GATE_EXPORT_HOST='1',CLOUDBENCH_GATE_VM_SIZE='performance-8x',CLOUDBENCH_GATE_VM_MEMORY='32768',CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB='256')
  need(int(env.get('CLOUDBENCH_GATE_TIMEOUT_S','0'))>5400,'explicit host watchdog must outlive benchmark cleanup')
  capture=root/'scripts/cloudbench-original-volume-capture.py';scope={'__file__':str(capture),'__name__':'bound_external_controller'};exec(compile(capture.read_bytes(),str(capture),'exec'),scope)
@@ -201,7 +248,12 @@ def run(config_path,config_sha,out,*,github_token=None):
  stop=[False];old_handlers={s:signal.getsignal(s)for s in(signal.SIGTERM,signal.SIGINT)}
  def cancel(*unused):stop[0]=True # never forward to gate process or VM
  for s in old_handlers:signal.signal(s,cancel)
- stream=log.open('xb');gate=subprocess.Popen(command,cwd=root,env=env,stdout=stream,stderr=subprocess.STDOUT)
+ stream=log.open('xb')
+ try:gate=spawn_gate(command,root,env,stream,out,config_path,config_sha,authority)
+ except BaseException:
+  stream.close()
+  for number,handler in old_handlers.items():signal.signal(number,handler)
+  raise
  mid=None;probe={};attempt=0;cleanup=None;cleanup_action=None;last_error=None;next_probe=0
  try:
   save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=TASK_REF,epoch=epoch,deadline=epoch+5400,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))

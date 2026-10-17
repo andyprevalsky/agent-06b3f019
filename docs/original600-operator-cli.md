@@ -198,8 +198,8 @@ An original local terminal or unpublished controller returns without a provider
 call. An unpublished supervisor/summary is reported explicitly; transport,
 identity, malformed-data or freshness uncertainty never becomes a fake result.
 
-Canonical infra counts deduplicate only terminal attempts with an explicit true
-infra flag. Terminal attempts with missing/null infra classification are counted
+Canonical infra counts deduplicate every attempt with an explicit true infra
+flag, including cancelled or unfinished attempts. Terminal attempts with missing/null infra classification are counted
 separately as unknown, as are failed jobs without a terminal attempt. A zero
 confirmed-infra count never means those unknown jobs were error free. Attempt-record counts are separate from completed attempts;
 local terminal and status output never infer benchmark success or full resource
@@ -216,4 +216,27 @@ This mode derives the exact config and absent output from the original launch
 intent. It preserves the workload source, reservations, task inputs and original
 clock, refreshes read-only capacity, and records the corrected host operator
 separately. It does not overwrite the original config or launch intent. Any
-existing run output refuses this path; use the existing owner's status instead.
+existing run output refuses this path unless the specific pre-exec failure below
+is proved; otherwise use the existing owner's status.
+
+
+For the recorded host `Popen` E2BIG failure from operator57e37b5, add
+`--prelaunch-failure "$POSITIVE_JOINED_FAILURE_RECEIPT"` to that same bound
+continuation command. The receipt must bind the observed joined tool session,
+exact synchronous errno7 traceback, original operator source, and the three
+unchanged output files; an empty directory or absent PID alone is insufficient.
+The old authority's owner must have exited. The CLI retains those files and
+writes an exclusive successor receipt, then launches into the printed new run
+directory with a fresh capacity check. Keep using the printed `config_path` and
+`run_directory` for status; the original workload, reservations and clock remain
+unchanged. A consumed receipt or any evidence of an existing gate refuses reuse.
+This narrowly supports the recorded pre-exec failure, not arbitrary failed runs.
+
+Controller launch metadata now travels in a deterministic compressed private
+file through the gate's existing `--file-local` transport. Command arguments
+contain the fixed guest path and content hashes, not the metadata itself. The
+host checks compressed size and hash before admission; the guest checks the
+compressed and decoded hashes before staging the original files. The corrected
+host gate's source/hash is recorded separately when continuing an older
+workload. A future synchronous E2BIG error also writes its own positive pre-exec
+receipt and restores the host signal handlers without claiming a gate started.

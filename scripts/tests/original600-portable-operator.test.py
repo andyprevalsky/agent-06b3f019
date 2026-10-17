@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline public CLI, original argv and fresh capacity/binding contracts."""
 import argparse
+import errno
+import gzip
 import importlib.util
 import io
 import http.server
@@ -31,6 +33,82 @@ def private(path, value):
 
 
 class Portable(unittest.TestCase):
+    def test_large_launch_payload_uses_a_small_hash_bound_file_command(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name)
+            remote={'remote_files':[{'data':'x'*400000}], 'tasks':['unchanged']}
+            old_argument=__import__('base64').b64encode(json.dumps(remote).encode()).decode()
+            with self.assertRaises(OSError) as old:
+                subprocess.run([sys.executable,'-c','pass',old_argument],check=True)
+            self.assertEqual(old.exception.errno,errno.E2BIG)
+            path,digest,command=RUNNER['launch_handoff'](root,remote)
+            self.assertEqual(json.loads(gzip.decompress(path.read_bytes())),remote)
+            self.assertEqual(CLI.digest(path.read_bytes()),digest)
+            self.assertLess(max(map(len,command)),16000)
+            self.assertLess(path.stat().st_size,256*1024)
+            self.assertEqual(path.stat().st_mode&0o777,0o600)
+            # Run the exact gate's pre-provider file verifier, not a copy.
+            gate=(ROOT/'scripts/run-cloudbench-controller-gate').read_text()
+            verifier=gate.split("<<'PY_LAUNCH_PAYLOAD'",1)[1].split('\nPY_LAUNCH_PAYLOAD',1)[0]
+            result=subprocess.run([sys.executable,'-c',verifier,str(path),digest],capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            for bad_path,bad_sha in [(path,'0'*64),(root/'link',digest)]:
+                if bad_path.name=='link':bad_path.symlink_to(path)
+                result=subprocess.run([sys.executable,'-c',verifier,str(bad_path),bad_sha],capture_output=True)
+                self.assertNotEqual(result.returncode,0)
+            # The new actual remote argv is executable; absent guest file fails
+            # inside Python, rather than at OS exec before the child exists.
+            result=subprocess.run(command,capture_output=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn(b'FileNotFoundError',result.stderr)
+
+    def test_popen_e2big_writes_positive_no_gate_receipt(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);config=private(root/'config',{})
+            authority=private(root/'authority',{})
+            stream=(root/'gate.private.log').open('xb')
+            try:
+                with self.assertRaises(OSError) as failed:
+                    RUNNER['spawn_gate']([sys.executable,'-c','pass','x'*400000],root,os.environ.copy(),stream,root,config,CLI.digest(config.read_bytes()),authority)
+                self.assertEqual(failed.exception.errno,errno.E2BIG)
+            finally:stream.close()
+            receipt=json.loads((root/'gate-start-failure.json').read_bytes())
+            self.assertEqual(receipt['errno'],7)
+            self.assertIs(receipt['gate_created'],False)
+            self.assertEqual(receipt['config_sha256'],CLI.digest(config.read_bytes()))
+            self.assertEqual((root/'gate.private.log').stat().st_size,0)
+            self.assertFalse((root/'caller.json').exists())
+
+    def test_legacy_e2big_import_requires_positive_traceback_and_exact_output(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);out=root/'run';out.mkdir(mode=0o700)
+            old_ref='57e37b5cb08f7604a63e88ee1f07ebc0b15da9f1'
+            old_source=subprocess.check_output(['git','-C',str(ROOT),'show',old_ref+':scripts/cloudbench-original600-runner.py'])
+            config=private(root/'config',dict(source_ref='a'*40,started_at_epoch=100))
+            provenance=dict(host_operator_source_ref=old_ref,host_runner_sha256=CLI.digest(old_source),workload_source_ref='a'*40,
+                original_config_path=str(config),original_config_sha256=CLI.digest(config.read_bytes()),original_started_at_epoch=100)
+            private(out/'host-operator-provenance.json',provenance)
+            private(out/'authority.private.json',dict(cleanup_owner_pid=99999999,cleanup_owner_birth='gone',source_ref='a'*40,output_directory=str(out/'export')))
+            private(out/'gate.private.log','')
+            log=private(root/'trace.log',json.dumps(dict(host_operator_source_ref=old_ref,source_ref='a'*40))+'\n'+
+                '  File "scripts/cloudbench-original600-runner.py", line 204, in run\n'+
+                "    stream=log.open('xb');gate=subprocess.Popen(command,cwd=root,env=env,stdout=stream,stderr=subprocess.STDOUT)\n"+
+                "OSError: [Errno 7] Argument list too long: 'bash'\n")
+            receipt=dict(schema='observed-tool-session-join-v1',tool_reported_exit_code=1,log_contains_synchronous_popen_errno=7,
+                gate_pid='NOT_CREATED_BY_FAILED_POPEN',stderr_and_stdout_log=str(log),log_sha256=CLI.digest(log.read_bytes()),
+                run_output_files_observed={str(p):dict(bytes=p.stat().st_size,sha256=CLI.digest(p.read_bytes())) for p in out.iterdir()})
+            evidence=private(root/'evidence',receipt)
+            accepted=CLI.prelaunch_failure(RUNNER,out,evidence,config,CLI.digest(config.read_bytes()))
+            self.assertEqual(accepted['prior_output'],str(out))
+            self.assertFalse(Path(accepted['successor_output']).exists())
+            private(out/'caller.json',{'possible_child':True})
+            with self.assertRaisesRegex(ValueError,'possible gate activity'):
+                CLI.prelaunch_failure(RUNNER,out,evidence,config,CLI.digest(config.read_bytes()))
+            (out/'caller.json').unlink()
+            log.write_text(log.read_text().replace('Errno 7','Errno 5'))
+            with self.assertRaisesRegex(ValueError,'traceback changed'):
+                CLI.prelaunch_failure(RUNNER,out,evidence,config,CLI.digest(config.read_bytes()))
+
     def test_inventory_reader_preserves_private_bounds_and_small_reader_limit(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

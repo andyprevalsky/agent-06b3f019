@@ -376,6 +376,65 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None):
 
 
 
+def prelaunch_failure(runner, output, evidence, original_config, original_sha):
+    """Accept the retained known pre-exec failure, never directory absence alone."""
+    raw=runner['read'](evidence);receipt=json.loads(raw)
+    if receipt.get('schema') != 'observed-tool-session-join-v1' or receipt.get('tool_reported_exit_code') != 1:
+        raise ValueError('positive joined Popen failure evidence required')
+    if receipt.get('log_contains_synchronous_popen_errno') != 7 or receipt.get('gate_pid') != 'NOT_CREATED_BY_FAILED_POPEN':
+        raise ValueError('only proven E2BIG before gate execution may continue')
+    expected={'host-operator-provenance.json','authority.private.json','gate.private.log'}
+    if output.resolve(strict=True)!=output or {p.name for p in output.iterdir()}!=expected:
+        raise ValueError('prelaunch output contains possible gate activity')
+    info=output.stat()
+    if info.st_uid!=os.geteuid() or info.st_mode&0o077:
+        raise ValueError('private current-owner prelaunch output required')
+    recorded=receipt['run_output_files_observed']
+    if set(recorded)!={str(output/name) for name in expected}:
+        raise ValueError('prelaunch evidence names another output')
+    for name in expected:
+        data=runner['read'](output/name);entry=recorded[str(output/name)]
+        if len(data)!=entry['bytes'] or digest(data)!=entry['sha256']:
+            raise ValueError('prelaunch evidence bytes changed')
+    if runner['read'](output/'gate.private.log'):
+        raise ValueError('gate produced output')
+    provenance=json.loads(runner['read'](output/'host-operator-provenance.json'))
+    if provenance.get('original_config_path')!=str(original_config) or provenance.get('original_config_sha256')!=original_sha:
+        raise ValueError('prelaunch original config changed')
+    # Legacy import is deliberately limited to the observed version whose
+    # Popen error occurred before caller publication or any gate execution.
+    known='965eb3a1a70a3ccb3b20c89b3780af0a87bc709ace31633c3220e5eb9db4c988'
+    host_ref=provenance.get('host_operator_source_ref','')
+    source=subprocess.check_output(['git','--no-replace-objects','-C',str(Path(__file__).resolve().parents[1]),'show',host_ref+':scripts/cloudbench-original600-runner.py'])
+    if digest(source)!=known or provenance.get('host_runner_sha256')!=known:
+        raise ValueError('unrecognized legacy prelaunch operator')
+    text=runner['read'](receipt['stderr_and_stdout_log'])
+    if digest(text)!=receipt['log_sha256']:
+        raise ValueError('prelaunch traceback changed')
+    lines=text.decode().splitlines()
+    if (not lines or lines[-1]!="OSError: [Errno 7] Argument list too long: 'bash'"
+            or sum('gate=subprocess.Popen(command,cwd=root,env=env,stdout=stream,stderr=subprocess.STDOUT)' in line for line in lines)!=1
+            or 'line 204, in run' not in text.decode()):
+        raise ValueError('exact synchronous pre-exec traceback required')
+    event=json.loads(lines[0])
+    if event.get('host_operator_source_ref')!=host_ref or event.get('source_ref')!=provenance.get('workload_source_ref'):
+        raise ValueError('traceback source identity changed')
+    authority=json.loads(runner['read'](output/'authority.private.json'))
+    config=json.loads(runner['read'](original_config))
+    if (authority.get('source_ref')!=config.get('source_ref') or provenance.get('workload_source_ref')!=config.get('source_ref')
+            or provenance.get('original_started_at_epoch')!=config.get('started_at_epoch')
+            or authority.get('output_directory')!=str(output/'export')):
+        raise ValueError('prelaunch authority/workload binding changed')
+    try:alive=runner['birth'](authority['cleanup_owner_pid'])==authority['cleanup_owner_birth']
+    except (FileNotFoundError,ProcessLookupError,ValueError):alive=False
+    if alive:
+        raise ValueError('prelaunch owner still live')
+    successor=output.parent/('run-after-popen-'+digest(raw)[:16])
+    if successor.exists() or successor.is_symlink() or (output/'host-launch-successor.json').exists():
+        raise ValueError('prelaunch continuation already claimed')
+    return dict(path=str(evidence),sha256=digest(raw),prior_output=str(output),successor_output=str(successor))
+
+
 def bound_launch_plan(args, runner):
     """Verify a failed pre-effect launch without changing its workload or clock."""
     directory = args.resume_bound_launch.absolute()
@@ -394,12 +453,20 @@ def bound_launch_plan(args, runner):
     config_path = Path(intent['config_path'])
     output = Path(intent['run_directory'])
     if (config_path.parent.parent != directory or output.parent != config_path.parent
-            or output.name != 'run' or output.exists() or output.is_symlink()):
+            or output.name != 'run' or output.is_symlink()):
         raise ValueError('bound launch output must be the original absent run directory')
     raw = runner['read'](config_path)
     if digest(raw) != intent['config_sha256']:
         raise ValueError('original bound config changed')
     config = json.loads(raw)
+    failure=None
+    if output.exists():
+        evidence=getattr(args,'prelaunch_failure',None)
+        if evidence is None:
+            raise ValueError('bound launch output must be the original absent run directory')
+        failure=prelaunch_failure(runner,output,evidence,config_path,intent['config_sha256'])
+    elif getattr(args,'prelaunch_failure',None):
+        raise ValueError('prelaunch evidence requires its exact existing output')
     old_ref = original['binding']['source_ref']
     if config['source_ref'] != old_ref or config['started_at_epoch'] != original['started_at_epoch']:
         raise ValueError('original bound workload or clock changed')
@@ -415,7 +482,7 @@ def bound_launch_plan(args, runner):
     if reserved['task_names'] != json.loads(runner['read'](args.tasks)):
         raise ValueError('original bound task manifest changed')
     return dict(directory=directory, intent_path=intent_path, intent=intent, config=config,
-                original_config_path=config_path, reserved=reserved, output=output, original_binding=original['binding'])
+                original_config_path=config_path, reserved=reserved, output=Path(failure['successor_output']) if failure else output, original_binding=original['binding'], prelaunch_failure=failure)
 
 
 def resume_bound_launch(args, root, runner, plan, github):
@@ -453,12 +520,22 @@ def resume_bound_launch(args, root, runner, plan, github):
                       original_config_path=str(plan['original_config_path']),original_config_sha256=plan['intent']['config_sha256'],
                       original_launch_intent_sha256=digest(runner['read'](plan['intent_path'])),
                       original_started_at_epoch=config['started_at_epoch'],
-                      host_runner_sha256=digest((root/'scripts/cloudbench-original600-runner.py').read_bytes()))
+                      host_runner_sha256=digest((root/'scripts/cloudbench-original600-runner.py').read_bytes()),
+                      host_gate_sha256=digest((root/'scripts/run-cloudbench-controller-gate').read_bytes()),
+                      prelaunch_failure=plan.get('prelaunch_failure'))
     derived = dict(config, authority_template=str(authority_path), host_operator_provenance=provenance)
     path = continuation/'config.private.json'
     runner['save'](path, derived)
+    if plan.get('prelaunch_failure'):
+        failure=plan['prelaunch_failure']
+        # Revalidate the old immutable evidence immediately before the exclusive handoff.
+        again=prelaunch_failure(runner,Path(failure['prior_output']),Path(failure['path']),plan['original_config_path'],plan['intent']['config_sha256'])
+        if again!=failure:raise ValueError('prelaunch continuation changed')
+        runner['save'](Path(failure['prior_output'])/'host-launch-successor.json',dict(schema='original600-host-launch-successor-v1',
+            evidence=failure,config_path=str(path),config_sha256=digest(runner['read'](path)),
+            original_started_at_epoch=config['started_at_epoch'],host_operator_source_ref=args.source_ref))
     print(json.dumps(dict(status='CONTINUING_ORIGINAL_BOUND_LAUNCH',admission_directory=str(plan['directory']),
-                         source_ref=config['source_ref'],host_operator_source_ref=args.source_ref)),flush=True)
+                         source_ref=config['source_ref'],host_operator_source_ref=args.source_ref,run_directory=str(plan['output']),config_path=str(path))),flush=True)
     return runner['run'](path, digest(runner['read'](path)), plan['output'], github_token=github)
 
 
@@ -473,6 +550,7 @@ def main():
         parser.add_argument('--'+name, required=True, type=Path)
     parser.add_argument('--archive-run', action='append', type=Path, help='Verified predecessor run directory; preserve IDs/volume using a clean task generation before fresh creation')
     parser.add_argument('--reuse-exclude-machine', action='append', default=[], help='Conservatively exclude a changed/pilot Machine from archived reuse')
+    parser.add_argument('--prelaunch-failure',type=Path,help='Retained positive no-child E2BIG evidence for an existing bound output')
     parser.add_argument('--resume-bound-launch', type=Path, help='Continue an original absent-output bound launch using a verified host operator and fresh capacity')
     parser.add_argument('--resume-admission', type=Path, help='Reconcile the same prelaunch archived-reservation state; never restart a bound controller')
     parser.add_argument('--org', choices=['personal'], default='personal')
@@ -502,6 +580,8 @@ def main():
     version = subprocess.check_output(['flyctl', 'version'], text=True, timeout=5)
     if not re.search(r'flyctl v0\.4\.115\b', version):
         raise ValueError('original controller requires the pinned Fly CLI v0.4.115')
+    if args.prelaunch_failure and not args.resume_bound_launch:
+        raise ValueError('--prelaunch-failure requires --resume-bound-launch')
     if args.resume_bound_launch and args.resume_admission:
         raise ValueError('select one continuation mode')
     bound = bound_launch_plan(args, runner) if args.resume_bound_launch else None
