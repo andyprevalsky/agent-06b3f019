@@ -138,6 +138,18 @@ current ownership; it does not delete its Machine or Volume or convert an old
 failure into a success. A later reuse must prove the latest archived owner and
 current native marker, so an older archive cannot reclaim a newer generation.
 
+If a completed controller never assigned some of its reserved Machines, add
+`--unused-reservation-run "$CLOSED_ADMISSION_DIRECTORY"` alongside the original
+`--archive-run` inputs. This operand is the outer admission directory containing
+the original request and reservation journals. Keep its complete verified
+controller archive, launch lineage and raw native receipts available. The CLI
+rejects any reservation with an assignment, claim or unresolved effect in that
+archive. It also requires the original native reservation to remain unchanged.
+The old reservation is never cleared or counted directly: only a new exclusive
+reservation and fresh native readback can give the new cohort capacity credit.
+Explicit `--reuse-exclude-machine` exclusions still apply. Missing evidence
+keeps a Machine unavailable; do not edit old requests or native markers.
+
 Retain the CLI's reservation intents, raw responses and readback receipts if an
 operation is interrupted. A missing response is an unknown effect, not evidence
 that nothing happened. To resume admission, use the same command and all its

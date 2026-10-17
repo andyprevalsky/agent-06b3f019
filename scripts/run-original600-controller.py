@@ -27,6 +27,7 @@ PINS = [
     'run-original600-controller.py', 'cloudbench-archived-machine-reuse.py',
     'cloudbench-archived-reuse-effects.py', 'cloudbench-archived-reuse-transport.py',
     'cloudbench-archived-owner-stop.py', 'cloudbench-stop-all.py',
+    'cloudbench-unused-reservations.py',
     'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',
     'lib/cloudbench-archived-reuse.sh', 'run-bench-fleet', 'run-bench-cloud',
 ]
@@ -222,13 +223,13 @@ def capacity_snapshot(api, token, org, directory, extra):
                 new_controller_slots=1, requested_original_primary_slots=600)
 
 
-def capacity(api, token, org, directory, extra, reuse_runs=None, harness_ref=None, excluded=(), image_ref=None):
+def capacity(api, token, org, directory, extra, reuse_runs=None, harness_ref=None, excluded=(), image_ref=None, unused_runs=()):
     proof = capacity_snapshot(api, token, org, directory, extra)
     if reuse_runs:
         helper=reuse_module()
         import secrets
         inventory_path=directory/'navi-whisper-lux-bench.private.json'
-        reuse=helper['prepare_request'](reuse_runs,inventory_path,secrets.token_hex(16),harness_ref,excluded)
+        reuse=helper['prepare_request'](reuse_runs,inventory_path,secrets.token_hex(16),harness_ref,excluded,unused_runs)
         if image_ref is not None:
             reuse['image_ref']=image_ref
         helper['validate_request'](reuse,harness_ref)
@@ -254,10 +255,14 @@ def capacity(api, token, org, directory, extra, reuse_runs=None, harness_ref=Non
 
 def admission_binding(args, runner):
     names=('facts','agents_env','backend_env','tasks','snapshot_inventory','warm_deps')
-    return dict(source_ref=args.source_ref, org=args.org, extra=args.extra_destroying_count,
+    binding = dict(source_ref=args.source_ref, org=args.org, extra=args.extra_destroying_count,
                 inputs={name:dict(path=str(getattr(args,name)),sha256=digest(runner['read'](getattr(args,name)))) for name in names},
                 archive_runs=[str(path.absolute()) for path in (args.archive_run or [])],
                 excluded_machines=sorted(set(args.reuse_exclude_machine)))
+    unused = getattr(args, 'unused_reservation_run', ())
+    if unused:
+        binding['unused_reservation_runs'] = [str(path.absolute()) for path in unused]
+    return binding
 
 
 def open_admission(parent, resume, binding, runner, has_archives):
@@ -550,6 +555,7 @@ def main():
     for name in ['state-dir', 'facts', 'agents-env', 'backend-env', 'tasks', 'snapshot-inventory', 'warm-deps']:
         parser.add_argument('--'+name, required=True, type=Path)
     parser.add_argument('--archive-run', action='append', type=Path, help='Verified predecessor run directory; preserve IDs/volume using a clean task generation before fresh creation')
+    parser.add_argument('--unused-reservation-run', action='append', default=[], type=Path, help='Closed admission whose fully archived, never-assigned reservations may pass to this new cohort')
     parser.add_argument('--reuse-exclude-machine', action='append', default=[], help='Conservatively exclude a changed/pilot Machine from archived reuse')
     parser.add_argument('--prelaunch-failure',type=Path,help='Retained positive no-child E2BIG evidence for an existing bound output')
     parser.add_argument('--resume-bound-launch', type=Path, help='Continue an original absent-output bound launch using a verified host operator and fresh capacity')
@@ -568,7 +574,10 @@ def main():
         preflight['private_input'](path)
         setattr(args, name, path)
     args.archive_run=[path.absolute() for path in (args.archive_run or [])]
-    for archive in args.archive_run:
+    args.unused_reservation_run=[path.absolute() for path in args.unused_reservation_run]
+    if args.unused_reservation_run and not args.archive_run:
+        raise ValueError('unused reservations require their original predecessor archives')
+    for archive in args.archive_run + args.unused_reservation_run:
         if archive.resolve(strict=True) != archive or not archive.is_dir():
             raise ValueError('original archive run must be a physical directory')
     runner['campaign_argv'](json.loads(runner['read'](args.tasks)), time.time())
@@ -609,7 +618,7 @@ def main():
                 cap=capacity_snapshot(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count)
             else:
                 cap=capacity(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count,args.archive_run,args.source_ref,args.reuse_exclude_machine,
-                             facts_from(runner['read'](args.facts))['image_ref'])
+                             facts_from(runner['read'](args.facts))['image_ref'],args.unused_reservation_run)
         if args.archive_run:
             cap=reserve_reuse_capacity(capture['Fly'],token,args,runner,directory,snapshot,cap)
             launch_directory=directory/('launch-'+str(time.time_ns()))

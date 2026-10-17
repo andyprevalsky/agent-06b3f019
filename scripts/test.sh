@@ -338,6 +338,7 @@ run_suite "Cloud Benchmark Fleet Card Stdlib Startup" python3 scripts/tests/clou
 run_suite "Cloud Benchmark Native Stdlib Startup" python3 scripts/tests/cloudbench-native-site-startup.test.py
 run_suite "Cloud Benchmark Start Accounting" python3 scripts/tests/cloudbench-start-accounting.test.py
 run_suite "Cloud Benchmark Archived Machine Reuse" python3 scripts/tests/cloudbench-archived-machine-reuse.test.py
+run_suite "Cloud Benchmark Unused Reservations" python3 scripts/tests/cloudbench-unused-reservations.test.py
 run_suite "Cloud Benchmark Archived Cloud Transport" python3 scripts/tests/cloudbench-archived-transport.test.py
 run_suite "Cloud Benchmark Archived Reuse Stream Transport" python3 scripts/tests/cloudbench-archived-reuse-transport.test.py
 run_suite "Cloud Benchmark Isolated Generation" python3 scripts/tests/cloudbench-isolated-generation.test.py

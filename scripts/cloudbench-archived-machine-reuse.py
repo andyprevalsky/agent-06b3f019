@@ -109,22 +109,44 @@ def target_from(machine, ownership, archive):
     )
 
 
-def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=()):
+def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=(), unused_runs=()):
     need(re.fullmatch("[0-9a-f]{32}", cohort or ""), "exact reserved successor cohort required")
     need(re.fullmatch("[0-9a-f]{40}", harness_ref or ""), "exact harness ref required")
     need(
         len(archive_runs) >= 1 and len(set(map(str, archive_runs))) == len(archive_runs),
         "distinct complete archive runs required",
     )
+    need(len(set(map(str, unused_runs))) == len(unused_runs), "duplicate unused reservation run")
+    # Validate closed unused reservations first, then exclude their identities
+    # only from the older archives' native comparison. Their old claims remain.
+    carried = []
+    carried_archives = []
+    carried_ids = set()
+    carried_volumes = set()
+    for run in unused_runs:
+        result = module("cloudbench-unused-reservations.py")["prepare"](run, inventory_path)
+        archive = result["archive"]
+        carried_archives.append(archive)
+        for candidate in result["candidates"]:
+            mid, volume = candidate["machine_id"], candidate["volume_id"]
+            need(mid not in carried_ids and volume not in carried_volumes, "duplicate unused Machine/Volume")
+            need(candidate["archive_sha256"] == archive["archive_sha256"], "unused reservation archive mismatch")
+            need("reservation" not in candidate, "prior reservation is not new capacity credit")
+            carried_ids.add(mid)
+            carried_volumes.add(volume)
+            carried.append(candidate)
     targets = {}
     archives = []
+    legacy_ownership = {}
     validator = module("cloudbench-archived-owner-stop.py")["prepare"]
     for run in archive_runs:
         plan = validator(
-            run, inventory_path, excluded_machines=excluded
+            run, inventory_path, excluded_machines=set(excluded) | carried_ids
         )  # Full archive hashes, membership, joined/deleted controller, protections.
         archive = next(d for name, d in plan["inputs"].items() if name.endswith("/originals.tar.gz"))
         archives.append(dict(controller=plan["controller"], archive_sha256=archive, inputs=plan["inputs"]))
+        for mid, ownership in plan["archived_ownership"].items():
+            legacy_ownership[archive, mid] = ownership
         for row in plan["targets"]:
             if row["machine"]["id"] in excluded:
                 continue
@@ -132,6 +154,24 @@ def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=
             mid = candidate["machine_id"]
             need(mid not in targets, "duplicate Machine across predecessor archives")
             targets[mid] = candidate
+    legacy_hashes = {archive["archive_sha256"] for archive in archives}
+    for candidate in carried:
+        need(candidate["legacy_archive_sha256"] in legacy_hashes, "unused reservation original archive not supplied")
+        ownership = legacy_ownership.get((candidate["legacy_archive_sha256"], candidate["machine_id"]))
+        need(
+            ownership is not None and candidate["predecessor"] == ownership,
+            "unused reservation original ownership differs from verified archive",
+        )
+        need(
+            candidate["volume_id"] == ownership["volume_id"] and candidate["name"] == ownership["name"],
+            "unused reservation native identity differs from original owner",
+        )
+        if candidate["machine_id"] in excluded:
+            continue
+        need(candidate["machine_id"] not in targets, "duplicate carried Machine")
+        targets[candidate["machine_id"]] = candidate
+    archives.extend(carried_archives)
+    need(len({row["volume_id"] for row in targets.values()}) == len(targets), "duplicate candidate Volume")
     need(targets, "no exact archived candidates")
     return dict(
         schema=SCHEMA,
@@ -484,6 +524,7 @@ def main():
     sub = parser.add_subparsers(dest="action", required=True)
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--archive-run", action="append", required=True, type=Path)
+    prepare.add_argument("--unused-reservation-run", action="append", default=[], type=Path)
     prepare.add_argument("--inventory", required=True, type=Path)
     prepare.add_argument("--cohort", required=True)
     prepare.add_argument("--harness-ref", required=True)
@@ -590,7 +631,14 @@ def main():
         proof = allocate(args.request, args.request_sha, int(args.ordinal), successor, args.output, token)
         print(proof["machine_id"] if proof else "")
         return
-    value = prepare_request(args.archive_run, args.inventory, args.cohort, args.harness_ref, args.exclude_machine)
+    value = prepare_request(
+        args.archive_run,
+        args.inventory,
+        args.cohort,
+        args.harness_ref,
+        args.exclude_machine,
+        args.unused_reservation_run,
+    )
     value["image_ref"] = args.image_ref
     validate_request(value)
     save(args.output, value)

@@ -161,6 +161,7 @@ def prepare(run, inventory_path, excluded_machines=()):
     return dict(schema='cloudbench-archived-owner-stop-plan-v1',app=app,controller=host,
                 source_ref=record['source_ref'],protected_machines=sorted(protected),
                 protected_volumes=sorted(protected_volumes),inputs={str(p):digest_file(p) for p in paths},
+                archived_ownership=owned,
                 targets=targets,unsealed_intents_skipped=skipped,unrelated_native_machines_skipped=unrelated,no_delete=True,no_volume_change=True,
                 no_claim_release=True,benchmark_success_inferred=False)
 

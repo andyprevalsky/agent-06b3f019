@@ -495,6 +495,99 @@ class IntegratedControls(unittest.TestCase):
         finally:
             previous.doCleanups()
 
+    def test_unused_rows_merge_before_nonempty_without_weakening_original_archive(self):
+        previous = runpy.run_path(str(Path(__file__).with_name("cloudbench-archived-owner-stop.test.py")))[
+            "ArchivedStop"
+        ]()
+        previous.setUp()
+        try:
+            inventory = json.loads(previous.inventory.read_text())
+            inventory[0].update(state="stopped", region="iad")
+            previous.inventory.write_text(json.dumps(inventory))
+            original = H["prepare_request"]([previous.run], previous.inventory, "c" * 32, "d" * 40)
+            row = copy.deepcopy(original["candidates"][0])
+            legacy = row["archive_sha256"]
+            inventory[0]["config"]["metadata"] = {H["MARKER"]: "reserved-prior-cohort"}
+            previous.inventory.write_text(json.dumps(inventory))
+            row.update(
+                prior_marker="reserved-prior-cohort",
+                legacy_archive_sha256=legacy,
+                archive_sha256="f" * 64,
+                source_config_sha256=H["config_sha"](inventory[0]["config"]),
+            )
+            carried = dict(candidates=[row], archive=dict(controller="9" * 14, archive_sha256="f" * 64, inputs={}))
+            load = H["prepare_request"].__globals__["module"]
+
+            def modules(name):
+                return (
+                    {"prepare": lambda run, path: copy.deepcopy(carried)}
+                    if name == "cloudbench-unused-reservations.py"
+                    else load(name)
+                )
+
+            with mock.patch.dict(H["prepare_request"].__globals__, module=modules):
+                merged = H["prepare_request"](
+                    [previous.run],
+                    previous.inventory,
+                    "c" * 32,
+                    "d" * 40,
+                    unused_runs=[previous.root / "closed-admission"],
+                )
+                self.assertEqual(merged["candidates"], [row])
+                self.assertNotIn("reservation", merged["candidates"][0])
+                self.assertEqual({a["archive_sha256"] for a in merged["archives"]}, {legacy, "f" * 64})
+                with self.assertRaisesRegex(ValueError, "no exact archived candidates"):
+                    H["prepare_request"](
+                        [previous.run],
+                        previous.inventory,
+                        "c" * 32,
+                        "d" * 40,
+                        [previous.mid],
+                        [previous.root / "closed-admission"],
+                    )
+                with self.assertRaisesRegex(ValueError, "duplicate unused Machine/Volume"):
+                    H["prepare_request"](
+                        [previous.run],
+                        previous.inventory,
+                        "c" * 32,
+                        "d" * 40,
+                        unused_runs=[previous.root / "one", previous.root / "two"],
+                    )
+                prior = copy.deepcopy(carried["candidates"][0]["predecessor"])
+                carried["candidates"][0]["predecessor"]["volume_id"] = "vol_forged"
+                with self.assertRaisesRegex(ValueError, "original ownership differs"):
+                    H["prepare_request"](
+                        [previous.run],
+                        previous.inventory,
+                        "c" * 32,
+                        "d" * 40,
+                        unused_runs=[previous.root / "closed-admission"],
+                    )
+                carried["candidates"][0]["predecessor"] = prior
+                carried["candidates"][0]["legacy_archive_sha256"] = "e" * 64
+                with self.assertRaisesRegex(ValueError, "original archive not supplied"):
+                    H["prepare_request"](
+                        [previous.run],
+                        previous.inventory,
+                        "c" * 32,
+                        "d" * 40,
+                        unused_runs=[previous.root / "closed-admission"],
+                    )
+                terminal = previous.run / "terminal.json"
+                invalid = json.loads(terminal.read_text())
+                invalid["release"]["machine_deleted"] = False
+                terminal.write_text(json.dumps(invalid))
+                with self.assertRaisesRegex(ValueError, "joined released original controller"):
+                    H["prepare_request"](
+                        [previous.run],
+                        previous.inventory,
+                        "c" * 32,
+                        "d" * 40,
+                        unused_runs=[previous.root / "closed-admission"],
+                    )
+        finally:
+            previous.doCleanups()
+
     def test_native_wire_reuses_auth_and_unique_durable_journals_on_resume(self):
         import http.server
         import threading

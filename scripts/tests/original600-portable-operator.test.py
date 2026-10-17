@@ -33,6 +33,24 @@ def private(path, value):
 
 
 class Portable(unittest.TestCase):
+    def test_unused_reservation_paths_are_bound_without_changing_legacy_bindings(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            args = argparse.Namespace(source_ref='a'*40, org='personal', extra_destroying_count=1,
+                                      archive_run=[root/'original'], reuse_exclude_machine=['a'*14])
+            for field in ('facts','agents_env','backend_env','tasks','snapshot_inventory','warm_deps'):
+                setattr(args, field, private(root/field, 'fixture'))
+            legacy = CLI.admission_binding(args, RUNNER)
+            self.assertNotIn('unused_reservation_runs', legacy)
+            args.unused_reservation_run = [root/'closed-admission']
+            bound = CLI.admission_binding(args, RUNNER)
+            self.assertEqual(bound['unused_reservation_runs'], [str(root/'closed-admission')])
+            self.assertEqual({k:v for k,v in bound.items() if k!='unused_reservation_runs'}, legacy)
+            directory,_ = CLI.open_admission(root,None,bound,RUNNER,True)
+            args.unused_reservation_run = [root/'different-admission']
+            with self.assertRaisesRegex(ValueError, 'source/inputs/archives'):
+                CLI.open_admission(root,directory,CLI.admission_binding(args,RUNNER),RUNNER,True)
+
     def test_large_launch_payload_uses_a_small_hash_bound_file_command(self):
         with tempfile.TemporaryDirectory() as name:
             root=Path(name)
