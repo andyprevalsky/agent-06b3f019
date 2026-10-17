@@ -213,6 +213,29 @@ class Parked(unittest.TestCase):
         f.members[direct] = before
         self.assertEqual(len(self.prepare()["candidates"]), 1)
 
+    def test_actual_empty_wire_json_holds_only_its_claim_after_hash_validation(self):
+        self.acked()
+        f = self.fixture
+        path = self.root + "/" + self.update_folder + "0001-wire.json"
+        f.members[path] = b""
+        result = self.prepare()
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["held_machine_ids"], [f.mid])
+        diagnostic = result["archive"]["parked_classification"]["rows"][0]
+        self.assertEqual(diagnostic["reason"], "malformed archived claim JSON")
+        self.assertEqual(
+            diagnostic["malformed_json"],
+            [{"path": path, "bytes": 0, "sha256": H["sha"](b"")}],
+        )
+        self.assertEqual(f.members[path], b"")
+        # Integrity mismatch is still global and precedes the per-row parse hold.
+        manifest_path = f.closed / "export/manifest.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest["files"][path]["sha256"] = "0" * 64
+        OLD["write"](manifest_path, manifest)
+        with self.assertRaisesRegex(ValueError, "claim bytes changed"):
+            M["collect"](f.closed, result["held_reservations"], {})
+
     def test_unknown_ack_duplicate_update_foreign_owner_and_native_drift_remain_held(
         self,
     ):

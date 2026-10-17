@@ -71,6 +71,7 @@ def collect(closed, held, inputs):
                         "hashes": {},
                         "claim_evidence": row["claim_evidence"],
                         "published": [],
+                        "malformed_json": [],
                     },
                 )
                 need(
@@ -105,8 +106,13 @@ def collect(closed, held, inputs):
                 and U["digest"](raw) == expected["sha256"],
                 "claim bytes changed",
             )
-            roots[root]["files"][relative] = json.loads(raw)
             roots[root]["hashes"][member.name] = U["digest"](raw)
+            try:
+                roots[root]["files"][relative] = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                roots[root]["malformed_json"].append(
+                    {"path": member.name, "bytes": len(raw), "sha256": U["digest"](raw)}
+                )
     return roots
 
 
@@ -146,6 +152,7 @@ def records(files):
 
 def qualify(outer, request, original, row, group, current, inputs, controller):
     files = group["files"]
+    need(not group["malformed_json"], "malformed archived claim JSON")
     source_sha = protocol(request["harness_ref"])
     exclusion = files.get("archived-reuse-journal/source-exclusion.json")
     successor = files["archived-successor.json"]
@@ -399,7 +406,14 @@ def prepare(run, inventory_path):
             subprocess.CalledProcessError,
         ) as error:
             reason = str(error) if type(error) is ValueError else type(error).__name__
-            diagnostics.append({"machine_id": mid, "eligible": False, "reason": reason})
+            diagnostics.append(
+                {
+                    "machine_id": mid,
+                    "eligible": False,
+                    "reason": reason,
+                    "malformed_json": by_mid[mid][0]["malformed_json"],
+                }
+            )
             continue  # Unknown or conflicting claims remain held, never native retries.
         candidate["archive_sha256"] = result["archive"]["archive_sha256"]
         candidate["parked_claim_proof"]["closed_archive_sha256"] = result["archive"][
