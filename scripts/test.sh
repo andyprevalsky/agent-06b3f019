@@ -333,6 +333,7 @@ run_suite "Original600 Public Status" python3 scripts/tests/original600-status.t
 run_suite "Cloud Benchmark Stdlib Startup" python3 scripts/tests/cloudbench-site-startup.test.py
 run_suite "Cloud Benchmark Hub Admission Stdlib Startup" python3 scripts/tests/cloudbench-hub-admission-site-startup.test.py
 run_suite "Cloud Benchmark Persistent Aggregator" python3 scripts/tests/cloudbench-persistent-aggregator.test.py
+run_suite "Cloud Benchmark Fleet Card Stdlib Startup" python3 scripts/tests/cloudbench-fleet-card-site-startup.test.py
 run_suite "Cloud Benchmark Native Stdlib Startup" python3 scripts/tests/cloudbench-native-site-startup.test.py
 run_suite "Cloud Benchmark Start Accounting" python3 scripts/tests/cloudbench-start-accounting.test.py
 run_suite "Cloud Benchmark Archived Owner Stop" python3 scripts/tests/cloudbench-archived-owner-stop.test.py

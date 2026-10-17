@@ -14012,7 +14012,7 @@ write_startup_card() {  # write_startup_card <phase-text>
         startup_modes="${startup_modes}${mode} "
     done
     STARTUP_BENCHES="${BENCHES[*]:-}" STARTUP_MODES="$startup_modes" \
-    PHASE="$1" CARD_RUN_ID="$RUN_ID" CARD_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" python3 - "$FLEET_DIR/_batch" <<'PY'
+    PHASE="$1" CARD_RUN_ID="$RUN_ID" CARD_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" python3 -S - "$FLEET_DIR/_batch" <<'PY'
 import json, os, sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -14122,7 +14122,7 @@ require_central_hub_visibility() {
         # The exact run is already served by the owned hub. Reading its card
         # avoids rescanning every run for each concurrent controller's probe.
         page="$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$DASH_BASE/run/$RUN_ID/report-card.json" 2>/dev/null || true)"
-        if printf '%s' "$page" | python3 -c 'import json, sys; card = json.load(sys.stdin); sys.exit(not (isinstance(card, dict) and card.get("run_id") == sys.argv[1]))' "$RUN_ID" >/dev/null 2>&1; then
+        if printf '%s' "$page" | python3 -S -c 'import json, sys; card = json.load(sys.stdin); sys.exit(not (isinstance(card, dict) and card.get("run_id") == sys.argv[1]))' "$RUN_ID" >/dev/null 2>&1; then
             echo "✅ central hub registration verified: run=$RUN_ID"
             return 0
         fi
