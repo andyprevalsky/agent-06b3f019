@@ -5704,8 +5704,13 @@ fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume>
     [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] || return 0
     fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
     # Pass the exact source-owned mutation guards to bounded child shells.
-    export -f FLY private_source_allows_provider_call
-    export APP GIT_COMMON_DIR PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID SHARED_WARM_ID SHARED_WARM_VOLUME_ID
+    export -f FLY private_source_allows_provider_call \
+        archived_reuse_helper archived_reuse_sftp_get archived_reuse_transport_args \
+        archived_reuse_fenced_effect cloudbench_mutation_admission cloudbench_mutation_launch_code
+    export APP GIT_COMMON_DIR PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID SHARED_WARM_ID SHARED_WARM_VOLUME_ID \
+        ROOT_DIR CLOUDBENCH_SCRIPT_SNAPSHOT FLEET_OWNER_TOKEN RUN_ID FLEET_OWNER_PID_START clone_timeout \
+        CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY \
+        CLOUDBENCH_CAPACITY_RESERVATION_ROOT
     python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-disposable-volume.py" \
         --registry "$FLEET_REGISTRY_DIR" --owner "$FLEET_OWNER_TOKEN" --app "$APP" \
         --audit "$FLEET_TEARDOWN_OWNERSHIP_DIR" --run "$RUN_ID" \

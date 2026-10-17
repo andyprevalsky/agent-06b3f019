@@ -82,6 +82,26 @@ test ! -e "$CASE/calls"
 '''
   result=subprocess.run(['bash','-c',script],env=dict(os.environ,CASE=self.tmp.name),capture_output=True,text=True)
   self.assertEqual(result.returncode,0,result.stderr)
+ def test_parent_fly_dependency_exports_survive_actual_volume_helper_child(self):
+  import shlex
+  root=MODULE.parents[1]
+  source=Path(os.environ.get('CLOUDBENCH_TEST_EXPORT_CLOSURE_SOURCE',str(root/'scripts/run-bench-fleet'))).read_text()
+  functions='\n'.join(re.search(r'^'+name+r'\(\).*?^}\n',source,re.M|re.S).group() for name in ('private_source_allows_provider_call','FLY','fleet_disable_disposable_volume_snapshots'))
+  bindir=Path(self.tmp.name)/'bin';bindir.mkdir();state=Path(self.tmp.name)/'native-disabled';trace=Path(self.tmp.name)/'native-calls'
+  fake=bindir/'flyctl';fake.write_text("#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\nargs=sys.argv[1:];state=Path(os.environ['FIXTURE_DISABLED'])\nwith Path(os.environ['FIXTURE_TRACE']).open('a') as out:out.write(json.dumps(args)+'\\n')\nif args[:2]==['machine','status']:value={'mounts':[{'volume':'vol_owned'}]}\nelif args[:2]==['volumes','update']:\n state.write_text('disabled');value={}\nelif args[:2]==['volumes','show']:value={'id':'vol_owned','state':'created','auto_backup_enabled':not state.exists(),'attached_machine_id':'abcd1234','size_gb':40,'snapshot_retention':5,'name':'fork'}\nelse:raise SystemExit(91)\nprint(json.dumps(value))\n");fake.chmod(0o700)
+  values=dict(ROOT_DIR=str(root),CLOUDBENCH_SCRIPT_SNAPSHOT=str(root/'scripts'),DISPOSABLE_LIFECYCLE='1',
+              APP='fixture',GIT_COMMON_DIR=self.tmp.name,FLEET_REGISTRY_DIR=str(self.reg),FLEET_OWNER_TOKEN=self.owner,
+              FLEET_TEARDOWN_OWNERSHIP_DIR=str(self.audit),RUN_ID='run',FIXTURE_DISABLED=str(state),FIXTURE_TRACE=str(trace),
+              PRIVATE_SOURCE_ID='protected-source',PRIVATE_SOURCE_VOLUME_ID='protected-volume',SHARED_WARM_ID='shared-source',SHARED_WARM_VOLUME_ID='shared-volume')
+  setup='\n'.join(key+'='+shlex.quote(value) for key,value in values.items())
+  script='set -eu\nsource '+shlex.quote(str(root/'scripts/lib/cloudbench-env.sh'))+'\nsource '+shlex.quote(str(root/'scripts/lib/cloudbench-archived-reuse.sh'))+'\n'+functions+'\n'+setup+'\nexport FIXTURE_DISABLED FIXTURE_TRACE\nfleet_current_disposable_registry(){ return 0; }\nfleet_disable_disposable_volume_snapshots cloudbench-fixture abcd1234 vol_owned\n'
+  result=subprocess.run(['bash','-c',script],env=dict(os.environ,PATH=str(bindir)+os.pathsep+os.environ['PATH']),capture_output=True,text=True)
+  self.assertEqual(result.returncode,0,result.stderr+result.stdout)
+  receipt=self.audit/'volume-backups/vol_owned/verified.json'
+  self.assertFalse(json.loads(receipt.read_text())['auto_backup_enabled'])
+  calls=[json.loads(line) for line in trace.read_text().splitlines()]
+  self.assertEqual([row[:2] for row in calls],[['machine','status'],['volumes','show'],['volumes','update'],['machine','status'],['volumes','show']])
+
  def test_actual_clone_waits_for_restored_storage_before_backup_update(self):
   root=Path(self.tmp.name)/'sources';(root/'scripts/lib').mkdir(parents=True)
   fleet=Path(os.environ.get('CLOUDBENCH_TEST_OLD_STORAGE_SOURCE',str(MODULE.with_name('run-bench-fleet'))))
