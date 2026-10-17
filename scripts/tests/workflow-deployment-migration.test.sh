@@ -213,6 +213,7 @@ WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
 COOP="$ROOT/scripts/deploy-agents-cooperative-cutover.sh"
 WORKER="$ROOT/agents/worker.py"
 python3 - "$WORKFLOW" <<'PY'
+import fnmatch
 import os
 import re
 import subprocess
@@ -221,6 +222,34 @@ import textwrap
 
 with open(sys.argv[1]) as source:
     workflow = source.read()
+path_section = re.search(r"(?ms)^    paths:\n(.*?)(?=^\S)", workflow)
+assert path_section, "worker deployment must declare its runtime path filters"
+patterns = re.findall(r'^\s+- [\"\']([^\"\']+)[\"\']$', path_section[1], re.M)
+
+def triggers_worker_deploy(path):
+    included = False
+    for pattern in patterns:
+        if fnmatch.fnmatchcase(path, pattern.lstrip("!")):
+            included = not pattern.startswith("!")
+    return included
+
+for path in (
+    "scripts/worker_pool_cutover.py",
+    "scripts/worker_pool_runtime.py",
+    "scripts/retained_agent_machine.py",
+    "back-end/src/providers/workerDeploymentQueue.ts",
+    "back-end/src/providers/workerDeploymentRetention.ts",
+    "back-end/src/providers/workerDeploymentMachineAdmission.ts",
+    "back-end/src/providers/workerDeploymentPollers.ts",
+):
+    assert triggers_worker_deploy(path), f"worker runtime change is not deployed: {path}"
+for path in (
+    "scripts/tests/worker-pool-cutover.test.py",
+    "back-end/src/tests/unit/worker-deployment-pollers.test.ts",
+    "agents/tests/blackbox/worker.blackbox.py",
+    "docs/rca/cases/worker-routing.md",
+):
+    assert not triggers_worker_deploy(path), f"non-runtime change deploys workers: {path}"
 dispatch = re.search(r"(?ms)^  workflow_dispatch:\n(.*?)^  push:", workflow)
 assert dispatch, "worker deployment needs a manual recovery entry point"
 assert "      expected_sha:" in dispatch[1] and "        required: true" in dispatch[1]

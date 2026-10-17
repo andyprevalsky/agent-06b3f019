@@ -5133,13 +5133,13 @@ async def test_native_grep_synthetic_producer_owner_and_protocol():
     foreign["native_grep_evidence"]["owner"]["user_id"] = "foreign-envelope-owner"
     foreign_text, _ = await root_wire(foreign)
     assert marker not in foreign_text and "synthetic-row" not in foreign_text
-    from domains.spawn_agent.evidence import admit_grep_records
+    from utils.explore_evidence import admit_grep_records
     units = [{"tool_name": "grep", "tool_call_id": f"synthetic-call-{i}", "result": {"matches": [{"source": "synthetic", "path": f"synthetic/{i}", "records": [{"message_id": f"row-{i}"}]}]}} for i in range(5)]
     selected = admit_grep_records(owner, units)
     assert selected["omitted_tool_units"] == 2
     assert [unit["tool_call_id"] for unit in selected["units"]] == ["synthetic-call-2", "synthetic-call-3", "synthetic-call-4"]
 
-    from domains.spawn_agent.evidence import render_native_grep
+    from utils.explore_evidence import render_native_grep
     conflict = [units[0], {**units[0], "result": {"matches": [{"records": [{"message_id": "conflicting-row"}]}]}}]
     rejected = admit_grep_records(owner, conflict)
     assert rejected.get("complete") is False and rejected.get("admission") == "invalid_tool_identity"
