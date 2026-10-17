@@ -25,6 +25,7 @@
 set -euo pipefail
 ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 cd "$ROOT_DIR"
+python3 -I -B "$ROOT_DIR/scripts/cloudbench-operator-preflight.py" --require-flyctl
 # Bash reads a script incrementally. A fix landing in this file while a gate is
 # running (2026-10-06) made the running controller resume at a shifted offset
 # and die with a syntax error after GATE_RESULT, before it could fetch the

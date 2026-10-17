@@ -1326,6 +1326,9 @@ if [ ! -f agents/venv/bin/activate ] \
     echo "🐍 Agents venv ready"
 fi
 
+# Python checkout fixtures and Node UI tests may require different browser revisions.
+agents/venv/bin/python "$SCRIPT_DIR/ensure-playwright-browsers.py" --root "$PWD" || exit 1
+
 # Pre-flight: handle processes on our ports from this worktree.
 # Cloud instances already handled above (aggressive cleanup). This block
 # handles macOS multi-worktree scenarios where we must distinguish our
