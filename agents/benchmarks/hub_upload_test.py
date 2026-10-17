@@ -1,3 +1,4 @@
+from benchmarks.fleet_aggregate_fixture import one_aggregate_tick
 """Tests for hub_upload — env-gated, best-effort run-bundle upload."""
 
 import gzip
@@ -619,6 +620,7 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
             ["bash", "-c", command, "timestamp-control", str(directory), str(repo)],
             check=True,
             capture_output=True,
+            timeout=30,
         )
 
     execute(startup)
@@ -626,7 +628,11 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
         marker = 'env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"'
         start = fleet.index(marker)
         end = fleet.index("\nPY\n", start) + len("\nPY\n")
-        command = setup + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n' + fleet[start:end]
+        producer_command = fleet[start:end]
+        header, program = producer_command.split("<<'PY'\n", 1)
+        program, suffix = program.rsplit("\nPY\n", 1)
+        producer_command = header + "<<'PY'\n" + one_aggregate_tick(program) + "PY\n" + suffix
+        command = setup + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n' + producer_command
         phases = ("queued", "running", "evaluated", "teardown", "released")
     elif producer == "terminal":
         command = (
@@ -721,6 +727,7 @@ def test_live_response_preserves_phase_and_startup_label_for_terminal_startup(
     fleet = Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", repo / "scripts/run-bench-fleet")).read_text()
     source = fleet.split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    aggregate = one_aggregate_tick(aggregate)
     names = [f"fixture-{index:03d}" for index in range(50)]
     batch = tmp_path / "_batch"
     batch.mkdir()
@@ -761,6 +768,7 @@ def test_live_response_preserves_phase_and_startup_label_for_terminal_startup(
             env=env,
             check=True,
             capture_output=True,
+            timeout=30,
         )
         assert record, "the real live projection was not published"
         bundle = record[-1]["body"]

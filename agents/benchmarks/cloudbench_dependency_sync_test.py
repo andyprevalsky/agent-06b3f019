@@ -1,3 +1,4 @@
+from benchmarks.fleet_aggregate_fixture import one_aggregate_tick
 import base64
 import gzip
 import hashlib
@@ -29374,6 +29375,7 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         )
     source = fleet_source_text().split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    aggregate = one_aggregate_tick(aggregate)
     assert fleet_source_text().index("# ── ONE aggregated batch dashboard") < fleet_source_text().index(
         "# ── Phase 1: provision"
     ), "live publisher begins after allocation"

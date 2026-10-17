@@ -249,3 +249,20 @@ was edited to remove the failure. A separate earlier mint,
 `card_d3f0c6a6b4aaaebc920d8e8b`, was still pending within its original deadline.
 Later test runs must retain these financial limitations even when the one-time
 overdue assertion no longer repeats. No provider or treasury policy changed.
+
+
+## October 17 exact owned sandbox transfer overdue — retained failure
+
+Fresh backend coverage on source 2a798afc5f2d3147e27af5ea488baa5d600cc48d returned EXIT1: 298 unit files passed; 199 of 200 blackbox domains passed. Treasury failed before minting a new card. The exact earlier transfer remained consumed with released_cents=0, amount 1300 sandbox cents and captured livemode=false at the 24.4-hour check. A different 13.1-hour entry remained waiting. The successful aggregate $37.21 pre-sweep does not credit this transfer.
+
+Positive custody is the retained bb7c462a92445b6595c9e5b5544b665c42c90f0f coverage log: the exact card was minted for $13, closed successfully, observed consumed after 24 settlement attempts, then recorded pending. Its canonical coverage receipt returned 0 with unchanged source. The later c9c08 log is an observation, not the original mint. The checker, pending-ledger owner and settlement predicate are byte-identical between bb7 and 2a.
+
+The operator-directed 24-hour deadline uses the transfer's provider created_at (2026-10-16T21:37:03.223Z), not journal recordedAt (21:41:16.801Z), card expiry or a provider SLA. No retained historical HTTP Date proves historical clock accuracy; no clock-cause attribution or deadline waiver follows. Existing human feedback permitting about a day remains binding.
+
+Nine offline controls exercised the unchanged captured-row predicate and actual pending-check caller against a temporary ledger: overdue failure, waiting, provider-time basis, exact reclaim, partial reclaim, foreign identity, foreign organization, unrelated pool credit and truncated-page uncertainty. The shared ledger was never edited. Setup import/formatter failures were retained separately from the successful offline owner reproduction.
+
+One authorized read-only canonical get_card completed in one HTTP 200 attempt. Exact card and recorded owner matched; status was CLOSED and balance_cents was 0. The getter omitted livemode, so current mode is UNKNOWN; historical transfer mode was false. Its expiry field was 10/28, a printed card expiry, not a reclamation deadline. The response Date was October 17 22:11:11 GMT; that current edge observation does not establish historical clock behavior. No close, recover, mint, purchase or financial mutation occurred. Closed/zero balance does not prove the transfer returned.
+
+The existing ledger owner automatically acknowledged the overdue failed observation before the outer assertion. This is intentional one-run failure acknowledgement, NOT repayment. Shared-ledger SHA256 remained 00fe6102dafbd4350bc7105f404144d64bbbe83a2e622364a7c258f6c76145f9 before and after investigation. The 1300 sandbox cents remain an unverified return exposure; no real-dollar loss is asserted. No checker or policy fix is justified. A later ordinary TestLoop PASS cannot establish financial recovery or erase this failed gate.
+
+Private evidence: `.context/auth-deploy/repair-next-primary/treasury-rails-2a798-rca/` contains hash-bound final-checkpoint.json, the redacted failure window, nine-control offline proof (28f398946d5af2ca80c7fa0f38d9598a06a222aa7b7b2ccdd9ad8423712f3452), one-read intent and safe projection (f2b098f8e8549cc24c984643ef3a6ecb229023e650f5a36ea84fb192563f9310). No raw journal, payment credentials or full card response was copied into this archive. Two exact-source searches and this case's Solution/Human feedback were read before choosing recurrence rather than a duplicate case.
