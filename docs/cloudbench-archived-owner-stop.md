@@ -56,3 +56,20 @@ If a target remains active after its single attempted stop, it needs a separatel
 reviewed corrective action; do not remove intents or select a new output directory
 as an automatic retry. A fresh capacity read/admission for the next experiment is
 still required after all exact-owned targets are verified stopped.
+
+An interrupted clone may have a successful creation acknowledgment in its
+archived `primary.log` while its registry still contains only the requested
+name. To stop those Machines, repeat `--acknowledged-create EXACT_MACHINE_ID`
+for each selected ID in both commands above, using a separate output directory.
+This mode targets only those IDs and requires the complete verified archive,
+matching owner/name/source intent and audit records, one successful exact-ID
+creation acknowledgment, and no conflicting allocation or successor claim.
+It also checks the original image, region, empty-volume name and unchanged
+`sleep infinity` init against the current native snapshot. The exact snapshot
+config, instance and creation identity are checked again under the STOP lease.
+
+This proof records the mounted volume as a **current observation**. It does not
+rewrite the incomplete registry, manufacture historical volume ownership,
+authorize reuse, release claims or certify guest cleanup. The default command
+continues to skip incomplete records. Keep these IDs excluded from subsequent
+reuse unless a separate supported protocol establishes that authority.

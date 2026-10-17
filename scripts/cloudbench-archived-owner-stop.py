@@ -6,6 +6,7 @@ most one stop per identity. Never deletes, edits config, detaches volumes,
 releases ownership, or certifies benchmark/guest/provider-session cleanup.
 """
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import multiprocessing
@@ -49,7 +50,206 @@ def fields(data):
     return value
 
 
-def prepare(run, inventory_path, excluded_machines=()):
+def acknowledged_create_proofs(
+    selected,
+    extra,
+    claimed,
+    requested,
+    native,
+    terminal,
+    protected,
+    protected_volumes,
+    owned,
+):
+    """Positive creation ACKs authorize STOP only; never repair archived ownership."""
+    proofs = {}
+    acknowledgments = {}
+    for path, data in extra.items():
+        if not path.endswith("/primary.log"):
+            continue
+        text = data.decode()
+        for mid in re.findall(
+            r"^\s*Machine ([0-9a-f]{14}) has been created\.\.\.$", text, re.M
+        ):
+            acknowledgments.setdefault(mid, []).append(path)
+    for path, row in selected.items():
+        match = re.fullmatch(
+            r"(git-common/cloudbench-fleet-ownership/([0-9a-f]{32}))/clones/(cloudbench-[0-9a-f]{24})",
+            path,
+        )
+        if not match or row.get("id"):
+            continue
+        prefix, owner, name = match.groups()
+        meta = selected.get(prefix + "/meta", {})
+        need(row == {"name": name}, "ambiguous unsealed creation record")
+        run_id = meta.get("run_id", "")
+        workspace = meta.get("workspace_root", "")
+        need(
+            re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9]+", run_id)
+            and workspace.startswith("/")
+            and meta.get("runs_root") == workspace + "/.context/fleet/runs"
+            and meta.get("audit_dir")
+            == workspace + "/.git/cloudbench-fleet-audits/" + owner,
+            "unsealed creation owner paths differ",
+        )
+        audit = "git-common/cloudbench-fleet-audits/" + owner
+        expected_path = audit + "/expected-fresh/" + name
+        fresh_path = audit + "/fresh/" + name
+        if expected_path not in extra or fresh_path not in extra:
+            continue
+        expected, fresh = fields(extra[expected_path]), fields(extra[fresh_path])
+        source = expected.get("source_machine_id", "")
+        need(
+            expected == {"clone_name": name, "source_machine_id": source}
+            and re.fullmatch("[0-9a-f]{14}", source)
+            and fresh
+            == {
+                "version": "1",
+                "fleet_owner_token": owner,
+                "run_id": run_id,
+                "app": meta["app"],
+                "clone_name": name,
+                "source": "fresh-clone",
+                "source_machine_id": source,
+                "machine_id": "",
+                "volume_id": "",
+                "disposition": "ownership-pending",
+            },
+            "unsealed creation audit differs",
+        )
+        for log, data in extra.items():
+            if not re.fullmatch(
+                re.escape("context/fleet/runs/" + run_id + "/") + r"[^/]+/primary\.log",
+                log,
+            ):
+                continue
+            text = data.decode()
+            headers = list(
+                re.finditer(
+                    r"^clone name=(\S+) source=(\S+) status=([0-9]+) attempt=([1-9][0-9]*)/([1-9][0-9]*)$",
+                    text,
+                    re.M,
+                )
+            )
+            for index, header in enumerate(headers):
+                if header[1] != name:
+                    continue
+                end = (
+                    headers[index + 1].start()
+                    if index + 1 < len(headers)
+                    else len(text)
+                )
+                block = text[header.end() : end]
+                ids = re.findall(
+                    r"^\s*Machine ([0-9a-f]{14}) has been created\.\.\.$", block, re.M
+                )
+                if not requested.intersection(ids):
+                    continue
+                need(
+                    header[2] == source and header[3] == "0" and len(ids) == 1,
+                    "creation ACK is not a unique successful invocation",
+                )
+                mid = ids[0]
+                need(
+                    mid not in proofs
+                    and acknowledgments[mid] == [log]
+                    and mid not in owned
+                    and mid not in claimed,
+                    "creation ACK conflicts with another allocation or claim",
+                )
+                names = log.removesuffix(".log") + ".names"
+                need(
+                    names in extra
+                    and extra[names].decode().splitlines().count(name) == 1,
+                    "creation name ledger differs",
+                )
+                machine = native.get(mid)
+                need(machine is not None, "acknowledged Machine absent from inventory")
+                config = machine.get("config", {})
+                mounts = config.get("mounts", [])
+                region = re.findall(
+                    r"^Cloning Machine " + re.escape(source) + r" into region (\S+)$",
+                    block,
+                    re.M,
+                )
+                images = re.findall(
+                    r"^Provisioning a new Machine with image (\S+@sha256:[0-9a-f]{64})\.\.\.$",
+                    block,
+                    re.M,
+                )
+                volume_names = re.findall(
+                    r"^Volume '([^']+)' will start empty$", block, re.M
+                )
+                need(
+                    machine.get("name") == name
+                    and len(region) == 1
+                    and machine.get("region") == region[0]
+                    and len(images) == 1
+                    and config.get("image") == images[0]
+                    and config.get("init") == {"cmd": ["sleep", "infinity"]}
+                    and not config.get("metadata", {}).get("cloudbench_archived_reuse"),
+                    "acknowledged native identity/configuration changed",
+                )
+                need(
+                    len(mounts) == 1
+                    and mounts[0].get("path") == "/data"
+                    and len(volume_names) == 1
+                    and mounts[0].get("name") == volume_names[0]
+                    and re.fullmatch(r"vol_[A-Za-z0-9]+", mounts[0].get("volume", "")),
+                    "acknowledged current volume differs",
+                )
+                timestamp = datetime.fromisoformat(
+                    machine["created_at"].replace("Z", "+00:00")
+                )
+                need(timestamp.tzinfo is not None, "creation timestamp lacks timezone")
+                created = timestamp.timestamp()
+                need(
+                    terminal["started_at_epoch"]
+                    <= created
+                    <= terminal["original_deadline"],
+                    "creation outside original run",
+                )
+                volume = mounts[0]["volume"]
+                need(
+                    mid not in protected
+                    and volume not in protected_volumes
+                    and sum(
+                        any(
+                            m.get("volume") == volume
+                            for m in n.get("config", {}).get("mounts", [])
+                        )
+                        for n in native.values()
+                    )
+                    == 1,
+                    "protected or shared acknowledged volume",
+                )
+                bindings = [
+                    path,
+                    prefix + "/meta",
+                    expected_path,
+                    fresh_path,
+                    log,
+                    names,
+                ]
+                proofs[mid] = {
+                    "kind": "acknowledged-create-stop-only",
+                    "id": mid,
+                    "name": name,
+                    "owner_token": owner,
+                    "current_volume_id": volume,
+                    "sealed_clone_identity": False,
+                    "reuse_credit": False,
+                    "ack_log": log,
+                    "archive_member_sha256": {p: sha(extra[p]) for p in bindings},
+                }
+    need(
+        set(proofs) == requested,
+        "requested creation lacks complete positive archived ACK proof",
+    )
+    return proofs
+
+
+def prepare(run, inventory_path, excluded_machines=(), acknowledged_creates=()):
     run=Path(run).absolute(); export=run/'export'
     terminal=obj(run/'terminal.json'); intent=obj(run/'cleanup-call.intent.json')
     authority=obj(run/'authority.private.json'); verified=obj(export/'disposable-export.verified.json')
@@ -69,6 +269,10 @@ def prepare(run, inventory_path, excluded_machines=()):
     excluded=set(excluded_machines)
     need(all(isinstance(mid,str) and re.fullmatch('[0-9a-f]{14}',mid) for mid in excluded), 'invalid excluded Machine')
     need(not excluded & protected, 'protected Machine cannot be hidden by exclusion')
+    acknowledged=set(acknowledged_creates)
+    need(len(acknowledged)==len(acknowledged_creates) and all(re.fullmatch('[0-9a-f]{14}',mid) for mid in acknowledged)
+         and not acknowledged&(excluded|protected),'invalid/protected/duplicate acknowledged creation')
+    if acknowledged: need(not manifest.get('excluded'),'incomplete archive cannot prove unsealed creation authority')
     need(manifest['version']==1 and manifest['resource_release_verified'] is False and manifest['record']==record,
          'original archive manifest mismatch')
     for name,digest in verified['files'].items():
@@ -76,24 +280,39 @@ def prepare(run, inventory_path, excluded_machines=()):
         need(digest_file(export/name)==digest,'verified export artifact changed')
     need(set(verified['files'])=={'caller.json','launch.json','manifest.json','originals.tar.gz'},'incomplete export receipt')
     need(digest_file(export/'originals.tar.gz')==manifest['archive_sha256'],'archive digest mismatch')
-    selected={}; seen=set(); joined=False
+    selected={}; extra={}; claimed=set(); seen=set(); joined=False
     # Never extract paths from the archive; read only hash-bound regular records.
     with tarfile.open(export/'originals.tar.gz','r:gz') as archive:
         for member in archive:
             need(member.name not in seen and not member.name.startswith('/') and '..' not in Path(member.name).parts,
                  'unsafe archive membership')
             seen.add(member.name)
-            wanted=(re.fullmatch(r'git-common/cloudbench-fleet-ownership/[0-9a-f]{32}/(?:meta|clones/[^/]+|archived-reuse/[0-9a-f]{14}\.json)',member.name)
-                    or member.name.startswith('context/original600-supervisor.') and member.name.endswith('.terminal.json'))
+            owner_record=re.fullmatch(r'git-common/cloudbench-fleet-ownership/[0-9a-f]{32}/(?:meta|clones/[^/]+|archived-reuse/[0-9a-f]{14}\.json)',member.name)
+            supervisor=member.name.startswith('context/original600-supervisor.') and member.name.endswith('.terminal.json')
+            sensitive=bool(acknowledged) and (member.name.startswith(('git-common/cloudbench-archived-reuse/current/','git-common/cloudbench-native-effect-fences/'))
+                or '/archived-reuse/' in member.name or '/archived-reuse-journal/' in member.name
+                or member.name.endswith(('/.cid','/archived-reuse-proof.json','/archived-successor.json')))
+            ack_record=bool(acknowledged) and (re.fullmatch(r'git-common/cloudbench-fleet-audits/[0-9a-f]{32}/(?:expected-fresh|fresh)/[^/]+',member.name)
+                or re.fullmatch(r'context/fleet/runs/[^/]+/[^/]+/primary\.(?:log|names)',member.name))
+            if acknowledged and member.name.startswith(('context/fleet/','git-common/cloudbench-fleet-ownership/','git-common/cloudbench-fleet-audits/','git-common/cloudbench-archived-reuse/','git-common/cloudbench-native-effect-fences/')):
+                need(not member.issym() and not member.islnk(),'creation/claim namespace contains alias')
+            if sensitive:
+                claimed.update(part.removesuffix('.json') for part in Path(member.name).parts if re.fullmatch(r'[0-9a-f]{14}(?:\.json)?',part))
+            if sensitive and member.isdir(): continue
+            wanted=owner_record or supervisor or ack_record or sensitive
             if not wanted: continue
             expected=manifest['files'].get(member.name,{})
-            need(member.isfile() and member.size<=1048576 and expected.get('kind')=='file'
+            limit=16*1048576 if acknowledged and (ack_record or sensitive) else 1048576
+            need(member.isfile() and member.size<=limit and expected.get('kind')=='file'
                  and expected.get('bytes')==member.size,'unsafe archived ownership record')
-            data=archive.extractfile(member).read(1048577)
+            data=archive.extractfile(member).read(limit+1)
             need(sha(data)==expected['sha256'],'archived ownership bytes changed')
-            if '/cloudbench-fleet-ownership/' in member.name:
+            if acknowledged: extra[member.name]=data
+            if sensitive:
+                claimed.update(m.decode() for m in re.findall(rb'(?<![0-9a-f])[0-9a-f]{14}(?![0-9a-f])',data))
+            if owner_record:
                 selected[member.name]=json.loads(data) if '/archived-reuse/' in member.name else fields(data)
-            else:
+            elif supervisor:
                 proof=json.loads(data)
                 need(proof['machine']==host and proof['source_ref']==record['source_ref']
                      and proof['supervisor_joined'] is True and proof['parent_joined'] is True,
@@ -136,9 +355,16 @@ def prepare(run, inventory_path, excluded_machines=()):
         else:
             owned[mid]=dict(id=mid,name=reuse['native_name'],volume_id=reuse['volume_id'],owner_token=match[2],archive_path=name,archived_reuse_proof=reuse)
     native=BASE['inventory'](json.loads(raw(inventory_path,256*1024*1024))); targets=[]; unrelated=0
+    proofs=acknowledged_create_proofs(selected,extra,claimed,acknowledged,{m['id']:m for m in native},terminal,protected,protected_volumes,owned) if acknowledged else {}
     for machine in native:
         mid=machine['id']
         if mid in protected: continue
+        if acknowledged:
+            if mid in proofs:
+                need(isinstance(machine.get('instance_id'),str) and bool(machine['instance_id']),'missing acknowledged instance')
+                targets.append(dict(machine=machine,ownership=proofs[mid]))
+            else: unrelated+=1
+            continue
         if mid not in owned:
             unrelated+=1
             continue  # Other retained cohorts never become this archive's stop authority.
@@ -158,12 +384,14 @@ def prepare(run, inventory_path, excluded_machines=()):
     need(protected<={m['id'] for m in native},'protected native cohort missing')
     paths=[run/'terminal.json',run/'cleanup-call.intent.json',run/'authority.private.json',
            export/'disposable-export.verified.json',export/'manifest.json',export/'launch.json',export/'originals.tar.gz',Path(inventory_path).absolute()]
-    return dict(schema='cloudbench-archived-owner-stop-plan-v1',app=app,controller=host,
+    plan=dict(schema='cloudbench-archived-owner-stop-plan-v1',app=app,controller=host,
                 source_ref=record['source_ref'],protected_machines=sorted(protected),
                 protected_volumes=sorted(protected_volumes),inputs={str(p):digest_file(p) for p in paths},
                 archived_ownership=owned,
                 targets=targets,unsealed_intents_skipped=skipped,unrelated_native_machines_skipped=unrelated,no_delete=True,no_volume_change=True,
                 no_claim_release=True,benchmark_success_inferred=False)
+    if acknowledged: plan.update(acknowledged_create_only=sorted(acknowledged),reuse_credit=False)
+    return plan
 
 
 def reconcile(api,row,out,end):
@@ -256,9 +484,11 @@ def main():
     p.add_argument('--run-dir',type=Path,required=True);p.add_argument('--inventory',type=Path,required=True)
     p.add_argument('--out-dir',type=Path,required=True);p.add_argument('--execute',action='store_true')
     p.add_argument('--agents-env',type=Path);p.add_argument('--timeout',type=int,default=300)
+    p.add_argument('--acknowledged-create',action='append',default=[],metavar='MACHINE_ID',
+                   help='STOP only these exact unsealed creations, requiring archived successful creation ACKs; never reuse authority')
     p.add_argument('--workers',type=int,default=16);a=p.parse_args();os.umask(0o077)
     output=a.out_dir.absolute();need(output.parent.resolve(strict=True)==output.parent,'physical output parent required')
-    plan=prepare(a.run_dir,a.inventory)
+    plan=prepare(a.run_dir,a.inventory,acknowledged_creates=a.acknowledged_create)
     if output.exists():
         need(output.is_dir() and not output.is_symlink() and output.stat().st_uid==os.getuid()
              and not output.stat().st_mode&0o077,'private output directory required')

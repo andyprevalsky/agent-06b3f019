@@ -2,12 +2,15 @@
 """Offline archive ownership plan + actual once-only canonical stop semantics."""
 import copy
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -67,6 +70,214 @@ class ArchivedStop(unittest.TestCase):
         write(self.run/'cleanup-call.intent.json',dict(gate_joined=True,supervisor_joined=True,machine=host,
               export_verified_file=S['digest_file'](export/'disposable-export.verified.json')))
         write(self.run/'terminal.json',dict(status='CONTROLLER_RELEASE_VERIFIED',machine=host,source_ref=ref,release=dict(machine_deleted=True)))
+
+    def reseal(self, members):
+        export = self.run / "export"
+        manifest = json.loads((export / "manifest.json").read_text())
+        files = {}
+        with tarfile.open(export / "originals.tar.gz", "w:gz") as archive:
+            for name, data in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+                files[name] = {
+                    "kind": "file",
+                    "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+        manifest.update(
+            files=files, archive_sha256=S["digest_file"](export / "originals.tar.gz")
+        )
+        write(export / "manifest.json", manifest)
+        verified = json.loads((export / "disposable-export.verified.json").read_text())
+        verified["files"] = {
+            name: S["digest_file"](export / name) for name in verified["files"]
+        }
+        write(export / "disposable-export.verified.json", verified)
+        intent = json.loads((self.run / "cleanup-call.intent.json").read_text())
+        intent["export_verified_file"] = S["digest_file"](
+            export / "disposable-export.verified.json"
+        )
+        write(self.run / "cleanup-call.intent.json", intent)
+
+    def acknowledged_fixture(self):
+        with tarfile.open(self.run / "export/originals.tar.gz") as archive:
+            members = {m.name: archive.extractfile(m).read() for m in archive}
+        mid = "abcddcba112233"
+        name = "cloudbench-" + "c" * 24
+        owner = "d" * 32
+        prefix = "git-common/cloudbench-fleet-ownership/" + owner
+        audit = "git-common/cloudbench-fleet-audits/" + owner
+        run_id = "20261017-083120-26239"
+        source = "123456789abcde"
+        meta = {
+            "version": "2",
+            "host": "11112222333344",
+            "app": "navi-whisper-lux-bench",
+            "fleet_owner_token": owner,
+            "cleanup_policy": "reap",
+            "run_id": run_id,
+            "workspace_root": "/tmp/gate/repo",
+            "runs_root": "/tmp/gate/repo/.context/fleet/runs",
+            "audit_dir": "/tmp/gate/repo/.git/cloudbench-fleet-audits/" + owner,
+        }
+        enc = lambda value: "".join(k + "=" + v + "\n" for k, v in value.items()).encode()
+        members[prefix + "/meta"] = enc(meta)
+        members[prefix + "/clones/" + name] = enc({"name": name})
+        members[audit + "/expected-fresh/" + name] = enc(
+            {"clone_name": name, "source_machine_id": source}
+        )
+        members[audit + "/fresh/" + name] = enc(
+            {
+                "version": "1",
+                "fleet_owner_token": owner,
+                "run_id": run_id,
+                "app": meta["app"],
+                "clone_name": name,
+                "source": "fresh-clone",
+                "source_machine_id": source,
+                "machine_id": "",
+                "volume_id": "",
+                "disposition": "ownership-pending",
+            }
+        )
+        log = "context/fleet/runs/" + run_id + "/fixture/primary.log"
+        image = "registry.fly.io/navi-whisper-lux-bench:fixture@sha256:" + "a" * 64
+        members[log] = (
+            f"clone name={name} source={source} status=0 attempt=1/5\n"
+            f"Cloning Machine {source} into region iad\n"
+            "Volume 'fresh' will start empty\n"
+            f"Provisioning a new Machine with image {image}...\n"
+            f"  Machine {mid} has been created...\n"
+        ).encode()
+        members[log.removesuffix(".log") + ".names"] = (name + "\n").encode()
+        row = {
+            "id": mid,
+            "name": name,
+            "instance_id": "ack-instance",
+            "created_at": "2026-10-17T08:52:59Z",
+            "region": "iad",
+            "state": "started",
+            "config": {
+                "image": image,
+                "init": {"cmd": ["sleep", "infinity"]},
+                "mounts": [{"volume": "vol_new", "path": "/data", "name": "fresh"}],
+            },
+        }
+        terminal = json.loads((self.run / "terminal.json").read_text())
+        epoch = datetime(2026, 10, 17, 8, 26, tzinfo=timezone.utc).timestamp()
+        terminal.update(started_at_epoch=epoch, original_deadline=epoch + 5400)
+        write(self.run / "terminal.json", terminal)
+        write(self.inventory, json.loads(self.inventory.read_text()) + [row])
+        self.reseal(members)
+        return mid, row, members, log, prefix, audit
+
+    def test_acknowledged_create_is_explicit_stop_only_with_current_volume_provenance(self):
+        mid, row, members, log, prefix, audit = self.acknowledged_fixture()
+        before = {str(p): p.read_bytes() for p in self.run.rglob("*") if p.is_file()}
+        self.assertNotIn(mid, S["prepare"](self.run, self.inventory)["archived_ownership"])
+        plan = S["prepare"](self.run, self.inventory, acknowledged_creates=[mid])
+        self.assertEqual([x["machine"]["id"] for x in plan["targets"]], [mid])
+        self.assertNotIn(mid, plan["archived_ownership"])
+        proof = plan["targets"][0]["ownership"]
+        self.assertEqual(proof["kind"], "acknowledged-create-stop-only")
+        self.assertEqual(proof["current_volume_id"], "vol_new")
+        self.assertEqual(proof["ack_log"], log)
+        self.assertFalse(proof["sealed_clone_identity"])
+        cli_output = self.root / "acknowledged-cli"
+        child = subprocess.run(
+            [sys.executable, "-S", S["__file__"], "--run-dir", str(self.run),
+             "--inventory", str(self.inventory), "--out-dir", str(cli_output),
+             "--acknowledged-create", mid],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        self.assertEqual(json.loads(child.stdout)["targets"], 1)
+        self.assertEqual(json.loads(child.stdout)["provider_calls"], 0)
+        self.assertEqual(json.loads((cli_output / "plan.json").read_text()), plan)
+        self.assertEqual(
+            before, {str(p): p.read_bytes() for p in self.run.rglob("*") if p.is_file()}
+        )
+        current = copy.deepcopy(row)
+        calls = []
+
+        class API:
+            def api(inner, method, path, body=None, timeout=0):
+                calls.append((method, path))
+                if method == "POST":
+                    self.assertEqual(path, "/machines/" + mid + "/stop")
+                    current["state"] = "stopped"
+                    raise TimeoutError("unknown ACK")
+                return copy.deepcopy(current)
+
+        for unused in range(2):
+            result = S["stop_owned"](
+                API(), row, self.out, time.monotonic() + 2, adapter_factory=LeasedFixture
+            )
+            self.assertEqual(result["status"], "STOPPED_CONFIRMED")
+        self.assertEqual(sum(method == "POST" for method, path in calls), 1)
+        self.assertEqual(row["config"], current["config"])
+
+    def test_acknowledged_create_rejects_missing_ambiguous_conflicting_or_superseded_evidence(
+        self,
+    ):
+        mid, row, members, log, prefix, audit = self.acknowledged_fixture()
+        original = copy.deepcopy(members)
+        inventory = self.inventory.read_bytes()
+
+        def deny(changed):
+            self.reseal(changed)
+            with self.assertRaises(ValueError):
+                S["prepare"](self.run, self.inventory, acknowledged_creates=[mid])
+
+        for old, new in [
+            (b"status=0", b"status=1"),
+            (mid.encode(), b"ffffffffffffff"),
+            (b"source=123456789abcde", b"source=ffffffffffffff"),
+        ]:
+            changed = copy.deepcopy(original)
+            changed[log] = changed[log].replace(old, new)
+            deny(changed)
+        changed = copy.deepcopy(original)
+        changed[log] += changed[log]
+        deny(changed)
+        changed = copy.deepcopy(original)
+        changed.pop(audit + "/fresh/" + row["name"])
+        deny(changed)
+        changed = copy.deepcopy(original)
+        changed["git-common/cloudbench-archived-reuse/current/" + mid + ".json"] = b"{}"
+        deny(changed)
+        changed = copy.deepcopy(original)
+        changed["context/fleet/runs/other/task/.cid"] = ("name " + mid + "\n").encode()
+        deny(changed)
+        self.reseal(original)
+        native = json.loads(inventory)
+        for update in [
+            {"created_at": "2026-10-16T08:52:59Z"},
+            {"region": "ord"},
+            {"config": dict(row["config"], init={"cmd": ["sh", "task"]})},
+            {
+                "config": dict(
+                    row["config"], metadata={"cloudbench_archived_reuse": "successor"}
+                )
+            },
+            {
+                "config": dict(
+                    row["config"],
+                    mounts=[{"volume": "vol_protected", "path": "/data", "name": "fresh"}],
+                )
+            },
+        ]:
+            write(self.inventory, native[:-1] + [dict(row, **update)])
+            with self.assertRaises(ValueError):
+                S["prepare"](self.run, self.inventory, acknowledged_creates=[mid])
+        self.inventory.write_bytes(inventory)
+        with self.assertRaises(ValueError):
+            S["prepare"](
+                self.run,
+                self.inventory,
+                excluded_machines=[mid],
+                acknowledged_creates=[mid],
+            )
 
     def test_archive_plan_excludes_protected_and_unsealed_and_refuses_changed_ownership(self):
         prior=[dict(id='22223333444455',name='prior-stopped',state='stopped',config=dict(mounts=[dict(volume='vol_prior_stopped')])),
