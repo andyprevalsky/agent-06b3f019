@@ -537,7 +537,9 @@ async def spawn_explore_agent_activity(
     explore_cache_sequence_id = f"agent:{agent_id}:task:{explore_task_key}:call:explore_agent"
 
     # Collect raw tool call results for callers that need evidence
-    tool_call_results: List[str] = []
+    from domains.spawn_agent.evidence import admit_grep_records, legacy_traces
+    tool_evidence_units = []
+    evidence_owner = {"agent_id": agent_id, "user_id": user_id, "task_id": task_id, "parent_tool_call_id": init_tool_call_id}
     # The local summary is fetched by a trusted backend activity before this
     # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
     # lookup can complete without a redundant grep solely to satisfy the guard.
@@ -554,8 +556,11 @@ async def spawn_explore_agent_activity(
     resume_details: Dict[str, Any] = {}
 
     def _heartbeat_payload() -> Dict[str, Any]:
+        tool_call_results = legacy_traces(tool_evidence_units, _render_explore_tool_result)
         compiled = compile_explore_wrap_up("", tool_call_results)
         resume_details.update(result=compiled, tool_call_results=list(tool_call_results[-8:]))
+        if any(unit["tool_name"] == "grep" for unit in tool_evidence_units):
+            resume_details["native_grep_evidence"] = admit_grep_records(evidence_owner, tool_evidence_units)
         return dict(resume_details)
 
     async def _heartbeat_loop() -> None:
@@ -864,7 +869,7 @@ async def spawn_explore_agent_activity(
 
         # Keep readable tool evidence for heartbeat, completion fallback, and
         # wait_for's out-of-band condition evaluator.
-        tool_call_results.append(f"[{tool_name}] {result_str}")
+        tool_evidence_units.append({"tool_name": tool_name, "tool_call_id": tool_call_id, "result": json.loads(json.dumps(actual_result, default=str))})
         activity.heartbeat(_heartbeat_payload())
 
         return {"success": True, "message": result_str}
@@ -1031,6 +1036,7 @@ async def spawn_explore_agent_activity(
     # but leaves result empty, the parent receives no evidence. Synthesize a
     # payload from accumulated tool results so the parent always has grounded data
     # to act on instead of hallucinating or re-spawning sub-agents.
+    tool_call_results = legacy_traces(tool_evidence_units, _render_explore_tool_result)
     final_response = compile_explore_wrap_up(
         result.get("final_response", "") or "",
         tool_call_results,
@@ -1084,5 +1090,6 @@ async def spawn_explore_agent_activity(
         "accumulated_usage": accumulated_usage,
         "llm_iteration_usage": llm_iteration_usage,
         "tool_call_results": tool_call_results,
+        **({"native_grep_evidence": admit_grep_records(evidence_owner, tool_evidence_units)} if any(unit["tool_name"] == "grep" for unit in tool_evidence_units) else {}),
     }
     return result_payload

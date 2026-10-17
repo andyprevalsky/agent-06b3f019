@@ -68,6 +68,7 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
+from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -3368,6 +3369,33 @@ async def _finalize_browser_recovery_action_result(
     await browser_stream.finish_tools(status="FINISHED" if action_result.get("success") else "ERROR")
 
 
+
+def _feed_browser_model_output_validation_error_back(*, error, browser_turn_messages, dom_service):
+    """Preserve actual model output and explicit runtime feedback, without inventing actions."""
+    response = error.response
+    messages = []
+    if response.content:
+        messages.append({"role": "assistant", "content": response.content})
+    if response.tool_calls:
+        messages.append({"role": "assistant", "content": (
+            "Rejected provider tool-call records (untrusted model output; not executed):\n"
+            + json.dumps(response.tool_calls, ensure_ascii=False, default=str)
+        )})
+    feedback = (
+        "[Browser runtime output validation] The preceding completed model response "
+        "did not contain a valid browser action. This is runtime validation feedback, "
+        "not a user request. Return a valid action using the existing tools or supported "
+        "action JSON. No action was executed."
+    )
+    redact = getattr(dom_service, "model_visible_value", None)
+    if callable(redact):
+        messages = _model_visible_browser_turn_messages(
+            messages, redact, secret_values_used=getattr(dom_service, "secret_values_used", False),
+        )
+    browser_turn_messages.extend(messages)
+    # Transport role is not durable human authorship; no user ledger is written.
+    browser_turn_messages.append({"role": "user", "content": feedback})
+
 async def _feed_browser_tool_validation_error_back(
     *,
     error: BrowserToolArgsValidationError,
@@ -4422,6 +4450,7 @@ async def _generate_write_lock_notification(
         media_candidates=browser_state.get("media_candidates"),
     )
     extra_user_messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
+    browser_turn_messages = [dict(message) for message in browser_turn_messages]
     fork_result: Dict[str, Any] = {}
     validated_notification: Any = None
     # Same policy for every gate: retry with the error in context, then let the
@@ -4473,6 +4502,12 @@ async def _generate_write_lock_notification(
             except ValueError as error:
                 raise PurchaseApprovalContextError(str(error)) from error
             break
+        except BrowserModelOutputValidationError as fork_error:
+            if attempt >= _WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS - 1:
+                raise
+            _feed_browser_model_output_validation_error_back(
+                error=fork_error, browser_turn_messages=browser_turn_messages, dom_service=dom_service,
+            )
         except (BrowserToolArgsValidationError, PurchaseApprovalContextError, ValueError) as fork_error:
             logger.info(
                 "Write-lock notification fork failed; retrying with error in context",
@@ -4500,14 +4535,21 @@ async def _generate_write_lock_notification(
         system_name=system_name,
         fallback_question=fallback_question,
     )
-    return {
+    from browser_tools.control_projection import OperationalResult
+
+    # Normalize while still private and unmasked, before deriving either view.
+    notification_source = GenerateWriteLockNotificationTool.model_validate(
+        {"tool": "generate_write_lock_notification", **notification},
+        context={"trusted_page_urls": [*trusted_page_urls, current_url]},
+    )
+    return OperationalResult({
         "notification": notification,
         "question": question,
         "usage": fork_result.get("usage") or {},
         "actual_model": fork_result.get("actual_model"),
         "request_id": fork_result.get("request_id"),
         "mode": fork_result.get("mode"),
-    }
+    }, field="write_lock_notification", source=notification_source)
 
 
 # ========================================
@@ -7088,7 +7130,9 @@ async def _spawn_browser_agent_activity_v3_real(
             },
         )
 
-    def _visible_activity_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    def _visible_activity_result(
+        result: Dict[str, Any], *, operational_sources: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         # Archive references and routing IDs remain exact protocol values.
         auth_response = result.get("auth_assistance_request")
         for key in ("current_url", "question", "write_lock_notification", "payment_request",
@@ -7096,7 +7140,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     "message", "structured_response", "best_effort_response",
                     "browser_error_message"):
             if key in result:
-                result[key] = _redact_activity_value(result[key])
+                source = (operational_sources or {}).get(key)
+                if source is not None:
+                    from browser_tools.control_projection import project_operational_source
+                    result[key] = project_operational_source(source, _redact_activity_value)
+                else:
+                    result[key] = _redact_activity_value(result[key])
         if "browser_output_schema" in result:
             result["browser_output_schema"] = _model_visible_browser_output_schema(
                 result["browser_output_schema"], _redact_activity_value
@@ -8738,7 +8787,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 # values until this result is safe to log, persist, and submit.
                 if hasattr(dom_service, "model_visible_action_result"):
                     action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
-                    result = dom_service.model_visible_action_result(action.get("action", ""), result)
+                    from browser_tools.control_projection import retain_operational_source
+                    result = retain_operational_source(
+                        result, dom_service.model_visible_action_result(action.get("action", ""), result),
+                    )
                 else:
                     for refs in redaction_refs:
                         result = mask_secret_values(result, refs)
@@ -9254,6 +9306,30 @@ async def _spawn_browser_agent_activity_v3_real(
                     logger.error(f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive browser decision timeouts")
                     break
                 raise
+            except BrowserModelOutputValidationError as validation_error:
+                response = validation_error.response
+                usage = response.usage or {}
+                step_input_tokens = usage.get("prompt_tokens", 0) or 0
+                step_output_tokens = usage.get("completion_tokens", 0) or 0
+                total_input_tokens += step_input_tokens
+                total_output_tokens += step_output_tokens
+                accumulate_model_usage(
+                    usage_by_model, response.actual_model, step_input_tokens, step_output_tokens,
+                    cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                    cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                    from_fast_cache=bool(usage.get("from_fast_cache")),
+                    cache_sequence_id=usage.get("cache_sequence_id"),
+                )
+                _feed_browser_model_output_validation_error_back(
+                    error=validation_error, browser_turn_messages=browser_turn_messages, dom_service=dom_service,
+                )
+                consecutive_api_failures = 0
+                logger.warning(
+                    "Completed browser response failed output validation",
+                    iteration=iteration, request_id=response.request_id, actual_model=response.actual_model,
+                    consecutive_failures=consecutive_api_failures,
+                )
+                continue
             except BrowserToolArgsValidationError as validation_error:
                 # The model chose a real tool but supplied arguments its schema
                 # rejects. This is a model-output error, NOT a Rose transport/infra
@@ -10970,6 +11046,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     "supervisor_recovered": True,
                 }
             step_timer.mark("execute_action")
+            # Retain only the validated producer source privately; history/forks use the safe view.
+            payment_operational_source = getattr(result, "operational_source", None) if (
+                getattr(result, "operational_field", None) == "payment_request"
+            ) else None
             # Nothing a tool read back from the page may carry a secret the tool typed.
             result = (
                 dom_service.model_visible_action_result(action_name, result)
@@ -11006,6 +11086,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     f"{system_name} wants to perform a write action. Approve?",
                 )
                 write_lock_notification = None
+                notification_operational_source = None
                 write_lock_notification_usage = None
                 write_lock_browser_state = None
 
@@ -11070,6 +11151,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         timeout=_notification_timeout_s,
                     )
                     write_lock_notification = notification_result.get("notification")
+                    notification_operational_source = getattr(notification_result, "operational_source", None)
                     write_lock_notification_usage = {
                         "usage": notification_result.get("usage", {}),
                         "actual_model": notification_result.get("actual_model"),
@@ -11159,7 +11241,9 @@ Based on this feedback, I need to continue working on the task and address the i
                     )),
                 }
                 browser_task_paused_for_resume = True
-                resume_result = _visible_activity_result(resume_result)
+                resume_result = _visible_activity_result(resume_result, operational_sources={
+                    "write_lock_notification": notification_operational_source,
+                })
                 return resume_result
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
@@ -11203,6 +11287,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 # the payment approval renders #662's itemized purchase notification instead of a
                 # plain question. Best-effort — the workflow falls back to build_payment_question.
                 payment_write_lock_notification = None
+                payment_notification_operational_source = None
                 payment_write_lock_notification_usage = None
                 payment_notification_state = None
                 try:
@@ -11240,6 +11325,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         dom_service=dom_service,
                     )
                     payment_write_lock_notification = payment_notification_result.get("notification")
+                    payment_notification_operational_source = getattr(payment_notification_result, "operational_source", None)
                     payment_write_lock_notification_usage = {
                         "usage": payment_notification_result.get("usage", {}),
                         "actual_model": payment_notification_result.get("actual_model"),
@@ -11297,7 +11383,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     )),
                 }
                 browser_task_paused_for_resume = True
-                resume_result = _visible_activity_result(resume_result)
+                resume_result = _visible_activity_result(resume_result, operational_sources={
+                    "payment_request": payment_operational_source,
+                    "write_lock_notification": payment_notification_operational_source,
+                })
                 return resume_result
 
             if result.get("success", True):

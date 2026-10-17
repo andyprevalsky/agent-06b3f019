@@ -196,6 +196,7 @@ def _explore_result_after_activity_failure(
             "status": "completed",
             "result": recovered_text,
             "tool_call_results": recovered.get("tool_call_results") or [],
+            **({"native_grep_evidence": recovered["native_grep_evidence"]} if "native_grep_evidence" in recovered else {}),
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
         }, False
@@ -921,7 +922,11 @@ class SpawnAgentManager(ToolManager):
             # not-connected notice). Only genuine explore failures swap in
             # error_reason / ERROR status.
             event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
-            grep_evidence = compile_explore_grep_evidence(explore_tool_call_results)
+            if "native_grep_evidence" in result:
+                from domains.spawn_agent.evidence import render_native_grep
+                grep_evidence = render_native_grep(result["native_grep_evidence"], {"agent_id": workflow_instance.agent_id, "user_id": workflow_instance.user_id, "task_id": task_id, "parent_tool_call_id": tool_call_id})
+            else:
+                grep_evidence = compile_explore_grep_evidence(explore_tool_call_results)
             if not explore_failed and grep_evidence and grep_evidence not in explore_result:
                 event_message = f"{event_message}\n\nOriginal grep results:\n{grep_evidence}"
             if (

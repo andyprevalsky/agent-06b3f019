@@ -1009,6 +1009,110 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     assert "auth_runtime_state.observe_page_text(browser_state.get(\"title\")" not in src
 
 
+
+async def test_completed_invalid_browser_output_is_fed_to_next_real_decision(_mixed_transport=False, _transport_only=False, _native_only=False):
+    """Actual client + full activity must tell the next call its output was invalid."""
+    from domains.spawn_browser_agent_v3 import handler
+    from providers.rose.client import RoseClient
+    from providers.rose.types import RoseResponse
+    # Captured normalizer log preserves this prefix, not the full historical response.
+    plaintext = 'I opened the exact Rose Shop API URL, but it returned: “Sign in to see your membership details, member number, and plan.” The saved sign-in attempts failed, so I’ve requested help with verification. I'
+    requests = []
+    dumps = []
+    async def collect(**kwargs):
+        requests.append(copy.deepcopy(kwargs))
+        if _transport_only or (_mixed_transport and len(requests) == 2):
+            from providers.rose.errors import RoseStallError
+            raise RoseStallError("offline genuine empty stream")
+        if _mixed_transport and len(requests) == 6:
+            return RoseResponse(tool_calls=[{"id": "real-completion", "name": "attempt_completion", "arguments": '{"reasoning": "The visible heading is confirmed"}'}], actual_model="offline-original-model", request_id="owned-response-6", usage={"prompt_tokens": 7, "completion_tokens": 3})
+        return RoseResponse(content="" if _native_only else plaintext, tool_calls=[{"id": "rejected-real-id", "name": "unknown_native_operation", "arguments": '{"value":"rejected-data"}'}] if _native_only else None, actual_model="offline-original-model", pool_name="rose-1-browser-use", request_id=f"owned-response-{len(requests)}", usage={"prompt_tokens": 7, "completion_tokens": 3})
+    real_model = handler._call_browser_use_with_rotation
+    source = ast.parse(Path(__file__).read_text())
+    fixture = copy.deepcopy(next(node for node in source.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "test_spawn_browser_activity_verified_completion_message_leads_with_goal"))
+    class Adapt(ast.NodeTransformer):
+        def visit_Call(self, node):
+            node = self.generic_visit(node)
+            if isinstance(node.func, ast.Name) and node.func.id == "patch" and node.args and isinstance(node.args[0], ast.Constant):
+                if node.args[0].value == "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation":
+                    node.args[1] = ast.Name(id="real_model", ctx=ast.Load())
+            return node
+    fixture = Adapt().visit(fixture)
+    fixture.body = [node for node in fixture.body if not isinstance(node, ast.Assert)]
+    fixture.body.append(ast.Return(value=ast.Name(id="result", ctx=ast.Load())))
+    namespace = dict(globals(), real_model=real_model)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[fixture], type_ignores=[])), "real-invalid-output-activity", "exec"), namespace)
+    setup_mock({})
+    with patch.object(RoseClient, "collect", side_effect=collect), patch.object(handler, "MAX_ITERATIONS", 10 if (_mixed_transport or _transport_only) else 2), patch("helpers.observability.dump_llm_context", side_effect=lambda **kw: dumps.append(copy.deepcopy(kw))), patch.object(handler, "accumulate_model_usage", wraps=handler.accumulate_model_usage) as accounting:
+        result = await namespace[fixture.name]()
+        await handler.drain_background_browser_cleanups()
+    if _transport_only:
+        assert len(requests) == 5 and result["success"] is False
+        assert all(x["messages"] == requests[0]["messages"] for x in requests)
+        assert len(dumps) == 5 and all("error" in x["output"] for x in dumps)
+        return
+    assert len(requests) == (6 if _mixed_transport else 2)
+    assert all(x["tool_choice"] == "auto" for x in requests)
+    first, second = requests[0]["messages"], requests[1]["messages"]
+    assert second != first, "completed invalid model output retried with identical input and no validation feedback"
+    additions = second[len(first):]
+    if _native_only:
+        data = json.dumps(additions)
+        assert all(value in data for value in ("rejected-real-id", "unknown_native_operation", "rejected-data")), "actual rejected native output missing from next decision"
+        assert not any(m.get("tool_calls") or m.get("role") == "tool" for m in additions)
+        return
+    assert any(m.get("role") == "assistant" and m.get("content") == plaintext for m in additions)
+    assert any(m.get("role") == "user" and "validation" in str(m.get("content", "")).lower() for m in additions)
+    assert [m for m in second if m.get("role") == "user" and not str(m.get("content", "")).startswith("[Browser runtime output validation]")] == [m for m in first if m.get("role") == "user"]
+    assert not any(m.get("role") == "tool" or m.get("tool_calls") for m in additions), "plaintext cannot manufacture a tool call/result"
+    completed = [x for x in dumps if x["output"].get("content") == plaintext]
+    assert len(dumps) == len(requests) and len(completed) == (4 if _mixed_transport else 2)
+    assert [x["output"]["request_id"] for x in completed] == [f"owned-response-{n}" for n in ([1, 3, 4, 5] if _mixed_transport else [1, 2])]
+    usage_calls = [c for c in accounting.call_args_list if len(c.args) > 1 and c.args[1] == "offline-original-model"]
+    assert len(usage_calls) == len(completed) + (1 if _mixed_transport else 0) and all(c.args[2:4] == (7, 3) for c in usage_calls)
+    if _mixed_transport:
+        assert requests[1]["messages"] == requests[2]["messages"], "genuine empty stream must not invent model feedback"
+    assert result["success"] is bool(_mixed_transport)
+
+
+async def test_rejected_native_output_reaches_next_decision_as_untrusted_data():
+    await test_completed_invalid_browser_output_is_fed_to_next_real_decision(_native_only=True)
+
+
+async def test_mixed_invalid_outputs_reset_transport_failure_counter():
+    await test_completed_invalid_browser_output_is_fed_to_next_real_decision(_mixed_transport=True)
+
+
+async def test_genuine_transport_stalls_still_abort_after_five():
+    await test_completed_invalid_browser_output_is_fed_to_next_real_decision(_transport_only=True)
+
+
+def test_output_validation_feedback_is_private_nonexecuted_runtime_context():
+    from providers.rose.errors import BrowserModelOutputValidationError
+    from providers.rose.types import RoseResponse
+    from browser_tools.secret_refs import mask_secret_values
+    from domains.spawn_browser_agent_v3.handler import _feed_browser_model_output_validation_error_back
+    messages = []
+    dom = SimpleNamespace(model_visible_value=lambda value: mask_secret_values(value, {"private": "sensitive-value", "role-collision": "assistant", "key-collision": "content"}), secret_values_used=True)
+    response = RoseResponse(content="sensitive-value", reasoning="opaque-reasoning-must-not-be-appended", tool_calls=[{"id": "real-provider-id", "name": "unknown", "arguments": "sensitive-value"}])
+    _feed_browser_model_output_validation_error_back(error=BrowserModelOutputValidationError("rejected", response=response), browser_turn_messages=messages, dom_service=dom)
+    text = json.dumps(messages)
+    assert "sensitive-value" not in text and "opaque-reasoning" not in text
+    assert messages[0]["role"] == "assistant" and messages[-1]["role"] == "user"
+    assert "not a user request" in text and "No action was executed" in text
+    assert not any(m.get("role") == "tool" or m.get("tool_calls") for m in messages)
+    assert "real-provider-id" in text
+    assert "sensitive-value" not in messages[-1]["content"]
+    from providers.rose.transforms import transform_messages_for_anthropic
+    from providers.rose.gpt_auth import _build_responses_input
+    for actual in (transform_messages_for_anthropic(messages)[2], _build_responses_input(messages)):
+        wire = json.dumps(actual)
+        assert "real-provider-id" in wire and "unknown" in wire
+        assert "sensitive-value" not in wire and "opaque-reasoning" not in wire
+        assert "No action was executed" in wire
+
+
+
 async def test_max_steps_return_declares_best_effort_and_final_verifier():
     """Execute max-step exit: final verifier evidence and partial text reach caller."""
     import ast
@@ -20004,6 +20108,121 @@ async def test_generate_write_lock_notification_retries_once_on_schema_rejection
     assert result["request_id"] == "req-return-retry"
 
 
+async def test_completed_invalid_notification_fork_retains_rejected_data():
+    """Return-shaped purchase-without-details must not abort the session on first try;
+    feed validation detail back and accept a corrected generic_write payload."""
+    import domains.spawn_browser_agent_v3.handler as handler
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _generate_write_lock_notification
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    return_url = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+    )
+    try:
+        validate_browser_tool_args(
+            "generate_write_lock_notification",
+            {
+                "trigger_type": "purchase",
+                "action": "confirm return",
+                "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            },
+        )
+        raise AssertionError("expected schema rejection for purchase without details")
+    except BrowserToolArgsValidationError as err:
+        from providers.rose.errors import BrowserModelOutputValidationError
+        from providers.rose.types import RoseResponse
+        first_error = BrowserModelOutputValidationError("private-rejected-detail", response=RoseResponse(content="rejected-fork-text", tool_calls=[{"id": "fork-real-id", "name": "unknown_fork_action", "arguments": "{}"}]))
+        assert "private-rejected-detail" not in str(first_error) and not hasattr(first_error, "detail")
+
+    fixed_action = {
+        "action": "generate_write_lock_notification",
+        "params": {
+            "trigger_type": "generic_write",
+            "action": "confirm Amazon return for Carhartt beanie",
+            "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                    "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                }
+            ],
+            "generic_write": {
+                "label": "Confirm return",
+                "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                "payload_summary": (
+                    "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                    "Return by Sep 19, 2026."
+                ),
+            },
+        },
+    }
+
+    fork_mock = AsyncMock(
+        side_effect=[
+            first_error,
+            {
+                "action": fixed_action,
+                "usage": {"input_tokens": 900, "output_tokens": 40},
+                "actual_model": "gpt-5.6-sol-gpt",
+                "request_id": "req-return-retry",
+                "mode": "gpt",
+            },
+        ]
+    )
+
+    with patch.object(handler, "_call_browser_use_with_rotation", new=fork_mock):
+        result = await _generate_write_lock_notification(
+            rose_client=SimpleNamespace(),
+            task_prompt="Return the beanie",
+            dynamic_system_context="dynamic-ctx",
+            browser_turn_messages=[{"role": "user", "content": "return"}],
+            browser_state={"url": return_url, "screenshot": None},
+            action_entries=[{"type": "click"}],
+            config=_fake_config(),
+            user_id="user-return",
+            agent_id="agent-return",
+            iteration=14,
+            token_state=token_state,
+            gpt_token="gpt-token",
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            browser_use_mode="gpt",
+            approval_type="purchase",
+            current_url=return_url,
+            trusted_page_urls=[return_url],
+            pending_action={"action": "click", "params": {"index": 58768}},
+            write_lock_result={
+                "status": "needs_write_approval",
+                "approval_type": "purchase",
+                "element_text": "Confirm your return",
+            },
+            system_name="Rose",
+            fallback_question="Approve?",
+        )
+
+    assert fork_mock.await_count == 2
+    assert fork_mock.await_args_list[0].kwargs["call_site"] == "write_lock_notification_fork_14"
+    assert fork_mock.await_args_list[1].kwargs["call_site"] == "write_lock_notification_fork_14_retry1"
+    retry_messages = fork_mock.await_args_list[1].kwargs["extra_user_messages"]
+    assert len(retry_messages) == 1
+    actual = fork_mock.await_args_list[1].kwargs
+    serialized = json.dumps(actual["turn_messages"])
+    assert all(value in serialized for value in ("rejected-fork-text", "fork-real-id", "unknown_fork_action"))
+    assert actual["turn_messages"][-1]["role"] == "user"
+    assert all(call.kwargs["skip_cache_write"] is True for call in fork_mock.await_args_list)
+    assert not any(message.get("tool_calls") or message.get("role") == "tool" for message in actual["turn_messages"])
+    assert result["notification"]["trigger_type"] == "generic_write"
+    assert "$10.84" in result["question"]
+    assert result["request_id"] == "req-return-retry"
+
+
 async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool():
     """If the forked model calls anything other than generate_write_lock_notification,
     the helper raises so the caller falls back to build_payment_question rather than
@@ -28654,7 +28873,14 @@ async def test_fresh_browser_retains_user_input_before_activity_scheduling():
 
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
+    from browser_operational_projection_fixtures import (
+        test_activity_manager_projection, test_typed_source_guards_and_scalar_policy,
+        test_notification_source_normalization_and_preview,
+    )
     r = BlackboxResult()
+    await r.record_async("operational_source_activity_manager_json_hydration", lambda: test_activity_manager_projection(SimpleNamespace(**globals())))
+    r.record("operational_source_type_privacy_and_numeric_policy", test_typed_source_guards_and_scalar_policy)
+    await r.record_async("operational_notification_source_preview_fallback", lambda: test_notification_source_normalization_and_preview(SimpleNamespace(**globals())))
     await r.record_async("browser_task_scoped_feedback_refreshes_only_its_actor_and_verifier", test_browser_task_scoped_feedback_refreshes_only_its_actor_and_verifier)
     await r.record_async("browser_transient_resume_poll_miss_preserves_approved_pending_write", test_browser_transient_resume_poll_miss_preserves_approved_pending_write)
     await r.record_async("fresh_browser_retains_user_input_before_activity_scheduling", test_fresh_browser_retains_user_input_before_activity_scheduling)
@@ -28692,6 +28918,12 @@ async def run_all_tests():
     await r.record_async("browser_active_schema_failure_delivers_real_input_and_retries_unacknowledged_contract", test_browser_active_schema_failure_delivers_real_input_and_retries_unacknowledged_contract)
     await r.record_async("browser_coalesced_schema_failure_retains_completed_usage_and_latest_input", test_browser_coalesced_schema_failure_retains_completed_usage_and_latest_input)
     await r.record_async("browser_pending_schema_failure_does_not_accept_previous_contract_completion", test_browser_pending_schema_failure_does_not_accept_previous_contract_completion)
+    await r.record_async("completed_invalid_browser_output_is_fed_to_next_real_decision", test_completed_invalid_browser_output_is_fed_to_next_real_decision)
+    await r.record_async("completed_invalid_notification_fork", test_completed_invalid_notification_fork_retains_rejected_data)
+    await r.record_async("rejected_native_output_data", test_rejected_native_output_reaches_next_decision_as_untrusted_data)
+    await r.record_async("mixed_invalid_outputs_and_transport_keep_five_failure_bound", test_mixed_invalid_outputs_reset_transport_failure_counter)
+    await r.record_async("genuine_transport_stalls_still_abort_after_five", test_genuine_transport_stalls_still_abort_after_five)
+    r.record("output_validation_feedback_is_private_nonexecuted_runtime_context", test_output_validation_feedback_is_private_nonexecuted_runtime_context)
     await r.record_async(
         "browser_tool_validation_error_feeds_back_through_normal_path",
         test_browser_tool_validation_error_feeds_back_through_normal_path,

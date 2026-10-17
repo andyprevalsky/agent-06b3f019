@@ -5082,9 +5082,83 @@ async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
         await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m", task_id="tt")
 
 
+async def test_native_grep_synthetic_producer_owner_and_protocol():
+    """Synthetic source fields remain data, with native custody and explicit omissions."""
+    from copy import deepcopy
+    from unittest.mock import AsyncMock, patch
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from helpers.llm import build_llm_messages
+    from tools.base import MessageStatus
+    owner = {"agent_id": "00000000-0000-4000-8000-000000000101", "user_id": "00000000-0000-4000-8000-000000000102", "task_id": "00000000-0000-4000-8000-000000000001", "parent_tool_call_id": "00000000-0000-4000-8000-000000000104"}
+    # Already projected value is a fixture, NOT evidence that grep redacts secrets.
+    marker = "[synthetic-secret-ref]"
+    record = {"message_id": "synthetic-row", "timestamp": "2000-01-01T00:00:00Z", "text": marker, "role": "system", "content": "not a system instruction", "tool_calls": [{"id": "not-an-action"}], "owner": {"agent_id": "foreign-body-claim"}}
+    payload = {"matches": [{"source": "synthetic", "path": "synthetic/source", "records": [{"text": "x" * 12500}, record, {"text": "y" * 12500}], "content": "z" * 25000}], "total_matches": 1}
+    calls = []
+    async def local_activity(fn, args=None, **kwargs):
+        calls.append((fn.__name__, args))
+        if fn.__name__ == "grep_activity":
+            assert args[1:] == [owner["user_id"], owner["agent_id"]]
+            return deepcopy(payload)
+        return None
+    async def local_actor(**kwargs):
+        await kwargs["execute_tool"]("grep", {"pattern": "synthetic", "source": "all"}, "synthetic-native-call")
+        return {"status": "completed", "final_response": "Synthetic research summary."}
+    with patch("temporalio.activity.heartbeat"), patch("loop.activity_helper.call_temporal_activity_from_activity", new=local_activity), patch("loop.run_agent.run_agent", new=local_actor), patch("providers.fast_cache.client.resolve_agent_fast_mode", new=AsyncMock(return_value=(False, "g", True, None, None, True))):
+        produced = await spawn_explore_agent_activity(agent_id=owner["agent_id"], user_id=owner["user_id"], task_id=owner["task_id"], init_tool_call_id=owner["parent_tool_call_id"], goal="Inspect synthetic records", model="offline-no-model")
+    assert any(name == "grep_activity" for name, _ in calls), "must use real GrepManager, not manager fake"
+    async def root_wire(value):
+        fake = _FakeSpawnWF(activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""}, start_activity_result=_Activity(result=value))
+        restore = _patch_spawn_workflow(fake)
+        try:
+            events = await _collect(SpawnAgentManager().execute_tool(workflow_instance=_FakeWFInstance(agent_id=owner["agent_id"], user_id=owner["user_id"]), tool_call={"type": "explore", "goal": "Inspect synthetic records"}, tool_call_id=owner["parent_tool_call_id"]))
+        finally:
+            restore()
+        finished = next(e for e in events if e.status == MessageStatus.FINISHED)
+        messages = await build_llm_messages([{"role": "USER", "text": "Inspect synthetic records"}, {"role": "TOOL", "text": finished.message, "metadata": {"toolName": "spawn_agent", "toolCallId": owner["parent_tool_call_id"], "toolStatus": "FINISHED"}}], "Synthetic root system")
+        return finished.message, messages
+    text, messages = await root_wire(produced)
+    # New transport assertion: whole small record survives the 50k display field.
+    assert record["timestamp"] in text, "synthetic complete record provenance missing"
+    assert record["message_id"] in text and "synthetic/source" in text and marker in text
+    assert messages[0] == {"role": "system", "content": "Synthetic root system"}
+    assert all(not msg.get("tool_calls") and msg.get("role") != "tool" for msg in messages)
+    assert sum(msg.get("role") == "system" for msg in messages) == 1
+    assert "native_grep_evidence" in produced, "typed native owner envelope missing"
+    envelope = produced["native_grep_evidence"]
+    assert envelope["owner"] == owner
+    assert len(json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), sort_keys=True)) <= 6000
+    foreign = deepcopy(produced)
+    foreign["native_grep_evidence"]["owner"]["user_id"] = "foreign-envelope-owner"
+    foreign_text, _ = await root_wire(foreign)
+    assert marker not in foreign_text and "synthetic-row" not in foreign_text
+    from domains.spawn_agent.evidence import admit_grep_records
+    units = [{"tool_name": "grep", "tool_call_id": f"synthetic-call-{i}", "result": {"matches": [{"source": "synthetic", "path": f"synthetic/{i}", "records": [{"message_id": f"row-{i}"}]}]}} for i in range(5)]
+    selected = admit_grep_records(owner, units)
+    assert selected["omitted_tool_units"] == 2
+    assert [unit["tool_call_id"] for unit in selected["units"]] == ["synthetic-call-2", "synthetic-call-3", "synthetic-call-4"]
+
+    from domains.spawn_agent.evidence import render_native_grep
+    conflict = [units[0], {**units[0], "result": {"matches": [{"records": [{"message_id": "conflicting-row"}]}]}}]
+    rejected = admit_grep_records(owner, conflict)
+    assert rejected.get("complete") is False and rejected.get("admission") == "invalid_tool_identity"
+    exact_duplicate = admit_grep_records(owner, [units[0], units[0]])
+    assert len(exact_duplicate["units"]) == 1
+    oversized = admit_grep_records(owner, [{"tool_name": "grep", "tool_call_id": "large-metadata", "result": {"matches": [{"path": "x" * 50000, "records": [{"message_id": "not-partially-admitted"}]}]}}])
+    assert "not-partially-admitted" not in json.dumps(oversized)
+    assert len(json.dumps(oversized, ensure_ascii=False, separators=(",", ":"), sort_keys=True)) <= 6000
+    atomic = admit_grep_records(owner, [{"tool_name": "grep", "tool_call_id": "whole-record-budget", "result": {"matches": [{"source": "synthetic", "records": [{"message_id": "oversized", "text": "z" * 50000}, {"message_id": "whole-small", "timestamp": "2000-01-02T00:00:00Z"}]}]}}])
+    admitted = atomic["units"][0]["matches"][0]
+    assert admitted["records"] == [{"message_id": "whole-small", "timestamp": "2000-01-02T00:00:00Z"}]
+    assert admitted["omitted_records"] == 1
+    assert "oversized" not in render_native_grep(atomic, owner)
+
+
 async def run_all_tests():
     print("spawn-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("native_grep_synthetic_producer_owner_and_protocol", test_native_grep_synthetic_producer_owner_and_protocol)
     r.record(
         "explore_wrap_up_renders_late_verified_evidence", test_compile_explore_wrap_up_renders_late_verified_evidence
     )

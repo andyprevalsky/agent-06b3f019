@@ -254,6 +254,11 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
                 os.environ[name] = value
 
 
+def test_hub_transport_owned_root_projection_preserves_evidence():
+    from benchmarks.hub_upload_test import test_hub_transport_projects_every_owned_root_without_changing_evidence as control
+    control()
+
+
 def test_hub_requests_preserve_external_proxy_routing():
     from pytest import MonkeyPatch
 
@@ -22634,6 +22639,7 @@ async def run_all_tests():
         test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry,
     )
     r.record("hub_requests_preserve_external_proxy_routing", test_hub_requests_preserve_external_proxy_routing)
+    r.record("hub_transport_owned_root_projection_preserves_evidence", test_hub_transport_owned_root_projection_preserves_evidence)
     r.record("evaluated_fleet_outcomes_publish_before_teardown", test_evaluated_fleet_outcomes_publish_before_teardown)
     r.record(
         "cloudbench_rejects_stale_wrong_task",

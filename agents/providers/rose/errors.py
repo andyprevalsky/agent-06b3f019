@@ -112,3 +112,12 @@ class RoseStepError:
 
     def __repr__(self) -> str:
         return f"RoseStepError(model={self.model!r}, error={self.error!r})"
+
+
+class BrowserModelOutputValidationError(ValueError):
+    """A completed response was received but did not describe a valid browser action."""
+
+    def __init__(self, detail, *, response):
+        super().__init__("Completed browser model response did not contain a valid action")
+        self.private_detail = detail
+        self.response = response

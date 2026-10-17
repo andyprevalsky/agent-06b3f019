@@ -156,3 +156,105 @@ are included in the metadata handoff; private contacts/history are not copied he
 The earlier e576 and a6ae signup runs both began with a direct browser goal using an available verifiable identity, entered the minted email, received an actual OTP, and passed in 431.5s and 431.2s. The b547 run first explored preferred contact at the ROOT agent, then explicitly delegated the personal address; the browser obeyed that goal and the new site withheld verification before code generation, ending in a 948.2s failure. The earliest observed divergence is the ROOT first action, not a demonstrated browser delivery failure.
 
 The initial ROOT system's three segments, tools, and configuration match exactly. All five initial messages match only after explicit URL/time/reference normalization; this is not identical historical wire input. Browser static instructions, auth section, tools, and configuration match, while dynamic goals, inventory, and history differ. Nine inspected source files covering client, GPT auth, Foundry, pools, browser-use, LLM helpers, prompts, tool schemas, and run-agent match across the three checkpoints; this is not whole-deployment equivalence or causal proof. The retained comparator README and structured comparison accompany the final deployment evidence. No model-intelligence, AUTH-STABILIZE-1 causation, or repair claim follows. The EXECUTE reasonable-assumption gap and product clarification remain unresolved; this case stays OPEN.
+
+### October17 follow-through: bounded native source-evidence retention contract
+
+This append retains status OPEN and the entire earlier case prefix, including its
+Solution and Human feedback. Two archive searches were rerun: `delegated signup
+historical contact parent goal` and `grep original evidence truncated timestamp
+source records`. The first returned this unresolved case and delegated-context
+relatives; the second returned message-search alignment and explore-compaction
+cases. Their Solution/Human feedback and the RCA process-feedback rules were
+reread. These are related evidence-transport boundaries, not proof of identical
+account-choice causes. Factor912 remains a negative route-fixed four-call result:
+no category improvement, no adoption, no native repair proof. No generic parent-goal
+factor replay, model upgrade or new semantic diagnostic was performed here.
+
+On source0a74e8d555c9f793360c5ca2c78f5950939ecc0a, unchanged original30 case16
+`browser-auth-signup-already-registered`, root
+fe570fd5-368c-4cf9-9320-d41d50c49c32, ended native FAIL645.4s. Retained controller
+evidence reports a 514s silent tree against the existing 510s stall threshold,
+ACTIVE root, 59messages and one nonterminal leaf; this was not the 900s task
+deadline. A handoff judge accepted email-verification help, but the bounded
+retained trace showed no resulting USER callback/resume. Available mailbox
+association, eligibility and delivery health remain UNKNOWN; no missing-provider
+or inaccessible-inbox conclusion follows. Retrieved historical contact, explorer
+recommendation, parent-selected method and human mandate remain distinct. The
+browser's received delegated goal did not prove original-human identity authority.
+No hidden fixture recipient, automatic identity switch or fabricated user grant
+was introduced. The deepest semantic signup cause remains unproven.
+
+A separate component reproduction establishes a narrower mechanical fact:
+GrepManager -> spawn_explore_agent_activity -> parent SpawnAgentManager -> actual
+build_llm_messages can lose a small complete source record's timestamp/envelope
+inside legacy head/tail clipping. The existing grep renderer serialized ALL result
+keys; its last-three/6000-character compiler was a bound, not a redactor. The new
+bounded contract retains native grep units with the producer's agent/user/task and
+initializing parent-tool-call IDs, source-result digest, whole admitted records,
+and explicit omission counts. It never parses researcher prose into source facts
+or promotes body role/content/tool_calls/owner keys into executable protocol or
+native custody. The source-result digest binds normalized JSON values, not unseen
+historical wire bytes or human authorship. Complete-record retention is new
+information preservation, not registration evidence or a user-selection rule.
+
+Runtime patch2b777ace662ab76807bc1fc8198c64be6e7cd9ffb412c1b24b09cdeba6477b57
+preserves the existing last-three unique-result selection, 6000-character typed
+envelope budget and shared50k explore compaction controls. Overlarge metadata and
+records are omitted explicitly rather than clipped and called complete. Duplicate
+call-ID conflicts fail closed; exact duplicate results retain deduplication. The
+policy-excluded older units count toward omitted_tool_units. No new model call,
+query, task clock, evaluator exception or native outcome promotion was added.
+
+The clean permanent synthetic patch
+43042c0ca9c8a820d501e798cfe5708a17bbbbcb3d4b41ed4702c00c5a3c5ee3 was generated
+against exact0a test bytes and passed a temporary-baseline apply check. It contains
+only a self-contained synthetic registered test and its normal registrar: no
+captured user/contact records or private regression-module import. The same
+selected test failed baseline at missing source provenance, then passed with the
+runtime patch. Its real GrepManager/activity/parent/builder path uses local mocked
+backend activity, actor, Temporal and workflow scheduling seams, not a scripted
+semantic grade. Synthetic controls cover source timestamp/location, whole-record
+admission, native-owner and foreign-owner rejection, protocol-key collisions,
+last-three/omission counts, duplicate/conflicting call IDs, oversized metadata,
+6000 envelope and surrounding50k source text. All436 original assertion ASTs remain
+in order. The full canonical spawn-agent domain entrypoint passed1domain/0failed,
+141printed checks,2.3s, with0socket attempts/0transmissions. Two earlier private
+assembly attempts lacked canonical source-file prerequisites; they are retained,
+then resolved by copying exact0a cutover/Fly source bytes without changing tests.
+The preceding1792 test patch's private-import/context portability defect is also
+retained and explicitly superseded; it was not silently treated as permanent.
+
+Privacy proof is limited to the actual owner boundary. No browser-style generic
+redactor was found on GrepManager -> explore -> ROOT message assembly. Legacy
+already exposed authorized grep JSON fields; the candidate changes which bounded
+whole records survive, not tenant permissions. An already-projected synthetic
+secret marker is preserved as data; arbitrary source secrets were not claimed to
+be redacted. Backend user scoping/connector access is upstream of the mocked
+activity and was not newly proved. No raw price restoration, new identity
+classifier, source-body authority grant or production redaction bypass was added.
+
+Storage/input costs remain bounded but nonzero. One retained private component
+measurement adds a 5995-character typed envelope, about6k extra activity-result
+storage beside the legacy result. That reduced ROOT-builder fixture measured6858
+wire-JSON characters and an o200k_base text-token estimate2300; these are local
+representation estimates, NOT provider billing or full historical prompt parity.
+The6000 envelope bound is preserved; legacy summary/other tools still contribute
+their existing text independently. Historical deployment/wire, pointer/cache state
+and complete callback order remain unreconstructed. A reduced-context ROOT-builder
+proof cannot establish native semantic causality or universal model-input equality.
+
+Parent selected this explicit source-evidence contract and clean test for a future
+source batch. No candidate native rerun has established case16 repair. The completed
+source0a original30 outcome remains23PASS7FAIL/controller1, including this failure;
+root separately verified32owned-root resource custody and all30 durable evidence
+publications. Resource release/publication is not semantic PASS, production
+adoption or deployment approval. Existing failures remain unwaived. This is a
+local evidence-fidelity component correction, not class elimination, proof of
+human contact authority, model-intelligence limitation, or a fabricated failed
+Step5b rung. General account-choice causality and unchanged native outcome proof
+remain OPEN.
+
+Private proof packets: structured-admission-prep/candidate-final-proof-v2.json;
+structured-evidence-synthetic-review/clean-permanent-proof.json (SHA256
+11d99e0781a7260123991f3814bc23d01cfd945f8879e26ff32a4d82c0d81806).
+No raw private source records are copied into this append.

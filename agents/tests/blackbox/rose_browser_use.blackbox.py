@@ -2483,9 +2483,60 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
 # =====================================================================
 
 
+
+async def test_completed_browser_output_validation_is_not_transport_or_completion():
+    from providers.rose.errors import BrowserModelOutputValidationError, RoseStallError
+    from providers.rose.types import RoseResponse
+    from browser_tools.schemas import BrowserToolArgsValidationError
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from helpers import observability
+    client = RoseClient(openrouter_key="offline-fake")
+    kwargs = dict(task="Read the visible heading", browser_state=_browser_state(), action_history=[], available_actions=["wait", "request_user_assistance_for_authentication"])
+    outputs = []
+    with patch.object(observability, "dump_llm_context", side_effect=lambda **kw: outputs.append(kw)):
+        for content in ("The page is finished.", '{"action": []}'):
+            response = RoseResponse(content=content, actual_model="offline-model", request_id="actual-response", usage={"prompt_tokens": 7, "completion_tokens": 3})
+            client.collect = AsyncMock(return_value=response)
+            try:
+                await client.complete_browser_use(**kwargs)
+                raise AssertionError("invalid output must not be accepted as completion")
+            except BrowserModelOutputValidationError as error:
+                assert error.response is response and error.response.usage == response.usage
+            assert outputs[-1]["output"]["content"] == content
+            assert outputs[-1]["output"]["request_id"] == "actual-response"
+            assert outputs[-1]["config"]["tool_choice"] == "auto"
+        with patch.object(observability, "dump_llm_context", side_effect=OSError("offline capture failure")):
+            response = RoseResponse(content="Invalid completed answer", request_id="actual-failed-capture")
+            client.collect = AsyncMock(return_value=response)
+            try:
+                await client.complete_browser_use(**kwargs)
+                raise AssertionError("capture failure must not accept invalid output")
+            except BrowserModelOutputValidationError as error:
+                assert error.response is response
+        for original in (RoseStallError("empty stream"), ValueError("unrelated transport wrapper"), asyncio.CancelledError(), WorkflowGenerationSealed("sealed")):
+            client.collect = AsyncMock(side_effect=original)
+            try:
+                await client.complete_browser_use(**kwargs)
+                raise AssertionError("expected original transport/control error")
+            except BaseException as error:
+                assert error is original and not isinstance(error, BrowserModelOutputValidationError)
+        typed = RoseResponse(tool_calls=[{"id": "real-tool", "name": "request_user_assistance_for_authentication", "arguments": "{}"}])
+        client.collect = AsyncMock(return_value=typed)
+        try:
+            await client.complete_browser_use(**kwargs)
+            raise AssertionError("invalid typed arguments must retain existing error")
+        except BrowserToolArgsValidationError:
+            pass
+        for response in (RoseResponse(content='{"action": [{"wait": {"time_ms": 1}}]}'), RoseResponse(tool_calls=[{"id": "real-wait", "name": "wait", "arguments": '{"time_ms": 1}'}])):
+            client.collect = AsyncMock(return_value=response)
+            result = await client.complete_browser_use(**kwargs)
+            assert result["action"]["action"] == "wait"
+
+
 async def run_all_tests():
     print("rose_browser_use blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("completed_browser_output_validation_is_not_transport_or_completion", test_completed_browser_output_validation_is_not_transport_or_completion)
 
     r.record("browser_use_pool_registered", test_browser_use_pool_registered)
 

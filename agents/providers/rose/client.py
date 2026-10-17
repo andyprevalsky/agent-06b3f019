@@ -49,6 +49,7 @@ from providers.rose.claude_auth import (
     claude_auth_complete,
 )
 from providers.rose.errors import (
+    BrowserModelOutputValidationError,
     RoseAuthError,
     RoseDeadlineError,
     RoseError,
@@ -2199,13 +2200,24 @@ class RoseClient:
         # through the waterfall (sequential pool tries via OpenRouter).
         is_claude = actual_model.endswith("-claude")
         mode = "claude" if is_claude else ("gpt" if actual_model.endswith("-gpt") else "waterfall")
-        if response.tool_calls:
-            action = normalize_browser_use_tool_calls(
-                response.tool_calls,
-                thinking=(response.reasoning or response.content or None),
+        from browser_tools.schemas import BrowserToolArgsValidationError
+
+        output_validation_error = None
+        action = None
+        try:
+            if response.tool_calls:
+                action = normalize_browser_use_tool_calls(
+                    response.tool_calls,
+                    thinking=(response.reasoning or response.content or None),
+                )
+            else:
+                action = normalize_browser_use_response(response.content)
+        except BrowserToolArgsValidationError:
+            raise
+        except ValueError as normalization_error:
+            output_validation_error = BrowserModelOutputValidationError(
+                str(normalization_error), response=response,
             )
-        else:
-            action = normalize_browser_use_response(response.content)
 
         try:
             from helpers.observability import dump_llm_context
@@ -2237,6 +2249,7 @@ class RoseClient:
                 tools=tools,
                 output={
                     "action": action,
+                    **({"output_validation_error": str(output_validation_error), "private_output_validation_detail": output_validation_error.private_detail} if output_validation_error else {}),
                     "content": response.content,
                     "reasoning": response.reasoning,
                     "tool_calls": response.tool_calls,
@@ -2253,6 +2266,9 @@ class RoseClient:
             )
         except Exception:
             logger.debug("rose.browser_use.dump_output_failed", call_site=call_site, exc_info=True)
+
+        if output_validation_error is not None:
+            raise output_validation_error
 
         return {
             "action": action,

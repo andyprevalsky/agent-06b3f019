@@ -929,11 +929,13 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
             "success": False,
             "error": f"request_payment_card receipt is incomplete: {'; '.join(image_errors)}.",
         }
-    return {
+    from browser_tools.control_projection import OperationalResult
+
+    return OperationalResult({
         "status": "awaiting_payment_card_approval",
-        "payment_request": context.params,
+        "payment_request": payment_request.model_dump(exclude={"tool"}, exclude_unset=True),
         "current_url": context.current_url,
-    }
+    }, field="payment_request", source=payment_request)
 
 
 def _browser_state_action_result(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -1723,7 +1725,8 @@ async def execute_action(
         # Keep the public boundary safe for adapters without DOMService policy.
         action_policy = getattr(type(dom_service), "model_visible_action_result", None)
         if isinstance(value, dict) and callable(action_policy):
-            return action_policy(dom_service, action_name, value)
+            from browser_tools.control_projection import retain_operational_source
+            return retain_operational_source(value, action_policy(dom_service, action_name, value))
         policy = getattr(type(dom_service), "model_visible_value", None)
         return policy(dom_service, value) if callable(policy) else mask_secret_values(value, refs)
 
