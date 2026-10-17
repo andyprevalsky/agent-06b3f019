@@ -328,6 +328,26 @@ successful transfer does not certify task execution or cleanup. An incomplete
 borrower intent refuses a fresh transfer attempt; retain its evidence for
 reconciliation.
 
+Keep the original operator alive after transfer. From a separate immutable
+checkout, capture its live caller and gate identities before the gate exits:
+
+```bash
+python3 -S scripts/cloudbench-controller-payload-finalization.py \
+  --capture --operator-ref "$EXACT_FINALIZER_COMMIT" \
+  --config "$EXISTING_CONFIG" --config-sha256 "$EXISTING_CONFIG_SHA256" \
+  --run-directory "$EXISTING_RUN_DIRECTORY"
+```
+
+This capture is local and makes no provider requests. With the same arguments,
+`--check` validates the captured identities. Once transfer is complete,
+`--finalize` observes the original supervisor and gate, verifies the full export,
+and invokes the existing controller cleanup helper. It preserves the original
+execution deadline and signals only the exact supervisor when cancellation or
+that deadline requires it. The original caller is retired only after verified
+resource release. The canonical terminal receipt retains the original workload
+source and records the separate finalizer. An unresolved prior finalizer or
+cleanup intent is retained and never authorizes an automatic repeat.
+
 
 Within a live strict cohort, the fleet shares one successful read-only app-secret
 verification. The proof is bound to the campaign owner and process births,
