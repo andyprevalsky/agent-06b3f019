@@ -192,9 +192,50 @@ class WorkerRuntime:
             "actualQueue": actual,
         }
 
+    def certify_unpublished_retirement(self, expected, previous, live, machine, command):
+        job = self.ledger.read()
+        queue = self.runtime_queue()
+        if (
+            job["stage"] not in ("PREPARING", "READY")
+            or expected.get("managedJobId") != self.ledger.job_id
+            or expected["id"] not in job["candidateMachineIds"]
+            or previous["taskQueue"] != queue
+            or live != job["priorPointer"]
+            or not self.target(machine, draining=True)
+        ):
+            raise ValueError("Only this job's unpublished candidate may bypass runtime health")
+        pointer = json.loads(command("set-agent-queue-pointer.ts", "--read").strip().splitlines()[-1])
+        if (
+            not pointer
+            or pointer.get("taskQueue") == queue
+            or any(pointer.get(key) != live[key] for key in ("taskQueue", "surfaceHash"))
+        ):
+            raise ValueError("Candidate routing is published or unknown")
+        command("retire-agent-queue.ts", "--verify-retired", "--queue", queue)
+
     def revalidate_retained_routes(self, records):
         self.ledger.retained_status()
         for record in records:
             proof = self.observe_route(record, record["routeEvidence"]["expectedQueue"])
             if proof != record["routeEvidence"]:
                 raise ValueError("Held old bank process route changed since PREPARING")
+
+
+def previous_route_mismatches(native, previous, machines, pointer, minimum):
+    mismatch_records = []
+    managed = [record for record in previous if record.get("managedJobId")]
+    states = {machine["id"]: machine["state"] for machine in machines}
+    if any(states[record["id"]] not in ("started", "stopped") for record in managed):
+        raise ValueError("Old managed bank has an unknown native lifecycle")
+    observations = [
+        (record, native.observe_route(record, pointer["taskQueue"]))
+        for record in managed
+        if states[record["id"]] == "started"
+    ]
+    if any(proof["actualQueue"] != pointer["taskQueue"] for _, proof in observations):
+        if len(observations) != minimum or any(
+            proof["actualQueue"] == pointer["taskQueue"] for _, proof in observations
+        ):
+            raise ValueError("Mixed or incomplete old-bank route mismatch evidence")
+        mismatch_records = [{**record, "routeEvidence": proof} for record, proof in observations]
+    return mismatch_records

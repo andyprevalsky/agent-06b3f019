@@ -130,6 +130,69 @@ that adoption and verification is complete.
 At 10k agents this adds no per-agent hot path: coordinator work is bounded by the
 eight current candidates and eight retained workers, with no task/model branches.
 
+## Review recurrence: stopped prior members and unhealthy unpublished candidates
+
+Review comments 4300830304 and 4300830307 identified two lifecycle boundaries in
+commit 1dab284d0a0e3fe984853d73b8bfaf4a90e257ba. A stopped prior member has no
+health listener; an owned unpublished candidate may be unhealthy precisely when
+abandonment is necessary. Neither condition permits inferring an active worker's
+route or retiring a published/foreign bank.
+
+The registered causal command was:
+
+```sh
+python3 scripts/tests/worker-pool-cutover.test.py WorkerPoolCutoverTests.test_unpublished_owned_unhealthy_candidate_can_retire_only_after_queue_certificate WorkerPoolCutoverTests.test_stopped_old_managed_bank_needs_no_runtime_health_probe
+```
+
+Unchanged source failed both cases (one failure, one error): runtime probing
+raised `unhealthy worker has no HTTP listener` and `Stopped workers have no
+health server`. The same command passes after the correction. Preparation skips
+only native state `stopped`; unknown states and unhealthy started members still
+fail. Unpublished retirement requires this job's PREPARING/READY candidate,
+matching target/custody identity, a non-target current pointer, and the existing
+retired-unused queue certificate before any native lease or stop. Holds and all
+existing native mutation checks remain mandatory.
+
+The full commands `python3 scripts/tests/worker-pool-cutover.test.py` and
+`python3 scripts/tests/retained-agent-machine.test.py` pass 31 and 32 cases.
+Negative controls reject missing certificates, published/foreign/activated
+candidates before any native effect, unknown started routes, unknown native
+states, and partial stopped/mismatched prior banks. Commands and log/source
+hashes are frozen under `.context/worker-route-review1/.context/review1/frozen/`.
+These are offline controls, not native repair or whole-source qualification;
+the original 1dab smoke cohort remains independent and unchanged.
+
+## Review recurrence: explicit empty retention and poller clocks
+
+Independent native preparation found that the Python producer always includes
+`retainedRouteMismatchRecords`, including an empty array for an ordinary
+deployment. The backend treated that array as truthy and required an eight-worker
+retention proof. The shared classifier now treats only absence and an empty array
+as the normal path; malformed values and nonempty arrays of the wrong size remain
+errors. Registered real-Postgres cases exercise both a legacy first deployment
+and a subsequent managed deployment through preparation, pointer publication,
+retirement and release with the explicit empty array. The same final owner failed
+on `1dab284d` (9 passed, 1 failed) and passes with the correction (10 passed).
+These are local protocol controls, not native retirement certificates.
+
+The initial PR review also identified strict comparison between a Temporal server
+timestamp and the controller clock. Five seconds of bounded future skew is now
+accepted without extending the 120-second freshness window. The same registered
+owner failed its new two-second skew case before the correction and passes all
+five cases afterward; six-second and the original ten-second skew remain errors,
+as do malformed timestamps, foreign identities and transport failures.
+
+The frozen successor source and raw command/log hashes are recorded in
+`.context/lantern-empty-retention1dab/.context/empty-retention-proof/FINAL.json`
+(SHA256 `f9bb0fe1246b7019c5ebaadccd542fb591495fb287bbf70c68e650f322af8057`).
+Independent source review and hash verification are recorded beside it in
+`C-INDEPENDENT-AUDIT.json` (SHA256
+`deb7e1ca8b0bc0689a9d85084588ffc841a93e9e87cdb958f41a8ab7663b0ec9`).
+Earlier failures and superseded runs retain their original source and clocks.
+Full combined qualification, final review, merged-source readiness and native
+verification remain required; these controls do not change the original serving
+workers or waive their unresolved work.
+
 ## Human feedback
 
 None recorded.

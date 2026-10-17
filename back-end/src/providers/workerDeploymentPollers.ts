@@ -39,7 +39,7 @@ export async function checkWorkerNativePollers(
       )
         throw new Error('Malformed native poller observation');
       const at = Number(poller.lastAccessTime.seconds) * 1000;
-      if (!Number.isFinite(at) || at > Date.now())
+      if (!Number.isFinite(at) || at > Date.now() + 5_000)
         throw new Error('Malformed native poller timestamp');
       if (Date.now() - at > 120_000) continue;
       if (!identities.includes(poller.identity))

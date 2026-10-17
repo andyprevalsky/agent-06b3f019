@@ -582,6 +582,119 @@ class WorkerPoolCutoverTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unknown"):
                 native.observe_route(expected, expected_queue)
 
+    def unhealthy_candidate_retirement(
+        self, certificate_error=False, managed_job=None, published=False, stage="PREPARING"
+    ):
+        native, value, _ = self.runtime_native()
+        queue = cutover.deployment_queue(native.identity, native.ledger.job_id)
+        previous = {"taskQueue": queue, "surfaceHash": native.identity["surfaceHash"]}
+        live = {"taskQueue": "navi-agent-tasks@old", "surfaceHash": "old"}
+        proof = pool.metadata(value, pool.CUSTODY_KEY)
+        proof.update(
+            {
+                key: item
+                for key, item in pool.record(value, "prod").items()
+                if key in ("app", "id", "instance_id", "config_sha256")
+            }
+        )
+        value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(proof)
+        expected = {**cutover.machine_identity(value), "managedJobId": managed_job or native.ledger.job_id}
+        effects = []
+        self.retirement_effects = effects
+
+        class Client:
+            def assert_managed_mutable(self):
+                native.ledger.assert_mutable(value["id"])
+
+            @contextmanager
+            def lease(self):
+                effects.append("lease")
+                yield
+
+            def request(self, method, suffix="", data=None):
+                if method == "GET":
+                    return copy.deepcopy(value)
+                effects.append(suffix)
+                if suffix.startswith("/metadata/"):
+                    value["config"]["metadata"][suffix.rsplit("/", 1)[1]] = data["value"]
+                elif suffix == "/stop":
+                    value["state"] = "stopped"
+                else:
+                    raise AssertionError((method, suffix))
+                return {}
+
+        native.ledger.job.update(stage=stage, candidateMachineIds=[value["id"]], priorPointer=live)
+
+        def certificate(script, *args):
+            if script == "set-agent-queue-pointer.ts":
+                return json.dumps(previous if published else live)
+            self.assertEqual((script, args), ("retire-agent-queue.ts", ("--verify-retired", "--queue", queue)))
+            if certificate_error:
+                raise ValueError("candidate queue not certified")
+            return ""
+
+        with (
+            patch.object(native, "get", side_effect=lambda mid: copy.deepcopy(value)),
+            patch.object(native, "client", return_value=Client()),
+            patch.object(
+                native, "observe_route", side_effect=ValueError("unhealthy worker has no HTTP listener")
+            ) as route,
+            patch.object(cutover, "backend_command", side_effect=certificate) as verify,
+        ):
+            result = native.retire(expected, previous, live)
+        return result, effects, route.call_count, verify.call_count
+
+    def test_unpublished_owned_unhealthy_candidate_can_retire_only_after_queue_certificate(self):
+        result, effects, routes, certificates = self.unhealthy_candidate_retirement()
+        self.assertEqual(result["id"], "00000000000001")
+        self.assertIn("/stop", effects)
+        self.assertEqual(routes, 0)
+        self.assertEqual(certificates, 2)
+
+    def test_unpublished_retirement_rejects_missing_certificate_published_or_foreign_bank(self):
+        for options, error in (
+            ({"certificate_error": True}, "not certified"),
+            ({"published": True}, "published"),
+            ({"managed_job": "foreign"}, "unpublished candidate"),
+            ({"stage": "ACTIVATED"}, "unpublished candidate"),
+        ):
+            with self.subTest(options=options):
+                with self.assertRaisesRegex(ValueError, error):
+                    self.unhealthy_candidate_retirement(**options)
+                self.assertEqual(self.retirement_effects, [])
+
+    def test_started_unknown_and_partial_stopped_mismatch_block_preparation(self):
+        for state, unknown in (("started", True), ("stopped", False), ("replacing", False)):
+            with self.subTest(state=state, unknown=unknown):
+                ledger, native = self.mismatched_bank()
+                native.machines[8]["state"] = state
+                original = native.observe_route
+
+                def mismatch(record, queue):
+                    return {**original(record, queue), "actualQueue": "navi-agent-tasks@wrong"}
+
+                context = patch.object(
+                    native, "observe_route", side_effect=ValueError("unknown runtime") if unknown else mismatch
+                )
+                with context, self.assertRaises(ValueError):
+                    self.run_job(ledger, native)
+                self.assertEqual(ledger.job["stage"], "QUEUED")
+                self.assertFalse(native.prepared)
+                self.assertFalse(native.retired)
+
+    def test_stopped_old_managed_bank_needs_no_runtime_health_probe(self):
+        ledger, native = self.mismatched_bank()
+        for machine in native.machines:
+            if machine["id"] not in {row["id"] for row in native.machines[:8]}:
+                machine["state"] = "stopped"
+        with patch.object(
+            native, "observe_route", side_effect=AssertionError("Stopped workers have no health server")
+        ) as observe:
+            result = self.run_job(ledger, native)
+        self.assertEqual(result["stage"], "SUCCEEDED")
+        self.assertEqual(len(native.retired), 8)
+        observe.assert_not_called()
+
     def test_incomplete_bank_waits_without_mutating_any_machine(self):
         ledger, native = Ledger(), Native(count=7)
         with self.assertRaises(cutover.PoolCapacityPending):
@@ -745,7 +858,17 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         self.assertEqual(len(updates), 1)
         self.assertEqual(value["state"], "started")
         self.assertTrue(pool.custody_ready(value, "prod"))
-        with patch.object(native, "client", return_value=Client()):
+        ledger.job.update(stage="PREPARING", candidateMachineIds=[value["id"]], priorPointer=previous)
+        with (
+            patch.object(native, "client", return_value=Client()),
+            patch.object(
+                cutover,
+                "backend_command",
+                side_effect=lambda script, *args: (
+                    json.dumps(previous) if script == "set-agent-queue-pointer.ts" else ""
+                ),
+            ),
+        ):
             with patch.object(native, "observe_route", side_effect=lambda record, queue: {"actualQueue": queue}):
                 retired = native.abandon(expected, previous)
         self.assertEqual(retired["id"], expected["id"])

@@ -1,4 +1,4 @@
-import { fenceEmptyRetainedSource } from './workerDeploymentRetention';
+import { fenceEmptyRetainedSource, routeMismatchRecords } from './workerDeploymentRetention';
 /**
  * Current-generation agent task-queue pointer for zero-downtime cutover.
  *
@@ -144,8 +144,8 @@ export async function setCurrentAgentQueue(
       managedSource = job.identity.sourceCommit;
       const fullJob = row.request as unknown as WorkerDeploymentJob;
       if (
-        (fullJob.evidence.PREPARING as { retainedRouteMismatchRecords?: unknown })
-          ?.retainedRouteMismatchRecords
+        routeMismatchRecords(fullJob.evidence.PREPARING as Record<string, unknown> | undefined)
+          .length
       ) {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'deployment:worker-queue:' + fullJob.identity.app}))`;
         retainedJob = fullJob;

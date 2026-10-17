@@ -75,3 +75,21 @@ test('transport errors and future timestamps fail closed instead of readiness fa
     /timestamp/
   );
 });
+
+test('two-second positive clock skew remains fresh, over-five-second skew fails closed', async () => {
+  assert.equal(
+    (
+      await checkWorkerNativePollers(
+        client(undefined, -2000).native,
+        'q',
+        identities,
+        'local-fixture'
+      )
+    ).ready,
+    true
+  );
+  await assert.rejects(
+    checkWorkerNativePollers(client(undefined, -6000).native, 'q', identities, 'local-fixture'),
+    /timestamp/
+  );
+});

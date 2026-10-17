@@ -17,7 +17,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import retained_agent_machine as pool
-from worker_pool_runtime import RUNTIME_QUEUE_PROBE, WorkerRuntime, machine_identity
+from worker_pool_runtime import RUNTIME_QUEUE_PROBE, WorkerRuntime, machine_identity, previous_route_mismatches
 from worker_pool_runtime import runtime_queue_matches as _runtime_queue_matches
 
 
@@ -240,13 +240,15 @@ class NativePool(WorkerRuntime):
     def retire(self, expected, previous, live=None):
         self.ledger.assert_mutable(expected["id"])
         before = self.get(expected["id"])
-        if (
+        allow_created = live is not None
+        if allow_created:
+            self.certify_unpublished_retirement(expected, previous, live, before, backend_command)
+        elif (
             before["state"] == "started"
             and self.observe_route(expected, previous["taskQueue"])["actualQueue"] != previous["taskQueue"]
         ):
             raise ValueError("Old bank serves a different actual queue and cannot be retired")
         client = self.client(expected["id"])
-        allow_created = live is not None
         live = live or {
             "taskQueue": deployment_queue(self.identity, self.ledger.job_id),
             "surfaceHash": self.identity["surfaceHash"],
@@ -407,15 +409,7 @@ def prepare_bank(job, ledger, native, minimum):
             or any(record.get("managedJobId") != pointer["updatedBy"] for record in previous)
         ):
             raise ValueError("Current managed bank does not match its complete native ownership set")
-    mismatch_records = []
-    managed = [record for record in previous if record.get("managedJobId")]
-    observations = [(record, native.observe_route(record, pointer["taskQueue"])) for record in managed]
-    if any(proof["actualQueue"] != pointer["taskQueue"] for _, proof in observations):
-        if len(observations) != minimum or any(
-            proof["actualQueue"] == pointer["taskQueue"] for _, proof in observations
-        ):
-            raise ValueError("Mixed or incomplete old-bank route mismatch evidence")
-        mismatch_records = [{**record, "routeEvidence": proof} for record, proof in observations]
+    mismatch_records = previous_route_mismatches(native, previous, machines, pointer, minimum)
     return ledger.prepare(
         {key: pointer[key] for key in ("taskQueue", "surfaceHash")},
         [m["id"] for m in selected],

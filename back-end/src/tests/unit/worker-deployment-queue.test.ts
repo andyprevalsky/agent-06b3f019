@@ -1,3 +1,4 @@
+import { emptyRetentionCases } from './worker-empty-retention.cases';
 import { retainedRouteMismatchCases } from './worker-route-retention.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -425,6 +426,14 @@ async function main() {
       atomic(lease.ownerId));
     await test('two managed banks retain ACTIVE custody and release only certified old bank idempotently', () =>
       banks(lease.ownerId));
+    await test('explicit empty retention preserves ordinary legacy and managed full deployment', () =>
+      emptyRetentionCases({
+        api,
+        prisma,
+        owner: lease.ownerId,
+        app: appFor('empty-retention'),
+        identity,
+      }));
     await test('route mismatch retention is atomic, owned, non-destructive and reported honestly', async () => {
       const pointer = await prisma.agentQueuePointer.findUniqueOrThrow({
         where: { id: 'singleton' },

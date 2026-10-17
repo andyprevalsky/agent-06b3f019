@@ -50,14 +50,16 @@ export async function requireWorkerMachineNotRetained(
   if (await tx.toolSideEffect.findUnique({ where: { operationKey: holdKey(app, id) } }))
     throw new Error(`Machine ${id} is retained under an unresolved route mismatch hold`);
 }
-function records(plan: WorkerDeploymentPreparation): RouteMismatchRecord[] {
-  const value = plan.evidence?.retainedRouteMismatchRecords;
+export function routeMismatchRecords(
+  evidence: Record<string, unknown> | undefined
+): RouteMismatchRecord[] {
+  const value = evidence?.retainedRouteMismatchRecords;
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length !== 8) return fail();
+  if (!Array.isArray(value) || (value.length !== 0 && value.length !== 8)) return fail();
   return value as unknown as RouteMismatchRecord[];
 }
 async function validatePrior(tx: DB, job: WorkerDeploymentJob, plan: WorkerDeploymentPreparation) {
-  const held = records(plan);
+  const held = routeMismatchRecords(plan.evidence);
   if (!held.length) return held;
   const previous = plan.evidence?.previousRecords as unknown as RouteMismatchRecord[];
   if (!Array.isArray(previous)) return fail();
@@ -232,13 +234,10 @@ export async function requireRetainedDisposition(
   job: WorkerDeploymentJob,
   evidence: Record<string, Prisma.JsonValue>
 ) {
+  const held = routeMismatchRecords(job.evidence.PREPARING as Record<string, unknown> | undefined);
   if (evidence.priorDisposition === 'RETAINED_ROUTE_MISMATCH')
     return requireRetainedCompletion(tx, job, evidence);
-  if (
-    evidence.priorDisposition === 'RETIRED' &&
-    (job.evidence.PREPARING as { retainedRouteMismatchRecords?: unknown })
-      ?.retainedRouteMismatchRecords
-  )
+  if (evidence.priorDisposition === 'RETIRED' && held.length)
     throw new Error('Retained mismatch bank requires explicit unresolved disposition');
 }
 
@@ -308,10 +307,7 @@ export async function fenceEmptyRetainedSource(
 }
 
 export async function requireRetainedPreparation(tx: DB, job: WorkerDeploymentJob) {
-  if (
-    (job.evidence.PREPARING as { retainedRouteMismatchRecords?: unknown })
-      ?.retainedRouteMismatchRecords
-  )
+  if (routeMismatchRecords(job.evidence.PREPARING as Record<string, unknown> | undefined).length)
     await validateWorkerRouteRetention(tx, job);
 }
 
