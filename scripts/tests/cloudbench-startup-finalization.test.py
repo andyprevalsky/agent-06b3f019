@@ -323,6 +323,139 @@ class Startup(unittest.TestCase):
             ),
         )
 
+    def test_release_continuation_never_spawns_cleanup(self):
+        self.state.update(
+            operator_hashes={},
+            input_pins={},
+            machine={"id": self.state["machine_id"]},
+            owner={"pid": 12345},
+        )
+        self.state["proof"] = M["archive_proof"](self.state)
+        self.put(
+            self.export / "workspace-volume.ownership.json", {"volume_id": "vol_exact"}
+        )
+        original_proof = self.out / "startup-finalization/failure-proof.json"
+        original_proof.parent.mkdir()
+        self.put(original_proof, self.state["proof"])
+        self.state["prior_release"] = {
+            "proof": self.state["proof"],
+            "operator_ref": "oldoperator",
+            "files": {"failure-proof.json": M["sha"](original_proof.read_bytes())},
+        }
+        self.put(
+            self.out / "cleanup-call.intent.json",
+            {
+                "failure_proof_path": str(original_proof),
+                "failure_proof_sha256": M["sha"](original_proof.read_bytes()),
+                "supervisor_published": False,
+                "supervisor_joined": False,
+                "gate_joined": True,
+            },
+        )
+        self.put(
+            self.export / "disposable-controller.release.json",
+            {
+                "machine_id": self.state["machine_id"],
+                "volume_id": "vol_exact",
+                "machine_deleted": True,
+                "volume_disposition": "ABSENT",
+            },
+        )
+        (self.out / "payload-finalizer.lock").touch(mode=0o600)
+        calls = []
+
+        class NotFound(Exception):
+            pass
+
+        def api(method, path, body=None, timeout=20, observer=None):
+            calls.append((method, path))
+            observer(method, path, 404, b"not found")
+            raise NotFound()
+
+        api.__globals__["NotFound"] = NotFound
+        fixture = self
+
+        class Child:
+            pid = os.getpid()
+
+            def poll(self):
+                return 0
+
+            def wait(self):
+                fixture.put(
+                    fixture.export / "disposable-controller.release.json",
+                    {
+                        "machine_id": fixture.state["machine_id"],
+                        "volume_id": "vol_exact",
+                        "machine_deleted": True,
+                        "volume_disposition": "ABSENT",
+                    },
+                )
+                return 0
+
+        def retire(state, journal, closed):
+            closed()
+            self.assertEqual(len(calls), 2)
+            for number in (1, 2):
+                self.assertEqual(
+                    M["obj"](journal / f"wire-{number:06d}.raw.json")["status"], 404
+                )
+            return "PIDFD_EXIT_OBSERVED"
+
+        with (
+            patch.dict(
+                M["resume_release"].__globals__,
+                {
+                    "check": lambda _a: self.state,
+                    "prior_release": lambda _s: self.state["prior_release"],
+                },
+            ),
+            patch.dict(
+                M["F"],
+                {
+                    "api_for": lambda _s: SimpleNamespace(api=api),
+                    "cleanup_command": lambda _s: ["canonical-old-cleanup"],
+                    "selected_token": lambda _s: "private-token",
+                    "retire_caller": retire,
+                    "gate_gone": lambda _s: True,
+                },
+            ),
+            patch.object(
+                M["subprocess"], "Popen", side_effect=AssertionError("cleanup replay")
+            ),
+        ):
+            terminal = M["resume_release"](
+                SimpleNamespace(operator_ref="f" * 40), self.state
+            )
+        self.assertTrue(terminal["no_effect_replay"])
+        self.assertEqual(terminal["status"], "FAILED_BEFORE_SUPERVISOR")
+        self.assertFalse(terminal["supervisor_joined"])
+        self.assertEqual(
+            terminal["failure_proof_sha256"],
+            M["sha"](
+                (self.out / "startup-finalization/failure-proof.json").read_bytes()
+            ),
+        )
+
+    def test_destroyed_tombstone_requires_exact_incarnation_and_config(self):
+        native = {
+            "id": self.state["machine_id"],
+            "instance_id": "original",
+            "config": {"secret": "bound"},
+            "name": "exact",
+            "region": "iad",
+            "state": "destroyed",
+        }
+        self.state["machine"] = dict(native)
+        self.assertTrue(
+            M["released_native"](native, self.state, "machines", native["id"])
+        )
+        for key in ("id", "instance_id", "config", "name", "region", "state"):
+            changed = dict(native, **{key: "foreign"})
+            self.assertFalse(
+                M["released_native"](changed, self.state, "machines", native["id"])
+            )
+
     def test_evidence_pin_change_blocks_caller_signal(self):
         path = self.out / "caller.json"
         self.state.update(

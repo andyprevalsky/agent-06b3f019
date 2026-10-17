@@ -243,7 +243,13 @@ def check(args):
         "export/disposable-delete-machine.intent.json",
         "export/disposable-delete-volume.intent.json",
     ):
-        need(not os.path.lexists(out / name), "prior cleanup effect exists; no retry")
+        if not (
+            getattr(args, "resume_release", False)
+            or getattr(args, "check_release", False)
+        ):
+            need(
+                not os.path.lexists(out / name), "prior cleanup effect exists; no retry"
+            )
     names = (
         "cloudbench-startup-finalization.py",
         "cloudbench-controller-payload-finalization.py",
@@ -277,6 +283,8 @@ def check(args):
         for path in paths
     }
     state["proof"] = archive_proof(state)
+    if getattr(args, "resume_release", False) or getattr(args, "check_release", False):
+        state["prior_release"] = prior_release(state)
     return state
 
 
@@ -479,11 +487,232 @@ def finalize(args, state):
         os.close(fd)
 
 
+def prior_release(state):
+    out = Path(state["out"])
+    journal = out / "startup-finalization"
+    expected = {
+        "intent.json",
+        "failure-proof.json",
+        "cleanup.intent.json",
+        "cleanup.child.json",
+        "cleanup.joined.json",
+        "cleanup.log",
+    } | {
+        f"wire-{n:06d}.{kind}.json"
+        for n in (1, 2)
+        for kind in ("request", "raw", "decoded")
+    }
+    need(
+        {p.name for p in journal.iterdir()} == expected,
+        "unsupported prior startup journal",
+    )
+    files = {name: sha(read(journal / name)) for name in sorted(expected)}
+    intent = obj(journal / "intent.json")
+    roots = [
+        Path(p).parent.parent
+        for p in intent["operator_pins"]
+        if p.endswith("/scripts/cloudbench-startup-finalization.py")
+    ]
+    need(
+        len(roots) == 1
+        and intent["operator_hashes"]["cloudbench-startup-finalization.py"]
+        == "6335250eb296ae7be79d65f4fed1f8d8dfaaf8791aa25f7f05d7d57a9004f421",
+        "unsupported prior startup operator",
+    )
+    B["source_identity"](roots[0], intent["operator_ref"], intent["operator_hashes"])
+    try:
+        birth = R["birth"](intent["pid"])
+    except FileNotFoundError:
+        birth = None
+    need(birth != intent["birth"], "prior startup owner still live")
+    joined = obj(journal / "cleanup.joined.json")
+    need(
+        joined == {"exit_code": 0, "owned_join": True, "cancelled_signals": []},
+        "cleanup not positively joined",
+    )
+    need(
+        obj(journal / "cleanup.intent.json")
+        == {"argv": F["cleanup_command"](state), "no_supervisor": True},
+        "prior cleanup command differs",
+    )
+    proof = obj(journal / "failure-proof.json")
+    current = dict(state["proof"])
+    for key in ("operator_ref", "operator_pins"):
+        current[key] = proof[key]
+    need(current == proof, "prior startup proof changed")
+    release_check(state, proof)
+    for n in (1, 2):
+        request = obj(journal / f"wire-{n:06d}.request.json")
+        raw = obj(journal / f"wire-{n:06d}.raw.json")
+        import base64
+
+        body = base64.b64decode(raw["body_b64"], validate=True)
+        need(
+            request
+            == {
+                "method": "GET",
+                "path": "/machines/" + state["machine_id"],
+                "body": None,
+            }
+            and raw["method"] == "GET"
+            and raw["path"] == request["path"]
+            and raw["status"] == 200
+            and raw["bytes"] == len(body)
+            and raw["sha256"] == sha(body)
+            and json.loads(body) == obj(journal / f"wire-{n:06d}.decoded.json"),
+            "prior observation differs",
+        )
+    need(
+        all(
+            obj(journal / "wire-000001.decoded.json").get(k) == state["machine"].get(k)
+            for k in ("id", "instance_id", "config", "name", "region")
+        ),
+        "prior initial native identity differs",
+    )
+    need(
+        released_native(
+            obj(journal / "wire-000002.decoded.json"),
+            state,
+            "machines",
+            state["machine_id"],
+        ),
+        "prior release refusal not exact destroyed tombstone",
+    )
+    return {
+        "files": files,
+        "operator_ref": intent["operator_ref"],
+        "proof": proof,
+        "source_root": str(roots[0]),
+        "operator_hashes": intent["operator_hashes"],
+    }
+
+
+def released_native(native, state, kind, identifier):
+    if native is None:
+        return True
+    if kind == "volumes":
+        return native.get("id") == identifier and native.get("state") in (
+            "pending_destroy",
+            "destroyed",
+        )
+    return native.get("state") == "destroyed" and all(
+        native.get(k) == state["machine"].get(k)
+        for k in ("id", "instance_id", "config", "name", "region")
+    )
+
+
+def resume_release(args, state):
+    out = Path(state["out"])
+    fd = os.open(out / "payload-finalizer.lock", os.O_RDWR | os.O_NOFOLLOW)
+    cancelled = []
+    handlers = {
+        sig: signal.signal(sig, lambda sig, _: cancelled.append(sig))
+        for sig in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        info = os.fstat(fd)
+        need(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.geteuid()
+            and info.st_nlink == 1
+            and not info.st_mode & 0o077,
+            "private finalizer lock required",
+        )
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        need(
+            not os.path.lexists(out / "terminal.json")
+            and not os.path.lexists(out / "startup-release-observation"),
+            "prior continuation exists; no replay",
+        )
+        need(check(args) == state, "release continuation proof changed")
+        journal = out / "startup-release-observation"
+        journal.mkdir(mode=0o700)
+        save(
+            journal / "intent.json",
+            {
+                "operator_ref": args.operator_ref,
+                "operator_pins": state["operator_pins"],
+                "prior": state["prior_release"],
+                "no_effect_replay": True,
+            },
+        )
+        api = F["RecordedAPI"](F["api_for"](state), state, journal)
+        release = release_check(state, state["prior_release"]["proof"])
+        not_found = api.transport.api.__globals__["NotFound"]
+        for kind, identifier in (
+            ("machines", state["machine_id"]),
+            ("volumes", release["volume_id"]),
+        ):
+            need(not cancelled, "release continuation cancelled")
+            try:
+                native = api.request("GET", "/" + kind + "/" + identifier)
+                need(
+                    isinstance(native, dict), "non404 native observation must be object"
+                )
+            except not_found:
+                raw = obj(journal / f"wire-{api.sequence:06d}.raw.json")
+                need(
+                    raw["status"] == 404
+                    and raw["method"] == "GET"
+                    and raw["path"] == "/" + kind + "/" + identifier,
+                    "unconfirmed release absence",
+                )
+                native = None
+            need(
+                released_native(native, state, kind, identifier),
+                "resource release still pending",
+            )
+
+        def closed():
+            pin_check(state)
+            need(
+                not cancelled and F["gate_gone"](state),
+                "release continuation ownership changed",
+            )
+            need(
+                prior_release(state) == state["prior_release"],
+                "prior release journal changed",
+            )
+
+        closed()
+        retired = F["retire_caller"](state, journal, closed)
+        terminal = {
+            "status": "FAILED_BEFORE_SUPERVISOR",
+            "machine": state["machine_id"],
+            "source_ref": SOURCE,
+            "started_at_epoch": state["epoch"],
+            "original_deadline": state["deadline"],
+            "gate_reap": state["prior_release"]["proof"]["gate_reap"],
+            "supervisor_published": False,
+            "supervisor_joined": False,
+            "controller_cleanup_exit_code": 0,
+            "release": release,
+            "failure_proof_path": str(out / "startup-finalization/failure-proof.json"),
+            "failure_proof_sha256": sha(
+                read(out / "startup-finalization/failure-proof.json")
+            ),
+            "prior_finalizer_operator_ref": state["prior_release"]["operator_ref"],
+            "finalizer_operator_ref": args.operator_ref,
+            "caller_disposition": retired,
+            "no_effect_replay": True,
+            "benchmark_success_inferred": False,
+        }
+        save(out / "terminal.json", terminal)
+        save(journal / "complete.json", terminal)
+        return terminal
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+        os.close(fd)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     m = p.add_mutually_exclusive_group(required=True)
     m.add_argument("--check", action="store_true")
     m.add_argument("--run", action="store_true")
+    m.add_argument("--resume-release", action="store_true")
+    m.add_argument("--check-release", action="store_true")
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--config-sha256", required=True)
     p.add_argument("--run-directory", type=Path, required=True)
@@ -495,7 +724,9 @@ def main():
     print(
         json.dumps(
             {"status": "CHECKED", "provider_calls": 0, "proof": state["proof"]}
-            if args.check
+            if args.check or args.check_release
+            else resume_release(args, state)
+            if args.resume_release
             else finalize(args, state),
             sort_keys=True,
         )
