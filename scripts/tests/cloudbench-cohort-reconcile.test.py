@@ -7,9 +7,11 @@ import os
 from pathlib import Path
 import re
 import signal
+import tempfile
 import subprocess
 import time
 import unittest
+from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[2]
 MODULE=ROOT/'scripts/cloudbench-cohort-reconcile.py'
@@ -145,6 +147,68 @@ exit "$status"
 
 
 class CohortReconciliation(unittest.TestCase):
+    def test_canonical_snapshot_loads_reviewed_tickets_and_rejects_any_other_bytes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as name:
+            snapshot = Path(name)
+            old = subprocess.check_output(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    str(ROOT),
+                    "show",
+                    "49b792dcc2ea983325c6a25801da6c982f29c206:scripts/cloudbench-cohort-reconcile.py",
+                ]
+            )
+            (snapshot / MODULE.name).write_bytes(old)
+            for dependency in ("cloudbench-cleanup-tickets.py", "run-bench-fleet"):
+                (snapshot / dependency).write_bytes(
+                    (ROOT / "scripts" / dependency).read_bytes()
+                )
+            before = ReconciliationFixture(self, width=1)
+            with mock.patch.dict(
+                os.environ, CLOUDBENCH_TEST_RECONCILE_HELPER_DIR=str(snapshot)
+            ):
+                code, out, err = before.join(before.spawn(0))
+            self.assertNotEqual(code, 0)
+            self.assertIn("cleanup reconciliation dependency source changed", err)
+            self.assertEqual(before.metadata(), [])
+            self.assertFalse(
+                (before.ticket.cohort / "stale-reconcile.completed.json").exists()
+            )
+            before.assert_records_preserved()
+            # Same canonical fleet shell and actual adjacent ticket module;
+            # only the reviewed consumer pin changes, with no fake loader.
+            (snapshot / MODULE.name).write_bytes(MODULE.read_bytes())
+            after = ReconciliationFixture(self, width=1)
+            with mock.patch.dict(
+                os.environ, CLOUDBENCH_TEST_RECONCILE_HELPER_DIR=str(snapshot)
+            ):
+                code, out, err = after.join(after.spawn(0))
+            self.assertEqual(code, 0, out + err)
+            self.assertTrue(
+                (after.ticket.cohort / "stale-reconcile.completed.json").exists()
+            )
+            self.assertTrue(after.metadata())
+            after.assert_records_preserved()
+            # Arbitrary drift is still rejected before executing dependency or
+            # reading ownership; this repair is a single exact reviewed hash.
+            (snapshot / "cloudbench-cleanup-tickets.py").write_bytes(
+                (snapshot / "cloudbench-cleanup-tickets.py").read_bytes()
+                + b"\n# unreviewed drift\n"
+            )
+            foreign = ReconciliationFixture(self, width=1)
+            with mock.patch.dict(
+                os.environ, CLOUDBENCH_TEST_RECONCILE_HELPER_DIR=str(snapshot)
+            ):
+                code, out, err = foreign.join(foreign.spawn(0))
+            self.assertNotEqual(code, 0)
+            self.assertIn("cleanup reconciliation dependency source changed", err)
+            self.assertEqual(foreign.metadata(), [])
+            foreign.assert_records_preserved()
+
     def test_three_controllers_share_one_complete_scan(self):
         f=ReconciliationFixture(self,barrier=True,width=8)
         first=f.spawn(0);f.wait_entered()
