@@ -1,8 +1,13 @@
 /** Fresh write-domain claims: legacy bytes remain read-only archive evidence. */
+export type ObjectPointer = { key: string; etag: string };
+export type AgentIndexPointer = { index: ObjectPointer; revision: ObjectPointer };
 export type Claim = {
   state: 'pending' | 'published' | 'hidden';
   publication: string;
   body_etag?: string;
+  body_key?: string;
+  visibility_key?: string;
+  visibility_etag?: string;
 };
 export type OverlayCatalog = {
   format: 'benchmark-hub-overlay-v1';
@@ -10,7 +15,25 @@ export type OverlayCatalog = {
   revision: number;
   runs: Array<Record<string, unknown>>;
   claims: Record<string, Claim>;
+  agent_index?: AgentIndexPointer;
 };
+function validPointer(value: ObjectPointer | undefined): boolean {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 2 &&
+    /^publications\/[A-Za-z0-9-]+\/[A-Za-z0-9-]+\.json$/.test(value.key) &&
+    typeof value.etag === 'string' &&
+    value.etag
+  );
+}
+/** structuredClone does not preserve a dictionary's null prototype. */
+export function cloneOverlay(value: OverlayCatalog): OverlayCatalog {
+  const copy = structuredClone(value);
+  copy.claims = Object.assign(Object.create(null), copy.claims);
+  return copy;
+}
 export function parseOverlay(raw: string | null, epoch: string): OverlayCatalog {
   if (raw === null)
     return {
@@ -42,7 +65,34 @@ export function parseOverlay(raw: string | null, epoch: string): OverlayCatalog 
       (claim.state === 'published' && (typeof claim.body_etag !== 'string' || !claim.body_etag))
     )
       throw new Error('Invalid Hub overlay claim');
+    if (
+      claim.body_key !== undefined ||
+      claim.visibility_key !== undefined ||
+      claim.visibility_etag !== undefined
+    ) {
+      if (
+        claim.state !== 'published' ||
+        !validPointer({ key: claim.body_key!, etag: claim.body_etag! }) ||
+        !validPointer({ key: claim.visibility_key!, etag: claim.visibility_etag! }) ||
+        !claim.body_key?.startsWith(`publications/${claim.publication}/body-`) ||
+        !claim.visibility_key?.startsWith(`publications/${claim.publication}/visibility-`)
+      )
+        throw new Error('Invalid Hub committed publication pointers');
+    }
   }
+  if (
+    Object.hasOwn(v, 'agent_index') &&
+    (!v.agent_index ||
+      typeof v.agent_index !== 'object' ||
+      Array.isArray(v.agent_index) ||
+      Object.keys(v.agent_index).length !== 2 ||
+      !validPointer(v.agent_index.index) ||
+      !validPointer(v.agent_index.revision) ||
+      !v.agent_index.index.key.endsWith('/index.json') ||
+      v.agent_index.revision.key !==
+        v.agent_index.index.key.replace(/\/index\.json$/, '/revision.json'))
+  )
+    throw new Error('Invalid Hub committed agent index pointers');
   v.claims = Object.assign(Object.create(null), v.claims);
   const ids = new Set<string>();
   for (const row of v.runs) {

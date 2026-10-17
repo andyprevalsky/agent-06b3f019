@@ -5,7 +5,18 @@ import * as fs from 'node:fs/promises';
 import path from 'path';
 import { randomUUID } from 'node:crypto';
 import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
-import { parseOverlay, mergeCatalog, type OverlayCatalog } from './benchmarkHubOverlay';
+import {
+  parseOverlay,
+  mergeCatalog,
+  cloneOverlay,
+  type OverlayCatalog,
+  type ObjectPointer,
+} from './benchmarkHubOverlay';
+import {
+  beginPrivatePublications,
+  stagePublicationWrite,
+  commitPrivatePublications,
+} from './benchmarkHubPublicationCommit';
 import {
   assertHubStorageOwnership,
   hubStorageVersions,
@@ -18,14 +29,13 @@ if (EPOCH && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(EPOCH))
   throw new Error('Invalid Hub storage epoch');
 const WRITES_ENABLED = process.env.BENCHMARK_HUB_V2_WRITES === 'true';
 const KEY_PREFIX = EPOCH ? `benchmark-hub-v2/${EPOCH}` : LEGACY_PREFIX;
-const publications = new WeakMap<Map<string, string | null>, Map<string, string>>();
-const receipts = new WeakMap<
-  Map<string, string | null>,
-  Map<string, { etag: string; data: string }>
->();
 const pairReads = new WeakMap<
   Map<string, string | null>,
   Map<string, Promise<Array<{ raw: string | null; etag: string | null }>>>
+>();
+const committedPairs = new WeakMap<
+  Map<string, string | null>,
+  Promise<{ catalog: OverlayCatalog; pair: Array<{ raw: string | null; etag: string | null }> }>
 >();
 const backfillStamps = new WeakMap<Map<string, string | null>, string>();
 const remoteCache = new Map<string, { raw: string; etag: string }>();
@@ -133,7 +143,7 @@ function decodePublication(raw: string): string {
   return value.payload;
 }
 
-async function writeRemote(key: string, data: string, signal?: AbortSignal): Promise<void> {
+async function writeRemote(key: string, data: string, signal?: AbortSignal): Promise<string> {
   if (!EPOCH || !WRITES_ENABLED)
     throw new BenchmarkHubUnavailableError(
       'Hub publication is paused pending storage epoch activation'
@@ -158,16 +168,10 @@ async function writeRemote(key: string, data: string, signal?: AbortSignal): Pro
   assertHubStorageOwnership();
   if (!response.ETag) throw new Error('Hub write returned no ETag');
   versions?.set(physical, response.ETag);
-  if (versions) {
-    let own = receipts.get(versions);
-    if (!own) {
-      own = new Map();
-      receipts.set(versions, own);
-    }
-    own.set(physical, { etag: response.ETag, data: key.startsWith('visibility/') ? data : '' });
-  }
   remoteCache.delete(physical);
+  if (versions && key === 'index.json') committedPairs.delete(versions);
   if (versions && key.startsWith('agent-run-index')) pairReads.get(versions)?.delete(KEY_PREFIX);
+  return response.ETag;
 }
 async function catalog(signal?: AbortSignal, mutable = false): Promise<OverlayCatalog> {
   const value = await readRemoteObject('index.json', signal);
@@ -176,7 +180,7 @@ async function catalog(signal?: AbortSignal, mutable = false): Promise<OverlayCa
       etag: value.etag,
       value: parseOverlay(value.raw === null ? null : decodePublication(value.raw), EPOCH),
     };
-  return mutable ? structuredClone(parsedCatalog.value) : parsedCatalog.value;
+  return mutable ? cloneOverlay(parsedCatalog.value) : parsedCatalog.value;
 }
 /** Called only after the owning store has validated every selected publication. */
 export async function beginHubPublications(ids: string[]): Promise<void> {
@@ -185,44 +189,20 @@ export async function beginHubPublications(ids: string[]): Promise<void> {
     throw new BenchmarkHubUnavailableError(
       'Hub publication is paused pending storage epoch activation'
     );
-  await ownedHubStorageRequest(async (signal) => {
-    const versions = hubStorageVersions();
-    if (!versions) throw new Error('Hub publication requires SQL ownership');
-    const pending = new Map<string, string>();
-    const value = await catalog(signal, true);
-    for (const id of new Set(ids)) {
-      if (!/^[A-Za-z0-9._-]+$/.test(id)) throw new Error('Invalid Hub publication ID');
-      const publication = randomUUID();
-      pending.set(id, publication);
-      value.claims[id] = { state: 'pending', publication };
-    }
-    value.runs = value.runs.filter((row) => !pending.has(String(row.run_id)));
-    value.revision++;
-    await writeRemote('index.json', JSON.stringify(value), signal);
-    publications.set(versions, pending);
-  });
+  beginPrivatePublications(ids);
 }
 export async function putObject(key: string, data: string): Promise<void> {
   await ownedHubStorageRequest(async (signal) => {
     if (r2Configured()) {
+      if (!EPOCH || !WRITES_ENABLED)
+        throw new BenchmarkHubUnavailableError(
+          'Hub publication is paused pending storage epoch activation'
+        );
+      const io = { catalog, write: writeRemote };
       if (EPOCH && key === 'index.json') {
-        const value = await catalog(signal, true);
-        const versions = hubStorageVersions();
-        const pending = versions ? publications.get(versions) : undefined;
         const rows = JSON.parse(data) as Array<Record<string, unknown>>;
         if (!Array.isArray(rows)) throw new Error('Invalid Hub logical catalog');
-        for (const [id, publication] of pending ?? []) {
-          const own = versions ? receipts.get(versions) : undefined;
-          const body = own?.get(`${KEY_PREFIX}/runs/${id}.json`);
-          const marker = own?.get(`${KEY_PREFIX}/visibility/${id}.json`);
-          if (!body || marker?.data !== 'true' || value.claims[id]?.publication !== publication)
-            throw new Error('Hub publication is incomplete');
-          value.claims[id] = { state: 'published', publication, body_etag: body.etag };
-        }
-        value.runs = rows.filter((row) => value.claims[String(row.run_id)]?.state === 'published');
-        value.revision++;
-        await writeRemote(key, JSON.stringify(value), signal);
-        if (versions) publications.delete(versions);
+        await commitPrivatePublications(rows, io, signal);
         return;
       }
       const versions = hubStorageVersions();
@@ -234,15 +214,8 @@ export async function putObject(key: string, data: string): Promise<void> {
             ? { _hub_legacy_backfill: backfillStamps.get(versions) }
             : {}),
         });
-      await putHubObjectVersion(key, data);
-      const hidden = /^visibility\/([A-Za-z0-9._-]+)\.json$/.exec(key);
-      if (EPOCH && hidden && data === 'false') {
-        const value = await catalog(signal, true);
-        value.claims[hidden[1]] = { state: 'hidden', publication: randomUUID() };
-        value.runs = value.runs.filter((row) => row.run_id !== hidden[1]);
-        value.revision++;
-        await writeRemote('index.json', JSON.stringify(value), signal);
-      }
+      if (await stagePublicationWrite(key, data, io, signal)) return;
+      await writeRemote(key, data, signal);
       return;
     }
     const target = path.join(LOCAL_DIR, key);
@@ -341,6 +314,37 @@ async function agentPair(
   return pair;
 }
 
+async function readPointer(
+  pointer: ObjectPointer,
+  signal?: AbortSignal
+): Promise<{ raw: string; etag: string }> {
+  const value = await readRemoteObject(pointer.key, signal);
+  if (value.raw === null || value.etag !== pointer.etag)
+    throw new Error('Hub committed index pointer differs from its publication');
+  return { raw: value.raw, etag: value.etag };
+}
+
+/** Both logical compact-index keys project one captured committed catalog head. */
+async function committedAgentPair(signal?: AbortSignal) {
+  const versions = hubStorageVersions();
+  let pending = versions ? committedPairs.get(versions) : undefined;
+  if (!pending) {
+    pending = (async () => {
+      const value = await catalog(signal);
+      const pair = value.agent_index
+        ? await Promise.all(
+            [value.agent_index.index, value.agent_index.revision].map((pointer) =>
+              readPointer(pointer, signal)
+            )
+          )
+        : await agentPair(KEY_PREFIX, signal);
+      return { catalog: value, pair };
+    })();
+    if (versions) committedPairs.set(versions, pending);
+  }
+  return pending;
+}
+
 /** Null means confirmed missing; transport, ownership and codec faults throw. */
 export async function getObjectStrict(key: string): Promise<string | null> {
   return ownedHubStorageRequest(async (signal) => {
@@ -357,20 +361,31 @@ export async function getObjectStrict(key: string): Promise<string | null> {
       if (selected) {
         const value = await catalog(signal);
         const id = selected[2];
-        const claim = value.claims[id];
+        const claim = Object.hasOwn(value.claims, id) ? value.claims[id] : undefined;
         if (claim?.state === 'hidden') return selected[1] === 'visibility' ? 'false' : null;
         if (claim?.state === 'pending') throw new Error('Hub publication is pending');
-        const own = await readRemoteObject(key, signal);
+        const own = await readRemoteObject(
+          claim?.state === 'published'
+            ? ((selected[1] === 'runs' ? claim.body_key : claim.visibility_key) ?? key)
+            : key,
+          signal
+        );
         if (claim?.state === 'published') {
           const body =
-            selected[1] === 'runs' ? own : await readRemoteObject(`runs/${id}.json`, signal);
+            selected[1] === 'runs'
+              ? own
+              : await readRemoteObject(claim.body_key ?? `runs/${id}.json`, signal);
           if (body.raw === null || body.etag !== claim.body_etag)
             throw new Error('Hub body differs from committed publication');
           const marker =
             selected[1] === 'visibility'
               ? own
-              : await readRemoteObject(`visibility/${id}.json`, signal);
-          if (marker.raw === null || decodePublication(marker.raw) !== 'true')
+              : await readRemoteObject(claim.visibility_key ?? `visibility/${id}.json`, signal);
+          if (
+            marker.raw === null ||
+            (claim.visibility_etag && marker.etag !== claim.visibility_etag) ||
+            decodePublication(marker.raw) !== 'true'
+          )
             throw new Error('Hub committed visibility is missing');
           return own.raw === null ? null : decodePublication(own.raw);
         }
@@ -383,7 +398,9 @@ export async function getObjectStrict(key: string): Promise<string | null> {
         return (await readRemoteObject(key, signal, LEGACY_PREFIX)).raw;
       }
       const isAgentPair = key === 'agent-run-index.json' || key === 'agent-run-index-revision.json';
-      const pair = isAgentPair ? await agentPair(KEY_PREFIX, signal) : undefined;
+      const snapshot = isAgentPair ? await committedAgentPair(signal) : undefined;
+      const committed = snapshot?.catalog;
+      const pair = snapshot?.pair;
       const own = pair
         ? pair[key === 'agent-run-index.json' ? 0 : 1]
         : await readRemoteObject(key, signal);
@@ -409,7 +426,7 @@ export async function getObjectStrict(key: string): Promise<string | null> {
                   ([, id]) => !Object.hasOwn(value.claims, String(id))
                 )
               ),
-              _hub_cache_version: `${KEY_PREFIX}|missing|${legacy.etag}|${legacyPair[1].etag}|${parsedCatalog?.etag || 'missing'}`,
+              _hub_cache_version: `${KEY_PREFIX}|missing|${legacy.etag}|${legacyPair[1].etag}|${committed?.revision ?? 'missing'}`,
             });
           }
           return legacy.raw;
@@ -440,7 +457,7 @@ export async function getObjectStrict(key: string): Promise<string | null> {
           if (invalidLegacy && !backfilled && !sameObservation)
             throw new Error('Legacy Hub index trails its revision floor');
           const legacy = legacyDocument?.agents || {};
-          const value = await catalog(signal);
+          const value = committed!;
           const legacyRows = JSON.parse(
             remoteCache.get(`${LEGACY_PREFIX}/index.json`)?.raw || '[]'
           ) as Array<{ run_id: string }>;
@@ -466,7 +483,7 @@ export async function getObjectStrict(key: string): Promise<string | null> {
                 )
               ),
             },
-            _hub_cache_version: `${KEY_PREFIX}|${own.etag}|${other.etag}|${remoteCache.get(`${LEGACY_PREFIX}/${key}`)?.etag || 'missing'}|${floor.etag || 'missing'}|${parsedCatalog?.etag || 'missing'}`,
+            _hub_cache_version: `${KEY_PREFIX}|${own.etag}|${other.etag}|${remoteCache.get(`${LEGACY_PREFIX}/${key}`)?.etag || 'missing'}|${floor.etag || 'missing'}|${committed?.revision ?? 'missing'}`,
           });
         }
       }
@@ -534,7 +551,9 @@ export async function bindHubLegacyBackfill(stamp?: string): Promise<void> {
 
 /** Physical CAS boundary shared by logical publication and transport qualification. */
 export async function putHubObjectVersion(key: string, data: string): Promise<void> {
-  return ownedHubStorageRequest((signal) => writeRemote(key, data, signal));
+  return ownedHubStorageRequest(async (signal) => {
+    await writeRemote(key, data, signal);
+  });
 }
 export async function getHubObjectVersion(key: string): Promise<string | null> {
   return ownedHubStorageRequest(async (signal) => {
