@@ -2,6 +2,7 @@
 """One bounded read-only status capture for an explicitly bound original600 run."""
 import argparse
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -367,10 +368,19 @@ def binding(run,config=None,agents_env=None):
                 payload=dict(machine=mid,source_ref=ref,epoch=caller['epoch'],identity_path=caller['identity_path']))
 
 
+def status_command(payload):
+    encoded=base64.b64encode(json.dumps(payload).encode()).decode()
+    package=base64.b64encode(gzip.compress(json.dumps([REMOTE,encoded]).encode(),mtime=0)).decode()
+    loader="import base64,gzip,json,sys;source,payload=json.loads(gzip.decompress(base64.b64decode(sys.argv[1])));sys.argv=['original600-status',payload];exec(compile(source,'<original600-status>','exec'),{'__name__':'__main__'})"
+    return shlex.join(['python3','-S','-c',loader,package])
+
+
 def observe(api,value):
-    command=shlex.join(['python3','-S','-c',REMOTE,base64.b64encode(json.dumps(value['payload']).encode()).decode()])
+    command=status_command(value['payload'])
+    body={'cmd':command,'timeout':20,'machine':True}
+    need(len(json.dumps(body).encode())<=16384,'status exec exceeds bounded JSON transport')
     with bounded(25):
-        response=api.api('POST','/machines/'+value['machine']+'/exec',dict(cmd=command,timeout=20,machine=True),timeout=20)
+        response=api.api('POST','/machines/'+value['machine']+'/exec',body,timeout=20)
         need(isinstance(response,dict),'invalid native exec envelope')
         if response.get('exit_code',0)!=0 or response.get('exit_signal',0)!=0 or response.get('stderr') not in (None,''):
             return dict(status='TRANSPORT_UNKNOWN',machine=value['machine'],source_ref=value['source_ref'],original_epoch=value['payload']['epoch'])

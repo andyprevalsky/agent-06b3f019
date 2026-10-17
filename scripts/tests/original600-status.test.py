@@ -168,13 +168,12 @@ class Status(unittest.TestCase):
         self.assertFalse(result['benchmark_success_inferred'])
 
     def test_actual_remote_entrypoint_decodes_payload_and_reports_guest_mismatch(self):
-        import base64
         payload=dict(machine=self.mid,source_ref=self.ref,epoch=self.epoch,
                      identity_path='/tmp/gate/repo/.context/original600-supervisor.fixture.json')
         # Execute the exact production -S/-c body, including __main__. A wrong
         # guest identity returns UNKNOWN before Git or any other external call.
-        result=subprocess.run(['python3','-S','-c',M['REMOTE'],
-                               base64.b64encode(json.dumps(payload).encode()).decode()],
+        import shlex
+        result=subprocess.run(shlex.split(M['status_command'](payload)),
                               env=dict(os.environ,FLY_MACHINE_ID='ffffffffffffff'),
                               capture_output=True,text=True,timeout=3)
         self.assertEqual(result.returncode,0,result.stderr)
@@ -496,13 +495,22 @@ class Status(unittest.TestCase):
         class API:
             def api(inner,method,path,body,timeout):
                 calls.append((method,path,body,timeout))
+                if len(json.dumps(body).encode())>16384:
+                    return {'stdout':'','stderr':'PayloadTooLarge','exit_code':0}
                 return dict(stdout=json.dumps(result),stderr='',exit_code=0)
         actual=M['observe'](API(),value)
         self.assertEqual(actual['status'],'SUPERVISOR_NOT_PUBLISHED');self.assertEqual(len(calls),1)
         self.assertEqual(calls[0][:2],('POST','/machines/'+self.mid+'/exec'))
         import shlex
         argv=shlex.split(calls[0][2]['cmd']);self.assertEqual(argv[:3],['python3','-S','-c'])
-        self.assertEqual(argv[3],M['REMOTE'])
+        import base64
+        import gzip
+        source,encoded=json.loads(gzip.decompress(base64.b64decode(argv[4])))
+        self.assertEqual(source,M['REMOTE'])
+        self.assertEqual(json.loads(base64.b64decode(encoded)),value['payload'])
+        self.assertLessEqual(len(json.dumps(calls[0][2]).encode()),16384)
+        old=shlex.join(['python3','-S','-c',M['REMOTE'],encoded])
+        self.assertGreater(len(json.dumps({'cmd':old,'timeout':20,'machine':True}).encode()),16384)
         result['machine']='ffffffffffffff'
         with self.assertRaises(ValueError):M['observe'](API(),value)
         class Failed:
