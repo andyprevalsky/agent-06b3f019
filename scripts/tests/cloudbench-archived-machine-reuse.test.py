@@ -867,6 +867,42 @@ class IntegratedControls(unittest.TestCase):
             previous.doCleanups()
             latest.doCleanups()
 
+    def test_parked_mode_uses_guarded_carried_merge_and_rejects_duplicate_mode(self):
+        previous = runpy.run_path(str(Path(__file__).with_name("cloudbench-archived-owner-stop.test.py")))[
+            "ArchivedStop"
+        ]()
+        previous.setUp()
+        try:
+            inventory = json.loads(previous.inventory.read_text())
+            inventory[0].update(state="stopped", region="iad")
+            previous.inventory.write_text(json.dumps(inventory))
+            original = H["prepare_request"]([previous.run], previous.inventory, "c" * 32, "d" * 40)
+            row = copy.deepcopy(original["candidates"][0])
+            row["legacy_archive_sha256"] = row["archive_sha256"]
+            row["archive_sha256"] = "f" * 64
+            response = {"candidates": [row], "held_machine_ids": [],
+                        "archive": {"controller": "9" * 14, "archive_sha256": "f" * 64, "inputs": {}}}
+            load = H["module"]
+            calls = []
+
+            def modules(name):
+                if name == "cloudbench-parked-reservations.py":
+                    calls.append(name)
+                    return {"prepare": lambda *_: response}
+                return load(name)
+
+            run = previous.root / "parked-admission"
+            with mock.patch.dict(H["prepare_request"].__globals__, module=modules):
+                result = H["prepare_request"]([previous.run], previous.inventory, "c" * 32,
+                                              "d" * 40, parked_runs=[run])
+                self.assertEqual(result["candidates"], [row])
+                self.assertEqual(calls, ["cloudbench-parked-reservations.py"])
+                with self.assertRaisesRegex(ValueError, "overlapping reservation"):
+                    H["prepare_request"]([previous.run], previous.inventory, "c" * 32,
+                                         "d" * 40, unused_runs=[run], parked_runs=[run])
+        finally:
+            previous.doCleanups()
+
     def test_native_wire_reuses_auth_and_unique_durable_journals_on_resume(self):
         import http.server
         import threading

@@ -161,6 +161,17 @@ archives' stale native comparisons. The matching closed archive must independent
 prove current ownership before offering such a Machine as an ordinary archived
 candidate. Explicit user exclusions apply everywhere. Held IDs and their source
 archive hashes remain in the request; no old claim is cleared or granted credit.
+
+When a closed run also has parked, unpublished claim attempts, use
+`--parked-reservation-run "$CLOSED_ADMISSION_DIRECTORY"` instead of the unused
+option for that same directory. This explicit mode includes the ordinary
+untouched checks and may qualify a parked claim only from complete, hash-bound
+historical evidence and exact current stopped native state. It never edits the
+old attempt, manufactures its missing acknowledgment, or changes its outcome.
+Unknown writes stay held. Keep both the original lineage archive and the latest
+closed archive in `--archive-run` inputs. Eligibility still grants no quota:
+the normal new lease, version-checked reservation and fresh capacity readback
+must succeed before the next controller starts.
 The old reservation is never cleared or counted directly: only a new exclusive
 reservation and fresh native readback can give the new cohort capacity credit.
 Explicit `--reuse-exclude-machine` exclusions still apply. Missing evidence

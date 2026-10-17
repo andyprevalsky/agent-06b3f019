@@ -19,7 +19,7 @@ sources:
   - fleet run original600-1792228733439245508
   - agent 01a137e6-c4c8-7691-a3dd-52540286a46c
 repro: scripts/tests/cloudbench-unused-reservations.test.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -53,8 +53,12 @@ No claim, Machine configuration or volume is changed during preparation.
 
 Focused controls reproduce both the whole-request rejection and the stale
 original-archive rejection. The fixed controls exercise mixed requests, changed
-untouched rows, and a changed current marker. Actual next-run preparation is still
-required before this case can be closed.
+untouched rows, and a changed current marker. Actual normal preparation on
+`500babc9035912cbbdede1fa63b2d67ce960c7ac` then passed with 370 candidates
+from the complete run70 evidence. Its request hash was
+`0bf5e3d29b2c815c6331f69ee8cde016d7aa216a18e4b37d57513da69dce9e89`.
+This fixes partition and lineage handling; the measured remaining organization
+capacity gap is a separate admission requirement.
 
 ## Human feedback
 

@@ -20,7 +20,7 @@ sources:
   - fleet run original600-1792228733439245508
   - agent 01a137e6-c4c8-7691-a3dd-52540286a46c
 repro: scripts/tests/cloudbench-controller-payload-finalization.test.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -56,8 +56,11 @@ this route. Existing supervisor TERM and canonical cleanup ownership are retaine
 
 Focused controls cover the exact ECHILD envelope, read-only history, foreign
 requests, journal mutation, process birth, and resumed cancellation through owned
-cleanup and caller retirement. This is not yet proof of run70 resource closure;
-the case remains open until the actual continuation completes.
+cleanup and caller retirement. The actual run70 continuation subsequently
+completed with finalizer `1fc5b729ced76dda398f997650b8ba5d08eb522b`:
+the canonical terminal records controller release, cleanup exit zero and the
+unchanged original workload epoch. The original read failure remains in its
+retained journal; the failed benchmark was not regraded.
 
 ## Human feedback
 

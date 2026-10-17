@@ -19,7 +19,7 @@ sources:
   - fleet run original600-1792228733439245508
   - agent 01a137e6-c4c8-7691-a3dd-52540286a46c
 repro: scripts/tests/cloudbench-controller-payload-finalization.test.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -51,7 +51,11 @@ trace, a dead and positively joined child, the unchanged verified export, and no
 native deletion/release markers. It preserves the original cleanup intent and
 failed journal, rechecks the original supervisor/owner, and creates one exclusive
 successor journal. All ordinary unknown cleanup attempts still refuse replay.
-This case remains open until the actual cleanup and resource release complete.
+The actual run70 continuation on `1fc5b729ced76dda398f997650b8ba5d08eb522b`
+completed with cleanup exit zero and canonical controller release verified.
+The original failed child and cleanup intent remained intact; subsequent
+archive-owned STOP also confirmed all 911 Machines stopped. This establishes
+cleanup completion and does not change the failed benchmark outcome.
 
 ## Human feedback
 

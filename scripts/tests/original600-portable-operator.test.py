@@ -276,6 +276,15 @@ class Portable(unittest.TestCase):
             args.unused_reservation_run = [root/'different-admission']
             with self.assertRaisesRegex(ValueError, 'source/inputs/archives'):
                 CLI.open_admission(root,directory,CLI.admission_binding(args,RUNNER),RUNNER,True)
+            args.unused_reservation_run = []
+            args.parked_reservation_run = [root/'parked-admission']
+            parked = CLI.admission_binding(args, RUNNER)
+            self.assertEqual(parked['parked_reservation_runs'], [str(root/'parked-admission')])
+            self.assertEqual({k:v for k,v in parked.items() if k!='parked_reservation_runs'}, legacy)
+            parked_directory,_ = CLI.open_admission(root,None,parked,RUNNER,True)
+            args.parked_reservation_run = [root/'foreign-parked-admission']
+            with self.assertRaisesRegex(ValueError, 'source/inputs/archives'):
+                CLI.open_admission(root,parked_directory,CLI.admission_binding(args,RUNNER),RUNNER,True)
 
     def test_large_launch_payload_uses_a_small_hash_bound_file_command(self):
         with tempfile.TemporaryDirectory() as name:
@@ -432,16 +441,19 @@ class Portable(unittest.TestCase):
                 def api(self,method,path,timeout):
                     calls.append((method,path))
                     return [{'id':str(i)} for i in range(417)]
-            helper={'prepare_request':lambda *unused:request,'validate_request':lambda *unused:None,
+            prepared=[]
+            helper={'prepare_request':lambda *args:prepared.append(args) or request,'validate_request':lambda *unused:None,
                     'capacity_demand':lambda *unused:{'qualified_reuse_count':375}}
             with patch.object(CLI.urllib.request,'urlopen',return_value=io.BytesIO(json.dumps(settings).encode())), \
                  patch.object(CLI.subprocess,'run',return_value=apps),patch.object(CLI,'reuse_module',return_value=helper):
-                result=CLI.capacity(API,'fixture','personal',directory,1,[directory/'old-run'],'a'*40)
+                result=CLI.capacity(API,'fixture','personal',directory,1,[directory/'old-run'],'a'*40,
+                                    parked_runs=[directory/'parked-run'])
             baseline=directory/'without-reuse';baseline.mkdir()
             with patch.object(CLI.urllib.request,'urlopen',return_value=io.BytesIO(json.dumps(settings).encode())), \
                  patch.object(CLI.subprocess,'run',return_value=apps),self.assertRaisesRegex(ValueError,'insufficient measured capacity'):
                 CLI.capacity(API,'fixture','personal',baseline,1)
             self.assertEqual(result['available_slots_conservative'],582)
+            self.assertEqual(prepared[0][-1],[directory/'parked-run'])
             self.assertEqual(result['eligible_reuse_count'],375)
             self.assertEqual(result['qualified_reuse_count'],0)
             self.assertEqual(result['new_machine_demand'],601)
