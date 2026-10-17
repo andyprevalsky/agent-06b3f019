@@ -159,9 +159,15 @@ def execute(v):
 
 
 def command(payload):
-    package = base64.b64encode(gzip.compress(json.dumps([GUEST, payload]).encode(), mtime=0)).decode()
+    package = base64.b64encode(
+        gzip.compress(json.dumps([GUEST, payload]).encode(), mtime=0)
+    ).decode()
     loader = "import base64,gzip,json,sys;s,v=json.loads(gzip.decompress(base64.b64decode(sys.argv[1])));exec(s);print(json.dumps(execute(v),sort_keys=True))"
-    body = {"cmd": shlex.join(["python3", "-S", "-c", loader, package]), "timeout": 18, "machine": True}
+    body = {
+        "cmd": shlex.join(["python3", "-S", "-c", loader, package]),
+        "timeout": 18,
+        "machine": True,
+    }
     need(len(json.dumps(body).encode()) <= 16384, "bounded drain exec body required")
     return body
 
@@ -175,7 +181,14 @@ def local_state(args):
         if Path(p).name == "cloudbench-controller-payload-finalization.py"
     }
     need(len(roots) == 1, "ambiguous captured source")
-    F["validate"](state, args.config, args.config_sha256, out, state["operator_ref"], Path(roots.pop()))
+    F["validate"](
+        state,
+        args.config,
+        args.config_sha256,
+        out,
+        state["operator_ref"],
+        Path(roots.pop()),
+    )
     need(time.time() >= state["deadline"], "original clock has not expired")
     names = (
         "cloudbench-controller-orphan-drain.py",
@@ -187,7 +200,10 @@ def local_state(args):
     hashes = {n: sha((HERE / n).read_bytes()) for n in names}
     pins = B["source_identity"](HERE.parent, args.operator_ref, hashes)
     journal = args.joined_journal.absolute()
-    need(journal.parent == out and journal.resolve(strict=True) == journal, "exact prior joined journal required")
+    need(
+        journal.parent == out and journal.resolve(strict=True) == journal,
+        "exact prior joined journal required",
+    )
     files = {p.name: sha(read(p)) for p in journal.iterdir()}
     requests = {}
     probe = {
@@ -197,13 +213,27 @@ def local_state(args):
         "identity_path": state["caller"]["identity_path"],
         "action": "PROBE",
     }
-    expected = {"cmd": R["exec_command"](R["REMOTE_CONTROL"], probe), "timeout": 20, "machine": True}
+    expected = {
+        "cmd": R["exec_command"](R["REMOTE_CONTROL"], probe),
+        "timeout": 20,
+        "machine": True,
+    }
     for name in files:
         if name.endswith(".request.json"):
             value = F["obj"](journal / name)
             need(
-                value == {"method": "GET", "path": "/machines/" + state["machine_id"], "body": None}
-                or value == {"method": "POST", "path": "/machines/" + state["machine_id"] + "/exec", "body": expected},
+                value
+                == {
+                    "method": "GET",
+                    "path": "/machines/" + state["machine_id"],
+                    "body": None,
+                }
+                or value
+                == {
+                    "method": "POST",
+                    "path": "/machines/" + state["machine_id"] + "/exec",
+                    "body": expected,
+                },
                 "prior journal contains effects",
             )
             requests[name.removesuffix(".request.json")] = value
@@ -212,7 +242,8 @@ def local_state(args):
     pending_raw = read(args.pending)
     pending = json.loads(pending_raw)
     need(
-        pending["status"] == "pending" and pending["reason"] == "live controller writers",
+        pending["status"] == "pending"
+        and pending["reason"] == "live controller writers",
         "pending writers proof required",
     )
     state["_drain"] = {
@@ -230,15 +261,15 @@ def local_state(args):
 
 def run(args, state):
     out = Path(state["out"]) / "registered-orphan-drain"
-    payload = dict(
-        machine=state["machine_id"],
-        source_ref=state["source_ref"],
-        epoch=state["epoch"],
-        deadline=state["deadline"],
-        joined=state["_drain"]["joined"],
-        launch_sha256=state["_drain"]["launch_sha256"],
-        operator_ref=args.operator_ref,
-    )
+    payload = {
+        "machine": state["machine_id"],
+        "source_ref": state["source_ref"],
+        "epoch": state["epoch"],
+        "deadline": state["deadline"],
+        "joined": state["_drain"]["joined"],
+        "launch_sha256": state["_drain"]["launch_sha256"],
+        "operator_ref": args.operator_ref,
+    }
     payload["fleet_source_sha256"] = sha(
         subprocess.check_output(
             [
@@ -271,7 +302,10 @@ def run(args, state):
         base = "/machines/" + state["machine_id"]
         current = api.request("GET", base, timeout=18)
         need(
-            all(current.get(k) == state["machine"].get(k) for k in ("id", "instance_id", "config", "name", "region")),
+            all(
+                current.get(k) == state["machine"].get(k)
+                for k in ("id", "instance_id", "config", "name", "region")
+            ),
             "native controller changed",
         )
         response = api.request("POST", base + "/exec", body, timeout=18)
@@ -290,7 +324,11 @@ def run(args, state):
     plan = call("plan")
     for batch in range((plan["targets"] + 15) // 16):
         call("signal", batch=batch, plan_sha256=plan["plan_sha256"])
-    return {"status": "REGISTERED_OWNER_TERMS_REQUESTED", "targets": plan["targets"], "no_release_claim": True}
+    return {
+        "status": "REGISTERED_OWNER_TERMS_REQUESTED",
+        "targets": plan["targets"],
+        "no_release_claim": True,
+    }
 
 
 def main():
@@ -308,7 +346,9 @@ def main():
     args = p.parse_args()
     os.umask(0o077)
     state = local_state(args)
-    result = {"status": "CHECKED", "provider_calls": 0} if args.check else run(args, state)
+    result = (
+        {"status": "CHECKED", "provider_calls": 0} if args.check else run(args, state)
+    )
     print(json.dumps(result, sort_keys=True))
 
 

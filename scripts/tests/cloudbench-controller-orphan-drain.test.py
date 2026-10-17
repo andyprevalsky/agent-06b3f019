@@ -6,15 +6,15 @@ import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
 import runpy
 import shlex
 import socket
 import subprocess
 import tempfile
 import time
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 M = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-orphan-drain.py"))
@@ -30,13 +30,18 @@ class Drain(unittest.TestCase):
         for path in (self.repo / "scripts", self.common, self.custody):
             path.mkdir(parents=True, exist_ok=True)
         self.script = self.repo / "scripts/run-bench-fleet"
-        self.script.write_text("trap 'exit 0' TERM\nwhile :; do read -r -t .1 ignored || true; done\n")
+        self.script.write_text(
+            "trap 'exit 0' TERM\nwhile :; do read -r -t .1 ignored || true; done\n"
+        )
         self.token = "a" * 32
         self.registry = self.common / "cloudbench-fleet-ownership" / self.token
         self.registry.mkdir(parents=True)
         self.audit = self.common / "cloudbench-fleet-audits" / self.token
         self.audit.mkdir(parents=True)
-        self.seed = self.repo / ".context/benchmarks/campaigns/exact/startup-cohorts/c001/seed-proof.private.json"
+        self.seed = (
+            self.repo
+            / ".context/benchmarks/campaigns/exact/startup-cohorts/c001/seed-proof.private.json"
+        )
         self.seed.parent.mkdir(parents=True)
         self.ref = "b" * 40
         self.taskref = "570830dbf17635e13d16a6f03b4d705f6b6443b1"
@@ -47,7 +52,15 @@ class Drain(unittest.TestCase):
             "owner": {"parent_pid": "3061"},
         }
         self.child = subprocess.Popen(
-            ["bash", str(self.script), self.task, "--strict-barrier", "--ref", self.taskref, "--foreground"],
+            [
+                "bash",
+                str(self.script),
+                self.task,
+                "--strict-barrier",
+                "--ref",
+                self.taskref,
+                "--foreground",
+            ],
             cwd=self.repo,
             stdin=subprocess.DEVNULL,
             env=dict(
@@ -58,8 +71,9 @@ class Drain(unittest.TestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        self.ns = {}
-        exec(M["GUEST"], self.ns)
+        guest_path = self.root / "orphan-guest.py"
+        guest_path.write_text(M["GUEST"])
+        self.ns = runpy.run_path(str(guest_path))["execute"].__globals__
         for _ in range(100):
             try:
                 self.process = self.ns["process"](self.child.pid)
@@ -84,8 +98,13 @@ class Drain(unittest.TestCase):
         path = self.repo / ".context/fleet/runs" / self.run / self.task
         path.mkdir(parents=True)
         (path / "archived-successor.json").write_text(json.dumps(successor))
-        jobs = {"r001-j" + str(i).zfill(4): self.child.pid if i == 1 else 100000 + i for i in range(1, 601)}
-        (self.seed.parent / "manifest.json").write_text(json.dumps({"cohort_id": "c001", "jobs": jobs}))
+        jobs = {
+            "r001-j" + str(i).zfill(4): self.child.pid if i == 1 else 100000 + i
+            for i in range(1, 601)
+        }
+        (self.seed.parent / "manifest.json").write_text(
+            json.dumps({"cohort_id": "c001", "jobs": jobs})
+        )
         self.meta = {
             "version": "2",
             "app": "navi-whisper-lux-bench",
@@ -110,8 +129,15 @@ class Drain(unittest.TestCase):
             FLEET_SHA=hashlib.sha256(self.script.read_bytes()).hexdigest(),
             EXPECTED_FLEET_SHA=hashlib.sha256(self.script.read_bytes()).hexdigest(),
         )
-        self.pending = {"writers": [{"pid": self.child.pid, "birth": self.process["birth"]}]}
-        self.ns["prerequisites"] = lambda value: (self.repo, self.common, self.custody, self.pending)
+        self.pending = {
+            "writers": [{"pid": self.child.pid, "birth": self.process["birth"]}]
+        }
+        self.ns["prerequisites"] = lambda value: (
+            self.repo,
+            self.common,
+            self.custody,
+            self.pending,
+        )
         self.payload = {
             "identity_sha256": "c" * 64,
             "operator_ref": "d" * 40,
@@ -120,7 +146,9 @@ class Drain(unittest.TestCase):
         }
 
     def write_meta(self):
-        (self.registry / "meta").write_text("".join(k + "=" + v + "\n" for k, v in self.meta.items()))
+        (self.registry / "meta").write_text(
+            "".join(k + "=" + v + "\n" for k, v in self.meta.items())
+        )
 
     def tearDown(self):
         if self.child.poll() is None:
@@ -139,11 +167,27 @@ class Drain(unittest.TestCase):
     def test_registered_owner_pidfd_term_once_and_observe(self):
         planned = self.ns["execute"](dict(self.payload, action="plan"))
         self.assertEqual(planned["targets"], 1)
-        result = self.ns["execute"](dict(self.payload, action="signal", batch=0, plan_sha256=planned["plan_sha256"]))
+        result = self.ns["execute"](
+            dict(
+                self.payload,
+                action="signal",
+                batch=0,
+                plan_sha256=planned["plan_sha256"],
+            )
+        )
         self.assertEqual(result["results"][0]["state"], "TERM_SENT_NOT_JOINED")
         self.assertEqual(self.child.wait(timeout=3), 0)
-        repeat = self.ns["execute"](dict(self.payload, action="signal", batch=0, plan_sha256=planned["plan_sha256"]))
-        self.assertEqual(repeat["results"][0]["state"], "INTENT_EXISTS_UNKNOWN_NO_REPLAY")
+        repeat = self.ns["execute"](
+            dict(
+                self.payload,
+                action="signal",
+                batch=0,
+                plan_sha256=planned["plan_sha256"],
+            )
+        )
+        self.assertEqual(
+            repeat["results"][0]["state"], "INTENT_EXISTS_UNKNOWN_NO_REPLAY"
+        )
         observed = self.ns["execute"](dict(self.payload, action="observe"))
         self.assertTrue(observed["no_signal"])
         self.assertEqual(len(observed["intents"]), 1)
@@ -157,16 +201,27 @@ class Drain(unittest.TestCase):
         self.assertEqual(planned["targets"], 0)
         self.assertEqual(planned["held"], 1)
         self.assertIsNone(self.child.poll())
-        self.assertEqual(list((self.custody / "registered-orphan-drain").glob("term-*")), [])
+        self.assertEqual(
+            list((self.custody / "registered-orphan-drain").glob("term-*")), []
+        )
 
     def test_identity_change_between_plan_and_effect_denies_signal(self):
         planned = self.ns["execute"](dict(self.payload, action="plan"))
         self.meta["run_id"] = "20261017-170847-" + str(self.child.pid)
         self.write_meta()
-        result = self.ns["execute"](dict(self.payload, action="signal", batch=0, plan_sha256=planned["plan_sha256"]))
+        result = self.ns["execute"](
+            dict(
+                self.payload,
+                action="signal",
+                batch=0,
+                plan_sha256=planned["plan_sha256"],
+            )
+        )
         self.assertEqual(result["results"][0]["state"], "HELD")
         self.assertIsNone(self.child.poll())
-        self.assertEqual(list((self.custody / "registered-orphan-drain").glob("term-*")), [])
+        self.assertEqual(
+            list((self.custody / "registered-orphan-drain").glob("term-*")), []
+        )
 
     def test_process_uid_must_match_before_pidfd_intent(self):
         with self.assertRaisesRegex(ValueError, "UID"):
@@ -195,9 +250,12 @@ class Drain(unittest.TestCase):
             child.stdout.close()
 
     def test_expired_joined_driver_and_pending_proofs_before_any_intent(self):
-        actual = {}
-        exec(M["GUEST"], actual)
-        actual["pwd"] = SimpleNamespace(getpwnam=lambda name: SimpleNamespace(pw_uid=os.geteuid()))
+        actual = runpy.run_path(str(self.root / "orphan-guest.py"))[
+            "execute"
+        ].__globals__
+        actual["pwd"] = SimpleNamespace(
+            getpwnam=lambda name: SimpleNamespace(pw_uid=os.geteuid())
+        )
         launch = {
             "source_ref": self.ref,
             "machine_id": "84ed412b11d168",
@@ -233,8 +291,16 @@ class Drain(unittest.TestCase):
             fleet_source_sha256=hashlib.sha256(self.script.read_bytes()).hexdigest(),
             launch_sha256=hashlib.sha256(launch_raw).hexdigest(),
             joined={
-                "identity": {"machine": "84ed412b11d168", "source_ref": self.ref, "epoch": time.time() - 6000},
-                "terminal": {"parent_joined": True, "supervisor_joined": True, "parent_pid": 99999999},
+                "identity": {
+                    "machine": "84ed412b11d168",
+                    "source_ref": self.ref,
+                    "epoch": time.time() - 6000,
+                },
+                "terminal": {
+                    "parent_joined": True,
+                    "supervisor_joined": True,
+                    "parent_pid": 99999999,
+                },
             },
         )
         payload["joined"]["identity"]["epoch"] = payload["epoch"]
@@ -242,9 +308,13 @@ class Drain(unittest.TestCase):
         os.environ["GATE_REF"] = self.ref
         cwd = Path.cwd()
         try:
-            self.assertEqual(actual["prerequisites"](payload, self.repo, self.custody)[0], self.repo)
+            self.assertEqual(
+                actual["prerequisites"](payload, self.repo, self.custody)[0], self.repo
+            )
             with self.assertRaisesRegex(ValueError, "clock"):
-                actual["prerequisites"](dict(payload, deadline=time.time() + 60), self.repo, self.custody)
+                actual["prerequisites"](
+                    dict(payload, deadline=time.time() + 60), self.repo, self.custody
+                )
             joined_path.unlink()
             with self.assertRaises(FileNotFoundError):
                 actual["prerequisites"](payload, self.repo, self.custody)
