@@ -37,6 +37,69 @@ def raw(path, limit=16*1024*1024):
 
 def sha(data): return hashlib.sha256(data).hexdigest()
 def obj(path): return json.loads(raw(path))
+
+
+def manifest_bytes(path):
+    """Read export metadata separately from the 16 MiB operational inputs."""
+    path = Path(path).absolute()
+    need(
+        path.name == "manifest.json" and path.parent.name == "export",
+        "export manifest required",
+    )
+    return raw(path, 64 * 1024 * 1024)
+
+
+def archive_digest(path):
+    """Recheck the full export on one private stable descriptor, in bounded memory."""
+    path = Path(path).absolute()
+    need(
+        path.name == "originals.tar.gz" and path.parent.name == "export",
+        "export archive required",
+    )
+    need(path.resolve(strict=True) == path, "physical archive required")
+
+    def stable(s):
+        return (
+            s.st_dev,
+            s.st_ino,
+            s.st_mode,
+            s.st_uid,
+            s.st_gid,
+            s.st_nlink,
+            s.st_size,
+            s.st_mtime_ns,
+            s.st_ctime_ns,
+        )
+
+    digest = hashlib.sha256()
+    with os.fdopen(
+        os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
+    ) as stream:
+        before = os.fstat(stream.fileno())
+        need(
+            stat.S_ISREG(before.st_mode)
+            and before.st_uid == os.getuid()
+            and not before.st_mode & 0o077
+            and before.st_nlink == 1,
+            "private regular current-owner archive required",
+        )
+        remaining = before.st_size
+        while remaining:
+            block = stream.read(min(1024 * 1024, remaining))
+            need(bool(block), "archive shortened during hashing")
+            digest.update(block)
+            remaining -= len(block)
+        need(
+            not stream.read(1)
+            and stable(before)
+            == stable(os.fstat(stream.fileno()))
+            == stable(path.lstat())
+            and path.resolve(strict=True) == path,
+            "archive changed during hashing",
+        )
+    return digest.hexdigest()
+
+
 def digest_file(path):
     h=hashlib.sha256()
     with Path(path).open('rb') as f:
@@ -253,7 +316,7 @@ def prepare(run, inventory_path, excluded_machines=(), acknowledged_creates=()):
     run=Path(run).absolute(); export=run/'export'
     terminal=obj(run/'terminal.json'); intent=obj(run/'cleanup-call.intent.json')
     authority=obj(run/'authority.private.json'); verified=obj(export/'disposable-export.verified.json')
-    manifest=obj(export/'manifest.json'); record=obj(export/'launch.json')
+    manifest=json.loads(manifest_bytes(export/'manifest.json')); record=obj(export/'launch.json')
     app=record['app']; host=record['machine_id']
     need(app=='navi-whisper-lux-bench' and record['host']==host,'original app/controller mismatch')
     need(terminal['status']=='CONTROLLER_RELEASE_VERIFIED' and terminal['machine']==host

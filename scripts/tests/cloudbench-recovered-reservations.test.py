@@ -6,6 +6,7 @@ import copy
 import json
 import runpy
 import shutil
+import tracemalloc
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -233,10 +234,38 @@ class Recovered(unittest.TestCase):
             },
         )
         closure = M["C"]["U"]["CLOSED"]["prepare"](closed, self.f.inventory)
+        # A valid gzip archive can have trailing zero padding. Keep the real
+        # archive and full closure checks while exceeding the former read cap.
+        archive = closed / "export/originals.tar.gz"
+        with archive.open("r+b") as stream:
+            stream.truncate(256 * 1024 * 1024 + 1)
+        manifest_path = closed / "export/manifest.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        closed_reader = M["C"]["U"]["CLOSED"]
+        manifest["archive_sha256"] = closed_reader["digest_file"](archive)
+        write(manifest_path, manifest)
+        verified_path = closed / "export/disposable-export.verified.json"
+        verified = json.loads(verified_path.read_bytes())
+        for name in ("manifest.json", "originals.tar.gz"):
+            verified["files"][name] = closed_reader["digest_file"](
+                closed / "export" / name
+            )
+        write(verified_path, verified)
+        cleanup_path = closed / "cleanup-call.intent.json"
+        cleanup = json.loads(cleanup_path.read_bytes())
+        cleanup["export_verified_file"] = closed_reader["digest_file"](verified_path)
+        write(cleanup_path, cleanup)
+        closure = closed_reader["prepare"](closed, self.f.inventory)
         with mock.patch.dict(
             M["I"], SOURCE="a" * 40, historical_plan=lambda *_args: plan
         ):
-            context = M["load"](self.f.outer, closed, config, closure, {})
+            tracemalloc.start()
+            try:
+                context = M["load"](self.f.outer, closed, config, closure, {})
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            self.assertLess(peak, 64 * 1024 * 1024)
             self.assertEqual(context["request"], request)
             self.assertNotEqual(
                 identity,
@@ -248,6 +277,14 @@ class Recovered(unittest.TestCase):
             write(self.journal / "complete.json", complete)
             with self.assertRaises(ValueError):
                 M["load"](self.f.outer, closed, config, closure, {})
+        archive.chmod(0o644)
+        with self.assertRaises(ValueError):
+            closed_reader["archive_digest"](archive)
+        archive.chmod(0o600)
+        alias = archive.with_name("alias.tar.gz")
+        alias.symlink_to(archive)
+        with self.assertRaises(ValueError):
+            closed_reader["archive_digest"](alias)
 
 
 if __name__ == "__main__":

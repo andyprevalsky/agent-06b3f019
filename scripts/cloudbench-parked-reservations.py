@@ -92,7 +92,7 @@ def protocol(ref):
 
 
 def collect(closed, held, inputs):
-    manifest = U["obj"](closed / "export/manifest.json", inputs)
+    manifest = U["archive_manifest"](closed, inputs)
     roots = {}
     for row in held:
         for evidence in row["claim_evidence"]:

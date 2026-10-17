@@ -66,8 +66,13 @@ def load(outer, closed, config, closure, inputs):
     }
     need(required <= set(closure["inputs"]), "incomplete closed context")
     for path, expected in closure["inputs"].items():
-        raw = C["U"]["CLOSED"]["raw"](Path(path), 256 * 1024 * 1024)
-        need(sha(raw) == expected, "closed context bytes changed")
+        if Path(path) == closed / "export/originals.tar.gz":
+            observed = C["U"]["CLOSED"]["archive_digest"](Path(path))
+        else:
+            # Buffered read(n) may reserve n bytes even for a small file.
+            limit = min(Path(path).lstat().st_size, 256 * 1024 * 1024)
+            observed = sha(C["U"]["CLOSED"]["raw"](Path(path), limit))
+        need(observed == expected, "closed context bytes changed")
         inputs[path] = expected
     launch = obj(outer / "controller-launch.intent.json", inputs)
     config_path = Path(launch["config_path"])

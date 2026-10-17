@@ -50,6 +50,13 @@ def obj(path, inputs):
     return json.loads(read(path, inputs))
 
 
+def archive_manifest(run, inputs):
+    path = Path(run).absolute() / "export/manifest.json"
+    raw = CLOSED["manifest_bytes"](path)
+    inputs[str(path)] = digest(raw)
+    return json.loads(raw)
+
+
 def closed_run(outer, inputs):
     launch = obj(outer / "controller-launch.intent.json", inputs)
     original_config = Path(launch["config_path"])
@@ -142,7 +149,7 @@ def closed_run(outer, inputs):
 
 def archive_members(run, closure, request, config, inputs):
     """The full verified archive is the closed world for allocation absence."""
-    manifest = obj(run / "export/manifest.json", inputs)
+    manifest = archive_manifest(run, inputs)
     need(not manifest.get("excluded"), "archive exclusions cannot prove claim absence")
     imported = "git-common/cloudbench-archived-reuse-" + request["cohort"] + ".json"
     seen, claimed, imported_raw = set(), {}, None

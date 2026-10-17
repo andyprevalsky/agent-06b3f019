@@ -15,6 +15,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[2]
 S=runpy.run_path(os.environ.get('CLOUDBENCH_TEST_ARCHIVED_STOP_MODULE',str(ROOT/'scripts/cloudbench-archived-owner-stop.py')))
@@ -298,6 +299,83 @@ class ArchivedStop(unittest.TestCase):
         terminal=json.loads((self.run/'terminal.json').read_text());terminal['release']['machine_deleted']=False
         write(self.run/'terminal.json',terminal)
         with self.assertRaises(ValueError):S['prepare'](self.run,self.inventory)
+
+    def test_large_export_manifest_keeps_full_integrity_and_operational_limit(self):
+        export = self.run / "export"
+        path = export / "manifest.json"
+        manifest = json.loads(path.read_bytes())
+        manifest["fixture_padding"] = "x" * (16 * 1024 * 1024)
+        write(path, manifest)
+        verified_path = export / "disposable-export.verified.json"
+        verified = json.loads(verified_path.read_bytes())
+        verified["files"]["manifest.json"] = S["digest_file"](path)
+        write(verified_path, verified)
+        intent_path = self.run / "cleanup-call.intent.json"
+        intent = json.loads(intent_path.read_bytes())
+        intent["export_verified_file"] = S["digest_file"](verified_path)
+        write(intent_path, intent)
+        with self.assertRaises(ValueError):
+            S["raw"](path)
+        plan = S["prepare"](self.run, self.inventory)
+        self.assertEqual([row["machine"]["id"] for row in plan["targets"]], [self.mid])
+        unused = runpy.run_path(str(ROOT / "scripts/cloudbench-unused-reservations.py"))
+        parked = runpy.run_path(str(ROOT / "scripts/cloudbench-parked-reservations.py"))
+        inputs = {}
+        self.assertEqual(unused["archive_manifest"](self.run, inputs), manifest)
+        self.assertEqual(inputs[str(path)], verified["files"]["manifest.json"])
+        self.assertEqual(parked["collect"](self.run, [], {}), {})
+        manifest["fixture_padding"] = "y" + manifest["fixture_padding"][1:]
+        write(path, manifest)
+        with self.assertRaisesRegex(ValueError, "verified export artifact changed"):
+            S["prepare"](self.run, self.inventory)
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            S["manifest_bytes"](path)
+        path.chmod(0o600)
+        with path.open("r+b") as stream:
+            stream.truncate(64 * 1024 * 1024 + 1)
+        with self.assertRaises(ValueError):
+            S["manifest_bytes"](path)
+        with self.assertRaisesRegex(ValueError, "export manifest required"):
+            S["manifest_bytes"](self.inventory)
+
+    def test_archive_stream_rejects_mutation_replacement_and_hard_links(self):
+        archive = self.run / "export/originals.tar.gz"
+        original = archive.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        self.assertEqual(S["archive_digest"](archive), digest)
+        alias = archive.with_name("linked")
+        os.link(archive, alias)
+        with self.assertRaises(ValueError):
+            S["archive_digest"](archive)
+        alias.unlink()
+        real_sha256 = hashlib.sha256
+        for replace in (False, True):
+
+            class ChangedArchive:
+                def __init__(self):
+                    self.digest = real_sha256()
+                    self.changed = False
+
+                def update(self, block):
+                    if not self.changed:
+                        self.changed = True
+                        if replace:
+                            replacement = archive.with_name("replacement")
+                            replacement.write_bytes(original)
+                            replacement.chmod(0o600)
+                            os.replace(replacement, archive)
+                        else:
+                            archive.write_bytes(original + b"changed")
+                    self.digest.update(block)
+
+                def hexdigest(self):
+                    return self.digest.hexdigest()
+
+            with mock.patch.object(S["hashlib"], "sha256", ChangedArchive):
+                with self.assertRaisesRegex(ValueError, "archive changed"):
+                    S["archive_digest"](archive)
+            archive.write_bytes(original)
 
     def test_exact_preget_ambiguous_stop_reconciles_and_resume_never_reposts(self):
         row=copy.deepcopy(self.row);calls=[]
