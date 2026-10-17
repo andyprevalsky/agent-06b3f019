@@ -438,6 +438,67 @@ def validate_candidate(outer, original, reserved, current, cohort, harness_ref, 
     return copy.deepcopy(reserved)
 
 
+def normal_hold_partition(outer, original, request, inputs):
+    """Retain failed normal-admission rows as liabilities, never as candidates."""
+    initial = {row["machine_id"]: row for row in original["candidates"]}
+    selected = {row["machine_id"] for row in request["candidates"]}
+    failed = request.get("held_native_reservations", [])
+    ids = [row["machine_id"] for row in failed]
+    need(
+        len(ids) == len(set(ids))
+        and not selected.intersection(ids)
+        and set(initial) == selected | set(ids),
+        "normal reservation held partition differs",
+    )
+    held = []
+    for row in failed:
+        mid = row["machine_id"]
+        need(
+            set(row) == {"machine_id", "not_credited", "error_type", "error"}
+            and row["not_credited"] is True
+            and isinstance(row["error_type"], str)
+            and isinstance(row["error"], str),
+            "normal reservation hold evidence differs",
+        )
+        directory = outer / "archived-reuse-reservations" / mid
+        need(
+            directory.is_dir() and directory.resolve(strict=True) == directory,
+            "normal held journal missing or aliased",
+        )
+        for path in sorted(directory.rglob("*")):
+            need(
+                path.resolve(strict=True) == path and not path.is_symlink(),
+                "normal held journal alias",
+            )
+            if not path.is_dir():
+                read(path, inputs)
+        held.append(
+            dict(
+                copy.deepcopy(row),
+                volume_id=initial[mid]["volume_id"],
+                capacity_credit=0,
+                reuse_credit=False,
+            )
+        )
+    inherited = copy.deepcopy(original.get("held_prior_reservations", []))
+    origins = {entry["archive_sha256"] for entry in original["archives"]}
+    seen = set()
+    for scope in inherited:
+        ids = scope["machine_ids"]
+        need(
+            scope["archive_sha256"] in origins
+            and scope["archive_sha256"] not in seen
+            and scope.get("reuse_credit") is False
+            and len(ids) == len(set(ids))
+            and all(
+                isinstance(mid, str) and re.fullmatch("[0-9a-f]{14}", mid)
+                for mid in ids
+            ),
+            "invalid inherited normal hold scope",
+        )
+        seen.add(scope["archive_sha256"])
+    return held, inherited
+
 def prepare(run, inventory_path):
     """Return only positively unused reserved IDs from one explicit outer state dir."""
     outer = Path(run).absolute()
@@ -473,11 +534,15 @@ def prepare(run, inventory_path):
     need(len(machines) == len(json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))), "duplicate inventory")
     need(closure["controller"] not in machines, "closed controller still present in native inventory")
     candidates, held = [], []
+    if context is None:
+        omitted_rows, inherited_scopes = normal_hold_partition(outer, original, request, inputs)
+    else:
+        omitted_rows, inherited_scopes = context["held_rows"], context["inherited_held_scopes"]
     archive_sha = closure["inputs"][str((closed / "export/originals.tar.gz").absolute())]
-    if context is not None:
+    if omitted_rows:
         selected = {row["machine_id"] for row in request["candidates"]}
         seen_held = set()
-        for omitted in context["held_rows"]:
+        for omitted in omitted_rows:
             mid = omitted["machine_id"]
             need(mid in initial and mid not in selected and mid not in seen_held,
                  "invalid recovered held partition")
@@ -487,6 +552,7 @@ def prepare(run, inventory_path):
                  and omitted["volume_id"] not in closure["protected_volumes"],
                  "protected or mismatched recovered hold")
             try:
+                need(context is not None, "normal failed reservation remains held")
                 candidate = transition_reader()["omitted"](context, initial[mid], machines[mid], inputs, claimed)
             except (ValueError, KeyError, TypeError, OSError):
                 held.append(dict(omitted, capacity_credit=0, closed_archive_sha256=archive_sha,
@@ -545,6 +611,6 @@ def prepare(run, inventory_path):
     )
     if request_custody == "HOST_BOUND_NOT_IMPORTED":
         result["archive"].update(request_binding)
-    if context is not None:
-        result["inherited_held_scopes"] = copy.deepcopy(context["inherited_held_scopes"])
+    if inherited_scopes:
+        result["inherited_held_scopes"] = copy.deepcopy(inherited_scopes)
     return result

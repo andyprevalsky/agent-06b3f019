@@ -230,6 +230,96 @@ class Unused(unittest.TestCase):
         source.write_bytes(self.request_path.read_bytes() + b" ")
         with self.assertRaisesRegex(ValueError, "copies differ"):
             M["archive_members"](self.closed, closure, self.request, config, {})
+    def test_normal_omissions_and_inherited_scopes_remain_zero_credit_holds(self):
+        omitted = "bbbbccccddddee"
+        row = copy.deepcopy(self.original["candidates"][0])
+        row.update(machine_id=omitted, volume_id="vol_failed")
+        row["predecessor"].update(id=omitted, volume_id="vol_failed")
+        self.original["candidates"].append(row)
+        origin = self.original["archives"][0]["archive_sha256"]
+        scopes = [
+            dict(
+                archive_sha256=origin,
+                machine_ids=[self.mid, omitted],
+                reuse_credit=False,
+            )
+        ]
+        self.original["held_prior_reservations"] = copy.deepcopy(scopes)
+        self.request["held_prior_reservations"] = copy.deepcopy(scopes)
+        failure = dict(
+            machine_id=omitted,
+            not_credited=True,
+            error_type="TimeoutExpired",
+            error="old outcome UNKNOWN",
+        )
+        self.request["held_native_reservations"] = [failure]
+        journal = self.outer / "archived-reuse-reservations" / omitted
+        evidence = write(journal / "held-original.json", failure)
+        partial = journal / "wire/request.json"
+        partial.parent.mkdir(mode=0o700)
+        partial.write_bytes(b"")
+        partial.chmod(0o600)
+        write(self.request_path, self.request)
+        write(
+            self.outer / "archived-reuse-original.private.json",
+            dict(
+                schema="original600-archived-admission-request-v1",
+                request=self.original,
+                sha256=H["sha"](
+                    json.dumps(self.original, sort_keys=True, allow_nan=False).encode()
+                ),
+            ),
+        )
+        self.members[self.imported] = self.request_path.read_bytes()
+        self.seal()
+        config_path = self.outer / "launch-1/config.private.json"
+        config = json.loads(config_path.read_bytes())
+        digest = H["sha"](self.request_path.read_bytes())
+        config["remote_files"][0]["sha256"] = digest
+        config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"] = digest
+        write(config_path, config)
+        launch_path = self.outer / "controller-launch.intent.json"
+        launch = json.loads(launch_path.read_bytes())
+        launch["config_sha256"] = H["sha"](config_path.read_bytes())
+        write(launch_path, launch)
+        value = M["prepare"](self.outer, self.inventory)
+        self.assertEqual([r["machine_id"] for r in value["candidates"]], [self.mid])
+        self.assertEqual(value["held_machine_ids"], [omitted])
+        self.assertEqual(value["inherited_held_scopes"], scopes)
+        held = value["held_reservations"][0]
+        self.assertEqual(held["volume_id"], "vol_failed")
+        self.assertEqual(held["error"], failure["error"])
+        self.assertEqual(held["capacity_credit"], 0)
+        self.assertFalse(held["reuse_credit"])
+        self.assertIn(str(evidence), value["archive"]["inputs"])
+        self.assertEqual(value["archive"]["inputs"][str(partial)], H["sha"](b""))
+        baseline = self.outer / "baseline-normal"
+        baseline.mkdir(mode=0o700)
+        for path in (ROOT / "scripts").glob("*.py"):
+            if path.name != "cloudbench-unused-reservations.py":
+                (baseline / path.name).symlink_to(path)
+        old = baseline / "cloudbench-unused-reservations.py"
+        old.write_bytes(
+            subprocess.check_output(
+                [
+                    "git",
+                    "show",
+                    "55de5e0b9ee5f0bf89b52b3c9c2445fd65f8aac3:scripts/cloudbench-unused-reservations.py",
+                ],
+                cwd=ROOT,
+            )
+        )
+        previous = runpy.run_path(str(old))["prepare"](self.outer, self.inventory)
+        self.assertEqual(previous["held_machine_ids"], [])
+        self.assertNotIn("inherited_held_scopes", previous)
+        bad = copy.deepcopy(self.request)
+        bad["held_native_reservations"] = []
+        with self.assertRaisesRegex(ValueError, "partition differs"):
+            M["normal_hold_partition"](self.outer, self.original, bad, {})
+        bad = copy.deepcopy(self.original)
+        bad["held_prior_reservations"][0]["reuse_credit"] = True
+        with self.assertRaisesRegex(ValueError, "inherited normal hold"):
+            M["normal_hold_partition"](self.outer, bad, self.request, {})
     def test_closed_unused_reservation_preserves_lineage_without_credit(self):
         value = M["prepare"](self.outer, self.inventory)
         self.assertEqual(len(value["candidates"]), 1)

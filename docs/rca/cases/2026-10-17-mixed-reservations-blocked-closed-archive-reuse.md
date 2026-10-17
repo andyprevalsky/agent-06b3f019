@@ -16,7 +16,9 @@ tags:
   - unused-reservations
 sources:
   - commit 1fc5b729ced76dda398f997650b8ba5d08eb522b
+  - commit 55de5e0b9ee5f0bf89b52b3c9c2445fd65f8aac3
   - fleet run original600-1792228733439245508
+  - fleet run original600-1792263746104190724
   - agent 01a137e6-c4c8-7691-a3dd-52540286a46c
 repro: scripts/tests/cloudbench-unused-reservations.test.py
 status: fixed
@@ -28,6 +30,13 @@ Run70 closed with a mixture of claimed and untouched reserved Machines. The
 normal next-run preparation rejected the entire request at the first claimed
 row. Offering the original archive alongside the new archive also encountered
 stale native ownership for IDs that had advanced to the new generation.
+
+A later ordinary admission exposed another propagation gap. Run73's closed
+request selected 551 of its original 553 candidates and retained three older
+hold scopes. The unused-reservation reader returned all 551 candidates but
+lost both omitted rows and every inherited scope when no recovered-admission
+context was present. The next archive comparison then failed on superseded
+native ownership.
 
 ## Diagnosis
 
@@ -59,6 +68,14 @@ from the complete run70 evidence. Its request hash was
 `0bf5e3d29b2c815c6331f69ee8cde016d7aa216a18e4b37d57513da69dce9e89`.
 This fixes partition and lineage handling; the measured remaining organization
 capacity gap is a separate admission requirement.
+
+The ordinary-admission path must preserve the same partition contract as the
+recovered path. Its selected and explicitly held IDs must exactly partition
+the original candidates. Omitted rows retain their original Machine and
+Volume identity and zero credit. Inherited scopes remain bound to their
+original archive hashes, with no release or eligibility inferred from their
+presence. This restores required exclusions without weakening the native
+ownership comparison.
 
 ## Human feedback
 
