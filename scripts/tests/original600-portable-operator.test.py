@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Offline public CLI, original argv and fresh capacity/binding contracts."""
 import argparse
+import ast
+import base64
 import errno
 import gzip
+import hashlib
 import importlib.util
 import io
 import http.server
@@ -33,6 +36,40 @@ def private(path, value):
 
 
 class Portable(unittest.TestCase):
+    def test_inner_file_compression_preserves_bytes_with_existing_outer_bound(self):
+        data=json.dumps({'inputs':{f'/state/original600-123456789/archived-reuse-reservations/old-machine/wire/request-{i}.json':hashlib.sha256(str(i).encode()).hexdigest() for i in range(5500)}}).encode()
+        item={'relative_path':'.git/cloudbench-fixture.json','sha256':CLI.digest(data)}
+        legacy=dict(item,data=base64.b64encode(data).decode())
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name)
+            with self.assertRaisesRegex(ValueError,'compressed launch payload too large'):
+                RUNNER['launch_handoff'](root,{'remote_files':[legacy]})
+            encoded=RUNNER['encode_remote_file'](item,data)
+            path,_,command=RUNNER['launch_handoff'](root,{'remote_files':[encoded]})
+            self.assertLess(path.stat().st_size,256*1024)
+            self.assertLess(max(map(len,command)),16000)
+            node=next(n for n in ast.parse(RUNNER['REMOTE_LAUNCH']).body if isinstance(n,ast.FunctionDef) and n.name=='decode_remote_file')
+            scope=dict(base64=base64,gzip=gzip,io=io,hashlib=hashlib)
+            exec(compile(ast.Module(body=[node],type_ignores=[]),'<actual remote decoder>','exec'),scope)
+            self.assertEqual(scope['decode_remote_file'](encoded),data)
+            self.assertEqual(scope['decode_remote_file'](legacy),data)
+            with self.assertRaises(AssertionError):scope['decode_remote_file'](dict(encoded,sha256='0'*64))
+
+    def test_observed_payload_guard_refusal_requires_positive_bound_history(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);out=root/'run';out.mkdir(mode=0o700)
+            ref='852692d8c850c6d20640103561fa02ad0cb333ed'
+            config=private(root/'config',dict(source_ref=ref,started_at_epoch=100))
+            auth=private(out/'authority.private.json',dict(source_ref=ref,output_directory=str(out/'export'),cleanup_owner_pid=99999999,cleanup_owner_birth='gone'))
+            log=private(root/'log','\n'.join([json.dumps({'status':'ADMISSION_STARTED','source_ref':ref}),json.dumps({'status':'LAUNCHING_ORIGINAL600','source_ref':ref,'directory':str(config.parent)}),'line 236, in run','    payload,payload_sha,remote_command=launch_handoff(out,remote)','line 176, in launch_handoff','ValueError: compressed launch payload too large for config transport'])+'\n')
+            evidence=private(root/'refusal',dict(schema='observed-host-prelaunch-refusal-v1',tool_reported_exit_code=1,gate_created=False,error='compressed launch payload too large for config transport',source_ref=ref,config_path=str(config),config_sha256=CLI.digest(config.read_bytes()),output_directory=str(out),log=str(log),log_sha256=CLI.digest(log.read_bytes()),output_files={'authority.private.json':{'bytes':auth.stat().st_size,'sha256':CLI.digest(auth.read_bytes())}}))
+            accepted=CLI.prelaunch_failure(RUNNER,out,evidence,config,CLI.digest(config.read_bytes()))
+            self.assertTrue(Path(accepted['successor_output']).name.startswith('run-after-prelaunch-'))
+            self.assertFalse(Path(accepted['successor_output']).exists())
+            private(out/'caller.json',{'possible_effect':True})
+            with self.assertRaisesRegex(ValueError,'possible gate activity'):
+                CLI.prelaunch_failure(RUNNER,out,evidence,config,CLI.digest(config.read_bytes()))
+
     def test_unused_reservation_paths_are_bound_without_changing_legacy_bindings(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

@@ -25,6 +25,9 @@ def birth(pid):
  need(type(pid)is int and pid>1,'positive non-init PID required')
  v=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split();need(v[0]!='Z','zombie owner')
  return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+v[19]
+def encode_remote_file(item,data):
+ need(sha(data)==item['sha256'] and len(data)<16*1024*1024,'remote metadata source changed')
+ return dict(relative_path=item['relative_path'],sha256=item['sha256'],encoding='gzip-base64',data=base64.b64encode(gzip.compress(data,mtime=0)).decode())
 @contextmanager
 def bounded(seconds):
  old=signal.getitimer(signal.ITIMER_REAL);handler=signal.getsignal(signal.SIGALRM);start=time.monotonic();need(old[1]==0,'periodic alarm refused');seconds=min(seconds,old[0])if old[0]else seconds
@@ -61,10 +64,17 @@ def birth(pid):
  a=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split();assert a[0]!='Z'
  return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+a[19]
 identity=root/'.context'/v['identity_name'];identity.parent.mkdir(exist_ok=True)
+def decode_remote_file(item):
+ raw=base64.b64decode(item['data'],validate=True)
+ if item.get('encoding')=='gzip-base64':
+  with gzip.GzipFile(fileobj=io.BytesIO(raw)) as f:raw=f.read(16*1024*1024)
+ else:assert item.get('encoding','base64')=='base64'
+ assert len(raw)<16*1024*1024 and hashlib.sha256(raw).hexdigest()==item['sha256']
+ return raw
 for item in v['remote_files']:
  relative=item['relative_path'];assert relative.startswith('.git/cloudbench-')and '/'not in relative[len('.git/'):]
  path=root/relative;assert path.parent.resolve()==root/'.git'
- raw=base64.b64decode(item['data']);assert hashlib.sha256(raw).hexdigest()==item['sha256']
+ raw=decode_remote_file(item)
  save(path,raw)
 tasks=identity.with_suffix('.tasks.json');save(tasks,(json.dumps(v['tasks'],sort_keys=True)+'\n').encode());env=dict(os.environ,**v['remote_env']);env.update(REVIEWED_OPERATOR_ROOT=str(root),REVIEWED_OPERATOR_SOURCE_REF=v['source_ref'],REVIEWED_OPERATOR_TASKS=str(tasks),REVIEWED_OPERATOR_TASKS_SHA256=hashlib.sha256(tasks.read_bytes()).hexdigest(),REVIEWED_OPERATOR_IDENTITY_PATH=str(identity))
 row=dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth=birth(os.getpid()),machine=os.environ['FLY_MACHINE_ID'],source_ref=v['source_ref'],epoch=v['epoch'])
@@ -228,12 +238,18 @@ def run(config_path,config_sha,out,*,github_token=None):
  for item in v['remote_files']:
   need(re.fullmatch(r'\.git/cloudbench-[A-Za-z0-9_.-]+',item['relative_path']),'only bound benchmark Git metadata may be staged')
   data=read(item['source_path']);need(sha(data)==item['sha256'],'remote metadata source changed')
-  files.append(dict(relative_path=item['relative_path'],sha256=item['sha256'],data=base64.b64encode(data).decode()))
+  files.append(encode_remote_file(item,data))
  snapshot_name='.git/cloudbench-warm-snapshot-inventory.cloudbench-warm-t10-ord-85a7e2c.json'
  snapshot=next((i for i in files if i['relative_path']==snapshot_name),None);need(snapshot is not None,'authentic selected warm snapshot inventory required')
  remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']
  identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote=dict(source_ref=ref,supervisor_sha256=v['source_files']['cloudbench-original600-supervisor.py'],identity_name=identity_name,tasks=tasks,epoch=epoch,campaign_argv=argv,remote_env=remote_env,remote_files=files)
- payload,payload_sha,remote_command=launch_handoff(out,remote)
+ try:payload,payload_sha,remote_command=launch_handoff(out,remote)
+ except ValueError as error:
+  if str(error)in('compressed launch payload too large for config transport','launch payload exceeds bounded decoded size'):
+   save(out/'launch-payload-failure.json',dict(schema='original600-host-payload-failure-v1',reason=str(error),gate_created=False,
+        source_ref=ref,config_path=str(config_path),config_sha256=config_sha,output_directory=str(out),
+        host_runner_sha256=sha(Path(__file__).read_bytes()),owner_pid=os.getpid(),owner_birth=birth(os.getpid())))
+  raise
  export=out/'export';log=out/'gate.private.log';command=['bash',str(host_gate(root,v)),'--disposable-controller',str(authority),'--',*remote_command]
  env=dict(os.environ,**v.get('gate_env',{}))
  if github_token is not None:

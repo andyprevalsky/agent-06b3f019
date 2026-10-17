@@ -54,14 +54,26 @@ def closed_run(outer, inputs):
             "successor failure binding changed",
         )
         failure = json.loads(raw)
+        legacy = failure.get("schema") == "observed-tool-session-join-v1"
+        payload_refusal = (
+            failure.get("schema") == "observed-host-prelaunch-refusal-v1"
+            and failure.get("error") == "compressed launch payload too large for config transport"
+            and failure.get("gate_created") is False
+        )
         need(
-            failure.get("schema") == "observed-tool-session-join-v1"
+            (legacy or payload_refusal)
             and failure.get("tool_reported_exit_code") == 1
-            and failure.get("log_contains_synchronous_popen_errno") == 7
-            and failure.get("gate_pid") == "NOT_CREATED_BY_FAILED_POPEN",
+            and (
+                payload_refusal
+                or (
+                    failure.get("log_contains_synchronous_popen_errno") == 7
+                    and failure.get("gate_pid") == "NOT_CREATED_BY_FAILED_POPEN"
+                )
+            ),
             "unproven pre-exec successor",
         )
-        expected = output.parent / ("run-after-popen-" + digest(raw)[:16])
+        prefix = "run-after-popen-" if legacy else "run-after-prelaunch-"
+        expected = output.parent / (prefix + digest(raw)[:16])
         need(evidence["successor_output"] == str(expected), "unexpected successor output")
         # Follow the recorded canonical path, preserving its layout when reading
         # an offline copy of the admission. No ad-hoc alias is an input contract.

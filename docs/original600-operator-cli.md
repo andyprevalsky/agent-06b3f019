@@ -253,6 +253,14 @@ host gate's source/hash is recorded separately when continuing an older
 workload. A future synchronous E2BIG error also writes its own positive pre-exec
 receipt and restores the host signal handlers without claiming a gate started.
 
+Embedded evidence files are individually compressed before base64 encoding,
+then decoded and checked against their original hashes on the guest. This keeps
+large reservation proofs within the existing 256KiB outer transport limit
+without changing their contents. A retained, positively recorded pre-gate
+payload-size refusal can use the same `--prelaunch-failure` continuation mode;
+the old output remains preserved and the new run path starts with
+`run-after-prelaunch-`. The original workload and clock remain bound.
+
 
 Within a live strict cohort, the fleet shares one successful read-only app-secret
 verification. The proof is bound to the campaign owner and process births,

@@ -382,9 +382,55 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None):
 
 
 
+def payload_guard_failure(runner, output, evidence, original_config, original_sha, raw, receipt):
+    """Import the observed 852 pre-gate size refusal without replaying a launch."""
+    config=json.loads(runner['read'](original_config))
+    if (receipt.get('tool_reported_exit_code')!=1 or receipt.get('gate_created') is not False
+            or receipt.get('error')!='compressed launch payload too large for config transport'
+            or receipt.get('source_ref')!=config['source_ref']
+            or receipt.get('config_path')!=str(original_config) or receipt.get('config_sha256')!=original_sha
+            or receipt.get('output_directory')!=str(output)):
+        raise ValueError('unbound prelaunch payload refusal')
+    known='591e49e553c227c73a02bedc65e49562e9216e0d961493c20790e1cd4c34613a'
+    source=subprocess.check_output(['git','--no-replace-objects','-C',str(Path(__file__).resolve().parents[1]),'show',config['source_ref']+':scripts/cloudbench-original600-runner.py'])
+    if digest(source)!=known:
+        raise ValueError('unrecognized prelaunch payload operator')
+    log=runner['read'](receipt['log'])
+    lines=log.decode().splitlines()
+    if (digest(log)!=receipt['log_sha256'] or not lines
+            or lines[-1]!='ValueError: compressed launch payload too large for config transport'
+            or sum('payload,payload_sha,remote_command=launch_handoff(out,remote)' in line for line in lines)!=1
+            or 'line 236, in run' not in log.decode() or 'line 176, in launch_handoff' not in log.decode()):
+        raise ValueError('exact pre-gate payload traceback required')
+    event=json.loads(lines[1])
+    if event.get('status')!='LAUNCHING_ORIGINAL600' or event.get('source_ref')!=config['source_ref'] or event.get('directory')!=str(original_config.parent):
+        raise ValueError('prelaunch event binding differs')
+    if output.resolve(strict=True)!=output or {p.name for p in output.iterdir()}!={'authority.private.json'}:
+        raise ValueError('payload refusal output contains possible gate activity')
+    info=output.stat()
+    if info.st_uid!=os.geteuid() or info.st_mode&0o077:
+        raise ValueError('private current-owner prelaunch output required')
+    authority_raw=runner['read'](output/'authority.private.json')
+    recorded=receipt['output_files']
+    if set(recorded)!={'authority.private.json'} or recorded['authority.private.json']!={'bytes':len(authority_raw),'sha256':digest(authority_raw)}:
+        raise ValueError('prelaunch authority bytes changed')
+    authority=json.loads(authority_raw)
+    if authority.get('source_ref')!=config['source_ref'] or authority.get('output_directory')!=str(output/'export'):
+        raise ValueError('prelaunch authority binding differs')
+    try:alive=runner['birth'](authority['cleanup_owner_pid'])==authority['cleanup_owner_birth']
+    except (FileNotFoundError,ProcessLookupError,ValueError):alive=False
+    if alive:raise ValueError('prelaunch owner still live')
+    successor=output.parent/('run-after-prelaunch-'+digest(raw)[:16])
+    if successor.exists() or successor.is_symlink() or (output/'host-launch-successor.json').exists():
+        raise ValueError('prelaunch continuation already claimed')
+    return dict(path=str(evidence),sha256=digest(raw),prior_output=str(output),successor_output=str(successor))
+
+
 def prelaunch_failure(runner, output, evidence, original_config, original_sha):
     """Accept the retained known pre-exec failure, never directory absence alone."""
     raw=runner['read'](evidence);receipt=json.loads(raw)
+    if receipt.get('schema')=='observed-host-prelaunch-refusal-v1':
+        return payload_guard_failure(runner,output,evidence,original_config,original_sha,raw,receipt)
     if receipt.get('schema') != 'observed-tool-session-join-v1' or receipt.get('tool_reported_exit_code') != 1:
         raise ValueError('positive joined Popen failure evidence required')
     if receipt.get('log_contains_synchronous_popen_errno') != 7 or receipt.get('gate_pid') != 'NOT_CREATED_BY_FAILED_POPEN':

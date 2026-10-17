@@ -185,24 +185,35 @@ class Unused(unittest.TestCase):
         self.assertEqual(row["source_instance_id"], self.current["instance_id"])
         self.assertIn(str(self.wire / "2/0001-wire.json"), value["archive"]["inputs"])
 
-    def test_successor_uses_recorded_canonical_config_without_alias(self):
+    def successor_fixture(self, payload=False):
         launch_path = self.outer / "controller-launch.intent.json"
         launch = json.loads(launch_path.read_bytes())
         original_config = Path(launch["config_path"])
-        failure_path = write(
-            self.outer / "bound-continuation-popen-failure.safe.json",
+        failure = (
             dict(
+                schema="observed-host-prelaunch-refusal-v1",
+                tool_reported_exit_code=1,
+                error="compressed launch payload too large for config transport",
+                gate_created=False,
+            )
+            if payload
+            else dict(
                 schema="observed-tool-session-join-v1",
                 tool_reported_exit_code=1,
                 log_contains_synchronous_popen_errno=7,
                 gate_pid="NOT_CREATED_BY_FAILED_POPEN",
-            ),
+            )
         )
+        failure_path = write(
+            self.outer / "bound-continuation-popen-failure.safe.json",
+            failure,
+        )
+        prefix = "run-after-prelaunch-" if payload else "run-after-popen-"
         evidence = dict(
             path=str(failure_path),
             sha256=H["sha"](failure_path.read_bytes()),
             prior_output=str(self.closed),
-            successor_output=str(self.closed.parent / ("run-after-popen-" + H["sha"](failure_path.read_bytes())[:16])),
+            successor_output=str(self.closed.parent / (prefix + H["sha"](failure_path.read_bytes())[:16])),
         )
         successor = Path(evidence["successor_output"])
         self.closed.rename(successor)
@@ -224,6 +235,10 @@ class Unused(unittest.TestCase):
         pointer_path = write(self.closed / "host-launch-successor.json", pointer)
         write(successor / "host-operator-provenance.json", provenance)
         self.assertFalse((self.outer / "derived-config.private.json").exists())
+        return derived_path, pointer_path, pointer
+
+    def test_successor_uses_recorded_canonical_config_without_alias(self):
+        derived_path, pointer_path, pointer = self.successor_fixture()
         value = M["prepare"](self.outer, self.inventory)
         self.assertEqual([row["machine_id"] for row in value["candidates"]], [self.mid])
         self.assertIn(str(derived_path), value["archive"]["inputs"])
@@ -231,6 +246,12 @@ class Unused(unittest.TestCase):
         write(pointer_path, pointer)
         with self.assertRaises(ValueError):
             M["prepare"](self.outer, self.inventory)
+
+    def test_payload_refusal_successor_keeps_complete_unused_proof(self):
+        derived_path, _, _ = self.successor_fixture(payload=True)
+        value = M["prepare"](self.outer, self.inventory)
+        self.assertEqual([row["machine_id"] for row in value["candidates"]], [self.mid])
+        self.assertIn(str(derived_path), value["archive"]["inputs"])
 
     def test_allocation_or_pre_effect_claim_blocks_unused_classification(self):
         for suffix, payload in [
