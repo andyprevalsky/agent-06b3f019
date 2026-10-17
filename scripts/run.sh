@@ -1327,6 +1327,7 @@ if [ ! -f agents/venv/bin/activate ] \
 fi
 
 # Python checkout fixtures and Node UI tests may require different browser revisions.
+echo "📦 Ensuring Playwright browser assets..."
 agents/venv/bin/python "$SCRIPT_DIR/ensure-playwright-browsers.py" --root "$PWD" || exit 1
 
 # Pre-flight: handle processes on our ports from this worktree.

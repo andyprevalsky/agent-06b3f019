@@ -575,11 +575,44 @@ def test_live_response_preserves_phase_and_startup_label():
         assert not live_response_matches(bundle, {**stored, "tasks": [{k: v for k, v in task.items() if k != key}]})
 
 
+def _one_fleet_aggregate_tick(source):
+    """Retain the real tick; its persistent owner loop belongs to the controller."""
+    assert "def aggregate_tick():" in source
+    assert source.count("\nwhile True:\n") == 1
+    return source.split("\nwhile True:\n", 1)[0] + "\naggregate_tick()\n"
+
+
+def _run_owned_live_projection(argv, *, env=None):
+    """Bound and join only this fixture's new process group, including heredoc child."""
+    import os
+    import signal
+    import subprocess
+
+    from benchmarks.fixture_host_guard import FIXTURE_DRAIN_SECONDS, FIXTURE_HOST_GUARD_SECONDS
+
+    process = subprocess.Popen(
+        argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
+    except BaseException:
+        # The leader may already have exited while an owned child holds the pipes.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate(timeout=FIXTURE_DRAIN_SECONDS)
+        raise
+    result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    result.check_returncode()
+    return result
+
+
 @pytest.mark.parametrize("producer", ["startup", "aggregate", "terminal"])
 def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_timestamp(tmp_path, monkeypatch, producer):
     """One 50-task fleet retains its identity and original clock through release."""
     import os
-    import subprocess
     from datetime import datetime, timezone
     from pathlib import Path
 
@@ -615,10 +648,8 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
     startup = definitions + "\n" + setup + 'write_startup_card "verifying environment"\n'
 
     def execute(command):
-        subprocess.run(
-            ["bash", "-c", command, "timestamp-control", str(directory), str(repo)],
-            check=True,
-            capture_output=True,
+        _run_owned_live_projection(
+            ["bash", "-c", command, "timestamp-control", str(directory), str(repo)]
         )
 
     execute(startup)
@@ -626,7 +657,10 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
         marker = 'env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"'
         start = fleet.index(marker)
         end = fleet.index("\nPY\n", start) + len("\nPY\n")
-        command = setup + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n' + fleet[start:end]
+        command = (
+            setup + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n'
+            + _one_fleet_aggregate_tick(fleet[start:end]) + "PY\n"
+        )
         phases = ("queued", "running", "evaluated", "teardown", "released")
     elif producer == "terminal":
         command = (
@@ -712,7 +746,6 @@ def test_live_response_preserves_phase_and_startup_label_for_terminal_startup(
 ):
     """A finished child without a task result cannot remain a queued placeholder."""
     import os
-    import subprocess
     import sys
     from datetime import datetime, timezone
     from pathlib import Path
@@ -721,6 +754,7 @@ def test_live_response_preserves_phase_and_startup_label_for_terminal_startup(
     fleet = Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", repo / "scripts/run-bench-fleet")).read_text()
     source = fleet.split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    aggregate = _one_fleet_aggregate_tick(aggregate)
     names = [f"fixture-{index:03d}" for index in range(50)]
     batch = tmp_path / "_batch"
     batch.mkdir()
@@ -756,11 +790,8 @@ def test_live_response_preserves_phase_and_startup_label_for_terminal_startup(
     monkeypatch.delenv("BENCHMARK_HUB_GROUP_RUN_ID", raising=False)
     env.pop("BENCHMARK_HUB_GROUP_RUN_ID", None)
     try:
-        subprocess.run(
-            [sys.executable, "-c", aggregate, str(batch / "report-card.json")],
-            env=env,
-            check=True,
-            capture_output=True,
+        _run_owned_live_projection(
+            [sys.executable, "-c", aggregate, str(batch / "report-card.json")], env=env
         )
         assert record, "the real live projection was not published"
         bundle = record[-1]["body"]
@@ -797,3 +828,22 @@ def test_archived_diagnostic_projection_requires_authenticated_bindings():
  except HubVisibilityError:pass
  else:raise AssertionError('Caller cannot selfattest unarchived substitution')
  print('PASS small owning immutable projection + changed-inline/matchingdigest substitution rejection')
+
+
+def test_live_projection_fixture_joins_inherited_pipe_after_leader_exit(tmp_path, monkeypatch):
+    """The direct command can exit while its owned child retains both pipes."""
+    import subprocess
+    import sys
+    from benchmarks import fixture_host_guard
+
+    monkeypatch.setattr(fixture_host_guard, "FIXTURE_HOST_GUARD_SECONDS", 0.2)
+    started = tmp_path / "pipe-child-started"
+    command = (
+        "import subprocess,sys; "
+        "subprocess.Popen([sys.executable, '-c', "
+        + repr("from pathlib import Path; import time; Path(" + repr(str(started)) + ").touch(); time.sleep(60)")
+        + "])"
+    )
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_owned_live_projection([sys.executable, "-c", command])
+    assert started.exists(), "the inherited-pipe child must actually have started"

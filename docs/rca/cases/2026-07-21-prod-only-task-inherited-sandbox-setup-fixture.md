@@ -213,3 +213,41 @@ one historical rejection assertion was added. The private causal packet is
 These are hermetic fixture proofs. Full deploy coverage requalification remains
 required; no live financial result, refund, release or fundraiser success is
 established by this repair.
+
+## October 17: remaining Hub fixtures entered the persistent owner loop
+
+Two additional `hub_upload_test.py` consumers still executed the complete
+aggregator heredoc after `201226d3c`. The stable timestamp control hung in its
+`aggregate` parameter, and the six-parameter terminal-startup control used the
+same unbounded entry. Actual C12 structural evidence identified the former
+callback and its Bash/Python descendants; ROOT preserved the interrupted gate
+as a failure. A successful publication did not terminate this owner loop.
+
+Both fixtures now invoke the real `aggregate_tick`
+once, retaining the full production function and imports. It does not change
+the controller's persistent loop. Both fixture subprocess callers now use
+owned sessions and the existing `FIXTURE_HOST_GUARD_SECONDS`, joining their
+created process group on interruption. All 106 original assertions across
+29 test functions and every parameter decorator have identical ASTs. The
+50-task fleet, phases, clocks, outcomes and publication assertions remain.
+
+With real fixture loopback HTTP and external networking denied, separate safe
+outer guards observed the aggregate parameter and the terminal-startup
+function hang. Each new local process tree was retired; no guest process was
+signalled by the worker. The candidate passed all three timestamp producer
+parameters, all six terminal-startup parameters and the complete 37-test
+`hub_upload_test.py` file. The neighboring finite fleet-publication callback
+also passed. This is test-fixture lifecycle proof, not production publication,
+provider acceptance, a completed deploy or a newly qualified source revision.
+
+Full callback commands, source hashes, original assertion parity, local guard
+limits and retained harness diagnostics are in the private
+`rca-c12-hub-aggregate-fixture-01a136f6` packet. ROOT owns source application and
+normal full-gate requalification; the original C12 interruption remains FAIL.
+
+Independent review also identified an exited direct leader retaining an owned child
+with open pipes. A new registered real-subprocess regression reproduced the old
+cleanup hang under a four-second outer guard. The correction kills the
+exact owned group even after leader exit and bounds drain with the existing
+30-second fixture constant; the same regression and complete 37-test file pass.
+The canonical 600-second fixture guard and production loop remain unchanged.
