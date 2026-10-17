@@ -55,14 +55,14 @@ Do not delete one consumer's browser to make room for the other.
 
 The original600 harness is versioned separately so its disposable controller,
 ticket accounting and shared relay are not replaced with older main versions.
-The portable operator commit is `41f525019d8da0f008daf65669943d62adb887de`, with
+The portable operator commit is `a82f959dbc72737a8a5584a24f3ba90022cc2703`, with
 immutable parent `b0fbd7742dde51446288c22601825a85981c1d0b`. Fetch the published
 `fix/original600-portable-operator` branch, create a separate worktree at that
 exact commit, and follow its `docs/original600-operator-cli.md`:
 
 ```bash
 git fetch origin fix/original600-portable-operator
-git worktree add --detach "$OPERATOR_CHECKOUT" 41f525019d8da0f008daf65669943d62adb887de
+git worktree add --detach "$OPERATOR_CHECKOUT" a82f959dbc72737a8a5584a24f3ba90022cc2703
 cd "$OPERATOR_CHECKOUT"
 python3 scripts/run-original600-controller.py --help
 ```
@@ -80,3 +80,7 @@ cohort does not force an inventory refresh; a mutating winner seals one fresh
 healthy inventory generation for its peers under the original deadline. The
 public `--status --run-dir` command reads a bound run without changing its source.
 An already running experiment retains its recorded commit until it terminates.
+
+Archive-based cleanup targets only the current archive's sealed Machine IDs.
+Unrelated active or stopped Machines remain untouched and are counted as
+excluded; their presence does not block cleanup of the current run.
