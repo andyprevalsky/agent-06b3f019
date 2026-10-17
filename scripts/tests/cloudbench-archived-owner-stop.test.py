@@ -13,7 +13,7 @@ import time
 import unittest
 
 ROOT=Path(__file__).resolve().parents[2]
-S=runpy.run_path(str(ROOT/'scripts/cloudbench-archived-owner-stop.py'))
+S=runpy.run_path(os.environ.get('CLOUDBENCH_TEST_ARCHIVED_STOP_MODULE',str(ROOT/'scripts/cloudbench-archived-owner-stop.py')))
 
 
 def write(path,value):
@@ -56,14 +56,21 @@ class ArchivedStop(unittest.TestCase):
         write(self.run/'terminal.json',dict(status='CONTROLLER_RELEASE_VERIFIED',machine=host,source_ref=ref,release=dict(machine_deleted=True)))
 
     def test_archive_plan_excludes_protected_and_unsealed_and_refuses_changed_ownership(self):
+        prior=[dict(id='22223333444455',name='prior-stopped',state='stopped',config=dict(mounts=[dict(volume='vol_prior_stopped')])),
+               dict(id='33334444555566',name='prior-active',state='started',config=dict(mounts=[dict(volume='vol_prior_active')]))]
+        original=json.loads(self.inventory.read_text())
+        write(self.inventory,original+prior)
+        inventory_before=self.inventory.read_bytes()
         plan=S['prepare'](self.run,self.inventory)
+        self.assertEqual(plan['unrelated_native_machines_skipped'],2)
+        self.assertEqual(self.inventory.read_bytes(),inventory_before,'planning modified unrelated retained resources')
         self.assertEqual([x['machine']['id'] for x in plan['targets']],[self.mid])
         self.assertEqual(plan['unsealed_intents_skipped'],1)
         self.assertFalse(plan['benchmark_success_inferred'])
-        for changed in [dict(name='foreign'),dict(config=dict(mounts=[dict(volume='vol_other')]))]:
-            write(self.inventory,[dict(self.row,**changed)]+[dict(id=x,state='started') for x in plan['protected_machines']])
+        for changed in [dict(name='foreign'),dict(instance_id=None),dict(config=None),dict(config=dict(mounts=[dict(volume='vol_other')]))]:
+            write(self.inventory,[dict(self.row,**changed)]+[dict(id=x,state='started') for x in plan['protected_machines']]+prior)
             with self.assertRaises(ValueError):S['prepare'](self.run,self.inventory)
-        write(self.inventory,[self.row]+[dict(id=x,state='started') for x in plan['protected_machines']])
+        write(self.inventory,[self.row]+[dict(id=x,state='started') for x in plan['protected_machines']]+prior)
         terminal=json.loads((self.run/'terminal.json').read_text());terminal['release']['machine_deleted']=False
         write(self.run/'terminal.json',terminal)
         with self.assertRaises(ValueError):S['prepare'](self.run,self.inventory)
@@ -116,13 +123,14 @@ class ArchivedStop(unittest.TestCase):
                 if path=='/machines':
                     # Replacement config must not turn the old owned identity
                     # into a stopped confirmation, even when state is stopped.
-                    return [dict(row,instance_id='replacement')]
+                    return [dict(row,instance_id='replacement'),dict(id='22223333444455',state='started'),dict(id='33334444555566',state='stopped')]
                 self.assertEqual(path,'/machines/'+self.mid)
                 return copy.deepcopy(row)
         plan=dict(schema='cloudbench-archived-owner-stop-plan-v1',inputs={},
-                  protected_machines=['00000000000000'],targets=[dict(machine=row)])
+                  protected_machines=['00000000000000'],targets=[dict(machine=row)],unrelated_native_machines_skipped=2)
         result=S['execute'](API(),plan,self.out,seconds=60,workers=1)
         self.assertFalse(result['all_owned_stopped'])
+        self.assertEqual(result['unrelated_native_machines_skipped'],2)
         self.assertEqual(result['results'][0]['status'],'PENDING')
         calls=trace.read_text().splitlines()
         self.assertEqual(calls.count('GET /machines'),1)

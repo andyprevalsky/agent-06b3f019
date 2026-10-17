@@ -113,11 +113,13 @@ def prepare(run, inventory_path):
         need(row['id'] not in protected and row['volume_id'] not in protected_volumes,'protected archived resource')
         need(row['id'] not in owned,'duplicate archived machine identity')
         owned[row['id']]=dict(row,owner_token=match[2],archive_path=name)
-    native=BASE['inventory'](json.loads(raw(inventory_path,256*1024*1024))); targets=[]
+    native=BASE['inventory'](json.loads(raw(inventory_path,256*1024*1024))); targets=[]; unrelated=0
     for machine in native:
         mid=machine['id']
         if mid in protected: continue
-        need(mid in owned,'unowned nonprotected native Machine; refusing whole plan')
+        if mid not in owned:
+            unrelated+=1
+            continue  # Other retained cohorts never become this archive's stop authority.
         row=owned[mid]; config=machine.get('config')
         need(machine.get('name')==row['name'] and isinstance(machine.get('instance_id'),str)
              and bool(machine['instance_id']) and isinstance(machine.get('created_at'),str)
@@ -130,7 +132,7 @@ def prepare(run, inventory_path):
     return dict(schema='cloudbench-archived-owner-stop-plan-v1',app=app,controller=host,
                 source_ref=record['source_ref'],protected_machines=sorted(protected),
                 protected_volumes=sorted(protected_volumes),inputs={str(p):digest_file(p) for p in paths},
-                targets=targets,unsealed_intents_skipped=skipped,no_delete=True,no_volume_change=True,
+                targets=targets,unsealed_intents_skipped=skipped,unrelated_native_machines_skipped=unrelated,no_delete=True,no_volume_change=True,
                 no_claim_release=True,benchmark_success_inferred=False)
 
 
@@ -204,7 +206,7 @@ def execute(api,plan,output,seconds=300,workers=16):
                 results.append(value)
             summary=dict(schema='cloudbench-archived-owner-stop-observation-v1',results=results,
                          all_owned_stopped=all(v['status']=='STOPPED_CONFIRMED' for v in results),
-                         no_delete=True,volumes_retained=True,claims_released=False,benchmark_success_inferred=False)
+                         no_delete=True,unrelated_native_machines_skipped=plan['unrelated_native_machines_skipped'],volumes_retained=True,claims_released=False,benchmark_success_inferred=False)
             save(output/('observation-'+str(time.time_ns())+'.json'),summary)
             return summary
     finally:
@@ -225,7 +227,7 @@ def main():
         need(json.loads(raw(output/'plan.json',256*1024*1024))==plan,'existing exact plan changed')
     else: output.mkdir(mode=0o700);save(output/'plan.json',plan)
     if not a.execute:
-        print(json.dumps(dict(status='PLANNED_NOT_STOPPED',targets=len(plan['targets']),provider_calls=0)));return 0
+        print(json.dumps(dict(status='PLANNED_NOT_STOPPED',targets=len(plan['targets']),unrelated_native_machines_skipped=plan['unrelated_native_machines_skipped'],provider_calls=0)));return 0
     need(a.agents_env is not None,'explicit complete agents env required')
     operator=runpy.run_path(str(HERE/'run-original600-controller.py'))
     helper=runpy.run_path(str(HERE/'cloudbench-original-volume-capture.py'))
@@ -233,7 +235,7 @@ def main():
         api=helper['Fly'](plan['app'],operator['token_from_agents'](raw(a.agents_env)))
         result=execute(api,plan,output,a.timeout,a.workers)
     print(json.dumps(dict(all_owned_stopped=result['all_owned_stopped'],targets=len(result['results']),
-                         volumes_retained=True,claims_released=False)))
+                         unrelated_native_machines_skipped=plan['unrelated_native_machines_skipped'],volumes_retained=True,claims_released=False)))
     return 0 if result['all_owned_stopped'] else 1
 
 
