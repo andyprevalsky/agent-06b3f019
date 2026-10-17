@@ -191,7 +191,7 @@ _refresh_inventory_snapshot_unlocked() {
     fi
     inventory_refresh_diagnostic publish-index pending "" "$started" || true
     status=0
-    python3 "$MACHINE_READINESS_SCRIPT" --publish-index \
+    python3 -S "$MACHINE_READINESS_SCRIPT" --publish-index \
         "$machines_tmp" "$volumes_tmp" "$INVENTORY_INDEX" > "$publish_tmp" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         inventory_refresh_diagnostic publish-index "$status" "$publish_tmp" "$started" || true
