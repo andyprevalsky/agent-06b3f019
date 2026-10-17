@@ -54,6 +54,49 @@ class ExportResume(unittest.TestCase):
             result = M["remote"](API(), self.value, journal, "check")
         self.assertEqual(result["machine"], self.mid)
 
+    def test_phase_stderr_survives_owned_child_timeout_without_payload(self):
+        journal = self.out / "phase-timeout"
+        journal.mkdir()
+        capture = runpy.run_path(
+            str(ROOT / "scripts/cloudbench-original-volume-capture.py")
+        )
+        prefix = M["REMOTE"].split(
+            "import ast,base64,copy,hashlib,json,os,subprocess", 1
+        )[0]
+        calls = []
+        test = self
+
+        class API:
+            def flyctl(inner, timeout, *argv):
+                test.assertEqual(timeout, 30)
+                calls.append(argv)
+                command = shlex.split(argv[-1])
+                test.assertEqual(command[:3], ["python3", "-S", "-c"])
+                rc, stdout, stderr = capture["run_bounded"](
+                    command, 0.25, dict(os.environ)
+                )
+                return rc, stdout.decode(), stderr.decode()
+
+        with mock.patch.dict(
+            M["remote"].__globals__, REMOTE=prefix + "time.sleep(10)\n"
+        ):
+            with self.assertRaises(ValueError):
+                M["remote"](API(), self.value, journal, "check")
+        response = json.loads((journal / "check.response.json").read_text())
+        self.assertEqual(response["exit_code"], 142)
+        self.assertTrue(response["local_transport_joined"])
+        self.assertEqual(response["stdout"], "")
+        lines = [line.split() for line in response["stderr"].splitlines()]
+        self.assertEqual(
+            [line[:2] for line in lines],
+            [["EXPORT_PHASE", "BOOTSTRAP_ENTERED"], ["EXPORT_PHASE", "REMOTE_ENTERED"]],
+        )
+        stamps = [int(line[2]) for line in lines]
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn(self.mid, response["stderr"])
+        self.assertNotIn(self.record["collector_sha256"], response["stderr"])
+
     def test_recorded_drain_requires_matching_original_guest_custody(self):
         identity, operator, launch = "a" * 64, "b" * 40, "c" * 64
         guest = {
@@ -194,7 +237,12 @@ class ExportResume(unittest.TestCase):
                     payload = json.loads(base64.b64decode(argv[-1]))
                     test.assertEqual(payload["record"], test.record)
                     test.assertEqual(argv[:3], ["python3", "-S", "-c"])
-                    test.assertTrue(argv[3].startswith("import os;os.chdir('/')\n"))
+                    test.assertTrue(
+                        argv[3].startswith(
+                            "import sys,time;print('EXPORT_PHASE BOOTSTRAP_ENTERED '"
+                        )
+                    )
+                    test.assertIn("import os;os.chdir('/')\n", argv[3])
                     result = {
                         "machine": test.mid,
                         "launch_sha256": test.binding["launch_sha256"],

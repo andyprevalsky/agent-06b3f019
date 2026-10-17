@@ -21,7 +21,14 @@ F = runpy.run_path(str(HERE / "cloudbench-controller-payload-finalization.py"))
 B, R = F["B"], F["R"]
 need, read, save, sha = (R[key] for key in ("need", "read", "save", "sha"))
 REMOTE = r"""
-import ast,base64,copy,hashlib,json,os,subprocess,sys
+import sys,time
+
+def phase(name):
+ assert name in ('REMOTE_ENTERED','GIT_START','GIT_DONE','LAUNCH_START','LAUNCH_DONE','HUB_START','HUB_DONE','WRITERS_START','WRITERS_DONE','DRAIN_START','DRAIN_DONE','EXPORT_START','EXPORT_DONE','VERIFY_START','VERIFY_DONE','RESPONSE_READY')
+ print('EXPORT_PHASE '+name+' '+str(time.monotonic_ns()),file=sys.stderr,flush=True)
+
+phase('REMOTE_ENTERED')
+import ast,base64,copy,hashlib,json,os,subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,9 +44,10 @@ def readonly_hubs(scope,source,repo,directory):
  return namespace['readonly_hubs'](repo,directory)or[]
 
 def drain_evidence(scope):
+ phase('DRAIN_START')
  root=Path('/tmp/gate/controller-host-custody/registered-orphan-drain')
  result={'root':str(root),'present':root.exists(),'directories':[],'files':{}}
- if not root.exists():return result
+ if not root.exists():phase('DRAIN_DONE');return result
  assert root.resolve(strict=True)==root and root.is_dir()
  paths=[root,*sorted(root.rglob('*'))];before={str(p):scope['file_state'](p)for p in paths};total=0
  for path in paths[1:]:
@@ -49,13 +57,17 @@ def drain_evidence(scope):
   digest,raw=scope['sealed_bytes'](path,16777216);total+=len(raw);assert total<=16777216
   result['files'][name]={'bytes':len(raw),'sha256':digest,'body_b64':base64.b64encode(raw).decode()}
  assert before=={str(p):scope['file_state'](p)for p in [root,*sorted(root.rglob('*'))]}
+ phase('DRAIN_DONE')
  return result
 
 def main(v):
  assert os.getcwd()=='/' and os.environ['FLY_MACHINE_ID']==v['machine']
  repo=Path('/tmp/gate/repo');custody=Path('/tmp/gate/controller-host-custody');record_path=custody/'launch.json'
+ phase('GIT_START')
  source=subprocess.check_output(['git','-c','safe.directory='+str(repo),'--no-replace-objects','-C',str(repo),'show',v['source_ref']+':scripts/cloudbench-controller-export.py'])
  assert hashlib.sha256(source).hexdigest()==v['collector_sha256']
+ phase('GIT_DONE')
+ phase('LAUNCH_START')
  scope={'__name__':'bound_original_export','__file__':'/tmp/controller-host-export.py','CHECKED_COLLECTOR_SHA256':hashlib.sha256(source).hexdigest(),'CHECKED_COLLECTOR_SOURCE_BYTES':source}
  exec(compile(source,scope['__file__'],'exec'),scope)
  assert scope['sealed_bytes'](Path('/tmp/controller-host-export.py'),67108864)[1]==source
@@ -75,16 +87,25 @@ def main(v):
  _,pending_raw=scope['sealed_bytes'](custody/'pending.json',1048576);pending=json.loads(pending_raw)
  assert pending['status']=='pending'and pending.get('record_sha256')==record_sha
  roots=[repo,Path(record['common_git']),*[Path(p)for p in record['temp_state_roots']if Path(p).exists()]]
- hubs=readonly_hubs(scope,source,repo,custody);permitted={os.getpid(),driver,*[h['pid']for h in hubs]}
+ phase('LAUNCH_DONE')
+ phase('HUB_START')
+ hubs=readonly_hubs(scope,source,repo,custody);phase('HUB_DONE');permitted={os.getpid(),driver,*[h['pid']for h in hubs]}
+ phase('WRITERS_START')
  active=scope['controller_active_writers'](Path(record['common_git']),roots,permitted)
+ phase('WRITERS_DONE')
  if active:
   print(json.dumps({'status':'PENDING_WRITERS','non_hub_writers':active,'machine':v['machine'],'launch_sha256':record_sha}),flush=True)
   raise SystemExit(75)
  result={'machine':v['machine'],'launch_sha256':record_sha,'driver_pid':driver,'driver_birth':record['driver_birth'],'joined':joined,'hubs':hubs,'non_hub_writers':[]}
- if v['action']=='check':print(json.dumps(dict(result,drain_evidence=drain_evidence(scope))));return
+ if v['action']=='check':
+  encoded=json.dumps(dict(result,drain_evidence=drain_evidence(scope)));phase('RESPONSE_READY');print(encoded);return
  assert v['action']=='export'
+ phase('HUB_START')
  assert readonly_hubs(scope,source,repo,custody)==hubs
+ phase('HUB_DONE')
+ phase('WRITERS_START')
  active=scope['controller_active_writers'](Path(record['common_git']),roots,permitted)
+ phase('WRITERS_DONE')
  if active:
   print(json.dumps({'status':'PENDING_WRITERS','non_hub_writers':active,'machine':v['machine'],'launch_sha256':record_sha}),flush=True)
   raise SystemExit(75)
@@ -95,10 +116,14 @@ def main(v):
  try:os.fsync(fd)
  finally:os.close(fd)
  args=SimpleNamespace(record=record_path,archive=stage/'originals.tar.gz',manifest=stage/'manifest.json',pending=stage/'pending.json',capture_tool_ref=None,finalize_disposable_hubs=True)
+ phase('EXPORT_START')
  code=scope['export'](args)
  assert code==0,'canonical export still pending'
+ phase('EXPORT_DONE')
+ phase('VERIFY_START')
  scope['verify'](SimpleNamespace(record=record_path,archive=args.archive,manifest=args.manifest,caller=Path('/tmp/controller-host-caller.json'),ref=v['source_ref'],machine=v['machine'],app=record['app'],image=record['image'],repo=repo))
- print(json.dumps(dict(result,remote_stage=str(stage),canonical_export_exit=code,drain_evidence=drain_evidence(scope))))
+ phase('VERIFY_DONE')
+ encoded=json.dumps(dict(result,remote_stage=str(stage),canonical_export_exit=code,drain_evidence=drain_evidence(scope)));phase('RESPONSE_READY');print(encoded)
 
 if __name__=='__main__':main(json.loads(base64.b64decode(sys.argv[1])))
 """
@@ -349,7 +374,8 @@ def remote(fly, value, journal, action, *, allow_pending=False):
             "python3",
             "-S",
             "-c",
-            "import os;os.chdir('/')\n" + REMOTE,
+            "import sys,time;print('EXPORT_PHASE BOOTSTRAP_ENTERED '+str(time.monotonic_ns()),file=sys.stderr,flush=True)\nimport os;os.chdir('/')\n"
+            + REMOTE,
             base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode(),
         ]
     )
