@@ -21,6 +21,7 @@ need, sha, canonical = (H[k] for k in ("need", "sha", "canonical"))
 SOURCE = "724ae71f5bd8756be01ea237de0c2742e4f94b77"
 CLOSED_SOURCE = "49b792dcc2ea983325c6a25801da6c982f29c206"
 CLOSED75_SOURCE = "1cec8c1cb20c85e66e10cd49446b44c5e85101f1"
+CLOSED77_SOURCE = "c9d4817832720cc2b1bc6a212383973a77baf004"
 
 
 class CancelledAdmission(BaseException):
@@ -369,7 +370,10 @@ def closed_classification(directory, row, request, inputs):
 
 def closed_plan(directory, failure_path, *, historical=False, source=None):
     source = CLOSED_SOURCE if source is None else source
-    need(source in (CLOSED_SOURCE, CLOSED75_SOURCE), "unknown closed admission source")
+    need(
+        source in (CLOSED_SOURCE, CLOSED75_SOURCE, CLOSED77_SOURCE),
+        "unknown closed admission source",
+    )
     typed75 = source == CLOSED75_SOURCE
     expected_error = (
         "AttributeError: 'NoneType' object has no attribute 'get' at verify_reuse_images current['config']"
@@ -645,7 +649,11 @@ def _plan(directory, failure_path, *, historical=False):
     need(root.resolve(strict=True) == root, "physical admission required")
     inputs = {}
     admission = C["obj"](root / "admission-intent.private.json", inputs)
-    if admission["binding"]["source_ref"] in (CLOSED_SOURCE, CLOSED75_SOURCE):
+    if admission["binding"]["source_ref"] in (
+        CLOSED_SOURCE,
+        CLOSED75_SOURCE,
+        CLOSED77_SOURCE,
+    ):
         return closed_plan(
             root,
             failure_path,

@@ -16,6 +16,8 @@ tags:
   - recovery
 sources:
   - commit 49b792dcc2ea983325c6a25801da6c982f29c206
+  - commit c9d4817832720cc2b1bc6a212383973a77baf004
+  - fleet run original600-1792279176545861179
   - fleet run original600-1792271666901142356
 repro: python3 scripts/tests/cloudbench-incomplete-reservations.test.py
 status: fixed
@@ -44,3 +46,13 @@ The user asked to simplify startup and explain the repeated failure to reach ful
 ## Reusable lesson
 
 A closed partial admission needs an explicit state transition into the same recovery mechanism. Preserve the old operation history while obtaining fresh proof for any newly credited state.
+
+## Original77 recurrence
+
+Original77 on `c9d4817832720cc2b1bc6a212383973a77baf004` closed its initial reservation pass with 542 confirmed and eight held rows. The normal acknowledgment observer added five, leaving 547 confirmed and three held. The fresh capacity guard refused launch before any controller or task was created. The same recovery planner recognized the earlier 49 and75 source families but rejected this later source before classifying the otherwise supported closed admission.
+
+The 209-member selected evidence packet is SHA256 `45809e6aaf4fae8da12d855fb57707483509975e6c8071593333ee268449ddff`. Two rows have one uncertain configuration write each (HTTP499 and missing response); saved stopped native records retain their prior exact instance/configuration. These are historical eligibility evidence only. A fresh lease and prior-version read must precede any new version-fenced configuration write. The third row has a positive HTTP200 acknowledgment, but its saved native observation still has the old version/configuration in replacing state. It is eligible only for fresh leased read reconciliation against the acknowledged identity, with no second configuration write. The original 547 confirmations, all uncertain writes and the original 23:19:36.5459259 UTC epoch remain unchanged.
+
+The bounded repair adds the exact c9 source family to the existing planner and recovered-history consumer. The public CLI and native-effect implementations stay unchanged. The consumer binds the new planner and existing CLI bytes, all other original c9 dependency bytes and its existing observation helper closure. This is not current capacity credit; the complete plan still needs validation on the executor's original files, and execution still requires fresh native proof and the unchanged final capacity guard.
+
+Nine incomplete-admission owners, ten recovered-reader owners and the unchanged public-CLI owner pass. The same valid capacity-failure fixture is rejected by the original c9 planner and accepted by the extended planner. Existing late-old-CAS conflict and acknowledgment-only read controls remain passing. The selected three-row calibration grants zero live capacity credit; the full original plan and any native recovery remain executor checks.

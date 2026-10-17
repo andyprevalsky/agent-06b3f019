@@ -193,6 +193,11 @@ class Recovered(unittest.TestCase):
                 M["closed_host"].__globals__, CONFIG75_HOST_HASHES=expected
             ):
                 self.assertEqual(M["closed_host"](newref, workload=oldref), newref)
+            oldref = M["I"]["CLOSED77_SOURCE"]
+            with mock.patch.dict(
+                M["closed_host"].__globals__, CONFIG77_HOST_HASHES=expected
+            ):
+                self.assertEqual(M["closed_host"](newref, workload=oldref), newref)
             oldref = M["I"]["CLOSED_SOURCE"]
             for name in (
                 "cloudbench-incomplete-reservations.py",
@@ -234,6 +239,9 @@ class Recovered(unittest.TestCase):
     def test_typed75_closed_family_reconstructs_retained_native_rows(self):
         self.load_fixture(typed=True, typed75=True)
 
+    def test_typed77_closed_family_reconstructs_retained_rows_after_full_closure(self):
+        self.load_fixture(typed=True, typed77=True)
+
     def test_load_binds_both_plan_serializations_request_partition_and_closed_config(
         self,
     ):
@@ -256,7 +264,7 @@ class Recovered(unittest.TestCase):
     def test_released_workspace_successor_preserves_full_recovery(self):
         self.load_fixture(typed=True, successor=True)
 
-    def load_fixture(self, typed, successor=False, typed75=False):
+    def load_fixture(self, typed, successor=False, typed75=False, typed77=False):
         plan = {
             "request": self.f.original,
             "classifications": [
@@ -577,9 +585,10 @@ class Recovered(unittest.TestCase):
                 M["I"],
                 SOURCE="a" * 40,
                 CLOSED_SOURCE="a" * 40
-                if typed and not typed75
+                if typed and not typed75 and not typed77
                 else M["I"]["CLOSED_SOURCE"],
                 CLOSED75_SOURCE="a" * 40 if typed75 else M["I"]["CLOSED75_SOURCE"],
+                CLOSED77_SOURCE="a" * 40 if typed77 else M["I"]["CLOSED77_SOURCE"],
                 historical_plan=lambda *_args: plan,
             ),
             mock.patch.dict(

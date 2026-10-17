@@ -241,6 +241,63 @@ class Incomplete(unittest.TestCase):
             with self.assertRaises(ValueError):
                 M["plan"](root, failure)
 
+    def test_typed77_capacity_family_preserves_carried_rows_and_original_clock(self):
+        root, failure_path, closed, other = self.closed_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary)
+            for dependency in (ROOT / "scripts").glob("*.py"):
+                if dependency.name != "cloudbench-incomplete-reservations.py":
+                    (scripts / dependency.name).symlink_to(dependency)
+            old_path = scripts / "cloudbench-incomplete-reservations.py"
+            old_path.write_bytes(
+                M["subprocess"].check_output(
+                    [
+                        "git",
+                        "--no-replace-objects",
+                        "-C",
+                        str(ROOT),
+                        "show",
+                        M["CLOSED77_SOURCE"]
+                        + ":scripts/cloudbench-incomplete-reservations.py",
+                    ]
+                )
+            )
+            old = runpy.run_path(str(old_path))
+            with (
+                mock.patch.dict(
+                    old["plan"].__globals__, SOURCE="a" * 40, protocol=lambda: {}
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "positive original owner failure/join required"
+                ),
+            ):
+                old["plan"](root, failure_path)
+        with (
+            mock.patch.dict(
+                M["closed_plan"].__globals__,
+                CLOSED77_SOURCE="a" * 40,
+                protocol=lambda *_: {},
+            ),
+            mock.patch.object(M["subprocess"], "check_output", return_value="a" * 40),
+        ):
+            value = M["plan"](root, failure_path)
+            self.assertEqual(value["retained_request"], closed)
+            self.assertEqual(value["source_ref"], "a" * 40)
+            self.assertEqual(value["deadline"], value["started_at"] + 5400)
+            self.assertEqual(
+                value["classifications"][0]["machine_id"], other["machine_id"]
+            )
+            launch = root / "launch-foreign"
+            launch.mkdir()
+            with self.assertRaises(ValueError):
+                M["plan"](root, failure_path)
+            launch.rmdir()
+            failure = json.loads(failure_path.read_bytes())
+            failure["source_ref"] = "b" * 40
+            OLD["OLD"]["write"](failure_path, failure)
+            with self.assertRaises(ValueError):
+                M["plan"](root, failure_path)
+
     def test_typed75_incomplete_config_failure_keeps_closed_rows_and_exact_stack(self):
         root, failure_path, closed, other = self.closed_fixture()
         write = OLD["OLD"]["write"]

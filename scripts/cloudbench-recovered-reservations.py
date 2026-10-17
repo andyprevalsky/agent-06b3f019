@@ -31,15 +31,23 @@ CONFIG75_HOST_HASHES = {
 }
 
 
+CONFIG77_HOST_HASHES = {
+    "cloudbench-incomplete-reservations.py": "6ada89ea9ed992df6dcebf9cc7c2192dcf2707d92dbd4aa65f01ee1c62ee27c8",
+    "run-original600-controller.py": "fde608cdb6ca14cc39829b6de635bd48c4ce950ceab2c49ab9985b1d27eb33a7",
+}
+
+
 def closed_host(ref, cli_sha256=None, workload=None):
     workload = I["CLOSED_SOURCE"] if workload is None else workload
     need(
-        workload in (I["CLOSED_SOURCE"], I["CLOSED75_SOURCE"]),
+        workload in (I["CLOSED_SOURCE"], I["CLOSED75_SOURCE"], I["CLOSED77_SOURCE"]),
         "unknown recovered workload family",
     )
-    bindings = (
-        CONFIG75_HOST_HASHES if workload == I["CLOSED75_SOURCE"] else CLOSED_HOST_HASHES
-    )
+    bindings = {
+        I["CLOSED_SOURCE"]: CLOSED_HOST_HASHES,
+        I["CLOSED75_SOURCE"]: CONFIG75_HOST_HASHES,
+        I["CLOSED77_SOURCE"]: CONFIG77_HOST_HASHES,
+    }[workload]
     need(
         isinstance(ref, str) and re.fullmatch("[0-9a-f]{40}", ref),
         "invalid recovered operator",
@@ -396,7 +404,7 @@ def load(outer, closed, config, closure, inputs):
         closure.get("schema") == "cloudbench-archived-owner-stop-plan-v1"
         and closure["source_ref"] == config["source_ref"]
         and config["source_ref"]
-        in (I["SOURCE"], I["CLOSED_SOURCE"], I["CLOSED75_SOURCE"])
+        in (I["SOURCE"], I["CLOSED_SOURCE"], I["CLOSED75_SOURCE"], I["CLOSED77_SOURCE"])
         and closure.get("no_delete") is True,
         "full closed controller context required",
     )
@@ -432,7 +440,11 @@ def load(outer, closed, config, closure, inputs):
 def recovery_history(outer, closed, config_path, config, inputs):
     """Pure retained admission proof, shared only after a typed closure."""
     provenance = config["host_operator_provenance"]
-    typed_closed = config["source_ref"] in (I["CLOSED_SOURCE"], I["CLOSED75_SOURCE"])
+    typed_closed = config["source_ref"] in (
+        I["CLOSED_SOURCE"],
+        I["CLOSED75_SOURCE"],
+        I["CLOSED77_SOURCE"],
+    )
     host = (
         closed_host(
             provenance["host_operator_source_ref"], workload=config["source_ref"]
