@@ -240,3 +240,14 @@ compressed and decoded hashes before staging the original files. The corrected
 host gate's source/hash is recorded separately when continuing an older
 workload. A future synchronous E2BIG error also writes its own positive pre-exec
 receipt and restores the host signal handlers without claiming a gate started.
+
+
+Within a live strict cohort, the fleet shares one successful read-only app-secret
+verification. The proof is bound to the campaign owner and process births,
+cohort membership, app, source, verifier bytes, complete environment hashes and
+selected authentication inputs. It is consumed only while the same owner is
+live. Standalone runs keep their ordinary verification. A failed check is never
+cached: its stdout, stderr and exit status remain private under the cohort's
+`environment-preflight` directory. Waiting and cancellation retain the original
+startup deadline and join the owned verifier. This does not refresh app secrets
+or infer that a failed read means the app is missing.

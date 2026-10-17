@@ -1801,9 +1801,10 @@ inject_secrets() {
 # after machine update, and a stale GITHUB_TOKEN secret may be empty or 401.
 REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"
 verify_app_environment() {
-    local listing missing
-    listing="$(FLY secrets list -a "$APP" --json 2>/dev/null)" || {
-        echo "❌ Could not read app secrets for $APP (app missing or no access)." >&2
+    local listing missing read_status
+    listing="$(FLY secrets list -a "$APP" --json)" || {
+        read_status=$?
+        echo "❌ Could not read app secrets for $APP (read exit=$read_status)." >&2
         echo "   One-time setup: bash scripts/run-bench-cloud --setup" >&2
         return 1
     }

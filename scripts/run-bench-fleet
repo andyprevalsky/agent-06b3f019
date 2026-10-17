@@ -796,6 +796,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-campaign-machines.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-mutation.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-seed.py" \
+       "$ROOT_DIR/scripts/cloudbench-campaign-env.py" \
        "$ROOT_DIR/scripts/cloudbench-seed-get.sh" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
        "$ROOT_DIR/scripts/cloudbench-sealed-machine-retirement.py" \
@@ -15081,7 +15082,18 @@ pool_write_shape_hints || exit 1
 # verifies they exist; refreshing them is an explicit maintenance op.
 write_startup_card "verifying environment"
 echo "🔎 Verifying the shared benchmark app environment (read-only)..."
-if ! bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets; then
+verify_fleet_environment() {
+    if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] && [ -n "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ]; then
+        python3 -I -S -B "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-env.py" \
+            --root "$ROOT_DIR" --inventory "$CLOUDBENCH_CAMPAIGN_INVENTORY_DIR" \
+            --barrier "$RUN_BENCH_CAMPAIGN_BARRIER_DIR" --job "${RUN_BENCH_CAMPAIGN_JOB_ID:?}" \
+            --controller-pid "$$" --source-ref "${CLOUDBENCH_PRESTACK_CONTROLLER_REF:?}" \
+            --deadline "$((FLEET_CONTROLLER_STARTED_EPOCH + START_BARRIER_WAIT_SECONDS))"
+    else
+        bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets
+    fi
+}
+if ! verify_fleet_environment; then
     echo "❌ Cloud benchmark environment is not ready; no benchmark machine was started." >&2
     echo "   Refresh it explicitly (maintenance op): bash scripts/run-bench-cloud --refresh-secrets" >&2
     exit 1
