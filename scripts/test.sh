@@ -332,6 +332,7 @@ run_suite "Controller Operator Preflight" python3 scripts/tests/cloudbench-opera
 run_suite "Playwright Browser Bootstrap" python3 scripts/tests/playwright-browser-bootstrap.test.py
 run_suite "Cloud Benchmark Inventory Stdlib Startup" python3 scripts/tests/cloudbench-inventory-site-startup.test.py
 run_suite "Cloud Benchmark Poll Stdlib Startup" python3 scripts/tests/cloudbench-poll-site-startup.test.py
+run_suite "Cloud Benchmark Hub Admission Stdlib Startup" python3 scripts/tests/cloudbench-hub-admission-site-startup.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
 run_suite "Cloud Benchmark Quiesced Forensic Retirement" python3 scripts/tests/cloudbench-forensic-quiesced.test.py
 run_suite "Cloud Benchmark Native Linux Runner" python3 scripts/tests/cloudbench-controller-linux.test.py
