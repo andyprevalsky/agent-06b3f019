@@ -332,6 +332,7 @@ run_suite "Original600 Portable Operator" python3 scripts/tests/original600-port
 run_suite "Cloud Benchmark Stdlib Startup" python3 scripts/tests/cloudbench-site-startup.test.py
 run_suite "Cloud Benchmark Native Stdlib Startup" python3 scripts/tests/cloudbench-native-site-startup.test.py
 run_suite "Cloud Benchmark Start Accounting" python3 scripts/tests/cloudbench-start-accounting.test.py
+run_suite "Cloud Benchmark Status Readiness Observability" python3 scripts/tests/cloudbench-status-readiness-observability.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
 run_suite "Cloud Benchmark Quiesced Forensic Retirement" python3 scripts/tests/cloudbench-forensic-quiesced.test.py
 run_suite "Cloud Benchmark Staged Boot" python3 scripts/tests/cloudbench-staged-boot.test.py

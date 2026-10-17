@@ -1375,6 +1375,7 @@ cloudbench_shared_proxy_start() {  # same signature as data-plane proxy
   local port="$1" remote="$2" host="$3" log="$4" name="$5" label="$6"
   local timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}" result lease started health live_path live_value rc
   local lease_name="${5}_LEASE" token_name="${5}_TOKEN" live_name="${5}_LIVE"
+  local last_http=not_probed curl_exit=not_probed proxy_alive=not_checked readiness_reason=deadline
   local token="${RUN_LOG_TOKEN:-${RUN_ID:?}}-$label-$port"
   started="$(date +%s)"
   while :; do
@@ -1396,11 +1397,25 @@ cloudbench_shared_proxy_start() {  # same signature as data-plane proxy
   printf 'shared relay lease %s: localhost:%s -> %s:%s\n' "$lease" "$port" "$host" "$remote" >> "$log"
   [ "$label" = status ] || return 0
   while [ $(( $(date +%s) - started )) -lt "$timeout" ]; do
-    cloudbench_proxy_alive "$name" || break
-    health="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/driver-health" 2>/dev/null || true)"
+    if cloudbench_proxy_alive "$name"; then
+      proxy_alive=true
+    else
+      proxy_alive=false
+      readiness_reason=proxy_not_alive
+      break
+    fi
+    curl_exit=0
+    health="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/driver-health" 2>/dev/null)" || curl_exit=$?
+    case "$health" in
+      [0-9][0-9][0-9]) last_http="$health" ;;
+      *) last_http=invalid_code ;;
+    esac
     if cloudbench_status_proxy_lifecycle_response_accepted "$health"; then return 0; fi
     sleep 1
   done
+  # Keep only observations already made by the readiness loop, never response bodies.
+  printf 'status readiness failed: reason=%s last_http=%s curl_exit=%s proxy_alive=%s\n' \
+    "$readiness_reason" "$last_http" "$curl_exit" "$proxy_alive" >> "$log" || true
   cloudbench_proxy_stop "$name" || return 1
   return 1
 }
