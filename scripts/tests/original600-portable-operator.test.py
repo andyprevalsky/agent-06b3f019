@@ -30,6 +30,21 @@ def private(path, value):
 
 
 class Portable(unittest.TestCase):
+    def test_literal_token_accepts_canonical_scheme_without_nested_authorization(self):
+        for value in ['opaque-token', 'FlyV1 fm2_fixture+/=', 'Bearer opaque-token',
+                      '"FlyV1 fm2_fixture+/="', "'Bearer opaque-token'"]:
+            with self.subTest(value=value):
+                token = CLI.token_from_agents(('FLY_API_TOKEN='+value+'\nCOMPLETE=fixture\n').encode())
+                self.assertEqual(token, value.strip('\"\''))
+                expected = token if token.startswith(('FlyV1 ', 'Bearer ')) else 'Bearer '+token
+                self.assertEqual(CLI.token_header(token), expected)
+        for value in ['', 'FlyV1 ', 'Unknown abc', 'Bearer  abc', 'FlyV1 abc def',
+                      'FlyV1 abc\tdef', 'FlyV1 abc\x00def', '"FlyV1 abc',
+                      '"FlyV1 abc\ndef"', '$(command)', 'abc\nFLY_API_TOKEN=def']:
+            with self.subTest(invalid=repr(value)):
+                with self.assertRaises(ValueError):
+                    CLI.token_from_agents(('FLY_API_TOKEN='+value+'\n').encode())
+
     def test_drip_response_is_bounded_without_orphan_reader(self):
         class Drip(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -102,7 +117,7 @@ class Portable(unittest.TestCase):
             tasks = json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())
             facts = dict(app='navi-whisper-lux-bench', image_ref='registry.fly.io/fixture@sha256:'+'a'*64,
                          protected_machines=['m1', 'm2', 'm3', 'm4'], protected_volumes=['v1'])
-            for flag, data in [('facts', facts), ('agents-env', 'FLY_API_TOKEN=fixture\n'), ('backend-env', 'COMPLETE=fixture\n'),
+            for flag, data in [('facts', facts), ('agents-env', 'FLY_API_TOKEN=FlyV1 fixture\n'), ('backend-env', 'COMPLETE=fixture\n'),
                                ('tasks', tasks), ('snapshot-inventory', {}), ('warm-deps', 'fixture')]:
                 args += ['--'+flag, str(private(inputs/flag, data))]
             env = dict(os.environ, PATH=str(fakebin)+':'+os.environ['PATH'], PROVIDER_MARKER=str(marker))
@@ -139,9 +154,10 @@ class Portable(unittest.TestCase):
                     return [{'id': self.app+'-machine'}]
 
             response = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'navi-whisper-lux-bench', 'Organization': {'Slug': 'personal'}}, {'Name': 'new-app', 'Organization': {'Slug': 'personal'}}]), '')
-            with patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
+            with patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())) as request_open, \
                  patch.object(CLI.subprocess, 'run', return_value=response):
-                cap = CLI.capacity(API, 'fixture', 'personal', directory, 1)
+                cap = CLI.capacity(API, 'FlyV1 fixture', 'personal', directory, 1)
+            self.assertEqual(request_open.call_args.args[0].get_header('Authorization'), 'FlyV1 fixture')
             self.assertCountEqual(calls, [('navi-whisper-lux-bench', 'GET', '/machines'), ('new-app', 'GET', '/machines')])
             foreign = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'unrelated', 'Organization': {'Slug': 'personal'}}]), '')
             with patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \

@@ -45,12 +45,24 @@ def source(root, ref):
 
 
 def token_from_agents(raw):
-    # Same literal token-file contract used by the original capacity reader.
-    values = [line.split('=', 1)[1].strip().strip('\"\'')
+    # Preserve the canonical credential's explicit scheme. Only a single
+    # literal value is accepted; no shell expansion or multiline parsing.
+    values = [line.split('=', 1)[1].strip()
               for line in raw.decode().splitlines() if line.startswith('FLY_API_TOKEN=')]
-    if len(values) != 1 or not values[0] or any(c.isspace() for c in values[0]):
+    if len(values) != 1:
         raise ValueError('one literal Fly token required in selected complete agents env')
-    return values[0]
+    value = values[0]
+    if value[:1] in ('"', "'") or value[-1:] in ('"', "'"):
+        if len(value) < 2 or value[0] != value[-1]:
+            raise ValueError('one literal Fly token required in selected complete agents env')
+        value = value[1:-1]
+    if value in ('FlyV1', 'Bearer') or not re.fullmatch(r'(?:(?:FlyV1|Bearer) )?[A-Za-z0-9_./+,=:\-]+', value):
+        raise ValueError('one literal Fly token required in selected complete agents env')
+    return value
+
+
+def token_header(token):
+    return token if token.startswith(('FlyV1 ', 'Bearer ')) else 'Bearer ' + token
 
 
 def facts_from(raw):
@@ -69,7 +81,7 @@ def capacity(api, token, org, directory, extra):
     started = time.time()
     query = 'query { organization(slug:' + json.dumps(org) + ') { id slug settings billingStatus } }'
     req = urllib.request.Request('https://api.fly.io/graphql', data=json.dumps({'query': query}).encode(),
-                                 headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+                                 headers={'Authorization': token_header(token), 'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=20) as response:
         settings = json.load(response)
     if settings.get('errors') or not settings.get('data', {}).get('organization'):
