@@ -113,6 +113,57 @@ def file_sha(path):
     return scope["sealed_bytes"](Path(path))[0]
 
 
+def local_drain_binding(out, pins):
+    directory = out / "registered-orphan-drain"
+    if not directory.exists():
+        return None
+    intent_path = directory / "intent.json"
+    intent = obj(intent_path)
+    planned = []
+    for path in sorted(directory.glob("result-*.json")):
+        value = obj(path)
+        if value.get("status") == "PLANNED":
+            planned.append((path, value))
+    need(len(planned) == 1, "one recorded orphan drain plan required")
+    plan_path, plan = planned[0]
+    for path in (intent_path, plan_path):
+        pins[str(path)] = B["fingerprint"](path)
+    return {
+        "identity_sha256": intent["payload"]["identity_sha256"],
+        "operator_ref": intent["payload"]["operator_ref"],
+        "launch_sha256": intent["payload"]["launch_sha256"],
+        "plan_sha256": plan["plan_sha256"],
+        "host_intent_sha256": sha(read(intent_path)),
+        "host_plan_receipt_sha256": sha(read(plan_path)),
+    }
+
+
+def require_recorded_drain(binding, evidence):
+    if binding is None:
+        return
+    need(evidence.get("present") is True, "recorded orphan drain evidence missing")
+    files = evidence["files"]
+    decoded = {}
+    for name in ("intent.json", "plan.json"):
+        item = files[name]
+        raw = base64.b64decode(item["body_b64"], validate=True)
+        need(
+            len(raw) == item["bytes"] and sha(raw) == item["sha256"],
+            "drain evidence bytes differ",
+        )
+        decoded[name] = json.loads(raw)
+    intent, plan = decoded["intent.json"], decoded["plan.json"]
+    need(
+        intent["identity_sha256"]
+        == plan["identity_sha256"]
+        == binding["identity_sha256"]
+        and intent["operator_ref"] == binding["operator_ref"]
+        and plan["launch_sha256"] == binding["launch_sha256"]
+        and files["plan.json"]["sha256"] == binding["plan_sha256"],
+        "downloaded orphan drain differs from recorded plan",
+    )
+
+
 def check(config, config_sha256, run_directory, operator_ref):
     out = Path(run_directory).absolute()
     state = obj(out / "payload-finalizer.identities.private.json")
@@ -210,6 +261,12 @@ def check(config, config_sha256, run_directory, operator_ref):
         "original_epoch": state["epoch"],
         "original_deadline": state["deadline"],
     }
+    binding["orphan_drain"] = local_drain_binding(out, pins)
+    need(
+        binding["orphan_drain"] is None
+        or binding["orphan_drain"]["launch_sha256"] == binding["launch_sha256"],
+        "recorded orphan drain belongs to another controller launch",
+    )
     return {
         "state": state,
         "config": str(Path(config).absolute()),
@@ -287,12 +344,12 @@ def remote(fly, value, journal, action, *, allow_pending=False):
         "driver_sha256": value["driver_sha256"],
         "binding_sha256": binding_sha,
     }
-    command = "cd / && exec " + shlex.join(
+    command = shlex.join(
         [
             "python3",
             "-S",
             "-c",
-            REMOTE,
+            "import os;os.chdir('/')\n" + REMOTE,
             base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode(),
         ]
     )
@@ -514,6 +571,10 @@ def _observe(value, fly, cancelled):
     active()
     unchanged(value)
     ready = not result["non_hub_writers"]
+    if ready:
+        require_recorded_drain(
+            value["binding"].get("orphan_drain"), result["drain_evidence"]
+        )
     receipt = {
         "status": "EXPORT_READINESS_READY" if ready else "EXPORT_READINESS_PENDING",
         "journal": str(journal),
@@ -559,12 +620,18 @@ def _execute(value, fly, cancelled):
     active()
     native(fly, value, journal, "before")
     active()
-    remote(fly, value, journal, "check")
+    checked = remote(fly, value, journal, "check")
+    require_recorded_drain(
+        value["binding"].get("orphan_drain"), checked["drain_evidence"]
+    )
     active()
     unchanged(value)
     native(fly, value, journal, "pre-export")
     active()
     exported = remote(fly, value, journal, "export")
+    require_recorded_drain(
+        value["binding"].get("orphan_drain"), exported["drain_evidence"]
+    )
     preserve_drain(journal, exported["drain_evidence"])
     active()
     remote_stage = exported["remote_stage"]

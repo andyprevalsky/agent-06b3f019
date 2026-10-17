@@ -28,6 +28,76 @@ def write(path, value):
 
 
 class ExportResume(unittest.TestCase):
+    def test_remote_command_is_an_executable_without_an_implicit_shell(self):
+        journal = self.out / "remote-command"
+        journal.mkdir()
+        program = (
+            "import base64,json,os,sys\n"
+            "v=json.loads(base64.b64decode(sys.argv[1]))\n"
+            "assert os.getcwd()=='/'\n"
+            "print(json.dumps(dict(machine=v['machine'],launch_sha256=v['launch_sha256'],non_hub_writers=[])))\n"
+        )
+
+        class API:
+            def flyctl(inner, timeout, *argv):
+                result = subprocess.run(
+                    shlex.split(argv[-1]),
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+                return result.returncode, result.stdout, result.stderr
+
+        with mock.patch.dict(M["remote"].__globals__, REMOTE=program):
+            result = M["remote"](API(), self.value, journal, "check")
+        self.assertEqual(result["machine"], self.mid)
+
+    def test_recorded_drain_requires_matching_original_guest_custody(self):
+        identity, operator, launch = "a" * 64, "b" * 40, "c" * 64
+        guest = {
+            "intent.json": {"identity_sha256": identity, "operator_ref": operator},
+            "plan.json": {
+                "identity_sha256": identity,
+                "launch_sha256": launch,
+                "targets": [],
+            },
+        }
+        files = {}
+        for name, value in guest.items():
+            raw = (json.dumps(value, sort_keys=True) + "\n").encode()
+            files[name] = {
+                "bytes": len(raw),
+                "sha256": M["sha"](raw),
+                "body_b64": base64.b64encode(raw).decode(),
+            }
+        directory = self.out / "registered-orphan-drain"
+        write(
+            directory / "intent.json",
+            {
+                "payload": {
+                    "identity_sha256": identity,
+                    "operator_ref": operator,
+                    "launch_sha256": launch,
+                }
+            },
+        )
+        write(
+            directory / "result-1.json",
+            {"status": "PLANNED", "plan_sha256": files["plan.json"]["sha256"]},
+        )
+        pins = {}
+        binding = M["local_drain_binding"](self.out, pins)
+        evidence = {"present": True, "files": files}
+        M["require_recorded_drain"](binding, evidence)
+        self.assertEqual(len(pins), 2)
+        with self.assertRaisesRegex(ValueError, "evidence missing"):
+            M["require_recorded_drain"](binding, {"present": False, "files": {}})
+        binding["plan_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "recorded plan"):
+            M["require_recorded_drain"](binding, evidence)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -123,11 +193,18 @@ class ExportResume(unittest.TestCase):
                     argv = shlex.split(args[-1])
                     payload = json.loads(base64.b64decode(argv[-1]))
                     test.assertEqual(payload["record"], test.record)
-                    test.assertIn("cd / && exec", args[-1])
+                    test.assertEqual(argv[:3], ["python3", "-S", "-c"])
+                    test.assertTrue(argv[3].startswith("import os;os.chdir('/')\n"))
                     result = {
                         "machine": test.mid,
                         "launch_sha256": test.binding["launch_sha256"],
                         "non_hub_writers": [],
+                        "drain_evidence": {
+                            "root": "/tmp/gate/controller-host-custody/registered-orphan-drain",
+                            "present": False,
+                            "files": {},
+                            "directories": [],
+                        },
                     }
                     if writers and payload["action"] == "check":
                         return (
