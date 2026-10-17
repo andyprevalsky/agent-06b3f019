@@ -85,6 +85,8 @@ def capacity(api, token, org, directory, extra):
     apps = json.loads(result.stdout)
     if not isinstance(apps, list) or not apps or len({a['Name'] for a in apps}) != len(apps):
         raise ValueError('fresh complete organization app inventory required')
+    if 'navi-whisper-lux-bench' not in {a['Name'] for a in apps}:
+        raise ValueError('capacity inventory does not include the original benchmark app')
     for app in apps:
         organization_value = app.get('Organization')
         app_org = organization_value.get('Slug') if isinstance(organization_value, dict) else organization_value
@@ -164,7 +166,7 @@ def main():
     parser.add_argument('--source-ref', required=True)
     for name in ['state-dir', 'facts', 'agents-env', 'backend-env', 'tasks', 'snapshot-inventory', 'warm-deps']:
         parser.add_argument('--'+name, required=True, type=Path)
-    parser.add_argument('--org', default='personal')
+    parser.add_argument('--org', choices=['personal'], default='personal')
     parser.add_argument('--extra-destroying-count', type=int, default=1)
     args = parser.parse_args()
     os.umask(0o077)

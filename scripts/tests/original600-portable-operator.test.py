@@ -61,7 +61,7 @@ class Portable(unittest.TestCase):
                         return json.load(response)
 
             settings = {'data': {'organization': {'slug': 'personal', 'settings': {'machines_per_org_limit': 1000}, 'billingStatus': 'fixture'}}}
-            apps = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'first-app', 'Organization': {'Slug': 'personal'}}]), '')
+            apps = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'navi-whisper-lux-bench', 'Organization': {'Slug': 'personal'}}]), '')
             start = time.monotonic()
             try:
                 with patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
@@ -138,11 +138,16 @@ class Portable(unittest.TestCase):
                     calls.append((self.app, method, path))
                     return [{'id': self.app+'-machine'}]
 
-            response = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'first-app', 'Organization': {'Slug': 'personal'}}, {'Name': 'new-app', 'Organization': {'Slug': 'personal'}}]), '')
+            response = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'navi-whisper-lux-bench', 'Organization': {'Slug': 'personal'}}, {'Name': 'new-app', 'Organization': {'Slug': 'personal'}}]), '')
             with patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
                  patch.object(CLI.subprocess, 'run', return_value=response):
                 cap = CLI.capacity(API, 'fixture', 'personal', directory, 1)
-            self.assertCountEqual(calls, [('first-app', 'GET', '/machines'), ('new-app', 'GET', '/machines')])
+            self.assertCountEqual(calls, [('navi-whisper-lux-bench', 'GET', '/machines'), ('new-app', 'GET', '/machines')])
+            foreign = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'unrelated', 'Organization': {'Slug': 'personal'}}]), '')
+            with patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
+                 patch.object(CLI.subprocess, 'run', return_value=foreign):
+                with self.assertRaisesRegex(ValueError, 'does not include'):
+                    CLI.capacity(API, 'fixture', 'personal', directory, 1)
             self.assertEqual(cap['available_slots_conservative'], 997)
             config = CLI.prepare(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, directory, cap)
             value = json.loads(config.read_text())
