@@ -789,6 +789,11 @@ def publish_llm_dump(dump: Path, agent_id: str) -> tuple[Path, str]:
         str(dump),
         "-o",
         str(out_html),
+        # Keep the renderer's published copy in this agent's directory too.
+        # Its default artifact root shares the last_llm_call.html basename
+        # across runs, which can overwrite another agent's file or fail on it.
+        "--artifacts-dir",
+        str(out_dir),
         "--no-open",
     ]
     result = subprocess.run(cmd, check=True, cwd=str(REPO_ROOT), capture_output=True, text=True)

@@ -138,6 +138,55 @@ with tempfile.TemporaryDirectory() as tmp:
 print("ok publisher HTTPS dump URL")
 PY
 
+# 2c) Each agent keeps its rendered copy beside its evidence. A previous
+#     publication's shared basename must not be overwritten (or block this one).
+"$PYTHON_BIN" - <<'PY' || fail "publisher artifact isolation"
+import importlib.util
+import subprocess
+import tempfile
+from pathlib import Path
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, Path(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+publisher = load("isolated_publisher", "scripts/publish_evidence_links.py")
+renderer = load("isolated_renderer", "scripts/render_llm_dump.py")
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    shared = root / "shared-artifacts"
+    shared.mkdir()
+    foreign = shared / "last_llm_call.html"
+    foreign.write_text("retained publication from another agent")
+    renderer.DEFAULT_ARTIFACTS_DIR = shared
+    publisher.ARTIFACTS_ROOT = root / "evidence"
+    dump = root / "actual-call.json"
+    dump.write_text("{}")
+    copied = []
+
+    def render_locally(cmd, **kwargs):
+        output = Path(cmd[cmd.index("-o") + 1])
+        output.write_text("<html>this agent's actual call</html>")
+        artifacts = (
+            Path(cmd[cmd.index("--artifacts-dir") + 1])
+            if "--artifacts-dir" in cmd else renderer.DEFAULT_ARTIFACTS_DIR
+        )
+        copied.append(renderer.publish_rendered_dump(output, artifacts))
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="https://example.r2.dev/this-agent.html\n", stderr=""
+        )
+
+    publisher.subprocess.run = render_locally
+    html, url = publisher.publish_llm_dump(dump, "agent-1")
+    assert foreign.read_text() == "retained publication from another agent"
+    assert copied == [publisher.ARTIFACTS_ROOT / "agent-1" / "last_llm_call.html"]
+    assert html.read_text() == "<html>this agent's actual call</html>"
+    assert url == "https://example.r2.dev/this-agent.html"
+print("ok publisher keeps other agents' artifacts intact")
+PY
+
 # 3) Approval format still demands durable FE + no invalid recordings.
 FORMAT="$ROOT/.claude/shared/approval-format.md"
 grep -Fq 'https://roselabs.ai/?agent-id=' "$FORMAT" || fail "approval format missing durable FE"
