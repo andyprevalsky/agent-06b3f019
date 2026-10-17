@@ -144,6 +144,15 @@ class Reconcile(unittest.TestCase):
                 result["archive"]["expired_admission"]["directory"], str(outer)
             )
             self.assertTrue(M["validate_handoff"](result["archive"]))
+            inherited = {
+                "archive_sha256": self.row["archive_sha256"],
+                "machine_ids": [self.f.mid],
+                "reuse_credit": False,
+            }
+            value["original_request"]["held_prior_reservations"] = [inherited]
+            result = M["prepare"](outer, inventory)
+            self.assertEqual(result["inherited_held_scopes"], [inherited])
+            self.assertEqual(len(result["candidates"]), 1)
             OLD["write"](
                 outer / "expired-reservation-handoff.json", {"new_cohort": "a" * 32}
             )

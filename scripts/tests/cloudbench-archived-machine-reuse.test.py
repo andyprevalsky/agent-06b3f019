@@ -855,6 +855,17 @@ class IntegratedControls(unittest.TestCase):
                 self.assertEqual({r["archive_sha256"] for r in result["archives"]}, {original_hash, latest_hash})
                 self.assertFalse(result["held_prior_reservations"][0]["reuse_credit"])
                 self.assertEqual(result["excluded_machine_ids"], [])
+                inherited = copy.deepcopy(partition)
+                inherited["held_machine_ids"] = []
+                inherited["archive"]["archive_sha256"] = "f" * 64
+                inherited["inherited_held_scopes"] = [{"archive_sha256": latest_hash,
+                     "machine_ids": [previous.mid], "reuse_credit": False}]
+                with mock.patch.dict(H["prepare_request"].__globals__, module=lambda name:
+                        {"prepare": lambda *args: inherited} if name == "cloudbench-reconcile-reservations.py" else load(name)):
+                    inherited_result = H["prepare_request"]([previous.run, latest.run], previous.inventory,
+                        "c" * 32, "d" * 40, expired_runs=[previous.root / "expired"])
+                self.assertEqual([r["machine_id"] for r in inherited_result["candidates"]], [previous.mid])
+                self.assertEqual(inherited_result["candidates"][0]["archive_sha256"], latest_hash)
                 with self.assertRaisesRegex(ValueError, "no exact archived candidates"):
                     H["prepare_request"]([previous.run], previous.inventory, "c" * 32, "d" * 40,
                                          unused_runs=[previous.root / "admission"])

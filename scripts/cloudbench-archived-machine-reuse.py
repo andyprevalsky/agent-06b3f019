@@ -150,6 +150,13 @@ def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=
         unused_ids.update(result_ids)
         if held:
             held_scopes.setdefault(archive["archive_sha256"], set()).update(held)
+        for scope in result.get('inherited_held_scopes', []):
+            ids = scope['machine_ids']
+            need(re.fullmatch('[0-9a-f]{64}', scope['archive_sha256'])
+                 and scope.get('reuse_credit') is False and len(ids) == len(set(ids))
+                 and all(isinstance(mid, str) and re.fullmatch('[0-9a-f]{14}', mid) for mid in ids),
+                 'invalid inherited hold scope')
+            held_scopes.setdefault(scope['archive_sha256'], set()).update(ids)
         for candidate in result["candidates"]:
             mid, volume = candidate["machine_id"], candidate["volume_id"]
             need(mid not in carried_ids and volume not in carried_volumes, "duplicate unused Machine/Volume")

@@ -4,6 +4,7 @@
 import base64
 import copy
 import json
+import re
 import runpy
 import stat
 import subprocess
@@ -483,6 +484,25 @@ def prepare(expired_run, inventory_path):
         "deadline": value["deadline"],
     }
     archive_sha = sha(canonical(proof))
+    inherited = value["original_request"].get("held_prior_reservations", [])
+    origins = {
+        entry["archive_sha256"] for entry in value["original_request"]["archives"]
+    }
+    seen = set()
+    for scope in inherited:
+        ids = scope["machine_ids"]
+        need(
+            scope["archive_sha256"] in origins
+            and scope.get("reuse_credit") is False
+            and len(ids) == len(set(ids))
+            and all(
+                isinstance(mid, str) and re.fullmatch("[0-9a-f]{14}", mid)
+                for mid in ids
+            )
+            and scope["archive_sha256"] not in seen,
+            "invalid inherited reservation hold scope",
+        )
+        seen.add(scope["archive_sha256"])
     candidates = []
     for row in selected:
         mid = row["machine_id"]
@@ -511,6 +531,7 @@ def prepare(expired_run, inventory_path):
             "expired_admission": proof,
         },
         "diagnostics": value["rejected"],
+        "inherited_held_scopes": copy.deepcopy(inherited),
     }
 
 
