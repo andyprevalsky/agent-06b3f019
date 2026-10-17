@@ -4535,7 +4535,7 @@ capacity_reserve_slots() {  # <token> <machines> <shared> <machine-ceiling> <sha
     local current_machines="$6" current_shared="$7" kind="$8"
     local fleet_owner_token="${FLEET_OWNER_TOKEN:-${token%%-*}}"
     local fleet_ownership_root="${FLEET_OWNERSHIP_ROOT:-/nonexistent/cloudbench-fleet-ownership}"
-    python3 - "$CAPACITY_RESERVATION_ROOT" "$token" "$APP" \
+    python3 -S - "$CAPACITY_RESERVATION_ROOT" "$token" "$APP" \
         "$FLEET_OWNER_HOST" "$$" "$FLEET_OWNER_PID_START" "$RUN_ID" \
         "$fleet_owner_token" "$fleet_ownership_root" \
         "$machine_slots" "$shared_units" "$machine_ceiling" "$shared_ceiling" \
@@ -4580,6 +4580,8 @@ if not re.fullmatch(r"[0-9a-f]{32}", fleet_owner_token):
 reservations = os.path.join(root, "reservations")
 os.makedirs(reservations, exist_ok=True)
 lock_path = os.path.join(root, "admission.lock")
+boot_id = None
+live_owners = set()
 with open(lock_path, "a+", encoding="utf-8") as lock_handle:
     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
     reserved_machines = 0
@@ -4591,11 +4593,8 @@ with open(lock_path, "a+", encoding="utf-8") as lock_handle:
         if not os.path.isfile(path) or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
             fail(f"malformed capacity reservation entry: {name}")
         try:
-            fields = dict(
-                line.rstrip("\n").split("=", 1)
-                for line in open(path, encoding="utf-8")
-                if "=" in line
-            )
+            with open(path, encoding="utf-8") as record:
+                fields = dict(line.rstrip("\n").split("=", 1) for line in record if "=" in line)
             required = ("version", "app", "host", "pid", "pid_start", "run_id",
                         "token", "machine_slots", "shared_units", "kind")
             if any(key not in fields for key in required):
@@ -4618,10 +4617,17 @@ with open(lock_path, "a+", encoding="utf-8") as lock_handle:
                 raise ValueError("invalid fleet owner linkage")
         except (OSError, TypeError, ValueError) as exc:
             fail(f"malformed capacity reservation {name}: {exc}")
-        if owner_start.startswith("proc-start:"):
+        owner_key = (owner_pid, owner_start)
+        if owner_key in live_owners:
+            # A live observation can only become conservatively overcounted if
+            # its owner exits during this transaction. Never cache a failed or
+            # uncertain probe, which could discard a later readable owner.
+            owner_live = True
+        elif owner_start.startswith("proc-start:"):
             try:
-                with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as handle:
-                    boot_id = handle.read().strip()
+                if not boot_id:
+                    with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as handle:
+                        boot_id = handle.read().strip()
                 with open(f"/proc/{owner_pid}/stat", encoding="utf-8", errors="replace") as handle:
                     stat = handle.read()
                 stat_fields = stat[stat.rfind(")") + 2 :].split()
@@ -4641,6 +4647,8 @@ with open(lock_path, "a+", encoding="utf-8") as lock_handle:
             )
             actual_start = probe.stdout.strip()
             owner_live = probe.returncode == 0 and bool(actual_start) and actual_start == owner_start
+        if owner_live:
+            live_owners.add(owner_key)
         if not owner_live:
             cleanup_unconfirmed = bool(record_owner_token) and any(
                 os.path.lexists(os.path.join(fleet_ownership_root, record_owner_token, marker))
@@ -4694,7 +4702,7 @@ PY
 
 capacity_release_reservation() {  # <token>
     local token="$1"
-    python3 - "$CAPACITY_RESERVATION_ROOT" "$token" "$APP" \
+    python3 -S - "$CAPACITY_RESERVATION_ROOT" "$token" "$APP" \
         "$FLEET_OWNER_HOST" "$$" "$FLEET_OWNER_PID_START" <<'PY'
 import fcntl
 import os
@@ -4732,7 +4740,7 @@ PY
 capacity_release_owner_reservations() {
     # Normal teardown also sweeps an interrupted autoscaler child reservation.
     # Remove only records carrying this controller's exact PID birth identity.
-    python3 - "$CAPACITY_RESERVATION_ROOT" "$APP" "$FLEET_OWNER_HOST" \
+    python3 -S - "$CAPACITY_RESERVATION_ROOT" "$APP" "$FLEET_OWNER_HOST" \
         "$$" "$FLEET_OWNER_PID_START" "$FLEET_OWNER_TOKEN-" <<'PY'
 import fcntl
 import os
@@ -4772,7 +4780,7 @@ capacity_release_stale_owner_reservations() {  # <owner-meta> <exact-token>
     target_pid_start="$(registry_meta_value "$meta" pid_start)"
     target_host="$(registry_meta_value "$meta" host)"
     target_owner="$(registry_meta_value "$meta" fleet_owner_token)"
-    python3 - "$CAPACITY_RESERVATION_ROOT" "$APP" "$target_host" \
+    python3 -S - "$CAPACITY_RESERVATION_ROOT" "$APP" "$target_host" \
         "$target_pid" "$target_pid_start" "$target_owner" "$exact_token" <<'PY'
 import fcntl
 import os
