@@ -295,6 +295,11 @@ envelope exceeds the existing 256KiB config limit, the CLI sends the compressed
 files separately in bounded chunks to the exact owned controller. The small
 envelope contains their hashes and lengths. The guest publishes a file only
 after checking every byte and waits under the original campaign deadline.
+Each 32KiB chunk is assembled from indexed 2KiB fragments. The sender checks
+the complete serialized exec request against a 6200-byte bound before dispatch,
+including command escaping and JSON framing. Existing files and fragments are
+accepted only when their exact lengths and hashes match; an unresolved prior
+write is never retried as a new operation.
 Lost acknowledgements retain their receipts and may only be reconciled by an
 exact read; they never cause a blind write retry. The 16MiB decoded input bound
 is unchanged. A retained, positively recorded pre-gate

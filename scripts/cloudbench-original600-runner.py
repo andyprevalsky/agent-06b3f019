@@ -118,13 +118,21 @@ def receive(v,root=Path('/tmp')):
  assert entries and all(x['transfer_path']=='/tmp/controller-sidecar-'+digest+'.gz' and x['transfer_bytes']==entries[0]['transfer_bytes'] for x in entries)
  size=entries[0]['transfer_bytes'];assert type(size)is int and 0<size<16*1024*1024
  count=(size+32767)//32768;directory=root/('controller-sidecar-'+digest)
- if v['action']=='observe-chunk':
+ if v['action'] in ('observe-chunk','observe-fragment'):
   index=v['index'];assert type(index)is int and 0<=index<count
-  raw=read(directory/('%05d'%index),32768,{os.geteuid()})
-  assert len(raw)==min(32768,size-index*32768) and hashlib.sha256(raw).hexdigest()==v['chunk_sha256']
-  return dict(state='CHUNK',index=index,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())
+  target=directory/('%05d'%index);length=min(32768,size-index*32768);state='CHUNK'
+  if v['action']=='observe-fragment':
+   offset=v['offset'];assert type(offset)is int and offset%2048==0 and 0<=offset<length
+   target=directory/('fragments-%05d'%index)/('%05d'%offset);length=min(2048,length-offset);state='FRAGMENT'
+  try:raw=read(target,32768,{os.geteuid()})
+  except FileNotFoundError:return dict(state='ABSENT')
+  assert len(raw)==length and hashlib.sha256(raw).hexdigest()==v['chunk_sha256']
+  result=dict(state=state,index=index,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())
+  if state=='FRAGMENT':result['offset']=v['offset']
+  return result
  if v['action']=='observe-ready':
-  raw=read(root/('controller-sidecar-'+digest+'.gz'),size,{pwd.getpwnam('rose').pw_uid})
+  try:raw=read(root/('controller-sidecar-'+digest+'.gz'),size,{pwd.getpwnam('rose').pw_uid})
+  except FileNotFoundError:return dict(state='ABSENT')
   assert len(raw)==size and hashlib.sha256(raw).hexdigest()==digest
   return dict(state='READY',bytes=size,sha256=digest)
  try:directory.mkdir(mode=0o700)
@@ -136,11 +144,25 @@ def receive(v,root=Path('/tmp')):
   except FileExistsError:assert read(path,len(raw),{os.geteuid()})==raw;return
   with os.fdopen(fd,'wb')as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
   fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
- if v['action']=='chunk':
+ if v['action']in('chunk','fragment','assemble'):
   index=v['index'];assert type(index)is int and 0<=index<count
-  raw=base64.b64decode(v['data'],validate=True);assert len(raw)==min(32768,size-index*32768)
-  save(directory/('%05d'%index),raw)
-  return dict(state='CHUNK',index=index,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())
+  length=min(32768,size-index*32768);target=directory/('%05d'%index)
+  fragments=directory/('fragments-%05d'%index)
+  if v['action']=='fragment':
+   offset=v['offset'];assert type(offset)is int and offset%2048==0 and 0<=offset<length
+   try:fragments.mkdir(mode=0o700)
+   except FileExistsError:pass
+   s=fragments.lstat();assert fragments.resolve(strict=True)==fragments and stat.S_ISDIR(s.st_mode) and s.st_uid==os.geteuid() and not s.st_mode&0o077
+   raw=base64.b64decode(v['data'],validate=True);assert len(raw)==min(2048,length-offset)
+   target=fragments/('%05d'%offset)
+  elif v['action']=='assemble':
+   raw=b''.join(read(fragments/('%05d'%offset),2048,{os.geteuid()}) for offset in range(0,length,2048))
+   assert len(raw)==length and hashlib.sha256(raw).hexdigest()==v['chunk_sha256']
+  else:raw=base64.b64decode(v['data'],validate=True);assert len(raw)==length
+  save(target,raw)
+  result=dict(state='FRAGMENT' if v['action']=='fragment' else 'CHUNK',index=index,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())
+  if v['action']=='fragment':result['offset']=v['offset']
+  return result
  assert v['action']=='commit'
  raw=b''.join(read(directory/('%05d'%i),32768,{os.geteuid()}) for i in range(count))
  assert len(raw)==size and hashlib.sha256(raw).hexdigest()==digest
@@ -291,15 +313,21 @@ def launch_handoff(out,remote):
  digest=sha(read(path))
  return path,digest,['python3','-c',REMOTE_LAUNCH,'/tmp/controller-launch-payload.json.gz',digest,sha(raw)]
 
-def transfer_sidecars(api,mid,record,out,envelope_sha,deadline,cancelled=lambda:False):
+def sidecar_command(payload):
+ bundle=gzip.compress(json.dumps([REMOTE_SIDECAR,payload],sort_keys=True).encode(),mtime=0)
+ loader="import base64 as b,gzip,json,sys;s,p=json.loads(gzip.decompress(b.b64decode(sys.argv[1])));__name__='x';exec(s);print(json.dumps(receive(p)))"
+ return shlex.join(['python3','-c',loader,base64.b64encode(bundle).decode()])
+
+def transfer_sidecars(api,mid,record,out,envelope_sha,deadline,cancelled=lambda:False,*,journal=None):
  path=out/'controller-sidecars.private.json'
  if not path.exists():return
- descriptor=json.loads(read(path));journal=out/'payload-transfer';journal.mkdir(mode=0o700);sequence=[0]
+ descriptor=json.loads(read(path));journal=journal or out/'payload-transfer';journal.mkdir(mode=0o700);sequence=[0]
  def active():
   if cancelled():raise Deadline('payload transfer cancelled')
   need(time.time()<deadline,'original payload transfer deadline expired')
  def wire(method,url,body=None,kind='request'):
   active();sequence[0]+=1;prefix='%04d-%s'%(sequence[0],kind)
+  if method=='POST':need(len(json.dumps(body).encode())<=6200,'bounded payload JSON request required')
   save(journal/(prefix+'.request.json'),dict(method=method,path=url,body=body))
   def observer(observed_method,observed_path,status,data):
    need(observed_method==method and observed_path==url,'unexpected payload wire response')
@@ -316,7 +344,7 @@ def transfer_sidecars(api,mid,record,out,envelope_sha,deadline,cancelled=lambda:
    active();time.sleep(min(.2,max(0,deadline-time.time())))
  def send(request,label,expected):
   active();current()
-  command=exec_command(REMOTE_SIDECAR,request);need(len(command.encode())<100000,'bounded payload chunk command required')
+  command=sidecar_command(request);need(len(json.dumps(dict(cmd=command,timeout=20,machine=True)).encode())<=6200,'bounded payload JSON request required')
   save(journal/(label+'.intent.json'),dict(machine=mid,instance=record['instance_id'],request_sha256=sha(command.encode()),expected=expected))
   try:
    response=wire('POST','/machines/'+mid+'/exec',dict(cmd=command,timeout=max(1,int(min(20,deadline-time.time()))),machine=True),kind='write')
@@ -328,19 +356,31 @@ def transfer_sidecars(api,mid,record,out,envelope_sha,deadline,cancelled=lambda:
    # A missing ACK never repeats a write. One exact read can instead prove
    # that the original operation durably produced its complete expected bytes.
    observe={k:v for k,v in request.items() if k!='data'}
-   observe['action']='observe-chunk' if request['action']=='chunk' else 'observe-ready'
-   if request['action']=='chunk':observe['chunk_sha256']=expected['sha256']
+   observe['action']='observe-fragment' if request['action']=='fragment' else ('observe-chunk' if request['action'] in ('chunk','assemble') else 'observe-ready')
+   if request['action']in('chunk','assemble','fragment'):observe['chunk_sha256']=expected['sha256']
    active();current()
-   response=wire('POST','/machines/'+mid+'/exec',dict(cmd=exec_command(REMOTE_SIDECAR,observe),timeout=max(1,int(min(20,deadline-time.time()))),machine=True),kind='observe')
+   response=wire('POST','/machines/'+mid+'/exec',dict(cmd=sidecar_command(observe),timeout=max(1,int(min(20,deadline-time.time()))),machine=True),kind='observe')
    save(journal/(label+'.observation.json'),response)
    need(response.get('exit_code',0)==0 and response.get('exit_signal',0)==0 and response.get('stderr')in(None,'') and json.loads(response['stdout'])==expected,'payload transfer remains unknown')
    save(journal/(label+'.reconciled.json'),expected)
+ def exists(request,expected):
+  current();command=sidecar_command(request)
+  response=wire('POST','/machines/'+mid+'/exec',dict(cmd=command,timeout=max(1,int(min(20,deadline-time.time()))),machine=True),kind='observe-existing')
+  need(response.get('exit_code',0)==0 and response.get('exit_signal',0)==0 and response.get('stderr')in(None,''),'payload observation failed')
+  value=json.loads(response['stdout']);need(value==expected or value==dict(state='ABSENT'),'payload observation differs');return value==expected
  for item in descriptor:
   data=read(item['path']);need(len(data)==item['bytes'] and sha(data)==item['sha256'],'sidecar bytes changed')
   base=dict(machine=mid,source_ref=record['config']['env']['GATE_REF'],envelope_sha256=envelope_sha,sha256=item['sha256'])
+  if exists(dict(base,action='observe-ready'),dict(state='READY',bytes=len(data),sha256=item['sha256'])):continue
   for index,start in enumerate(range(0,len(data),32768)):
    chunk=data[start:start+32768]
-   send(dict(base,action='chunk',index=index,data=base64.b64encode(chunk).decode()),item['sha256']+'-%05d'%index,dict(state='CHUNK',index=index,bytes=len(chunk),sha256=sha(chunk)))
+   expected=dict(state='CHUNK',index=index,bytes=len(chunk),sha256=sha(chunk))
+   if exists(dict(base,action='observe-chunk',index=index,chunk_sha256=sha(chunk)),expected):continue
+   for offset in range(0,len(chunk),2048):
+    fragment=chunk[offset:offset+2048];wanted=dict(state='FRAGMENT',index=index,offset=offset,bytes=len(fragment),sha256=sha(fragment))
+    if exists(dict(base,action='observe-fragment',index=index,offset=offset,chunk_sha256=sha(fragment)),wanted):continue
+    send(dict(base,action='fragment',index=index,offset=offset,data=base64.b64encode(fragment).decode()),item['sha256']+'-%05d-%05d'%(index,offset),wanted)
+   send(dict(base,action='assemble',index=index,chunk_sha256=sha(chunk)),item['sha256']+'-%05d'%index,expected)
   send(dict(base,action='commit'),item['sha256']+'-commit',dict(state='READY',bytes=len(data),sha256=item['sha256']))
  current();save(journal/'complete.json',dict(machine=mid,instance=record['instance_id'],envelope_sha256=envelope_sha,sidecars=descriptor))
 

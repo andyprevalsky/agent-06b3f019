@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
+import types
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -59,6 +60,9 @@ class Portable(unittest.TestCase):
             gets=0
             actions=[]
             max_command_bytes=0
+            max_body_bytes=0
+            seen=set()
+            failed=False
             def api(self,method,path,body=None,timeout=None,observer=None):
                 owner.assertEqual(path,'/machines/'+'1'*14+('/exec' if method=='POST' else ''))
                 if method=='GET':
@@ -69,15 +73,32 @@ class Portable(unittest.TestCase):
                     return response
                 self.posts+=1
                 self.max_command_bytes=max(self.max_command_bytes,len(body['cmd'].encode()))
+                self.max_body_bytes=max(self.max_body_bytes,len(json.dumps(body).encode()))
+                if len(json.dumps(body).encode())>16384:
+                    response=dict(stdout='',stderr='Unhandled rejection: PayloadTooLarge',exit_code=0)
+                    if observer:observer(method,path,200,json.dumps(response).encode())
+                    return response
                 argv=shlex.split(body['cmd'])
-                request=json.loads(base64.b64decode(argv[-1]));self.actions.append(request['action'])
+                if 'gzip.decompress' in argv[2]:script,request=json.loads(gzip.decompress(base64.b64decode(argv[-1])))
+                else:script,request=argv[2],json.loads(base64.b64decode(argv[-1]))
+                self.actions.append(request['action'])
                 # Only filesystem root/account resolution are fixture-specific.
                 # The real receiver, request framing and OS file operations run.
-                argv[2]=('import os,pwd,types\npwd.getpwnam=lambda name:types.SimpleNamespace(pw_uid=os.getuid(),pw_gid=os.getgid())\n'+argv[2].replace("root=Path('/tmp')",'root=Path('+repr(str(guest))+')'))
-                done=subprocess.run(argv,capture_output=True,text=True,timeout=timeout,
-                    env=dict(os.environ,FLY_MACHINE_ID=record['id'],GATE_REF=ref))
-                if fail_ack is True or (fail_ack=='once' and self.posts==1):raise TimeoutError('lost response after receiver wrote chunk')
-                response=dict(stdout=done.stdout,stderr=done.stderr,exit_code=done.returncode)
+                script=('import os,pwd,types\npwd.getpwnam=lambda name:types.SimpleNamespace(pw_uid=os.getuid(),pw_gid=os.getgid())\n'+script.replace("root=Path('/tmp')",'root=Path('+repr(str(guest))+')'))
+                if request['action'] not in self.seen:
+                    self.seen.add(request['action'])
+                    if 'gzip.decompress' in argv[2]:argv[-1]=base64.b64encode(gzip.compress(json.dumps([script,request]).encode(),mtime=0)).decode()
+                    else:argv[2]=script
+                    done=subprocess.run(argv,capture_output=True,text=True,timeout=timeout,
+                        env=dict(os.environ,FLY_MACHINE_ID=record['id'],GATE_REF=ref))
+                    response=dict(stdout=done.stdout,stderr=done.stderr,exit_code=done.returncode)
+                else:
+                    scope={'__name__':'fixture_receiver'};exec(script,scope)
+                    with patch.dict(os.environ,FLY_MACHINE_ID=record['id'],GATE_REF=ref):
+                        try:response=dict(stdout=json.dumps(scope['receive'](request,guest)),stderr='',exit_code=0)
+                        except Exception as error:response=dict(stdout='',stderr=repr(error),exit_code=1)
+                if (fail_ack is True and (self.failed or request['action']=='fragment')) or (fail_ack=='once' and not self.failed and request['action']=='fragment'):
+                    self.failed=True;raise TimeoutError('lost response after receiver wrote chunk')
                 if observer:observer(method,path,200,json.dumps(response).encode())
                 return response
         return API(),record
@@ -94,7 +115,7 @@ class Portable(unittest.TestCase):
             self.assertEqual(delivered.stat().st_uid,os.getuid())
             self.assertEqual(delivered.stat().st_nlink,1)
             self.assertGreater(api.posts,2)
-            self.assertLess(api.max_command_bytes,100000)
+            self.assertLessEqual(api.max_body_bytes,6200)
             self.assertTrue((host/'payload-transfer/complete.json').is_file())
             node=next(n for n in ast.parse(RUNNER['REMOTE_LAUNCH']).body if isinstance(n,ast.FunctionDef) and n.name=='decode_remote_file')
             scope=dict(base64=base64,gzip=gzip,io=io,hashlib=hashlib,os=os,stat=__import__('stat'),time=time,v={'epoch':time.time()},
@@ -111,10 +132,10 @@ class Portable(unittest.TestCase):
             api,record=self.sidecar_api(guest,envelope,fail_ack=True)
             with self.assertRaises(TimeoutError):
                 RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60)
-            self.assertEqual(api.actions,['chunk','observe-chunk'])
+            self.assertEqual(api.actions[-2:],['fragment','observe-fragment'])
             self.assertEqual(len(list((host/'payload-transfer').glob('*.pending.json'))),1)
             self.assertFalse((host/'payload-transfer/complete.json').exists())
-            self.assertEqual(len(list(guest.glob('controller-sidecar-*/*'))),1)
+            self.assertEqual(len(list(guest.glob('controller-sidecar-*/fragments-*/*'))),1)
 
     def test_sidecar_waits_for_same_instance_to_start_before_exec(self):
         with tempfile.TemporaryDirectory() as name:
@@ -135,7 +156,8 @@ class Portable(unittest.TestCase):
             _,envelope,digest,_=self.large_sidecar(host)
             api,record=self.sidecar_api(guest,envelope,fail_ack='once')
             RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60)
-            self.assertEqual(api.actions[:3],['chunk','observe-chunk','chunk'])
+            index=api.actions.index('fragment')
+            self.assertEqual(api.actions[index:index+2],['fragment','observe-fragment'])
             self.assertTrue((host/'payload-transfer/complete.json').exists())
             self.assertEqual(len(list((host/'payload-transfer').glob('*.pending.json'))),1)
             self.assertEqual(len(list((host/'payload-transfer').glob('*.reconciled.json'))),1)
@@ -146,8 +168,8 @@ class Portable(unittest.TestCase):
             _,envelope,digest,_=self.large_sidecar(host)
             api,record=self.sidecar_api(guest,envelope)
             with self.assertRaises(RUNNER['Deadline']):
-                RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60,lambda:api.posts>0)
-            self.assertEqual(api.actions,['chunk'])
+                RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60,lambda:'fragment' in api.actions)
+            self.assertEqual(api.actions[-1],'fragment')
             self.assertFalse((host/'payload-transfer/complete.json').exists())
 
     def test_sidecar_raw_http_body_precedes_json_parse_failure(self):
