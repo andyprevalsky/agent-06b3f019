@@ -1565,3 +1565,73 @@ async def test_actual_task_runner_exports_fixture_custody_without_graded_root():
             assert calls.count(("delete",aid))==1 and calls.count(("provider",aid))==1
         assert row.owned_roots[0]["logs"]["cloud_cleanup_evidence"]["root_agent_id"]==ROOT
         assert row.benchmark_status==("PASSED" if mode=="both" else "CANCELLED" if mode=="cancel" else "ERROR")
+
+@async_case
+async def test_owned_cleanup_diagnostic_pipe_failure_preserves_provider_evidence():
+    await _diagnostic_pipe_case('success')
+    await _diagnostic_pipe_case('archive')
+
+
+async def _diagnostic_pipe_case(phase):
+    import builtins
+    roots = [ROOT, CHILD]
+    rows = [result(aid) for aid in roots]
+    rows[0].passed = True
+    rows[0].benchmark_status = 'PASSED'
+    rows[0].failure_reason = None
+    events = []
+    def query(_url, aid, **kwargs):
+        return {'root_user_id': ROOT, 'tree_agent_ids': [aid], 'browser_sessions': [], 'purchase_cleanup': []}
+    def release(_url, aid, before, *, evidence):
+        events.append(('provider', aid))
+        if phase == 'provider':
+            raise RuntimeError('genuine provider failure')
+        return {'root_agent_id': aid, 'tree_sealed': True, 'root_deleted': True, 'provider_receipts': []}
+    async def payments(_url, aid, evidence):
+        events.append(('payment', aid))
+        if phase == 'payment':
+            raise RuntimeError('genuine payment failure')
+        return {'root_agent_id': aid, 'purchases': []}
+    def output(*args, **kwargs):
+        text = ' '.join(str(x) for x in args)
+        if phase == 'unrelated' and 'Verified cloud root provider cleanup:' in text:
+            raise ValueError('unrelated diagnostic bug')
+        if (phase == 'success' and 'Verified cloud root provider cleanup:' in text) or (phase == 'archive' and 'Cloud archive warning:' in text):
+            raise BrokenPipeError('diagnostic fixture pipe closed')
+        return builtins.print(*args, **kwargs)
+    archive = AsyncMock(side_effect=RuntimeError('archive fixture unavailable')) if phase == 'archive' else AsyncMock(return_value=('archive', None))
+    with (
+        patch.object(cleanup, 'exact_root_sessions', query),
+        patch.object(bench, 'pause_agent', AsyncMock(return_value=True)),
+        patch.object(bench, '_refresh_browser_archive_snapshot', AsyncMock(return_value={'messages': []})),
+        patch.object(bench, 'finalize_archive_and_score_world_model', archive),
+        patch.object(bench, 'delete_agent', AsyncMock()),
+        patch.object(cleanup, 'close_exact_root_sessions', release),
+        patch.object(bench, '_finalize_owned_root_payments', payments),
+        patch.object(bench, 'fetch_local_worker_logs', return_value=[]),
+        patch.object(bench, 'print', output, create=True),
+    ):
+        if phase in {'provider', 'payment', 'unrelated'}:
+            with pytest.raises(RuntimeError):
+                await bench._finalize_owned_cloud_batch('http://localhost:1', rows, {})
+        else:
+            await bench._finalize_owned_cloud_batch('http://localhost:1', rows, {})
+    if phase in {'provider', 'payment', 'unrelated'}:
+        assert rows[0].passed is False and rows[0].benchmark_status == 'ERROR'
+        assert all(row.logs['cloud_cleanup_evidence']['errors'] for row in rows)
+        assert events.count(('payment', ROOT)) == events.count(('payment', CHILD)) == 1
+        return
+    assert rows[0].passed is True and rows[0].benchmark_status == 'PASSED'
+    assert rows[1].passed is False and rows[1].benchmark_status == 'FAILED'
+    assert rows[1].failure_reason == 'test timeout'
+    assert events == [('provider', ROOT), ('payment', ROOT), ('provider', CHILD), ('payment', CHILD)]
+    for row in rows:
+        assert row.logs['cloud_provider_cleanup']['root_agent_id'] == row.agent_id
+        assert row.logs['cloud_cleanup_evidence']['errors'] == []
+        assert any('BrokenPipeError' in warning for warning in row.logs['cloud_cleanup_evidence']['warnings'])
+
+
+@async_case
+async def test_owned_cleanup_diagnostic_sink_preserves_real_failures():
+    for phase in ('provider', 'payment', 'unrelated'):
+        await _diagnostic_pipe_case(phase)

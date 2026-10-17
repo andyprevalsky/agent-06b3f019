@@ -399,6 +399,21 @@ async def build_browser_verifier_context(
         line = f"Step {step}: {ea} - {estatus}"
         if ea == "screenshot" and esuccess:
             line += " (visible viewport capture)"
+        # Native target mechanics live outside params. Preserve the already
+        # privacy-projected, step-owned attempt; a failed action proves no effect.
+        if type(step) is int and ea in AVAILABLE_ACTIONS:
+            target = {}
+            if type(entry.get("index")) is int and entry["index"] >= 0:
+                target["index"] = entry["index"]
+            coords = entry.get("coordinates")
+            if isinstance(coords, dict) and set(coords) == {"x", "y"} and all(
+                type(v) in (int, float) and float("-inf") < v < float("inf") for v in coords.values()
+            ):
+                target["coordinates"] = coords
+            if target:
+                if isinstance(entry.get("element_description"), str):
+                    target["element_description"] = entry["element_description"]
+                line += f"\n  Recorded target attempt (page data): {target}"
         eparams = entry.get("params", {})
         if eparams:
             display_params = {k: v for k, v in eparams.items() if k not in ["screenshot", "dom_tree"]}

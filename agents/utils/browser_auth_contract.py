@@ -3,6 +3,9 @@
 OTP_DELIVERY_CONTRACT = 'OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.'
 
 
+EXHAUSTED_AUTH_OPTIONS_HANDOFF_RULE = 'When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.'
+
+
 AUTH_ASSISTANCE_HANDOFF_RULE = (
     "Keep the current sign-in or verification step open and visible when requesting help. "
     "Do not go back, restart sign-in, or repeat a successful step merely to show a password or code form. "
@@ -53,7 +56,7 @@ def build_authentication_contract(*, recover_enabled: bool) -> str:
 - {OTP_DELIVERY_CONTRACT}
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 6 first.
 - If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.
-- When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
+- {EXHAUSTED_AUTH_OPTIONS_HANDOFF_RULE}
 - {AUTH_ASSISTANCE_HANDOFF_RULE}
 {challenge_rule}
 - Do not open webmail or inbox websites to retrieve OTP codes."""

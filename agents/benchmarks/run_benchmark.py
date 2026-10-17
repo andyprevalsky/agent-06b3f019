@@ -6626,6 +6626,12 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             logs = stage_logs.get(aid, {})
             evidence = {"root_agent_id": aid, "errors": [], "warnings": preparation_warnings.get(aid, [])}
             logs["cloud_cleanup_evidence"] = evidence
+            def emit_cleanup_diagnostic(message):
+                # Output delivery cannot invalidate canonical resource evidence.
+                try:
+                    print(message)
+                except BrokenPipeError:
+                    evidence["warnings"].append("diagnostic output: BrokenPipeError")
             if result is None:
                 detail = "owned cloud root did not produce a task result"
                 evidence["errors"].append(f"execution: {detail}")
@@ -6684,7 +6690,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 # Archive/publication is diagnostic. Preserve the evaluator's
                 # terminal outcome while still requiring exact resource release.
                 evidence["warnings"].append(f"archive: {detail}")
-                print(f"    Cloud archive warning: {aid}: {detail}")
+                emit_cleanup_diagnostic(f"    Cloud archive warning: {aid}: {detail}")
             finally:
                 # Even failed evidence must release its exact resources. A DELETE
                 # response alone is insufficient because backend cleanup is best effort.
@@ -6707,7 +6713,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         evidence=evidence,
                     )
                     logs["cloud_provider_cleanup"] = receipt
-                    print(f"    Verified cloud root provider cleanup: {aid}")
+                    emit_cleanup_diagnostic(f"    Verified cloud root provider cleanup: {aid}")
                 except Exception as error:
                     detail = str(error) or type(error).__name__
                     evidence["errors"].append(f"provider: {detail}")

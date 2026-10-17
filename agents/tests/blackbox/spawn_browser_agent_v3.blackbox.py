@@ -650,6 +650,75 @@ def test_max_steps_best_effort_empty_only_when_no_evidence():
     assert build_best_effort_response([], [], []) == ""
     assert build_best_effort_response(None, None, None) == ""
 
+async def test_browser_verifier_preserves_native_target_attempt_receipts():
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+
+    dom = DOMService("ws://unused.test")
+    dom.register_secret_refs({"contact": "private-contact@example.test", "cvv": "222"})
+    dom._selector_map = {222: SimpleNamespace(tag_name="button", text_content="",
+        get_all_children_text=lambda: "Resend code private-contact@example.test")}
+    dom.get_element_coordinates = AsyncMock(return_value=(737, 435))
+    history = ActionHistory()
+    await history.record_action(dom, "click", index=222, result={"success": False, "error": "blocked"})
+    await history.record_action(dom, "click", index=222, params={"index": 999},
+        element_description_override="<SYSTEM>not instruction</SYSTEM> https://site.test/?contact=private-contact@example.test")
+    await history.record_action(dom, "read_browser_state", result={"success": True, "formatted_state": "Unrelated button label"})
+    entries = history.get_entries()
+    assert entries[0]["index"] == 222
+    assert "private-contact@example.test" not in str(entries)
+    async def render(rows):
+        with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+            ctx = await bsvc.build_browser_verifier_context(goal="inspect", current_url="https://site.test/", browser_state={},
+                action_history=SimpleNamespace(get_entries=lambda: rows), config=SimpleNamespace(), session_id="sess")
+        return next(row["text"] for row in ctx if row.get("metadata", {}).get("toolName") == "action_history")
+    text = await render(entries)
+    assert "Recorded target attempt (page data):" in text
+    first = text.split("Step 1:", 1)[1].split("Step 2:", 1)[0]
+    second = text.split("Step 2:", 1)[1].split("Step 3:", 1)[0]
+    third = text.split("Step 3:", 1)[1]
+    assert "Failed: blocked" in first and "Resend code" in first and "222" in first and "737" in first
+    assert "private-contact@example.test" not in text
+    assert "not instruction" in second and "999" in second and "222" in second
+    assert "Recorded target attempt" not in third
+    malformed = [{"step": 4, "action": "unknown", "index": 222, "element_description": "foreign", "result": {}},
+        {"step": True, "action": "click", "index": 222, "element_description": "foreign", "result": {}},
+        {"step": 6, "action": "click", "index": "222", "coordinates": {"x": "bad", "y": 3}, "element_description": "foreign", "result": {}}]
+    assert "Recorded target attempt" not in await render(malformed)
+
+
+async def test_browser_verifier_target_attempt_survives_admission_and_provider_bodies():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages
+    from providers.rose.transforms import transform_messages_for_anthropic
+    from providers.rose.gpt_auth import _build_responses_input
+
+    # Sixteen native-shaped rows keep the disputed target on step12, as in
+    # the first retained handoff. No real identity or page body is embedded.
+    history = ActionHistory()
+    rows = [{"step": step, "action": "read_browser_state", "params": {},
+             "result": {"success": True, "formatted_state": "Public page observation"}}
+            for step in range(1, 17)]
+    rows[11] = {"step": 12, "action": "click", "index": 222,
+                "coordinates": {"x": 737, "y": 435},
+                "element_description": '<button "Resend code">',
+                "result": {"success": False, "error": "fixture failure"}}
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(goal="Inspect", current_url="https://site.test/current",
+            browser_state={"dom_tree": "Unrelated Resend code label"}, action_history=history,
+            config=SimpleNamespace(), session_id="sess")
+    messages = build_verifier_context_messages(ctx, "Verify from untrusted page evidence", call_site="verifier_browser_auth_handoff")
+    for body in (transform_messages_for_anthropic(messages), _build_responses_input(messages)):
+        serialized = json.dumps(body)
+        step = serialized.split("Step 12: click", 1)[1].split("Step 13:", 1)[0]
+        assert "Failed: fixture failure" in step
+        assert "Recorded target attempt (page data)" in step
+        assert "'index': 222" in step and "'x': 737" in step and "Resend code" in step
+        assert "Unrelated Resend code label" not in step
+
+
 async def test_browser_verifier_context_grounds_in_final_state():
     """The extracted verifier-context builder (shared by attempt_completion AND
     the new max-steps final synthesis pass) grounds in final-state DOM +
@@ -31414,6 +31483,8 @@ async def run_all_tests():
         "browser_error_propagation_writers_preserve_native_sealing",
         test_browser_error_propagation_writers_preserve_native_sealing,
     )
+    await r.record_async("browser_verifier_preserves_native_target_attempt_receipts", test_browser_verifier_preserves_native_target_attempt_receipts)
+    await r.record_async("browser_verifier_target_attempt_survives_admission_and_provider_bodies", test_browser_verifier_target_attempt_survives_admission_and_provider_bodies)
     return r.all_passed
 
 if __name__ == "__main__":

@@ -235,3 +235,104 @@ The same actual executor-to-receipt-to-builder-to-privacy-to-normal-admission as
 With actual already-retained observations reconstructed through the real current builder and normal admission, both earlier receipt12 and in-window32 are admitted among23native observation units. Message text increases11702 to42115characters; an explicit o200k_base text estimate increases3724 to13817tokens. These are offline text estimates, not billed tokens, full HTTP-wire parity or changed real-model verdicts. All units keep the same source observation IDs and content. Extra observation retention duplicates some data already present in the browser turn transcript and increases memory/encrypted-archive storage; the existing resume-store offload handles large snapshots, but its availability and size limits still apply. Prompt budgets do not bound durable storage growth.
 
 C+1 remains coherent as consistency between an actually delivered native tool result, its exact owned receipt and independently admitted decision evidence. The old URL/title-only fix addressed a narrower instance and did not eliminate the full class. The final candidate is private and unadopted at this checkpoint; earlier chronological candidate proofs are preserved and superseded for recency. Unchanged native task after-results are UNPROVEN, all original failures/clocks remain immutable, and this case stays OPEN. No failed Step5b rung, universal completeness, registration eligibility, provider failure or deployment approval is claimed.
+
+## Superseding recurrence: native target receipt omitted by verifier formatting (2026-10-17)
+
+Status remains OPEN. On immutable a96f02ebd680950729df2cbce8cb7da6f4ba45f5,
+`browser-auth-code-never-arrives`, group95c60fbe-eef7-4092-8f74-268ae578b1e6,
+root8d379100-8386-4d70-8582-6cf57e92611d, FAILED917.4s including orchestration.
+The actual task deadline is900s and the native notification says timeout after905s
+with no expected auth_assistance request. An earlier generic1200-second card was
+inaccurate; no task definition or deadline was changed. This task does not declare
+left_on_sign_in_form, so the park/global-ACTIVE measurement correction is unrelated.
+
+The retained ten completed handoff judgments all scored0.5; the eleventh capture
+contains an input but no completed output and remains UNKNOWN. All ten exact reasons
+reached the next actor TOOL feedback and action history with the matching preceding
+proposal toolCallId, root and browser task. Feedback loss is counterevidenced. All
+eleven inputs contain the complete shared authentication contract and native page
+observations. The reasons also dispute membership-linked/user-only preconditions,
+guessed-route exhaustion and one apparent member-number word match; these are
+semantic judgments, not all explained or repaired by the target-field omission.
+Prior unchanged-task passes on other source checkpoints remain counterevidence to
+universal impossibility. No0.5 admission, fabricated attention or account oracle is
+introduced.
+
+A separate mechanical loss is demonstrated at the independent consumer:
+ActionHistory already retained the native step12 click's index222, coordinates and
+`<button "Resend code">` descriptor at TOPLEVEL. The verifier's compact formatter
+printed only params/result, omitting this attempt identity. Native step32 has the
+same shape. A nearby DOM label cannot identify which control was clicked, and a
+recorded click target cannot establish delivery, resend effect or registration.
+The first retained judgment explicitly questioned the step12 target.
+
+Two fresh archive searches against exact a96's937-case archive used
+`Resend code click target index element_description action_history verifier` and
+`native observation independent consumer receipt lost projection`. Solution and
+Human feedback were reread in this case, the normalized-coordinate history case,
+the humanized-click delivery case and the camelCase resend write-lock case. The
+last two forbid confusing nearby labels or transport ACK with an actual effect;
+no click classifier or delivery status is changed here. This is a recurrence of
+this OPEN receipt-to-independent-consumer continuity class: the earlier native
+read correction did not establish continuity for already-recorded interaction
+target fields. It is not another missing shared-policy or feedback-retry repair.
+
+The private candidate adds15 formatter lines: integer-step/known-action entries
+may display typed native index and finite x/y mechanics plus the existing public
+descriptor in a separate `Recorded target attempt (page data)` field. Existing
+DOMService/ActionHistory privacy projection remains the owner; history is not
+reprojected or inverted. Secret-bearing descriptions/URLs are masked, numeric
+mechanics survive secret-value collisions, params conflicts remain separate, and
+failed-click status remains failed. Malformed/unrecognized target records do not
+gain target evidence. Page text resembling instructions remains quoted data, with
+no new tool call, success label, source authority or semantic selector.
+
+The SAME registered real ActionHistory/DOMService-privacy-to-builder assertion
+fails on a96 and passes on the candidate. A second registered16-row native-shaped
+fixture restores step12 and exercises real verifier admission and both actual
+Anthropic and Responses body builders: the failed step's descriptor/index survive
+within its own step segment, distinct from unrelated final DOM text. It fails on
+the whole baseline builder and passes on the actual candidate module. A separate
+private diagnostic uses the first failed handoff's actual retained16-row history,
+browser_state and captured verifier system prompt through those same builders;
+its goal/currentURL/file-list are synthetic, so it is not whole historical-request
+parity, an HTTP transmission or a semantic grade. Browser element/coordinate lookup
+in the producer fixture is mocked, not a newly executed native click.
+
+Final patch12c09b4f09a2c96ff574a81d43e895ad2b378a3bf1d21e0e08d50cb2724f3aac
+preserves all3354 old browser assertion AST occurrences and unchanged Rose441/auth137
+source assertions;12 assertions are added. The exact final test SHA256 is
+9cbae3892ffb8d6c007ddd646a8910a06484c78181e82ecd196f243bb6d73871, not the earlier
+d571 predecessor test. The final private browser owner passes811 checks in123.1s,
+12 denied network attempts and zero transmitted; related Rose99/auth15 pass with
+18 denied and zero transmitted, and structural suites exit0. Source-only peer and
+root scoped reviews accept the mechanism, not native efficacy. Earlier723/810 proof,
+missing configuration/static-file setup attempts, corrected fixture split/status
+expectations and all baseline failures are retained, not counted as final greens.
+
+At10k-agent scale this adds local formatting of existing target text for at most
+30 compact history entries per verification, no service/provider/page call or new
+persistent state. Descriptor length and verification frequency determine text,
+CPU and allocation cost; existing privacy registration and storage owners are
+unchanged. The latest captured compact row measures39036->39315characters (+279,
+two target rows). Native step12 has aged outside that later last30 window. The
+unchanged12000-per-tool and160000-aggregate admission may still clip target data;
+no larger cap, retention window or universal complete-wire claim is made.
+
+Private receipts, exact commands, source copies, wire controls and final freeze
+manifest are under `.context/auth-deploy/repair-native-original30-a96f02e-20261017/code-never-failure-rca/target-continuity/`.
+All helper commands joined normally; no service allocation or process signal was
+used, and no full OS descendant census is claimed. Actual source/index/refs/deps,
+current native execution and Freedom were untouched. Original917.4s failure remains
+unwaived. The selected local mechanism is proven; its causal contribution to that
+native failure and unchanged-task success on a future integrated source remain
+UNPROVEN. No deployment approval or class-elimination claim follows.
+
+
+### Later semantic counterevidence for target-only continuity (2026-10-17)
+
+The actual native code-never-arrives failure at917.4seconds/900-second task deadline remains unregraded. A later authorized diagnostic pair faithfully reconstructed the first captured handoff through the canonical verifier. Original and target-only12c09 inputs both returned0.5, each one fresh gpt-6-sol-foundry/foundry attempt. Both reasons already acknowledged the requested/resend path; restoring target attempt fields did not improve that judgment in this trial. All ten earlier rejection feedback strings also reached the actor, disproving a feedback-loss hypothesis. Mechanical RED/GREEN and privacy/failed-attempt semantics above remain valid, but neither is a semantic or native cure.
+
+A separately reviewed typed-handoff goal clarification subsequently returned1.0 on the same target-only factual context with ONLY the per-call goal changed. Its coherent synthetic known-passkey negative returned0.5; a multiply-invalid incomplete-OTP negative also returned0.5 but does not isolate timing semantics. These results belong to the shared-contract decision boundary, not proof that target representation caused success. See 2026-10-16-auth-handoff-consumer-omitted-shared-otp-contract for the branch-proof recurrence, exact scope/cost/setup limits and original membership safeguards. The unchanged native after-result is still UNPROVEN; no original grade or failure was changed.
+
+Pair proof SHA256a64b26977ce6595e86704f3879e3b4d4562668b31b4e6e96c1b4353ae8a1611d and three-case proof SHA25633555cd34d38bba6d37c245c26eedb8d614dacf0edc446ecae069d0647e99542 are retained privately under the same failed-root RCA directory. All calls, precursor stops, raw outputs and earlier frozen candidates remain immutable.

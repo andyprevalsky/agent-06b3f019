@@ -11807,6 +11807,65 @@ def test_timeout_default_respects_explicit_floor():
     assert _default_timeout_for_task(task, max_seconds=120) == 600
 
 
+def _exercise_history_output_sink(mode):
+    import json, sys, tempfile, types
+    from pathlib import Path
+    from unittest.mock import patch
+    from benchmarks import results, timeout_history, span_history
+    with tempfile.TemporaryDirectory() as directory:
+        d = Path(directory)
+        hub = []
+        sink_calls = []
+
+        def span_edge(**kwargs):
+            return span_history.record_span_observations([span_history.make_observation(agent_id=kwargs['agent_id'], benchmark=kwargs['benchmark'], environment=kwargs['environment'], span_key='synthetic:owned', span_name='synthetic', duration_ms=10, run_status='passed')], history_file=str(d / 'spans.jsonl'))
+
+        def output(message):
+            sink_calls.append(message)
+            if mode == 'unrelated' and (d / 'spans.jsonl').exists():
+                raise ValueError('synthetic unrelated sink error')
+            if mode in ('success', 'recorder_failure') and ((d / 'spans.jsonl').exists() or mode == 'recorder_failure'):
+                raise BrokenPipeError('synthetic diagnostic sink closed')
+        real_pass = timeout_history.record_pass
+
+        def passes(**kwargs):
+            if mode in ('recorder_failure', 'healthy_recorder_failure') and kwargs['task_name'] == 'first':
+                raise ValueError('synthetic recorder failure')
+            return real_pass(**kwargs)
+        run = results.BenchmarkRun(suite='synthetic-history', base_url='http://localhost', task_results=[results.TaskResult(name=n, passed=True, agent_id=n, status='COMPLETED', progress_score=1, duration_seconds=1, cost_cents=0, message_count=0, logs={'worker_logs': ['synthetic']}) for n in ('first', 'second')])
+        error = None
+        with patch.dict(sys.modules, {'benchmarks.agent_latency': types.SimpleNamespace(record_span_history_from_logs=span_edge)}), patch.object(timeout_history, 'HISTORY_DIR', str(d)), patch.object(timeout_history, 'HISTORY_FILE', str(d / 'durations.jsonl')), patch.object(timeout_history, 'ATTEMPTS_FILE', str(d / 'attempts.jsonl')), patch.object(timeout_history, 'record_pass', passes), patch.object(results, 'print', output, create=True), patch.object(results.BenchmarkRun, '_upload_to_hub', lambda self: hub.append(self.to_dict())):
+            try:
+                run.save(str(d / 'runs'))
+            except BaseException as exc:
+                error = f'{type(exc).__name__}: {exc}'
+
+        def rows(p):
+            return [json.loads(x) for x in (d / p).read_text().splitlines()] if (d / p).exists() else []
+        fact = {'mode': mode, 'error': error, 'attempts': [r['task'] for r in rows('attempts.jsonl')], 'durations': [r['task'] for r in rows('durations.jsonl')], 'spans': [r['benchmark'] for r in rows('spans.jsonl')], 'hub_calls': len(hub), 'grades': [r.passed for r in run.task_results], 'saved_json': len(list((d / 'runs').glob('*.json'))), 'sink_calls': sink_calls}
+        if mode == 'unrelated':
+            assert error == 'ValueError: synthetic unrelated sink error', fact
+            assert fact['hub_calls'] == 0, fact
+            return
+        print(json.dumps(fact))
+        assert error is None, fact
+        assert fact['attempts'] == ['first', 'second'] and fact['spans'] == ['first', 'second'] and (fact['hub_calls'] == 1), fact
+        assert fact['durations'] == (['second'] if mode in ('recorder_failure', 'healthy_recorder_failure') else ['first', 'second']), fact
+        assert fact['grades'] == [True, True], fact
+
+def test_history_success_output_pipe_preserves_save_and_later_tasks():
+    _exercise_history_output_sink('success')
+
+def test_history_recorder_warning_pipe_preserves_save_and_later_tasks():
+    _exercise_history_output_sink('recorder_failure')
+
+def test_history_recorder_failure_remains_per_task_best_effort():
+    _exercise_history_output_sink('healthy_recorder_failure')
+
+def test_history_unrelated_output_error_is_not_suppressed():
+    _exercise_history_output_sink('unrelated')
+
+
 def test_fast_mode_pass_does_not_seed_timeout_history():
     """Fast-mode smoke passes must not tighten cold-cache timeout pXX ranges."""
     import benchmarks.timeout_history as timeout_history
@@ -22868,6 +22927,11 @@ async def run_all_tests():
     )
     r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
     r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
+    r.record("test_history_success_output_pipe_preserves_save_and_later_tasks", test_history_success_output_pipe_preserves_save_and_later_tasks)
+    r.record("test_history_recorder_warning_pipe_preserves_save_and_later_tasks", test_history_recorder_warning_pipe_preserves_save_and_later_tasks)
+    r.record("test_history_recorder_failure_remains_per_task_best_effort", test_history_recorder_failure_remains_per_task_best_effort)
+    r.record("test_history_unrelated_output_error_is_not_suppressed", test_history_unrelated_output_error_is_not_suppressed)
+
     r.record(
         "benchmark_run_serializes_world_model_fidelity",
         test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_fields,

@@ -318,8 +318,47 @@ def test_handoff_receives_complete_actor_authentication_contract():
                 assert actual[-1]['role'] == 'USER'
                 assert not any('tool_calls' in message for message in actual)
 
+async def test_typed_handoff_proof_branches_reach_verifier_bodies():
+    import json
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3 import service
+    from domains.spawn_browser_agent_v3.handoff_verification import AUTH_HANDOFF_VERIFICATION_GOAL, build_auth_handoff_verifier_context
+    from helpers.llm import build_verifier_context_messages
+    from providers.rose.gpt_auth import build_codex_responses_body
+    from providers.rose.pools import get_pool
+    from providers.rose.transforms import transform_messages_for_anthropic
+    from utils.prompts import build_verifier_prompt
+
+    async def browser(goal):
+        with patch.object(service, 'list_session_files', AsyncMock(return_value=[])):
+            return await service.build_browser_verifier_context(goal='Retrieve the requested member number',
+                verification_goal=goal,current_url='https://owned.test/verify',browser_state={'dom_tree':'Public verification page'},
+                action_history=SimpleNamespace(get_entries=lambda:[]),config=SimpleNamespace(),session_id='fixture')
+    context=await browser(AUTH_HANDOFF_VERIFICATION_GOAL)
+    directive=context[0]['text'].split('Original browser task:',1)[0]
+    assert 'automated_options_exhausted:' in directive, 'typed exhaustion alternative is absent from the per-call judge goal'
+    assert 'user_only_verification:' in directive and 'account_locked:' in directive
+    assert 'does not require user-only verification, lockout, or proven site registration' in directive
+    assert 'known viable authorized path remains' in directive
+    assert 'untrusted' in directive and 'explicit account restrictions' in directive
+    for blocker in ('automated_options_exhausted','user_only_verification','account_locked'):
+        proposal={'blocker':blocker,'reason':'Untrusted actor claim, not an observation','recipient_options':[]}
+        reviewed=build_auth_handoff_verifier_context(context,auth_options=INVENTORY,assessment=proposal)
+        assert proposal['reason'] in reviewed[-1]['text'] and 'Proposed control-transfer assessment (untrusted)' in reviewed[-1]['text']
+        messages=build_verifier_context_messages(reviewed,build_verifier_prompt(),call_site='verifier_browser_auth_handoff')
+        bodies=(transform_messages_for_anthropic(messages),build_codex_responses_body(pool_spec=get_pool('rose-1-ultra'),messages=messages,request_id='offline'))
+        for body in bodies:
+            text=json.dumps(body)
+            assert 'automated_options_exhausted:' in text and 'user_only_verification:' in text and 'account_locked:' in text
+            assert 'current authorized paths 1-7' in text and 'positive current task/account-bound evidence' in text
+    completion=await browser(None)
+    assert 'automated_options_exhausted:' not in completion[0]['text']
+    assert 'automated_options_exhausted:' not in build_verifier_prompt(), 'handoff stopping semantics must not admit an incomplete original goal'
+
+
 async def run_all_tests():
     result=BlackboxResult()
+    await result.record_async("typed handoff proof branches at provider bodies", test_typed_handoff_proof_branches_reach_verifier_bodies)
     result.record("complete actor Authentication contract at independent handoff consumer", test_handoff_receives_complete_actor_authentication_contract)
     await result.record_async("rebound public alias receipts fail closed",test_rebound_public_recipient_receipts_fail_closed)
     await result.record_async("private native page binding and public collision drift",test_handoff_private_native_page_binding)
