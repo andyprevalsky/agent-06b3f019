@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 U = runpy.run_path(str(HERE / "cloudbench-unused-reservations.py"))
 H, CLOSED = U["H"], U["CLOSED"]
 need, canonical, config_sha = (H[k] for k in ("need", "canonical", "config_sha"))
+T = runpy.run_path(str(HERE / "cloudbench-closed-transition-reservations.py"))
 
 
 def protocol(ref):
@@ -175,7 +176,11 @@ def records(files):
         ]
         need(len(wires) <= 1, "ambiguous raw claim response")
         if not wires:
-            result.append((None, request, None, None))
+            started = files.get(prefix + "transport-start.json", {})
+            at = started.get("monotonic_ns")
+            if request["method"] == "POST" and request["path"].count("/") == 2:
+                need(type(at) is int and started.get("direct") is False, "unknown claim dispatch ordering")
+            result.append((at, request, None, None))
             continue
         wire = wires[0]
         raw = base64.b64decode(wire["body_b64"], validate=True)
@@ -206,7 +211,7 @@ def qualify(
     reservation_context=None,
 ):
     files = group["files"]
-    need(not group["malformed_json"], "malformed archived claim JSON")
+    read_failures = T["read_failures"](group, row["machine_id"])
     source_sha = protocol(request["harness_ref"])
     exclusion = files.get("archived-reuse-journal/source-exclusion.json")
     successor = files["archived-successor.json"]
@@ -301,13 +306,6 @@ def qualify(
         )
         need(len(posts) == 1, "unknown or repeated claim native update")
         at, update, ack, status = posts[0]
-        need(
-            at is not None
-            and status is not None
-            and 200 <= status < 300
-            and isinstance(ack, dict),
-            "unknown claim update ACK",
-        )
         expected = copy.deepcopy(before["config"])
         expected.setdefault("metadata", {})[H["MARKER"]] = canonical(
             proof["native_marker"]
@@ -353,6 +351,7 @@ def qualify(
                 and t < at
                 and req["method"] == "GET"
                 and req["path"] == url
+                and req.get("headers", {}).get("fly-machine-lease-nonce") == nonce
                 and code is not None
                 and 200 <= code < 300
                 and isinstance(value, dict)
@@ -362,28 +361,33 @@ def qualify(
             ),
             "claim pre-update read missing",
         )
-        need(
-            ack.get("id") == mid
-            and ack.get("instance_id")
-            and ack["instance_id"] != before["instance_id"]
-            and ack.get("config") == expected,
-            "claim native ACK differs",
-        )
-        need(
-            all(
-                current.get(key) == ack.get(key)
-                for key in (
-                    "id",
-                    "instance_id",
-                    "config",
-                    "name",
-                    "region",
-                    "created_at",
-                )
-            ),
-            "current parked identity differs from ACK",
-        )
-        stage = "CONFIG_ACKED_UNPUBLISHED"
+        if status is None or not 200 <= status < 300:
+            transition = T["unchanged"](before, current, update, intent, wire, mid, expected)
+            stage = transition["stage"]
+        else:
+            need(isinstance(ack, dict), "claim update has no decoded ACK")
+            need(
+                ack.get("id") == mid
+                and ack.get("instance_id")
+                and ack["instance_id"] != before["instance_id"]
+                and ack.get("config") == expected,
+                "claim native ACK differs",
+            )
+            need(
+                all(
+                    current.get(key) == ack.get(key)
+                    for key in (
+                        "id",
+                        "instance_id",
+                        "config",
+                        "name",
+                        "region",
+                        "created_at",
+                    )
+                ),
+                "current parked identity differs from ACK",
+            )
+            stage = "CONFIG_ACKED_UNPUBLISHED"
     candidate = copy.deepcopy(row)
     candidate.pop("reservation")
     candidate.update(
@@ -392,6 +396,7 @@ def qualify(
         prior_marker=current["config"].get("metadata", {}).get(H["MARKER"]),
     )
     candidate.setdefault("legacy_archive_sha256", candidate["archive_sha256"])
+    candidate["closed_transition_proof"] = {"unknown_read_responses": read_failures, "prior_effect": transition if intent is not None and stage != "CONFIG_ACKED_UNPUBLISHED" else None}
     candidate["parked_claim_proof"] = {
         "stage": stage,
         "archived_claim_source_sha256": source_sha,
@@ -426,11 +431,12 @@ def prepare(run, inventory_path):
         for row in json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))
     }
     selected = {row["machine_id"] for row in request["candidates"]}
+    held_ids = {row["machine_id"] for row in result["held_reservations"]}
     omitted = {
         row["machine_id"]: row
         for row in (reservation_context["held_rows"] if reservation_context else [])
+        if row["machine_id"] in held_ids
     }
-    held_ids = {row["machine_id"] for row in result["held_reservations"]}
     need(
         not selected & omitted.keys() and omitted.keys() <= held_ids,
         "recovered held partition changed",

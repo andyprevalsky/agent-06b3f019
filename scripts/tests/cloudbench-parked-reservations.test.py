@@ -209,7 +209,14 @@ class Parked(unittest.TestCase):
         self.add_wire(
             1, "POST", "/lease", {"ttl": 180}, {"data": {"nonce": "claim-lease"}}
         )
-        self.add_wire(2, "GET", "", None, before)
+        self.add_wire(
+            2,
+            "GET",
+            "",
+            None,
+            before,
+            {"fly-machine-lease-nonce": "claim-lease"},
+        )
         self.update_folder = self.add_wire(
             3,
             "POST",
@@ -317,6 +324,59 @@ class Parked(unittest.TestCase):
             any(path.endswith("claim-ack.json") for path in self.fixture.members)
         )
 
+    def test_empty_post_ack_get_preserves_failure_and_new_eligibility(self):
+        ack = self.acked()
+        folder = self.add_wire(
+            4,
+            "GET",
+            "",
+            None,
+            ack,
+            {"fly-machine-lease-nonce": "claim-lease"},
+        )
+        path = self.root + "/" + folder + "0001-wire.json"
+        self.fixture.members[path] = b""
+        result = self.prepare()
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["parked_claim_proof"]["capacity_credit"], 0)
+        self.assertEqual(
+            candidate["closed_transition_proof"]["unknown_read_responses"],
+            [{"path": path, "bytes": 0, "sha256": H["sha"](b"")}],
+        )
+        self.assertEqual(self.fixture.members[path], b"")
+
+    def test_unknown_versioned_update_requires_unchanged_leased_prior_state(self):
+        self.acked()
+        f = self.fixture
+        before = json.loads(
+            f.members[self.root + "/archived-reuse-journal/original-native.json"]
+        )
+        wire_path = self.root + "/" + self.update_folder + "0001-wire.json"
+        del f.members[wire_path]
+        self.put(
+            self.update_folder + "transport-start.json",
+            {"monotonic_ns": 3, "direct": False},
+        )
+        inventory = json.loads(f.inventory.read_bytes())
+        inventory[0] = dict(before, state="stopped")
+        OLD["write"](f.inventory, inventory)
+        result = self.prepare()
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        proof = candidate["closed_transition_proof"]["prior_effect"]
+        self.assertEqual(proof["old_outcome"], "UNKNOWN_OR_ERROR_RETAINED")
+        self.assertEqual(proof["capacity_credit"], 0)
+        self.assertNotIn(wire_path, f.members)
+        # A different leased pre-read cannot certify this old transition.
+        request_path = (
+            self.root + "/archived-reuse-wire/" + format(2, "032x") + "/request.json"
+        )
+        request = json.loads(f.members[request_path])
+        request["headers"]["fly-machine-lease-nonce"] = "other-lease"
+        f.members[request_path] = H["canonical"](request)
+        self.assertEqual(self.prepare()["candidates"], [])
+
     def test_unaccounted_claims_published_proof_and_other_native_methods_stay_held(
         self,
     ):
@@ -365,7 +425,9 @@ class Parked(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
         self.assertEqual(result["held_machine_ids"], [f.mid])
         diagnostic = result["archive"]["parked_classification"]["rows"][0]
-        self.assertEqual(diagnostic["reason"], "malformed archived claim JSON")
+        self.assertEqual(
+            diagnostic["reason"], "malformed response is not an isolated read"
+        )
         self.assertEqual(
             diagnostic["malformed_json"],
             [{"path": path, "bytes": 0, "sha256": H["sha"](b"")}],

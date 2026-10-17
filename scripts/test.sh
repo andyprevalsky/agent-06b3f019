@@ -341,6 +341,15 @@ run_suite "Cloud Benchmark Native Stdlib Startup" python3 scripts/tests/cloudben
 run_suite "Cloud Benchmark Start Accounting" python3 scripts/tests/cloudbench-start-accounting.test.py
 run_suite "Cloud Benchmark Archived Machine Reuse" python3 scripts/tests/cloudbench-archived-machine-reuse.test.py
 run_suite "Cloud Benchmark Unused Reservations" python3 scripts/tests/cloudbench-unused-reservations.test.py
+run_suite "Cloud Benchmark Parked Reservations" python3 scripts/tests/cloudbench-parked-reservations.test.py
+run_suite "Cloud Benchmark Reservation Reconciliation" python3 scripts/tests/cloudbench-reconcile-reservations.test.py
+run_suite "Cloud Benchmark Incomplete Reservations" python3 scripts/tests/cloudbench-incomplete-reservations.test.py
+run_suite "Cloud Benchmark Recovered Reservations" python3 scripts/tests/cloudbench-recovered-reservations.test.py
+run_suite "Cloud Benchmark Closed Transition Reservations" python3 scripts/tests/cloudbench-closed-transition-reservations.test.py
+run_suite "Cloud Benchmark Reuse Index" python3 scripts/tests/cloudbench-reuse-index.test.py
+run_suite "Cloud Benchmark Registered Orphan Drain" python3 scripts/tests/cloudbench-controller-orphan-drain.test.py
+run_suite "Cloud Benchmark Relay Bootstrap Retirement" python3 scripts/tests/cloudbench-controller-relay-retire.test.py
+run_suite "Cloud Benchmark Recovered Controller Export" python3 scripts/tests/cloudbench-resume-controller-export.test.py
 run_suite "Cloud Benchmark Archived Cloud Transport" python3 scripts/tests/cloudbench-archived-transport.test.py
 run_suite "Cloud Benchmark Archived Reuse Stream Transport" python3 scripts/tests/cloudbench-archived-reuse-transport.test.py
 run_suite "Cloud Benchmark Isolated Generation" python3 scripts/tests/cloudbench-isolated-generation.test.py

@@ -5,7 +5,7 @@ title: Persistent per-route Fly proxies exhausted controller memory
 surface: infra
 component: cloudbench-shared-transport
 classification: our-bug
-problem_class: resource-amplification
+problem_class: concurrency-inefficiency
 first_bad_boundary: each primary controller starts persistent Fly processes for status and metrics plus optional backend transport
 symptoms:
   - "controller kernel killed flyctl processes"

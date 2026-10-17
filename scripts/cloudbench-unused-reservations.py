@@ -20,6 +20,11 @@ def recovered_reader():
     return runpy.run_path(str(HERE / "cloudbench-recovered-reservations.py"))
 
 
+@cache
+def transition_reader():
+    return runpy.run_path(str(HERE / "cloudbench-closed-transition-reservations.py"))
+
+
 def request_for_closed(outer, closed, config, closure, inputs):
     provenance = config.get("host_operator_provenance", {})
     need(isinstance(provenance, dict), "invalid closed host provenance")
@@ -442,9 +447,15 @@ def prepare(run, inventory_path):
                  and mid not in closure["protected_machines"]
                  and omitted["volume_id"] not in closure["protected_volumes"],
                  "protected or mismatched recovered hold")
-            held.append(dict(omitted, capacity_credit=0, closed_archive_sha256=archive_sha,
-                             imported_request_sha256=imported_sha,
-                             original_request_sha256=original_envelope["sha256"]))
+            try:
+                candidate = transition_reader()["omitted"](context, initial[mid], machines[mid], inputs, claimed)
+            except (ValueError, KeyError, TypeError, OSError):
+                held.append(dict(omitted, capacity_credit=0, closed_archive_sha256=archive_sha,
+                                 imported_request_sha256=imported_sha,
+                                 original_request_sha256=original_envelope["sha256"]))
+            else:
+                candidate["archive_sha256"] = archive_sha
+                candidates.append(candidate)
     for row in request["candidates"]:
         mid = row["machine_id"]
         need(mid in initial, "reservation absent from original admission")
