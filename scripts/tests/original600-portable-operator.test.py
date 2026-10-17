@@ -11,6 +11,7 @@ import io
 import http.server
 import json
 import os
+import random
 from pathlib import Path
 import runpy
 import signal
@@ -102,6 +103,18 @@ class Portable(unittest.TestCase):
                 if observer:observer(method,path,200,json.dumps(response).encode())
                 return response
         return API(),record
+
+    def test_fragment_request_retains_transport_margin(self):
+        # The old receiver's unused CLI trailer made this request 6,202 bytes.
+        payload={"machine": "1234567890abcd", "source_ref": "f0967aaa680b9917f62c4dc8063966e588d0aa5d",
+                 "envelope_sha256": hashlib.sha256(b'envelope').hexdigest(), "sha256": hashlib.sha256(b'file').hexdigest(),
+                 "action": "fragment", "index": 20, "offset": 30720, "data": base64.b64encode(random.Random(1).randbytes(2048)).decode()}
+        command=RUNNER['sidecar_command'](payload)
+        self.assertLessEqual(len(json.dumps({"cmd": command, "timeout": 20, "machine": True}).encode()),6144)
+        argv=shlex.split(command)
+        script,decoded=json.loads(gzip.decompress(base64.b64decode(argv[-1])))
+        self.assertEqual(decoded,payload)
+        self.assertEqual(script,RUNNER['REMOTE_SIDECAR'])
 
     def test_large_payload_streams_exact_bytes_without_config_growth(self):
         with tempfile.TemporaryDirectory() as name:

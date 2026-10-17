@@ -182,7 +182,6 @@ def receive(v,root=Path('/tmp')):
     if temporary.exists():temporary.unlink()
  finally:os.close(lock)
  return dict(state='READY',bytes=size,sha256=digest)
-if __name__=='__main__':print(json.dumps(receive(json.loads(base64.b64decode(sys.argv[1],validate=True))),sort_keys=True))
 '''
 REMOTE_CONTROL=r'''
 import base64,hashlib,json,os,signal,sys
