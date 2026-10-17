@@ -27,6 +27,71 @@ def write(path, value):
 
 
 class Borrower(unittest.TestCase):
+    def test_canonical_gate_private_self_copy_is_bound_to_original_bytes(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            host_gate = root / "run-cloudbench-controller-gate"
+            host_gate.write_bytes(b"#!/bin/bash\nexit 0\n")
+            snapshot = root / "cloudbench-gate-self.8n7mHA"
+            snapshot.write_bytes(host_gate.read_bytes())
+            snapshot.chmod(0o600)
+            authority = root / "authority.private.json"
+            gate = {
+                "cwd": str(root),
+                "argv": [
+                    "bash",
+                    str(snapshot),
+                    "--disposable-controller",
+                    str(authority),
+                    "--",
+                    "true",
+                ],
+            }
+            digest = R["sha"](host_gate.read_bytes())
+            pins = M["gate_program_identity"](gate, host_gate, root, authority, digest)
+            self.assertEqual(pins, {str(snapshot): M["fingerprint"](snapshot)})
+            direct = dict(gate, argv=["bash", str(host_gate), *gate["argv"][2:]])
+            self.assertIn(
+                str(host_gate),
+                M["gate_program_identity"](direct, host_gate, root, authority, digest),
+            )
+            snapshot.write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                M["gate_program_identity"](gate, host_gate, root, authority, digest)
+
+    def test_gate_self_copy_refuses_unsafe_path_mode_or_authority(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            host_gate = root / "run-cloudbench-controller-gate"
+            host_gate.write_bytes(b"original")
+            snapshot = root / "cloudbench-gate-self.Abc123"
+            snapshot.write_bytes(host_gate.read_bytes())
+            authority = root / "authority.private.json"
+            gate = {
+                "cwd": str(root),
+                "argv": [
+                    "bash",
+                    str(snapshot),
+                    "--disposable-controller",
+                    str(authority),
+                    "--",
+                    "true",
+                ],
+            }
+            digest = R["sha"](host_gate.read_bytes())
+            snapshot.chmod(0o644)
+            with self.assertRaises(ValueError):
+                M["gate_program_identity"](gate, host_gate, root, authority, digest)
+            snapshot.chmod(0o600)
+            gate["argv"][3] = str(root / "foreign-authority")
+            with self.assertRaises(ValueError):
+                M["gate_program_identity"](gate, host_gate, root, authority, digest)
+            gate["argv"][3] = str(authority)
+            snapshot.unlink()
+            snapshot.symlink_to(host_gate)
+            with self.assertRaises(ValueError):
+                M["gate_program_identity"](gate, host_gate, root, authority, digest)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

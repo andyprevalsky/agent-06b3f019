@@ -100,6 +100,35 @@ def source_identity(root, ref, paths):
     return result
 
 
+def gate_program_identity(gate, host_gate, source_root, authority, digest):
+    """Bind either the checked-in gate or its canonical private self-copy."""
+    argv = gate["argv"]
+    need(
+        len(argv) >= 6
+        and Path(argv[0]).name == "bash"
+        and argv[2:5] == ["--disposable-controller", str(authority), "--"]
+        and gate["cwd"] == str(Path(source_root).resolve(strict=True)),
+        "original gate command/cwd differs",
+    )
+    program = Path(argv[1])
+    need(program.is_absolute(), "absolute original gate program required")
+    before = fingerprint(program)
+    if program == host_gate:
+        need(program.resolve(strict=True) == program, "physical original gate required")
+        raw = program.read_bytes()
+    else:
+        need(
+            re.fullmatch(r"cloudbench-gate-self\.[A-Za-z0-9]{6}", program.name),
+            "canonical gate self-copy required",
+        )
+        raw = read(program)
+    need(
+        sha(raw) == digest and before == fingerprint(program),
+        "original gate program bytes changed",
+    )
+    return {str(program): before}
+
+
 def old_rejection(state):
     """Only the retained typed pre-exec old-router rejection permits first borrow."""
     old = runpy.run_path(
@@ -316,13 +345,16 @@ def check(config, config_sha256, run_directory, operator_ref):
         ),
         public[0].name: sha(public[0].read_bytes()),
     }
-    need(
-        str(host_gate) in gate["argv"]
-        and gate["cwd"] == str(Path(value["source_root"]).resolve(strict=True)),
-        "original gate command/cwd differs",
+    gate_pins = gate_program_identity(
+        gate,
+        host_gate,
+        value["source_root"],
+        out / "authority.private.json",
+        host_pins["run-cloudbench-controller-gate"],
     )
     pins = source_identity(Path(value["source_root"]), ref, value["source_files"])
     pins.update(source_identity(host, host_ref, host_pins))
+    pins.update(gate_pins)
     pins.update(operator_pins)
     need(
         sha(host_runner.read_bytes()) == host_pins["cloudbench-original600-runner.py"],
