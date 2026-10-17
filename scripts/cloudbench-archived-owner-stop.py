@@ -49,7 +49,7 @@ def fields(data):
     return value
 
 
-def prepare(run, inventory_path):
+def prepare(run, inventory_path, excluded_machines=()):
     run=Path(run).absolute(); export=run/'export'
     terminal=obj(run/'terminal.json'); intent=obj(run/'cleanup-call.intent.json')
     authority=obj(run/'authority.private.json'); verified=obj(export/'disposable-export.verified.json')
@@ -66,6 +66,9 @@ def prepare(run, inventory_path):
     need(authority['app']==app and authority['source_ref']==record['source_ref'],'source authority mismatch')
     protected=set(authority['protected_machines']); protected_volumes=set(authority['protected_volumes'])
     need(len(protected)>=4 and host not in protected,'explicit protected cohort required')
+    excluded=set(excluded_machines)
+    need(all(isinstance(mid,str) and re.fullmatch('[0-9a-f]{14}',mid) for mid in excluded), 'invalid excluded Machine')
+    need(not excluded & protected, 'protected Machine cannot be hidden by exclusion')
     need(manifest['version']==1 and manifest['resource_release_verified'] is False and manifest['record']==record,
          'original archive manifest mismatch')
     for name,digest in verified['files'].items():
@@ -139,6 +142,9 @@ def prepare(run, inventory_path):
         if mid not in owned:
             unrelated+=1
             continue  # Other retained cohorts never become this archive's stop authority.
+        # Archive integrity remains fully verified; excluded native identities
+        # receive no reuse/stop authority and remain in the measured inventory.
+        if mid in excluded: continue
         row=owned[mid]; config=machine.get('config')
         need(machine.get('name')==row['name'] and isinstance(machine.get('instance_id'),str)
              and bool(machine['instance_id']) and isinstance(machine.get('created_at'),str)

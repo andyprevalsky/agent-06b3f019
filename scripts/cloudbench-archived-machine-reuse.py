@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import re
 import runpy
-from urllib.parse import quote
 
 HERE = Path(__file__).resolve().parent
 SCHEMA = "cloudbench-archived-reuse-v1"
@@ -122,7 +121,7 @@ def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=
     validator = module("cloudbench-archived-owner-stop.py")["prepare"]
     for run in archive_runs:
         plan = validator(
-            run, inventory_path
+            run, inventory_path, excluded_machines=excluded
         )  # Full archive hashes, membership, joined/deleted controller, protections.
         archive = next(d for name, d in plan["inputs"].items() if name.endswith("/originals.tar.gz"))
         archives.append(dict(controller=plan["controller"], archive_sha256=archive, inputs=plan["inputs"]))
@@ -322,17 +321,7 @@ def claim_native(api, request, row, successor, journal):
             and config_sha(ack["config"]) == config_sha(config),
             "claim update ACK mismatch",
         )
-        waited = api.request(
-            "GET",
-            url
-            + "/wait?state="
-            + ("created" if ack.get("state") == "created" else "stopped")
-            + "&instance_id="
-            + quote(ack["instance_id"], safe="")
-            + "&timeout=10",
-        )
-        need(waited.get("ok") is True, "native version wait did not confirm")
-        observed = api.request("GET", url)
+        observed = wait_inactive(api, url, ack)
         need(
             observed.get("instance_id") == ack["instance_id"]
             and config_sha(observed["config"]) == config_sha(config)
@@ -428,6 +417,7 @@ _EFFECTS = runpy.run_path(
 NativeAdapter = _EFFECTS["NativeAdapter"]
 reserve_cohort = _EFFECTS["reserve_cohort"]
 retire_native = _EFFECTS["retire_native"]
+wait_inactive = _EFFECTS["wait_inactive"]
 
 
 def external_command(proof, command):

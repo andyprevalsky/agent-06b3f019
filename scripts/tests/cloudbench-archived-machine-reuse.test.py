@@ -98,15 +98,17 @@ class Tests(unittest.TestCase):
                 effects.append(("lease", mid))
                 yield
 
-            def request(self, method, url, body=None):
+            def request(self, method, url, body=None, *, timeout=30):
                 nonlocal current
                 if method == "GET":
+                    if "/wait?state=created" in url:
+                        raise ValueError("HTTP400 invalid wait state: created")
                     if "/wait?" in url:
                         return dict(ok=True)
                     return copy.deepcopy(current)
                 effects.append((method, url, body))
                 self.assert_version(body)
-                current = dict(current, config=body["config"], instance_id="new-version")
+                current = dict(current, config=body["config"], instance_id="new-version", state="created")
                 return copy.deepcopy(current)
 
             def assert_version(self, body):
@@ -135,9 +137,11 @@ class Tests(unittest.TestCase):
             def lease(self, mid):
                 yield
 
-            def request(self, method, url, body=None):
+            def request(self, method, url, body=None, *, timeout=30):
                 nonlocal current
                 if method == "GET":
+                    if "/wait?state=created" in url:
+                        raise ValueError("HTTP400 invalid wait state: created")
                     if "/wait?" in url:
                         return dict(ok=True)
                     return copy.deepcopy(current)
@@ -225,7 +229,7 @@ class IntegratedControls(unittest.TestCase):
             def lease(self, mid):
                 yield
 
-            def request(self, method, url, body=None):
+            def request(self, method, url, body=None, *, timeout=30):
                 if method == "GET":
                     return copy.deepcopy(current)
                 posts.append((method, url))
@@ -314,9 +318,11 @@ class IntegratedControls(unittest.TestCase):
             def lease(self, mid):
                 yield
 
-            def request(self, method, url, body=None):
+            def request(self, method, url, body=None, *, timeout=30):
                 nonlocal current
                 if method == "GET":
+                    if "/wait?state=created" in url:
+                        raise ValueError("HTTP400 invalid wait state: created")
                     if "/wait?" in url:
                         return dict(ok=True)
                     return copy.deepcopy(current)
@@ -337,6 +343,23 @@ class IntegratedControls(unittest.TestCase):
                 H["reserve_cohort"](lambda out: API(), dict(request, cohort="f" * 32), Path(directory) / "foreign")
             self.assertEqual(len(posts), 1)
 
+    def test_inactive_version_observation_is_bounded_and_exact(self):
+        _, machines, _ = fixture()
+        expected = copy.deepcopy(machines[0])
+        expected["state"] = "created"
+        calls = []
+
+        class API:
+            def request(self, method, url, body=None, *, timeout=30):
+                calls.append((method, url, timeout))
+                return dict(expected, instance_id="wrong-incarnation")
+
+        clock = H["wait_inactive"].__globals__["time"]
+        with mock.patch.object(clock, "monotonic", side_effect=[0, 0, 0, 0, 11]), mock.patch.object(clock, "sleep"):
+            with self.assertRaisesRegex(ValueError, "observation deadline"):
+                H["wait_inactive"](API(), "/machines/" + expected["id"], expected)
+        self.assertEqual(calls, [("GET", "/machines/" + expected["id"], 10)])
+
     def test_lost_reservation_ack_with_old_visibility_never_reposts(self):
         request, machines, _ = fixture()
         posts = []
@@ -346,7 +369,7 @@ class IntegratedControls(unittest.TestCase):
             def lease(self, mid):
                 yield
 
-            def request(self, method, url, body=None):
+            def request(self, method, url, body=None, *, timeout=30):
                 if method == "GET":
                     return copy.deepcopy(machines[0])
                 posts.append(body)
@@ -377,6 +400,14 @@ class IntegratedControls(unittest.TestCase):
             previous.inventory.chmod(0o600)
             with self.assertRaises(ValueError):
                 H["prepare_request"]([previous.run], previous.inventory, "e" * 32, "d" * 40)
+            with self.assertRaisesRegex(ValueError, "no exact archived candidates"):
+                H["prepare_request"]([previous.run], previous.inventory, "e" * 32, "d" * 40, [previous.mid])
+            terminal = previous.run / "terminal.json"
+            invalid = json.loads(terminal.read_text())
+            invalid["release"]["machine_deleted"] = False
+            terminal.write_text(json.dumps(invalid))
+            with self.assertRaisesRegex(ValueError, "joined released original controller"):
+                H["prepare_request"]([previous.run], previous.inventory, "e" * 32, "d" * 40, [previous.mid])
         finally:
             previous.doCleanups()
 
@@ -449,7 +480,7 @@ class IntegratedControls(unittest.TestCase):
             def lease(self, mid):
                 yield
 
-            def request(self, method, url, body=None):
+            def request(self, method, url, body=None, *, timeout=30):
                 if method == "GET":
                     return copy.deepcopy(current)
                 posts.append(url)

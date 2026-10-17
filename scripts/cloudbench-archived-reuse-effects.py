@@ -7,7 +7,6 @@ import copy
 import json
 from pathlib import Path
 import time
-from urllib.parse import quote
 
 HERE = Path(__file__).resolve().parent
 
@@ -88,11 +87,15 @@ class NativeAdapter:
             stderr=errors,
         )
 
-    def request(self, method, url, body=None):
+    def request(self, method, url, body=None, *, timeout=30):
         headers = {"fly-machine-lease-nonce": self.nonce} if self.nonce else {}
         need(method == "GET" or self.nonce, "native write without exclusive lease")
-        need(not self.nonce or time.monotonic() + 40 < self.lease_end, "native lease budget exhausted before operation")
-        return self.wire(method, url, body, headers=headers)
+        need(0 < timeout <= 30, "native request budget outside original bound")
+        need(
+            not self.nonce or time.monotonic() + timeout + 10 < self.lease_end,
+            "native lease budget exhausted before operation",
+        )
+        return self.wire(method, url, body, timeout=timeout, headers=headers)
 
     @contextmanager
     def lease(self, mid):
@@ -111,6 +114,25 @@ class NativeAdapter:
         finally:
             self.wire("DELETE", "/machines/" + mid + "/lease", timeout=20, headers={"fly-machine-lease-nonce": nonce})
             self.nonce = None
+
+
+def wait_inactive(api, url, acknowledged):
+    """Observe the exact inactive incarnation; /wait does not accept created."""
+    deadline = time.monotonic() + 10
+    expected_config = config_sha(acknowledged["config"])
+    while True:
+        remaining = deadline - time.monotonic()
+        need(remaining > 0, "inactive native version observation deadline")
+        observed = api.request("GET", url, timeout=min(10, remaining))
+        need(time.monotonic() <= deadline, "late inactive native version observation")
+        if (
+            observed.get("id") == acknowledged["id"]
+            and observed.get("instance_id") == acknowledged["instance_id"]
+            and observed.get("state") in ("created", "stopped")
+            and config_sha(observed.get("config", {})) == expected_config
+        ):
+            return observed
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
 
 
 def reserve_cohort(api_factory, request, journal):
@@ -164,17 +186,7 @@ def reserve_cohort(api_factory, request, journal):
                     and config_sha(ack["config"]) == config_sha(config),
                     "reservation ACK mismatch",
                 )
-                waited = api.request(
-                    "GET",
-                    url
-                    + "/wait?state="
-                    + ("created" if ack.get("state") == "created" else "stopped")
-                    + "&instance_id="
-                    + quote(ack["instance_id"], safe="")
-                    + "&timeout=10",
-                )
-                need(waited.get("ok") is True, "reservation native version wait did not confirm")
-                current = api.request("GET", url)
+                current = wait_inactive(api, url, ack)
                 need(current["instance_id"] == ack["instance_id"], "reservation native version not visible")
             intent = json.loads(private(out / "intent.json"))
             need(
