@@ -68,7 +68,7 @@ def wire(directory, inputs):
     return result
 
 
-def positive(directory, row, request, inputs):
+def positive(directory, row, request, inputs, records=None, allow_pending=False):
     mid = row["machine_id"]
     before = obj(directory / "original-native.json", inputs)
     H["same_source"](row, before)
@@ -104,7 +104,7 @@ def positive(directory, row, request, inputs):
         },
         "reservation intent differs",
     )
-    records = wire(directory, inputs)
+    records = wire(directory, inputs) if records is None else records
     url = "/machines/" + mid
     need(
         all(
@@ -123,8 +123,17 @@ def positive(directory, row, request, inputs):
     posts = [r for r in records if r[0]["method"] == "POST" and r[0]["path"] == url]
     need(len(posts) == 1, "unknown or repeated config dispatch")
     update, raw, ack, ack_path = posts[0]
+    pending = bool(
+        allow_pending
+        and raw is not None
+        and (raw.get("missing_response") is True or raw.get("status") == 499)
+    )
     need(
-        raw is not None and 200 <= raw["status"] < 300 and isinstance(ack, dict),
+        pending
+        or raw is not None
+        and isinstance(raw.get("status"), int)
+        and 200 <= raw["status"] < 300
+        and isinstance(ack, dict),
         "no positive raw config ACK",
     )
     nonce = update.get("headers", {}).get("fly-machine-lease-nonce")
@@ -144,6 +153,7 @@ def positive(directory, row, request, inputs):
         any(
             w is not None
             and w["monotonic_ns"] < at
+            and isinstance(w.get("status"), int)
             and 200 <= w["status"] < 300
             and req["method"] == "POST"
             and req["path"] == url + "/lease"
@@ -157,6 +167,7 @@ def positive(directory, row, request, inputs):
         any(
             w is not None
             and w["monotonic_ns"] < at
+            and isinstance(w.get("status"), int)
             and 200 <= w["status"] < 300
             and req["method"] == "GET"
             and req["path"] == url
@@ -168,6 +179,16 @@ def positive(directory, row, request, inputs):
         ),
         "pre-update GET missing",
     )
+    if pending:
+        return {
+            "machine_id": mid,
+            "candidate": row,
+            "marker": marker,
+            "expected_native": dict(before, config=expected),
+            "original_instance": before["instance_id"],
+            "old_response_unknown": True,
+            "same_cohort": request["cohort"],
+        }
     need(
         ack.get("id") == mid
         and ack.get("instance_id")

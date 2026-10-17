@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Portable original600 capacity → bind → owned controller entrypoint."""
 import argparse
+import ast
+import copy
 from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import os
@@ -32,6 +35,7 @@ PINS = [
     'cloudbench-parked-reservations.py',
     'cloudbench-reconcile-reservations.py',
     'cloudbench-observe-reservations.py',
+    'cloudbench-incomplete-reservations.py',
     'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',
     'lib/cloudbench-archived-reuse.sh', 'run-bench-fleet', 'run-bench-cloud',
 ]
@@ -317,6 +321,28 @@ def seal_expired_handoffs(request, directory, runner):
             raise ValueError('expired admission already assigned to another successor')
 
 
+def reservation_disk_headroom(directory, request, inventory, snapshot_directory):
+    """Budget retained wire copies, observation and fresh inventories before effects."""
+    fs=os.statvfs(directory)
+    block=fs.f_frsize or fs.f_bsize
+    def allocated(size):
+        return ((size+block-1)//block)*block
+    machines={row['id']:row for row in inventory}
+    selected=sum(allocated(len(json.dumps(machines[row['machine_id']],sort_keys=True).encode()))
+                 for row in request['candidates'])
+    rows=sum(allocated(len(json.dumps(row,sort_keys=True).encode())) for row in request['candidates'])
+    snapshot=sum(allocated(path.stat().st_size) for path in snapshot_directory.glob('*.private.json'))
+    request_bytes=allocated(len(json.dumps(request,sort_keys=True).encode()))
+    # Native, update, raw-base64 and decoded copies plus one leased observation;
+    # 64 small journal files/directories per candidate cover both bounded paths.
+    required=14*selected+4*rows+2*snapshot+4*request_bytes+64*block*len(request['candidates'])
+    inodes=64*len(request['candidates'])+128
+    if fs.f_bavail*block < required or (fs.f_files and fs.f_favail < inodes):
+        raise ValueError('insufficient local disk headroom for retained reservation evidence')
+    return {'required_bytes':required,'available_bytes':fs.f_bavail*block,
+            'required_inodes':inodes,'available_inodes':fs.f_favail}
+
+
 def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directory, cap, started_at=None):
     """Reserve existing identities before crediting them; retain journals across resume."""
     helper=reuse_module()
@@ -334,12 +360,14 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
         raise ValueError('original archived reuse request bytes changed')
     if request.get('image_ref') != facts_from(runner['read'](args.facts))['image_ref']:
         raise ValueError('reserved image differs from the admitted immutable image')
-    verify_reuse_images(request,json.loads(read_inventory(snapshot_directory/'navi-whisper-lux-bench.private.json')),request['image_ref'])
+    initial_inventory=json.loads(read_inventory(snapshot_directory/'navi-whisper-lux-bench.private.json'))
+    verify_reuse_images(request,initial_inventory,request['image_ref'])
     helper['validate_request'](request,args.source_ref)
     if request.get('task_names') != json.loads(runner['read'](args.tasks)):
         raise ValueError('reserved task manifest differs from original ordered200')
     if cap['available_slots_conservative'] + len(request['candidates']) < 601:
         raise ValueError('insufficient measured capacity even with every reserved candidate')
+    reservation_disk_headroom(directory,request,initial_inventory,snapshot_directory)
     seal_expired_handoffs(request,directory,runner)
     # NativeAdapter owns finite per-operation deadlines and joins all reservations.
     connection=api('navi-whisper-lux-bench',token)
@@ -376,7 +404,7 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
     return dict(final,proof_path=str(proof_path))
 
 
-def prepare(args, root, pins, runner, directory, cap, started_at=None):
+def prepare(args, root, pins, runner, directory, cap, started_at=None, host_operator_provenance=None):
     if not 0 <= time.time() - cap['ended_epoch'] < 270 or cap['available_slots_conservative'] < cap.get('new_machine_demand',601):
         raise ValueError('capacity proof expired or insufficient')
     read, save = runner['read'], runner['save']
@@ -414,6 +442,8 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None):
                   remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
                                 CLOUDBENCH_GATE_TIMEOUT_S='7200', PYTHONDONTWRITEBYTECODE='1'))
+    if host_operator_provenance is not None:
+        config['host_operator_provenance']=host_operator_provenance
     save(directory/'config.private.json', config)
     save(directory/'attempt-start.safe.json', dict(scope='original200x3REAL', scheduled_total=600,
          source_ref=args.source_ref, task_ref=runner['TASK_REF'], started_at_epoch=stamp,
@@ -664,6 +694,107 @@ def resume_bound_launch(args, root, runner, plan, github):
     return runner['run'](path, digest(runner['read'](path)), plan['output'], github_token=github)
 
 
+def incomplete_admission_plan(args, runner):
+    directory=args.resume_incomplete_admission.absolute()
+    if directory.parent!=args.state_dir.absolute() or directory.resolve(strict=True)!=directory:
+        raise ValueError('incomplete admission must be an original private state directory')
+    module=runpy.run_path(str(Path(__file__).with_name('cloudbench-incomplete-reservations.py')))
+    plan=module['plan'](directory,args.incomplete_admission_failure)
+    original=json.loads(runner['read'](directory/'admission-intent.private.json'))
+    binding=admission_binding(args,runner)
+    binding['source_ref']=original['binding']['source_ref']
+    if binding!=original['binding'] or plan['source_ref']!=binding['source_ref']:
+        raise ValueError('incomplete admission original inputs changed')
+    oldroot=Path(plan['source_root'])
+    if subprocess.check_output(['git','-C',str(oldroot),'rev-parse','HEAD'],text=True).strip()!=plan['source_ref']:
+        raise ValueError('original workload HEAD changed')
+    oldcli=subprocess.check_output(['git','--no-replace-objects','-C',str(oldroot),'show',plan['source_ref']+':scripts/run-original600-controller.py'])
+    names=ast.literal_eval(next(node.value for node in ast.parse(oldcli).body
+        if isinstance(node,ast.Assign) and any(isinstance(n,ast.Name) and n.id=='PINS' for n in node.targets)))
+    if subprocess.check_output(['git','-C',str(oldroot),'status','--porcelain','--untracked-files=no']):
+        raise ValueError('original workload checkout changed')
+    pins={name:digest((oldroot/'scripts'/name).read_bytes()) for name in names}
+    runner['validate_source_members'](oldroot,plan['source_ref'],pins)
+    return module,plan,pins
+
+
+def resume_incomplete_admission(args, root, runner, github):
+    module,plan,oldpins=incomplete_admission_plan(args,runner)
+    directory=Path(plan['directory']);deadline=plan['deadline']
+    def remaining():
+        value=deadline-time.time()
+        if not 0<value<=5400:
+            raise ValueError('original incomplete-admission clock expired')
+        return min(110,value)
+    lock=directory/'incomplete-admission.lock'
+    fd=os.open(lock,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o077 or info.st_nlink!=1:
+            raise ValueError('private incomplete admission lock required')
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        if incomplete_admission_plan(args,runner)[1]!=plan:
+            raise ValueError('incomplete admission evidence changed')
+        operator={'source_ref':args.source_ref,'source_root':str(root),
+                  'original_plan_sha256':digest(json.dumps(plan,sort_keys=True,allow_nan=False).encode())}
+        operator_path=directory/'incomplete-operator.intent.json'
+        try:runner['save'](operator_path,operator)
+        except FileExistsError:pass
+        if json.loads(runner['read'](operator_path))!=operator:
+            raise ValueError('incomplete admission assigned to another operator')
+        token=token_from_agents(runner['read'](args.agents_env))
+        os.environ['FLY_API_TOKEN']=token
+        capture=runpy.run_path(str(root/'scripts/cloudbench-original-volume-capture.py'))
+        before=directory/('capacity-before-recovery-'+str(time.time_ns()));before.mkdir(mode=0o700)
+        with runner['bounded'](remaining()):
+            initial=capacity_snapshot(capture['Fly'],token,args.org,before,args.extra_destroying_count)
+        inventory=json.loads(read_inventory(before/'navi-whisper-lux-bench.private.json'))
+        request=plan['request']
+        verify_reuse_images(request,inventory,facts_from(runner['read'](args.facts))['image_ref'])
+        reservation_disk_headroom(directory,request,inventory,before)
+        if initial['available_slots_conservative']+len(plan['classifications'])<601:
+            raise ValueError('incomplete admission has insufficient possible capacity')
+        if incomplete_admission_plan(args,runner)[1]!=plan:
+            raise ValueError('incomplete admission evidence changed before native effect')
+        remaining()
+        helper=reuse_module()
+        connection=capture['Fly']('navi-whisper-lux-bench',token)
+        def adapter(journal):return helper['NativeAdapter'](connection,journal/'wire')
+        with joined_admission_signals():
+            reserved=module['reconcile'](adapter,plan,directory/'incomplete-admission-recovery',deadline)
+        after=directory/('capacity-after-recovery-'+str(time.time_ns()));after.mkdir(mode=0o700)
+        with runner['bounded'](remaining()):
+            final=capacity_snapshot(capture['Fly'],token,args.org,after,args.extra_destroying_count)
+        inventory=json.loads(read_inventory(after/'navi-whisper-lux-bench.private.json'))
+        facts=facts_from(runner['read'](args.facts))
+        verify_reuse_images(reserved,inventory,facts['image_ref'])
+        final.update(helper['capacity_demand'](reserved,inventory,set(facts['protected_machines']),require_reserved=True))
+        if final['available_slots_conservative']<final['new_machine_demand']:
+            raise ValueError('fresh incomplete-admission capacity insufficient')
+        proof=after/'capacity-proof.private.json';runner['save'](proof,final)
+        final['proof_path']=str(proof)
+        if incomplete_admission_plan(args,runner)[1]!=plan:
+            raise ValueError('incomplete admission evidence changed before launch')
+        remaining()
+        launch=directory/('launch-'+str(time.time_ns()));launch.mkdir(mode=0o700)
+        runner['save'](launch/'archived-reuse-request.private.json',reserved)
+        provenance={'host_operator_source_ref':args.source_ref,'workload_source_ref':plan['source_ref'],
+            'original_started_at_epoch':plan['started_at'], 'incomplete_admission':operator,
+            'host_runner_sha256':digest((root/'scripts/cloudbench-original600-runner.py').read_bytes()),
+            'host_gate_sha256':digest((root/'scripts/run-cloudbench-controller-gate').read_bytes())}
+        oldargs=copy.copy(args);oldargs.source_ref=plan['source_ref']
+        config=prepare(oldargs,Path(plan['source_root']),oldpins,runner,launch,final,
+                       started_at=plan['started_at'],host_operator_provenance=provenance)
+        runner['save'](directory/'controller-launch.intent.json',{'config_path':str(config),
+            'config_sha256':digest(runner['read'](config)),'run_directory':str(launch/'run')})
+        print(json.dumps({'status':'CONTINUING_ORIGINAL_ADMISSION','admission_directory':str(directory),
+            'source_ref':plan['source_ref'],'host_operator_source_ref':args.source_ref,
+            'config_path':str(config),'run_directory':str(launch/'run')}),flush=True)
+        return runner['run'](config,digest(runner['read'](config)),launch/'run',github_token=github)
+    finally:
+        os.close(fd)
+
+
 def main():
     if sys.argv[1:2] == ['--status']:
         status = runpy.run_path(str(Path(__file__).with_name('original600-status.py')))
@@ -681,6 +812,8 @@ def main():
     parser.add_argument('--prelaunch-failure',type=Path,help='Retained positive no-child E2BIG evidence for an existing bound output')
     parser.add_argument('--resume-bound-launch', type=Path, help='Continue an original absent-output bound launch using a verified host operator and fresh capacity')
     parser.add_argument('--resume-admission', type=Path, help='Reconcile the same prelaunch archived-reservation state; never restart a bound controller')
+    parser.add_argument('--resume-incomplete-admission',type=Path,help='Continue a proven joined pre-controller failure without rewriting its partial journals')
+    parser.add_argument('--incomplete-admission-failure',type=Path,help='Positive source-bound joined admission failure receipt')
     parser.add_argument('--org', choices=['personal'], default='personal')
     parser.add_argument('--extra-destroying-count', type=int, default=1)
     args = parser.parse_args()
@@ -718,14 +851,20 @@ def main():
         raise ValueError('original controller requires the pinned Fly CLI v0.4.115')
     if args.prelaunch_failure and not args.resume_bound_launch:
         raise ValueError('--prelaunch-failure requires --resume-bound-launch')
-    if args.resume_bound_launch and args.resume_admission:
+    if sum(bool(v) for v in (args.resume_bound_launch,args.resume_admission,args.resume_incomplete_admission))>1:
         raise ValueError('select one continuation mode')
+    if bool(args.resume_incomplete_admission)!=bool(args.incomplete_admission_failure):
+        raise ValueError('incomplete admission requires its explicit failure receipt')
+    if args.resume_incomplete_admission:
+        incomplete_admission_plan(args,runner)
     bound = bound_launch_plan(args, runner) if args.resume_bound_launch else None
     if not args.run:
         print(json.dumps(dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=0)))
         return 0
     if bound is not None:
         return resume_bound_launch(args, root, runner, bound, github)
+    if args.resume_incomplete_admission:
+        return resume_incomplete_admission(args,root,runner,github)
     parent = args.state_dir.absolute()
     if parent.resolve(strict=True) != parent or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
         raise ValueError('private physical current-owner state directory required')

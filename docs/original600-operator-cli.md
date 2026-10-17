@@ -159,6 +159,33 @@ still requires every remaining new Machine slot. Cancellation stops queued work 
 a prepared intent can resume only with its exact durable proof that dispatch
 did not begin. Unknown dispatched writes remain held.
 
+Before native reservation, the CLI checks available filesystem blocks and
+inodes against a conservative estimate of retained native/configuration copies,
+wire receipts, possible held-row observations and fresh inventory snapshots.
+This is a preflight estimate, not a filesystem reservation; other processes can
+still consume space. Preserve the original journals if any write fails.
+
+For a positively observed, joined admission failure before any controller was
+created, the explicit continuation accepts the original directory and its
+source-bound failure receipt:
+
+```bash
+  --resume-incomplete-admission "$ORIGINAL_ADMISSION" \
+  --incomplete-admission-failure "$OBSERVED_FAILURE_RECEIPT"
+```
+
+Use the identical original inputs and predecessor archives with the new
+published host operator. The validator retains the original workload checkout,
+cohort and deadline. It seals the incomplete journals, observes positively
+acknowledged reservations under new leases, and may reserve an untouched row
+only after proving its old configuration update was never dispatched. A single
+update with a missing response can qualify through a fresh leased read of its
+exact intended configuration and unique cohort marker; its historical outcome
+remains unknown. Conflicting or unproved updates remain held. All new work is
+recorded separately; the old partial
+files and failed outcome are never rewritten. Fresh complete capacity and
+native readback are still required before the first controller can launch.
+
 Reused Machines keep their IDs, names and attached physical Volumes. The storage
 mode is explicitly `retained-volume-fresh-generation`, not a newly created
 Volume. A new exclusive generation directory is mounted over `/data` in a

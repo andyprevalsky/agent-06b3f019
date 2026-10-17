@@ -534,7 +534,9 @@ class Portable(unittest.TestCase):
                 return dict(qualified_reuse_count=375,new_machine_demand=226,qualified_ids=[row['machine_id'] for row in candidates])
             helper={'validate_request':lambda *unused:None,'reserve_cohort':reserve,'capacity_demand':demand,
                     'NativeAdapter':lambda connection,journal:connection}
-            with patch.object(CLI,'reuse_module',return_value=helper),patch.object(CLI,'capacity_snapshot',side_effect=snapshot):
+            space=types.SimpleNamespace(f_frsize=4096,f_bsize=4096,f_bavail=10**9,f_files=10**9,f_favail=10**9)
+            with patch.object(CLI,'reuse_module',return_value=helper),patch.object(CLI,'capacity_snapshot',side_effect=snapshot), \
+                 patch.object(CLI.os,'statvfs',return_value=space):
                 result=CLI.reserve_reuse_capacity(lambda *unused:object(),'fixture',args,RUNNER,directory,before,{'available_slots_conservative':582})
             self.assertEqual(events,['reserve','fresh-read','verify-reserved'])
             self.assertEqual(result['admission'],'RESERVED_NATIVE_READBACK')
@@ -599,8 +601,18 @@ class Portable(unittest.TestCase):
                 if Path(path).name=='cloudbench-reconcile-reservations.py':
                     return {'observe_acknowledged_holds':observe}
                 return original_loader(path,*args,**kwargs)
+            full=types.SimpleNamespace(f_frsize=4096,f_bsize=4096,f_bavail=0,f_files=10**9,f_favail=10**9)
+            with patch.object(CLI,'reuse_module',return_value=helper), \
+                 patch.object(CLI.os,'statvfs',return_value=full), \
+                 self.assertRaisesRegex(ValueError,'local disk headroom'):
+                CLI.reserve_reuse_capacity(lambda *unused: (_ for _ in ()).throw(AssertionError('native effect')),
+                    'fixture',args,RUNNER,directory,before,{'available_slots_conservative':582},epoch)
+            self.assertEqual(events,[])
+            self.assertFalse((directory/'archived-reuse-reservations').exists())
+            space=types.SimpleNamespace(f_frsize=4096,f_bsize=4096,f_bavail=10**9,f_files=10**9,f_favail=10**9)
             with patch.object(CLI,'reuse_module',return_value=helper), \
                  patch.object(CLI,'capacity_snapshot',side_effect=snapshot), \
+                 patch.object(CLI.os,'statvfs',return_value=space), \
                  patch.object(CLI.runpy,'run_path',side_effect=load):
                 result=CLI.reserve_reuse_capacity(lambda *unused:object(),'fixture',args,RUNNER,
                     directory,before,{'available_slots_conservative':582},epoch)
@@ -611,6 +623,62 @@ class Portable(unittest.TestCase):
             self.assertEqual(derivative['held_native_reservations'],[])
             self.assertEqual(result['reservation_request_sha256'],CLI.digest(
                 (directory/'archived-reuse-request.private.json').read_bytes()))
+
+    def test_incomplete_admission_continuation_keeps_old_workload_clock_and_lock(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory=Path(name);original=private(directory/'original-evidence','unchanged')
+            oldref='a'*40;newref='b'*40;epoch=time.time()-10;deadline=epoch+5400
+            image='fixture@sha256:'+'c'*64
+            facts=private(directory/'facts',{'app':'navi-whisper-lux-bench','image_ref':image,
+                'protected_machines':['p1','p2','p3','p4'],'protected_volumes':['v1']})
+            agents=private(directory/'agents','FLY_API_TOKEN=fixture_token\n')
+            args=argparse.Namespace(source_ref=newref,agents_env=agents,facts=facts,org='personal',extra_destroying_count=1)
+            request={'candidates':[{'machine_id':'first'},{'machine_id':'second'}]}
+            plan={'directory':str(directory),'source_root':str(directory/'old-workload'),
+                'source_ref':oldref,'started_at':epoch,'deadline':deadline,'request':request,
+                'classifications':[{'machine_id':'first'},{'machine_id':'second'}]}
+            machines=[{'id':row['machine_id'],'config':{'image':image}} for row in request['candidates']]
+            events=[];snapshots=[];oldpins={'old-source':'pinned'}
+            def snapshot(*parameters):
+                snapshots.append(parameters[3])
+                events.append('before-capacity' if len(snapshots)==1 else 'after-capacity')
+                private(parameters[3]/'navi-whisper-lux-bench.private.json',machines)
+                return {'available_slots_conservative':600,'ended_epoch':time.time()}
+            def reconcile(factory,received,journal,end):
+                events.append('reconcile')
+                self.assertEqual(received,plan);self.assertEqual(end,deadline)
+                self.assertEqual(journal,directory/'incomplete-admission-recovery')
+                return dict(request,candidates=[dict(r,reservation={'cohort':'old'}) for r in request['candidates']])
+            def prepare(args,root,pins,runner,launch,cap,started_at=None,host_operator_provenance=None):
+                events.append('prepare')
+                self.assertEqual((args.source_ref,root,pins,started_at),(oldref,Path(plan['source_root']),oldpins,epoch))
+                self.assertEqual(host_operator_provenance['host_operator_source_ref'],newref)
+                self.assertEqual(host_operator_provenance['workload_source_ref'],oldref)
+                self.assertNotIn('original_config_path',host_operator_provenance)
+                return private(launch/'config.private.json',{'source_ref':oldref,'started_at_epoch':epoch})
+            def run(config,sha,out,**kwargs):
+                events.append('run')
+                self.assertEqual(sha,CLI.digest(config.read_bytes()))
+                self.assertEqual(json.loads(config.read_bytes())['started_at_epoch'],epoch)
+                with (directory/'incomplete-admission.lock').open() as stream, self.assertRaises(BlockingIOError):
+                    CLI.fcntl.flock(stream.fileno(),CLI.fcntl.LOCK_EX|CLI.fcntl.LOCK_NB)
+                return 0
+            runner=dict(RUNNER,run=run)
+            capture={'Fly':lambda *_:object()}
+            original_loader=CLI.runpy.run_path
+            def load(path,*a,**kw):
+                return capture if Path(path).name=='cloudbench-original-volume-capture.py' else original_loader(path,*a,**kw)
+            helper={'NativeAdapter':lambda api,path:api,'capacity_demand':lambda *a,**kw:
+                {'qualified_reuse_count':2,'new_machine_demand':599}}
+            with patch.object(CLI,'incomplete_admission_plan',return_value=({'reconcile':reconcile},plan,oldpins)), \
+                 patch.object(CLI,'capacity_snapshot',side_effect=snapshot), \
+                 patch.object(CLI,'reuse_module',return_value=helper), \
+                 patch.object(CLI,'prepare',side_effect=prepare),patch.object(CLI.runpy,'run_path',side_effect=load):
+                self.assertEqual(CLI.resume_incomplete_admission(args,ROOT,runner,'fixture'),0)
+            self.assertEqual(events,['before-capacity','reconcile','after-capacity','prepare','run'])
+            self.assertEqual(original.read_text(),'unchanged')
+            self.assertEqual(json.loads((directory/'controller-launch.intent.json').read_bytes())['config_path'],
+                             str(next(directory.glob('launch-*'))/'config.private.json'))
 
     def test_explicit_complete_github_sources_and_process_precedence_before_launch(self):
         with tempfile.TemporaryDirectory() as name:
