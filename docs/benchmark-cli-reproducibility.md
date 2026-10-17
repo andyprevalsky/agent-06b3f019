@@ -53,12 +53,24 @@ Do not delete one consumer's browser to make room for the other.
 
 ## Original600 persistence boundary
 
-The original600 controller source at b0fbd774 is committed on a separate
-benchmark lineage, not incorporated wholesale into main by these guards. Its
-disposable controller, ticket accounting and shared relay must not be replaced
-with older main implementations. The historical capacity reader, config binder
-and external owner also used private host paths; this document does not turn
-those private scripts into a portable command. A versioned harness entrypoint
-with explicit config/capacity/task/env paths remains a separate required
-persistence task. No fresh-agent reproduction or original600 qualification is
-claimed solely from the prerequisite checks here.
+The original600 harness is versioned separately so its disposable controller,
+ticket accounting and shared relay are not replaced with older main versions.
+The portable operator commit is `79a79d60524de09f351e76fd7990bf4ee53e028a`, with
+immutable parent `b0fbd7742dde51446288c22601825a85981c1d0b`. Fetch the published
+`fix/original600-portable-operator` branch, create a separate worktree at that
+exact commit, and follow its `docs/original600-operator-cli.md`:
+
+```bash
+git fetch origin fix/original600-portable-operator
+git worktree add --detach "$OPERATOR_CHECKOUT" 79a79d60524de09f351e76fd7990bf4ee53e028a
+cd "$OPERATOR_CHECKOUT"
+python3 scripts/run-original600-controller.py --help
+```
+
+The command takes explicit current-owner facts, complete env files, original
+tasks, authentic warm metadata and state directory. Omitting `--run` checks
+local prerequisites with zero provider calls. Adding `--run` owns fresh capacity
+reads, configuration binding and the actual controller lifecycle. It needs no
+previous operator's host `/tmp` scripts or attempt receipts. This portable
+entrypoint has local fixture qualification, not actual original600 success
+credit or permission to replay a separately owned live operation.
