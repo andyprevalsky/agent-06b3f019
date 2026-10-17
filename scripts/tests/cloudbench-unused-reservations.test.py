@@ -12,6 +12,7 @@ import runpy
 import shutil
 import tarfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 M = runpy.run_path(
@@ -184,6 +185,62 @@ class Unused(unittest.TestCase):
         self.assertIn("UNRESOLVED", row["prior_liabilities"])
         self.assertEqual(row["source_instance_id"], self.current["instance_id"])
         self.assertIn(str(self.wire / "2/0001-wire.json"), value["archive"]["inputs"])
+
+    def test_closed_recovery_routes_bound_launch_request_without_outer_alias(self):
+        config_path = self.outer / "launch-1/config.private.json"
+        config = json.loads(config_path.read_bytes())
+        config["host_operator_provenance"] = {"incomplete_admission": {"fixture": True}}
+        write(config_path, config)
+        launch_path = self.outer / "controller-launch.intent.json"
+        launch = json.loads(launch_path.read_bytes())
+        launch["config_sha256"] = H["sha"](config_path.read_bytes())
+        write(launch_path, launch)
+        bound = write(config_path.parent / "archived-reuse-request.private.json", self.request)
+        self.request_path.unlink()
+        context = {"request": self.request, "original": self.original,
+                   "held_rows": [], "inherited_held_scopes": []}
+        calls = []
+
+        def load(outer, closed, actual_config, closure, inputs):
+            self.assertEqual((outer, closed), (self.outer, self.closed))
+            self.assertEqual(actual_config, config)
+            self.assertIn("archived_ownership", closure)
+            M["read"](bound, inputs)
+            calls.append("load")
+            return context
+
+        def validate(actual, original, reserved, current, inputs):
+            self.assertIs(actual, context)
+            calls.append("validate")
+            return M["validate_candidate"](
+                self.outer, original, reserved, current,
+                self.request["cohort"], self.request["harness_ref"], inputs,
+            )
+
+        with mock.patch.dict(M["prepare"].__globals__, recovered_reader=lambda: {"load": load, "validate": validate}):
+            result = M["prepare"](self.outer, self.inventory)
+        self.assertEqual(calls, ["load", "validate"])
+        self.assertEqual([r["machine_id"] for r in result["candidates"]], [self.mid])
+        self.assertNotIn("reservation", result["candidates"][0])
+        self.assertFalse(self.request_path.exists())
+        omitted = copy.deepcopy(self.original["candidates"][0])
+        omitted.update(machine_id="bbbbccccddddee", volume_id="vol_held")
+        omitted["predecessor"].update(id=omitted["machine_id"], volume_id=omitted["volume_id"])
+        self.original["candidates"].append(omitted)
+        write(self.outer / "archived-reuse-original.private.json", {
+            "schema": "original600-archived-admission-request-v1", "request": self.original,
+            "sha256": H["sha"](json.dumps(self.original, sort_keys=True, allow_nan=False).encode()),
+        })
+        context["held_rows"] = [{"machine_id": omitted["machine_id"], "volume_id": omitted["volume_id"]}]
+        context["inherited_held_scopes"] = [{
+            "archive_sha256": self.original["archives"][0]["archive_sha256"],
+            "machine_ids": [self.mid], "reuse_credit": False,
+        }]
+        with mock.patch.dict(M["prepare"].__globals__, recovered_reader=lambda: {"load": load, "validate": validate}):
+            result = M["prepare"](self.outer, self.inventory)
+        self.assertEqual(result["held_machine_ids"], [omitted["machine_id"]])
+        self.assertEqual(result["held_reservations"][0]["capacity_credit"], 0)
+        self.assertEqual(result["inherited_held_scopes"], context["inherited_held_scopes"])
 
     def test_repeated_unused_succession_preserves_original_archive_lineage(self):
         legacy = "e" * 64

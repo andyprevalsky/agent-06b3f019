@@ -32,6 +32,10 @@ class ObservationDeadline(Exception):
     """Escape HTTP's OSError conversion when the whole observation expires."""
 
 
+class NativeWireDeadline(Exception):
+    """A lease request remains unknown when its complete wire budget expires."""
+
+
 class NativeAdapter:
     """Existing bounded Fly transport plus a native lease nonce on every owned write."""
 
@@ -144,13 +148,21 @@ class NativeAdapter:
         with observation_window(deadline):
             return self.request("GET", url, timeout=min(10, deadline - time.monotonic()), direct=True)
 
+    def _lease_wire(self, method, url, body=None, headers=None):
+        need(method in ("POST", "DELETE") and url.endswith("/lease"), "lease wire operation required")
+        if threading.current_thread() is threading.main_thread():
+            # The complete operation retains the old 25s child budget. Avoid
+            # spending that budget reloading the immutable client in a child.
+            with native_wire_window(time.monotonic() + 25):
+                return self.wire(method, url, body, timeout=20, headers=headers, direct=True)
+        return self.wire(method, url, body, timeout=20, headers=headers)
+
     @contextmanager
     def lease(self, mid):
-        response = self.wire(
+        response = self._lease_wire(
             "POST",
             "/machines/" + mid + "/lease",
             {"ttl": 180, "description": "archived same-volume successor"},
-            timeout=20,
         )
         nonce = response.get("data", {}).get("nonce")
         need(isinstance(nonce, str) and nonce, "native lease nonce absent")
@@ -159,12 +171,12 @@ class NativeAdapter:
         try:
             yield
         finally:
-            self.wire("DELETE", "/machines/" + mid + "/lease", timeout=20, headers={"fly-machine-lease-nonce": nonce})
+            self._lease_wire("DELETE", "/machines/" + mid + "/lease", headers={"fly-machine-lease-nonce": nonce})
             self.nonce = None
 
 
 @contextmanager
-def observation_window(deadline):
+def _native_window(deadline, error_type, reason):
     started = time.monotonic()
     prior = signal.getitimer(signal.ITIMER_REAL)
     handler = signal.getsignal(signal.SIGALRM)
@@ -173,19 +185,27 @@ def observation_window(deadline):
     need(end > started, "inactive native observation deadline")
 
     def expire(*args):
-        raise ObservationDeadline("inactive native observation deadline")
+        raise error_type(reason)
 
     signal.signal(signal.SIGALRM, expire)
     signal.setitimer(signal.ITIMER_REAL, end - started)
     try:
         yield
         if time.monotonic() >= end:
-            raise ObservationDeadline("late inactive native observation")
+            raise error_type(reason)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, handler)
         if prior[0]:
             signal.setitimer(signal.ITIMER_REAL, max(0.000001, prior[0] - (time.monotonic() - started)))
+
+
+def observation_window(deadline):
+    return _native_window(deadline, ObservationDeadline, "inactive native observation deadline")
+
+
+def native_wire_window(deadline):
+    return _native_window(deadline, NativeWireDeadline, "native lease wire deadline")
 
 
 def wait_inactive(api, url, acknowledged):

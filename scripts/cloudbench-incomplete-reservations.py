@@ -265,7 +265,7 @@ def classify(directory, row, request, inputs):
     }
 
 
-def plan(directory, failure_path):
+def _plan(directory, failure_path, *, historical=False):
     root = Path(directory).absolute()
     need(root.resolve(strict=True) == root, "physical admission required")
     inputs = {}
@@ -351,12 +351,13 @@ def plan(directory, failure_path):
         == H["immutable_image"](request["image_ref"]),
         "admitted task/image differs",
     )
-    need(
-        not (root / "controller-launch.intent.json").exists()
-        and not any(root.glob("launch-*"))
-        and not (root / "config.private.json").exists(),
-        "admission already launched",
-    )
+    if not historical:
+        need(
+            not (root / "controller-launch.intent.json").exists()
+            and not any(root.glob("launch-*"))
+            and not (root / "config.private.json").exists(),
+            "admission already launched",
+        )
     base = root / "archived-reuse-reservations"
     need(
         not (base / "reserved-request.json").exists(), "closed reservation plan exists"
@@ -402,6 +403,16 @@ def plan(directory, failure_path):
         "original_epoch": admission["started_at_epoch"],
         "failure_path": str(Path(failure_path).absolute()),
     }
+
+
+def plan(directory, failure_path):
+    """Unlaunched admission only; retain the original launch refusal."""
+    return _plan(directory, failure_path)
+
+
+def historical_plan(directory, failure_path):
+    """Proof-only replay after a caller has independently verified full closure."""
+    return _plan(directory, failure_path, historical=True)
 
 
 def known_error(error):

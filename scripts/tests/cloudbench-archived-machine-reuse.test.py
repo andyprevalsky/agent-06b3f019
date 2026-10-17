@@ -23,10 +23,27 @@ def native_read_server(expected, *, drip=False):
     import http.server
     import threading
     import time
+    lease_requests = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            lease_requests.append(("POST", self.path, json.loads(body)))
+            self.lease_response({"data": {"nonce": "fixture-nonce"}})
+
+        def do_DELETE(self):
+            lease_requests.append(("DELETE", self.path, self.headers.get("fly-machine-lease-nonce")))
+            self.lease_response({})
+
+        def lease_response(self, value):
+            data = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
 
         def do_GET(self):
             body = expected if isinstance(expected, bytes) else json.dumps(expected).encode()
@@ -54,6 +71,7 @@ def native_read_server(expected, *, drip=False):
     api.authorization = "Bearer private-fixture"
     api.loopback = True
     api.env = dict(os.environ)
+    api.lease_requests = lease_requests
     try:
         yield api
     finally:
@@ -107,6 +125,78 @@ def fixture(count=1):
 
 
 class Tests(unittest.TestCase):
+    def test_main_thread_lease_avoids_slow_child_and_keeps_raw_receipts(self):
+        with native_read_server({}) as api, tempfile.TemporaryDirectory() as directory:
+            adapter = H["NativeAdapter"](api, directory)
+            with mock.patch.object(adapter, "_run_wire", side_effect=subprocess.TimeoutExpired("slow child startup", 25)) as child:
+                with adapter.lease("a" * 14):
+                    self.assertEqual(adapter.nonce, "fixture-nonce")
+                child.assert_not_called()
+            self.assertIsNone(adapter.nonce)
+            self.assertEqual([r[0] for r in api.lease_requests], ["POST", "DELETE"])
+            for folder in Path(directory).iterdir():
+                request = json.loads((folder / "request.json").read_bytes())
+                raw = json.loads((folder / "0001-wire.json").read_bytes())
+                self.assertEqual(request["timeout"], 20)
+                self.assertTrue(json.loads((folder / "transport-start.json").read_bytes())["direct"])
+                self.assertEqual(raw["status"], 200)
+                self.assertTrue((folder / "result.json").is_file())
+
+    def test_direct_lease_deadline_retains_unknown_and_restores_timer(self):
+        import signal
+        import time
+
+        with native_read_server({}) as api, tempfile.TemporaryDirectory() as directory:
+            adapter = H["NativeAdapter"](api, directory)
+            real_api = api.api
+            window = adapter._lease_wire.__globals__["native_wire_window"]
+
+            def delayed_result(*args, **kwargs):
+                value = real_api(*args, **kwargs)
+                time.sleep(0.3)
+                return value
+
+            prior_handler = signal.getsignal(signal.SIGALRM)
+            prior_timer = signal.getitimer(signal.ITIMER_REAL)
+            sentinel = lambda *args: self.fail("longer caller alarm fired")
+            signal.signal(signal.SIGALRM, sentinel)
+            signal.setitimer(signal.ITIMER_REAL, 2)
+            try:
+                with (
+                    mock.patch.object(api, "api", side_effect=delayed_result),
+                    mock.patch.dict(adapter._lease_wire.__globals__, native_wire_window=lambda _: window(time.monotonic() + 0.05)),
+                    self.assertRaises(H["NativeWireDeadline"]),
+                    adapter.lease("a" * 14),
+                ):
+                    self.fail("late lease was accepted")
+                self.assertIs(signal.getsignal(signal.SIGALRM), sentinel)
+                self.assertGreater(signal.getitimer(signal.ITIMER_REAL)[0], 1)
+                self.assertIsNone(adapter.nonce)
+                self.assertEqual([r[0] for r in api.lease_requests], ["POST"])
+                self.assertEqual(len(list(Path(directory).glob("*/0001-wire.json"))), 1)
+                self.assertFalse(list(Path(directory).glob("*/result.json")))
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, prior_handler)
+                signal.setitimer(signal.ITIMER_REAL, *prior_timer)
+
+    def test_worker_thread_lease_keeps_bounded_child_transport(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with native_read_server({}) as api, tempfile.TemporaryDirectory() as directory:
+            adapter = H["NativeAdapter"](api, directory)
+            with mock.patch.object(adapter, "_run_wire", wraps=adapter._run_wire) as child:
+                def operation():
+                    with adapter.lease("a" * 14):
+                        self.assertEqual(adapter.nonce, "fixture-nonce")
+                with ThreadPoolExecutor(max_workers=1) as workers:
+                    workers.submit(operation).result(timeout=5)
+                self.assertEqual(child.call_count, 2)
+            self.assertTrue(all(
+                json.loads(path.read_bytes())["direct"] is False
+                for path in Path(directory).glob("*/transport-start.json")
+            ))
+
     def test_direct_observation_does_not_reload_private_io(self):
         import time
 
@@ -924,7 +1014,6 @@ class IntegratedControls(unittest.TestCase):
     def test_native_wire_reuses_auth_and_unique_durable_journals_on_resume(self):
         import http.server
         import threading
-        import types
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -952,13 +1041,12 @@ class IntegratedControls(unittest.TestCase):
         thread.start()
         try:
             with tempfile.TemporaryDirectory() as directory:
-                api = types.SimpleNamespace(
-                    app=H["APP"],
-                    base=f"http://127.0.0.1:{server.server_port}",
-                    authorization="Bearer already-resolved",
-                    loopback=True,
-                    env=dict(os.environ, FLY_API_TOKEN="unused-original"),
-                )
+                api = object.__new__(H["module"]("cloudbench-original-volume-capture.py")["Fly"])
+                api.app = H["APP"]
+                api.base = f"http://127.0.0.1:{server.server_port}"
+                api.authorization = "Bearer already-resolved"
+                api.loopback = True
+                api.env = dict(os.environ, FLY_API_TOKEN="unused-original")
                 for attempt in range(2):
                     adapter = H["NativeAdapter"](api, directory)
                     with adapter.lease("a" * 14):

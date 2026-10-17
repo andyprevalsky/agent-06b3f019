@@ -150,7 +150,17 @@ def records(files):
     return result
 
 
-def qualify(outer, request, original, row, group, current, inputs, controller):
+def qualify(
+    outer,
+    request,
+    original,
+    row,
+    group,
+    current,
+    inputs,
+    controller,
+    reservation_context=None,
+):
     files = group["files"]
     need(not group["malformed_json"], "malformed archived claim JSON")
     source_sha = protocol(request["harness_ref"])
@@ -217,7 +227,7 @@ def qualify(outer, request, original, row, group, current, inputs, controller):
     if intent is None:
         need(not posts, "unknown native update without intent")
         # Even lease-only claims retain the original reservation's full raw proof.
-        U["validate_candidate"](
+        U["validate_reserved"](
             outer,
             original,
             row,
@@ -225,6 +235,7 @@ def qualify(outer, request, original, row, group, current, inputs, controller):
             request["cohort"],
             request["harness_ref"],
             inputs,
+            reservation_context,
         )
         stage = (
             "PRE_CONFIG_UNCHANGED_RESERVED"
@@ -234,7 +245,7 @@ def qualify(outer, request, original, row, group, current, inputs, controller):
     else:
         need(exclusion is not None, "claim intent without source exclusion")
         before = files["archived-reuse-journal/original-native.json"]
-        U["validate_candidate"](
+        U["validate_reserved"](
             outer,
             original,
             row,
@@ -242,6 +253,7 @@ def qualify(outer, request, original, row, group, current, inputs, controller):
             request["cohort"],
             request["harness_ref"],
             inputs,
+            reservation_context,
         )
         need(len(posts) == 1, "unknown or repeated claim native update")
         at, update, ack, status = posts[0]
@@ -354,13 +366,16 @@ def prepare(run, inventory_path):
     outer = Path(run).absolute()
     result = U["prepare"](outer, inventory_path)
     inputs = result["archive"]["inputs"]
-    request = U["obj"](outer / "archived-reuse-request.private.json", inputs)
     original = U["obj"](outer / "archived-reuse-original.private.json", inputs)[
         "request"
     ]
     initial = {row["machine_id"]: row for row in original["candidates"]}
-    closed, _ = U["closed_run"](outer, inputs)
+    closed, config = U["closed_run"](outer, inputs)
     latest = CLOSED["prepare"](closed, inventory_path)
+    inputs.update(latest["inputs"])
+    request, reservation_context = U["request_for_closed"](
+        outer, closed, config, latest, inputs
+    )
     owned = set(latest["archived_ownership"])
     native = {
         row["id"]: row
@@ -397,6 +412,7 @@ def prepare(run, inventory_path):
                 native[mid],
                 inputs,
                 result["archive"]["controller"],
+                reservation_context,
             )
         except (
             ValueError,

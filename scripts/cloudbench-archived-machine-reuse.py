@@ -499,6 +499,7 @@ reserve_cohort = _EFFECTS["reserve_cohort"]
 retire_native = _EFFECTS["retire_native"]
 wait_inactive = _EFFECTS["wait_inactive"]
 ObservationDeadline = _EFFECTS["ObservationDeadline"]
+NativeWireDeadline = _EFFECTS["NativeWireDeadline"]
 
 
 def external_command(proof, command):

@@ -51,6 +51,56 @@ class Parked(unittest.TestCase):
         self.fixture.seal()
         return M["prepare"](self.fixture.outer, self.fixture.inventory)
 
+    def test_recovered_reservation_context_reaches_parked_claim_validation(self):
+        self.acked()
+        f = self.fixture
+        config_path = f.outer / "launch-1/config.private.json"
+        config = json.loads(config_path.read_bytes())
+        config["host_operator_provenance"] = {"incomplete_admission": {"fixture": True}}
+        OLD["write"](config_path, config)
+        launch_path = f.outer / "controller-launch.intent.json"
+        launch = json.loads(launch_path.read_bytes())
+        launch["config_sha256"] = H["sha"](config_path.read_bytes())
+        OLD["write"](launch_path, launch)
+        f.request_path.unlink()
+        context = {
+            "request": f.request,
+            "original": f.original,
+            "held_rows": [],
+            "inherited_held_scopes": [],
+        }
+        calls = []
+
+        def load(outer, closed, actual_config, closure, inputs):
+            self.assertEqual(actual_config, config)
+            self.assertEqual((outer, closed), (f.outer, f.closed))
+            self.assertIn("archived_ownership", closure)
+            calls.append("load")
+            return context
+
+        def validate(actual, original, reserved, current, inputs):
+            self.assertIs(actual, context)
+            calls.append("validate")
+            return M["U"]["validate_candidate"](
+                f.outer,
+                original,
+                reserved,
+                current,
+                f.request["cohort"],
+                f.request["harness_ref"],
+                inputs,
+            )
+
+        reader = {"load": load, "validate": validate}
+        with mock.patch.dict(
+            M["U"]["prepare"].__globals__, recovered_reader=lambda: reader
+        ):
+            result = self.prepare()
+        self.assertEqual(calls, ["load", "load", "validate"])
+        self.assertEqual([r["machine_id"] for r in result["candidates"]], [f.mid])
+        self.assertEqual(result["held_machine_ids"], [])
+        self.assertFalse(f.request_path.exists())
+
     def add_exclusion(self):
         self.put(
             "archived-reuse-journal/source-exclusion.json",

@@ -3,6 +3,7 @@
 
 import base64
 import copy
+from functools import cache
 import hashlib
 import json
 from pathlib import Path
@@ -14,6 +15,24 @@ HERE = Path(__file__).resolve().parent
 H = runpy.run_path(str(HERE / "cloudbench-archived-machine-reuse.py"))
 CLOSED = runpy.run_path(str(HERE / "cloudbench-archived-owner-stop.py"))
 need, canonical, config_sha = (H[key] for key in ("need", "canonical", "config_sha"))
+@cache
+def recovered_reader():
+    return runpy.run_path(str(HERE / "cloudbench-recovered-reservations.py"))
+
+
+def request_for_closed(outer, closed, config, closure, inputs):
+    provenance = config.get("host_operator_provenance", {})
+    need(isinstance(provenance, dict), "invalid closed host provenance")
+    if "incomplete_admission" in provenance:
+        context = recovered_reader()["load"](outer, closed, config, closure, inputs)
+        return context["request"], context
+    return obj(outer / "archived-reuse-request.private.json", inputs), None
+
+
+def validate_reserved(outer, original, reserved, current, cohort, harness_ref, inputs, context=None):
+    if context is not None:
+        return recovered_reader()["validate"](context, original, reserved, current, inputs)
+    return validate_candidate(outer, original, reserved, current, cohort, harness_ref, inputs)
 
 
 def digest(raw):
@@ -374,7 +393,10 @@ def prepare(run, inventory_path):
     outer = Path(run).absolute()
     need(outer.resolve(strict=True) == outer and outer.is_dir(), "physical admission directory required")
     inputs = {}
-    request = obj(outer / "archived-reuse-request.private.json", inputs)
+    closed, config = closed_run(outer, inputs)
+    closure = CLOSED["prepare"](closed, inventory_path)
+    inputs.update(closure["inputs"])
+    request, context = request_for_closed(outer, closed, config, closure, inputs)
     H["validate_request"](request)
     original_envelope = obj(outer / "archived-reuse-original.private.json", inputs)
     original = original_envelope["request"]
@@ -384,14 +406,13 @@ def prepare(run, inventory_path):
         "original admission request checksum differs",
     )
     H["validate_request"](original)
+    if context is not None:
+        need(context["original"] == original, "recovered original request differs")
     need(
         all(request[key] == value for key, value in original.items() if key != "candidates"),
         "reservation request source differs",
     )
     initial = {row["machine_id"]: row for row in original["candidates"]}
-    closed, config = closed_run(outer, inputs)
-    closure = CLOSED["prepare"](closed, inventory_path)
-    inputs.update(closure["inputs"])
     need(
         closure["source_ref"] == request["harness_ref"] == config["source_ref"],
         "closed controller source differs from admission",
@@ -402,6 +423,21 @@ def prepare(run, inventory_path):
     need(closure["controller"] not in machines, "closed controller still present in native inventory")
     candidates, held = [], []
     archive_sha = closure["inputs"][str((closed / "export/originals.tar.gz").absolute())]
+    if context is not None:
+        selected = {row["machine_id"] for row in request["candidates"]}
+        seen_held = set()
+        for omitted in context["held_rows"]:
+            mid = omitted["machine_id"]
+            need(mid in initial and mid not in selected and mid not in seen_held,
+                 "invalid recovered held partition")
+            seen_held.add(mid)
+            need(omitted["volume_id"] == initial[mid]["volume_id"]
+                 and mid not in closure["protected_machines"]
+                 and omitted["volume_id"] not in closure["protected_volumes"],
+                 "protected or mismatched recovered hold")
+            held.append(dict(omitted, capacity_credit=0, closed_archive_sha256=archive_sha,
+                             imported_request_sha256=imported_sha,
+                             original_request_sha256=original_envelope["sha256"]))
     for row in request["candidates"]:
         mid = row["machine_id"]
         need(mid in initial, "reservation absent from original admission")
@@ -427,8 +463,8 @@ def prepare(run, inventory_path):
             })
             continue
         need(mid in machines, "reserved Machine missing from native inventory")
-        candidate = validate_candidate(
-            outer, before, row, machines[mid], request["cohort"], request["harness_ref"], inputs
+        candidate = validate_reserved(
+            outer, before, row, machines[mid], request["cohort"], request["harness_ref"], inputs, context
         )
         candidate.pop("reservation")
         candidate.setdefault("legacy_archive_sha256", candidate["archive_sha256"])
@@ -440,7 +476,7 @@ def prepare(run, inventory_path):
             original_request_sha256=original_envelope["sha256"],
         )
         candidates.append(candidate)
-    return dict(
+    result = dict(
         candidates=candidates,
         held_machine_ids=sorted(row["machine_id"] for row in held),
         held_reservations=sorted(held, key=lambda row: row["machine_id"]),
@@ -450,3 +486,6 @@ def prepare(run, inventory_path):
             inputs=inputs,
         ),
     )
+    if context is not None:
+        result["inherited_held_scopes"] = copy.deepcopy(context["inherited_held_scopes"])
+    return result

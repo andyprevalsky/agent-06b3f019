@@ -221,6 +221,14 @@ archive at zero unused-reservation credit. Untouched rows retain every original
 lineage, wire-receipt and unchanged-native-reservation check. A malformed or
 changed untouched row still rejects preparation.
 
+For a controller launched after incomplete-admission recovery, the same unused
+and parked operands select the request bound by its closed launch configuration.
+The reader verifies that request against the completed recovery receipt and
+checks each reservation's actual recovery lane and raw native evidence. It does
+not require an alias at the original outer request path or synthesize a closed
+original reservation plan. Original interrupted journals and failed outcomes
+remain unchanged; this path is available only after verified controller closure.
+
 For a mixed run, include its newly closed archive and the original archive
 needed to prove untouched rows' lineage. Claimed rows suppress only older
 archives' stale native comparisons. The matching closed archive must independently
@@ -331,6 +339,13 @@ canonical unknown counts before treating coverage as complete. The saved
 job, attempt, owner and log/binding-record hashes. It does not rewrite canonical
 classification, infer a task result, or certify cleanup. The CLI still does not
 send signals; the existing exact-owner cancellation procedure applies.
+
+Main-thread native lease acquisition and release use the already loaded client
+and the same durable raw-response observer. The complete operation retains its
+25-second absolute budget and 20-second HTTP timeout; worker threads retain the
+bounded, joined child transport. A timeout never retries the write or turns a
+saved response into late success. Bound `NativeWireDeadline` startup traces are
+reported separately with the native lease outcome still unknown.
 
 The reader also recognizes the direct shared-environment identity refusal while waiting
 followed by the canonical no-Machine-started message. That earlier startup

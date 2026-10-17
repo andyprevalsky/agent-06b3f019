@@ -36,6 +36,7 @@ PINS = [
     'cloudbench-reconcile-reservations.py',
     'cloudbench-observe-reservations.py',
     'cloudbench-incomplete-reservations.py',
+    'cloudbench-recovered-reservations.py',
     'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',
     'lib/cloudbench-archived-reuse.sh', 'run-bench-fleet', 'run-bench-cloud',
 ]

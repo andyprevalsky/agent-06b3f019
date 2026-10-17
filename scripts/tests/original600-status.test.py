@@ -456,6 +456,7 @@ class Status(unittest.TestCase):
         save_failure = observation.replace(f'  File "{module}", line 44, in private', f'  File "{effects}", line 102, in perform_wire\n  File "{module}", line 50, in save')
         argv = [str(repo / 'agents/venv/bin/python3'), '-S', module, 'wire', str(wire)]
         lease = prefix + f'  File "{effects}", line 149, in lease\n' + f'  File "{effects}", line 85, in wire\n' + f'  File "{effects}", line 108, in _run_wire\n' + '  File "/usr/lib/python3.11/subprocess.py", line 1989, in _wait\n' + f"subprocess.TimeoutExpired: Command '{argv}' timed out after 24.999969649999912 seconds\n" + suffix
+        direct_lease = prefix + f'  File "{effects}", line 170, in lease\n' + f'  File "{effects}", line 156, in _lease_wire\n' + f'  File "{effects}", line 87, in wire\n' + f'  File "{effects}", line 193, in expire\n' + '<run_path>.NativeWireDeadline: native lease wire deadline\n' + suffix
         job = {'job_id': ident, 'task': task, 'log': str(log), 'attempt': 1, 'controller_pid': pid, 'status': 'failed', 'attempts': []}
         summary = {'total_jobs': 600, 'jobs': [job]}
         payload = {'machine': self.mid, 'source_ref': self.ref, 'epoch': self.epoch}
@@ -465,7 +466,7 @@ class Status(unittest.TestCase):
             log.write_text(body)
             return scope['startup_evidence'](summary, repo, campaign, payload)
         ssl_failure = observation.replace(f'  File "{module}", line 44, in private', '  File "/usr/lib/python3.11/ssl.py", line 1382, in do_handshake')
-        for failure in (observation, save_failure, ssl_failure, lease):
+        for failure in (observation, save_failure, ssl_failure, lease, direct_lease):
             with self.subTest(failure=failure.splitlines()[-3]):
                 actual = evidence(header + failure)
                 self.assertEqual(len(actual['proofs']), 1)
@@ -477,6 +478,10 @@ class Status(unittest.TestCase):
                 self.assertEqual(evidence(failure + header)['proofs'], [])
                 self.assertEqual(evidence(header + failure.replace('claim_native', 'retire_native'))['proofs'], [])
                 self.assertEqual(evidence(header + failure.replace(suffix, 'canary already failed\n'))['proofs'], [])
+        direct = evidence(header + direct_lease)['proofs'][0]
+        self.assertEqual(direct['reason'], 'archived_reuse_direct_lease_deadline')
+        self.assertEqual(direct['native_lease_outcome'], 'unknown')
+        self.assertEqual(evidence(header + direct_lease.replace('in _lease_wire', 'in unrelated'))['proofs'], [])
         for change in ({'method': 'GET'}, {'path': '/machines/22222222222222/lease'}, {'timeout': 30}):
             write(wire / 'request.json', dict(request, **change))
             self.assertEqual(evidence(header + lease)['proofs'], [])

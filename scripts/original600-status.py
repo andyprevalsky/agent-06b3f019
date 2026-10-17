@@ -87,7 +87,8 @@ def environment_failure(body,job,ident,pid,campaign,member_ids,budget,reader):
 
 def reuse_failure(body):
     markers=(('ValueError: late inactive native version observation\n','archived_reuse_inactive_observation_deadline'),
-             ('<run_path>.ObservationDeadline: inactive native observation deadline\n','archived_reuse_inactive_observation_deadline'))
+             ('<run_path>.ObservationDeadline: inactive native observation deadline\n','archived_reuse_inactive_observation_deadline'),
+             ('<run_path>.NativeWireDeadline: native lease wire deadline\n','archived_reuse_direct_lease_deadline'))
     found=[(body.find(marker),marker,reason) for marker,reason in markers if marker in body]
     timed=re.search(r"^subprocess\.TimeoutExpired: Command (.+) timed out after ([0-9.]+) seconds$",body,re.M)
     if timed:found.append((timed.start(),timed[0]+'\n','archived_reuse_lease_wire_deadline'))
@@ -98,7 +99,11 @@ def reuse_failure(body):
     if not claim or 'Traceback (most recent call last):\n' not in trace:return None
     def frame(name):
         return re.search(r'^  File "/tmp/cloudbench-scripts\.'+claim[1]+r'/cloudbench-archived-reuse-effects\.py", line [0-9]+, in '+name+'$',trace,re.M)
-    if reason=='archived_reuse_lease_wire_deadline':
+    if reason=='archived_reuse_direct_lease_deadline':
+        argv=None
+        if (not all(frame(name) for name in ('lease','_lease_wire')) or frame('wait_inactive')
+            or not (frame('_native_window') or frame('wire') and frame('expire'))):return None
+    elif reason=='archived_reuse_lease_wire_deadline':
         if not all(frame(name) for name in ('lease','wire','_run_wire')) or frame('wait_inactive'):return None
         command=timed[1]
         if not (command.startswith("'[") and command.endswith("]'")):return None
@@ -158,6 +163,7 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
                 marker='ValueError: late inactive native version observation\n'
                 if (marker not in text and 'ValueError: environment-check identity' not in text
                     and '<run_path>.ObservationDeadline: inactive native observation deadline' not in text
+                    and '<run_path>.NativeWireDeadline: native lease wire deadline' not in text
                     and 'subprocess.TimeoutExpired: Command ' not in text):continue
                 headers=list(re.finditer(r'^\s*'+re.escape(str(repo/'scripts/run-bench'))+r' monitor ('+
                     re.escape(str(repo/'.context/fleet/runs'))+r'/([0-9]{8}-[0-9]{6}-[0-9]+))\n'
@@ -196,7 +202,8 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
                     or proof.get('native_marker',{}).get('successor')!=successor):
                     raise ValueError('source exclusion does not belong to job')
                 wire=(lease_wire_binding(failure['wire_argv'],task_dir,repo,proof,budget,reader)
-                      if failure['wire_argv'] is not None else {})
+                      if failure['wire_argv'] is not None else
+                      {'native_lease_outcome':'unknown'} if failure['reason']=='archived_reuse_direct_lease_deadline' else {})
                 meta_sha=fleet_meta_hash(repo,owner,pid,fleet_id,payload,budget,reader)
                 proofs.append(dict(job_id=ident,task=task,attempt=number,controller_pid=pid,
                     fleet_owner_token=owner,run_id=fleet_id,log_path=str(expected.relative_to(repo)),
