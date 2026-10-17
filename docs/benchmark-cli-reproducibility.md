@@ -55,14 +55,14 @@ Do not delete one consumer's browser to make room for the other.
 
 The original600 harness is versioned separately so its disposable controller,
 ticket accounting and shared relay are not replaced with older main versions.
-The portable operator commit is `1fc5b729ced76dda398f997650b8ba5d08eb522b`, with
+The portable operator commit is `08ecb42f3f8837fbc90ca6ab6857ffd9de795201`, with
 immutable parent `b0fbd7742dde51446288c22601825a85981c1d0b`. Fetch the published
 `fix/original600-portable-operator` branch, create a separate worktree at that
 exact commit, and follow its `docs/original600-operator-cli.md`:
 
 ```bash
 git fetch origin fix/original600-portable-operator
-git worktree add --detach "$OPERATOR_CHECKOUT" 1fc5b729ced76dda398f997650b8ba5d08eb522b
+git worktree add --detach "$OPERATOR_CHECKOUT" 08ecb42f3f8837fbc90ca6ab6857ffd9de795201
 cd "$OPERATOR_CHECKOUT"
 python3 scripts/run-original600-controller.py --help
 ```
@@ -116,3 +116,10 @@ Cleanup receives the credential from the explicitly bound complete env file.
 Native observation keeps its original deadline while loading immutable I/O
 helpers once, and status counts directly proven startup failures separately
 from canonical infrastructure flags.
+
+For a closed run with both used and untouched reservations, the explicit
+`--parked-reservation-run` path validates each recoverable parked claim and
+retains ambiguous records without capacity credit. The complete archive and
+current native identity are required; the next admission still obtains new
+leases and verifies capacity. Empty archived responses remain held. Payload
+fragments retain the existing 6,200-byte request limit.
