@@ -6662,3 +6662,5 @@
 {"task": "browser-auth-member-discount-signup-fails-purchase", "duration_seconds": 233.0, "cost_cents": 0.0, "timestamp": "2026-10-17T03:57:50.639455+00:00", "agent_id": "bb23bf6e-7cd8-4945-85c2-eef75bcee497"}
 {"task": "browser-auth-paid-membership-purchase", "duration_seconds": 151.6, "cost_cents": 0.0, "timestamp": "2026-10-17T03:57:50.639455+00:00", "agent_id": "b6e64802-2fde-49ef-85e1-91c6016817d3"}
 {"task": "browser-auth-signup-purchase-no-subscription", "duration_seconds": 230.3, "cost_cents": 0.0, "timestamp": "2026-10-17T03:57:50.639455+00:00", "agent_id": "6ecb3bb5-27c3-491b-b50f-85d456180e00"}
+{"task": "browser-auth-signup-purchase", "duration_seconds": 221.3, "cost_cents": 0.0, "timestamp": "2026-10-17T06:52:24.098249+00:00", "agent_id": "af367cb1-90f0-4bb5-b302-4dd46e52c0b5"}
+{"task": "browser-auth-session-expires-at-checkout", "duration_seconds": 311.0, "cost_cents": 6.0, "timestamp": "2026-10-17T06:52:24.098249+00:00", "agent_id": "8c0f9fd0-5caf-4671-9869-f19842458b24"}
