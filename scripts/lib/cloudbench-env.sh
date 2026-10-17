@@ -84,13 +84,13 @@ cloudbench_prepare_workspace_patch() {  # <repo-root> <base-ref> <out-file> [gen
 cloudbench_central_hub_runs_root() {  # <port>
   curl --noproxy '*' -fsS --max-time 2 \
     "http://127.0.0.1:$1/hub-meta.json" 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("hub_runs_dir", ""))' \
+    | python3 -S -c 'import json,sys; print(json.load(sys.stdin).get("hub_runs_dir", ""))' \
       2>/dev/null
 }
 
 cloudbench_central_hub_matches() {  # <port> <expected-runs-root>
   local actual_root expected_root
-  expected_root="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$2")"
+  expected_root="$(python3 -S -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$2")"
   actual_root="$(cloudbench_central_hub_runs_root "$1" || true)"
   [ -n "$actual_root" ] && [ "$actual_root" = "$expected_root" ]
 }
@@ -101,7 +101,7 @@ cloudbench_central_hub_owner_matches() {  # <port> <runs-root> <repo-root> <owne
   [ -f "$owner_file" ] || return 1
   metadata="$(curl --noproxy '*' -fsS --max-time 2 \
     "http://127.0.0.1:$port/hub-meta.json" 2>/dev/null)" || return 1
-  HUB_METADATA_JSON="$metadata" python3 - "$owner_file" "$port" \
+  HUB_METADATA_JSON="$metadata" python3 -S - "$owner_file" "$port" \
     "$runs_root" "$repo_root" <<'PY' || return 1
 import json
 import os
@@ -286,7 +286,7 @@ cloudbench_tcp_listener_present() {  # <port>
   #   1 — no listener (port free)
   #   2 — bad argument
   #   3 — probe failed (timeout / python / unexpected); callers must fail closed
-  python3 - "$1" <<'PY'
+  python3 -S - "$1" <<'PY'
 import errno
 import socket
 import sys
