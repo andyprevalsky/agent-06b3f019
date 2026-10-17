@@ -205,3 +205,15 @@ confirmed-infra count never means those unknown jobs were error free. Attempt-re
 local terminal and status output never infer benchmark success or full resource
 cleanup. This is a one-shot diagnostic, not an automatic threshold owner or
 five-experiment qualification loop.
+
+### Continue a bound launch rejected before controller creation
+
+If a corrected host operator must continue an already prepared admission, use
+its normal command and complete original inputs with `--resume-bound-launch
+"$ORIGINAL_ADMISSION_DIRECTORY"`. Keep the old workload checkout intact and
+pass the new operator commit as `--source-ref`. Omit `--run` first for validation.
+This mode derives the exact config and absent output from the original launch
+intent. It preserves the workload source, reservations, task inputs and original
+clock, refreshes read-only capacity, and records the corrected host operator
+separately. It does not overwrite the original config or launch intent. Any
+existing run output refuses this path; use the existing owner's status instead.

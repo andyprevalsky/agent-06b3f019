@@ -154,19 +154,27 @@ def preallocation_terminal(joined,gate_code,gate_pid,ref,export,receipt):
              benchmark_success_inferred=False,receipt_sha256=sha(read(receipt)))
 
 
+def validate_source_members(root,ref,pins):
+ required={'run-cloudbench-controller-gate','cloudbench-disposable-controller.py','cloudbench-controller-export.py','cloudbench-original-volume-capture.py','cloudbench-original600-supervisor.py'}
+ need(required<=set(pins),'complete control source pins required')
+ explicit={'cloudbench-fetch-ref.sh','lib/cloudbench-archived-reuse.sh','run-bench-cloud','run-bench-fleet'}
+ for name,digest in pins.items():
+  need(isinstance(name,str) and (name in explicit or ('/'not in name and name.endswith(('.py','gate')))) and '\\'not in name and name not in ('.','..'),'invalid source member')
+  path=Path(root)/'scripts'/name
+  need(path.resolve(strict=True)==path.absolute(),'physical source member required')
+  data=path.read_bytes();need(sha(data)==digest and data==subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',ref+':scripts/'+name]),'source bytes changed: '+name)
+
+
 def run(config_path,config_sha,out,*,github_token=None):
  os.umask(0o077);raw=read(config_path);need(sha(raw)==config_sha,'root config bytes changed');v=json.loads(raw)
  need(v['schema']=='original600-controller-runner-v1'and v['allowed']is True,'explicit root operation config required')
  root=Path(v['source_root']).resolve(strict=True);ref=v['source_ref'];need(re.fullmatch('[0-9a-f]{40}',ref or''),'UNBOUND final source')
  need(subprocess.check_output(['git','--no-replace-objects','-C',str(root),'rev-parse','HEAD'],text=True).strip()==ref,'source HEAD mismatch')
- required={'run-cloudbench-controller-gate','cloudbench-disposable-controller.py','cloudbench-controller-export.py','cloudbench-original-volume-capture.py','cloudbench-original600-supervisor.py'}
- need(required<=set(v['source_files']),'complete control source pins required')
- for name,digest in v['source_files'].items():
-  need('/'not in name and name.endswith(('.py','gate')),'invalid source member')
-  data=(root/'scripts'/name).read_bytes();need(sha(data)==digest and data==subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',ref+':scripts/'+name]),'source bytes changed: '+name)
+ validate_source_members(root,ref,v['source_files'])
  tasks=json.loads(read(v['tasks_path']));epoch=v['started_at_epoch'];need(type(epoch)in(int,float)and epoch>0 and time.time()<epoch+5400,'original new attempt clock expired');argv=campaign_argv(tasks,epoch)
  authority_template=json.loads(read(v['authority_template']));need(authority_template['allowed']is True and authority_template['source_ref']==ref,'root authority must match final source')
  out=Path(out).absolute();out.mkdir(mode=0o700);need(out.resolve()==out,'physical new output')
+ if v.get('host_operator_provenance'):save(out/'host-operator-provenance.json',v['host_operator_provenance'])
  auth=dict(authority_template,cleanup_owner_pid=os.getpid(),cleanup_owner_birth=birth(os.getpid()),output_directory=str(out/'export'));authority=out/'authority.private.json';save(authority,auth)
  fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME='cloudbench-warm-t10-ord-85a7e2c',CLOUDBENCH_WARM_VOLUME_NAME='cloudbench_t10_ord_85a7e2c',CLOUDBENCH_REGION='ord',CLOUDBENCH_FRESH_TARGET_REGION='iad',CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE='false',CLOUDBENCH_SNAPSHOT_ID='vs_xA6B3617AO9TaeovZ3OKN42',CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
  remote_env=dict(v.get('remote_env',{}))

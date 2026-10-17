@@ -346,6 +346,75 @@ class Portable(unittest.TestCase):
             self.assertNotEqual(refused.returncode, 0)
             self.assertFalse(marker.exists())
 
+    def test_prepared_source_members_include_canonical_shell_pins_only(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);(root/'scripts').mkdir()
+            pins={}
+            for member in CLI.PINS:
+                path=root/'scripts'/member;path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_bytes((ROOT/'scripts'/member).read_bytes());pins[member]=CLI.digest(path.read_bytes())
+            def committed(command, **unused):
+                return (root/command[-1].split(':',1)[1]).read_bytes()
+            with patch.object(RUNNER['subprocess'],'check_output',side_effect=committed):
+                RUNNER['validate_source_members'](root,'a'*40,pins)
+                for bad in ['../outside.py','/absolute.py','lib/../../outside.py','lib/unknown.sh','run-anything']:
+                    with self.subTest(name=bad),self.assertRaises(ValueError):
+                        RUNNER['validate_source_members'](root,'a'*40,dict(pins,**{bad:'f'*64}))
+
+    def test_bound_launch_preserves_workload_clock_and_rejects_existing_output(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);directory=root/'admission';directory.mkdir(mode=0o700)
+            launch=directory/'launch-1';launch.mkdir(mode=0o700)
+            tasks=private(root/'tasks',json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text()))
+            args=argparse.Namespace(source_ref='b'*40,state_dir=root,resume_bound_launch=directory,tasks=tasks,
+                org='personal',extra_destroying_count=1,archive_run=[root/'archive'],reuse_exclude_machine=['1'*14])
+            for key in ['facts','agents_env','backend_env','snapshot_inventory','warm_deps']:
+                setattr(args,key,private(root/key,'fixture'))
+            facts=dict(app='navi-whisper-lux-bench',image_ref='fixture@sha256:'+'1'*64,protected_machines=['p1','p2','p3','p4'],protected_volumes=['v1'])
+            private(args.facts,facts)
+            private(args.agents_env,'FLY_API_TOKEN=fixture\n')
+            binding=CLI.admission_binding(args,RUNNER);binding['source_ref']='a'*40
+            private(directory/'admission-intent.private.json',dict(binding=binding,started_at_epoch=100))
+            reserved=private(launch/'reserved.json',dict(task_names=json.loads(tasks.read_bytes()),candidates=[dict(machine_id='candidate')]))
+            authority=private(launch/'authority.json',dict(source_ref='a'*40,original=True))
+            config=private(launch/'config.private.json',dict(source_ref='a'*40,started_at_epoch=100,
+                source_root=str(root/'old-workload'),source_files={'old.py':'f'*64},authority_template=str(authority),
+                remote_files=[dict(relative_path='.git/cloudbench-archived-reuse-fixture.json',source_path=str(reserved),sha256=CLI.digest(reserved.read_bytes()))]))
+            private(directory/'controller-launch.intent.json',dict(config_path=str(config),config_sha256=CLI.digest(config.read_bytes()),run_directory=str(launch/'run')))
+            helper={'validate_request':lambda value,ref:value}
+            with patch.object(CLI.subprocess,'check_output',return_value='a'*40),patch.object(CLI,'reuse_module',return_value=helper),patch.dict(RUNNER,validate_source_members=lambda *unused:None):
+                plan=CLI.bound_launch_plan(args,RUNNER)
+                self.assertEqual(plan['config']['source_ref'],'a'*40)
+                self.assertEqual(plan['config']['started_at_epoch'],100)
+                before=config.read_bytes()
+                authority_before=authority.read_bytes()
+                def snapshot(api, token, org, output, extra):
+                    private(output/'navi-whisper-lux-bench.private.json',[
+                        dict(id='candidate',config=dict(image=facts['image_ref']))])
+                    return dict(available_slots_conservative=700,machine_limit=1000,
+                                total_active_inventory_objects=299,conservative_extra_destroying_bench_objects=1,ended_epoch=110)
+                helper['capacity_demand']=lambda *unused,**kwargs:dict(new_machine_demand=600,qualified_reuse_count=1)
+                captured=[]
+                def run_corrected(path, sha, output, **kwargs):
+                    value=json.loads(path.read_bytes());captured.append(value)
+                    self.assertEqual(value['source_ref'],'a'*40)
+                    self.assertEqual(value['started_at_epoch'],100)
+                    self.assertEqual(value['host_operator_provenance']['host_operator_source_ref'],'b'*40)
+                    self.assertEqual(output,launch/'run')
+                    fresh=json.loads(Path(value['authority_template']).read_bytes())
+                    self.assertEqual(fresh['verified_epoch'],110)
+                    self.assertEqual(fresh['source_ref'],'a'*40)
+                    return 0
+                with patch.object(CLI,'capacity_snapshot',side_effect=snapshot),patch.object(CLI.time,'time',return_value=110),patch.dict(RUNNER,run=run_corrected):
+                    self.assertEqual(CLI.resume_bound_launch(args,ROOT,RUNNER,plan,'fixture-github'),0)
+                self.assertEqual(len(captured),1)
+                self.assertEqual(authority.read_bytes(),authority_before)
+                self.assertEqual(config.read_bytes(),before)
+                (launch/'run').mkdir()
+                with self.assertRaisesRegex(ValueError,'absent run directory'):
+                    CLI.bound_launch_plan(args,RUNNER)
+                self.assertEqual(config.read_bytes(),before)
+
     def test_fresh_all_app_capacity_and_original_binding(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)

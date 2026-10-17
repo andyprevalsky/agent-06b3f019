@@ -375,6 +375,93 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None):
     return directory/'config.private.json'
 
 
+
+def bound_launch_plan(args, runner):
+    """Verify a failed pre-effect launch without changing its workload or clock."""
+    directory = args.resume_bound_launch.absolute()
+    if directory.resolve(strict=True) != directory or directory.parent != args.state_dir.absolute():
+        raise ValueError('bound admission must be physical and below original state-dir')
+    info = directory.stat()
+    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError('private current-owner bound admission required')
+    original = json.loads(runner['read'](directory/'admission-intent.private.json'))
+    binding = admission_binding(args, runner)
+    binding['source_ref'] = original['binding']['source_ref']
+    if binding != original['binding']:
+        raise ValueError('bound launch original inputs changed')
+    intent_path = directory/'controller-launch.intent.json'
+    intent = json.loads(runner['read'](intent_path))
+    config_path = Path(intent['config_path'])
+    output = Path(intent['run_directory'])
+    if (config_path.parent.parent != directory or output.parent != config_path.parent
+            or output.name != 'run' or output.exists() or output.is_symlink()):
+        raise ValueError('bound launch output must be the original absent run directory')
+    raw = runner['read'](config_path)
+    if digest(raw) != intent['config_sha256']:
+        raise ValueError('original bound config changed')
+    config = json.loads(raw)
+    old_ref = original['binding']['source_ref']
+    if config['source_ref'] != old_ref or config['started_at_epoch'] != original['started_at_epoch']:
+        raise ValueError('original bound workload or clock changed')
+    workload = Path(config['source_root'])
+    if subprocess.check_output(['git','-C',str(workload),'rev-parse','HEAD'],text=True).strip() != old_ref:
+        raise ValueError('original workload checkout changed')
+    runner['validate_source_members'](workload, old_ref, config['source_files'])
+    descriptor = next(row for row in config['remote_files'] if row['relative_path'].startswith('.git/cloudbench-archived-reuse-'))
+    reserved_raw = runner['read'](descriptor['source_path'])
+    if digest(reserved_raw) != descriptor['sha256']:
+        raise ValueError('original bound reservations changed')
+    reserved = reuse_module()['validate_request'](json.loads(reserved_raw), old_ref)
+    if reserved['task_names'] != json.loads(runner['read'](args.tasks)):
+        raise ValueError('original bound task manifest changed')
+    return dict(directory=directory, intent_path=intent_path, intent=intent, config=config,
+                original_config_path=config_path, reserved=reserved, output=output, original_binding=original['binding'])
+
+
+def resume_bound_launch(args, root, runner, plan, github):
+    # The old immutable workload remains the execution source. Only this host
+    # operator and fresh read-only admission proof are new and separately logged.
+    config = plan['config']
+    current_binding = admission_binding(args, runner)
+    current_binding['source_ref'] = config['source_ref']
+    if current_binding != plan['original_binding']:
+        raise ValueError('bound launch input changed after validation')
+    if not 0 <= time.time()-config['started_at_epoch'] < 5400:
+        raise ValueError('original campaign clock expired')
+    continuation = plan['directory']/('bound-continuation-'+str(time.time_ns()))
+    continuation.mkdir(mode=0o700)
+    token = token_from_agents(runner['read'](args.agents_env))
+    os.environ['FLY_API_TOKEN'] = token
+    capture = runpy.run_path(str(root/'scripts/cloudbench-original-volume-capture.py'))
+    with runner['bounded'](110):
+        cap = capacity_snapshot(capture['Fly'], token, args.org, continuation, args.extra_destroying_count)
+    inventory = json.loads(read_inventory(continuation/'navi-whisper-lux-bench.private.json'))
+    facts = facts_from(runner['read'](args.facts))
+    verify_reuse_images(plan['reserved'], inventory, facts['image_ref'])
+    cap.update(reuse_module()['capacity_demand'](plan['reserved'], inventory, set(facts['protected_machines']), require_reserved=True))
+    if cap['available_slots_conservative'] < cap['new_machine_demand']:
+        raise ValueError('fresh bound-launch capacity insufficient')
+    proof_path = continuation/'capacity-proof.private.json'
+    runner['save'](proof_path, cap)
+    authority = json.loads(runner['read'](config['authority_template']))
+    authority.update(org_machine_limit=cap['machine_limit'],
+                     org_object_count=cap['total_active_inventory_objects']+cap['conservative_extra_destroying_bench_objects'],
+                     verified_epoch=cap['ended_epoch'],capacity_proof=dict(path=str(proof_path),sha256=digest(runner['read'](proof_path))))
+    authority_path = continuation/'authority-template.private.json'
+    runner['save'](authority_path, authority)
+    provenance = dict(host_operator_source_ref=args.source_ref, workload_source_ref=config['source_ref'],
+                      original_config_path=str(plan['original_config_path']),original_config_sha256=plan['intent']['config_sha256'],
+                      original_launch_intent_sha256=digest(runner['read'](plan['intent_path'])),
+                      original_started_at_epoch=config['started_at_epoch'],
+                      host_runner_sha256=digest((root/'scripts/cloudbench-original600-runner.py').read_bytes()))
+    derived = dict(config, authority_template=str(authority_path), host_operator_provenance=provenance)
+    path = continuation/'config.private.json'
+    runner['save'](path, derived)
+    print(json.dumps(dict(status='CONTINUING_ORIGINAL_BOUND_LAUNCH',admission_directory=str(plan['directory']),
+                         source_ref=config['source_ref'],host_operator_source_ref=args.source_ref)),flush=True)
+    return runner['run'](path, digest(runner['read'](path)), plan['output'], github_token=github)
+
+
 def main():
     if sys.argv[1:2] == ['--status']:
         status = runpy.run_path(str(Path(__file__).with_name('original600-status.py')))
@@ -386,6 +473,7 @@ def main():
         parser.add_argument('--'+name, required=True, type=Path)
     parser.add_argument('--archive-run', action='append', type=Path, help='Verified predecessor run directory; preserve IDs/volume using a clean task generation before fresh creation')
     parser.add_argument('--reuse-exclude-machine', action='append', default=[], help='Conservatively exclude a changed/pilot Machine from archived reuse')
+    parser.add_argument('--resume-bound-launch', type=Path, help='Continue an original absent-output bound launch using a verified host operator and fresh capacity')
     parser.add_argument('--resume-admission', type=Path, help='Reconcile the same prelaunch archived-reservation state; never restart a bound controller')
     parser.add_argument('--org', choices=['personal'], default='personal')
     parser.add_argument('--extra-destroying-count', type=int, default=1)
@@ -394,6 +482,7 @@ def main():
     root = Path(__file__).resolve().parents[1]
     pins = source(root, args.source_ref)
     runner = runpy.run_path(str(root/'scripts/cloudbench-original600-runner.py'))
+    runner['validate_source_members'](root, args.source_ref, pins)
     preflight = runpy.run_path(str(root/'scripts/cloudbench-operator-preflight.py'))
     for name in ['facts', 'agents_env', 'backend_env', 'tasks', 'snapshot_inventory', 'warm_deps']:
         path = getattr(args, name).absolute()
@@ -413,9 +502,14 @@ def main():
     version = subprocess.check_output(['flyctl', 'version'], text=True, timeout=5)
     if not re.search(r'flyctl v0\.4\.115\b', version):
         raise ValueError('original controller requires the pinned Fly CLI v0.4.115')
+    if args.resume_bound_launch and args.resume_admission:
+        raise ValueError('select one continuation mode')
+    bound = bound_launch_plan(args, runner) if args.resume_bound_launch else None
     if not args.run:
         print(json.dumps(dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=0)))
         return 0
+    if bound is not None:
+        return resume_bound_launch(args, root, runner, bound, github)
     parent = args.state_dir.absolute()
     if parent.resolve(strict=True) != parent or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
         raise ValueError('private physical current-owner state directory required')
