@@ -381,7 +381,7 @@ class Fly:
             raise Refusal("empty Fly credential")
         return f"{scheme} {token}"
 
-    def api(self, method: str, path: str, body: object | None = None, timeout: int = 60):
+    def api(self, method: str, path: str, body: object | None = None, timeout: int = 60, headers: dict | None = None, observer=None):
         import urllib.error
         import urllib.parse
         import urllib.request
@@ -389,16 +389,19 @@ class Fly:
         url = self.base + "/v1/apps/" + urllib.parse.quote(self.app, safe="") + path
         data = (b"" if method == "POST" else None) if body is None else json.dumps(body).encode()
         request = urllib.request.Request(url, data=data, method=method, headers={
-            "Authorization": self.authorization, "Content-Type": "application/json"})
+            "Authorization": self.authorization, "Content-Type": "application/json", **(headers or {})})
         handlers = [urllib.request.ProxyHandler({})] if self.loopback else []
         opener = urllib.request.build_opener(*handlers)
         try:
             with opener.open(request, timeout=timeout) as response:
                 payload = response.read(256 * 1024 * 1024)
+                if observer is not None: observer(method, path, response.status, payload)
         except urllib.error.HTTPError as error:
+            error_body = error.read(256 * 1024 * 1024)
+            if observer is not None: observer(method, path, error.code, error_body)
             if error.code == 404:
                 raise NotFound(path) from None
-            detail = error.read(200).decode("utf-8", "replace")
+            detail = error_body[:200].decode("utf-8", "replace")
             raise CaptureFailure(f"Machines API {method} {path} returned HTTP {error.code}: {detail}") from None
         except (urllib.error.URLError, OSError) as error:
             raise CaptureFailure(f"Machines API {method} {path} failed: {error}") from None

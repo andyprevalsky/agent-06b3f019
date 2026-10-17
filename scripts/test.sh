@@ -336,6 +336,10 @@ run_suite "Cloud Benchmark Persistent Aggregator" python3 scripts/tests/cloudben
 run_suite "Cloud Benchmark Fleet Card Stdlib Startup" python3 scripts/tests/cloudbench-fleet-card-site-startup.test.py
 run_suite "Cloud Benchmark Native Stdlib Startup" python3 scripts/tests/cloudbench-native-site-startup.test.py
 run_suite "Cloud Benchmark Start Accounting" python3 scripts/tests/cloudbench-start-accounting.test.py
+run_suite "Cloud Benchmark Archived Machine Reuse" python3 scripts/tests/cloudbench-archived-machine-reuse.test.py
+run_suite "Cloud Benchmark Archived Cloud Transport" python3 scripts/tests/cloudbench-archived-transport.test.py
+run_suite "Cloud Benchmark Archived Reuse Stream Transport" python3 scripts/tests/cloudbench-archived-reuse-transport.test.py
+run_suite "Cloud Benchmark Isolated Generation" python3 scripts/tests/cloudbench-isolated-generation.test.py
 run_suite "Cloud Benchmark Archived Owner Stop" python3 scripts/tests/cloudbench-archived-owner-stop.test.py
 run_suite "Cloud Benchmark Status Readiness Observability" python3 scripts/tests/cloudbench-status-readiness-observability.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py

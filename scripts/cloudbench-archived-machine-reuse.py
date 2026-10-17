@@ -1,0 +1,600 @@
+#!/usr/bin/env python3
+"""Preserved-ID archived Machine admission. Never delete resources or old claims."""
+
+from __future__ import annotations
+import argparse
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+from urllib.parse import quote
+
+HERE = Path(__file__).resolve().parent
+SCHEMA = "cloudbench-archived-reuse-v1"
+STORAGE = "retained-volume-fresh-generation"
+MARKER = "cloudbench_archived_reuse"
+APP = "navi-whisper-lux-bench"
+TASK_REF = "570830dbf17635e13d16a6f03b4d705f6b6443b1"
+
+
+def need(value, reason):
+    if not value:
+        raise ValueError(reason)
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def config_sha(value):
+    return sha(canonical(value))
+
+
+def module(name):
+    return runpy.run_path(str(HERE / name))
+
+
+def private(path):
+    return module("cloudbench-original600-runner.py")["read"](path)
+
+
+def save(path, value):
+    path = Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    module("cloudbench-original600-runner.py")["save"](path, value)
+
+
+def exact_or_save(path, value):
+    path = Path(path)
+    if path.exists():
+        need(json.loads(private(path)) == value, "durable claim changed")
+    else:
+        save(path, value)
+
+
+def immutable_image(value):
+    need(isinstance(value, str) and "@sha256:" in value, "immutable native image required")
+    repository, digest = value.rsplit("@sha256:", 1)
+    need(re.fullmatch("[0-9a-f]{64}", digest), "immutable image digest required")
+    if ":" in repository.rsplit("/", 1)[-1]:
+        repository = repository.rsplit(":", 1)[0]
+    return repository, digest
+
+
+def target_from(machine, ownership, archive):
+    mid, vid = machine["id"], ownership["volume_id"]
+    need(
+        machine["state"] == "stopped" and machine.get("instance_id"),
+        "archived candidate must be stopped with exact version",
+    )
+    cfg = machine["config"]
+    mounts = cfg.get("mounts", [])
+    need(
+        len(mounts) == 1 and mounts[0].get("volume") == vid and mounts[0].get("path") == "/data",
+        "same-volume /data binding required",
+    )
+    need(
+        cfg.get("persist_rootfs", cfg.get("guest", {}).get("persist_rootfs", "never")) == "never",
+        "fresh rootfs policy required",
+    )
+    need(
+        not any(cfg.get(key) for key in ("containers", "processes", "standbys", "schedule")),
+        "unsupported native layout",
+    )
+    prior_marker = cfg.get("metadata", {}).get(MARKER)
+    proof = ownership.get("archived_reuse_proof")
+    need(
+        prior_marker == (canonical(proof["native_marker"]).decode() if proof else None),
+        "candidate successor custody not bound by current archive",
+    )
+    return dict(
+        machine_id=mid,
+        volume_id=vid,
+        source_instance_id=machine["instance_id"],
+        source_config_sha256=config_sha(cfg),
+        image_ref=cfg.get("image"),
+        name=machine["name"],
+        created_at=machine["created_at"],
+        region=machine["region"],
+        predecessor=ownership,
+        archive_sha256=archive,
+        prior_marker=prior_marker,
+        prior_liabilities="UNRESOLVED; no successful/never-started/provider-cleanup inference",
+    )
+
+
+def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=()):
+    need(re.fullmatch("[0-9a-f]{32}", cohort or ""), "exact reserved successor cohort required")
+    need(re.fullmatch("[0-9a-f]{40}", harness_ref or ""), "exact harness ref required")
+    need(
+        len(archive_runs) >= 1 and len(set(map(str, archive_runs))) == len(archive_runs),
+        "distinct complete archive runs required",
+    )
+    targets = {}
+    archives = []
+    validator = module("cloudbench-archived-owner-stop.py")["prepare"]
+    for run in archive_runs:
+        plan = validator(
+            run, inventory_path
+        )  # Full archive hashes, membership, joined/deleted controller, protections.
+        archive = next(d for name, d in plan["inputs"].items() if name.endswith("/originals.tar.gz"))
+        archives.append(dict(controller=plan["controller"], archive_sha256=archive, inputs=plan["inputs"]))
+        for row in plan["targets"]:
+            if row["machine"]["id"] in excluded:
+                continue
+            candidate = target_from(row["machine"], row["ownership"], archive)
+            mid = candidate["machine_id"]
+            need(mid not in targets, "duplicate Machine across predecessor archives")
+            targets[mid] = candidate
+    need(targets, "no exact archived candidates")
+    return dict(
+        schema=SCHEMA,
+        storage_mode=STORAGE,
+        app=APP,
+        cohort=cohort,
+        harness_ref=harness_ref,
+        task_ref=TASK_REF,
+        archives=archives,
+        candidates=sorted(targets.values(), key=lambda r: r["machine_id"]),
+        no_delete=True,
+        no_old_claim_release=True,
+        benchmark_success_inferred=False,
+        excluded_machine_ids=sorted(set(excluded)),
+    )
+
+
+def validate_request(value, harness_ref=None):
+    need(
+        value.get("schema") == SCHEMA and value.get("storage_mode") == STORAGE and value.get("app") == APP,
+        "foreign reuse request",
+    )
+    need(
+        value.get("task_ref") == TASK_REF and (harness_ref is None or value["harness_ref"] == harness_ref),
+        "task/harness pin mismatch",
+    )
+    need(re.fullmatch("[0-9a-f]{32}", value.get("cohort", "")), "invalid successor cohort")
+    rows = value.get("candidates")
+    need(isinstance(rows, list) and rows, "missing reuse candidates")
+    need(
+        len({r["machine_id"] for r in rows}) == len(rows) and len({r["volume_id"] for r in rows}) == len(rows),
+        "duplicate Machine/Volume",
+    )
+    expected_image = immutable_image(value.get("image_ref"))
+    for row in rows:
+        need(
+            immutable_image(row.get("image_ref")) == expected_image,
+            "archived Machine image differs from admitted image",
+        )
+        need(
+            re.fullmatch("[0-9a-f]{14}", row["machine_id"]) and re.fullmatch("vol_[A-Za-z0-9]+", row["volume_id"]),
+            "invalid resource identity",
+        )
+        need(
+            row["source_instance_id"] and re.fullmatch("[0-9a-f]{64}", row["source_config_sha256"]),
+            "missing native version/config",
+        )
+        need(row["archive_sha256"] in {a["archive_sha256"] for a in value["archives"]}, "unbound predecessor archive")
+    return value
+
+
+def capacity_demand(value, inventory, protected, *, require_reserved=False):
+    validate_request(value)
+    machines = {m["id"]: m for m in inventory}
+    need(len(machines) == len(inventory), "duplicate inventory identity")
+    qualified = []
+    for row in value["candidates"]:
+        need(row["machine_id"] not in protected, "protected Machine cannot be reused")
+        current = machines.get(row["machine_id"])
+        need(current is not None, "candidate absent from current inventory")
+        if require_reserved:
+            need(
+                row.get("reservation") and row["reservation"]["cohort"] == value["cohort"],
+                "capacity cannot credit unreserved archived identity",
+            )
+        same_source(row, current)
+        qualified.append(row["machine_id"])
+    need(len(qualified) <= 600, "reuse exceeds original600 logical demand")
+    return dict(
+        qualified_ids=qualified,
+        qualified_reuse_count=len(qualified),
+        new_machine_demand=601 - len(qualified),
+        original_tasks=600,
+        controller_slots=1,
+    )
+
+
+def same_source(row, machine):
+    need(
+        machine.get("id") == row["machine_id"]
+        and machine.get("name") == row["name"]
+        and machine.get("created_at") == row["created_at"],
+        "Machine creation identity changed",
+    )
+    need(
+        machine.get("state") in (("created", "stopped") if row.get("reservation") else ("stopped",))
+        and machine.get("instance_id") == row["source_instance_id"],
+        "candidate state/version changed",
+    )
+    need(config_sha(machine["config"]) == row["source_config_sha256"], "candidate config changed")
+    need(
+        [m.get("volume") for m in machine["config"].get("mounts", [])] == [row["volume_id"]], "candidate volume changed"
+    )
+    need(
+        machine["config"].get("metadata", {}).get(MARKER) == row.get("prior_marker"),
+        "predecessor superseded by durable native successor",
+    )
+
+
+def proof_for(request, row, successor):
+    need(
+        re.fullmatch("[0-9a-f]{14}", successor.get("controller_id", "")),
+        "actual successor controller required before task effects",
+    )
+    need(
+        successor.get("harness_ref") == request["harness_ref"] and successor.get("task_ref") == TASK_REF,
+        "successor source/task mismatch",
+    )
+    need(
+        re.fullmatch("[0-9a-f]{32}", successor.get("owner_token", ""))
+        and type(successor.get("ordinal")) is int
+        and successor["ordinal"] >= 0,
+        "exact successor task owner required",
+    )
+    need(successor.get("run_id") and successor.get("task"), "successor task/run missing")
+    claim = sha(canonical([request["cohort"], row["machine_id"], successor]))[:32]
+    data = "/data/.cloudbench-generations/" + claim
+    marker = dict(
+        schema=SCHEMA,
+        cohort=request["cohort"],
+        claim_id=claim,
+        machine_id=row["machine_id"],
+        volume_id=row["volume_id"],
+        source_excluded=True,
+        predecessor_archive_sha256=row["archive_sha256"],
+        prior_marker_sha256=sha(row["prior_marker"].encode()) if row.get("prior_marker") else None,
+        successor=successor,
+    )
+    return dict(
+        schema=SCHEMA,
+        storage_mode=STORAGE,
+        claim_id=claim,
+        generation_id=claim,
+        machine_id=row["machine_id"],
+        volume_id=row["volume_id"],
+        native_name=row["name"],
+        created_at=row["created_at"],
+        region=row["region"],
+        source_instance_id=row["source_instance_id"],
+        source_config_sha256=row["source_config_sha256"],
+        predecessor_archive_sha256s=[a["archive_sha256"] for a in request["archives"]],
+        successor=successor,
+        guest=dict(data_dir=data, repo_dir=data + "/repo"),
+        native_marker=marker,
+        native_marker_sha256=sha(canonical(marker)),
+        old_liabilities=row["prior_liabilities"],
+    )
+
+
+def claim_native(api, request, row, successor, journal):
+    """Caller owns API/token; lease and current_version are mandatory, no START/DELETE."""
+    proof = proof_for(request, row, successor)
+    journal = Path(journal)
+    journal.mkdir(mode=0o700, parents=True, exist_ok=True)
+    exact_or_save(journal / "source-exclusion.json", dict(proof=proof, predecessor=row))
+    mid = row["machine_id"]
+    url = "/machines/" + mid
+    with api.lease(mid):
+        current = api.request("GET", url)
+        marker = current.get("config", {}).get("metadata", {}).get(MARKER)
+        if marker == canonical(proof["native_marker"]).decode():
+            need(current["state"] in ("stopped", "created"), "claimed Machine is not inactive")
+            intent = json.loads(private(journal / "claim-intent.json"))
+            need(config_sha(current["config"]) == intent["config_sha256"], "claimed config drifted after native claim")
+            exact_or_save(
+                journal / "claim-ack.json",
+                dict(instance_id=current["instance_id"], native_marker_sha256=proof["native_marker_sha256"]),
+            )
+            return proof
+        same_source(row, current)
+        exact_or_save(journal / "original-native.json", current)
+        config = copy.deepcopy(current["config"])
+        config.setdefault("metadata", {})[MARKER] = canonical(proof["native_marker"]).decode()
+        # Park old startup without launching it; exact old volume stays attached.
+        config["init"] = {"cmd": ["sleep", "infinity"]}
+        need(not (journal / "claim-intent.json").exists(), "ambiguous claim update: reconcile only, never rePOST")
+        exact_or_save(
+            journal / "claim-intent.json",
+            dict(current_version=current["instance_id"], config_sha256=config_sha(config)),
+        )
+        ack = api.request("POST", url, dict(config=config, current_version=current["instance_id"], skip_launch=True))
+        need(
+            ack.get("id") == mid
+            and isinstance(ack.get("instance_id"), str)
+            and ack["instance_id"]
+            and ack["instance_id"] != current["instance_id"]
+            and config_sha(ack["config"]) == config_sha(config),
+            "claim update ACK mismatch",
+        )
+        waited = api.request(
+            "GET",
+            url
+            + "/wait?state="
+            + ("created" if ack.get("state") == "created" else "stopped")
+            + "&instance_id="
+            + quote(ack["instance_id"], safe="")
+            + "&timeout=10",
+        )
+        need(waited.get("ok") is True, "native version wait did not confirm")
+        observed = api.request("GET", url)
+        need(
+            observed.get("instance_id") == ack["instance_id"]
+            and config_sha(observed["config"]) == config_sha(config)
+            and observed["state"] in ("stopped", "created"),
+            "claim readback mismatch; retain durable source exclusion",
+        )
+        exact_or_save(
+            journal / "claim-ack.json",
+            dict(instance_id=observed["instance_id"], native_marker_sha256=proof["native_marker_sha256"]),
+        )
+    return proof
+
+
+def campaign_candidate_index(request, successor):
+    """One task per child; campaign index is distinct from its local ordinal zero."""
+    names = request.get("task_names")
+    module("cloudbench-original600-runner.py")["campaign_argv"](names, 1)
+    match = re.fullmatch(r"r(\d{3})-j(\d{4})", successor.get("campaign_job_id", ""))
+    need(match and successor.get("campaign_total_jobs") == 600, "exact original600 campaign child required")
+    index = int(match[2]) - 1
+    need(0 <= index < 600 and int(match[1]) == index // 200 + 1, "campaign replica/index mismatch")
+    need(
+        successor.get("ordinal") == 0 and successor.get("task") == names[index % 200],
+        "campaign task/local ordinal mismatch",
+    )
+    need(
+        type(successor.get("campaign_attempt")) is int and successor["campaign_attempt"] >= 1,
+        "campaign attempt missing",
+    )
+    return index
+
+
+def allocate(request_path, request_sha, ordinal, successor, output, token):
+    raw = private(request_path)
+    need(sha(raw) == request_sha, "reuse request bytes changed")
+    request = validate_request(json.loads(raw), successor["harness_ref"])
+    need(successor["ordinal"] == ordinal, "successor ordinal mismatch")
+    index = campaign_candidate_index(request, successor)
+    # A retry has a different native task lifetime. It cannot steal its prior
+    # attempt's Machine or generation; normal fresh retry admission still applies.
+    if successor["campaign_attempt"] > 1 or index >= len(request["candidates"]):
+        return None
+    row = request["candidates"][index]
+    need(row.get("reservation"), "unreserved candidate cannot be allocated")
+    api = NativeAdapter(
+        module("cloudbench-original-volume-capture.py")["Fly"](APP, token), Path(output) / "archived-reuse-wire"
+    )
+    proof = claim_native(api, request, row, successor, Path(output) / "archived-reuse-journal")
+    exact_or_save(Path(output) / "archived-reuse-proof.json", proof)
+    return proof
+
+
+def read_proof(filename):
+    value = json.loads(private(filename))
+    need(value["schema"] == SCHEMA and value["storage_mode"] == STORAGE, "foreign reuse proof")
+    claim = value["claim_id"]
+    need(re.fullmatch("[0-9a-f]{32}", claim), "unsafe generation claim")
+    need(
+        value["guest"]
+        == dict(
+            data_dir="/data/.cloudbench-generations/" + claim,
+            repo_dir="/data/.cloudbench-generations/" + claim + "/repo",
+        ),
+        "unsafe physical generation mapping",
+    )
+    need(sha(canonical(value["native_marker"])) == value["native_marker_sha256"], "native marker digest changed")
+    return value
+
+
+# Share one validation contract with bounded native effects; no third-party imports.
+_EFFECTS = runpy.run_path(
+    str(HERE / "cloudbench-archived-reuse-effects.py"),
+    init_globals={
+        "VALIDATION": {
+            key: globals()[key]
+            for key in (
+                "need",
+                "canonical",
+                "sha",
+                "config_sha",
+                "module",
+                "private",
+                "save",
+                "exact_or_save",
+                "validate_request",
+                "same_source",
+                "MARKER",
+                "SCHEMA",
+            )
+        }
+    },
+)
+NativeAdapter = _EFFECTS["NativeAdapter"]
+reserve_cohort = _EFFECTS["reserve_cohort"]
+retire_native = _EFFECTS["retire_native"]
+
+
+def external_command(proof, command):
+    return module("cloudbench-archived-reuse-transport.py")["external_command"](proof, command, canonical(proof))
+
+
+def main():
+    import sys
+
+    if sys.argv[1:2] == ["wire"]:
+        directory = Path(sys.argv[2])
+        request = json.loads(private(directory / "request.json"))
+        Fly = module("cloudbench-original-volume-capture.py")["Fly"]
+        api = object.__new__(Fly)
+        api.app = request["app"]
+        api.authorization = os.environ["CLOUDBENCH_WIRE_AUTH"]
+        api.base = os.environ["CLOUDBENCH_WIRE_BASE"]
+        api.loopback = os.environ["CLOUDBENCH_WIRE_LOOPBACK"] == "1"
+        observer = NativeAdapter(api, directory)
+        result = api.api(
+            request["method"],
+            request["path"],
+            request["body"],
+            timeout=request["timeout"],
+            headers=request["headers"],
+            observer=observer.observe,
+        )
+        save(directory / "result.json", result)
+        return
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="action", required=True)
+    prepare = sub.add_parser("prepare")
+    prepare.add_argument("--archive-run", action="append", required=True, type=Path)
+    prepare.add_argument("--inventory", required=True, type=Path)
+    prepare.add_argument("--cohort", required=True)
+    prepare.add_argument("--harness-ref", required=True)
+    prepare.add_argument("--image-ref", required=True)
+    prepare.add_argument("--output", required=True, type=Path)
+    prepare.add_argument("--exclude-machine", action="append", default=[])
+    allocate_parser = sub.add_parser("allocate")
+    for name in ("request", "request-sha", "ordinal", "successor", "output"):
+        allocate_parser.add_argument("--" + name, required=True)
+    retire = sub.add_parser("retire")
+    retire.add_argument("--proof", required=True)
+    retire.add_argument("--journal", required=True)
+    mapping = sub.add_parser("map-command")
+    mapping.add_argument("--proof", required=True)
+    mapping.add_argument("--command", required=True)
+    export = sub.add_parser("export-file")
+    export.add_argument("--proof", required=True)
+    export.add_argument("--remote", required=True)
+    export.add_argument("--local", required=True)
+    credit = sub.add_parser("capacity-credit")
+    credit.add_argument("--task", required=True)
+    transport = sub.add_parser("transport")
+    transport.add_argument("--proof", required=True)
+    transport.add_argument("args", nargs=argparse.REMAINDER)
+    effect = sub.add_parser("fenced-effect")
+    effect.add_argument("--machine", required=True)
+    effect.add_argument("--operation", choices=["stop", "destroy"], required=True)
+    effect.add_argument("--journal", required=True)
+    args = parser.parse_args()
+    os.umask(0o077)
+    if args.action == "fenced-effect":
+        need(re.fullmatch("[0-9a-f]{14}", args.machine), "exact Machine required")
+        journal = Path(args.journal)
+        journal.mkdir(mode=0o700, parents=True, exist_ok=True)
+        api = NativeAdapter(
+            module("cloudbench-original-volume-capture.py")["Fly"](APP, os.environ["FLY_API_TOKEN"]), journal / "wire"
+        )
+        with api.lease(args.machine):
+            url = "/machines/" + args.machine
+            current = api.request("GET", url)
+            need(
+                not current["config"].get("metadata", {}).get(MARKER),
+                "archived successor forbids predecessor native effect",
+            )
+            need(not (journal / "intent.json").exists(), "unknown predecessor native effect; reconcile only")
+            save(journal / "intent.json", dict(machine=current, operation=args.operation))
+            result = api.request(
+                "DELETE" if args.operation == "destroy" else "POST",
+                url + ("?force=true" if args.operation == "destroy" else "/stop"),
+            )
+            save(journal / "ack.json", result)
+        return
+    if args.action == "export-file":
+        module("cloudbench-archived-reuse-transport.py")["export_file"](
+            read_proof(args.proof), args.remote, args.local, external_command
+        )
+        return
+    if args.action == "transport":
+        proof = read_proof(args.proof)
+        values = args.args
+        if values[:1] == ["--"]:
+            values = values[1:]
+        need(
+            "--machine" in values and values[values.index("--machine") + 1] == proof["machine_id"],
+            "transport exact Machine mismatch",
+        )
+        if values[:2] == ["ssh", "console"]:
+            need("-C" in values, "interactive archived task SSH is not supported")
+            position = values.index("-C") + 1
+            values[position] = external_command(proof, values[position])
+        elif values[:2] == ["ssh", "sftp"]:
+            for position, value in enumerate(values):
+                if value == "/data" or value.startswith("/data/"):
+                    need("/../" not in value and not value.endswith("/.."), "unsafe logical guest path")
+                    raise ValueError("use namespace-bound export-file for archived /data reads; writes are forbidden")
+        else:
+            raise ValueError("unsupported archived guest transport")
+        for value in values:
+            sys.stdout.buffer.write(value.encode() + b"\0")
+        return
+    if args.action == "capacity-credit":
+        raw = private(os.environ["CLOUDBENCH_ARCHIVED_REUSE_REQUEST"])
+        need(sha(raw) == os.environ["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"], "reuse request bytes changed")
+        request = validate_request(json.loads(raw))
+        successor = dict(
+            ordinal=0,
+            task=args.task,
+            campaign_job_id=os.environ.get("RUN_BENCH_CAMPAIGN_JOB_ID"),
+            campaign_total_jobs=int(os.environ.get("RUN_BENCH_CAMPAIGN_TOTAL_JOBS", "0")),
+            campaign_attempt=int(os.environ.get("RUN_BENCH_CAMPAIGN_ATTEMPT", "1")),
+        )
+        index = campaign_candidate_index(request, successor)
+        if successor["campaign_attempt"] > 1 or index >= len(request["candidates"]):
+            print(0)
+        else:
+            need(
+                request["candidates"][index].get("reservation", {}).get("cohort") == request["cohort"],
+                "capacity requires exact reserved native candidate",
+            )
+            print(1)
+        return
+    if args.action == "map-command":
+        print(external_command(read_proof(args.proof), args.command))
+        return
+    if args.action == "retire":
+        proof = read_proof(args.proof)
+        api = NativeAdapter(
+            module("cloudbench-original-volume-capture.py")["Fly"](APP, os.environ["FLY_API_TOKEN"]),
+            Path(args.journal) / "wire",
+        )
+        retire_native(api, proof, args.journal)
+        return
+    if args.action == "allocate":
+        successor = json.loads(private(args.successor))
+        token = os.environ.get("FLY_API_TOKEN", "")
+        need(token, "canonical Fly credential required")
+        proof = allocate(args.request, args.request_sha, int(args.ordinal), successor, args.output, token)
+        print(proof["machine_id"] if proof else "")
+        return
+    value = prepare_request(args.archive_run, args.inventory, args.cohort, args.harness_ref, args.exclude_machine)
+    value["image_ref"] = args.image_ref
+    validate_request(value)
+    save(args.output, value)
+    print(
+        json.dumps(
+            dict(
+                path=str(args.output),
+                sha256=sha(private(args.output)),
+                candidates=len(value["candidates"]),
+                storage_mode=STORAGE,
+            )
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

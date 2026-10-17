@@ -60,8 +60,8 @@ the selected agents file. Capacity reads use the requested organization
 inventory. The read phase retains the original110-second bound, without
 background worker threads that could outlive a drip-fed response. Capacity is
 not atomic; the proof says so. It conservatively subtracts the separately
-declared unlisted/destroying allowance (default1), requires at least601 slots,
-and must be younger than270 seconds at binding. A later allocation admission
+declared unlisted/destroying allowance (default1), requires at least601 new
+slots without archived reuse, and must be younger than270 seconds at binding. A later allocation admission
 still rechecks the existing canonical authority. No quota is increased.
 
 The controller remains performance-8x/32768MiB with a256GiB workspace. The actual
@@ -81,6 +81,65 @@ an original600 success: inspect the canonical600 outcomes and unique-infra count
 Local offline fixture passes do not qualify actual capacity, R2 publication,
 provider allocation or the five-consecutive-run goal.
 
+
+### Reuse preserved Machines from completed controller archives
+
+To reuse the preserved Machines of prior interrupted runs, add one
+`--archive-run` for each original run directory to the same command above:
+
+```bash
+  --archive-run "$PREVIOUS_RUN_DIRECTORY_1" \
+  --archive-run "$PREVIOUS_RUN_DIRECTORY_2" \
+  --reuse-exclude-machine "$OPTIONAL_CHANGED_MACHINE_ID"
+```
+
+The exclusion flag is optional and repeatable. For example, exclude a Machine
+whose current instance changed during a separately recorded capability probe;
+an old inventory must not substitute for its new ownership evidence. Supply the
+complete original run directories with their verified controller export,
+terminal and cleanup records, not a list of Machine IDs. Keep those directories
+and their private original artifacts available. Missing or conflicting evidence
+refuses reuse; do not edit old receipts to make them match.
+
+Without `--run`, this is still a local source/input check with no provider
+calls. With `--run`, the CLI reads fresh capacity and verifies archived ownership,
+protected resources, stopped state, instance, configuration and attached Volume.
+An eligible stopped Machine is not free quota. Only an exclusive, durably
+recorded native reservation that has been read back can reduce new allocation
+demand. With R such reservations, the unchanged600-task campaign needs
+`601 - R` new Machine slots, including its controller. Existing objects remain
+in the organization's measured total. All qualified candidates are considered
+before creating fresh Machines; protected or unproven candidates receive no
+credit.
+
+Reused Machines keep their IDs, names and attached physical Volumes. The storage
+mode is explicitly `retained-volume-fresh-generation`, not a newly created
+Volume. A new exclusive generation directory is mounted over `/data` in a
+private mount namespace before the ordinary boot, status server and task
+processes start. The previous Volume contents remain outside that task view.
+The immutable guest helper checks the generation, owner, namespace and source
+bindings. External runtime commands enter that same verified namespace; file
+collection resolves the matching generation rather than old `/data` artifacts.
+An unavailable isolation primitive or stale binding stops admission before task
+execution.
+
+This changes storage reuse, not the original ordered tasks, three repetitions,
+600 concurrency, retry budget or execution limits. Old claims, unresolved prior
+outcomes and data are retained. Cleanup stops a reused Machine and archives its
+current ownership; it does not delete its Machine or Volume or convert an old
+failure into a success. A later reuse must prove the latest archived owner and
+current native marker, so an older archive cannot reclaim a newer generation.
+
+Retain the CLI's reservation intents, raw responses and readback receipts if an
+operation is interrupted. A missing response is an unknown effect, not evidence
+that nothing happened. To resume admission, use the same command and all its
+original inputs with `--resume-admission "$PRINTED_ADMISSION_DIRECTORY"`.
+The CLI verifies the source and input hashes, keeps the first admission's
+5400-second clock, and reconciles the same cohort and journals. An ambiguous
+operation is never blindly repeated. Once a controller launch is recorded,
+this option refuses a second launch; use the printed run directory with
+`--status` and keep its existing owner. Never remove an intent, bypass a claim,
+or select a new output directory merely to retry an ambiguous operation.
 
 ### Launcher credentials and no-effect failures
 

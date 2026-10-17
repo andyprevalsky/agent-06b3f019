@@ -117,6 +117,24 @@ class Status(unittest.TestCase):
             with self.assertRaises(ValueError):scope['guest_status'](dict(payload,identity_path='/private/arbitrary.json'),repo,'boot-fixture')
             with self.assertRaises(ValueError):scope['guest_status'](dict(payload,epoch=self.epoch+1),repo,'boot-fixture')
 
+    def test_cancelled_and_unfinished_exact_true_infra_count_without_terminal_credit(self):
+        scope={'__name__':'offline_status_payload'};exec(M['REMOTE'],scope)
+        jobs=[dict(job_id='cancelled',status='cancelled',attempts=[
+            dict(status='cancelled',finished_at=None,infra_failure=True),
+            dict(status='cancelled',finished_at='cancel-time',infra_failure=True)]),
+            dict(job_id='unfinished',status='running',attempts=[dict(status='running',infra_failure=True)]),
+            dict(job_id='not-bool',status='cancelled',attempts=[
+                dict(status='cancelled',infra_failure=1),dict(status='cancelled',infra_failure='true')])]
+        jobs += [dict(job_id='queued-'+str(i),status='queued',attempts=[]) for i in range(597)]
+        result=scope['project'](dict(total_jobs=600,jobs=jobs))
+        self.assertEqual(result['canonical_infra_affected_jobs'],2)
+        self.assertEqual(result['attempt_records'],5)
+        self.assertEqual(result['terminal_attempts'],0)
+        self.assertEqual(result['terminal_attempt_records_with_unknown_infra'],0)
+        self.assertEqual(result['jobs_with_unknown_terminal_infra'],0)
+        self.assertEqual(result['job_statuses'],dict(cancelled=2,running=1,queued=597))
+        self.assertFalse(result['benchmark_success_inferred'])
+
     def test_one_native_exec_is_readonly_and_unknown_envelopes_do_not_fake_summary(self):
         value=M['binding'](self.run);calls=[]
         result=dict(status='SUPERVISOR_NOT_PUBLISHED',machine=self.mid,source_ref=self.ref,original_epoch=self.epoch)

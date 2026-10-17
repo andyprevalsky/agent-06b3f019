@@ -48,10 +48,10 @@ def project(summary):
         terminal_for_job=0
         for attempt in records:
             attempts+=1
+            if attempt.get('infra_failure') is True:infra.add(ident)
             if attempt.get('status') in ('passed','failed') and attempt.get('finished_at'):
                 terminal+=1;terminal_for_job+=1
-                if attempt.get('infra_failure') is True:infra.add(ident)
-                elif type(attempt.get('infra_failure')) is not bool:
+                if type(attempt.get('infra_failure')) is not bool:
                     unknown_attempts+=1;unknown_infra.add(ident)
         if status=='failed' and not terminal_for_job:unknown_failures+=1
     value=dict(job_statuses=statuses,attempt_records=attempts,terminal_attempts=terminal,

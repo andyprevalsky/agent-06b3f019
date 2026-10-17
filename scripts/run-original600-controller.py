@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Portable original600 capacity → bind → owned controller entrypoint."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 import re
 from pathlib import Path
 import runpy
+import signal
 import subprocess
 import sys
 import time
@@ -20,12 +22,43 @@ PINS = [
     'cloudbench-cleanup-tickets.py', 'cloudbench-machine-readiness.py',
     'cloudbench-cohort-reconcile.py', 'cloudbench-shared-relay.py',
     'cloudbench-operator-preflight.py', 'cloudbench-original600-runner.py',
-    'run-original600-controller.py',
+    'run-original600-controller.py', 'cloudbench-archived-machine-reuse.py',
+    'cloudbench-archived-reuse-effects.py', 'cloudbench-archived-reuse-transport.py',
+    'cloudbench-archived-owner-stop.py', 'cloudbench-stop-all.py',
+    'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',
+    'lib/cloudbench-archived-reuse.sh', 'run-bench-fleet', 'run-bench-cloud',
 ]
 
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def reuse_module():
+    return runpy.run_path(str(Path(__file__).with_name('cloudbench-archived-machine-reuse.py')))
+
+
+class AdmissionInterrupted(BaseException):
+    def __init__(self, signum):
+        self.signum=signum
+
+
+@contextmanager
+def joined_admission_signals():
+    """Interrupt admission once, allowing its executor to join owned operations."""
+    previous={number:signal.getsignal(number) for number in (signal.SIGINT,signal.SIGTERM)}
+    def interrupted(signum, frame):
+        # Repeated signals must not interrupt the finite native join/lease release.
+        for number in previous:
+            signal.signal(number,lambda *_:None)
+        raise AdmissionInterrupted(signum)
+    for number in previous:
+        signal.signal(number,interrupted)
+    try:
+        yield
+    finally:
+        for number,handler in previous.items():
+            signal.signal(number,handler)
 
 
 def source(root, ref):
@@ -90,7 +123,30 @@ def facts_from(raw):
     return facts
 
 
-def capacity(api, token, org, directory, extra):
+def image_identity(value):
+    match=re.fullmatch(r'([^@\s]+)@(sha256:[0-9a-f]{64})',value if isinstance(value,str) else '')
+    if not match:
+        raise ValueError('immutable repository and image digest required')
+    name=match[1]
+    # Tags are labels, while repository plus digest identifies immutable bytes.
+    if ':' in name.rsplit('/',1)[-1]:
+        name=name.rsplit(':',1)[0]
+    return name,match[2]
+
+
+def verify_reuse_images(request, inventory, expected):
+    identity=image_identity(expected)
+    machines={machine['id']:machine for machine in inventory}
+    for row in request['candidates']:
+        current=machines.get(row['machine_id'])
+        if current is None or image_identity(current['config'].get('image')) != identity:
+            raise ValueError('archived candidate image differs from the admitted immutable image')
+        resolved=current.get('image_ref')
+        if isinstance(resolved,dict) and resolved.get('digest') and resolved['digest'] != identity[1]:
+            raise ValueError('resolved native image digest differs from the admitted image')
+
+
+def capacity_snapshot(api, token, org, directory, extra):
     started = time.time()
     query = 'query { organization(slug:' + json.dumps(org) + ') { id slug settings billingStatus } }'
     req = urllib.request.Request('https://api.fly.io/graphql', data=json.dumps({'query': query}).encode(),
@@ -121,6 +177,7 @@ def capacity(api, token, org, directory, extra):
     runner['save'](directory / 'organization.private.json', settings)
     runner['save'](directory / 'apps.private.json', apps)
 
+    native_by_app = {}
     def read_app(app):
         name = app['Name']
         if not isinstance(name, str) or not name or any(c not in 'abcdefghijklmnopqrstuvwxyz0123456789-' for c in name):
@@ -128,6 +185,7 @@ def capacity(api, token, org, directory, extra):
         machines = api(name, token).api('GET', '/machines', timeout=20)
         if not isinstance(machines, list) or len({m['id'] for m in machines}) != len(machines):
             raise ValueError('complete native Machine inventory required')
+        native_by_app[name] = machines
         path = directory / (name + '.private.json')
         runner['save'](path, machines)
         return dict(app=name, count=len(machines), path=str(path), sha256=digest(path.read_bytes()))
@@ -136,30 +194,136 @@ def capacity(api, token, org, directory, extra):
     # bound a drip-fed body, and thread-pool shutdown cannot join such a worker.
     rows = [read_app(app) for app in apps]
     count = sum(r['count'] for r in rows)
-    proof = dict(started_epoch=started, ended_epoch=time.time(), machine_limit=limit,
-                 billing_status=organization['billingStatus'], total_active_inventory_objects=count,
-                 conservative_extra_destroying_bench_objects=extra, apps=rows,
-                 atomic_snapshot=False, all_reads_only=True, available_slots_conservative=limit-count-extra,
-                 new_controller_slots=1, requested_original_primary_slots=600)
+    return dict(started_epoch=started, ended_epoch=time.time(), machine_limit=limit,
+                billing_status=organization['billingStatus'], total_active_inventory_objects=count,
+                conservative_extra_destroying_bench_objects=extra, apps=rows,
+                atomic_snapshot=False, all_reads_only=True, available_slots_conservative=limit-count-extra,
+                new_controller_slots=1, requested_original_primary_slots=600)
+
+
+def capacity(api, token, org, directory, extra, reuse_runs=None, harness_ref=None, excluded=(), image_ref=None):
+    proof = capacity_snapshot(api, token, org, directory, extra)
+    if reuse_runs:
+        helper=reuse_module()
+        import secrets
+        inventory_path=directory/'navi-whisper-lux-bench.private.json'
+        reuse=helper['prepare_request'](reuse_runs,inventory_path,secrets.token_hex(16),harness_ref,excluded)
+        if image_ref is not None:
+            reuse['image_ref']=image_ref
+        helper['validate_request'](reuse,harness_ref)
+        inventory=json.loads(inventory_path.read_bytes())
+        if image_ref is not None:
+            verify_reuse_images(reuse,inventory,image_ref)
+        eligible=helper['capacity_demand'](reuse,inventory,set())['qualified_reuse_count']
+        # Eligibility is a planning result, never a native reservation or quota credit.
+        proof.update(eligible_reuse_count=eligible, qualified_reuse_count=0,
+                     new_machine_demand=601, qualified_ids=[], admission='ELIGIBLE_NOT_RESERVED')
+        if proof['available_slots_conservative'] + eligible < 601:
+            raise ValueError('insufficient capacity even if every eligible archived identity is reserved')
+        save = runpy.run_path(str(Path(__file__).with_name('cloudbench-original600-runner.py')))['save']
+        save(directory/'archived-reuse-request.private.json',reuse)
+        save(directory/'capacity-before-reservation.private.json',proof)
+        return proof
+    proof.update(qualified_reuse_count=0,new_machine_demand=601,qualified_ids=[])
     if proof['available_slots_conservative'] < 601:
-        raise ValueError('fewer than 601 conservatively available native slots')
-    runner['save'](directory / 'capacity-proof.private.json', proof)
+        raise ValueError('insufficient measured capacity for original601 new Machines')
+    runpy.run_path(str(Path(__file__).with_name('cloudbench-original600-runner.py')))['save'](directory/'capacity-proof.private.json',proof)
     return proof
 
 
-def prepare(args, root, pins, runner, directory, cap):
-    if not 0 <= time.time() - cap['ended_epoch'] < 270 or cap['available_slots_conservative'] < 601:
+def admission_binding(args, runner):
+    names=('facts','agents_env','backend_env','tasks','snapshot_inventory','warm_deps')
+    return dict(source_ref=args.source_ref, org=args.org, extra=args.extra_destroying_count,
+                inputs={name:dict(path=str(getattr(args,name)),sha256=digest(runner['read'](getattr(args,name)))) for name in names},
+                archive_runs=[str(path.absolute()) for path in (args.archive_run or [])],
+                excluded_machines=sorted(set(args.reuse_exclude_machine)))
+
+
+def open_admission(parent, resume, binding, runner, has_archives):
+    if resume:
+        directory=resume.absolute()
+        if directory.parent != parent or directory.resolve(strict=True) != directory or directory.stat().st_uid != os.geteuid() or directory.stat().st_mode & 0o077:
+            raise ValueError('resume must select an existing private admission below state-dir')
+        original=json.loads(runner['read'](directory/'admission-intent.private.json'))
+        if original['binding'] != binding or not has_archives:
+            raise ValueError('resume source/inputs/archives differ from the original admission')
+        if (directory/'controller-launch.intent.json').exists() or (directory/'config.private.json').exists():
+            raise ValueError('admission already bound; use --status and its existing controller owner')
+        return directory,original['started_at_epoch']
+    directory=parent/('original600-'+str(time.time_ns()))
+    directory.mkdir(mode=0o700)
+    started_at=time.time()
+    runner['save'](directory/'admission-intent.private.json',dict(binding=binding,started_at_epoch=started_at,deadline_epoch=started_at+5400))
+    return directory,started_at
+
+
+def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directory, cap):
+    """Reserve existing identities before crediting them; retain journals across resume."""
+    helper=reuse_module()
+    request_path=directory/'archived-reuse-original.private.json'
+    if not request_path.exists():
+        request=json.loads(runner['read'](snapshot_directory/'archived-reuse-request.private.json'))
+        request['task_names']=json.loads(runner['read'](args.tasks))
+        request['image_ref']=facts_from(runner['read'](args.facts))['image_ref']
+        runner['campaign_argv'](request['task_names'],time.time())
+        runner['save'](request_path,dict(schema='original600-archived-admission-request-v1',request=request,
+                                       sha256=digest(json.dumps(request,sort_keys=True,allow_nan=False).encode())))
+    saved=json.loads(runner['read'](request_path))
+    request=saved['request']
+    if saved.get('schema') != 'original600-archived-admission-request-v1' or digest(json.dumps(request,sort_keys=True,allow_nan=False).encode()) != saved['sha256']:
+        raise ValueError('original archived reuse request bytes changed')
+    if request.get('image_ref') != facts_from(runner['read'](args.facts))['image_ref']:
+        raise ValueError('reserved image differs from the admitted immutable image')
+    verify_reuse_images(request,json.loads(runner['read'](snapshot_directory/'navi-whisper-lux-bench.private.json')),request['image_ref'])
+    helper['validate_request'](request,args.source_ref)
+    if request.get('task_names') != json.loads(runner['read'](args.tasks)):
+        raise ValueError('reserved task manifest differs from original ordered200')
+    if cap['available_slots_conservative'] + len(request['candidates']) < 601:
+        raise ValueError('insufficient measured capacity even with every reserved candidate')
+    # NativeAdapter owns finite per-operation deadlines and joins all reservations.
+    connection=api('navi-whisper-lux-bench',token)
+    def adapter(journal):
+        return helper['NativeAdapter'](connection,journal/'wire')
+    with joined_admission_signals():
+        reserved=helper['reserve_cohort'](adapter,request,directory/'archived-reuse-reservations')
+    refreshed=directory/('capacity-after-reservation-'+str(time.time_ns()))
+    refreshed.mkdir(mode=0o700)
+    with runner['bounded'](110):
+        final=capacity_snapshot(api,token,args.org,refreshed,args.extra_destroying_count)
+    inventory=json.loads(runner['read'](refreshed/'navi-whisper-lux-bench.private.json'))
+    facts=facts_from(runner['read'](args.facts))
+    verify_reuse_images(reserved,inventory,facts['image_ref'])
+    demand=helper['capacity_demand'](reserved,inventory,set(facts['protected_machines']),require_reserved=True)
+    final.update(demand,admission='RESERVED_NATIVE_READBACK',reservation_mutations_separate=True)
+    if final['available_slots_conservative'] < final['new_machine_demand']:
+        raise ValueError('fresh capacity after reserved native readback is insufficient')
+    request_output=directory/'archived-reuse-request.private.json'
+    if request_output.exists():
+        if json.loads(runner['read'](request_output)) != reserved:
+            raise ValueError('the previously reserved request changed')
+    else:
+        runner['save'](request_output,reserved)
+    final['reservation_request_sha256']=digest(runner['read'](request_output))
+    proof_path=refreshed/'capacity-proof.private.json'
+    runner['save'](proof_path,final)
+    return dict(final,proof_path=str(proof_path))
+
+
+def prepare(args, root, pins, runner, directory, cap, started_at=None):
+    if not 0 <= time.time() - cap['ended_epoch'] < 270 or cap['available_slots_conservative'] < cap.get('new_machine_demand',601):
         raise ValueError('capacity proof expired or insufficient')
     read, save = runner['read'], runner['save']
     facts = facts_from(read(args.facts))
     tasks = json.loads(read(args.tasks))
-    stamp = time.time()
+    stamp = time.time() if started_at is None else started_at
+    if not 0 <= time.time()-stamp < 5400:
+        raise ValueError('original campaign clock expired during admission')
     runner['campaign_argv'](tasks, stamp)  # Exact task-name hash and all original arguments.
     auth = dict(schema='cloudbench-disposable-controller-authority-v1', allowed=True, single_host=True,
                 app=facts['app'], region='iad', vm_size='performance-8x', memory_mib=32768,
                 workspace_size_gb=256, org_machine_limit=cap['machine_limit'],
                 org_object_count=cap['total_active_inventory_objects'] + cap['conservative_extra_destroying_bench_objects'],
-                verified_epoch=cap['ended_epoch'], capacity_proof=dict(path=str(directory/'capacity-proof.private.json'), sha256=digest(read(directory/'capacity-proof.private.json'))),
+                verified_epoch=cap['ended_epoch'], capacity_proof=dict(path=cap.get('proof_path',str(directory/'capacity-proof.private.json')), sha256=digest(read(cap.get('proof_path',directory/'capacity-proof.private.json')))),
                 protected_machines=facts['protected_machines'], protected_volumes=facts['protected_volumes'],
                 source_ref=args.source_ref, output_directory=str(directory/'run/export'), env_files={})
     if len(auth['protected_machines']) < 4 or not isinstance(auth['protected_volumes'], list):
@@ -171,10 +335,16 @@ def prepare(args, root, pins, runner, directory, cap):
     for path, relative in [(args.snapshot_inventory, '.git/cloudbench-warm-snapshot-inventory.cloudbench-warm-t10-ord-85a7e2c.json'),
                            (args.warm_deps, '.git/cloudbench-warm-deps.cloudbench-warm-t10-ord-85a7e2c.fp')]:
         files.append(dict(source_path=str(path), relative_path=relative, sha256=digest(read(path))))
+    reuse_env = {}
+    if cap.get('qualified_reuse_count'):
+        reuse_path=directory/'archived-reuse-request.private.json';reuse_sha=digest(read(reuse_path))
+        relative='.git/cloudbench-archived-reuse-'+str(json.loads(read(reuse_path))['cohort'])+'.json'
+        files.append(dict(source_path=str(reuse_path),relative_path=relative,sha256=reuse_sha))
+        reuse_env=dict(CLOUDBENCH_ARCHIVED_REUSE_REQUEST='/tmp/gate/repo/'+relative,CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256=reuse_sha)
     config = dict(schema='original600-controller-runner-v1', allowed=True, source_root=str(root),
                   source_ref=args.source_ref, source_files=pins, tasks_path=str(args.tasks),
                   started_at_epoch=stamp, authority_template=str(directory/'authority-template.private.json'),
-                  remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1'),
+                  remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
                                 CLOUDBENCH_GATE_TIMEOUT_S='7200', PYTHONDONTWRITEBYTECODE='1'))
     save(directory/'config.private.json', config)
@@ -194,6 +364,9 @@ def main():
     parser.add_argument('--source-ref', required=True)
     for name in ['state-dir', 'facts', 'agents-env', 'backend-env', 'tasks', 'snapshot-inventory', 'warm-deps']:
         parser.add_argument('--'+name, required=True, type=Path)
+    parser.add_argument('--archive-run', action='append', type=Path, help='Verified predecessor run directory; preserve IDs/volume using a clean task generation before fresh creation')
+    parser.add_argument('--reuse-exclude-machine', action='append', default=[], help='Conservatively exclude a changed/pilot Machine from archived reuse')
+    parser.add_argument('--resume-admission', type=Path, help='Reconcile the same prelaunch archived-reservation state; never restart a bound controller')
     parser.add_argument('--org', choices=['personal'], default='personal')
     parser.add_argument('--extra-destroying-count', type=int, default=1)
     args = parser.parse_args()
@@ -206,6 +379,10 @@ def main():
         path = getattr(args, name).absolute()
         preflight['private_input'](path)
         setattr(args, name, path)
+    args.archive_run=[path.absolute() for path in (args.archive_run or [])]
+    for archive in args.archive_run:
+        if archive.resolve(strict=True) != archive or not archive.is_dir():
+            raise ValueError('original archive run must be a physical directory')
     runner['campaign_argv'](json.loads(runner['read'](args.tasks)), time.time())
     facts_from(runner['read'](args.facts))
     token_from_agents(runner['read'](args.agents_env))
@@ -222,16 +399,40 @@ def main():
     parent = args.state_dir.absolute()
     if parent.resolve(strict=True) != parent or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
         raise ValueError('private physical current-owner state directory required')
-    directory = parent / ('original600-' + str(time.time_ns()))
-    directory.mkdir(mode=0o700)
+    directory,started_at=open_admission(parent,args.resume_admission,admission_binding(args,runner),runner,bool(args.archive_run))
+    if not 0 <= time.time()-started_at < 5400:
+        raise ValueError('original campaign clock expired; retained reservations are not new launch permission')
     token = token_from_agents(runner['read'](args.agents_env))
     os.environ['FLY_API_TOKEN'] = token
     capture = runpy.run_path(str(root/'scripts/cloudbench-original-volume-capture.py'))
-    with runner['bounded'](110):
-        cap = capacity(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
-    config = prepare(args, root, pins, runner, directory, cap)
-    print(json.dumps(dict(directory=str(directory), source_ref=args.source_ref, status='LAUNCHING_ORIGINAL600')), flush=True)
-    return runner['run'](config, digest(runner['read'](config)), directory/'run', github_token=github)
+    snapshot=directory/('capacity-before-reservation-'+str(time.time_ns())) if args.archive_run else directory
+    if snapshot != directory: snapshot.mkdir(mode=0o700)
+    print(json.dumps(dict(directory=str(directory),source_ref=args.source_ref,status='ADMISSION_STARTED',resume_option='--resume-admission '+str(directory))),flush=True)
+    try:
+        with runner['bounded'](110):
+            if (directory/'archived-reuse-original.private.json').exists():
+                cap=capacity_snapshot(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count)
+            else:
+                cap=capacity(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count,args.archive_run,args.source_ref,args.reuse_exclude_machine,
+                             facts_from(runner['read'](args.facts))['image_ref'])
+        if args.archive_run:
+            cap=reserve_reuse_capacity(capture['Fly'],token,args,runner,directory,snapshot,cap)
+            launch_directory=directory/('launch-'+str(time.time_ns()))
+            launch_directory.mkdir(mode=0o700)
+            runner['save'](launch_directory/'archived-reuse-request.private.json',json.loads(runner['read'](directory/'archived-reuse-request.private.json')))
+        else:
+            launch_directory=directory
+        config = prepare(args, root, pins, runner, launch_directory, cap,started_at=started_at)
+    except BaseException as error:
+        print(json.dumps(dict(directory=str(directory),status='ADMISSION_PENDING',controller_started=False,
+                             action=('Keep this state and use the same command with --resume-admission; never discard native reservation intents.'
+                                     if args.archive_run else 'Preserve this failed admission; no controller was started.'))),file=sys.stderr,flush=True)
+        if isinstance(error,AdmissionInterrupted):
+            raise SystemExit(128+error.signum)
+        raise
+    runner['save'](directory/'controller-launch.intent.json',dict(config_path=str(config),config_sha256=digest(runner['read'](config)),run_directory=str(launch_directory/'run')))
+    print(json.dumps(dict(directory=str(launch_directory),admission_directory=str(directory), source_ref=args.source_ref, status='LAUNCHING_ORIGINAL600')), flush=True)
+    return runner['run'](config, digest(runner['read'](config)), launch_directory/'run', github_token=github)
 
 
 if __name__ == '__main__':

@@ -80,7 +80,7 @@ def prepare(run, inventory_path):
             need(member.name not in seen and not member.name.startswith('/') and '..' not in Path(member.name).parts,
                  'unsafe archive membership')
             seen.add(member.name)
-            wanted=(re.fullmatch(r'git-common/cloudbench-fleet-ownership/[0-9a-f]{32}/(?:meta|clones/[^/]+)',member.name)
+            wanted=(re.fullmatch(r'git-common/cloudbench-fleet-ownership/[0-9a-f]{32}/(?:meta|clones/[^/]+|archived-reuse/[0-9a-f]{14}\.json)',member.name)
                     or member.name.startswith('context/original600-supervisor.') and member.name.endswith('.terminal.json'))
             if not wanted: continue
             expected=manifest['files'].get(member.name,{})
@@ -89,7 +89,7 @@ def prepare(run, inventory_path):
             data=archive.extractfile(member).read(1048577)
             need(sha(data)==expected['sha256'],'archived ownership bytes changed')
             if '/cloudbench-fleet-ownership/' in member.name:
-                selected[member.name]=fields(data)
+                selected[member.name]=json.loads(data) if '/archived-reuse/' in member.name else fields(data)
             else:
                 proof=json.loads(data)
                 need(proof['machine']==host and proof['source_ref']==record['source_ref']
@@ -112,7 +112,26 @@ def prepare(run, inventory_path):
              'unsafe sealed clone identity')
         need(row['id'] not in protected and row['volume_id'] not in protected_volumes,'protected archived resource')
         need(row['id'] not in owned,'duplicate archived machine identity')
-        owned[row['id']]=dict(row,owner_token=match[2],archive_path=name)
+        reuse=selected.get(match[1]+'/archived-reuse/'+row['id']+'.json')
+        if reuse:
+            need(reuse.get('schema')=='cloudbench-archived-reuse-v1' and reuse['machine_id']==row['id'] and reuse['volume_id']==row['volume_id']
+                 and reuse['successor']['owner_token']==match[2] and reuse['successor']['controller_id']==host
+                 and reuse['successor']['run_id']==meta['run_id'], 'archived successor owner mismatch')
+        owned[row['id']]=dict(row,owner_token=match[2],archive_path=name,archived_reuse_proof=reuse)
+    # Successor allocations have honest reuse records, not fictional new clone rows.
+    for name,reuse in selected.items():
+        match=re.fullmatch(r'(git-common/cloudbench-fleet-ownership/([0-9a-f]{32}))/archived-reuse/([0-9a-f]{14})\.json',name)
+        if not match: continue
+        meta=selected.get(match[1]+'/meta',{});mid=match[3]
+        need(reuse.get('schema')=='cloudbench-archived-reuse-v1' and reuse['machine_id']==mid
+             and reuse['successor']['owner_token']==match[2] and reuse['successor']['controller_id']==host
+             and reuse['successor']['run_id']==meta.get('run_id') and meta.get('host')==host,
+             'archived retained successor is not owned by this controller')
+        need(mid not in protected and reuse['volume_id'] not in protected_volumes,'protected successor resource')
+        if mid in owned:
+            need(owned[mid].get('archived_reuse_proof')==reuse,'conflicting clone/reuse owner')
+        else:
+            owned[mid]=dict(id=mid,name=reuse['native_name'],volume_id=reuse['volume_id'],owner_token=match[2],archive_path=name,archived_reuse_proof=reuse)
     native=BASE['inventory'](json.loads(raw(inventory_path,256*1024*1024))); targets=[]; unrelated=0
     for machine in native:
         mid=machine['id']
@@ -125,6 +144,10 @@ def prepare(run, inventory_path):
              and bool(machine['instance_id']) and isinstance(machine.get('created_at'),str)
              and bool(machine['created_at']) and isinstance(config,dict),'native identity/config incomplete')
         need([v.get('volume') for v in config.get('mounts',[])]==[row['volume_id']], 'native owned volume mismatch')
+        marker=config.get('metadata',{}).get('cloudbench_archived_reuse')
+        reuse=row.get('archived_reuse_proof')
+        expected=json.dumps(reuse['native_marker'],sort_keys=True,separators=(',',':')) if reuse else None
+        need(marker==expected, 'predecessor superseded by archived successor')
         targets.append(dict(machine=machine,ownership=row))
     need(protected<={m['id'] for m in native},'protected native cohort missing')
     paths=[run/'terminal.json',run/'cleanup-call.intent.json',run/'authority.private.json',
@@ -144,22 +167,30 @@ def reconcile(api,row,out,end):
                 stop_attempted=(out/'stop-intent.json').exists(),observation_only=True)
 
 
-def stop_owned(api,row,output,end):
+def stop_owned(api,row,output,end,adapter_factory=None):
     mid=row['id']; out=output/mid
     try:
         with until(end):
             if out.exists(): return reconcile(api,row,out,end)
-            current=call(api,'GET','/machines/'+mid,end)
-            same_machine(row,current)
-            need(current.get('created_at')==row['created_at'],'Machine creation identity changed')
-            save(output/(mid+'.exact-before.json'),current)
-            if current.get('state')=='stopped':
-                out.mkdir(mode=0o700)
-                value=dict(machine=mid,status='STOPPED_CONFIRMED',stop_attempted=False)
-                save(out/'terminal.json',value); return value
-            need(current.get('state') in BASE['ACTIVE'],'native Machine not stoppable')
-            BASE['stop_one'](api,current,out,end)
-            return json.loads(raw(out/'terminal.json'))
+            helper=runpy.run_path(str(HERE/'cloudbench-archived-machine-reuse.py'))
+            adapter=(adapter_factory or helper['NativeAdapter'])(api,output/(mid+'.wire'))
+            with adapter.lease(mid):
+                current=adapter.request('GET','/machines/'+mid)
+                same_machine(row,current)
+                need(current.get('created_at')==row['created_at'],'Machine creation identity changed')
+                # The exact planned full config (including successor marker)
+                # must still hold under the SAME lease as the STOP effect.
+                save(output/(mid+'.exact-before.json'),current)
+                if current.get('state')=='stopped':
+                    out.mkdir(mode=0o700)
+                    value=dict(machine=mid,status='STOPPED_CONFIRMED',stop_attempted=False)
+                    save(out/'terminal.json',value); return value
+                need(current.get('state') in BASE['ACTIVE'],'native Machine not stoppable')
+                class LeasedAPI:
+                    def api(self,method,path,body=None,timeout=20):
+                        return adapter.request(method,path,body)
+                BASE['stop_one'](LeasedAPI(),current,out,min(end,time.monotonic()+60))
+                return json.loads(raw(out/'terminal.json'))
     except Exception as error:
         return dict(machine=mid,status='PENDING',error=type(error).__name__)
 

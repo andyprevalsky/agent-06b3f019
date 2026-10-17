@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline archive ownership plan + actual once-only canonical stop semantics."""
 import copy
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -19,6 +20,18 @@ S=runpy.run_path(os.environ.get('CLOUDBENCH_TEST_ARCHIVED_STOP_MODULE',str(ROOT/
 def write(path,value):
     path.write_text(json.dumps(value));path.chmod(0o600)
     return path
+
+
+class LeasedFixture:
+    def __init__(self,api,journal):self.api=api;self.held=False
+    @contextmanager
+    def lease(self,mid):
+        self.held=True
+        try:yield
+        finally:self.held=False
+    def request(self,method,path,body=None):
+        assert self.held, 'native operation outside exclusive lease'
+        return self.api.api(method,path,body)
 
 
 class ArchivedStop(unittest.TestCase):
@@ -86,11 +99,11 @@ class ArchivedStop(unittest.TestCase):
                     row['state']='stopped';raise TimeoutError('lost response')
                 return copy.deepcopy(row)
         api=API()
-        first=S['stop_owned'](api,self.row,self.out,time.monotonic()+2)
+        first=S['stop_owned'](api,self.row,self.out,time.monotonic()+2,adapter_factory=LeasedFixture)
         self.assertEqual(first['status'],'STOPPED_CONFIRMED')
         self.assertEqual(calls,[('GET','/machines/'+self.mid),('POST','/machines/'+self.mid+'/stop'),('GET','/machines/'+self.mid)])
         self.assertTrue((self.out/self.mid/'stop-intent.json').exists())
-        self.assertEqual(S['stop_owned'](api,self.row,self.out,time.monotonic()+2)['status'],'STOPPED_CONFIRMED')
+        self.assertEqual(S['stop_owned'](api,self.row,self.out,time.monotonic()+2,adapter_factory=LeasedFixture)['status'],'STOPPED_CONFIRMED')
         self.assertEqual(sum(method=='POST' for method,path in calls),1)
         self.assertEqual(self.row['config'],row['config'])
         self.assertNotIn('claims_released',first)
@@ -101,7 +114,7 @@ class ArchivedStop(unittest.TestCase):
             class API:
                 def api(inner,method,path,body=None,timeout=0):
                     calls.append(method);return dict(self.row,**change)
-            value=S['stop_owned'](API(),self.row,self.out,time.monotonic()+2)
+            value=S['stop_owned'](API(),self.row,self.out,time.monotonic()+2,adapter_factory=LeasedFixture)
             self.assertEqual(value['status'],'PENDING');self.assertEqual(calls,['GET'])
         directory=self.out/self.mid;directory.mkdir(mode=0o700)
         write(directory/'stop-intent.json',dict(ambiguous=True))
@@ -112,6 +125,24 @@ class ArchivedStop(unittest.TestCase):
         self.assertEqual(value['status'],'PENDING')
         self.assertFalse((directory/'terminal.json').exists())
 
+
+    def test_successor_claim_between_plan_and_lease_prevents_stop(self):
+        current=copy.deepcopy(self.row);effects=[]
+        class API:
+            def api(inner,method,path,body=None,timeout=0):
+                effects.append(method)
+                return copy.deepcopy(current)
+        class RacedLease(LeasedFixture):
+            @contextmanager
+            def lease(inner,mid):
+                current['config']['metadata']={'cloudbench_archived_reuse':'claimed-by-successor'}
+                inner.held=True
+                try:yield
+                finally:inner.held=False
+        result=S['stop_owned'](API(),self.row,self.out,time.monotonic()+2,adapter_factory=RacedLease)
+        self.assertEqual(result['status'],'PENDING')
+        self.assertEqual(effects,['GET'])
+        self.assertFalse((self.out/self.mid/'stop-intent.json').exists())
 
     def test_final_observation_is_one_inventory_and_keeps_unknown_pending(self):
         row=copy.deepcopy(self.row);row['state']='stopped'

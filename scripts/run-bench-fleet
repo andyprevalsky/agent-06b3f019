@@ -756,6 +756,11 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-controller-export.py" \
        "$ROOT_DIR/scripts/cloudbench-retained-controller-endpoint.py" \
        "$ROOT_DIR/scripts/cloudbench-original-volume-capture.py" \
+       "$ROOT_DIR/scripts/cloudbench-original600-runner.py" \
+       "$ROOT_DIR/scripts/cloudbench-archived-machine-reuse.py" \
+       "$ROOT_DIR/scripts/cloudbench-archived-reuse-effects.py" \
+       "$ROOT_DIR/scripts/cloudbench-archived-reuse-transport.py" \
+       "$ROOT_DIR/scripts/cloudbench-isolated-generation.py" \
        "$ROOT_DIR/scripts/cloudbench-disposable-volume.py" \
        "$ROOT_DIR/scripts/cloudbench-cleanup-tickets.py" \
        "$ROOT_DIR/scripts/cloudbench-cohort-reconcile.py" \
@@ -796,6 +801,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-sealed-machine-retirement.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh" \
+       "$ROOT_DIR/scripts/lib/cloudbench-archived-reuse.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-github-token.sh" \
@@ -1712,6 +1718,7 @@ if ! command -v flyctl >/dev/null 2>&1; then
 fi
 # shellcheck source=lib/cloudbench-inventory.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-inventory.sh"
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived-reuse.sh"
 
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
@@ -1742,6 +1749,14 @@ FLY() {
             fi ;;
     esac
     private_source_allows_provider_call "$@" || return $?
+    case "${1:-}:${2:-}" in
+        machine:destroy|machines:destroy|machine:stop|machines:stop)
+            if [ "$APP" != navi-whisper-lux-bench ]; then flyctl "$@"; return $?; fi
+            case "${3:-}" in ''|*[!0-9a-f]*) return 1 ;; esac
+            python3 "$(archived_reuse_helper)" fenced-effect --machine "$3" --operation "$2" \
+                --journal "$GIT_COMMON_DIR/cloudbench-native-effect-fences/$3/$2"
+            return $? ;;
+    esac
     case "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" in 0|1) ;; *) return 1 ;; esac
     if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ] \
         && [ "${1:-}:${2:-}" = machine:clone ]; then
@@ -1749,7 +1764,12 @@ FLY() {
             --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
             --owner-pid "$$" --owner-start "$FLEET_OWNER_PID_START" --wait-seconds "$clone_timeout" || return 1
     fi
-    flyctl "$@"
+    if archived_reuse_sftp_get "$@"; then return 0; else
+        _archived_sftp_status=$?
+        [ "$_archived_sftp_status" = 2 ] || return "$_archived_sftp_status"
+    fi
+    archived_reuse_transport_args "$@" || return 1
+    flyctl "${ARCHIVED_FLY_ARGS[@]}"
 }
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
@@ -6064,6 +6084,8 @@ fleet_registry_remove_if_empty() {  # fleet_registry_remove_if_empty <registry-d
     [ "$registry" != "$root" ] \
         && [ "${registry%/*}" = "$root" ] \
         || { echo "❌ refusing to remove non-child fleet registry path: $registry" >&2; return 1; }
+    # Reused native IDs retain their original data and permanent claim chain.
+    if [ -d "$registry/archived-reuse" ]; then return 0; fi
     [ -d "$registry/clones" ] || { rm -rf "$registry"; return 0; }
     for record in "$registry"/clones/*; do
         [ -f "$record" ] && return 0
@@ -11223,6 +11245,19 @@ admitted_outputs = {path.name for path in run.iterdir() if path.is_dir() and any
     for name in ('runtime-evidence.owner.json', 'post-config-start.accepted', 'worker-runtime-evidence'))}
 assert admitted_outputs <= task_names
 fresh = {row['machine_id'] for p in (audit / 'fresh').iterdir() if (row := fields(p)).get('machine_id')}
+reuse = {}
+for proof_path in (audit / 'archived-reuse').glob('*.json'):
+    assert not proof_path.is_symlink()
+    proof = json.loads(proof_path.read_bytes())
+    successor = proof['successor']
+    assert (proof['schema'] == 'cloudbench-archived-reuse-v1'
+            and proof['storage_mode'] == 'retained-volume-fresh-generation'
+            and proof_path.stem == proof['machine_id']
+            and successor['owner_token'] == registry.name
+            and successor['run_id'] == meta['run_id'])
+    assert json.loads((registry / 'archived-reuse' / proof_path.name).read_bytes()) == proof
+    reuse[proof['machine_id']] = proof
+
 pool_dir = audit / 'pool'
 assert not pool_dir.is_symlink() and (not pool_dir.exists() or pool_dir.is_dir())
 pool = set()
@@ -11238,7 +11273,7 @@ for record in pool_dir.iterdir() if pool_dir.exists() else ():
     if row.get('disposition') == 'claimed':
         pool.add(record.name)
         pool_volumes[record.name] = row.get('volume_id')
-preallocation = not admitted_outputs and not pool and not any((audit / 'fresh').iterdir())
+preallocation = not admitted_outputs and not pool and not reuse and not any((audit / 'fresh').iterdir())
 if preallocation:
     # Input provenance is staged after initial owner publication. A canceled
     # preflight can have neither inputs nor a guest whose execution needs them.
@@ -11297,7 +11332,7 @@ for index, task in enumerate(tasks):
     assert identity.is_file() and not identity.is_symlink()
     source, machine = identity.read_text().split()
     assert re.fullmatch(r'[0-9a-f]+', machine)
-    assert (source == 'clone' and machine in fresh) or (source == 'pool' and machine in pool)
+    assert (source == 'clone' and machine in fresh) or (source == 'pool' and machine in pool) or (source == 'archived-reuse' and machine in reuse and reuse[machine]['successor']['task'] == name)
     mode = 'simulate' if task['mode'] == 'SIM' else 'real'
     print(index, out, machine, name, mode, sep='\t')
 PY
@@ -13798,6 +13833,8 @@ PYINTENT
 
 provision_primary_machine() {  # <bench> <output>; actual claim-or-clone boundary
     local bench="$1" out="$2" bench_vm_size bench_vm_memory pcid=""
+    pcid="$(archived_reuse_allocate "$bench" "$out")" || return 1
+    if [ -n "$pcid" ]; then return 0; fi
     bench_vm_size="$(primary_vm_size_for_bench "$bench")" || return 1
     bench_vm_memory="$(primary_vm_memory_for_bench "$bench")" || return 1
     if [ -n "$FRESH_TARGET_REGION" ]; then
@@ -14622,6 +14659,7 @@ cleanup() {
     # Finish all data-plane reads first. Evidence retention does not authorize
     # provider release; this separate helper may only stop verified idle owned
     # Machines and retains every latch, audit, claim, file and volume.
+    if ! archived_reuse_retire_all; then ec=1; teardown_failed=1; fi
     fleet_billing_stop_retained_idle "$billing_owned_joins"
     # SIGKILL cannot run an autoscaler's EXIT trap. Release any remaining
     # complete lease records owned by this exact controller/run under the same
@@ -15666,7 +15704,11 @@ enforce_app_capacity_guard() {
     esac
     [ "$available_pool_machines" -gt "$requested_pool_eligible_machines" ] \
         && available_pool_machines="$requested_pool_eligible_machines"
-    requested_fresh_machines=$(( requested_machines - available_pool_machines ))
+    local archived_reuse_count
+    archived_reuse_count="$(archived_reuse_capacity_credit)" || return 1
+    [ "$available_pool_machines" = 0 ] || [ "$archived_reuse_count" = 0 ] || return 1
+    requested_fresh_machines=$(( requested_machines - available_pool_machines - archived_reuse_count ))
+    [ "$requested_fresh_machines" -ge 0 ] || return 1
     if [ "${POOL_REUSE_ONLY:-0}" = 1 ] && [ "$requested_fresh_machines" -ne 0 ]; then
         echo "❌ reuse-only requires $requested_machines eligible stopped pool primaries; observed $available_pool_machines" >&2
         return 1
@@ -18111,12 +18153,15 @@ for bench in "${BENCHES[@]}"; do
         i=$((i + 1)); continue
     fi
     cold_primary=0
+    if [ "$src" = archived-reuse ]; then cold_primary=1; fi
     if [ "$src" = pool ]; then
         cold_primary="$(primary_cold_bootstrap_requested "$out" "$cid")" || {
             echo "❌ [$bench] cold/warm claim intent differs from this exact task; refusing boot" >&2; exit 1;
         }
     fi
-    if [ "$src" = "pool" ]; then
+    if [ "$src" = archived-reuse ]; then
+        echo "▶️  [$bench] retained Machine $cid; same physical volume, new isolated task generation (mode=$mode_label, dash=$port)"
+    elif [ "$src" = "pool" ]; then
         echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port)"
     else
         echo "▶️  [$bench] cloned isolated machine $cid (mode=$mode_label, dash=$port)"
@@ -18169,6 +18214,7 @@ for bench in "${BENCHES[@]}"; do
     CLOUDBENCH_FLEET_RUN_TOKEN="$FLEET_OWNER_TOKEN-$i" \
     CLOUDBENCH_FLEET_RUN_ID="$RUN_ID" \
     CLOUDBENCH_ENV_VERIFIED=1 \
+    CLOUDBENCH_ARCHIVED_REUSE_PROOF_FILE="$([ "$src" = archived-reuse ] && printf '%s' "$out/archived-reuse-proof.json")" \
     CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)" \
     CLOUDBENCH_MACHINE_RECORD="$INVENTORY_INDEX/current/machines/$cid" \
     CLOUDBENCH_INVENTORY_OWNER_PID="$SNAPSHOT_LOOP_PID" \
@@ -18186,7 +18232,7 @@ for bench in "${BENCHES[@]}"; do
     CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256" \
     CLOUDBENCH_INFRA_PROBE="${INFRA_PROBE:-0}" \
     CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP="$cold_primary" \
-    CLOUDBENCH_FRESH_VOLUME="$([ "$cold_primary" = 1 ] || { [ "$src" != pool ] && [ "$(primary_clone_storage_mode "$bench")" = fresh ]; } && printf 1 || printf 0)" \
+    CLOUDBENCH_FRESH_VOLUME="$([ "$src" != archived-reuse ] && { [ "$cold_primary" = 1 ] || { [ "$src" != pool ] && [ "$(primary_clone_storage_mode "$bench")" = fresh ]; }; } && printf 1 || printf 0)" \
     CLOUDBENCH_POOL_BOOT_VM_SIZE="$pool_boot_vm_size" \
     CLOUDBENCH_POOL_BOOT_VM_MEMORY="$pool_boot_vm_memory" \
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \

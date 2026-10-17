@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import signal
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,127 @@ def private(path, value):
 
 
 class Portable(unittest.TestCase):
+    def test_reused_image_binding_uses_immutable_repository_digest(self):
+        pin='registry.fly.io/benchmark:expected@sha256:'+'a'*64
+        request={'candidates':[{'machine_id':'one'}]}
+        machine={'id':'one','config':{'image':'registry.fly.io/benchmark:different-label@sha256:'+'a'*64},
+                 'image_ref':{'digest':'sha256:'+'a'*64}}
+        CLI.verify_reuse_images(request,[machine],pin)
+        for bad in ['registry.fly.io/other@sha256:'+'a'*64,'registry.fly.io/benchmark@sha256:'+'b'*64,'registry.fly.io/benchmark:latest']:
+            with self.subTest(image=bad),self.assertRaises(ValueError):
+                CLI.verify_reuse_images(request,[dict(machine,config={'image':bad})],pin)
+        with self.assertRaises(ValueError):
+            CLI.verify_reuse_images(request,[dict(machine,image_ref={'digest':'sha256:'+'c'*64})],pin)
+
+    def test_admission_signal_unwinds_once_and_restores_handlers_after_join(self):
+        previous={number:signal.getsignal(number) for number in (signal.SIGINT,signal.SIGTERM)}
+        joined=[]
+        with self.assertRaises(CLI.AdmissionInterrupted) as interrupted:
+            with CLI.joined_admission_signals():
+                try:
+                    signal.getsignal(signal.SIGTERM)(signal.SIGTERM,None)
+                finally:
+                    # A repeated signal during native cleanup cannot interrupt joining.
+                    signal.getsignal(signal.SIGINT)(signal.SIGINT,None)
+                    joined.append(True)
+        self.assertEqual(interrupted.exception.signum,signal.SIGTERM)
+        self.assertEqual(joined,[True])
+        for number,handler in previous.items():
+            self.assertEqual(signal.getsignal(number),handler)
+
+    def test_resume_keeps_original_clock_and_rejects_changed_inputs_or_launched_owner(self):
+        with tempfile.TemporaryDirectory() as name:
+            parent=Path(name);binding={'source_ref':'a'*40,'inputs':{'env':'digest'}}
+            directory,epoch=CLI.open_admission(parent,None,binding,RUNNER,True)
+            resumed,resumed_epoch=CLI.open_admission(parent,directory,binding,RUNNER,True)
+            self.assertEqual((resumed,resumed_epoch),(directory,epoch))
+            self.assertEqual(len(list(parent.iterdir())),1)
+            with self.assertRaisesRegex(ValueError,'source/inputs/archives'):
+                CLI.open_admission(parent,directory,dict(binding,source_ref='b'*40),RUNNER,True)
+            with self.assertRaisesRegex(ValueError,'source/inputs/archives'):
+                CLI.open_admission(parent,directory,binding,RUNNER,False)
+            private(directory/'controller-launch.intent.json',{'existing_owner':True})
+            with self.assertRaisesRegex(ValueError,'already bound'):
+                CLI.open_admission(parent,directory,binding,RUNNER,True)
+            self.assertEqual(json.loads((directory/'admission-intent.private.json').read_text())['started_at_epoch'],epoch)
+
+    def test_archived_eligibility_is_not_reserved_capacity(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory=Path(name)
+            settings={'data':{'organization':{'slug':'personal','settings':{'machines_per_org_limit':1000},'billingStatus':'fixture'}}}
+            apps=subprocess.CompletedProcess([],0,json.dumps([{'Name':'navi-whisper-lux-bench','Organization':{'Slug':'personal'}}]),'')
+            request={'candidates':[{'machine_id':str(i)} for i in range(375)]}
+            calls=[]
+            class API:
+                def __init__(self,*unused):pass
+                def api(self,method,path,timeout):
+                    calls.append((method,path))
+                    return [{'id':str(i)} for i in range(417)]
+            helper={'prepare_request':lambda *unused:request,'validate_request':lambda *unused:None,
+                    'capacity_demand':lambda *unused:{'qualified_reuse_count':375}}
+            with patch.object(CLI.urllib.request,'urlopen',return_value=io.BytesIO(json.dumps(settings).encode())), \
+                 patch.object(CLI.subprocess,'run',return_value=apps),patch.object(CLI,'reuse_module',return_value=helper):
+                result=CLI.capacity(API,'fixture','personal',directory,1,[directory/'old-run'],'a'*40)
+            baseline=directory/'without-reuse';baseline.mkdir()
+            with patch.object(CLI.urllib.request,'urlopen',return_value=io.BytesIO(json.dumps(settings).encode())), \
+                 patch.object(CLI.subprocess,'run',return_value=apps),self.assertRaisesRegex(ValueError,'insufficient measured capacity'):
+                CLI.capacity(API,'fixture','personal',baseline,1)
+            self.assertEqual(result['available_slots_conservative'],582)
+            self.assertEqual(result['eligible_reuse_count'],375)
+            self.assertEqual(result['qualified_reuse_count'],0)
+            self.assertEqual(result['new_machine_demand'],601)
+            self.assertEqual(result['admission'],'ELIGIBLE_NOT_RESERVED')
+            self.assertEqual(calls,[('GET','/machines'),('GET','/machines')])
+            self.assertFalse((directory/'capacity-proof.private.json').exists())
+
+    def test_reserved_credit_requires_fresh_native_readback_and_original_tasks(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory=Path(name);before=directory/'before';before.mkdir()
+            tasks=json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())
+            args=argparse.Namespace(source_ref='a'*40,org='personal',extra_destroying_count=1,
+                  tasks=private(directory/'tasks',tasks),facts=private(directory/'facts',
+                  dict(app='navi-whisper-lux-bench',image_ref='fixture@sha256:'+'b'*64,protected_machines=['p1','p2','p3','p4'],protected_volumes=['v1'])))
+            candidates=[{'machine_id':'candidate-'+str(i)} for i in range(375)]
+            private(before/'archived-reuse-request.private.json',{'candidates':candidates})
+            machines=[{'id':row['machine_id'],'config':{'image':'fixture@sha256:'+'b'*64},'reserved':True} for row in candidates]
+            private(before/'navi-whisper-lux-bench.private.json',machines)
+            events=[]
+            def reserve(factory,request,journal):
+                events.append('reserve')
+                self.assertEqual(request['task_names'],tasks)
+                self.assertIs(factory(journal/'first'),factory(journal/'second'),
+                              'reservations must reuse one resolved authentication client')
+                return dict(request,candidates=[dict(row,reservation={'cohort':'fixture'}) for row in candidates])
+            def snapshot(*parameters):
+                events.append('fresh-read')
+                private(parameters[3]/'navi-whisper-lux-bench.private.json',machines)
+                return dict(available_slots_conservative=582,ended_epoch=time.time())
+            def demand(request,inventory,protected,*,require_reserved=False):
+                events.append('verify-reserved')
+                self.assertTrue(require_reserved)
+                self.assertEqual(protected,{'p1','p2','p3','p4'})
+                self.assertTrue(inventory[0]['reserved'])
+                self.assertIn('reservation',request['candidates'][0])
+                return dict(qualified_reuse_count=375,new_machine_demand=226,qualified_ids=[row['machine_id'] for row in candidates])
+            helper={'validate_request':lambda *unused:None,'reserve_cohort':reserve,'capacity_demand':demand,
+                    'NativeAdapter':lambda connection,journal:connection}
+            with patch.object(CLI,'reuse_module',return_value=helper),patch.object(CLI,'capacity_snapshot',side_effect=snapshot):
+                result=CLI.reserve_reuse_capacity(lambda *unused:object(),'fixture',args,RUNNER,directory,before,{'available_slots_conservative':582})
+            self.assertEqual(events,['reserve','fresh-read','verify-reserved'])
+            self.assertEqual(result['admission'],'RESERVED_NATIVE_READBACK')
+            self.assertEqual(result['new_machine_demand'],226)
+            saved=json.loads(Path(result['proof_path']).read_text())
+            self.assertEqual(saved['qualified_reuse_count'],375)
+            self.assertEqual(saved['reservation_request_sha256'],CLI.digest((directory/'archived-reuse-request.private.json').read_bytes()))
+            # Restarting admission uses the original task-bound request, not a new cohort.
+            saved_request=json.loads((directory/'archived-reuse-original.private.json').read_text())['request']
+            self.assertEqual(saved_request['task_names'],tasks)
+            private(directory/'different-tasks',tasks[:-1])
+            args.tasks=directory/'different-tasks'
+            with patch.object(CLI,'reuse_module',return_value=helper),self.assertRaisesRegex(ValueError,'task manifest'):
+                CLI.reserve_reuse_capacity(None,'fixture',args,RUNNER,directory,before,{'available_slots_conservative':600})
+            self.assertEqual(events,['reserve','fresh-read','verify-reserved'])
+
     def test_explicit_complete_github_sources_and_process_precedence_before_launch(self):
         with tempfile.TemporaryDirectory() as name:
             base=Path(name);root=base/'sparse';(root/'scripts/lib').mkdir(parents=True)
@@ -149,8 +271,10 @@ class Portable(unittest.TestCase):
             (root/'scripts').mkdir(parents=True)
             for member in CLI.PINS:
                 selected=Path(SPEC.origin) if member=='run-original600-controller.py' else ROOT/'scripts'/member
-                (root/'scripts'/member).write_bytes(selected.read_bytes())
-            (root/'scripts/lib').mkdir()
+                target=root/'scripts'/member
+                target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_bytes(selected.read_bytes())
+            (root/'scripts/lib').mkdir(exist_ok=True)
             (root/'scripts/lib/cloudbench-env.sh').write_bytes((ROOT/'scripts/lib/cloudbench-env.sh').read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             subprocess.run(['git', '-C', str(root), 'add', 'scripts'], check=True)
