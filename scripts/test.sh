@@ -328,6 +328,7 @@ run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Benchmark Live Results" python3 scripts/tests/benchmark-live-results.test.py
 run_suite "Benchmark Campaign Grouping" bash scripts/tests/campaign-hub-grouping.test.sh
 run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
+run_suite "Original600 Portable Operator" python3 scripts/tests/original600-portable-operator.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
 run_suite "Cloud Benchmark Quiesced Forensic Retirement" python3 scripts/tests/cloudbench-forensic-quiesced.test.py
 run_suite "Cloud Benchmark Staged Boot" python3 scripts/tests/cloudbench-staged-boot.test.py

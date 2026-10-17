@@ -32,6 +32,7 @@ set -euo pipefail
 umask 077
 ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 cd "$ROOT_DIR"
+python3 -I -B "$ROOT_DIR/scripts/cloudbench-operator-preflight.py" --require-flyctl
 DISPOSABLE_AUTHORITY=""
 if [ "${1:-}" = "--disposable-controller" ]; then
   [ "$#" -ge 4 ] && [ "${3:-}" = -- ] || { echo "usage: --disposable-controller AUTHORITY -- COMMAND" >&2; exit 2; }

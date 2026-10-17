@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""External owner of one original600 disposable controller. No gate/VM kill on cancellation."""
+import argparse,base64,hashlib,json,os,re,secrets,shlex,signal,stat,subprocess,sys,time
+from contextlib import contextmanager
+from pathlib import Path
+TASK_REF='570830dbf17635e13d16a6f03b4d705f6b6443b1'
+TASK_NAMES_SHA='660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bcb0a8987f1b59f5'
+APP='navi-whisper-lux-bench'
+class Deadline(BaseException):pass
+
+def need(v,m):
+ if not v:raise ValueError(m)
+def sha(b):return hashlib.sha256(b).hexdigest()
+def read(p):
+ p=Path(p).absolute();need(p.resolve(strict=True)==p,'physical private input required')
+ with os.fdopen(os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb')as f:
+  s=os.fstat(f.fileno());need(stat.S_ISREG(s.st_mode)and s.st_uid==os.geteuid()and not s.st_mode&0o077 and s.st_nlink==1 and s.st_size<16*1024*1024,'private current-owner file required');return f.read(s.st_size+1)
+def save(p,v):
+ raw=(json.dumps(v,sort_keys=True,allow_nan=False)+'\n').encode();fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ with os.fdopen(fd,'wb')as f:f.write(raw);f.flush();os.fsync(f.fileno())
+ fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY)
+ try:os.fsync(fd)
+ finally:os.close(fd)
+def birth(pid):
+ need(type(pid)is int and pid>1,'positive non-init PID required')
+ v=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split();need(v[0]!='Z','zombie owner')
+ return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+v[19]
+@contextmanager
+def bounded(seconds):
+ old=signal.getitimer(signal.ITIMER_REAL);handler=signal.getsignal(signal.SIGALRM);start=time.monotonic();need(old[1]==0,'periodic alarm refused');seconds=min(seconds,old[0])if old[0]else seconds
+ def expire(*unused):raise Deadline('external controller I/O deadline')
+ signal.signal(signal.SIGALRM,expire);signal.setitimer(signal.ITIMER_REAL,seconds)
+ try:yield;need(time.monotonic()-start<seconds,'late I/O response')
+ finally:
+  signal.setitimer(signal.ITIMER_REAL,0);signal.signal(signal.SIGALRM,handler)
+  if old[0]:signal.setitimer(signal.ITIMER_REAL,max(.000001,old[0]-(time.monotonic()-start)))
+
+def campaign_argv(tasks,epoch):
+ need(len(tasks)==len(set(tasks))==200 and sha(('\n'.join(tasks)+'\n').encode())==TASK_NAMES_SHA,'original ordered task manifest required')
+ return ['bash','scripts/run-bench','--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref',TASK_REF,*tasks]
+
+# Stage bound inputs, publish this PID/birth, then exec the canonical supervisor.
+# Its owned-parent finally writes the terminal receipt after campaign join.
+REMOTE_LAUNCH=r'''
+import base64,hashlib,json,os,subprocess,sys
+from pathlib import Path
+v=json.loads(base64.b64decode(sys.argv[1]));root=Path('/tmp/gate/repo')
+assert subprocess.check_output(['git','-c','safe.directory=/tmp/gate/repo','-C',str(root),'rev-parse','HEAD'],text=True).strip()==v['source_ref']
+script=root/'scripts/cloudbench-original600-supervisor.py';assert hashlib.sha256(script.read_bytes()).hexdigest()==v['supervisor_sha256']
+def save(p,raw):
+ fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ with os.fdopen(fd,'wb')as f:f.write(raw);f.flush();os.fsync(f.fileno())
+ fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+def birth(pid):
+ a=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split();assert a[0]!='Z'
+ return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+a[19]
+identity=root/'.context'/v['identity_name'];identity.parent.mkdir(exist_ok=True)
+for item in v['remote_files']:
+ relative=item['relative_path'];assert relative.startswith('.git/cloudbench-')and '/'not in relative[len('.git/'):]
+ path=root/relative;assert path.parent.resolve()==root/'.git'
+ raw=base64.b64decode(item['data']);assert hashlib.sha256(raw).hexdigest()==item['sha256']
+ save(path,raw)
+tasks=identity.with_suffix('.tasks.json');save(tasks,(json.dumps(v['tasks'],sort_keys=True)+'\n').encode());env=dict(os.environ,**v['remote_env']);env.update(REVIEWED_OPERATOR_ROOT=str(root),REVIEWED_OPERATOR_SOURCE_REF=v['source_ref'],REVIEWED_OPERATOR_TASKS=str(tasks),REVIEWED_OPERATOR_TASKS_SHA256=hashlib.sha256(tasks.read_bytes()).hexdigest(),REVIEWED_OPERATOR_IDENTITY_PATH=str(identity))
+row=dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth=birth(os.getpid()),machine=os.environ['FLY_MACHINE_ID'],source_ref=v['source_ref'],epoch=v['epoch'])
+assert row['pid']>1;save(identity,(json.dumps(row,sort_keys=True)+'\n').encode());print('ORIGINAL600_SUPERVISOR '+json.dumps(row),flush=True)
+os.chdir(root);os.execve(sys.executable,[sys.executable,str(script),str(v['epoch']),*v['campaign_argv']],env)
+'''
+REMOTE_CONTROL=r'''
+import base64,hashlib,json,os,signal,sys
+from pathlib import Path
+v=json.loads(base64.b64decode(sys.argv[1]));p=Path(v['identity_path']);assert p.is_absolute()and p.name.startswith('original600-supervisor.')and p.name.endswith('.json')
+if not p.exists():print(json.dumps(dict(state='NOT_PUBLISHED')));raise SystemExit(0)
+assert p.resolve()==p
+raw=p.read_bytes();j=json.loads(raw);assert j['schema']=='original600-supervisor-identity-v1'
+assert j['machine']==os.environ['FLY_MACHINE_ID']==v['machine']and j['source_ref']==v['source_ref']and j['epoch']==v['epoch']
+pid=j['pid'];assert type(pid)is int and pid>1
+try:
+ s=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()
+ actual='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+s[19]
+ assert actual==j['birth'],'PID birth changed'
+ live=s[0]!='Z'
+except FileNotFoundError:live=False
+if live:
+ cmd=Path('/proc',str(pid),'cmdline').read_bytes();assert b'cloudbench-original600-supervisor.py' in cmd
+ if v['action']=='TERM':
+  assert hashlib.sha256(raw).hexdigest()==v['identity_sha256'],'supervisor receipt changed'
+  os.kill(pid,signal.SIGTERM)
+ result=dict(state='TERM_SENT'if v['action']=='TERM'else'LIVE',identity=j,identity_sha256=hashlib.sha256(raw).hexdigest())
+else:
+ terminal=p.with_suffix('.terminal.json')
+ if terminal.exists():
+  t=json.loads(terminal.read_bytes());assert all(t[k]==j[k]for k in j)and t['supervisor_joined']is True
+  result=dict(state='JOINED',identity=j,terminal=t,identity_sha256=hashlib.sha256(raw).hexdigest())
+ else:result=dict(state='ABSENT_UNCONFIRMED',identity=j)
+print(json.dumps(result))
+'''
+def exec_command(script,payload):return shlex.join(['python3','-c',script,base64.b64encode(json.dumps(payload,sort_keys=True).encode()).decode()])
+def machine_control(api,mid,payload):
+ need(re.fullmatch('[0-9a-f]{14}',mid),'exact Machine required');need(payload['action']in('PROBE','TERM'),'invalid supervisor action')
+ with bounded(20):
+  response=api.api('POST','/machines/'+mid+'/exec',dict(cmd=exec_command(REMOTE_CONTROL,payload),timeout=20,machine=True),timeout=20)
+  need(isinstance(response,dict)and response.get('exit_code',0)==0 and response.get('exit_signal',0)==0 and response.get('stderr')in(None,''),'exact supervisor exec failed')
+  raw=response.get('stdout');need(isinstance(raw,str)and len(raw.encode())<65536,'bounded supervisor ACK');v=json.loads(raw);need(v.get('state')in('NOT_PUBLISHED','LIVE','TERM_SENT','JOINED','ABSENT_UNCONFIRMED'),'invalid supervisor ACK');return v
+
+def request_term(api,mid,payload,identity,out):
+ need(identity.get('state')=='LIVE'and type(identity['identity']['pid'])is int and identity['identity']['pid']>1,'only exact live supervisor may be signalled')
+ intent=out/'supervisor-term.intent.json'
+ if intent.exists():return None # ambiguous signal never replayed
+ request=dict(payload,action='TERM',identity_sha256=identity['identity_sha256'])
+ save(intent,dict(machine=mid,pid=identity['identity']['pid'],birth=identity['identity']['birth'],identity_sha256=identity['identity_sha256'],signal='SIGTERM',path=payload['identity_path']))
+ try:
+  ack=machine_control(api,mid,request);save(out/'supervisor-term.ack.json',ack);return ack
+ except BaseException as e:
+  save(out/'supervisor-term.pending.json',dict(error=type(e).__name__,ambiguous=True,no_signal_retry=True));return None
+
+def cleanup_ready(gate_joined,probe,verified_export):return gate_joined and probe.get('state')=='JOINED' and verified_export
+def cleanup_mode(gate_joined,has_ownership,has_workspace,probe,verified_export):
+ if not gate_joined:return None
+ if not has_ownership and has_workspace:return 'cleanup-workspace'
+ if has_ownership and cleanup_ready(True,probe,verified_export):return 'cleanup'
+ return None
+
+
+def reconciled_release(out,export,authority,mid,action,gate_joined,probe):
+ """Consume an exact canonical release without rewriting the first helper result."""
+ need(gate_joined,'gate must be joined before release')
+ intent=json.loads(read(out/'cleanup-call.intent.json'))
+ need(intent['action']==action and intent['machine']==mid and intent['gate_joined']is True,'original cleanup invocation changed')
+ workspace=export/'workspace-volume.ownership.json';workspace_raw=read(workspace);v=json.loads(workspace_raw)
+ r=json.loads(read(export/'disposable-controller.release.json'))
+ need(r['volume_id']==v['volume_id'] and r['volume_disposition']in('ABSENT','pending_destroy','destroyed'),'wrong original workspace release')
+ if action=='cleanup':
+  need(cleanup_ready(True,probe,(export/'disposable-export.verified.json').exists()) and intent['supervisor_joined']is True,'joined supervisor and verified export required')
+  auth_sha=sha(read(authority));record=json.loads(read(export/'disposable-controller.ownership.json'))
+  need(record['authority_sha256']==auth_sha and record['workspace_sha256']==sha(workspace_raw) and record['machine']['id']==mid and record['volume']['id']==v['volume_id'],'original controller ownership changed')
+  raw=read(export/'disposable-export.verified.json');verified=json.loads(raw)
+  need(sha(raw)==intent['export_verified_file'] and verified['authority_sha256']==auth_sha and verified['machine_id']==mid,'original verified export changed')
+  need(r['machine_id']==mid and r['machine_deleted']is True,'wrong externally reconciled release')
+ else:
+  need(action=='cleanup-workspace' and r['machine_id']is None and r['no_live_machine_observed']is True and r['command_history_verified']is False,'wrong partial external release')
+ return r
+
+def run(config_path,config_sha,out):
+ os.umask(0o077);raw=read(config_path);need(sha(raw)==config_sha,'root config bytes changed');v=json.loads(raw)
+ need(v['schema']=='original600-controller-runner-v1'and v['allowed']is True,'explicit root operation config required')
+ root=Path(v['source_root']).resolve(strict=True);ref=v['source_ref'];need(re.fullmatch('[0-9a-f]{40}',ref or''),'UNBOUND final source')
+ need(subprocess.check_output(['git','--no-replace-objects','-C',str(root),'rev-parse','HEAD'],text=True).strip()==ref,'source HEAD mismatch')
+ required={'run-cloudbench-controller-gate','cloudbench-disposable-controller.py','cloudbench-controller-export.py','cloudbench-original-volume-capture.py','cloudbench-original600-supervisor.py'}
+ need(required<=set(v['source_files']),'complete control source pins required')
+ for name,digest in v['source_files'].items():
+  need('/'not in name and name.endswith(('.py','gate')),'invalid source member')
+  data=(root/'scripts'/name).read_bytes();need(sha(data)==digest and data==subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',ref+':scripts/'+name]),'source bytes changed: '+name)
+ tasks=json.loads(read(v['tasks_path']));epoch=v['started_at_epoch'];need(type(epoch)in(int,float)and epoch>0 and time.time()<epoch+5400,'original new attempt clock expired');argv=campaign_argv(tasks,epoch)
+ authority_template=json.loads(read(v['authority_template']));need(authority_template['allowed']is True and authority_template['source_ref']==ref,'root authority must match final source')
+ out=Path(out).absolute();out.mkdir(mode=0o700);need(out.resolve()==out,'physical new output')
+ auth=dict(authority_template,cleanup_owner_pid=os.getpid(),cleanup_owner_birth=birth(os.getpid()),output_directory=str(out/'export'));authority=out/'authority.private.json';save(authority,auth)
+ fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME='cloudbench-warm-t10-ord-85a7e2c',CLOUDBENCH_WARM_VOLUME_NAME='cloudbench_t10_ord_85a7e2c',CLOUDBENCH_REGION='ord',CLOUDBENCH_FRESH_TARGET_REGION='iad',CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE='false',CLOUDBENCH_SNAPSHOT_ID='vs_xA6B3617AO9TaeovZ3OKN42',CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
+ remote_env=dict(v.get('remote_env',{}))
+ for key,value in fixed_env.items():need(remote_env.get(key,value)==value,'original warm/launch option changed: '+key);remote_env[key]=value
+ files=[]
+ for item in v['remote_files']:
+  need(re.fullmatch(r'\.git/cloudbench-[A-Za-z0-9_.-]+',item['relative_path']),'only bound benchmark Git metadata may be staged')
+  data=read(item['source_path']);need(sha(data)==item['sha256'],'remote metadata source changed')
+  files.append(dict(relative_path=item['relative_path'],sha256=item['sha256'],data=base64.b64encode(data).decode()))
+ snapshot_name='.git/cloudbench-warm-snapshot-inventory.cloudbench-warm-t10-ord-85a7e2c.json'
+ snapshot=next((i for i in files if i['relative_path']==snapshot_name),None);need(snapshot is not None,'authentic selected warm snapshot inventory required')
+ remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']
+ identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote=dict(source_ref=ref,supervisor_sha256=v['source_files']['cloudbench-original600-supervisor.py'],identity_name=identity_name,tasks=tasks,epoch=epoch,campaign_argv=argv,remote_env=remote_env,remote_files=files)
+ export=out/'export';log=out/'gate.private.log';command=['bash',str(root/'scripts/run-cloudbench-controller-gate'),'--disposable-controller',str(authority),'--','python3','-c',REMOTE_LAUNCH,base64.b64encode(json.dumps(remote,sort_keys=True).encode()).decode()]
+ env=dict(os.environ,**v.get('gate_env',{}));env.update(CLOUDBENCH_GATE_REF=ref,CLOUDBENCH_GATE_EXPORT_DIR=str(export),CLOUDBENCH_GATE_RETAIN_HOST='1',CLOUDBENCH_GATE_EXPORT_HOST='1',CLOUDBENCH_GATE_VM_SIZE='performance-8x',CLOUDBENCH_GATE_VM_MEMORY='32768',CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB='256')
+ need(int(env.get('CLOUDBENCH_GATE_TIMEOUT_S','0'))>5400,'explicit host watchdog must outlive benchmark cleanup')
+ capture=root/'scripts/cloudbench-original-volume-capture.py';scope={'__file__':str(capture),'__name__':'bound_external_controller'};exec(compile(capture.read_bytes(),str(capture),'exec'),scope)
+ token=scope['resolve_token']({'workspace':str(root)});api=scope['Fly'](APP,token)
+ stop=[False];old_handlers={s:signal.getsignal(s)for s in(signal.SIGTERM,signal.SIGINT)}
+ def cancel(*unused):stop[0]=True # never forward to gate process or VM
+ for s in old_handlers:signal.signal(s,cancel)
+ stream=log.open('xb');gate=subprocess.Popen(command,cwd=root,env=env,stdout=stream,stderr=subprocess.STDOUT)
+ mid=None;probe={};attempt=0;cleanup=None;cleanup_action=None;last_error=None;next_probe=0
+ try:
+  save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=TASK_REF,epoch=epoch,deadline=epoch+5400,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))
+  while True:
+   joined=gate.poll()is not None
+   if joined:gate.wait();stream.close()
+   ownership=export/'disposable-controller.ownership.json'
+   if mid is None and ownership.exists():
+    record=json.loads(read(ownership));need(record['authority_sha256']==sha(authority.read_bytes()),'wrong controller ownership');mid=record['machine']['id'];need(mid not in auth['protected_machines'],'protected controller ID')
+    save(out/'controller.identity.json',dict(machine=mid,instance=record['machine']['instance_id'],source_ref=ref,authority_sha256=sha(authority.read_bytes())))
+   if cleanup is None and mid and time.monotonic()>=next_probe:
+    payload=dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name,action='PROBE')
+    try:
+     probe=machine_control(api,mid,payload);save(out/('supervisor-probe-%06d.json'%attempt),probe);attempt+=1
+     if(stop[0]or time.time()>=epoch+5400)and probe['state']=='LIVE':request_term(api,mid,payload,probe,out)
+    except BaseException as e:
+     last_error=type(e).__name__
+     save(out/('supervisor-read-pending-%06d.json'%attempt),dict(error=last_error,no_gate_signal=True));attempt+=1
+    next_probe=time.monotonic()+5
+   verified=export/'disposable-export.verified.json'
+   mode=cleanup_mode(joined,ownership.exists(),(export/'workspace-volume.ownership.json').exists(),probe,verified.exists())
+   if mode is not None and cleanup is None:
+    cleanup_action=mode
+    save(out/'cleanup-call.intent.json',dict(machine=mid,action=mode,gate_joined=True,supervisor_joined=probe.get('state')=='JOINED',export_verified_file=sha(read(verified))if verified.exists()else None))
+    args=[sys.executable,str(root/'scripts/cloudbench-disposable-controller.py'),mode,'--authority',str(authority),'--root',str(root),'--directory',str(export),'--workspace',str(export/'workspace-volume.ownership.json')]
+    cleanup=subprocess.Popen(args,cwd=root,env=env,stdout=log.open('ab'),stderr=subprocess.STDOUT)
+   release=export/'disposable-controller.release.json'
+   if cleanup is not None and cleanup.poll()is not None:
+    code=cleanup.wait()
+    if release.exists():
+     r=reconciled_release(out,export,authority,mid,cleanup_action,joined,probe)
+     result=dict(status='CONTROLLER_RELEASE_VERIFIED'if cleanup_action=='cleanup'else'FAILED_STARTUP_WORKSPACE_RELEASED',gate_exit_code=gate.returncode,controller_cleanup_exit_code=code,externally_reconciled_after_helper_failure=code!=0,machine=mid,source_ref=ref,started_at_epoch=epoch,original_deadline=epoch+5400,release=r,benchmark_success_inferred=False)
+     save(out/'terminal.json',result);return gate.returncode
+    if not(out/'cleanup.pending.json').exists():save(out/'cleanup.pending.json',dict(status='PENDING_EXTERNAL_OWNER_LIVE',helper_exit_code=code,no_cleanup_retry=True))
+   if joined and not cleanup_ready(True,probe,verified.exists())and not(out/'gate.pending.json').exists():
+    save(out/'gate.pending.json',dict(status='PENDING_EXTERNAL_OWNER_LIVE',gate_exit_code=gate.returncode,supervisor_state=probe.get('state'),export_verified=verified.exists(),no_host_destroy=True))
+   # A failed export/provider action cannot authorize killing an active writer.
+   # Remain the live cleanup authority; root can reconcile originals while observing this process.
+   time.sleep(.25)
+ except BaseException as e:
+  # Keep the external cleanup authority alive after local I/O/validation failure.
+  # Do not terminate the gate or delete a VM whose writer/export state is unknown.
+  try:print(json.dumps(dict(status='PENDING_EXTERNAL_OWNER_LIVE',error=type(e).__name__,gate_pid=gate.pid,no_gate_or_vm_kill=True)),flush=True)
+  except BaseException:pass
+  while True:
+   if mid is None:
+    try:
+     candidate=export/'disposable-controller.ownership.json'
+     if candidate.exists():
+      record=json.loads(read(candidate));need(record['authority_sha256']==sha(authority.read_bytes()),'wrong late controller ownership');newmid=record['machine']['id'];need(newmid not in auth['protected_machines'],'protected controller ID');mid=newmid
+    except BaseException:pass
+   if cleanup is None and mid and (stop[0] or time.time()>=epoch+5400):
+    try:
+     payload=dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name,action='PROBE')
+     current=machine_control(api,mid,payload)
+     if current['state']=='LIVE':request_term(api,mid,payload,current,out)
+    except BaseException:pass
+   # Root may complete a failed export/reconciliation while this authority stays live.
+   release=export/'disposable-controller.release.json'
+   if gate.poll()is not None and release.exists():
+    try:
+     action=cleanup_action or json.loads(read(out/'cleanup-call.intent.json'))['action']
+     reconciled_release(out,export,authority,mid,action,True,probe)
+     return gate.wait()
+    except BaseException:pass
+   time.sleep(1)
+
+ finally:
+  for s,h in old_handlers.items():signal.signal(s,h)
+  if not stream.closed:stream.close()
+  # Intentionally no terminate/kill gate, VM, process group or unrelated PID here.
+
+def self_test():
+ import tempfile,unittest
+ class Tests(unittest.TestCase):
+  def test_pid1_refused(self):
+   with self.assertRaises(ValueError):birth(1)
+  def test_active_writer_blocks_cleanup(self):self.assertFalse(cleanup_ready(True,{'state':'LIVE'},True))
+  def test_partial_workspace_cleanup_waits_gate_join(self):
+   self.assertIsNone(cleanup_mode(False,False,True,{},False));self.assertEqual(cleanup_mode(True,False,True,{},False),'cleanup-workspace');self.assertIsNone(cleanup_mode(True,True,True,{'state':'LIVE'},False))
+  def test_export_and_join_required(self):
+   self.assertFalse(cleanup_ready(False,{'state':'JOINED'},True));self.assertFalse(cleanup_ready(True,{'state':'JOINED'},False));self.assertTrue(cleanup_ready(True,{'state':'JOINED'},True))
+  def test_real_exact_supervisor_term_and_join(self):
+   with tempfile.TemporaryDirectory()as d:
+    out=Path(d);mid='1234567890abcd';pidfile=out/'original600-supervisor.fixture.json';done=out/'done'
+    child=subprocess.Popen([sys.executable,'-c',"import signal,time,sys;from pathlib import Path;signal.signal(signal.SIGTERM,lambda *a:(Path(sys.argv[1]).write_text('cleanup'),sys.exit(7)));print('ready',flush=True);time.sleep(60)",str(done),'cloudbench-original600-supervisor.py'],stdout=subprocess.PIPE,text=True)
+    self.assertEqual(child.stdout.readline().strip(),'ready')
+    try:
+     row=dict(schema='original600-supervisor-identity-v1',pid=child.pid,birth=birth(child.pid),machine=mid,source_ref='a'*40,epoch=1);save(pidfile,row)
+     class FakeAPI:
+      def api(self,method,path,body,timeout):
+       assert method=='POST'and path=='/machines/'+mid+'/exec';p=subprocess.run(shlex.split(body['cmd']),capture_output=True,text=True,env=dict(os.environ,FLY_MACHINE_ID=mid),timeout=5);return dict(stdout=p.stdout,stderr=p.stderr,exit_code=p.returncode)
+     payload=dict(machine=mid,source_ref='a'*40,epoch=1,identity_path=str(pidfile),action='PROBE');api=FakeAPI();probe=machine_control(api,mid,payload);self.assertEqual(probe['state'],'LIVE')
+     request_term(api,mid,payload,probe,out);self.assertEqual(child.wait(timeout=5),7);self.assertEqual(done.read_text(),'cleanup');self.assertIsNone(request_term(api,mid,payload,probe,out))
+    finally:
+     if child.poll()is None:child.terminate();child.wait(timeout=5)
+     child.stdout.close()
+  def test_ambiguous_signal_never_replayed(self):
+   with tempfile.TemporaryDirectory()as d:
+    class API:
+     def __init__(self):self.calls=0
+     def api(self,*a,**k):self.calls+=1;raise TimeoutError()
+    api=API();out=Path(d);probe=dict(state='LIVE',identity=dict(pid=os.getpid(),birth=birth(os.getpid())),identity_sha256='a'*64);payload=dict(identity_path='/tmp/original600-supervisor.x.json')
+    request_term(api,'1234567890abcd',payload,probe,out);request_term(api,'1234567890abcd',payload,probe,out);self.assertEqual(api.calls,1)
+  def test_bad_identity_birth_refuses_signal(self):
+   with tempfile.TemporaryDirectory()as d:
+    p=Path(d)/'original600-supervisor.fixture.json';save(p,dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth='wrong',machine='1234567890abcd',source_ref='a'*40,epoch=1))
+    command=exec_command(REMOTE_CONTROL,dict(identity_path=str(p),machine='1234567890abcd',source_ref='a'*40,epoch=1,action='TERM',identity_sha256=sha(p.read_bytes())))
+    result=subprocess.run(shlex.split(command),env=dict(os.environ,FLY_MACHINE_ID='1234567890abcd'),capture_output=True);self.assertNotEqual(result.returncode,0)
+ suite=unittest.defaultTestLoader.loadTestsFromTestCase(Tests);result=unittest.TextTestRunner().run(suite);return 0 if result.wasSuccessful()else 1
+if __name__=='__main__':
+ p=argparse.ArgumentParser();p.add_argument('--self-test',action='store_true');p.add_argument('--config',type=Path);p.add_argument('--config-sha256');p.add_argument('--output',type=Path);args=p.parse_args()
+ if args.self_test:raise SystemExit(self_test())
+ need(args.config and args.config_sha256 and args.output,'explicit root config/hash/new output required');raise SystemExit(run(args.config,args.config_sha256,args.output))
