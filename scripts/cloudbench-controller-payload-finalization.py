@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import runpy
 import select
 import signal
@@ -30,7 +31,7 @@ def normalized(value):
     return json.loads(json.dumps(value, default=str, sort_keys=True, allow_nan=False))
 
 
-def operator(ref):
+def operator(ref, root=HERE.parent):
     names = (
         "cloudbench-controller-payload-finalization.py",
         "cloudbench-resume-controller-payload.py",
@@ -38,8 +39,8 @@ def operator(ref):
         "run-original600-controller.py",
         "cloudbench-original-volume-capture.py",
     )
-    hashes = {name: sha((HERE / name).read_bytes()) for name in names}
-    return hashes, B["source_identity"](HERE.parent, ref, hashes)
+    hashes = {name: sha((root / "scripts" / name).read_bytes()) for name in names}
+    return hashes, B["source_identity"](root, ref, hashes)
 
 
 def borrow_binding(state, intent):
@@ -144,7 +145,7 @@ def gate_gone(state):
         return True
 
 
-def validate(state, config, digest, directory, ref):
+def validate(state, config, digest, directory, ref, operator_root=HERE.parent):
     need(
         state["schema"] == "controller-payload-finalizer-identities-v1",
         "unknown identity receipt",
@@ -159,7 +160,7 @@ def validate(state, config, digest, directory, ref):
         and state["operator_ref"] == ref,
         "finalizer run/operator changed",
     )
-    hashes, _ = operator(ref)
+    hashes, _ = operator(ref, operator_root)
     need(hashes == state["finalizer_operator_hashes"], "finalizer runtime changed")
     out = Path(directory)
     intent = obj(out / "payload-borrow.intent.json")
@@ -181,9 +182,228 @@ def validate(state, config, digest, directory, ref):
 
 
 def validate_args(state, args):
+    resumed = state.get("_resume")
+    if resumed:
+        gone = validate(
+            state,
+            args.config,
+            args.config_sha256,
+            args.run_directory,
+            state["operator_ref"],
+            Path(resumed["capture_root"]),
+        )
+        need(args.operator_ref == resumed["operator_ref"], "resume operator changed")
+        hashes, _ = operator(args.operator_ref)
+        need(hashes == resumed["operator_hashes"], "resume source changed")
+        need(
+            {p.name for p in Path(resumed["journal"]).iterdir()}
+            == set(resumed["files"]),
+            "prior journal membership changed",
+        )
+        for path, expected in resumed["pins"].items():
+            need(
+                normalized(B["fingerprint"](path)) == expected,
+                "resume evidence changed: " + path,
+            )
+        return gone
     return validate(
         state, args.config, args.config_sha256, args.run_directory, args.operator_ref
     )
+
+
+def prior_finalizer_dead(intent):
+    pid, expected = intent.get("pid"), intent.get("birth")
+    need(
+        type(pid) is int
+        and pid > 1
+        and isinstance(expected, str)
+        and re.fullmatch(
+            r"proc-start:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9]+", expected
+        ),
+        "prior finalizer identity missing",
+    )
+    try:
+        raw = Path("/proc", str(pid), "stat").read_text().rsplit(") ", 1)[1].split()
+    except FileNotFoundError:
+        return True
+    current = (
+        "proc-start:"
+        + Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        + ":"
+        + raw[19]
+    )
+    return current != expected or raw[0] == "Z"
+
+
+def prepare_resume(state, args):
+    """Authorize a new reader only from a stopped, exclusively read-only journal."""
+    out = Path(state["out"])
+    roots = {
+        str(Path(path).parent.parent)
+        for path in state["pins"]
+        if Path(path).name == "cloudbench-controller-payload-finalization.py"
+    }
+    need(len(roots) == 1, "captured finalizer root is ambiguous")
+    capture_root = Path(roots.pop())
+    validate(
+        state, args.config, args.config_sha256, out, state["operator_ref"], capture_root
+    )
+    journal = Path(args.resume_journal).absolute()
+    need(
+        journal.parent == out
+        and re.fullmatch(
+            r"payload-finalization(?:-resume-[0-9a-f]{16})?", journal.name
+        ),
+        "exact prior finalizer journal required",
+    )
+    need(
+        journal.resolve(strict=True) == journal and journal.is_dir(),
+        "physical prior journal required",
+    )
+    info = journal.stat()
+    need(
+        info.st_uid == os.geteuid() and not info.st_mode & 0o077,
+        "private prior journal required",
+    )
+    need(
+        not (out / "cleanup-call.intent.json").exists()
+        and not (out / "terminal.json").exists(),
+        "cleanup or terminal already exists; reconcile without replay",
+    )
+    intent = obj(journal / "intent.json")
+    need(
+        intent.get("identity_sha256")
+        == sha(read(out / "payload-finalizer.identities.private.json"))
+        and intent.get("first_borrow_operator_ref")
+        == state["first_borrow_operator_ref"]
+        and intent.get("original_deadline") == state["deadline"],
+        "prior finalizer binding differs",
+    )
+    need(
+        prior_finalizer_dead(intent),
+        "prior finalizer still live or unknown",
+    )
+    prior_hashes = intent.get("operator_hashes", state["finalizer_operator_hashes"])
+    prior_ref = intent.get("finalizer_operator_ref")
+    need(
+        isinstance(prior_ref, str) and re.fullmatch("[0-9a-f]{40}", prior_ref),
+        "prior operator unbound",
+    )
+    need(
+        set(prior_hashes) == set(state["finalizer_operator_hashes"]),
+        "incomplete prior operator pins",
+    )
+    if journal.name == "payload-finalization":
+        need(
+            prior_ref == state["operator_ref"]
+            and prior_hashes == state["finalizer_operator_hashes"],
+            "initial finalizer differs from capture",
+        )
+    for name, digest in prior_hashes.items():
+        raw = subprocess.check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(HERE.parent),
+                "show",
+                prior_ref + ":scripts/" + name,
+            ]
+        )
+        need(sha(raw) == digest, "prior operator source differs")
+    expected_probe = {
+        "cmd": R["exec_command"](
+            R["REMOTE_CONTROL"],
+            {
+                "machine": state["machine_id"],
+                "source_ref": state["source_ref"],
+                "epoch": state["epoch"],
+                "identity_path": state["caller"]["identity_path"],
+                "action": "PROBE",
+            },
+        ),
+        "timeout": 20,
+        "machine": True,
+    }
+    files = {}
+    pins = {}
+    requests = {}
+    total = 0
+    entries = list(journal.iterdir())
+    need(len(entries) < 10000, "prior journal exceeds bounded membership")
+    for path in entries:
+        need(
+            path.name == "intent.json"
+            or re.fullmatch(r"(?:probe|read-pending)-[0-9]{6}\.json", path.name)
+            or re.fullmatch(r"wire-[0-9]{6}\.(?:request|raw|decoded)\.json", path.name),
+            "prior journal contains an effect or unknown member",
+        )
+        before = B["fingerprint"](path)
+        raw = read(path)
+        total += len(raw)
+        need(
+            before is not None and before == B["fingerprint"](path),
+            "prior journal changed during read",
+        )
+        need(total < 256 * 1024 * 1024, "prior journal exceeds bounded bytes")
+        value = json.loads(raw)
+        files[path.name] = sha(raw)
+        pins[str(path)] = normalized(before)
+        if path.name.endswith(".request.json"):
+            base = "/machines/" + state["machine_id"]
+            need(
+                value == {"method": "GET", "path": base, "body": None}
+                or value
+                == {"method": "POST", "path": base + "/exec", "body": expected_probe},
+                "prior request is not an exact read-only observation",
+            )
+            requests[path.name[:-13]] = value
+    need(requests, "prior journal has no read-only requests")
+    for path in entries:
+        if path.name.endswith((".raw.json", ".decoded.json")):
+            suffix = ".raw.json" if path.name.endswith(".raw.json") else ".decoded.json"
+            stem = path.name[: -len(suffix)]
+            need(stem in requests, "orphan prior response")
+            if suffix == ".decoded.json":
+                need(
+                    (journal / (stem + ".raw.json")).is_file(),
+                    "decoded prior response lacks raw receipt",
+                )
+            if suffix == ".raw.json":
+                value = obj(path)
+                raw = base64.b64decode(value["body_b64"], validate=True)
+                need(
+                    value["method"] == requests[stem]["method"]
+                    and value["path"] == requests[stem]["path"]
+                    and type(value["status"]) is int
+                    and value["bytes"] == len(raw)
+                    and value["sha256"] == sha(raw),
+                    "prior raw response binding differs",
+                )
+                decoded = journal / (stem + ".decoded.json")
+                if decoded.exists():
+                    need(
+                        obj(decoded) == (json.loads(raw) if raw.strip() else {}),
+                        "prior response decode differs",
+                    )
+    hashes, new_pins = operator(args.operator_ref)
+    pins.update({path: normalized(value) for path, value in new_pins.items()})
+    manifest = {
+        "journal": str(journal),
+        "files": files,
+        "operator_ref": args.operator_ref,
+    }
+    identity = sha(json.dumps(manifest, sort_keys=True).encode())
+    value = dict(state)
+    value["_resume"] = dict(
+        manifest,
+        capture_root=str(capture_root),
+        pins=pins,
+        operator_hashes=hashes,
+        journal_name="payload-finalization-resume-" + identity[:16],
+        prior_manifest_sha256=identity,
+    )
+    return value
 
 
 def term_once(api, state, payload, probe):
@@ -316,7 +536,35 @@ class RecordedAPI:
             ),
             "controller native identity/config changed",
         )
-        return self.request(method, path, body, timeout)
+        result = self.request(method, path, body, timeout)
+        probe = {
+            "machine": self.state["machine_id"],
+            "source_ref": self.state.get("source_ref"),
+            "epoch": self.state.get("epoch"),
+            "identity_path": self.state.get("caller", {}).get("identity_path"),
+            "action": "PROBE",
+        }
+        expected = {
+            "cmd": R["exec_command"](R["REMOTE_CONTROL"], probe),
+            "timeout": 20,
+            "machine": True,
+        }
+        if (
+            body == expected
+            and isinstance(result, dict)
+            and set(result) == {"exit_code", "exit_signal", "stderr", "stdout"}
+            and type(result["exit_code"]) is int
+            and result["exit_code"] == 0
+            and type(result["exit_signal"]) is int
+            and result["exit_signal"] == 0
+            and result["stdout"] == ""
+            and result["stderr"]
+            in ("No child process (os error 10)", "No child process (os error 10)\n")
+        ):
+            raise OSError(
+                "read-only supervisor exec unavailable: No child process (os error 10)"
+            )
+        return result
 
 
 def retire_caller(state, directory, closure_check, timeout=5):
@@ -391,7 +639,9 @@ def finalize(state, args, api_factory=api_for):
             complete["status"] == "TRANSFER_ONLY_COMPLETE",
             "borrow transfer not complete",
         )
-        journal = out / "payload-finalization"
+        journal = out / state.get("_resume", {}).get(
+            "journal_name", "payload-finalization"
+        )
         need(
             not journal.exists(),
             "prior finalizer exists: reconcile receipts, never relaunch effects",
@@ -408,6 +658,11 @@ def finalize(state, args, api_factory=api_for):
                 "original_deadline": state["deadline"],
                 "pid": os.getpid(),
                 "birth": R["birth"](os.getpid()),
+                "operator_hashes": state.get("_resume", {}).get(
+                    "operator_hashes", state.get("finalizer_operator_hashes")
+                ),
+                "resume_from": state.get("_resume", {}).get("prior_manifest_sha256"),
+                "prior_journal_files": state.get("_resume", {}).get("files"),
             },
         )
         api = RecordedAPI(api_factory(state), state, journal)
@@ -575,24 +830,51 @@ def main():
     modes.add_argument("--capture", action="store_true", help="Local capture only.")
     modes.add_argument("--check", action="store_true", help="Local validation only.")
     modes.add_argument("--finalize", action="store_true", help="Observe and finalize.")
+    modes.add_argument(
+        "--resume-finalize",
+        action="store_true",
+        help="Resume a proven read-only finalizer journal.",
+    )
+    parser.add_argument("--resume-journal", type=Path)
     parser.add_argument("--operator-ref", required=True)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--config-sha256", required=True)
     parser.add_argument("--run-directory", required=True, type=Path)
     args = parser.parse_args()
     os.umask(0o077)
+    need(not args.capture or not args.resume_journal, "capture cannot resume a journal")
     if args.capture:
         result = capture(
             args.config, args.config_sha256, args.run_directory, args.operator_ref
         )
     else:
         state = obj(args.run_directory / "payload-finalizer.identities.private.json")
+        if args.resume_journal:
+            need(
+                args.check or args.resume_finalize,
+                "resume journal requires check or resume-finalize",
+            )
+            state = prepare_resume(state, args)
+        else:
+            need(
+                not args.resume_finalize, "resume-finalize requires exact prior journal"
+            )
         validate_args(state, args)
         result = (
             finalize(state, args)
-            if args.finalize
-            else {"status": "CHECKED_FINALIZER", "provider_calls": 0}
+            if args.finalize or args.resume_finalize
+            else {
+                "status": "CHECKED_READ_ONLY_FINALIZER_RESUME"
+                if args.resume_journal
+                else "CHECKED_FINALIZER",
+                "provider_calls": 0,
+            }
         )
+        if args.check and args.resume_journal:
+            result.update(
+                journal=str(args.run_directory / state["_resume"]["journal_name"]),
+                prior_journal_sha256=state["_resume"]["prior_manifest_sha256"],
+            )
     print(json.dumps(result, sort_keys=True))
 
 

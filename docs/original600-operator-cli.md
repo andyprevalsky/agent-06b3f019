@@ -348,6 +348,28 @@ resource release. The canonical terminal receipt retains the original workload
 source and records the separate finalizer. An unresolved prior finalizer or
 cleanup intent is retained and never authorizes an automatic repeat.
 
+If that finalizer exited while making only read-only observations, retain its
+entire journal and the original capture. A new immutable operator can validate
+an explicit continuation without making provider calls:
+
+```bash
+python3 -S scripts/cloudbench-controller-payload-finalization.py \
+  --check --resume-journal "$EXISTING_RUN_DIRECTORY/payload-finalization" \
+  --operator-ref "$EXACT_FINALIZER_COMMIT" \
+  --config "$EXISTING_CONFIG" --config-sha256 "$EXISTING_CONFIG_SHA256" \
+  --run-directory "$EXISTING_RUN_DIRECTORY"
+```
+
+Replace `--check` with `--resume-finalize` after the check passes. The command
+requires the former finalizer's process birth to be dead, hashes every prior
+journal member, and accepts only exact controller GETs and supervisor PROBEs.
+Any prior cleanup or unrecognized effect refuses this route. The continuation
+uses a new exclusive journal, binds both operator versions, preserves the old
+capture and original deadline, and never repeats an existing supervisor TERM.
+An exact native exec `No child process (os error 10)` response to a PROBE is a
+recorded read failure that can be observed again; malformed identity responses
+remain refusals.
+
 
 Within a live strict cohort, the fleet shares one successful read-only app-secret
 verification. The proof is bound to the campaign owner and process births,
