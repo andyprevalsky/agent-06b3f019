@@ -114,14 +114,14 @@ def target_from(machine, ownership, archive):
     )
 
 
-def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=(), unused_runs=(), parked_runs=()):
+def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=(), unused_runs=(), parked_runs=(), expired_runs=()):
     need(re.fullmatch("[0-9a-f]{32}", cohort or ""), "exact reserved successor cohort required")
     need(re.fullmatch("[0-9a-f]{40}", harness_ref or ""), "exact harness ref required")
     need(
         len(archive_runs) >= 1 and len(set(map(str, archive_runs))) == len(archive_runs),
         "distinct complete archive runs required",
     )
-    recovery_runs = list(unused_runs) + list(parked_runs)
+    recovery_runs = list(unused_runs) + list(parked_runs) + list(expired_runs)
     need(len(set(map(str, recovery_runs))) == len(recovery_runs),
          "duplicate or overlapping reservation recovery run")
     # Validate closed unused reservations first, then exclude their identities
@@ -134,6 +134,7 @@ def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=
     unused_ids = set()
     recovery_sources = [("cloudbench-unused-reservations.py", run) for run in unused_runs]
     recovery_sources.extend(("cloudbench-parked-reservations.py", run) for run in parked_runs)
+    recovery_sources.extend(("cloudbench-reconcile-reservations.py", run) for run in expired_runs)
     for helper, run in recovery_sources:
         result = module(helper)["prepare"](run, inventory_path)
         archive = result["archive"]
@@ -551,6 +552,7 @@ def main():
     prepare.add_argument("--archive-run", action="append", required=True, type=Path)
     prepare.add_argument("--unused-reservation-run", action="append", default=[], type=Path)
     prepare.add_argument("--parked-reservation-run", action="append", default=[], type=Path)
+    prepare.add_argument("--expired-reservation-run", action="append", default=[], type=Path)
     prepare.add_argument("--inventory", required=True, type=Path)
     prepare.add_argument("--cohort", required=True)
     prepare.add_argument("--harness-ref", required=True)
@@ -670,6 +672,7 @@ def main():
         args.exclude_machine,
         args.unused_reservation_run,
         args.parked_reservation_run,
+        args.expired_reservation_run,
     )
     value["image_ref"] = args.image_ref
     validate_request(value)

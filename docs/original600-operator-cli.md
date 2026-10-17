@@ -82,6 +82,36 @@ Local offline fixture passes do not qualify actual capacity, R2 publication,
 provider allocation or the five-consecutive-run goal.
 
 
+### Expired admission that never launched a controller
+
+An expired admission must never restart its original clock. Preserve its entire
+private directory, including the original admission intent, request, closed
+reservation plan, failed wire records and the positive tool-join/capacity-refusal
+receipt. The versioned expired-admission validator also requires the recorded
+expiry/no-launch observation. It verifies the known source protocol, full local
+journal membership and fresh stopped native identities.
+
+For a new original600 admission, add the expired directory alongside the complete
+original predecessor archives:
+
+```bash
+  --archive-run "$ORIGINAL_PREDECESSOR_ARCHIVE" \
+  --expired-reservation-run "$EXPIRED_UNLAUNCHED_ADMISSION"
+```
+
+Use the normal local `--check`, then `--run` with the same inputs and a new
+admission. Do not also pass the same directory through the unused or parked
+reservation modes. Confirmed reservations and positively acknowledged held
+updates may qualify only when their exact native incarnation and full
+configuration still match. Unknown writes stay held even when their current
+marker looks plausible. This preparation gives no capacity credit.
+
+Before native reservation, the CLI seals the expired directory to that one new
+cohort and request. A second unrelated successor is refused. Every credited
+Machine then passes the ordinary new native lease, version-checked reservation
+and fresh readback. The old deadline, failed attempts, claims, volumes and
+receipts remain unchanged; the new admission gets its own explicit clock.
+
 ### Reuse preserved Machines from completed controller archives
 
 To reuse the preserved Machines of prior interrupted runs, add one

@@ -298,6 +298,11 @@ class Portable(unittest.TestCase):
             args.parked_reservation_run = [root/'foreign-parked-admission']
             with self.assertRaisesRegex(ValueError, 'source/inputs/archives'):
                 CLI.open_admission(root,parked_directory,CLI.admission_binding(args,RUNNER),RUNNER,True)
+            args.parked_reservation_run=[]
+            args.expired_reservation_run=[root/'expired-admission']
+            expired=CLI.admission_binding(args,RUNNER)
+            self.assertEqual(expired['expired_reservation_runs'],[str(root/'expired-admission')])
+            self.assertEqual({k:v for k,v in expired.items() if k!='expired_reservation_runs'},legacy)
 
     def test_large_launch_payload_uses_a_small_hash_bound_file_command(self):
         with tempfile.TemporaryDirectory() as name:
@@ -442,6 +447,28 @@ class Portable(unittest.TestCase):
                 CLI.open_admission(parent,directory,binding,RUNNER,True)
             self.assertEqual(json.loads((directory/'admission-intent.private.json').read_text())['started_at_epoch'],epoch)
 
+    def test_expired_admission_is_sealed_to_one_new_cohort(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);root.chmod(0o700)
+            old=root/'expired';old.mkdir(mode=0o700)
+            proof=private(old/'closure',{'expired':True})
+            request={'cohort':'a'*32,'archives':[{'archive_sha256':'b'*64,
+                'inputs':{str(proof):CLI.digest(proof.read_bytes())},'expired_admission':{'directory':str(old)}}]}
+            def validate(archive):
+                if CLI.digest(proof.read_bytes())!=archive['inputs'][str(proof)]:
+                    raise ValueError('input changed')
+            with patch.object(CLI.runpy,'run_path',return_value={'validate_handoff':validate}) as load:
+                CLI.seal_expired_handoffs(request,root/'new-admission',RUNNER)
+                self.assertTrue(str(load.call_args.args[0]).endswith('/cloudbench-reconcile-reservations.py'))
+                original=(old/'expired-reservation-handoff.json').read_bytes()
+                CLI.seal_expired_handoffs(request,root/'new-admission',RUNNER)
+                self.assertEqual((old/'expired-reservation-handoff.json').read_bytes(),original)
+                with self.assertRaisesRegex(ValueError,'another successor'):
+                    CLI.seal_expired_handoffs(dict(request,cohort='c'*32),root/'other',RUNNER)
+                proof.write_text('changed')
+                with self.assertRaisesRegex(ValueError,'input changed'):
+                    CLI.seal_expired_handoffs(request,root/'new-admission',RUNNER)
+
     def test_archived_eligibility_is_not_reserved_capacity(self):
         with tempfile.TemporaryDirectory() as name:
             directory=Path(name)
@@ -466,7 +493,8 @@ class Portable(unittest.TestCase):
                  patch.object(CLI.subprocess,'run',return_value=apps),self.assertRaisesRegex(ValueError,'insufficient measured capacity'):
                 CLI.capacity(API,'fixture','personal',baseline,1)
             self.assertEqual(result['available_slots_conservative'],582)
-            self.assertEqual(prepared[0][-1],[directory/'parked-run'])
+            self.assertEqual(prepared[0][-2],[directory/'parked-run'])
+            self.assertEqual(prepared[0][-1],())
             self.assertEqual(result['eligible_reuse_count'],375)
             self.assertEqual(result['qualified_reuse_count'],0)
             self.assertEqual(result['new_machine_demand'],601)

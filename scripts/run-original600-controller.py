@@ -30,6 +30,7 @@ PINS = [
     'cloudbench-archived-owner-stop.py', 'cloudbench-stop-all.py',
     'cloudbench-unused-reservations.py',
     'cloudbench-parked-reservations.py',
+    'cloudbench-reconcile-reservations.py',
     'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',
     'lib/cloudbench-archived-reuse.sh', 'run-bench-fleet', 'run-bench-cloud',
 ]
@@ -225,13 +226,13 @@ def capacity_snapshot(api, token, org, directory, extra):
                 new_controller_slots=1, requested_original_primary_slots=600)
 
 
-def capacity(api, token, org, directory, extra, reuse_runs=None, harness_ref=None, excluded=(), image_ref=None, unused_runs=(), parked_runs=()):
+def capacity(api, token, org, directory, extra, reuse_runs=None, harness_ref=None, excluded=(), image_ref=None, unused_runs=(), parked_runs=(), expired_runs=()):
     proof = capacity_snapshot(api, token, org, directory, extra)
     if reuse_runs:
         helper=reuse_module()
         import secrets
         inventory_path=directory/'navi-whisper-lux-bench.private.json'
-        reuse=helper['prepare_request'](reuse_runs,inventory_path,secrets.token_hex(16),harness_ref,excluded,unused_runs,parked_runs)
+        reuse=helper['prepare_request'](reuse_runs,inventory_path,secrets.token_hex(16),harness_ref,excluded,unused_runs,parked_runs,expired_runs)
         if image_ref is not None:
             reuse['image_ref']=image_ref
         helper['validate_request'](reuse,harness_ref)
@@ -267,6 +268,9 @@ def admission_binding(args, runner):
     parked = getattr(args, 'parked_reservation_run', ())
     if parked:
         binding['parked_reservation_runs'] = [str(path.absolute()) for path in parked]
+    expired = getattr(args, 'expired_reservation_run', [])
+    if expired:
+        binding['expired_reservation_runs'] = [str(path.absolute()) for path in expired]
     return binding
 
 
@@ -286,6 +290,30 @@ def open_admission(parent, resume, binding, runner, has_archives):
     started_at=time.time()
     runner['save'](directory/'admission-intent.private.json',dict(binding=binding,started_at_epoch=started_at,deadline_epoch=started_at+5400))
     return directory,started_at
+
+
+def seal_expired_handoffs(request, directory, runner):
+    """Give each expired admission exactly one new successor cohort."""
+    for archive in request['archives']:
+        old=archive.get('expired_admission')
+        if old is None:
+            continue
+        root=Path(old['directory'])
+        if root.resolve(strict=True)!=root or root.stat().st_uid!=os.geteuid() or root.stat().st_mode&0o077:
+            raise ValueError('private expired admission required')
+        validator=runpy.run_path(str(Path(__file__).with_name('cloudbench-reconcile-reservations.py')))
+        validator['validate_handoff'](archive)
+        if ((root/'controller-launch.intent.json').exists() or (root/'config.private.json').exists()
+                or any(root.glob('launch-*'))):
+            raise ValueError('expired admission acquired a controller')
+        seal={'schema':'original600-expired-admission-handoff-v1','original_closure_sha256':archive['archive_sha256'],
+              'new_admission_directory':str(directory),'new_cohort':request['cohort'],
+              'new_request_sha256':digest(json.dumps(request,sort_keys=True,allow_nan=False).encode())}
+        path=root/'expired-reservation-handoff.json'
+        try:runner['save'](path,seal)
+        except FileExistsError:pass
+        if json.loads(runner['read'](path))!=seal:
+            raise ValueError('expired admission already assigned to another successor')
 
 
 def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directory, cap):
@@ -311,6 +339,7 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
         raise ValueError('reserved task manifest differs from original ordered200')
     if cap['available_slots_conservative'] + len(request['candidates']) < 601:
         raise ValueError('insufficient measured capacity even with every reserved candidate')
+    seal_expired_handoffs(request,directory,runner)
     # NativeAdapter owns finite per-operation deadlines and joins all reservations.
     connection=api('navi-whisper-lux-bench',token)
     def adapter(journal):
@@ -640,6 +669,7 @@ def main():
     parser.add_argument('--archive-run', action='append', type=Path, help='Verified predecessor run directory; preserve IDs/volume using a clean task generation before fresh creation')
     parser.add_argument('--unused-reservation-run', action='append', default=[], type=Path, help='Closed admission whose fully archived, never-assigned reservations may pass to this new cohort')
     parser.add_argument('--parked-reservation-run', action='append', default=[], type=Path, help='Closed admission: validate untouched and positively proven parked claims for a new cohort')
+    parser.add_argument('--expired-reservation-run', action='append', default=[], type=Path, help='Expired never-launched admission: validate retained reservations for a new cohort')
     parser.add_argument('--reuse-exclude-machine', action='append', default=[], help='Conservatively exclude a changed/pilot Machine from archived reuse')
     parser.add_argument('--prelaunch-failure',type=Path,help='Retained positive no-child E2BIG evidence for an existing bound output')
     parser.add_argument('--resume-bound-launch', type=Path, help='Continue an original absent-output bound launch using a verified host operator and fresh capacity')
@@ -660,11 +690,13 @@ def main():
     args.archive_run=[path.absolute() for path in (args.archive_run or [])]
     args.unused_reservation_run=[path.absolute() for path in args.unused_reservation_run]
     args.parked_reservation_run=[path.absolute() for path in args.parked_reservation_run]
-    if (args.unused_reservation_run or args.parked_reservation_run) and not args.archive_run:
+    args.expired_reservation_run=[path.absolute() for path in args.expired_reservation_run]
+    if (args.unused_reservation_run or args.parked_reservation_run or args.expired_reservation_run) and not args.archive_run:
         raise ValueError('reservation recovery requires its original predecessor archives')
-    if set(args.unused_reservation_run) & set(args.parked_reservation_run):
-        raise ValueError('same admission cannot use both reservation recovery modes')
-    for archive in args.archive_run + args.unused_reservation_run + args.parked_reservation_run:
+    recovery=args.unused_reservation_run+args.parked_reservation_run+args.expired_reservation_run
+    if len(set(recovery))!=len(recovery):
+        raise ValueError('same admission cannot use multiple reservation recovery modes')
+    for archive in args.archive_run + recovery:
         if archive.resolve(strict=True) != archive or not archive.is_dir():
             raise ValueError('original archive run must be a physical directory')
     runner['campaign_argv'](json.loads(runner['read'](args.tasks)), time.time())
@@ -705,7 +737,7 @@ def main():
                 cap=capacity_snapshot(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count)
             else:
                 cap=capacity(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count,args.archive_run,args.source_ref,args.reuse_exclude_machine,
-                             facts_from(runner['read'](args.facts))['image_ref'],args.unused_reservation_run,args.parked_reservation_run)
+                             facts_from(runner['read'](args.facts))['image_ref'],args.unused_reservation_run,args.parked_reservation_run,args.expired_reservation_run)
         if args.archive_run:
             cap=reserve_reuse_capacity(capture['Fly'],token,args,runner,directory,snapshot,cap)
             launch_directory=directory/('launch-'+str(time.time_ns()))

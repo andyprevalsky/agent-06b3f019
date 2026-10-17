@@ -886,7 +886,7 @@ class IntegratedControls(unittest.TestCase):
             calls = []
 
             def modules(name):
-                if name == "cloudbench-parked-reservations.py":
+                if name in ("cloudbench-parked-reservations.py", "cloudbench-reconcile-reservations.py"):
                     calls.append(name)
                     return {"prepare": lambda *_: response}
                 return load(name)
@@ -897,6 +897,13 @@ class IntegratedControls(unittest.TestCase):
                                               "d" * 40, parked_runs=[run])
                 self.assertEqual(result["candidates"], [row])
                 self.assertEqual(calls, ["cloudbench-parked-reservations.py"])
+                result = H["prepare_request"]([previous.run], previous.inventory, "c" * 32,
+                                              "d" * 40, expired_runs=[run])
+                self.assertEqual(result["candidates"], [row])
+                self.assertEqual(calls[-1], "cloudbench-reconcile-reservations.py")
+                with self.assertRaisesRegex(ValueError, "overlapping reservation"):
+                    H["prepare_request"]([previous.run], previous.inventory, "c" * 32,
+                                         "d" * 40, parked_runs=[run], expired_runs=[run])
                 with self.assertRaisesRegex(ValueError, "overlapping reservation"):
                     H["prepare_request"]([previous.run], previous.inventory, "c" * 32,
                                          "d" * 40, unused_runs=[run], parked_runs=[run])
