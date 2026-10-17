@@ -193,25 +193,147 @@ def closed_run(outer, inputs):
     return local_output, json.loads(read(local_config, inputs))
 
 
+INVENTORY_PRODUCER_SHA256 = (
+    "f8c22753a9498de5cd9e6c01f672556f8ee3caf6ea13415dd49b73bac8b03163"
+)
+
+
+def inventory_pointer_members(manifest, config):
+    """Recognize a cache publication pointer, never resolve it as claim data."""
+    files = manifest["files"]
+    pointers, generations = {}, set()
+    for name, entry in files.items():
+        if (
+            not re.fullmatch(
+                r"context/fleet/runs/[0-9]{8}-[0-9]{6}-[0-9]+/inventory/current", name
+            )
+            or entry.get("kind") != "symlink"
+        ):
+            continue
+        target = entry.get("target")
+        need(
+            isinstance(target, str)
+            and re.fullmatch(r"[.]generation-[A-Za-z0-9._-]+", target),
+            "unsafe inventory generation pointer",
+        )
+        parent = str(Path(name).parent)
+        generation = parent + "/" + target
+        need(
+            files.get(parent) == {"kind": "directory"}
+            and files.get(generation) == {"kind": "directory"},
+            "inventory pointer target is not a physical directory",
+        )
+        source = files.get("source/scripts/cloudbench-machine-readiness.py", {})
+        need(
+            source.get("kind") == "file"
+            and source.get("sha256") == INVENTORY_PRODUCER_SHA256
+            and config.get("source_files", {}).get("cloudbench-machine-readiness.py")
+            == INVENTORY_PRODUCER_SHA256,
+            "unknown inventory pointer producer",
+        )
+        required = {
+            generation: "directory",
+            generation + "/machines": "directory",
+            generation + "/names": "directory",
+            generation + "/health": "file",
+            generation + "/published_at": "file",
+            generation + "/admission-machines.json": "file",
+        }
+        need(
+            all(
+                files.get(path, {}).get("kind") == kind
+                for path, kind in required.items()
+            ),
+            "incomplete inventory generation",
+        )
+        for path, value in files.items():
+            if not path.startswith(generation + "/"):
+                continue
+            relative = path[len(generation) + 1 :]
+            canonical_entry = (
+                relative in ("machines", "names")
+                and value.get("kind") == "directory"
+                or relative in ("health", "published_at", "admission-machines.json")
+                and value.get("kind") == "file"
+                or re.fullmatch(r"(?:machines|names)/[A-Za-z0-9._-]+", relative)
+                and Path(relative).name not in (".", "..")
+                and value.get("kind") == "file"
+            )
+            need(canonical_entry, "foreign or aliased inventory generation member")
+        pointers[name] = target
+        generations.add(generation)
+    return pointers, generations
+
+
 def archive_members(run, closure, request, config, inputs):
     """The full verified archive is the closed world for allocation absence."""
     manifest = archive_manifest(run, inputs)
     need(not manifest.get("excluded"), "archive exclusions cannot prove claim absence")
     imported = "git-common/cloudbench-archived-reuse-" + request["cohort"] + ".json"
+    inventory_pointers, inventory_generations = inventory_pointer_members(
+        manifest, config
+    )
+    inventory_parents = {str(Path(name).parent) for name in inventory_pointers}
     seen, claimed, imported_raw = set(), {}, None
+
     def hold(mid, name, expected):
-        need(isinstance(mid, str) and re.fullmatch("[0-9a-f]{14}", mid), "invalid archived claim Machine")
+        need(
+            isinstance(mid, str) and re.fullmatch("[0-9a-f]{14}", mid),
+            "invalid archived claim Machine",
+        )
         claimed.setdefault(mid, {})[name] = {"path": name, **expected}
+
     with tarfile.open(run / "export/originals.tar.gz", "r:gz") as archive:
         for member in archive:
             name = member.name
             need(
-                name not in seen and not name.startswith("/") and ".." not in Path(name).parts,
+                name not in seen
+                and not name.startswith("/")
+                and ".." not in Path(name).parts,
                 "unsafe archive membership",
             )
             seen.add(name)
             expected = manifest["files"].get(name)
             need(expected is not None, "archive member absent from complete manifest")
+            if name in inventory_pointers:
+                need(
+                    member.issym()
+                    and not member.islnk()
+                    and member.size == 0
+                    and member.linkname == inventory_pointers[name]
+                    and expected == dict(kind="symlink", target=member.linkname),
+                    "inventory pointer differs from manifest",
+                )
+                continue  # Do not dereference/extract/cache-credit this pointer.
+            inventory_member = name in inventory_parents or any(
+                name == root or name.startswith(root + "/")
+                for root in inventory_generations
+            )
+            producer_member = (
+                bool(inventory_pointers)
+                and name == "source/scripts/cloudbench-machine-readiness.py"
+            )
+            if inventory_member or producer_member:
+                if expected.get("kind") == "directory":
+                    need(member.isdir(), "inventory directory is not physical")
+                else:
+                    need(
+                        member.isfile()
+                        and expected.get("kind") == "file"
+                        and member.size == expected["bytes"],
+                        "inventory member is not a physical file",
+                    )
+                    stream = archive.extractfile(member)
+                    digest_value = hashlib.sha256()
+                    total = 0
+                    while block := stream.read(1024 * 1024):
+                        total += len(block)
+                        digest_value.update(block)
+                    need(
+                        total == member.size
+                        and digest_value.hexdigest() == expected["sha256"],
+                        "inventory member bytes differ",
+                    )
             # Any alias under task/claim roots makes a missing record ambiguous.
             if name == "context" or name.startswith(
                 (
@@ -222,12 +344,17 @@ def archive_members(run, closure, request, config, inputs):
                     "git-common/cloudbench-native-effect-fences",
                 )
             ):
-                need(not member.issym() and not member.islnk(), "claim namespace contains an alias")
+                need(
+                    not member.issym() and not member.islnk(),
+                    "claim namespace contains an alias",
+                )
             if name.startswith("git-common/cloudbench-native-effect-fences/"):
                 for part in Path(name).parts:
                     if re.fullmatch("[0-9a-f]{14}", part):
                         hold(part, name, expected)
-            current_claim = name.startswith("git-common/cloudbench-archived-reuse/current/")
+            current_claim = name.startswith(
+                "git-common/cloudbench-archived-reuse/current/"
+            )
             if current_claim and re.fullmatch("[0-9a-f]{14}", Path(name).stem):
                 hold(Path(name).stem, name, expected)
             sensitive = (
@@ -235,7 +362,9 @@ def archive_members(run, closure, request, config, inputs):
                 or name == imported
                 or "/archived-reuse/" in name
                 or "/archived-reuse-journal/" in name
-                or name.endswith(("/.cid", "/archived-reuse-proof.json", "/archived-successor.json"))
+                or name.endswith(
+                    ("/.cid", "/archived-reuse-proof.json", "/archived-successor.json")
+                )
             )
             if not sensitive or member.isdir():
                 continue
@@ -271,6 +400,9 @@ def archive_members(run, closure, request, config, inputs):
                     if index < len(request["candidates"]):
                         hold(request["candidates"][index]["machine_id"], name, expected)
     need(seen == set(manifest["files"]), "incomplete closed-world archive")
+    if inventory_pointers:
+        closure["inventory_pointer_proof"] = dict(schema="cloudbench-archived-inventory-pointer-v1", pointers=inventory_pointers,
+            producer_sha256=INVENTORY_PRODUCER_SHA256, followed=False, capacity_credit=0, claim_credit=0)
     custody = "ARCHIVED_IMPORT"
     expected_file = [
         row
@@ -1085,6 +1217,8 @@ def prepare(run, inventory_path):
             inputs=inputs,
         ),
     )
+    if closure.get("inventory_pointer_proof"):
+        result["archive"]["inventory_pointer_proof"] = closure["inventory_pointer_proof"]
     if request_custody == "HOST_BOUND_NOT_IMPORTED":
         result["archive"].update(request_binding)
     if inherited_scopes:

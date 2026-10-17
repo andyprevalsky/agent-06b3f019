@@ -157,23 +157,146 @@ class Unused(unittest.TestCase):
         with tarfile.open(export / "originals.tar.gz", "w:gz") as archive:
             for name, data in self.members.items():
                 member = tarfile.TarInfo(name)
-                member.size = len(data)
-                archive.addfile(member, io.BytesIO(data))
-                files[name] = dict(kind="file", bytes=len(data), sha256=H["sha"](data))
+                if data is None:
+                    member.type = tarfile.DIRTYPE
+                    archive.addfile(member)
+                    files[name] = dict(kind="directory")
+                elif isinstance(data, tuple):
+                    kind, target = data
+                    member.type = (
+                        tarfile.SYMTYPE if kind == "symlink" else tarfile.LNKTYPE
+                    )
+                    member.linkname = target
+                    archive.addfile(member)
+                    files[name] = dict(kind=kind, target=target)
+                else:
+                    member.size = len(data)
+                    archive.addfile(member, io.BytesIO(data))
+                    files[name] = dict(
+                        kind="file", bytes=len(data), sha256=H["sha"](data)
+                    )
         (export / "originals.tar.gz").chmod(0o600)
         manifest = json.loads((export / "manifest.json").read_bytes())
-        manifest.update(files=files, archive_sha256=H["sha"]((export / "originals.tar.gz").read_bytes()))
+        manifest.update(
+            files=files,
+            archive_sha256=H["sha"]((export / "originals.tar.gz").read_bytes()),
+        )
         write(export / "manifest.json", manifest)
         verified = json.loads((export / "disposable-export.verified.json").read_bytes())
         verified["files"] = {
             name: H["sha"]((export / name).read_bytes())
-            for name in ("caller.json", "launch.json", "manifest.json", "originals.tar.gz")
+            for name in (
+                "caller.json",
+                "launch.json",
+                "manifest.json",
+                "originals.tar.gz",
+            )
         }
-        verified["authority_sha256"] = H["sha"]((self.closed / "authority.private.json").read_bytes())
+        verified["authority_sha256"] = H["sha"](
+            (self.closed / "authority.private.json").read_bytes()
+        )
         write(export / "disposable-export.verified.json", verified)
         cleanup = json.loads((self.closed / "cleanup-call.intent.json").read_bytes())
-        cleanup["export_verified_file"] = H["sha"]((export / "disposable-export.verified.json").read_bytes())
+        cleanup["export_verified_file"] = H["sha"](
+            (export / "disposable-export.verified.json").read_bytes()
+        )
         write(self.closed / "cleanup-call.intent.json", cleanup)
+
+    def inventory_pointer_fixture(self):
+        parent = "context/fleet/runs/20261017-225357-1706/inventory"
+        target = ".generation-fixture"
+        generation = parent + "/" + target
+        self.members[parent] = None
+        self.members[parent + "/current"] = ("symlink", target)
+        for name in (generation, generation + "/machines", generation + "/names"):
+            self.members[name] = None
+        self.members[generation + "/health"] = (
+            b"publisher_token=fixture\nvalid_until=123\ngeneration=.generation-fixture\n"
+        )
+        self.members[generation + "/published_at"] = b"1\n"
+        self.members[generation + "/admission-machines.json"] = b"[]\n"
+        self.members[generation + "/machines/" + self.mid] = b"state=stopped\n"
+        self.members[generation + "/names/cloudbench-fixture"] = (
+            self.mid + "\n"
+        ).encode()
+        source = (ROOT / "scripts/cloudbench-machine-readiness.py").read_bytes()
+        self.members["source/scripts/cloudbench-machine-readiness.py"] = source
+        config_path = self.outer / "launch-1/config.private.json"
+        config = json.loads(config_path.read_bytes())
+        config["source_files"] = {"cloudbench-machine-readiness.py": H["sha"](source)}
+        write(config_path, config)
+        launch_path = self.outer / "controller-launch.intent.json"
+        launch = json.loads(launch_path.read_bytes())
+        launch["config_sha256"] = H["sha"](config_path.read_bytes())
+        write(launch_path, launch)
+        self.seal()
+        return parent, generation
+
+    def test_inventory_current_pointer_is_cache_not_claim_authority(self):
+        self.inventory_pointer_fixture()
+        result = M["prepare"](self.outer, self.inventory)
+        self.assertEqual(
+            [row["machine_id"] for row in result["candidates"]], [self.mid]
+        )
+        proof = result["archive"]["inventory_pointer_proof"]
+        self.assertFalse(proof["followed"])
+        self.assertEqual(proof["claim_credit"], 0)
+        self.assertEqual(proof["capacity_credit"], 0)
+
+    def test_inventory_pointer_rejects_unsafe_foreign_and_missing_targets(self):
+        parent, generation = self.inventory_pointer_fixture()
+        for target in (
+            "/tmp/foreign",
+            "../../claim",
+            ".generation-fixture/../foreign",
+            ".generation-missing",
+        ):
+            self.members[parent + "/current"] = ("symlink", target)
+            self.seal()
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                M["prepare"](self.outer, self.inventory)
+        self.members[parent + "/current"] = ("symlink", Path(generation).name)
+        self.members[generation + "/machines/" + self.mid] = ("symlink", "../../claim")
+        self.seal()
+        with self.assertRaises(ValueError):
+            M["prepare"](self.outer, self.inventory)
+        self.members[generation + "/machines/" + self.mid] = (
+            "hardlink",
+            generation + "/health",
+        )
+        self.seal()
+        with self.assertRaises(ValueError):
+            M["prepare"](self.outer, self.inventory)
+        self.members[generation + "/machines/" + self.mid] = b"state=stopped\n"
+        foreign = "context/fleet/runs/foreign/inventory/current"
+        self.members[foreign] = ("symlink", Path(generation).name)
+        self.seal()
+        with self.assertRaisesRegex(ValueError, "claim namespace contains an alias"):
+            M["prepare"](self.outer, self.inventory)
+        del self.members[foreign]
+        self.members[
+            "context/fleet/runs/20261017-225357-1706/task/archived-reuse-journal/current"
+        ] = ("symlink", ".generation-fixture")
+        self.seal()
+        with self.assertRaisesRegex(ValueError, "claim namespace contains an alias"):
+            M["prepare"](self.outer, self.inventory)
+
+    def test_inventory_pointer_tar_and_manifest_must_match(self):
+        parent, _ = self.inventory_pointer_fixture()
+        manifest_path = self.closed / "export/manifest.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest["files"][parent + "/current"]["target"] = ".generation-other"
+        write(manifest_path, manifest)
+        verified_path = self.closed / "export/disposable-export.verified.json"
+        verified = json.loads(verified_path.read_bytes())
+        verified["files"]["manifest.json"] = H["sha"](manifest_path.read_bytes())
+        write(verified_path, verified)
+        cleanup_path = self.closed / "cleanup-call.intent.json"
+        cleanup = json.loads(cleanup_path.read_bytes())
+        cleanup["export_verified_file"] = H["sha"](verified_path.read_bytes())
+        write(cleanup_path, cleanup)
+        with self.assertRaises(ValueError):
+            M["prepare"](self.outer, self.inventory)
 
     def test_closed_startup_binds_real_host_request_without_claiming_import(self):
         config = json.loads((self.outer / "launch-1/config.private.json").read_bytes())
