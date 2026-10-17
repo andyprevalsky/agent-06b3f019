@@ -17900,7 +17900,7 @@ RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
     exec env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
         ROOT_DIR="$ROOT_DIR" SELF_MANAGED_HUB_RUN="$SELF_MANAGED_HUB_RUN" \
         FLEET_CONTROLLER_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" \
-        python3 - "$UNIFIED_DIR/report-card.json" <<'PY'
+        python3 -u - "$UNIFIED_DIR/report-card.json" <<'PY'
 import json, os, sys
 from pathlib import Path
 from datetime import datetime, timezone

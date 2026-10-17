@@ -22,6 +22,7 @@ if os.environ['FAIL_IMPORT']=='1' and not (root/'import-failed').exists():
  raise SystemExit('fixture import failure')
 def publish_live_report_card(card,*,run_id,state_path):
  assert run_id=='parent-fixture' and state_path==root/'batch/hub-live-publication.json'
+ print('publication-visible-'+str(card['metadata']['tokens_in']))
  with (root/'events').open('a') as stream:stream.write(json.dumps({'kind':'publish','pid':os.getpid(),'card':card})+'\n')
  return True
 '''
@@ -61,8 +62,9 @@ class PersistentAggregator(unittest.TestCase):
                  FLEET_DIR=str(root/'fleet'),UNIFIED_DIR=str(root/'batch'),DASH_BASE='12345',ROOT_DIR=str(root),
                  SELF_MANAGED_HUB_RUN='1',FLEET_CONTROLLER_STARTED_EPOCH='1700000000',BENCHMARK_HUB_PARENT_RUN_ID='parent-fixture')
         stderr=(root/'stderr').open('w');self.addCleanup(stderr.close)
+        stdout=(root/'stdout').open('w');self.addCleanup(stdout.close)
         script=chunk+'\nprintf "%s" "$UNIFIED_AGG_PID" > "$CASE/owner-pid"\nwait "$UNIFIED_AGG_PID"\n'
-        process=subprocess.Popen(['bash','-c',script],env=env,stdout=subprocess.DEVNULL,stderr=stderr,start_new_session=True)
+        process=subprocess.Popen(['bash','-c',script],env=env,stdout=stdout,stderr=stderr,start_new_session=True)
         def cleanup():
             if process.poll()is None:
                 os.killpg(process.pid,signal.SIGTERM)
@@ -90,6 +92,7 @@ class PersistentAggregator(unittest.TestCase):
         owner=int((root/'owner-pid').read_text())
         if old:process.wait(timeout=4)
         else:
+            self.assertEqual((root/'stdout').read_text().count('publication-visible-'),target,'persistent publication stdout remained buffered until owner stop')
             # The existing recorded owner is the Python process itself, with no sleep child.
             children=subprocess.check_output(['ps','-axo','pid=,ppid='],text=True)
             self.assertFalse(any(len(row.split())==2 and row.split()[1]==str(owner)for row in children.splitlines()))
