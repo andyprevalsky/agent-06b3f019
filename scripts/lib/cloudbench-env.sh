@@ -2279,5 +2279,5 @@ PY
 }
 
 cloudbench_mutation_admission() {
-  python3 -c "$(cloudbench_mutation_launch_code)" "$@"
+  python3 -S -c "$(cloudbench_mutation_launch_code)" "$@"
 }

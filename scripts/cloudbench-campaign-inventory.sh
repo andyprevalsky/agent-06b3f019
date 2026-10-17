@@ -22,7 +22,7 @@ export FLY_API_TOKEN
 FLY() {
     if [ "$#" = 5 ] && [ "$1" = machines ] && [ "$2" = list ] \
         && [ "$3" = -a ] && [ "$4" = "$APP" ] && [ "$5" = --json ]; then
-        python3 "$SOURCE/cloudbench-campaign-machines.py" "$APP" "$SNAPSHOT_REFRESH_TIMEOUT"
+        python3 -S "$SOURCE/cloudbench-campaign-machines.py" "$APP" "$SNAPSHOT_REFRESH_TIMEOUT"
     else
         flyctl "$@"
     fi
