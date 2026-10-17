@@ -308,8 +308,12 @@ def transfer_sidecars(api,mid,record,out,envelope_sha,deadline,cancelled=lambda:
    response=api.api(method,url,body,timeout=max(1,int(min(20,deadline-time.time()))),observer=observer)
   save(journal/(prefix+'.response.json'),response);active();return response
  def current():
-  native=wire('GET','/machines/'+mid,kind='identity')
-  need(native['id']==mid and native['instance_id']==record['instance_id'] and native['config']==record['config'],'payload target incarnation changed')
+  while True:
+   native=wire('GET','/machines/'+mid,kind='identity')
+   need(native['id']==mid and native['instance_id']==record['instance_id'] and native['config']==record['config'],'payload target incarnation changed')
+   if native.get('state')=='started':return
+   need(native.get('state')in('created','starting'),'payload target is not starting')
+   active();time.sleep(min(.2,max(0,deadline-time.time())))
  def send(request,label,expected):
   active();current()
   command=exec_command(REMOTE_SIDECAR,request);need(len(command.encode())<100000,'bounded payload chunk command required')

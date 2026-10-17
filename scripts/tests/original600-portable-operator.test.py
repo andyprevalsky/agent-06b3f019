@@ -48,20 +48,23 @@ class Portable(unittest.TestCase):
         self.assertEqual(descriptor['encoding'],'external-gzip')
         return raw,payload,digest,descriptor
 
-    def sidecar_api(self, guest, envelope, fail_ack=False, foreign=False):
+    def sidecar_api(self, guest, envelope, fail_ack=False, foreign=False, starting=False):
         (guest/'controller-launch-payload.json.gz').write_bytes(envelope.read_bytes())
         (guest/'controller-launch-payload.json.gz').chmod(0o600)
         ref=json.loads(gzip.decompress(envelope.read_bytes()))['source_ref']
-        record=dict(id='1'*14,instance_id='original-instance',config=dict(env=dict(GATE_REF=ref)))
+        record=dict(id='1'*14,state='started',instance_id='original-instance',config=dict(env=dict(GATE_REF=ref)))
         owner=self
         class API:
             posts=0
+            gets=0
             actions=[]
             max_command_bytes=0
             def api(self,method,path,body=None,timeout=None,observer=None):
                 owner.assertEqual(path,'/machines/'+'1'*14+('/exec' if method=='POST' else ''))
                 if method=='GET':
+                    self.gets+=1
                     response=dict(record,instance_id='foreign' if foreign else record['instance_id'])
+                    if starting and self.gets==1:response['state']='starting'
                     if observer:observer(method,path,200,json.dumps(response).encode())
                     return response
                 self.posts+=1
@@ -112,6 +115,19 @@ class Portable(unittest.TestCase):
             self.assertEqual(len(list((host/'payload-transfer').glob('*.pending.json'))),1)
             self.assertFalse((host/'payload-transfer/complete.json').exists())
             self.assertEqual(len(list(guest.glob('controller-sidecar-*/*'))),1)
+
+    def test_sidecar_waits_for_same_instance_to_start_before_exec(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);host=root/'host';guest=root/'guest';host.mkdir();guest.mkdir()
+            _,envelope,digest,_=self.large_sidecar(host)
+            api,record=self.sidecar_api(guest,envelope,starting=True)
+            original=api.api
+            def guarded(method,*args,**kwargs):
+                if method=='POST':self.assertGreaterEqual(api.gets,2)
+                return original(method,*args,**kwargs)
+            api.api=guarded
+            RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60)
+            self.assertTrue((host/'payload-transfer/complete.json').exists())
 
     def test_sidecar_lost_ack_reconciles_by_read_without_replaying_write(self):
         with tempfile.TemporaryDirectory() as name:
