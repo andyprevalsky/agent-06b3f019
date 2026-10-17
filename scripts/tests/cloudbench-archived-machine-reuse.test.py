@@ -107,6 +107,70 @@ def fixture(count=1):
 
 
 class Tests(unittest.TestCase):
+    def test_direct_observation_does_not_reload_private_io(self):
+        import time
+
+        _, machines, _ = fixture()
+        original = H["runpy"].run_path
+        for phase in ("result-save", "result-read"):
+            with (
+                self.subTest(phase=phase),
+                native_read_server(machines[0]) as api,
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = {"http_returned": False, "reloads": 0}
+                call = api.api
+
+                def observed_http(*args, _call=call, _state=state, **kwargs):
+                    result = _call(*args, **kwargs)
+                    _state["http_returned"] = True
+                    return result
+
+                def slow_reload(path, *args, _state=state, _phase=phase, **kwargs):
+                    if (
+                        Path(path).name == "cloudbench-original600-runner.py"
+                        and _state["http_returned"]
+                    ):
+                        _state["reloads"] += 1
+                        if _state["reloads"] == (1 if _phase == "result-save" else 2):
+                            time.sleep(
+                                1
+                            )  # Same post-HTTP reload boundaries as the retained failures.
+                    return original(path, *args, **kwargs)
+
+                adapter = H["NativeAdapter"](api, directory)
+                with (
+                    mock.patch.object(api, "api", side_effect=observed_http),
+                    mock.patch.object(H["runpy"], "run_path", side_effect=slow_reload),
+                ):
+                    observed = adapter.observe_inactive(
+                        "/machines/" + machines[0]["id"], time.monotonic() + 0.75
+                    )
+                self.assertEqual(observed, machines[0])
+                self.assertTrue(state["http_returned"])
+                self.assertEqual(state["reloads"], 0)
+                raw = json.loads(
+                    next(Path(directory).glob("*/0001-wire.json")).read_bytes()
+                )
+                self.assertEqual(raw["status"], 200)
+                self.assertTrue(next(Path(directory).glob("*/result.json")).is_file())
+
+    def test_private_io_keeps_exclusive_write_and_private_read_guards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receipt.json"
+            H["save"](path, {"receipt": "original"})
+            self.assertEqual(json.loads(H["private"](path)), {"receipt": "original"})
+            with self.assertRaises(FileExistsError):
+                H["save"](path, {"receipt": "replacement"})
+            path.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "private current-owner"):
+                H["private"](path)
+            path.chmod(0o600)
+            alias = Path(directory) / "alias.json"
+            alias.symlink_to(path)
+            with self.assertRaisesRegex(ValueError, "physical private input"):
+                H["private"](alias)
+
     def test_claim_observation_avoids_slow_child_startup(self):
         import time
 

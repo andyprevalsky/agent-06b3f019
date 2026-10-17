@@ -40,14 +40,19 @@ def module(name):
     return runpy.run_path(str(HERE / name))
 
 
+# The immutable snapshot pins this dependency. Resolve it before native effects,
+# so private receipt reads/writes never reload a module inside an observation.
+_PRIVATE_IO = module("cloudbench-original600-runner.py")
+
+
 def private(path):
-    return module("cloudbench-original600-runner.py")["read"](path)
+    return _PRIVATE_IO["read"](path)
 
 
 def save(path, value):
     path = Path(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    module("cloudbench-original600-runner.py")["save"](path, value)
+    _PRIVATE_IO["save"](path, value)
 
 
 def exact_or_save(path, value):
