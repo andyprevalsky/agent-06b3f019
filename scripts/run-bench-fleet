@@ -17889,7 +17889,7 @@ fleet_infra_canary_preflight() {
     # controller lifecycle lock, so nested fleet entry cannot self-deadlock.
     if CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="${POOL_COLD_BOOTSTRAP:-0}" \
         CLOUDBENCH_INFRA_CANARY_REF="${BENCH_REF:-}" \
-        python3 "$INFRA_CANARY_PREFLIGHT_SCRIPT" \
+        python3 -S "$INFRA_CANARY_PREFLIGHT_SCRIPT" \
         --stamp "$stamp" \
         --lock "$lock" \
         --ttl-seconds "$ttl" \

@@ -366,6 +366,23 @@ class Portable(unittest.TestCase):
             self.assertNotEqual(result.returncode,0)
             self.assertIn(b'FileNotFoundError',result.stderr)
 
+    def test_launch_payload_verification_allows_read_access_time_update(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            path, digest, _ = RUNNER['launch_handoff'](
+                root, {'remote_files': [], 'tasks': ['unchanged']}
+            )
+            # A legitimate read updates an old atime without changing content.
+            os.utime(path, ns=(1, path.stat().st_mtime_ns))
+            gate = (ROOT/'scripts/run-cloudbench-controller-gate').read_text()
+            verifier = gate.split("<<'PY_LAUNCH_PAYLOAD'", 1)[1].split('\nPY_LAUNCH_PAYLOAD', 1)[0]
+            result = subprocess.run(
+                [sys.executable, '-c', verifier, str(path), digest],
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertGreater(path.stat().st_atime_ns, 1)
+
     def test_popen_e2big_writes_positive_no_gate_receipt(self):
         with tempfile.TemporaryDirectory() as name:
             root=Path(name);config=private(root/'config',{})

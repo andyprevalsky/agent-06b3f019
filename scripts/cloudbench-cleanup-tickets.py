@@ -23,6 +23,7 @@ import time
 
 MB = 1048576
 NESTED = '__infra_canary__'
+PARENT_PREFLIGHT = '__campaign_preflight__'
 
 class Deadline(Exception): pass
 
@@ -203,7 +204,7 @@ def prepare(args):
                 available=free_bytes(reserve_root)-liability-slots*args.headroom*MB
                 need(available>=slots*args.minimum*MB,'insufficient physical cleanup cohort floors')
                 amount=min(args.preferred,available//(slots*MB))
-                budget=dict(schema='cloudbench-cleanup-ticket-budget-v1',cohort=str(cohort),cohort_id=args.cohort_id,parent_pid=args.parent_pid,parent_start=args.parent_start,parent_lock_identity=parent_identity,device=device,reserve_root=str(reserve_root),preferred=args.preferred,minimum=args.minimum,headroom=args.headroom,amount=amount,job_count=len(jobs),members_sha256=digest(sorted(jobs)),global_root=str(root),global_budget_id=grant_id,deadline=manifest.get('e2e_deadline_monotonic',args.deadline),canary_script=args.canary_script or '',canary_sha256=hashlib.sha256(Path(args.canary_script).read_bytes()).hexdigest() if args.canary_script else '',canary_lock=args.canary_lock or '')
+                budget=dict(schema='cloudbench-cleanup-ticket-budget-v1',cohort=str(cohort),cohort_id=args.cohort_id,parent_pid=args.parent_pid,parent_start=args.parent_start,parent_lock_identity=parent_identity,device=device,reserve_root=str(reserve_root),preferred=args.preferred,minimum=args.minimum,headroom=args.headroom,amount=amount,job_count=len(jobs),members_sha256=digest(sorted(jobs)),global_root=str(root),global_budget_id=grant_id,deadline=manifest.get('e2e_deadline_monotonic',args.deadline),canary_script=args.canary_script or '',canary_sha256=hashlib.sha256(Path(args.canary_script).read_bytes()).hexdigest() if args.canary_script else '',canary_lock=args.canary_lock or '',canary_source_ref=getattr(args,'canary_source_ref',None) or '',canary_ticket_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),canary_runner_sha256=hashlib.sha256((Path(args.canary_script).parent/'run-fleet-infra-canary').read_bytes()).hexdigest() if args.canary_script and (Path(args.canary_script).parent/'run-fleet-infra-canary').is_file() else '')
                 write(base/'budget.json',budget)
                 write(grant_path,dict(base=str(base),budget_sha256=digest(budget)))
         # The durable grant covers the complete cohort while tickets are minted;
@@ -260,8 +261,9 @@ def nested_identity(budget, owner_pid, origin):
             return
         fields=Path('/proc',str(current),'stat').read_text().rsplit(') ',1)[1].split()
         argv=Path('/proc',str(current),'cmdline').read_bytes().split(b'\0')
-        if len(argv)>2 and Path(argv[1].decode()).name==Path(script).name and b'--lock' in argv:
-            actual_script=Path(argv[1].decode());physical(actual_script)
+        script_index = 2 if len(argv)>2 and argv[1] == b'-S' else 1
+        if len(argv)>script_index and Path(argv[script_index].decode()).name==Path(script).name and b'--lock' in argv:
+            actual_script=Path(argv[script_index].decode());physical(actual_script)
             need(hashlib.sha256(actual_script.read_bytes()).hexdigest()==budget['canary_sha256'],'nested canary source changed')
             index=argv.index(b'--lock');need(argv[index+1].decode()==str(path),'foreign nested transaction')
             info=physical(path);need(path.read_text().strip()==str(current),'nested lock PID changed')
@@ -312,8 +314,12 @@ def claim_inner(args):
             signal.setitimer(signal.ITIMER_REAL,min(armed,remaining))
         need(parent_active(budget) and not (base/'closing.json').exists(),'cleanup cohort parent retired')
         if args.nested:
-            origin=read(generation(base,'owners',args.job,args.generation))
-            need(read(keyed(base,'current',args.job))==origin,'nested origin assignment changed')
+            if args.job == PARENT_PREFLIGHT:
+                need(args.generation == 1 and re.fullmatch('[0-9a-f]{40}', budget.get('canary_source_ref', '')), 'invalid parent preflight origin')
+                origin = {'owner_pid': budget['parent_pid'], 'owner_start': budget['parent_start'], 'budget_sha256': digest(budget)}
+            else:
+                origin=read(generation(base,'owners',args.job,args.generation))
+                need(read(keyed(base,'current',args.job))==origin,'nested origin assignment changed')
             nested_identity(budget,args.owner_pid,origin);args.job=job;args.generation=1
             record=owner_record(args,budget);current=keyed(base,'current',job)
             if current.exists():
@@ -408,7 +414,7 @@ def retire(args):
 
 def parse(argv=None):
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=['prepare','assign','claim','release','retire'])
-    for name in ('cohort','cohort-id','manifest','reserve-root','job','reserve','parent-start','owner-start','canary-script','canary-lock'):parser.add_argument('--'+name)
+    for name in ('cohort','cohort-id','manifest','reserve-root','job','reserve','parent-start','owner-start','canary-script','canary-lock','canary-source-ref'):parser.add_argument('--'+name)
     for name in ('parent-pid','owner-pid','generation'):parser.add_argument('--'+name,type=int)
     for name,default in [('preferred',512),('minimum',32),('headroom',256)]:parser.add_argument('--'+name,type=int,default=default)
     parser.add_argument('--deadline',type=float);parser.add_argument('--nested',action='store_true');return parser.parse_args(argv)

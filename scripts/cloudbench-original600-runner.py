@@ -480,7 +480,14 @@ def run(config_path,config_sha,out,*,github_token=None):
    if mid is None and ownership.exists():
     record=json.loads(read(ownership));need(record['authority_sha256']==sha(authority.read_bytes()),'wrong controller ownership');mid=record['machine']['id'];need(mid not in auth['protected_machines'],'protected controller ID')
     save(out/'controller.identity.json',dict(machine=mid,instance=record['machine']['instance_id'],source_ref=ref,authority_sha256=sha(authority.read_bytes())))
-    transfer_sidecars(api,mid,record['machine'],out,payload_sha,epoch+5400,lambda:stop[0])
+    if 'cloudbench-controller-bulk-transfer.py' in v['source_files']:
+     import runpy
+     bulk_path=Path(__file__).with_name('cloudbench-controller-bulk-transfer.py')
+     need(sha(bulk_path.read_bytes())==v['source_files'][bulk_path.name],'bulk helper source changed')
+     runpy.run_path(str(bulk_path))['transfer'](api,mid,record['machine'],out,payload_sha,epoch+5400,lambda:stop[0],runtime=globals(),source_sha256=v['source_files'][bulk_path.name])
+    else:
+     need(v.get('host_operator_provenance') and v['source_files']['cloudbench-original600-runner.py']!=sha(Path(__file__).read_bytes()),'fragment transfer requires explicit historical workload compatibility')
+     transfer_sidecars(api,mid,record['machine'],out,payload_sha,epoch+5400,lambda:stop[0])
    if cleanup is None and mid and time.monotonic()>=next_probe:
     payload=dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name,action='PROBE')
     try:

@@ -1228,7 +1228,8 @@ def main() -> int:
                             "--minimum", policy.get("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "32"),
                             "--headroom", policy.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256"),
                             "--canary-script", str(root / "scripts/cloudbench-infra-canary-preflight.py"),
-                            "--canary-lock", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock"))
+                            "--canary-lock", policy.get("FLEET_INFRA_CANARY_LOCK", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock")),
+                            "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
                         current_cohort["_cleanup_tickets_prepared"] = True
                     current_cohort["status"] = "waiting"
                     if inventory_directory is not None:
@@ -1294,6 +1295,121 @@ def main() -> int:
                                 "Campaign canonical fixture preflight failed; no cohort controller admitted"
                             )
                         write_json_atomic(summary_path, state)
+                    if not barrier_failure and not current_cohort.get("_canary_proof"):
+                        try:
+                            policy = (
+                                dict(stress_environment)
+                                if stress_environment is not None
+                                else os.environ.copy()
+                            )
+                            for key in (
+                                "CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT",
+                                "CLOUDBENCH_COHORT_PREFLIGHT_SHA256",
+                            ):
+                                policy.pop(key, None)
+                            ref = subprocess.check_output(
+                                ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+                            ).strip()
+                            requested_ref = next(
+                                (
+                                    args.forward_arg[i + 1]
+                                    for i, arg in enumerate(args.forward_arg[:-1])
+                                    if arg == "--ref"
+                                ),
+                                ref,
+                            )
+                            bench_ref = subprocess.check_output(
+                                ["git", "-C", str(workspace), "rev-parse", requested_ref + "^{commit}"],
+                                text=True,
+                            ).strip()
+                            policy.update(
+                                RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(current_cohort["_directory"]),
+                                RUN_BENCH_CAMPAIGN_COHORT=str(current_cohort["cohort_id"]),
+                                RUN_BENCH_CLEANUP_COHORT_DIR=str(current_cohort["_directory"]),
+                                RUN_BENCH_CLEANUP_COHORT_ID=str(current_cohort["cohort_id"]),
+                                RUN_BENCH_CLEANUP_JOB="__campaign_preflight__",
+                                RUN_BENCH_CLEANUP_GENERATION="1",
+                                CLOUDBENCH_CAMPAIGN_PARENT_PREFLIGHT="1",
+                                CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="1"
+                                if "--cold-primary-bootstrap" in args.forward_arg
+                                else "0",
+                                CLOUDBENCH_INFRA_CANARY_REF=bench_ref,
+                            )
+                            if e2e_deadline is not None:
+                                policy["RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC"] = str(e2e_deadline)
+                            for key, default in (
+                                ("FLEET_INFRA_CANARY_TTL_SECONDS", "3600"),
+                                ("FLEET_INFRA_CANARY_PREFLIGHT_N", "2"),
+                            ):
+                                if (
+                                    not policy.get(key, default).isdigit()
+                                    or int(policy.get(key, default)) <= 0
+                                ):
+                                    policy[key] = default
+                            argv = [
+                                sys.executable,
+                                "-S",
+                                str(root / "scripts/cloudbench-infra-canary-preflight.py"),
+                                "--stamp",
+                                policy.get(
+                                    "FLEET_INFRA_CANARY_STAMP",
+                                    str(workspace / ".context/fleet-infra-canary.last-pass"),
+                                ),
+                                "--lock",
+                                policy.get(
+                                    "FLEET_INFRA_CANARY_LOCK",
+                                    str(
+                                        workspace / ".context/fleet-infra-canary-preflight.transaction.lock"
+                                    ),
+                                ),
+                                "--ttl-seconds",
+                                policy.get("FLEET_INFRA_CANARY_TTL_SECONDS", "3600"),
+                                "--width",
+                                policy.get("FLEET_INFRA_CANARY_PREFLIGHT_N", "2"),
+                                "--canary",
+                                str(root / "scripts/run-fleet-infra-canary"),
+                                "--nested-controller-lock",
+                                "cloudbench-controller-infra-canary-preflight.lock",
+                            ]
+                            log = current_cohort["_directory"] / "infra-canary-preflight.private.log"
+                            with log.open("w") as stream:
+                                log.chmod(0o600)
+                                child = subprocess.Popen(
+                                    argv, cwd=workspace, env=policy, stdout=stream, stderr=subprocess.STDOUT
+                                )
+                                terminated = False
+                                try:
+                                    while child.poll() is None:
+                                        if not terminated and (
+                                            stop_signal
+                                            or deadline_expired()
+                                            or inventory_process is not None
+                                            and inventory_process.poll() is not None
+                                        ):
+                                            child.terminate()
+                                            terminated = True
+                                        try:
+                                            child.wait(timeout=0.2)
+                                        except subprocess.TimeoutExpired:
+                                            pass
+                                finally:
+                                    if child.poll() is None:
+                                        child.terminate()
+                                        child.wait()
+                            if child.returncode or stop_signal or deadline_expired():
+                                raise ValueError("parent infrastructure canary did not pass")
+                            receipt = current_cohort["_directory"] / "infra-canary-preflight.pass.json"
+                            current_cohort["_canary_proof"] = {
+                                "path": str(receipt),
+                                "sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+                            }
+                        except (OSError, ValueError, subprocess.SubprocessError):
+                            first_failure = first_failure or 1
+                            barrier_failure = True
+                            abort_startup_cohort(
+                                current_cohort, "canonical parent N2 failed before worker admission"
+                            )
+                            write_json_atomic(summary_path, state)
             launched_this_round = False
             while (
                 pending
@@ -1306,6 +1422,8 @@ def main() -> int:
                 job = pending.popleft()
                 launched_this_round = True
                 environment = dict(stress_environment) if stress_environment is not None else os.environ.copy()
+                for key in ("CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT", "CLOUDBENCH_COHORT_PREFLIGHT_SHA256", "CLOUDBENCH_CAMPAIGN_PARENT_PREFLIGHT"):
+                    environment.pop(key, None)
                 # Group membership is distinct from publication ownership. Each
                 # child still registers, publishes and acknowledges its own run;
                 # the Hub projects these durable members as one campaign.
@@ -1346,6 +1464,9 @@ def main() -> int:
                         environment["CLOUDBENCH_CAMPAIGN_SEED_PROOF"] = str(
                             current_cohort["_seed_proof"]
                         )
+                    proof = current_cohort["_canary_proof"]
+                    environment["CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT"] = proof["path"]
+                    environment["CLOUDBENCH_COHORT_PREFLIGHT_SHA256"] = proof["sha256"]
                     environment.update(
                         {
                             "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(

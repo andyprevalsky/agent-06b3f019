@@ -27,6 +27,8 @@ PINS = [
     'cloudbench-cohort-reconcile.py', 'cloudbench-shared-relay.py',
     'cloudbench-campaign-env.py', 'cloudbench-campaign-seed.py', 'cloudbench-port-lease.py',
     'cloudbench-operator-preflight.py', 'cloudbench-original600-runner.py',
+    'cloudbench-controller-bulk-transfer.py', 'run-bench-campaign.py',
+    'cloudbench-infra-canary-preflight.py',
     'run-original600-controller.py', 'cloudbench-archived-machine-reuse.py',
     'cloudbench-archived-reuse-effects.py', 'cloudbench-archived-reuse-transport.py',
     'cloudbench-retained-successor.py',
