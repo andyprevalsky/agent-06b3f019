@@ -7,6 +7,7 @@ import copy
 import json
 from pathlib import Path
 import time
+import uuid
 
 HERE = Path(__file__).resolve().parent
 
@@ -144,6 +145,19 @@ def reserve_cohort(api_factory, request, journal):
     validate_request(request)
     journal = Path(journal)
     journal.mkdir(parents=True, exist_ok=True, mode=0o700)
+    closed = journal / "reserved-request.json"
+    if closed.exists():
+        saved = validate_request(json.loads(private(closed)))
+        for key, value in request.items():
+            if key != "candidates":
+                need(saved.get(key) == value, "closed reservation plan input changed")
+        original = {row["machine_id"]: row for row in request["candidates"]}
+        for row in saved["candidates"]:
+            need(row["machine_id"] in original, "closed plan contains a foreign Machine")
+            for key, value in original[row["machine_id"]].items():
+                if key not in ("source_instance_id", "source_config_sha256", "prior_marker"):
+                    need(row.get(key) == value, "closed candidate identity changed")
+        return saved
 
     def reserve(row):
         out = journal / row["machine_id"]
@@ -165,16 +179,25 @@ def reserve_cohort(api_factory, request, journal):
             current = api.request("GET", url)
             if current["config"].get("metadata", {}).get(MARKER) != canonical(marker).decode():
                 same_source(row, current)
-                need(not (out / "intent.json").exists(), "unknown reservation update; reconcile only")
                 config = copy.deepcopy(current["config"])
                 config.setdefault("metadata", {})[MARKER] = canonical(marker).decode()
                 config["init"] = {"cmd": ["sleep", "infinity"]}
-                save(out / "original-native.json", current)
-                save(out / "source-exclusion.json", dict(predecessor=row, marker=marker))
-                save(
-                    out / "intent.json", dict(current_version=current["instance_id"], config_sha256=config_sha(config))
-                )
-                need(not cancelled.is_set(), "reservation admission interrupted before native update")
+                intent = dict(current_version=current["instance_id"], config_sha256=config_sha(config))
+                no_dispatch = dict(intent_sha256=sha(canonical(intent)), cancelled_before_dispatch=True)
+                if (out / "intent.json").exists():
+                    need(
+                        (out / "not-dispatched.json").exists()
+                        and json.loads(private(out / "not-dispatched.json")) == no_dispatch
+                        and not (out / "dispatch-entered.json").exists(),
+                        "unknown reservation update; reconcile only",
+                    )
+                exact_or_save(out / "original-native.json", current)
+                exact_or_save(out / "source-exclusion.json", dict(predecessor=row, marker=marker))
+                exact_or_save(out / "intent.json", intent)
+                if cancelled.is_set():
+                    exact_or_save(out / "not-dispatched.json", no_dispatch)
+                    raise ValueError("reservation admission interrupted before native update")
+                save(out / "dispatch-entered.json", dict(intent_sha256=sha(canonical(intent))))
                 ack = api.request(
                     "POST", url, dict(config=config, current_version=current["instance_id"], skip_launch=True)
                 )
@@ -211,9 +234,21 @@ def reserve_cohort(api_factory, request, journal):
     # Native calls only when invoked by the explicit operator --run path.
     workers = ThreadPoolExecutor(max_workers=16)
     futures = []
+    rows, held, errors = [], [], []
     try:
         futures = [workers.submit(reserve, row) for row in request["candidates"]]
-        rows = [future.result() for future in futures]
+        for row, future in zip(request["candidates"], futures):
+            try:
+                rows.append(future.result())
+            except Exception as error:
+                # A failed candidate is never assigned or credited. Other finite,
+                # independently leased reservations may still finish successfully.
+                record = dict(
+                    machine_id=row["machine_id"], not_credited=True, error_type=type(error).__name__, error=str(error)
+                )
+                save(journal / row["machine_id"] / ("held-" + uuid.uuid4().hex + ".json"), record)
+                held.append(record)
+                errors.append(error)
     except BaseException:
         cancelled.set()
         for future in futures:
@@ -221,8 +256,12 @@ def reserve_cohort(api_factory, request, journal):
         raise
     finally:
         workers.shutdown(wait=True, cancel_futures=True)
+    if not rows:
+        raise errors[0] if errors else ValueError("no native reservations confirmed")
     value = dict(request, candidates=rows)
-    exact_or_save(journal / "reserved-request.json", value)
+    if held:
+        value["held_native_reservations"] = held
+    exact_or_save(closed, value)
     return value
 
 

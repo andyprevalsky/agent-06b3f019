@@ -343,6 +343,90 @@ class IntegratedControls(unittest.TestCase):
                 H["reserve_cohort"](lambda out: API(), dict(request, cohort="f" * 32), Path(directory) / "foreign")
             self.assertEqual(len(posts), 1)
 
+    def test_unknown_candidate_is_held_while_others_finish_and_plan_closes(self):
+        request, machines, _ = fixture(2)
+        current = {m["id"]: copy.deepcopy(m) for m in machines}
+        first, second = [m["id"] for m in machines]
+        calls = []
+
+        class API:
+            @contextmanager
+            def lease(self, mid):
+                yield
+
+            def request(self, method, url, body=None, *, timeout=30):
+                mid = url.split("/")[-1]
+                calls.append((mid, method))
+                if mid == first:
+                    raise TimeoutError("read-only timeout")
+                if method == "POST":
+                    current[mid] = dict(current[mid], config=body["config"], instance_id="reserved", state="created")
+                return copy.deepcopy(current[mid])
+
+        with tempfile.TemporaryDirectory() as directory:
+            resolved = H["reserve_cohort"](lambda out: API(), request, directory)
+            self.assertEqual([r["machine_id"] for r in resolved["candidates"]], [second])
+            self.assertEqual([r["machine_id"] for r in resolved["held_native_reservations"]], [first])
+            self.assertTrue(resolved["held_native_reservations"][0]["not_credited"])
+            self.assertEqual(
+                H["capacity_demand"](resolved, list(current.values()), set(), require_reserved=True)[
+                    "new_machine_demand"
+                ],
+                600,
+            )
+            before = list(calls)
+            again = H["reserve_cohort"](
+                lambda out: self.fail("closed plan must not replay held operations"), request, directory
+            )
+            self.assertEqual(again, resolved)
+            self.assertEqual(calls, before)
+
+    def test_cancelled_before_dispatch_records_receipt_and_resumes_once(self):
+        import threading
+
+        request, machines, _ = fixture()
+        current = copy.deepcopy(machines[0])
+        posts = []
+        events = []
+        original_event = threading.Event
+
+        def event_factory():
+            value = original_event()
+            events.append(value)
+            return value
+
+        class API:
+            cancel = True
+
+            @contextmanager
+            def lease(self, mid):
+                yield
+
+            def request(self, method, url, body=None, *, timeout=30):
+                nonlocal current
+                if method == "GET":
+                    if self.cancel:
+                        events[0].set()
+                    return copy.deepcopy(current)
+                posts.append(body)
+                current = dict(current, config=body["config"], instance_id="reserved", state="created")
+                return copy.deepcopy(current)
+
+        api = API()
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(threading, "Event", side_effect=event_factory):
+                with self.assertRaisesRegex(ValueError, "interrupted before native update"):
+                    H["reserve_cohort"](lambda out: api, request, directory)
+            out = Path(directory) / current["id"]
+            before = (out / "intent.json").read_bytes()
+            self.assertTrue((out / "not-dispatched.json").is_file())
+            self.assertFalse((out / "dispatch-entered.json").exists())
+            self.assertEqual(posts, [])
+            api.cancel = False
+            H["reserve_cohort"](lambda out: api, request, directory)
+            self.assertEqual((out / "intent.json").read_bytes(), before)
+            self.assertEqual(len(posts), 1)
+
     def test_inactive_version_observation_is_bounded_and_exact(self):
         _, machines, _ = fixture()
         expected = copy.deepcopy(machines[0])

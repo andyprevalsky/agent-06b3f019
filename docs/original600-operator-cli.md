@@ -112,6 +112,14 @@ in the organization's measured total. All qualified candidates are considered
 before creating fresh Machines; protected or unproven candidates receive no
 credit.
 
+An individual reservation failure is retained as a held, uncredited candidate;
+it does not cancel unrelated reservations. The closed plan contains only
+confirmed reservations, and its uncertain candidates are never assigned or
+replayed. The final fresh capacity check still requires every remaining new
+Machine slot. Cancellation stops queued work and joins active operations;
+a prepared intent can resume only with its exact durable proof that dispatch
+did not begin. Unknown dispatched writes remain held.
+
 Reused Machines keep their IDs, names and attached physical Volumes. The storage
 mode is explicitly `retained-volume-fresh-generation`, not a newly created
 Volume. A new exclusive generation directory is mounted over `/data` in a
