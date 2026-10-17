@@ -402,7 +402,7 @@ def prepare(run, inventory_path):
             outer, before, row, machines[mid], request["cohort"], request["harness_ref"], inputs
         )
         candidate.pop("reservation")
-        candidate["legacy_archive_sha256"] = candidate["archive_sha256"]
+        candidate.setdefault("legacy_archive_sha256", candidate["archive_sha256"])
         candidate["archive_sha256"] = closure["inputs"][str((closed / "export/originals.tar.gz").absolute())]
         candidate["unused_reservation_proof"] = dict(
             controller=closure["controller"],

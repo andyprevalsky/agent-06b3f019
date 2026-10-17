@@ -185,6 +185,40 @@ class Unused(unittest.TestCase):
         self.assertEqual(row["source_instance_id"], self.current["instance_id"])
         self.assertIn(str(self.wire / "2/0001-wire.json"), value["archive"]["inputs"])
 
+    def test_repeated_unused_succession_preserves_original_archive_lineage(self):
+        legacy = "e" * 64
+        self.original["candidates"][0]["legacy_archive_sha256"] = legacy
+        self.request["candidates"][0]["legacy_archive_sha256"] = legacy
+        write(self.request_path, self.request)
+        write(
+            self.outer / "archived-reuse-original.private.json",
+            dict(
+                schema="original600-archived-admission-request-v1",
+                request=self.original,
+                sha256=hashlib.sha256(json.dumps(self.original, sort_keys=True, allow_nan=False).encode()).hexdigest(),
+            ),
+        )
+        directory = self.outer / "archived-reuse-reservations" / self.mid
+        exclusion = json.loads((directory / "source-exclusion.json").read_bytes())
+        exclusion["predecessor"] = self.original["candidates"][0]
+        write(directory / "source-exclusion.json", exclusion)
+        write(directory / "reserved.json", self.request["candidates"][0])
+        self.members[self.imported] = self.request_path.read_bytes()
+        self.seal()
+        config_path = self.outer / "launch-1/config.private.json"
+        config = json.loads(config_path.read_bytes())
+        request_sha = H["sha"](self.request_path.read_bytes())
+        config["remote_files"][0]["sha256"] = request_sha
+        config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"] = request_sha
+        write(config_path, config)
+        launch_path = self.outer / "controller-launch.intent.json"
+        launch = json.loads(launch_path.read_bytes())
+        launch["config_sha256"] = H["sha"](config_path.read_bytes())
+        write(launch_path, launch)
+        value = M["prepare"](self.outer, self.inventory)
+        self.assertEqual(value["candidates"][0]["legacy_archive_sha256"], legacy)
+        self.assertEqual(value["candidates"][0]["predecessor"], self.original["candidates"][0]["predecessor"])
+
     def successor_fixture(self, payload=False):
         launch_path = self.outer / "controller-launch.intent.json"
         launch = json.loads(launch_path.read_bytes())
