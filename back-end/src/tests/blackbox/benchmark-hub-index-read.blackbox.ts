@@ -1,9 +1,17 @@
 #!/usr/bin/env tsx
+import './benchmark-hub-overlay-env.fixture';
+import { hubLegacyArchiveStamp } from '../../providers/benchmarkHubStorage';
 /**
  * Cold Hub readers must observe a committed index or a durable failure, and a
  * fleet's queued live snapshots must not delay a final upload behind them.
  */
 import assert from 'node:assert/strict';
+import {
+  commitObject,
+  logicalObject,
+  objectETag,
+  type HubObjectInput,
+} from './benchmark-hub-r2.fixture';
 import { mock } from 'node:test';
 import { S3Client } from '@aws-sdk/client-s3';
 import { prisma } from '../../providers/database';
@@ -18,6 +26,7 @@ import {
   persistHubAgentRunBackfill,
   putRun,
 } from '../../providers/benchmarkHubStore';
+import { concurrentFinalBurst } from './benchmark-hub-burst.cases';
 import {
   delayedStartingRetryAcrossProcesses,
   startingRetryWorker,
@@ -47,25 +56,31 @@ async function publicationRead(failIndexWrite: boolean): Promise<void> {
   const floorPublished = deferred();
   const releaseWriter = deferred();
   sender.send = async (command) => {
-    const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
+    const input = (command as { input: HubObjectInput }).input;
     assert.equal(input.Bucket, 'offline');
+    if (command?.constructor?.name === 'HeadObjectCommand') {
+      const value = objects.get(input.Key);
+      if (value === undefined)
+        throw Object.assign(new Error('fixture absent'), { name: 'NotFound' });
+      return { ETag: objectETag(value) };
+    }
     if (command?.constructor?.name === 'GetObjectCommand') {
       const value = objects.get(input.Key);
       if (value === undefined)
         throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
-      return { Body: Buffer.from(value) };
+      return { Body: Buffer.from(value), ETag: objectETag(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
     assert.equal(typeof input.Body, 'string');
-    if (input.Key === 'benchmark-hub/agent-run-index.json' && failIndexWrite) {
+    if (input.Key === 'benchmark-hub-v2/pg_owner/agent-run-index.json' && failIndexWrite) {
       throw new Error('fixture index publication failed');
     }
-    objects.set(input.Key, input.Body!);
-    if (input.Key === 'benchmark-hub/agent-run-index-revision.json') {
+    const committed = commitObject(objects, input);
+    if (input.Key === 'benchmark-hub-v2/pg_owner/agent-run-index-revision.json') {
       floorPublished.resolve();
       await releaseWriter.promise;
     }
-    return {};
+    return committed;
   };
   let writer: Promise<unknown> | undefined;
   let reader: Promise<unknown> | undefined;
@@ -105,9 +120,9 @@ async function publicationRead(failIndexWrite: boolean): Promise<void> {
       });
       assert.deepEqual(await reader, {
         kind: 'error',
-        error: 'Error: Benchmark Hub agent-run index trails its durable revision floor',
+        error: 'Error: Hub new-domain agent index pair is incomplete',
       });
-      await assert.rejects(loadHubAgentRunIndex(), /trails its durable revision floor/);
+      await assert.rejects(loadHubAgentRunIndex(), /new-domain agent index pair is incomplete/);
     } else {
       assert.deepEqual(await writer, { kind: 'stored' });
       assert.deepEqual(await reader, { kind: 'ready', revision: 2 });
@@ -206,8 +221,14 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
   const archivedBundleReads: string[] = [];
   let countingReads = true;
   sender.send = async (command) => {
-    const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
+    const input = (command as { input: HubObjectInput }).input;
     assert.equal(input.Bucket, 'offline');
+    if (command?.constructor?.name === 'HeadObjectCommand') {
+      const value = objects.get(input.Key);
+      if (value === undefined)
+        throw Object.assign(new Error('fixture absent'), { name: 'NotFound' });
+      return { ETag: objectETag(value) };
+    }
     if (command?.constructor?.name === 'GetObjectCommand') {
       if (countingReads && input.Key.startsWith(`benchmark-hub/runs/${prefix}-`)) {
         archivedBundleReads.push(input.Key);
@@ -215,11 +236,11 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
       const value = objects.get(input.Key);
       if (value === undefined)
         throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
-      return { Body: Buffer.from(value) };
+      return { Body: Buffer.from(value), ETag: objectETag(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
-    objects.set(input.Key, input.Body!);
-    return {};
+    const committed = commitObject(objects, input);
+    return committed;
   };
   try {
     await putRun({ run_id: `${prefix}-next`, tasks: [{ agent_id: 'agent-next' }] });
@@ -243,11 +264,12 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
     assert.equal(stale.complete, false, 'a scan from before the repair cannot complete');
     const seed = await loadHubAgentRunIndex();
     assert.ok(seed !== null);
+    const legacyStamp = await hubLegacyArchiveStamp();
     const backfilled = await backfillHubAgentRunIndexFromCatalog(
       listRunsStrict,
       getRunBundleStrict,
       new Map(seed.agents),
-      (agents) => persistHubAgentRunBackfill(agents, seed.revision)
+      (agents) => persistHubAgentRunBackfill(agents, seed.revision, legacyStamp)
     );
     assert.equal(backfilled.complete, true, 'backfill completes over legacy task-less bundles');
     assert.equal(backfilled.revision, 11);
@@ -266,10 +288,15 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
   }
 }
 
+/**
+ * 2026-10-06/07: a final upload and a required starting registration waited
+ * behind every queued live snapshot at the serial writer. Whatever its kind, an
+ * upload queued behind the current holder must commit in the very next catalog
+ * publication, together with the snapshots queued beside it.
+ */
 async function queuedUploadAdmission(
   bundle: Record<string, unknown> = { tasks: [] },
-  live = false,
-  expected = ['holder', 'final', 'snapshot-a', 'snapshot-b']
+  live = false
 ): Promise<void> {
   const sender = S3Client.prototype as unknown as {
     send: (command: unknown) => Promise<unknown>;
@@ -287,17 +314,34 @@ async function queuedUploadAdmission(
   const holderWriting = deferred();
   const releaseHolder = deferred();
   const bundleWrites: string[] = [];
+  const publications: Array<Array<{ run_id: string; live: boolean }>> = [];
   sender.send = async (command) => {
-    const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
+    const input = (command as { input: HubObjectInput }).input;
     assert.equal(input.Bucket, 'offline');
+    if (command?.constructor?.name === 'HeadObjectCommand') {
+      const value = objects.get(input.Key);
+      if (value === undefined)
+        throw Object.assign(new Error('fixture absent'), { name: 'NotFound' });
+      return { ETag: objectETag(value) };
+    }
     if (command?.constructor?.name === 'GetObjectCommand') {
       const value = objects.get(input.Key);
       if (value === undefined)
         throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
-      return { Body: Buffer.from(value) };
+      return { Body: Buffer.from(value), ETag: objectETag(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
-    const runId = /^benchmark-hub\/runs\/(.+)\.json$/.exec(input.Key)?.[1];
+    if (input.Key === 'benchmark-hub-v2/pg_owner/index.json') {
+      const rows = JSON.parse(logicalObject(input.Body!));
+      const document = JSON.parse(JSON.parse(input.Body!).payload);
+      if (
+        !Object.values(document.claims).some(
+          (claim) => (claim as { state: string }).state === 'pending'
+        )
+      )
+        publications.push(rows);
+    }
+    const runId = /^benchmark-hub-v2\/pg_owner\/runs\/(.+)\.json$/.exec(input.Key)?.[1];
     if (runId !== undefined) {
       bundleWrites.push(runId.slice(prefix.length + 1));
       if (runId === `${prefix}-holder`) {
@@ -305,8 +349,8 @@ async function queuedUploadAdmission(
         await releaseHolder.promise;
       }
     }
-    objects.set(input.Key, input.Body!);
-    return {};
+    const committed = commitObject(objects, input);
+    return committed;
   };
   const upload = (name: string, snapshot: boolean) =>
     putRun(
@@ -325,12 +369,13 @@ async function queuedUploadAdmission(
     ]);
     releaseHolder.resolve();
     await uploads;
-    assert.deepEqual(bundleWrites, expected);
-    const index = JSON.parse(objects.get('benchmark-hub/index.json')!) as Array<{
-      run_id: string;
-      live: boolean;
-    }>;
-    assert.equal(index.find((run) => run.run_id === `${prefix}-final`)?.live, live);
+    assert.deepEqual(bundleWrites, ['holder', 'snapshot-a', 'snapshot-b', 'final']);
+    assert.equal(publications.length, 2, 'the queued uploads share the next publication');
+    const next = publications[1];
+    assert.equal(next.find((run) => run.run_id === `${prefix}-final`)?.live, live);
+    for (const name of ['snapshot-a', 'snapshot-b']) {
+      assert.equal(next.find((run) => run.run_id === `${prefix}-${name}`)?.live, true);
+    }
   } finally {
     releaseHolder.resolve();
     await Promise.allSettled([uploads]);
@@ -351,16 +396,15 @@ async function failedReadBackoff(mode: 'error' | 'legacy' | 'stale'): Promise<vo
     if (key === 'benchmark-hub/index.json') throw new Error('fixture legacy catalog unavailable');
     reads += 1;
     if (unavailable && mode === 'error') throw new Error('fixture storage unavailable');
+    if (key.startsWith('benchmark-hub-v2/'))
+      throw Object.assign(new Error('fixture fresh domain absent'), { name: 'NoSuchKey' });
     const revision = unavailable ? 7 : 13;
-    return {
-      Body: Buffer.from(
-        JSON.stringify(
-          key.endsWith('-revision.json')
-            ? { version: 1, revision }
-            : { version: 1, revision, complete: !unavailable || mode !== 'legacy', agents: {} }
-        )
-      ),
-    };
+    const body = JSON.stringify(
+      key.endsWith('-revision.json')
+        ? { version: 1, revision }
+        : { version: 1, revision, complete: !unavailable || mode !== 'legacy', agents: {} }
+    );
+    return { Body: Buffer.from(body), ETag: objectETag(body) };
   });
   try {
     if (mode === 'stale') applyHubRunToResolutionCaches('ahead-replica', [], 12);
@@ -370,26 +414,39 @@ async function failedReadBackoff(mode: 'error' | 'legacy' | 'stale'): Promise<vo
         assert.rejects(findAgentAcrossRuns(`concurrent-${id}`), expectedError)
       )
     );
-    assert.equal(reads, 2, 'Concurrent cold reads were not coalesced');
+    const initialReads = mode === 'error' ? 2 : 5;
+    assert.equal(reads, initialReads, '100 callers must share ONE paired-domain logical refresh');
     for (let id = 0; id < 10; id += 1) {
       await assert.rejects(findAgentAcrossRuns(`sequential-${id}`), expectedError);
     }
-    assert.equal(reads, 2, 'Persistent failure retried shared storage for every agent request');
+    assert.equal(
+      reads,
+      initialReads,
+      'Persistent failure retried shared storage for every agent request'
+    );
     now += 5_001;
     await Promise.all(
       Array.from({ length: 100 }, (_, id) =>
         assert.rejects(findAgentAcrossRuns(`retry-after-backoff-${id}`), expectedError)
       )
     );
-    assert.equal(reads, 4, 'Read did not retry after the existing refresh interval');
+    assert.equal(reads, initialReads * 2, 'Read did not retry after the existing refresh interval');
     unavailable = false;
     now += 5_001;
     assert.equal(await findAgentAcrossRuns('recovered-miss'), null);
-    assert.equal(reads, 6, 'Recovery did not read the committed compact snapshot');
+    assert.equal(
+      reads,
+      initialReads * 2 + 5,
+      'Recovery did not read both domains committed compact snapshot'
+    );
     for (let id = 0; id < 100; id += 1) {
       assert.equal(await findAgentAcrossRuns(`healthy-miss-${id}`), null);
     }
-    assert.equal(reads, 6, 'Healthy cached misses performed shared storage reads');
+    assert.equal(
+      reads,
+      initialReads * 2 + 5,
+      'Healthy cached misses performed shared storage reads'
+    );
   } finally {
     await new Promise((resolve) => setImmediate(resolve));
     transport.mock.restore();
@@ -445,9 +502,20 @@ async function main(): Promise<void> {
         console.error(`FAIL: ${failures.at(-1)}`);
       }
     }
+    for (const count of [40, 129, 600]) {
+      try {
+        await concurrentFinalBurst(count);
+        console.log(
+          `PASS: ${count} concurrent finals preserve transcripts in bounded catalog cycles`
+        );
+      } catch (error: unknown) {
+        failures.push(`concurrent final burst (${count}): ${String(error)}`);
+        console.error(`FAIL: ${failures.at(-1)}`);
+      }
+    }
     try {
       await queuedUploadAdmission();
-      console.log('PASS: a final upload is admitted ahead of queued live snapshots');
+      console.log('PASS: a queued final upload commits in the next catalog publication');
     } catch (error: unknown) {
       failures.push(`final upload admission: ${String(error)}`);
       console.error(`FAIL: ${failures.at(-1)}`);
@@ -458,22 +526,19 @@ async function main(): Promise<void> {
       source: 'benchmark-runner',
       tasks: [{ name: 'agent-payment-production-abandonment', status: 'starting' }],
     };
-    const snapshotOrder = ['holder', 'snapshot-a', 'snapshot-b', 'final'];
-    for (const [label, bundle, expected] of [
-      ['required starting registration precedes queued snapshots', starting, undefined],
+    for (const [label, bundle] of [
+      ['required starting registration commits in the next publication', starting],
       [
-        'already-owned starting progress retains snapshot admission',
+        'already-owned starting progress commits in the next publication',
         { ...starting, tasks: [{ ...starting.tasks[0], agent_id: 'fixture-owned-agent' }] },
-        snapshotOrder,
       ],
       [
-        'mixed running progress retains snapshot admission',
+        'mixed running progress commits in the next publication',
         { ...starting, tasks: [...starting.tasks, { name: 'fixture-running', status: 'running' }] },
-        snapshotOrder,
       ],
     ] as const) {
       try {
-        await queuedUploadAdmission(bundle, true, expected);
+        await queuedUploadAdmission(bundle, true);
         console.log(`PASS: ${label}`);
       } catch (error: unknown) {
         failures.push(`${label}: ${String(error)}`);

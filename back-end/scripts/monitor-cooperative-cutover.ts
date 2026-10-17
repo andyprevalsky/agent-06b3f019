@@ -21,6 +21,7 @@ import { prisma } from '../src/providers/database';
 import { getTemporalClient } from '../src/providers/temporal';
 import {
   readWorkerDeployment,
+  readWorkerDeploymentRetainedRouteMismatch,
   workerDeploymentQueueName,
 } from '../src/providers/workerDeploymentQueue';
 import { queueAdmissionKey, type QueueAdmission } from '../src/providers/workflowQueueAdmission';
@@ -35,7 +36,8 @@ type CutoverPhase =
   | 'cooperative_drain_complete'
   | 'same_generation'
   | 'managed_deployment_pending'
-  | 'retained_legacy_generation';
+  | 'retained_legacy_generation'
+  | 'retained_route_mismatch';
 
 type CutoverReport = {
   phase: CutoverPhase;
@@ -53,6 +55,12 @@ type CutoverReport = {
   verifyOk: boolean;
   messages: string[];
   deploymentJobId?: string;
+  retainedRouteMismatch?: {
+    machineIds: string[];
+    actualQueues: string[];
+    unresolved: number;
+    retirementComplete: false;
+  };
 };
 
 function argValue(flag: string): string | undefined {
@@ -179,7 +187,10 @@ async function buildManagedReport(jobId: string, expectedHash?: string): Promise
     job.candidateMachineIds.length === 8 &&
     active.every((id) => typeof id === 'string' && job.candidateMachineIds.includes(id));
   let retired = false;
-  if (evidence?.priorDisposition === 'RETIRED' && job.priorPointer) {
+  if (
+    ['RETIRED', 'RETAINED_ROUTE_MISMATCH'].includes(String(evidence?.priorDisposition)) &&
+    job.priorPointer
+  ) {
     const certificate = await prisma.toolSideEffect.findUnique({
       where: { operationKey: queueAdmissionKey(job.priorPointer.taskQueue) },
     });
@@ -187,20 +198,29 @@ async function buildManagedReport(jobId: string, expectedHash?: string): Promise
     retired = gate?.phase === 'RETIRED' && gate.legacyCoverage === 'QUALIFIED';
   }
   const retained = evidence?.priorDisposition === 'RETAINED_LEGACY';
+  const mismatch =
+    evidence?.priorDisposition === 'RETAINED_ROUTE_MISMATCH'
+      ? await readWorkerDeploymentRetainedRouteMismatch(jobId)
+      : undefined;
   const verifyOk =
     job.stage === 'SUCCEEDED' &&
     !job.failure &&
     pointerMatchesExpected &&
     sameBank &&
     evidence?.candidateHealthy === true &&
-    (retired || retained);
+    (retained ||
+      (retired &&
+        (evidence?.priorDisposition === 'RETIRED' || Boolean(mismatch?.declaredQueueRetired))));
   return {
     phase: verifyOk
-      ? retained
-        ? 'retained_legacy_generation'
-        : 'cooperative_drain_complete'
+      ? mismatch
+        ? 'retained_route_mismatch'
+        : retained
+          ? 'retained_legacy_generation'
+          : 'cooperative_drain_complete'
       : 'managed_deployment_pending',
     deploymentJobId: jobId,
+    ...(mismatch ? { retainedRouteMismatch: mismatch } : {}),
     expectedSurfaceHash: job.identity.surfaceHash,
     expectedQueue,
     livePointer,
@@ -210,9 +230,11 @@ async function buildManagedReport(jobId: string, expectedHash?: string): Promise
     verifyOk,
     messages: [
       `Durable job ${jobId}: ${job.stage}${job.failure ? ` (${job.failure.message})` : ''}.`,
-      retained
-        ? 'Legacy workers and their unfinished work remain served; no retirement certificate is claimed.'
-        : 'A managed predecessor requires its durable qualified retirement certificate.',
+      mismatch
+        ? 'Managed route-mismatch cohort is held and unresolved; no work closure, retirement or reuse is certified.'
+        : retained
+          ? 'Legacy workers and their unfinished work remain served; no retirement certificate is claimed.'
+          : 'A managed predecessor requires its durable qualified retirement certificate.',
     ],
   };
 }

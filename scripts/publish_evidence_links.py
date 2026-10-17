@@ -22,6 +22,11 @@ Usage:
   python3 scripts/publish_evidence_links.py \\
     --agent-id <uuid> \\
     --dump .llm-dumps/<agent_id>/<last>.json
+
+The CLI loads back-end/.env without replacing caller-provided variables. When
+no local dump exists, it verifies and materializes the root's archived calls
+before uploading the run. All generated artifacts stay under that agent's
+evidence directory; no separate archive or renderer command is required.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -55,6 +61,16 @@ def _ensure_agents_site_packages() -> None:
     for candidate in sorted(lib_root.glob("python*/site-packages")):
         sys.path.insert(0, str(candidate))
         return
+
+
+def _load_cli_environment() -> None:
+    """Use the canonical backend credentials while preserving explicit overrides."""
+    _ensure_agents_site_packages()
+    from dotenv import load_dotenv
+
+    load_dotenv(REPO_ROOT / "back-end" / ".env", override=False)
+
+
 DEFAULT_HUB = "https://navi-j9a9.onrender.com"
 DURABLE_ORIGIN = "https://www.roselabs.ai"
 _CURSOR_ARTIFACTS = Path("/opt/cursor/artifacts")
@@ -803,9 +819,33 @@ def latest_dump_for_agent(agent_id: str, *, bundle: dict | None = None) -> Path:
                         changed = True
     dumps = [path for owner in owned
              for path in (REPO_ROOT / ".llm-dumps" / owner).glob("*.json")]
-    if not dumps:
-        raise SystemExit(f"no LLM dumps for captured tree rooted at {agent_id}")
-    return max(dumps, key=lambda path: (path.name, str(path)))
+    if dumps:
+        return max(dumps, key=lambda path: (path.name, str(path)))
+
+    # Production workers archive their calls instead of writing to this host.
+    # Keep each recovery attempt, including partial failures, in its own directory.
+    parent = ARTIFACTS_ROOT / agent_id
+    parent.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(tempfile.mkdtemp(prefix="archive-", dir=parent)).resolve()
+    result = subprocess.run(
+        ["node", "--import", "tsx",
+         str(REPO_ROOT / "back-end" / "scripts" / "fetch-agent-llm-dumps.ts"),
+         agent_id, "--output-dir", str(output_dir), "--json"],
+        cwd=str(REPO_ROOT / "back-end"), capture_output=True, text=True, check=False,
+    )
+    sys.stderr.write(result.stderr)
+    if result.returncode:
+        raise SystemExit(f"Archived LLM dump recovery failed for {agent_id}; see diagnostics above")
+    try:
+        recovered = json.loads(result.stdout)
+        dump = Path(recovered["latest"]["path"]).resolve()
+        if recovered["rootAgentId"] != agent_id or not dump.is_relative_to(output_dir):
+            raise ValueError("archive recovery returned a foreign root or path")
+        if hashlib.sha256(dump.read_bytes()).hexdigest() != recovered["latest"]["sha256"]:
+            raise ValueError("archive recovery dump hash mismatch")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(f"Invalid archived LLM dump recovery: {exc}") from exc
+    return dump
 
 
 def publish_llm_dump(dump: Path, agent_id: str) -> tuple[Path, str]:
@@ -822,9 +862,19 @@ def publish_llm_dump(dump: Path, agent_id: str) -> tuple[Path, str]:
         str(dump),
         "-o",
         str(out_html),
+        # Keep the renderer's published copy in this agent's directory too.
+        # Its default artifact root shares the last_llm_call.html basename
+        # across runs, which can overwrite another agent's file or fail on it.
+        "--artifacts-dir",
+        str(out_dir),
         "--no-open",
     ]
-    result = subprocess.run(cmd, check=True, cwd=str(REPO_ROOT), capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, check=True, cwd=str(REPO_ROOT), capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        sys.stdout.write(exc.stdout or "")
+        sys.stderr.write(exc.stderr or "")
+        raise
     sys.stderr.write(result.stderr)
     https_url = next(
         (line.strip() for line in result.stdout.splitlines() if line.startswith("https://")),
@@ -879,13 +929,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    _load_cli_environment()
     agent_id = _normalize_agent_id(args.agent_id)
+    # Resolve the evidence before uploading, so recovery failures cannot leave
+    # a successful Hub upload followed by an unexplained local-dump failure.
+    bundle = (
+        json.loads(args.run_json.resolve().read_text(encoding="utf-8"))
+        if args.run_json else None
+    )
+    dump = (args.dump or latest_dump_for_agent(agent_id, bundle=bundle)).resolve()
+    if not dump.is_file():
+        raise SystemExit(f"LLM dump does not exist: {dump}")
     run_id = args.run_id or ""
     zero_session_task_ids: set[str] = set()
     preparation_cancelled_task_ids: set[str] = set()
     if args.run_json:
         run_path = args.run_json.resolve()
-        bundle = json.loads(run_path.read_text(encoding="utf-8"))
+        assert bundle is not None
         zero_session_task_ids = verified_zero_session_tasks(bundle, agent_id)
         preparation_cancelled_task_ids = verified_preparation_cancelled_tasks(bundle, agent_id)
         if args.skip_hub_upload:
@@ -896,7 +956,6 @@ def main() -> int:
     if not _AGENT_ID_RE.fullmatch(run_id):
         raise SystemExit("a UUID run_id from --run-json or --run-id is required for a share link")
     token = benchmark_share_token(run_id)
-    dump = (args.dump or latest_dump_for_agent(agent_id, bundle=bundle if args.run_json else None)).resolve()
     dump_html, dump_https_url = publish_llm_dump(dump, agent_id)
     if args.skip_fe_verify:
         fe_status, message_count = "skipped", 0

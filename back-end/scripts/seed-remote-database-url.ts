@@ -10,5 +10,21 @@ export function selectRemoteDatabaseUrl(env: SeedEnvironment): string | undefine
   if (routedEndpoint) {
     return routedEndpoint;
   }
-  return env.DATABASE_URL || env.DIRECT_DATABASE_URL;
+  const implicit = env.DATABASE_URL || env.DIRECT_DATABASE_URL;
+  if (implicit) {
+    const host = new URL(implicit).hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host === '[::1]' ||
+      host === '::1' ||
+      host.startsWith('127.') ||
+      host === '0.0.0.0'
+    ) {
+      throw new Error(
+        'Implicit credential READ source is loopback. Preserve the complete authoritative backend .env; use SEED_REMOTE_DATABASE_URL explicitly for an intentional local restore or tunnel.'
+      );
+    }
+  }
+  return implicit;
 }

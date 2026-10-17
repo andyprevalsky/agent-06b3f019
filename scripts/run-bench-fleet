@@ -11630,7 +11630,7 @@ write_startup_card() {  # write_startup_card <phase-text>
         startup_modes="${startup_modes}${mode} "
     done
     STARTUP_BENCHES="${BENCHES[*]:-}" STARTUP_MODES="$startup_modes" \
-    PHASE="$1" CARD_RUN_ID="$RUN_ID" CARD_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" python3 - "$FLEET_DIR/_batch" <<'PY'
+    PHASE="$1" CARD_RUN_ID="$RUN_ID" CARD_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" python3 -S - "$FLEET_DIR/_batch" <<'PY'
 import json, os, sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -14778,124 +14778,142 @@ require_central_hub_visibility || exit 1
 HUB_URL="http://localhost:$DASH_BASE/"
 RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
 (
-    while :; do
-        env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
-            ROOT_DIR="$ROOT_DIR" SELF_MANAGED_HUB_RUN="$SELF_MANAGED_HUB_RUN" \
-            FLEET_CONTROLLER_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" \
-            python3 - "$UNIFIED_DIR/report-card.json" <<'PY' || echo "⚠️ live benchmark publication failed" >&2
+    exec env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
+        ROOT_DIR="$ROOT_DIR" SELF_MANAGED_HUB_RUN="$SELF_MANAGED_HUB_RUN" \
+        FLEET_CONTROLLER_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" \
+        python3 -u - "$UNIFIED_DIR/report-card.json" <<'PY'
 import json, os, sys
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
-out = sys.argv[1]; fleet = os.environ["FLEET_DIR"]; dash_base = os.environ.get("DASH_BASE", "8765")
-# Startup-phase tracker (stdlib-only) → per-row step timeline while queued.
+import time
+import traceback
 sys.path.insert(0, os.path.join(os.environ["ROOT_DIR"], "agents"))
-try:
-    from benchmarks.fleet_startup_phase import startup_state
-except Exception:
-    startup_state = None
-benches = json.load(open(os.path.join(os.environ["UNIFIED_DIR"], "benches.json")))
-per_task = []
-ci = {"agents_llm_usd": 0.0, "wmh_grounding_usd": 0.0, "infra_usd": 0.0, "total_usd": 0.0}
-mi = {"tokens_in": 0, "tokens_out": 0}
-modes, elapsed = set(), 0.0
-for b in benches:
-    name = b["name"]; default_mode = "simulate" if b.get("mode") == "SIM" else "real"
-    card = None
-    try: card = json.load(open(os.path.join(fleet, name, "cloudbench-live", "report-card.json")))
-    except Exception: card = None
-    row = None
-    if card:
-        rows = card.get("per_task") or []
-        row = next((r for r in rows if r.get("name") == name), rows[0] if rows else None)
-    if row is None:   # seed a queued placeholder so ALL N benches always show
-        row = {"name": name, "status": "queued", "duration_s": None, "cost_usd": None,
-               "agent_url": None, "tokens_in": 0, "tokens_out": 0,
-               "world_model_mode": default_mode, "infra_usd": None}
-    row.setdefault("world_model_mode", default_mode)
-    directory = Path(fleet) / name
-    if (row.get("status") in ("queued", "starting", "running")
-            and (directory / "benchmark-child.finished").is_file()
-            and not (directory / "cloudbench-run.json").is_file()):
-        row["status"] = "error"
-    if (directory / "bench-e2e.finished-epoch").exists():
-        row["lifecycle_stage"] = "released"
-    elif (directory / "guest-shutdown.confirmed").exists() or (directory / "benchmark-child.finished").exists():
-        row["lifecycle_stage"] = "teardown"
-    elif row.get("status") in ("passed", "failed", "error"):
-        row["lifecycle_stage"] = "evaluated"
-    elif row.get("status") == "running":
-        row["lifecycle_stage"] = "running"
-    elif (directory / "barrier.ready.observed").exists():
-        row["lifecycle_stage"] = "ready"
-    elif (directory / "bench-e2e.started-epoch").exists():
-        row["lifecycle_stage"] = "starting"
-    else:
-        row["lifecycle_stage"] = "queued"
-    # Route "open" through the DURABLE batch resolver (DASH_BASE) — never the
-    # per-bench port that dies with the run. The resolver serves from local run
-    # data, so the link can't go dead.
-    url = row.get("agent_url")
-    if url:
-        try:
-            aid = (parse_qs(urlparse(url).query).get("agent-id") or [""])[0]
-        except Exception:
-            aid = ""
-        if aid:
-            row["agent_url"] = f"http://localhost:{dash_base}/open-agent?agent-id={aid}"
-    # While queued (before the on-box run_benchmark emits a card), surface the
-    # concrete startup step + expected/elapsed so the dashboard shows progress.
-    if row.get("status") == "queued" and startup_state is not None:
-        try:
-            row["startup"] = startup_state(
-                Path(fleet) / name / "fleet-child.log",
-                Path(fleet) / name / ".startup-state.json",
-            )
-        except Exception:
-            pass
-    per_task.append(row)
-    if card:
-        cost = card.get("cost") or {}
-        for k in ci:
-            v = cost.get(k)
-            if isinstance(v, (int, float)): ci[k] += v
-        md = card.get("metadata") or {}
-        mi["tokens_in"] += int(md.get("tokens_in") or 0); mi["tokens_out"] += int(md.get("tokens_out") or 0)
-        elapsed = max(elapsed, float(card.get("elapsed_s") or 0))
-    if row.get("world_model_mode"): modes.add(row["world_model_mode"])
-st = lambda s: sum(1 for t in per_task if t.get("status") == s)
-passed, failed = st("passed"), st("failed") + st("error")
-running = sum(1 for t in per_task if t.get("status") == "running")
-queued = sum(1 for t in per_task if t.get("status") == "queued")
-try:
-    code_summary = open(os.path.join(os.environ["UNIFIED_DIR"], "code.txt")).read().strip()
-except Exception:
-    code_summary = ""
-card = {
-    "run_id": "batch",
-    "timestamp": datetime.fromtimestamp(float(os.environ["FLEET_CONTROLLER_STARTED_EPOCH"]), timezone.utc).isoformat(),
-    "code": code_summary,
-    "elapsed_s": elapsed,
-    "world_model_mode": (list(modes)[0] if len(modes) == 1 else "mixed") if modes else "real",
-    "tasks": {"total": len(benches), "running": running, "completed": passed + failed, "queued": queued},
-    "results": {"passed": passed, "failed": failed, "transient": st("transient"),
-                "success_rate": round(passed / max(1, passed + failed), 3)},
-    "cost": {**{k: round(v, 4) for k, v in ci.items()}, "fast_cache_hit_rate": None},
-    "metadata": mi,
-    "infra": None,
-    "per_task": per_task,
-}
-with open(out, "w") as f: json.dump(card, f); f.write("\n")
-if os.environ.get("SELF_MANAGED_HUB_RUN") == "1":
-    from benchmarks.hub_upload import publish_live_report_card
-    from benchmarks.outcome_publication import acknowledge_published
-    parent = os.environ["BENCHMARK_HUB_PARENT_RUN_ID"]
-    if publish_live_report_card(card, run_id=parent,
-                               state_path=Path(out).with_name("hub-live-publication.json")):
-        acknowledge_published(card, run_id=parent, fleet_dir=Path(fleet))
+
+
+def aggregate_tick():
+    out = sys.argv[1]; fleet = os.environ["FLEET_DIR"]; dash_base = os.environ.get("DASH_BASE", "8765")
+    # Startup-phase tracker (stdlib-only) → per-row step timeline while queued.
+    try:
+        from benchmarks.fleet_startup_phase import startup_state
+    except Exception:
+        startup_state = None
+    benches = json.load(open(os.path.join(os.environ["UNIFIED_DIR"], "benches.json")))
+    per_task = []
+    ci = {"agents_llm_usd": 0.0, "wmh_grounding_usd": 0.0, "infra_usd": 0.0, "total_usd": 0.0}
+    mi = {"tokens_in": 0, "tokens_out": 0}
+    modes, elapsed = set(), 0.0
+    for b in benches:
+        name = b["name"]; default_mode = "simulate" if b.get("mode") == "SIM" else "real"
+        card = None
+        try: card = json.load(open(os.path.join(fleet, name, "cloudbench-live", "report-card.json")))
+        except Exception: card = None
+        row = None
+        if card:
+            rows = card.get("per_task") or []
+            row = next((r for r in rows if r.get("name") == name), rows[0] if rows else None)
+        if row is None:   # seed a queued placeholder so ALL N benches always show
+            row = {"name": name, "status": "queued", "duration_s": None, "cost_usd": None,
+                   "agent_url": None, "tokens_in": 0, "tokens_out": 0,
+                   "world_model_mode": default_mode, "infra_usd": None}
+        row.setdefault("world_model_mode", default_mode)
+        directory = Path(fleet) / name
+        if (row.get("status") in ("queued", "starting", "running")
+                and (directory / "benchmark-child.finished").is_file()
+                and not (directory / "cloudbench-run.json").is_file()):
+            row["status"] = "error"
+        if (directory / "bench-e2e.finished-epoch").exists():
+            row["lifecycle_stage"] = "released"
+        elif (directory / "guest-shutdown.confirmed").exists() or (directory / "benchmark-child.finished").exists():
+            row["lifecycle_stage"] = "teardown"
+        elif row.get("status") in ("passed", "failed", "error"):
+            row["lifecycle_stage"] = "evaluated"
+        elif row.get("status") == "running":
+            row["lifecycle_stage"] = "running"
+        elif (directory / "barrier.ready.observed").exists():
+            row["lifecycle_stage"] = "ready"
+        elif (directory / "bench-e2e.started-epoch").exists():
+            row["lifecycle_stage"] = "starting"
+        else:
+            row["lifecycle_stage"] = "queued"
+        # Route "open" through the DURABLE batch resolver (DASH_BASE) — never the
+        # per-bench port that dies with the run. The resolver serves from local run
+        # data, so the link can't go dead.
+        url = row.get("agent_url")
+        if url:
+            try:
+                aid = (parse_qs(urlparse(url).query).get("agent-id") or [""])[0]
+            except Exception:
+                aid = ""
+            if aid:
+                row["agent_url"] = f"http://localhost:{dash_base}/open-agent?agent-id={aid}"
+        # While queued (before the on-box run_benchmark emits a card), surface the
+        # concrete startup step + expected/elapsed so the dashboard shows progress.
+        if row.get("status") == "queued" and startup_state is not None:
+            try:
+                row["startup"] = startup_state(
+                    Path(fleet) / name / "fleet-child.log",
+                    Path(fleet) / name / ".startup-state.json",
+                )
+            except Exception:
+                pass
+        per_task.append(row)
+        if card:
+            cost = card.get("cost") or {}
+            for k in ci:
+                v = cost.get(k)
+                if isinstance(v, (int, float)): ci[k] += v
+            md = card.get("metadata") or {}
+            mi["tokens_in"] += int(md.get("tokens_in") or 0); mi["tokens_out"] += int(md.get("tokens_out") or 0)
+            elapsed = max(elapsed, float(card.get("elapsed_s") or 0))
+        if row.get("world_model_mode"): modes.add(row["world_model_mode"])
+    st = lambda s: sum(1 for t in per_task if t.get("status") == s)
+    passed, failed = st("passed"), st("failed") + st("error")
+    running = sum(1 for t in per_task if t.get("status") == "running")
+    queued = sum(1 for t in per_task if t.get("status") == "queued")
+    try:
+        code_summary = open(os.path.join(os.environ["UNIFIED_DIR"], "code.txt")).read().strip()
+    except Exception:
+        code_summary = ""
+    card = {
+        "run_id": "batch",
+        "timestamp": datetime.fromtimestamp(float(os.environ["FLEET_CONTROLLER_STARTED_EPOCH"]), timezone.utc).isoformat(),
+        "code": code_summary,
+        "elapsed_s": elapsed,
+        "world_model_mode": (list(modes)[0] if len(modes) == 1 else "mixed") if modes else "real",
+        "tasks": {"total": len(benches), "running": running, "completed": passed + failed, "queued": queued},
+        "results": {"passed": passed, "failed": failed, "transient": st("transient"),
+                    "success_rate": round(passed / max(1, passed + failed), 3)},
+        "cost": {**{k: round(v, 4) for k, v in ci.items()}, "fast_cache_hit_rate": None},
+        "metadata": mi,
+        "infra": None,
+        "per_task": per_task,
+    }
+    with open(out, "w") as f: json.dump(card, f); f.write("\n")
+    if os.environ.get("SELF_MANAGED_HUB_RUN") == "1":
+        from benchmarks.hub_upload import publish_live_report_card
+        from benchmarks.outcome_publication import acknowledge_published
+        parent = os.environ["BENCHMARK_HUB_PARENT_RUN_ID"]
+        if publish_live_report_card(card, run_id=parent,
+                                   state_path=Path(out).with_name("hub-live-publication.json")):
+            acknowledge_published(card, run_id=parent, fleet_dir=Path(fleet))
+
+
+while True:
+    try:
+        aggregate_tick()
+    except SystemExit as error:
+        # A zero-status tick exit was successful in the former Bash loop.
+        if error.code not in (None, 0):
+            traceback.print_exc()
+            print("⚠️ live benchmark publication failed", file=sys.stderr, flush=True)
+    except Exception:
+        traceback.print_exc()
+        print("⚠️ live benchmark publication failed", file=sys.stderr, flush=True)
+    # Keep the original delay AFTER each completed or failed iteration.
+    # TERM/KeyboardInterrupt remain owner-stop signals, never tick failures.
+    time.sleep(1)
 PY
-        sleep 1
-    done
 ) & UNIFIED_AGG_PID=$!
 
 # ── Phase 1: provision every bench's isolated machine CONCURRENTLY ───────────

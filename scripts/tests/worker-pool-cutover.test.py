@@ -4,6 +4,9 @@
 import copy
 import importlib.util
 import json
+import io
+import runpy
+from types import SimpleNamespace
 import sys
 import unittest
 from contextlib import contextmanager
@@ -87,6 +90,16 @@ class Ledger:
     def assert_owned(self):
         return None
 
+    def assert_mutable(self, machine_id):
+        if machine_id in {
+            row["id"]
+            for row in self.job.get("evidence", {}).get("PREPARING", {}).get("retainedRouteMismatchRecords", [])
+        }:
+            raise ValueError("Machine has a durable mutation hold")
+
+    def retained_status(self):
+        return {"held": True}
+
     def prepare(self, pointer, ids, evidence):
         self.job.update(
             stage="PREPARING",
@@ -146,6 +159,29 @@ class Native:
             self.fail_after_prepare = False
             raise RuntimeError("native response was lost after configuration")
 
+    def observe_route(self, expected, expected_queue):
+        return {
+            "machineId": expected["id"],
+            "instanceId": expected["instanceId"],
+            "configSHA256": expected["configSHA256"],
+            "pid": 635,
+            "started": 100.0,
+            "namespace": "fixture.namespace",
+            "expectedQueue": expected_queue,
+            "actualQueue": expected_queue,
+            "buildId": "old-build",
+            "surfaceHash": "old",
+            "attempt": "old-attempt",
+            "identity": "635@fixture-host",
+            "autoscalerActuate": "0",
+        }
+
+    def native_pollers_ready(self, machine_ids):
+        return True
+
+    def revalidate_retained_routes(self, records):
+        self.revalidated = copy.deepcopy(records)
+
     def healthy(self, machine_id):
         self.health_reads += 1
         if self.fail_health_after is not None and self.health_reads > self.fail_health_after:
@@ -178,6 +214,486 @@ class WorkerPoolCutoverTests(unittest.TestCase):
             patch.object(cutover.subprocess, "run", side_effect=AssertionError("Unexpected unmocked subprocess")),
         ):
             return cutover.run(ledger, lambda identity, owner: native)
+
+    def runtime_native(self):
+        ledger = Ledger()
+        native = cutover.NativePool(ledger.job["identity"], ledger)
+        value = spare(1)
+        value["state"] = "started"
+        queue = cutover.deployment_queue(native.identity, ledger.job_id)
+        value["config"]["image"] = native.identity["imageRef"]
+        value["config"]["env"].update(
+            TEMPORAL_WORKER_SURFACE_HASH=native.identity["surfaceHash"],
+            TEMPORAL_WORKER_BUILD_ID=native.identity["buildId"],
+            TEMPORAL_WORKER_DEPLOYMENT_TOKEN=native.identity["attempt"],
+            TEMPORAL_WORKER_POOL_QUEUE=queue,
+            AUTOSCALER_ACTUATE="0",
+            PEOPLE_CREDENTIAL_BROKER_URL="https://navi-j9a9.onrender.com",
+        )
+        value["config"]["init"] = {
+            "exec": ["/usr/bin/env", "TEMPORAL_TASK_QUEUE=" + queue.rsplit("@", 1)[0], "python", "worker.py"]
+        }
+        value["config"]["metadata"][pool.POOL_KEY] = json.dumps(
+            {
+                "job": ledger.job_id,
+                "phase": "active",
+                "build": native.identity["buildId"],
+                "token": native.identity["attempt"],
+                "configSHA256": pool.config_digest(value["config"]),
+            }
+        )
+        health = {
+            "healthy": True,
+            "phase": "running",
+            "started_at": "fixture-boot",
+            "build_id": native.identity["buildId"],
+            "runtime": {
+                "pid": 635,
+                "hostname": "fixture-host",
+                "identity": "635@fixture-host",
+                "started": 100.0,
+                "pidAfter": 635,
+                "startedAfter": 100.0,
+                "queue": queue,
+                "baseQueue": queue.rsplit("@", 1)[0],
+                "surfaceHash": native.identity["surfaceHash"],
+                "poolQueue": queue,
+                "namespace": "fixture.namespace",
+                "autoscalerActuate": "0",
+                "buildId": native.identity["buildId"],
+                "attempt": native.identity["attempt"],
+            },
+        }
+        return native, value, health
+
+    def test_runtime_queue_identity_is_required_even_when_native_config_and_health_match(self):
+        for field, wrong in (
+            ("queue", "navi-agent-tasks@wrong"),
+            ("namespace", "foreign"),
+            ("pidAfter", 636),
+            ("identity", "foreign"),
+            ("startedAfter", 101.0),
+            ("buildId", "stale"),
+            ("surfaceHash", "foreign"),
+            ("autoscalerActuate", "1"),
+            ("attempt", "foreign"),
+        ):
+            with self.subTest(field=field):
+                native, value, health = self.runtime_native()
+                health["runtime"][field] = wrong
+                client = type("Client", (), {"request": lambda *args: {"exit_code": 0, "stdout": json.dumps(health)}})()
+                with (
+                    patch.object(native, "get", return_value=value),
+                    patch.object(native, "client", return_value=client),
+                    patch.dict(cutover.os.environ, {"TEMPORAL_NAMESPACE": "fixture.namespace"}),
+                ):
+                    self.assertFalse(native.healthy(value["id"]))
+
+    def test_runtime_queue_positive_and_native_version_change(self):
+        native, value, health = self.runtime_native()
+        client = type("Client", (), {"request": lambda *args: {"exit_code": 0, "stdout": json.dumps(health)}})()
+        with (
+            patch.object(native, "get", return_value=value),
+            patch.object(native, "client", return_value=client),
+            patch.dict(cutover.os.environ, {"TEMPORAL_NAMESPACE": "fixture.namespace"}),
+        ):
+            self.assertTrue(native.healthy(value["id"]))
+        changed = copy.deepcopy(value)
+        changed["instance_id"] = "foreign-native-version"
+        with (
+            patch.object(native, "get", side_effect=[value, changed]),
+            patch.object(native, "client", return_value=client),
+            patch.dict(cutover.os.environ, {"TEMPORAL_NAMESPACE": "fixture.namespace"}),
+        ):
+            self.assertFalse(native.healthy(value["id"]))
+
+    def test_matching_old_metadata_without_startup_binding_is_not_a_target(self):
+        native, value, _ = self.runtime_native()
+        value["config"]["init"] = {}
+        marker = pool.metadata(value, pool.POOL_KEY)
+        marker["configSHA256"] = pool.config_digest(value["config"])
+        value["config"]["metadata"][pool.POOL_KEY] = json.dumps(marker)
+        self.assertFalse(native.target(value))
+        with patch.object(native, "get", return_value=value), patch.object(native, "client") as client:
+            self.assertFalse(native.healthy(value["id"]))
+            client.assert_not_called()
+
+    def test_actual_probe_binds_health_listener_and_rejects_ambiguous_or_foreign_process(self):
+        native, _, health = self.runtime_native()
+        runtime = health["runtime"]
+        environment = {
+            "TEMPORAL_TASK_QUEUE": runtime["baseQueue"],
+            "TEMPORAL_WORKER_SURFACE_HASH": runtime["surfaceHash"],
+            "TEMPORAL_WORKER_POOL_QUEUE": runtime["poolQueue"],
+            "TEMPORAL_NAMESPACE": runtime["namespace"],
+            "AUTOSCALER_ACTUATE": "0",
+            "TEMPORAL_WORKER_BUILD_ID": runtime["buildId"],
+            "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": runtime["attempt"],
+        }
+        resolver = runpy.run_path(str(ROOT / "agents/helpers/worker_generation.py"))
+        for fault in ("", "ambiguous", "foreign-command", "process-replaced"):
+            with self.subTest(fault=fault):
+                calls = []
+                process = SimpleNamespace(
+                    pid=635,
+                    create_time=lambda: 100.0,
+                    environ=lambda: environment,
+                    cmdline=lambda: ["python", "foreign.py" if fault == "foreign-command" else "worker.py"],
+                )
+
+                def connections(**kwargs):
+                    calls.append(True)
+                    pids = [635, 636] if fault == "ambiguous" else [635]
+                    return [SimpleNamespace(pid=pid, status="LISTEN", laddr=SimpleNamespace(port=8080)) for pid in pids]
+
+                def get_process(pid):
+                    if fault == "process-replaced" and len(calls) > 1:
+                        return SimpleNamespace(pid=636, create_time=lambda: 101.0)
+                    return process
+
+                fake_psutil = SimpleNamespace(CONN_LISTEN="LISTEN", net_connections=connections, Process=get_process)
+                captured = io.StringIO()
+                with (
+                    patch.dict(sys.modules, {"psutil": fake_psutil}),
+                    patch.object(runpy, "run_path", return_value=resolver),
+                    patch("socket.gethostname", return_value="fixture-host"),
+                ):
+                    with (
+                        patch(
+                            "urllib.request.urlopen",
+                            side_effect=lambda *args, **kwargs: io.BytesIO(json.dumps(health).encode()),
+                        ),
+                        patch("sys.stdout", captured),
+                    ):
+                        if fault in ("ambiguous", "foreign-command"):
+                            with self.assertRaises(ValueError):
+                                exec(compile(cutover.RUNTIME_QUEUE_PROBE, "<runtime-queue-probe>", "exec"), {})
+                            continue
+                        exec(compile(cutover.RUNTIME_QUEUE_PROBE, "<runtime-queue-probe>", "exec"), {})
+                observed = json.loads(captured.getvalue())
+                with patch.dict(cutover.os.environ, {"TEMPORAL_NAMESPACE": "fixture.namespace"}):
+                    self.assertEqual(
+                        cutover.runtime_queue_matches(observed, native.identity, native.ledger.job_id), fault == ""
+                    )
+
+    def test_native_mutation_hold_precedes_effect_but_exact_runtime_probe_remains_read_only(self):
+        ledger = Ledger()
+        ledger.assert_mutable = lambda mid: (_ for _ in ()).throw(ValueError("held"))
+        native = cutover.NativePool(ledger.job["identity"], ledger)
+        with patch.object(pool.Fly, "request", return_value={}) as request:
+            client = native.client("held-machine")
+            with self.assertRaisesRegex(ValueError, "held"):
+                client.request("POST", "/stop")
+            with self.assertRaisesRegex(ValueError, "held"):
+                client.request("POST", "/exec", {"command": ["arbitrary"]})
+            request.assert_not_called()
+            client.request("GET")
+            client.request(
+                "POST", "/exec", {"command": ["python", "-I", "-B", "-c", cutover.RUNTIME_QUEUE_PROBE], "timeout": 10}
+            )
+            self.assertEqual(request.call_count, 2)
+
+    def test_matched_bank_retirement_checks_runtime_before_lease_or_stop(self):
+        native, value, _ = self.runtime_native()
+        expected = {**cutover.machine_identity(value), "managedJobId": "old"}
+        with (
+            patch.object(native, "get", return_value=value),
+            patch.object(native, "observe_route", return_value={"actualQueue": "foreign"}),
+            patch.object(native, "client") as client,
+        ):
+            with self.assertRaisesRegex(ValueError, "different actual queue"):
+                native.retire(expected, {"taskQueue": "expected", "surfaceHash": "old"})
+            client.assert_not_called()
+
+    def test_initial_partial_native_pollers_wait_in_existing_budget_then_complete(self):
+        ledger, native = Ledger(), Native()
+        with (
+            patch.object(native, "native_pollers_ready", side_effect=[False, True, True, True]),
+            patch.object(cutover.time, "sleep") as sleep,
+        ):
+            result = self.run_job(ledger, native)
+        self.assertEqual(result["stage"], "SUCCEEDED")
+        sleep.assert_called_once_with(5)
+
+    def test_native_poller_transport_error_is_not_converted_to_not_ready(self):
+        ledger, native = Ledger(), Native()
+        with (
+            patch.object(native, "native_pollers_ready", side_effect=RuntimeError("transport")),
+            patch.object(cutover.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "transport"):
+                self.run_job(ledger, native)
+        self.assertEqual(ledger.job["stage"], "PREPARING")
+        sleep.assert_not_called()
+        self.assertFalse(
+            any(name == "set-agent-queue-pointer.ts" and "--queue" in args for name, args in self.commands)
+        )
+
+    def mismatched_bank(self):
+        ledger, native = Ledger(), Native(managed=True)
+        old = native.machines[-1]
+        old_queue = "navi-agent-tasks-pool-" + "c" * 12 + "@" + "d" * 12
+        old["config"]["env"]["TEMPORAL_WORKER_POOL_QUEUE"] = old_queue
+        self.pointer = {"taskQueue": old_queue, "surfaceHash": "d" * 12, "updatedBy": "old-deployment"}
+        for index in range(7):
+            extra = copy.deepcopy(old)
+            extra["id"] = f"{100 + index:014x}"
+            native.machines.append(extra)
+        return ledger, native
+
+    def test_positive_route_mismatch_holds_old_managed_bank_without_retirement(self):
+        ledger, native = self.mismatched_bank()
+        original = native.observe_route
+
+        def mismatch(expected, expected_queue):
+            return {**original(expected, expected_queue), "actualQueue": "navi-agent-tasks@" + "d" * 12}
+
+        with patch.object(native, "observe_route", side_effect=mismatch):
+            result = self.run_job(ledger, native)
+        proof = result["evidence"]["PREPARING"]["retainedRouteMismatchRecords"]
+        self.assertEqual(len(proof), 8)
+        self.assertEqual(result["evidence"]["priorDisposition"], "RETAINED_ROUTE_MISMATCH")
+        self.assertEqual(set(result["evidence"]["retainedRouteMismatchMachineIds"]), {row["id"] for row in proof})
+        self.assertEqual(native.revalidated, proof)
+        self.assertFalse(native.retired)
+        self.assertFalse(ledger.released)
+        self.assertEqual(
+            [
+                args[0]
+                for name, args in self.commands
+                if name == "retire-agent-queue.ts" and args[0] in ("--begin", "--retire")
+            ],
+            ["--begin", "--retire"],
+        )
+
+    def test_actual_native_poller_payload_uses_current_target_versions_and_exact_identity_set(self):
+        native, value, _ = self.runtime_native()
+        machines = {}
+        for index in range(8):
+            current = copy.deepcopy(value)
+            current["id"] = f"{index + 1:014x}"
+            current["instance_id"] = f"target-version-{index}"
+            identity = f"{635 + index}@fixture-host"
+            machines[current["id"]] = current
+            native.runtime_observations[current["id"]] = {
+                "identity": identity,
+                "machineRecord": {**cutover.machine_identity(current), "identity": identity},
+            }
+        ids = list(machines)
+        captured = []
+
+        def verify(identities, records):
+            captured.append((identities, records))
+            return {
+                "ready": True,
+                "queue": cutover.deployment_queue(native.identity, native.ledger.job_id),
+                "identities": identities,
+            }
+
+        with (
+            patch.object(native, "get", side_effect=lambda mid: copy.deepcopy(machines[mid])),
+            patch.object(native.ledger, "verify_native_pollers", create=True, side_effect=verify),
+        ):
+            self.assertTrue(native.native_pollers_ready(ids))
+        self.assertEqual(len(captured[0][0]), 8)
+        self.assertEqual(
+            {record["instanceId"] for record in captured[0][1]}, {f"target-version-{index}" for index in range(8)}
+        )
+        for wrong in (
+            {"ready": False, "queue": "foreign"},
+            {
+                "ready": True,
+                "queue": cutover.deployment_queue(native.identity, native.ledger.job_id),
+                "identities": ["foreign"],
+            },
+            {"ready": "false"},
+        ):
+            with (
+                self.subTest(wrong=wrong),
+                patch.object(native, "get", side_effect=lambda mid: copy.deepcopy(machines[mid])),
+                patch.object(native.ledger, "verify_native_pollers", create=True, return_value=wrong),
+                self.assertRaises(ValueError),
+            ):
+                native.native_pollers_ready(ids)
+        machines[ids[0]]["instance_id"] = "changed-after-health"
+        with (
+            patch.object(native, "get", side_effect=lambda mid: copy.deepcopy(machines[mid])),
+            patch.object(native.ledger, "verify_native_pollers", create=True) as verify_mock,
+            self.assertRaisesRegex(ValueError, "changed"),
+        ):
+            native.native_pollers_ready(ids)
+        verify_mock.assert_not_called()
+
+    def test_retained_route_revalidation_keeps_original_proof_and_rejects_changed_pid(self):
+        native, _, _ = self.runtime_native()
+        record = {"id": "old", "routeEvidence": {"expectedQueue": "expected", "actualQueue": "shared", "pid": 635}}
+        original = copy.deepcopy(record)
+        with (
+            patch.object(native, "observe_route", return_value={**record["routeEvidence"], "pid": 636}),
+            self.assertRaisesRegex(ValueError, "changed"),
+        ):
+            native.revalidate_retained_routes([record])
+        self.assertEqual(record, original)
+
+    def test_retained_physical_bank_cannot_ignore_unretired_declared_queue(self):
+        ledger, native = self.mismatched_bank()
+        original_route = native.observe_route
+
+        def mismatch(expected, queue):
+            return {**original_route(expected, queue), "actualQueue": "navi-agent-tasks@" + "d" * 12}
+
+        original_command = self.command
+
+        def command(script, *args):
+            if script == "retire-agent-queue.ts" and "--retire" in args:
+                raise cutover.subprocess.CalledProcessError(1, [script, *args])
+            return original_command(script, *args)
+
+        self.command = command
+        with (
+            patch.object(native, "observe_route", side_effect=mismatch),
+            patch.object(cutover.time, "monotonic", side_effect=[0, 0, 2701]),
+            patch.object(cutover.time, "sleep") as sleep,
+        ):
+            with self.assertRaises(cutover.PoolCapacityPending):
+                self.run_job(ledger, native)
+        self.assertEqual(ledger.job["stage"], "DRAINING")
+        self.assertFalse(native.retired)
+        self.assertFalse(ledger.released)
+        sleep.assert_not_called()
+
+    def test_actual_route_observation_distinguishes_runtime_mismatch_from_unknown(self):
+        native, value, health = self.runtime_native()
+        expected_queue = cutover.deployment_queue(native.identity, native.ledger.job_id)
+        health["runtime"]["baseQueue"] = "navi-agent-tasks"
+        health["runtime"]["queue"] = "navi-agent-tasks@" + native.identity["surfaceHash"]
+        expected = cutover.machine_identity(value)
+        client = type("Client", (), {"request": lambda *args: {"exit_code": 0, "stdout": json.dumps(health)}})()
+        with (
+            patch.object(native, "get", return_value=value),
+            patch.object(native, "client", return_value=client),
+            patch.dict(cutover.os.environ, {"TEMPORAL_NAMESPACE": "fixture.namespace"}),
+        ):
+            proof = native.observe_route(expected, expected_queue)
+            self.assertEqual(proof["actualQueue"], health["runtime"]["queue"])
+            self.assertEqual(proof["expectedQueue"], expected_queue)
+            self.assertEqual(proof["autoscalerActuate"], "0")
+            health["runtime"]["autoscalerActuate"] = "1"
+            with self.assertRaisesRegex(ValueError, "unknown"):
+                native.observe_route(expected, expected_queue)
+
+    def unhealthy_candidate_retirement(
+        self, certificate_error=False, managed_job=None, published=False, stage="PREPARING"
+    ):
+        native, value, _ = self.runtime_native()
+        queue = cutover.deployment_queue(native.identity, native.ledger.job_id)
+        previous = {"taskQueue": queue, "surfaceHash": native.identity["surfaceHash"]}
+        live = {"taskQueue": "navi-agent-tasks@old", "surfaceHash": "old"}
+        proof = pool.metadata(value, pool.CUSTODY_KEY)
+        proof.update(
+            {
+                key: item
+                for key, item in pool.record(value, "prod").items()
+                if key in ("app", "id", "instance_id", "config_sha256")
+            }
+        )
+        value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(proof)
+        expected = {**cutover.machine_identity(value), "managedJobId": managed_job or native.ledger.job_id}
+        effects = []
+        self.retirement_effects = effects
+
+        class Client:
+            def assert_managed_mutable(self):
+                native.ledger.assert_mutable(value["id"])
+
+            @contextmanager
+            def lease(self):
+                effects.append("lease")
+                yield
+
+            def request(self, method, suffix="", data=None):
+                if method == "GET":
+                    return copy.deepcopy(value)
+                effects.append(suffix)
+                if suffix.startswith("/metadata/"):
+                    value["config"]["metadata"][suffix.rsplit("/", 1)[1]] = data["value"]
+                elif suffix == "/stop":
+                    value["state"] = "stopped"
+                else:
+                    raise AssertionError((method, suffix))
+                return {}
+
+        native.ledger.job.update(stage=stage, candidateMachineIds=[value["id"]], priorPointer=live)
+
+        def certificate(script, *args):
+            if script == "set-agent-queue-pointer.ts":
+                return json.dumps(previous if published else live)
+            self.assertEqual((script, args), ("retire-agent-queue.ts", ("--verify-retired", "--queue", queue)))
+            if certificate_error:
+                raise ValueError("candidate queue not certified")
+            return ""
+
+        with (
+            patch.object(native, "get", side_effect=lambda mid: copy.deepcopy(value)),
+            patch.object(native, "client", return_value=Client()),
+            patch.object(
+                native, "observe_route", side_effect=ValueError("unhealthy worker has no HTTP listener")
+            ) as route,
+            patch.object(cutover, "backend_command", side_effect=certificate) as verify,
+        ):
+            result = native.retire(expected, previous, live)
+        return result, effects, route.call_count, verify.call_count
+
+    def test_unpublished_owned_unhealthy_candidate_can_retire_only_after_queue_certificate(self):
+        result, effects, routes, certificates = self.unhealthy_candidate_retirement()
+        self.assertEqual(result["id"], "00000000000001")
+        self.assertIn("/stop", effects)
+        self.assertEqual(routes, 0)
+        self.assertEqual(certificates, 2)
+
+    def test_unpublished_retirement_rejects_missing_certificate_published_or_foreign_bank(self):
+        for options, error in (
+            ({"certificate_error": True}, "not certified"),
+            ({"published": True}, "published"),
+            ({"managed_job": "foreign"}, "unpublished candidate"),
+            ({"stage": "ACTIVATED"}, "unpublished candidate"),
+        ):
+            with self.subTest(options=options):
+                with self.assertRaisesRegex(ValueError, error):
+                    self.unhealthy_candidate_retirement(**options)
+                self.assertEqual(self.retirement_effects, [])
+
+    def test_started_unknown_and_partial_stopped_mismatch_block_preparation(self):
+        for state, unknown in (("started", True), ("stopped", False), ("replacing", False)):
+            with self.subTest(state=state, unknown=unknown):
+                ledger, native = self.mismatched_bank()
+                native.machines[8]["state"] = state
+                original = native.observe_route
+
+                def mismatch(record, queue):
+                    return {**original(record, queue), "actualQueue": "navi-agent-tasks@wrong"}
+
+                context = patch.object(
+                    native, "observe_route", side_effect=ValueError("unknown runtime") if unknown else mismatch
+                )
+                with context, self.assertRaises(ValueError):
+                    self.run_job(ledger, native)
+                self.assertEqual(ledger.job["stage"], "QUEUED")
+                self.assertFalse(native.prepared)
+                self.assertFalse(native.retired)
+
+    def test_stopped_old_managed_bank_needs_no_runtime_health_probe(self):
+        ledger, native = self.mismatched_bank()
+        for machine in native.machines:
+            if machine["id"] not in {row["id"] for row in native.machines[:8]}:
+                machine["state"] = "stopped"
+        with patch.object(
+            native, "observe_route", side_effect=AssertionError("Stopped workers have no health server")
+        ) as observe:
+            result = self.run_job(ledger, native)
+        self.assertEqual(result["stage"], "SUCCEEDED")
+        self.assertEqual(len(native.retired), 8)
+        observe.assert_not_called()
 
     def test_incomplete_bank_waits_without_mutating_any_machine(self):
         ledger, native = Ledger(), Native(count=7)
@@ -302,6 +818,9 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         updates = []
 
         class Client:
+            def assert_managed_mutable(self):
+                ledger.assert_mutable(value["id"])
+
             @contextmanager
             def lease(self):
                 yield
@@ -339,8 +858,19 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         self.assertEqual(len(updates), 1)
         self.assertEqual(value["state"], "started")
         self.assertTrue(pool.custody_ready(value, "prod"))
-        with patch.object(native, "client", return_value=Client()):
-            retired = native.abandon(expected, previous)
+        ledger.job.update(stage="PREPARING", candidateMachineIds=[value["id"]], priorPointer=previous)
+        with (
+            patch.object(native, "client", return_value=Client()),
+            patch.object(
+                cutover,
+                "backend_command",
+                side_effect=lambda script, *args: (
+                    json.dumps(previous) if script == "set-agent-queue-pointer.ts" else ""
+                ),
+            ),
+        ):
+            with patch.object(native, "observe_route", side_effect=lambda record, queue: {"actualQueue": queue}):
+                retired = native.abandon(expected, previous)
         self.assertEqual(retired["id"], expected["id"])
         self.assertTrue(pool.eligible(value, "prod", previous["surfaceHash"], previous["taskQueue"]))
         self.assertEqual(len(updates), 1)
