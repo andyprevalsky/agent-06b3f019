@@ -129,6 +129,332 @@ def gate_program_identity(gate, host_gate, source_root, authority, digest):
     return {str(program): before}
 
 
+def parent_pid(pid):
+    return int(
+        Path("/proc", str(pid), "stat").read_text().rsplit(") ", 1)[1].split()[1]
+    )
+
+
+def transfer_unwound(state):
+    """Bind the captured exception print to the live caller's actual tee pipe."""
+    path = state["out"] / "payload-transfer.interruption.json"
+    proof = object_file(path)
+    identities = [
+        process_identity(state["caller"]["pid"]),
+        process_identity(proof["parent"]["pid"]),
+    ]
+    for key, identity in zip(("caller", "parent"), identities):
+        recorded = proof[key]
+        need(
+            all(recorded[name] == identity[name] for name in ("pid", "birth", "cwd")),
+            "interruption process identity differs",
+        )
+        command = b"\0".join(os.fsencode(arg) for arg in identity["argv"]) + b"\0"
+        need(
+            sha(command) == recorded["cmdline_sha256"],
+            "interruption process argv differs",
+        )
+    need(
+        identities[0]["birth"] == state["caller"]["birth"]
+        and parent_pid(identities[0]["pid"])
+        == proof["caller"]["ppid"]
+        == identities[1]["pid"],
+        "interruption parent ownership differs",
+    )
+    pipe = proof["caller_fd1"]
+    need(
+        re.fullmatch(r"pipe:\[\d+\]", pipe)
+        and os.readlink(f"/proc/{identities[0]['pid']}/fd/1") == pipe,
+        "interruption caller stdout differs",
+    )
+    log = Path(proof["log_path"])
+    links = proof["parent_matching_fds"]
+    need(
+        set(links.values()) == {pipe, str(log)} and len(links) == 2,
+        "interruption tee descriptors differ",
+    )
+    for fd, target in links.items():
+        need(
+            fd.isdigit()
+            and os.readlink(f"/proc/{identities[1]['pid']}/fd/{fd}") == target,
+            "interruption tee descriptor changed",
+        )
+    wrapper = Path(proof["wrapper_path"])
+    need(
+        str(wrapper) in identities[1]["argv"]
+        and wrapper.resolve(strict=True) == wrapper,
+        "interruption tee source differs",
+    )
+    before = fingerprint(wrapper)
+    info = wrapper.lstat()
+    need(
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and info.st_nlink == 1
+        and sha(wrapper.read_bytes()) == proof["wrapper_sha256"]
+        and fingerprint(wrapper) == before,
+        "interruption tee source changed",
+    )
+    raw = read(log)
+    need(sha(raw) == proof["log_sha256"], "interruption stream changed")
+    rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    need(
+        rows
+        == [
+            {
+                "status": "CONTINUING_ORIGINAL_ADMISSION",
+                "admission_directory": str(state["out"].parent.parent),
+                "source_ref": state["source_ref"],
+                "host_operator_source_ref": state["host_ref"],
+                "config_path": state["config"],
+                "run_directory": str(state["out"]),
+            },
+            {
+                "status": "PENDING_EXTERNAL_OWNER_LIVE",
+                "error": "Deadline",
+                "gate_pid": state["caller"]["gate_pid"],
+                "no_gate_or_vm_kill": True,
+            },
+        ],
+        "positive original transfer unwind print required",
+    )
+    need(
+        log.parent == state["out"].parent.parent.parent
+        and state["epoch"] <= proof["observed_epoch"] <= time.time(),
+        "interruption stream scope or capture time differs",
+    )
+    state["pins"].update({str(p): fingerprint(p) for p in (path, log, wrapper)})
+    return {
+        "receipt_sha256": sha(read(path)),
+        "log_sha256": sha(raw),
+        "wrapper_sha256": proof["wrapper_sha256"],
+        "capture_kind": "live tee pipe and exception print",
+    }
+
+
+def acknowledged_read_timeout(state):
+    """First borrow after an incomplete identity GET; every write remains proved."""
+    unwound = transfer_unwound(state)
+    old = runpy.run_path(
+        str(Path(state["host"]) / "scripts/cloudbench-original600-runner.py")
+    )
+    directory = state["out"] / "payload-transfer"
+    before = {p.name: fingerprint(p) for p in directory.iterdir()}
+    need(
+        all(p.is_file() and not p.is_symlink() for p in directory.iterdir()),
+        "physical old transfer files required",
+    )
+    descriptors = {
+        row["sha256"]: row
+        for row in object_file(state["out"] / "controller-sidecars.private.json")
+    }
+    requests = sorted(directory.glob("[0-9][0-9][0-9][0-9]-*.request.json"))
+    need(requests, "old transfer request history missing")
+    allowed, hashes, writes = set(), {}, 0
+
+    def load(name):
+        allowed.add(name)
+        raw = read(directory / name)
+        hashes[name] = sha(raw)
+        return json.loads(raw)
+
+    def expected(payload):
+        need(
+            payload["machine"] == state["machine_id"]
+            and payload["source_ref"] == state["source_ref"]
+            and payload["envelope_sha256"] == state["envelope_sha256"],
+            "old sidecar target differs",
+        )
+        descriptor = descriptors[payload["sha256"]]
+        data = read(descriptor["path"])
+        need(
+            sha(data) == payload["sha256"] and len(data) == descriptor["bytes"],
+            "old sidecar bytes differ",
+        )
+        action = payload["action"]
+        if action in ("commit", "observe-ready"):
+            need(
+                set(payload)
+                == {"machine", "source_ref", "envelope_sha256", "sha256", "action"},
+                "unexpected ready payload",
+            )
+            return {"state": "READY", "bytes": len(data), "sha256": sha(data)}, payload[
+                "sha256"
+            ] + "-commit"
+        index = payload["index"]
+        need(
+            type(index) is int and 0 <= index < (len(data) + 32767) // 32768,
+            "old chunk index differs",
+        )
+        chunk = data[index * 32768 : (index + 1) * 32768]
+        label = payload["sha256"] + f"-{index:05d}"
+        if action in ("fragment", "observe-fragment"):
+            offset = payload["offset"]
+            need(
+                type(offset) is int and offset % 2048 == 0 and 0 <= offset < len(chunk),
+                "old fragment offset differs",
+            )
+            content = chunk[offset : offset + 2048]
+            result = {
+                "state": "FRAGMENT",
+                "index": index,
+                "offset": offset,
+                "bytes": len(content),
+                "sha256": sha(content),
+            }
+            label += f"-{offset:05d}"
+        else:
+            need(
+                action in ("assemble", "observe-chunk"),
+                "unsupported old sidecar action",
+            )
+            content = chunk
+            result = {
+                "state": "CHUNK",
+                "index": index,
+                "bytes": len(chunk),
+                "sha256": sha(chunk),
+            }
+        if action == "fragment":
+            need(
+                base64.b64decode(payload["data"], validate=True) == content,
+                "old fragment data differs",
+            )
+        else:
+            need(
+                payload["chunk_sha256"] == sha(content),
+                "old observation digest differs",
+            )
+        return result, label
+
+    for index, path in enumerate(requests, 1):
+        prefix = path.name.removesuffix(".request.json")
+        need(prefix.startswith(f"{index:04d}-"), "old request sequence differs")
+        request = load(path.name)
+        final = index == len(requests)
+        if final:
+            need(
+                prefix.endswith("-identity")
+                and request
+                == {
+                    "method": "GET",
+                    "path": "/machines/" + state["machine_id"],
+                    "body": None,
+                },
+                "only final identity GET may lack a response",
+            )
+            need(
+                not (directory / (prefix + ".wire.json")).exists()
+                and not (directory / (prefix + ".response.json")).exists(),
+                "final GET is not the retained incomplete read",
+            )
+            continue
+        wire = load(prefix + ".wire.json")
+        raw = base64.b64decode(wire["body_b64"], validate=True)
+        need(
+            wire["sha256"] == sha(raw)
+            and wire["status"] == 200
+            and wire["method"] == request["method"]
+            and wire["path"] == request["path"],
+            "old raw response binding differs",
+        )
+        response = load(prefix + ".response.json")
+        need(json.loads(raw) == response, "old decoded response differs")
+        if request["method"] == "GET":
+            need(
+                prefix.endswith("-identity")
+                and request
+                == {
+                    "method": "GET",
+                    "path": "/machines/" + state["machine_id"],
+                    "body": None,
+                }
+                and all(
+                    response[key] == state["machine"][key]
+                    for key in ("id", "instance_id", "config")
+                )
+                and response.get("state") in ("created", "starting", "started"),
+                "old native identity differs",
+            )
+            continue
+        need(
+            request["method"] == "POST"
+            and request["path"] == "/machines/" + state["machine_id"] + "/exec",
+            "unknown old transfer effect",
+        )
+        body = request["body"]
+        argv = shlex.split(body["cmd"])
+        need(
+            len(argv) == 4 and argv[:2] == ["python3", "-c"], "old sidecar argv differs"
+        )
+        source, payload = json.loads(
+            gzip.decompress(base64.b64decode(argv[3], validate=True))
+        )
+        need(
+            source == old["REMOTE_SIDECAR"]
+            and body["cmd"] == old["sidecar_command"](payload)
+            and set(body) == {"cmd", "timeout", "machine"}
+            and body["machine"] is True
+            and type(body["timeout"]) is int
+            and 1 <= body["timeout"] <= 20,
+            "old source-bound command differs",
+        )
+        wanted, label = expected(payload)
+        need(
+            response.get("exit_code") == 0
+            and response.get("exit_signal", 0) == 0
+            and response.get("stderr") in (None, ""),
+            "old exec response failed",
+        )
+        ack = json.loads(response["stdout"])
+        if prefix.endswith("-write"):
+            need(
+                payload["action"] in ("fragment", "assemble", "commit")
+                and ack == wanted,
+                "old write lacks exact positive acknowledgement",
+            )
+            intent = load(label + ".intent.json")
+            need(
+                intent
+                == {
+                    "machine": state["machine_id"],
+                    "instance": state["machine"]["instance_id"],
+                    "request_sha256": sha(body["cmd"].encode()),
+                    "expected": wanted,
+                }
+                and load(label + ".response.json") == response,
+                "old write intent/response differs",
+            )
+            writes += 1
+        else:
+            need(
+                prefix.endswith("-observe-existing")
+                and payload["action"].startswith("observe-")
+                and ack in (wanted, {"state": "ABSENT"}),
+                "unknown old observation",
+            )
+    need(
+        writes and set(before) == allowed,
+        "unaccounted old transfer artifact or no writes",
+    )
+    need(
+        before == {p.name: fingerprint(p) for p in directory.iterdir()},
+        "old transfer history changed",
+    )
+    state["pins"].update(
+        {str(directory / name): value for name, value in before.items()}
+    )
+    state["pins"][str(directory)] = fingerprint(directory)
+    return {
+        "kind": "ACKNOWLEDGED_WRITES_FINAL_IDENTITY_GET_INCOMPLETE",
+        "acknowledged_writes": writes,
+        "history_sha256": sha(json.dumps(hashes, sort_keys=True).encode()),
+        "inputs": hashes,
+        "old_response_unknown": "read-only GET",
+        "unwound": unwound,
+    }
+
+
 def old_rejection(state):
     """Only the retained typed pre-exec old-router rejection permits first borrow."""
     old = runpy.run_path(
@@ -472,7 +798,20 @@ def check(config, config_sha256, run_directory, operator_ref):
         "host": str(host),
         "host_ref": host_ref,
     }
-    state["old_recovery"] = old_rejection(state)
+    requests = sorted(
+        (out / "payload-transfer").glob("[0-9][0-9][0-9][0-9]-*.request.json")
+    )
+    last = requests[-1] if requests else None
+    if (
+        last
+        and last.name.endswith("-identity.request.json")
+        and not last.with_name(
+            last.name.removesuffix(".request.json") + ".wire.json"
+        ).exists()
+    ):
+        state["old_recovery"] = acknowledged_read_timeout(state)
+    else:
+        state["old_recovery"] = old_rejection(state)
     return state
 
 

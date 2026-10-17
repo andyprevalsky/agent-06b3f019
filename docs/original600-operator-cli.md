@@ -396,8 +396,15 @@ Current operators emit `launch-payload-failure.json` in that original output;
 pass its exact path to `--prelaunch-failure` without copying or renaming it.
 
 If an already-created controller rejected the old large exec request before
-receiving its payload, keep the original operator alive. The recovery command
-uses that same controller, configuration, source and original deadline:
+receiving its payload, or transfer stopped on a read-only identity request after
+all earlier writes were acknowledged, keep the original operator alive. The
+recovery command uses that same controller, configuration, source and original
+deadline:
+
+For a read interruption, retain `payload-transfer.interruption.json` in the
+original run directory. This observed receipt must bind the live caller and
+tee parent, their pipe/log descriptors, the exact captured exception output,
+and its wrapper source. Missing response files alone do not authorize a handoff.
 
 ```bash
 python3 scripts/cloudbench-resume-controller-payload.py \
@@ -407,7 +414,8 @@ python3 scripts/cloudbench-resume-controller-payload.py \
 ```
 
 After this local check passes, replace `--check` with `--run` to transfer the
-remaining bytes. The command verifies the retained rejection and readback,
+remaining bytes. The command verifies the retained rejection and readback or
+the complete acknowledged-write/read-only-interruption history,
 original caller and gate, source files, authority and payload hashes. It creates
 one durable borrower intent and preserves the original transfer journal. A
 successful transfer does not certify task execution or cleanup. An incomplete

@@ -336,7 +336,12 @@ def transfer_sidecars(api,mid,record,out,envelope_sha,deadline,cancelled=lambda:
   save(journal/(prefix+'.response.json'),response);active();return response
  def current():
   while True:
-   native=wire('GET','/machines/'+mid,kind='identity')
+   try:native=wire('GET','/machines/'+mid,kind='identity')
+   except Deadline:
+    # This request only reads identity. Preserve its interrupted receipt and
+    # reobserve under the unchanged original deadline; never replay an exec.
+    active();save(journal/f'{sequence[0]:04d}-read-pending.json',{'error':'Deadline','read_only':True,'original_deadline':deadline})
+    time.sleep(min(.2,max(0,deadline-time.time())));continue
    need(native['id']==mid and native['instance_id']==record['instance_id'] and native['config']==record['config'],'payload target incarnation changed')
    if native.get('state')=='started':return
    need(native.get('state')in('created','starting'),'payload target is not starting')

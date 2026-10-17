@@ -123,6 +123,206 @@ class Borrower(unittest.TestCase):
             "old_recovery": {"rejection_wire_sha256": "3" * 64},
         }
 
+    def test_transfer_unwind_requires_exact_caller_pipe_and_pending_print(self):
+        base = self.root / "base"
+        out = base / "admission" / "launch" / "run"
+        out.mkdir(parents=True)
+        wrapper = base / "wrapper.py"
+        wrapper.write_bytes(b"known tee wrapper")
+        wrapper.chmod(0o600)
+        config = out.parent / "config.private.json"
+        owner = {
+            "pid": 11,
+            "birth": "caller-birth",
+            "cwd": str(base),
+            "argv": ["python3", "caller.py"],
+        }
+        parent = {
+            "pid": 12,
+            "birth": "parent-birth",
+            "cwd": str(base),
+            "argv": ["python3", str(wrapper)],
+        }
+        state = {
+            "out": out,
+            "config": str(config),
+            "source_ref": "a" * 40,
+            "host_ref": "b" * 40,
+            "epoch": time.time() - 10,
+            "caller": {"pid": 11, "birth": "caller-birth", "gate_pid": 13},
+            "pins": {},
+        }
+        first = {
+            "status": "CONTINUING_ORIGINAL_ADMISSION",
+            "admission_directory": str(out.parent.parent),
+            "source_ref": state["source_ref"],
+            "host_operator_source_ref": state["host_ref"],
+            "config_path": str(config),
+            "run_directory": str(out),
+        }
+        pending = {
+            "status": "PENDING_EXTERNAL_OWNER_LIVE",
+            "error": "Deadline",
+            "gate_pid": 13,
+            "no_gate_or_vm_kill": True,
+        }
+        log = base / "stream.log"
+        log.write_text(json.dumps(first) + "\n" + json.dumps(pending) + "\n")
+        log.chmod(0o600)
+
+        def captured(value):
+            return {key: value[key] for key in ("pid", "birth", "cwd")} | {
+                "cmdline_sha256": R["sha"](
+                    b"\0".join(os.fsencode(arg) for arg in value["argv"]) + b"\0"
+                )
+            }
+
+        proof = {
+            "observed_epoch": time.time(),
+            "caller": captured(owner) | {"ppid": 12},
+            "parent": captured(parent),
+            "caller_fd1": "pipe:[123]",
+            "parent_matching_fds": {"3": str(log), "4": "pipe:[123]"},
+            "log_path": str(log),
+            "log_sha256": R["sha"](log.read_bytes()),
+            "wrapper_path": str(wrapper),
+            "wrapper_sha256": R["sha"](wrapper.read_bytes()),
+        }
+        receipt = write(out / "payload-transfer.interruption.json", proof)
+        globals_ = M["transfer_unwound"].__globals__
+        links = {
+            "/proc/11/fd/1": "pipe:[123]",
+            "/proc/12/fd/3": str(log),
+            "/proc/12/fd/4": "pipe:[123]",
+        }
+        with (
+            mock.patch.dict(
+                globals_,
+                process_identity=lambda pid: {11: owner, 12: parent}[pid],
+                parent_pid=lambda pid: 12,
+            ),
+            mock.patch.object(
+                os, "readlink", side_effect=lambda path: links[str(path)]
+            ),
+        ):
+            result = M["transfer_unwound"](state)
+            self.assertEqual(result["receipt_sha256"], R["sha"](receipt.read_bytes()))
+            self.assertIn(str(log), state["pins"])
+            links["/proc/12/fd/4"] = "pipe:[999]"
+            with self.assertRaises(ValueError):
+                M["transfer_unwound"](state)
+            links["/proc/12/fd/4"] = "pipe:[123]"
+            pending["gate_pid"] = 99
+            log.write_text(json.dumps(first) + "\n" + json.dumps(pending) + "\n")
+            proof["log_sha256"] = R["sha"](log.read_bytes())
+            write(receipt, proof)
+            with self.assertRaises(ValueError):
+                M["transfer_unwound"](state)
+
+    def test_acknowledged_writes_allow_only_final_incomplete_identity_get(self):
+        state = dict(self.state, host=ROOT, source_ref="a" * 40, pins={})
+        state["machine"] = {
+            "id": state["machine_id"],
+            "instance_id": "original-instance",
+            "config": {},
+        }
+        data = b"actual fixture sidecar bytes"
+        digest = R["sha"](data)
+        sidecar = self.out / "sidecar.gz"
+        sidecar.write_bytes(data)
+        sidecar.chmod(0o600)
+        write(
+            self.out / "controller-sidecars.private.json",
+            [{"path": str(sidecar), "sha256": digest, "bytes": len(data)}],
+        )
+        directory = self.out / "payload-transfer"
+        directory.mkdir(mode=0o700)
+        payload = {
+            "machine": state["machine_id"],
+            "source_ref": state["source_ref"],
+            "envelope_sha256": state["envelope_sha256"],
+            "sha256": digest,
+            "action": "fragment",
+            "index": 0,
+            "offset": 0,
+            "data": base64.b64encode(data).decode(),
+        }
+        command = R["sidecar_command"](payload)
+        wanted = {
+            "state": "FRAGMENT",
+            "index": 0,
+            "offset": 0,
+            "bytes": len(data),
+            "sha256": digest,
+        }
+        response = {
+            "exit_code": 0,
+            "exit_signal": 0,
+            "stderr": "",
+            "stdout": json.dumps(wanted),
+        }
+        request = {
+            "method": "POST",
+            "path": "/machines/" + state["machine_id"] + "/exec",
+            "body": {"cmd": command, "timeout": 20, "machine": True},
+        }
+        raw = json.dumps(response).encode()
+        write(directory / "0001-write.request.json", request)
+        write(
+            directory / "0001-write.wire.json",
+            {
+                "method": "POST",
+                "path": request["path"],
+                "status": 200,
+                "sha256": R["sha"](raw),
+                "body_b64": base64.b64encode(raw).decode(),
+            },
+        )
+        write(directory / "0001-write.response.json", response)
+        label = digest + "-00000-00000"
+        write(
+            directory / (label + ".intent.json"),
+            {
+                "machine": state["machine_id"],
+                "instance": "original-instance",
+                "request_sha256": R["sha"](command.encode()),
+                "expected": wanted,
+            },
+        )
+        write(directory / (label + ".response.json"), response)
+        write(
+            directory / "0002-identity.request.json",
+            {"method": "GET", "path": "/machines/" + state["machine_id"], "body": None},
+        )
+        with self.assertRaises(ValueError):
+            M["old_rejection"](
+                state
+            )  # Same positive history was not previously eligible.
+        with self.assertRaises(FileNotFoundError):
+            M["acknowledged_read_timeout"](state)
+        with mock.patch.dict(
+            M["acknowledged_read_timeout"].__globals__,
+            transfer_unwound=lambda state: {"fixture": "unwound"},
+        ):
+            result = M["acknowledged_read_timeout"](state)
+            self.assertEqual(result["acknowledged_writes"], 1)
+            self.assertIn(str(directory), state["pins"])
+            # Unknown write, unaccounted effect, and wrong ACK never permit borrowing.
+            for name, value in [
+                ("0003-write.request.json", request),
+                (label + ".pending.json", {"unknown": True}),
+                ("0002-identity.wire.json", {"status": 499}),
+            ]:
+                path = write(directory / name, value)
+                with self.assertRaises((ValueError, OSError)):
+                    M["acknowledged_read_timeout"](state)
+                path.unlink()
+            bad = dict(wanted, sha256="0" * 64)
+            altered = dict(response, stdout=json.dumps(bad))
+            write(directory / "0001-write.response.json", altered)
+            with self.assertRaises(ValueError):
+                M["acknowledged_read_timeout"](state)
+
     def test_one_borrow_closes_without_replay_or_cleanup_claim(self):
         calls = []
 

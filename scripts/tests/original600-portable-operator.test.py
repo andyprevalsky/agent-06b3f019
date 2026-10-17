@@ -138,6 +138,38 @@ class Portable(unittest.TestCase):
             delivered.write_bytes(b'corrupt')
             with self.assertRaises(AssertionError):scope['decode_remote_file'](descriptor)
 
+    def test_sidecar_identity_deadline_reobserves_without_replaying_exec(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);host=root/'host';guest=root/'guest';host.mkdir();guest.mkdir()
+            _,envelope,digest,_=self.large_sidecar(host)
+            api,record=self.sidecar_api(guest,envelope)
+            original=api.api;attempts=[]
+            def interrupted(method,*args,**kwargs):
+                if method=='GET':
+                    attempts.append(method)
+                    if len(attempts)==1:raise RUNNER['Deadline']('external controller I/O deadline')
+                return original(method,*args,**kwargs)
+            api.api=interrupted
+            RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60)
+            pending=list((host/'payload-transfer').glob('*-read-pending.json'))
+            self.assertEqual(len(pending),1)
+            self.assertTrue(json.loads(pending[0].read_bytes())['read_only'])
+            self.assertTrue((host/'payload-transfer/complete.json').is_file())
+            self.assertGreater(api.posts,0)
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);host=root/'host';guest=root/'guest';host.mkdir();guest.mkdir()
+            _,envelope,digest,_=self.large_sidecar(host)
+            api,record=self.sidecar_api(guest,envelope);stopped=[]
+            def cancelled(method,*args,**kwargs):
+                self.assertEqual(method,'GET');stopped.append(True)
+                raise RUNNER['Deadline']('external controller I/O deadline')
+            api.api=cancelled
+            with self.assertRaises(RUNNER['Deadline']):
+                RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60,lambda:bool(stopped))
+            self.assertEqual(len(stopped),1)
+            self.assertEqual(api.posts,0)
+            self.assertFalse((host/'payload-transfer/complete.json').exists())
+
     def test_sidecar_unknown_ack_is_retained_without_post_retry(self):
         with tempfile.TemporaryDirectory() as name:
             root=Path(name);host=root/'host';guest=root/'guest';host.mkdir();guest.mkdir()
