@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import runpy
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('operator_cli', Path(os.environ.get('PORTABLE_OPERATOR_SOURCE', ROOT/'scripts/run-original600-controller.py')))
 CLI = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CLI)
-RUNNER = runpy.run_path(str(ROOT/'scripts/cloudbench-original600-runner.py'))
+RUNNER = runpy.run_path(os.environ.get('ORIGINAL600_RUNNER_SOURCE',str(ROOT/'scripts/cloudbench-original600-runner.py')))
 
 
 def private(path, value):
@@ -36,14 +37,164 @@ def private(path, value):
 
 
 class Portable(unittest.TestCase):
+    def large_sidecar(self, root):
+        raw='\n'.join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(14000)).encode()
+        item=dict(relative_path='.git/cloudbench-stream-fixture.json',sha256=CLI.digest(raw))
+        remote=dict(source_ref='a'*40,epoch=time.time(),remote_files=[RUNNER['encode_remote_file'](item,raw)])
+        payload,digest,command=RUNNER['launch_handoff'](root,remote)
+        self.assertLess(payload.stat().st_size,256*1024)
+        self.assertLess(max(map(len,command)),16000)
+        descriptor=json.loads(gzip.decompress(payload.read_bytes()))['remote_files'][0]
+        self.assertEqual(descriptor['encoding'],'external-gzip')
+        return raw,payload,digest,descriptor
+
+    def sidecar_api(self, guest, envelope, fail_ack=False, foreign=False):
+        (guest/'controller-launch-payload.json.gz').write_bytes(envelope.read_bytes())
+        (guest/'controller-launch-payload.json.gz').chmod(0o600)
+        ref=json.loads(gzip.decompress(envelope.read_bytes()))['source_ref']
+        record=dict(id='1'*14,instance_id='original-instance',config=dict(env=dict(GATE_REF=ref)))
+        owner=self
+        class API:
+            posts=0
+            actions=[]
+            max_command_bytes=0
+            def api(self,method,path,body=None,timeout=None,observer=None):
+                owner.assertEqual(path,'/machines/'+'1'*14+('/exec' if method=='POST' else ''))
+                if method=='GET':
+                    response=dict(record,instance_id='foreign' if foreign else record['instance_id'])
+                    if observer:observer(method,path,200,json.dumps(response).encode())
+                    return response
+                self.posts+=1
+                self.max_command_bytes=max(self.max_command_bytes,len(body['cmd'].encode()))
+                argv=shlex.split(body['cmd'])
+                request=json.loads(base64.b64decode(argv[-1]));self.actions.append(request['action'])
+                # Only filesystem root/account resolution are fixture-specific.
+                # The real receiver, request framing and OS file operations run.
+                argv[2]=('import os,pwd,types\npwd.getpwnam=lambda name:types.SimpleNamespace(pw_uid=os.getuid(),pw_gid=os.getgid())\n'+argv[2].replace("root=Path('/tmp')",'root=Path('+repr(str(guest))+')'))
+                done=subprocess.run(argv,capture_output=True,text=True,timeout=timeout,
+                    env=dict(os.environ,FLY_MACHINE_ID=record['id'],GATE_REF=ref))
+                if fail_ack is True or (fail_ack=='once' and self.posts==1):raise TimeoutError('lost response after receiver wrote chunk')
+                response=dict(stdout=done.stdout,stderr=done.stderr,exit_code=done.returncode)
+                if observer:observer(method,path,200,json.dumps(response).encode())
+                return response
+        return API(),record
+
+    def test_large_payload_streams_exact_bytes_without_config_growth(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);host=root/'host';guest=root/'guest';host.mkdir();guest.mkdir()
+            raw,envelope,digest,descriptor=self.large_sidecar(host)
+            api,record=self.sidecar_api(guest,envelope)
+            RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60)
+            delivered=guest/Path(descriptor['transfer_path']).name
+            self.assertEqual(gzip.decompress(delivered.read_bytes()),raw)
+            self.assertEqual(delivered.stat().st_mode&0o777,0o600)
+            self.assertEqual(delivered.stat().st_uid,os.getuid())
+            self.assertEqual(delivered.stat().st_nlink,1)
+            self.assertGreater(api.posts,2)
+            self.assertLess(api.max_command_bytes,100000)
+            self.assertTrue((host/'payload-transfer/complete.json').is_file())
+            node=next(n for n in ast.parse(RUNNER['REMOTE_LAUNCH']).body if isinstance(n,ast.FunctionDef) and n.name=='decode_remote_file')
+            scope=dict(base64=base64,gzip=gzip,io=io,hashlib=hashlib,os=os,stat=__import__('stat'),time=time,v={'epoch':time.time()},
+                       Path=lambda value:guest/Path(value).name)
+            exec(compile(ast.Module(body=[node],type_ignores=[]),'<production sidecar decoder>','exec'),scope)
+            self.assertEqual(scope['decode_remote_file'](descriptor),raw)
+            delivered.write_bytes(b'corrupt')
+            with self.assertRaises(AssertionError):scope['decode_remote_file'](descriptor)
+
+    def test_sidecar_unknown_ack_is_retained_without_post_retry(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);host=root/'host';guest=root/'guest';host.mkdir();guest.mkdir()
+            _,envelope,digest,_=self.large_sidecar(host)
+            api,record=self.sidecar_api(guest,envelope,fail_ack=True)
+            with self.assertRaises(TimeoutError):
+                RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60)
+            self.assertEqual(api.actions,['chunk','observe-chunk'])
+            self.assertEqual(len(list((host/'payload-transfer').glob('*.pending.json'))),1)
+            self.assertFalse((host/'payload-transfer/complete.json').exists())
+            self.assertEqual(len(list(guest.glob('controller-sidecar-*/*'))),1)
+
+    def test_sidecar_lost_ack_reconciles_by_read_without_replaying_write(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);host=root/'host';guest=root/'guest';host.mkdir();guest.mkdir()
+            _,envelope,digest,_=self.large_sidecar(host)
+            api,record=self.sidecar_api(guest,envelope,fail_ack='once')
+            RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60)
+            self.assertEqual(api.actions[:3],['chunk','observe-chunk','chunk'])
+            self.assertTrue((host/'payload-transfer/complete.json').exists())
+            self.assertEqual(len(list((host/'payload-transfer').glob('*.pending.json'))),1)
+            self.assertEqual(len(list((host/'payload-transfer').glob('*.reconciled.json'))),1)
+
+    def test_sidecar_cancellation_stops_before_next_request(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);host=root/'host';guest=root/'guest';host.mkdir();guest.mkdir()
+            _,envelope,digest,_=self.large_sidecar(host)
+            api,record=self.sidecar_api(guest,envelope)
+            with self.assertRaises(RUNNER['Deadline']):
+                RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60,lambda:api.posts>0)
+            self.assertEqual(api.actions,['chunk'])
+            self.assertFalse((host/'payload-transfer/complete.json').exists())
+
+    def test_sidecar_raw_http_body_precedes_json_parse_failure(self):
+        capture=runpy.run_path(str(ROOT/'scripts/cloudbench-original-volume-capture.py'))
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200);self.end_headers();self.wfile.write(b'{')
+            def log_message(self,*args):pass
+        server=http.server.HTTPServer(('127.0.0.1',0),Handler)
+        thread=threading.Thread(target=server.serve_forever);thread.start()
+        try:
+            api=object.__new__(capture['Fly']);api.app='fixture';api.authorization='Bearer fixture';api.loopback=True
+            api.base='http://127.0.0.1:'+str(server.server_port)
+            with tempfile.TemporaryDirectory() as name:
+                host=Path(name);_,_,digest,_=self.large_sidecar(host)
+                with self.assertRaises(json.JSONDecodeError):
+                    RUNNER['transfer_sidecars'](api,'1'*14,dict(config=dict(env=dict(GATE_REF='a'*40))),host,digest,time.time()+60)
+                wire=list((host/'payload-transfer').glob('*.wire.json'))
+                self.assertEqual(len(wire),1)
+                self.assertEqual(base64.b64decode(json.loads(wire[0].read_bytes())['body_b64']),b'{')
+                self.assertFalse(list((host/'payload-transfer').glob('*.response.json')))
+        finally:server.shutdown();thread.join();server.server_close()
+
+    def test_sidecar_foreign_incarnation_and_expired_clock_refuse_before_write(self):
+        for foreign in (False,True):
+            with self.subTest(foreign=foreign),tempfile.TemporaryDirectory() as name:
+                root=Path(name);host=root/'host';guest=root/'guest';host.mkdir();guest.mkdir()
+                _,envelope,digest,_=self.large_sidecar(host)
+                api,record=self.sidecar_api(guest,envelope,foreign=foreign)
+                with self.assertRaises(ValueError):
+                    RUNNER['transfer_sidecars'](api,record['id'],record,host,digest,time.time()+60 if foreign else time.time()-1)
+                self.assertEqual(api.posts,0)
+
+    def test_typed_payload_refusal_keeps_original_output_and_clock(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);out=root/'run';out.mkdir(mode=0o700)
+            ref='efd8a396a6b6e4a65d10186c7c9a24342ad9065a'
+            config=private(root/'config.private.json',dict(source_ref=ref,started_at_epoch=100))
+            authority=dict(source_ref=ref,output_directory=str(out/'export'),cleanup_owner_pid=99999999,cleanup_owner_birth='gone')
+            private(out/'authority.private.json',authority)
+            receipt=dict(schema='original600-host-payload-failure-v1',reason='compressed launch payload too large for config transport',gate_created=False,
+                         source_ref=ref,config_path=str(config),config_sha256=CLI.digest(config.read_bytes()),output_directory=str(out),
+                         host_runner_sha256='f0da1304a88459677a4f5017c7c8689c73c3441357e635fe9040450637c1ab0f',owner_pid=99999999,owner_birth='gone')
+            evidence=private(out/'launch-payload-failure.json',receipt)
+            before={p.name:p.read_bytes() for p in out.iterdir()}
+            accepted=CLI.prelaunch_failure(RUNNER,out,evidence,config,CLI.digest(config.read_bytes()))
+            self.assertEqual(accepted['prior_output'],str(out))
+            self.assertFalse(Path(accepted['successor_output']).exists())
+            self.assertEqual({p.name:p.read_bytes() for p in out.iterdir()},before)
+            private(out/'caller.json',{})
+            with self.assertRaisesRegex(ValueError,'possible gate activity'):
+                CLI.prelaunch_failure(RUNNER,out,evidence,config,CLI.digest(config.read_bytes()))
+
     def test_inner_file_compression_preserves_bytes_with_existing_outer_bound(self):
         data=json.dumps({'inputs':{f'/state/original600-123456789/archived-reuse-reservations/old-machine/wire/request-{i}.json':hashlib.sha256(str(i).encode()).hexdigest() for i in range(5500)}}).encode()
         item={'relative_path':'.git/cloudbench-fixture.json','sha256':CLI.digest(data)}
         legacy=dict(item,data=base64.b64encode(data).decode())
         with tempfile.TemporaryDirectory() as name:
             root=Path(name)
-            with self.assertRaisesRegex(ValueError,'compressed launch payload too large'):
-                RUNNER['launch_handoff'](root,{'remote_files':[legacy]})
+            first=root/'legacy';first.mkdir()
+            first_path,_,_=RUNNER['launch_handoff'](first,{'remote_files':[legacy]})
+            self.assertLess(first_path.stat().st_size,256*1024)
+            self.assertTrue((first/'controller-sidecars.private.json').exists())
             encoded=RUNNER['encode_remote_file'](item,data)
             path,_,command=RUNNER['launch_handoff'](root,{'remote_files':[encoded]})
             self.assertLess(path.stat().st_size,256*1024)

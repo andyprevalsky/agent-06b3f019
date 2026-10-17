@@ -45,7 +45,7 @@ def campaign_argv(tasks,epoch):
 # Stage bound inputs, publish this PID/birth, then exec the canonical supervisor.
 # Its owned-parent finally writes the terminal receipt after campaign join.
 REMOTE_LAUNCH=r'''
-import base64,hashlib,io,json,os,stat,subprocess,sys,gzip
+import base64,hashlib,io,json,os,stat,subprocess,sys,gzip,time
 from pathlib import Path
 p=Path(sys.argv[1]);assert p==Path('/tmp/controller-launch-payload.json.gz') and p.resolve(strict=True)==p
 with os.fdopen(os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as f:
@@ -65,10 +65,24 @@ def birth(pid):
  return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+a[19]
 identity=root/'.context'/v['identity_name'];identity.parent.mkdir(exist_ok=True)
 def decode_remote_file(item):
- raw=base64.b64decode(item['data'],validate=True)
- if item.get('encoding')=='gzip-base64':
+ if item.get('encoding')=='external-gzip':
+  path=Path(item['transfer_path']);assert path==Path('/tmp/controller-sidecar-'+item['transfer_sha256']+'.gz')
+  assert 0<item['transfer_bytes']<16*1024*1024
+  while True:
+   assert time.time()<v['epoch']+5400,'original payload transfer deadline expired'
+   try:
+    assert path.resolve(strict=True)==path
+    with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb')as source:
+     before=os.fstat(source.fileno());assert stat.S_ISREG(before.st_mode) and before.st_nlink==1 and before.st_uid==os.geteuid() and not before.st_mode&0o077
+     assert before.st_size==item['transfer_bytes'];raw=source.read(before.st_size+1);after=os.fstat(source.fileno())
+     stable=lambda s:(s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+     assert stable(before)==stable(after)==stable(path.lstat()) and len(raw)==before.st_size and hashlib.sha256(raw).hexdigest()==item['transfer_sha256']
+    break
+   except (FileNotFoundError,PermissionError):time.sleep(min(.2,max(0,v['epoch']+5400-time.time())))
+ elif item.get('encoding','base64')in('base64','gzip-base64'):raw=base64.b64decode(item['data'],validate=True)
+ else:raise ValueError('unsupported remote file encoding')
+ if item.get('encoding')in('gzip-base64','external-gzip'):
   with gzip.GzipFile(fileobj=io.BytesIO(raw)) as f:raw=f.read(16*1024*1024)
- else:assert item.get('encoding','base64')=='base64'
  assert len(raw)<16*1024*1024 and hashlib.sha256(raw).hexdigest()==item['sha256']
  return raw
 for item in v['remote_files']:
@@ -80,6 +94,73 @@ tasks=identity.with_suffix('.tasks.json');save(tasks,(json.dumps(v['tasks'],sort
 row=dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth=birth(os.getpid()),machine=os.environ['FLY_MACHINE_ID'],source_ref=v['source_ref'],epoch=v['epoch'])
 assert row['pid']>1;save(identity,(json.dumps(row,sort_keys=True)+'\n').encode());print('ORIGINAL600_SUPERVISOR '+json.dumps(row),flush=True)
 os.chdir(root);os.execve(sys.executable,[sys.executable,str(script),str(v['epoch']),*v['campaign_argv']],env)
+'''
+REMOTE_SIDECAR=r'''
+import base64,fcntl,gzip,hashlib,io,json,os,pwd,re,stat,sys,tempfile,time
+from pathlib import Path
+def receive(v,root=Path('/tmp')):
+ assert os.environ['FLY_MACHINE_ID']==v['machine'] and os.environ['GATE_REF']==v['source_ref']
+ def read(path,limit,uid,private=True):
+  assert path.resolve(strict=True)==path
+  with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb')as stream:
+   before=os.fstat(stream.fileno());assert stat.S_ISREG(before.st_mode) and before.st_nlink==1 and before.st_uid in uid and not before.st_mode&(0o077 if private else 0o022) and before.st_size<=limit
+   stable=lambda s:(s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+   raw=stream.read(before.st_size+1);assert stable(before)==stable(os.fstat(stream.fileno()))==stable(path.lstat()) and len(raw)==before.st_size
+   return raw
+ envelope=read(root/'controller-launch-payload.json.gz',256*1024,{0,pwd.getpwnam('rose').pw_uid},False)
+ assert hashlib.sha256(envelope).hexdigest()==v['envelope_sha256']
+ with gzip.GzipFile(fileobj=io.BytesIO(envelope))as stream:decoded=stream.read(16*1024*1024)
+ assert len(decoded)<16*1024*1024
+ manifest=json.loads(decoded);assert manifest['source_ref']==v['source_ref']
+ assert time.time()<manifest['epoch']+5400,'original sidecar deadline expired'
+ digest=v['sha256'];assert re.fullmatch('[0-9a-f]{64}',digest)
+ entries=[x for x in manifest['remote_files'] if x.get('encoding')=='external-gzip' and x.get('transfer_sha256')==digest]
+ assert entries and all(x['transfer_path']=='/tmp/controller-sidecar-'+digest+'.gz' and x['transfer_bytes']==entries[0]['transfer_bytes'] for x in entries)
+ size=entries[0]['transfer_bytes'];assert type(size)is int and 0<size<16*1024*1024
+ count=(size+32767)//32768;directory=root/('controller-sidecar-'+digest)
+ if v['action']=='observe-chunk':
+  index=v['index'];assert type(index)is int and 0<=index<count
+  raw=read(directory/('%05d'%index),32768,{os.geteuid()})
+  assert len(raw)==min(32768,size-index*32768) and hashlib.sha256(raw).hexdigest()==v['chunk_sha256']
+  return dict(state='CHUNK',index=index,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())
+ if v['action']=='observe-ready':
+  raw=read(root/('controller-sidecar-'+digest+'.gz'),size,{pwd.getpwnam('rose').pw_uid})
+  assert len(raw)==size and hashlib.sha256(raw).hexdigest()==digest
+  return dict(state='READY',bytes=size,sha256=digest)
+ try:directory.mkdir(mode=0o700)
+ except FileExistsError:pass
+ s=directory.lstat();assert directory.resolve(strict=True)==directory and stat.S_ISDIR(s.st_mode) and s.st_uid==os.geteuid() and not s.st_mode&0o077
+ def save(path,raw):
+  assert time.time()<manifest['epoch']+5400,'original sidecar deadline expired'
+  try:fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+  except FileExistsError:assert read(path,len(raw),{os.geteuid()})==raw;return
+  with os.fdopen(fd,'wb')as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+  fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+ if v['action']=='chunk':
+  index=v['index'];assert type(index)is int and 0<=index<count
+  raw=base64.b64decode(v['data'],validate=True);assert len(raw)==min(32768,size-index*32768)
+  save(directory/('%05d'%index),raw)
+  return dict(state='CHUNK',index=index,bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest())
+ assert v['action']=='commit'
+ raw=b''.join(read(directory/('%05d'%i),32768,{os.geteuid()}) for i in range(count))
+ assert len(raw)==size and hashlib.sha256(raw).hexdigest()==digest
+ destination=root/('controller-sidecar-'+digest+'.gz');user=pwd.getpwnam('rose')
+ lock=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+ try:
+  fcntl.flock(lock,fcntl.LOCK_EX)
+  if os.path.lexists(destination):assert read(destination,size,{user.pw_uid})==raw
+  else:
+   fd,name=tempfile.mkstemp(prefix='.controller-sidecar-',dir=root);temporary=Path(name)
+   try:
+    with os.fdopen(fd,'wb')as stream:stream.write(raw);stream.flush();os.fchown(stream.fileno(),user.pw_uid,user.pw_gid);os.fsync(stream.fileno())
+    assert time.time()<manifest['epoch']+5400,'original sidecar deadline expired'
+    os.rename(temporary,destination)
+    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+   finally:
+    if temporary.exists():temporary.unlink()
+ finally:os.close(lock)
+ return dict(state='READY',bytes=size,sha256=digest)
+if __name__=='__main__':print(json.dumps(receive(json.loads(base64.b64decode(sys.argv[1],validate=True))),sort_keys=True))
 '''
 REMOTE_CONTROL=r'''
 import base64,hashlib,json,os,signal,sys
@@ -183,7 +264,24 @@ def validate_source_members(root,ref,pins):
 
 def launch_handoff(out,remote):
  raw=(json.dumps(remote,sort_keys=True,allow_nan=False)+'\n').encode();need(len(raw)<16*1024*1024,'launch payload exceeds bounded decoded size')
- packed=gzip.compress(raw,mtime=0);need(len(packed)<256*1024,'compressed launch payload too large for config transport')
+ packed=gzip.compress(raw,mtime=0)
+ if len(packed)>=256*1024:
+  remote=dict(remote);files=[];sidecars=[]
+  for item in remote['remote_files']:
+   data=base64.b64decode(item['data'],validate=True)
+   if item.get('encoding','base64')=='base64':data=gzip.compress(data,mtime=0)
+   else:need(item['encoding']=='gzip-base64','unsupported source encoding')
+   need(0<len(data)<16*1024*1024,'bounded sidecar required');digest=sha(data)
+   path=out/('controller-sidecar-'+digest+'.private.gz')
+   if path.exists():need(read(path)==data,'sidecar bytes changed')
+   else:
+    with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb')as stream:stream.write(data);stream.flush();os.fsync(stream.fileno())
+   files.append(dict(relative_path=item['relative_path'],sha256=item['sha256'],encoding='external-gzip',transfer_sha256=digest,transfer_bytes=len(data),transfer_path='/tmp/controller-sidecar-'+digest+'.gz'))
+   if not any(row['sha256']==digest for row in sidecars):sidecars.append(dict(path=str(path),sha256=digest,bytes=len(data)))
+  remote['remote_files']=files;raw=(json.dumps(remote,sort_keys=True,allow_nan=False)+'\n').encode();packed=gzip.compress(raw,mtime=0)
+  need(len(packed)<256*1024,'sidecar descriptor exceeds bounded config transport')
+  save(out/'controller-sidecars.private.json',sidecars)
+ need(len(packed)<256*1024,'compressed launch payload too large for config transport')
  path=out/'controller-launch-payload.private.json.gz'
  fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
  with os.fdopen(fd,'wb')as f:f.write(packed);f.flush();os.fsync(f.fileno())
@@ -192,6 +290,55 @@ def launch_handoff(out,remote):
  finally:os.close(fd)
  digest=sha(read(path))
  return path,digest,['python3','-c',REMOTE_LAUNCH,'/tmp/controller-launch-payload.json.gz',digest,sha(raw)]
+
+def transfer_sidecars(api,mid,record,out,envelope_sha,deadline,cancelled=lambda:False):
+ path=out/'controller-sidecars.private.json'
+ if not path.exists():return
+ descriptor=json.loads(read(path));journal=out/'payload-transfer';journal.mkdir(mode=0o700);sequence=[0]
+ def active():
+  if cancelled():raise Deadline('payload transfer cancelled')
+  need(time.time()<deadline,'original payload transfer deadline expired')
+ def wire(method,url,body=None,kind='request'):
+  active();sequence[0]+=1;prefix='%04d-%s'%(sequence[0],kind)
+  save(journal/(prefix+'.request.json'),dict(method=method,path=url,body=body))
+  def observer(observed_method,observed_path,status,data):
+   need(observed_method==method and observed_path==url,'unexpected payload wire response')
+   save(journal/(prefix+'.wire.json'),dict(method=method,path=url,status=status,body_b64=base64.b64encode(data).decode(),sha256=sha(data)))
+  with bounded(min(20,deadline-time.time())):
+   response=api.api(method,url,body,timeout=max(1,int(min(20,deadline-time.time()))),observer=observer)
+  save(journal/(prefix+'.response.json'),response);active();return response
+ def current():
+  native=wire('GET','/machines/'+mid,kind='identity')
+  need(native['id']==mid and native['instance_id']==record['instance_id'] and native['config']==record['config'],'payload target incarnation changed')
+ def send(request,label,expected):
+  active();current()
+  command=exec_command(REMOTE_SIDECAR,request);need(len(command.encode())<100000,'bounded payload chunk command required')
+  save(journal/(label+'.intent.json'),dict(machine=mid,instance=record['instance_id'],request_sha256=sha(command.encode()),expected=expected))
+  try:
+   response=wire('POST','/machines/'+mid+'/exec',dict(cmd=command,timeout=max(1,int(min(20,deadline-time.time()))),machine=True),kind='write')
+   save(journal/(label+'.response.json'),response)
+   need(response.get('exit_code',0)==0 and response.get('exit_signal',0)==0 and response.get('stderr')in(None,''),'payload receiver failed')
+   need(json.loads(response['stdout'])==expected,'payload acknowledgement differs')
+  except BaseException as error:
+   save(journal/(label+'.pending.json'),dict(error=type(error).__name__,no_blind_retry=True))
+   # A missing ACK never repeats a write. One exact read can instead prove
+   # that the original operation durably produced its complete expected bytes.
+   observe={k:v for k,v in request.items() if k!='data'}
+   observe['action']='observe-chunk' if request['action']=='chunk' else 'observe-ready'
+   if request['action']=='chunk':observe['chunk_sha256']=expected['sha256']
+   active();current()
+   response=wire('POST','/machines/'+mid+'/exec',dict(cmd=exec_command(REMOTE_SIDECAR,observe),timeout=max(1,int(min(20,deadline-time.time()))),machine=True),kind='observe')
+   save(journal/(label+'.observation.json'),response)
+   need(response.get('exit_code',0)==0 and response.get('exit_signal',0)==0 and response.get('stderr')in(None,'') and json.loads(response['stdout'])==expected,'payload transfer remains unknown')
+   save(journal/(label+'.reconciled.json'),expected)
+ for item in descriptor:
+  data=read(item['path']);need(len(data)==item['bytes'] and sha(data)==item['sha256'],'sidecar bytes changed')
+  base=dict(machine=mid,source_ref=record['config']['env']['GATE_REF'],envelope_sha256=envelope_sha,sha256=item['sha256'])
+  for index,start in enumerate(range(0,len(data),32768)):
+   chunk=data[start:start+32768]
+   send(dict(base,action='chunk',index=index,data=base64.b64encode(chunk).decode()),item['sha256']+'-%05d'%index,dict(state='CHUNK',index=index,bytes=len(chunk),sha256=sha(chunk)))
+  send(dict(base,action='commit'),item['sha256']+'-commit',dict(state='READY',bytes=len(data),sha256=item['sha256']))
+ current();save(journal/'complete.json',dict(machine=mid,instance=record['instance_id'],envelope_sha256=envelope_sha,sidecars=descriptor))
 
 
 def host_gate(root,v):
@@ -285,6 +432,7 @@ def run(config_path,config_sha,out,*,github_token=None):
    if mid is None and ownership.exists():
     record=json.loads(read(ownership));need(record['authority_sha256']==sha(authority.read_bytes()),'wrong controller ownership');mid=record['machine']['id'];need(mid not in auth['protected_machines'],'protected controller ID')
     save(out/'controller.identity.json',dict(machine=mid,instance=record['machine']['instance_id'],source_ref=ref,authority_sha256=sha(authority.read_bytes())))
+    transfer_sidecars(api,mid,record['machine'],out,payload_sha,epoch+5400,lambda:stop[0])
    if cleanup is None and mid and time.monotonic()>=next_probe:
     payload=dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name,action='PROBE')
     try:

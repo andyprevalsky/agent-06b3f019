@@ -42,13 +42,20 @@ def closed_run(outer, inputs):
     need(re.fullmatch(r"launch-[0-9]+", original_config.parent.name), "invalid bound launch directory")
     local_config = outer / original_config.parent.name / original_config.name
     need(digest(read(local_config, inputs)) == launch["config_sha256"], "original config bytes changed")
+    original_value = json.loads(read(local_config, inputs))
     local_output = outer / original_config.parent.name / output.name
     successor = local_output / "host-launch-successor.json"
     if successor.exists():
         pointer = obj(successor, inputs)
         need(pointer.get("schema") == "original600-host-launch-successor-v1", "foreign launch successor")
         evidence = pointer["evidence"]
-        raw = read(outer / Path(evidence["path"]).name, inputs)
+        recorded_failure = Path(evidence["path"])
+        if recorded_failure.is_absolute() and recorded_failure.is_relative_to(original_config.parent.parent):
+            relative_failure = recorded_failure.relative_to(original_config.parent.parent)
+            need(".." not in relative_failure.parts, "unsafe failure path")
+            raw = read(outer / relative_failure, inputs)
+        else:
+            raw = read(outer / recorded_failure.name, inputs)
         need(
             digest(raw) == evidence["sha256"] and evidence["prior_output"] == str(output),
             "successor failure binding changed",
@@ -60,16 +67,24 @@ def closed_run(outer, inputs):
             and failure.get("error") == "compressed launch payload too large for config transport"
             and failure.get("gate_created") is False
         )
+        typed_refusal = (
+            failure.get("schema") == "original600-host-payload-failure-v1"
+            and failure.get("reason") == "compressed launch payload too large for config transport"
+            and failure.get("gate_created") is False
+            and failure.get("config_path") == str(original_config)
+            and failure.get("config_sha256") == launch["config_sha256"]
+            and failure.get("source_ref") == original_value["source_ref"]
+            and recorded_failure == output / "launch-payload-failure.json"
+        )
         need(
-            (legacy or payload_refusal)
-            and failure.get("tool_reported_exit_code") == 1
-            and (
+            typed_refusal or ((legacy or payload_refusal)
+            and failure.get("tool_reported_exit_code") == 1 and (
                 payload_refusal
                 or (
                     failure.get("log_contains_synchronous_popen_errno") == 7
                     and failure.get("gate_pid") == "NOT_CREATED_BY_FAILED_POPEN"
                 )
-            ),
+            )),
             "unproven pre-exec successor",
         )
         prefix = "run-after-popen-" if legacy else "run-after-prelaunch-"

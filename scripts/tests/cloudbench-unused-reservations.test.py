@@ -219,7 +219,7 @@ class Unused(unittest.TestCase):
         self.assertEqual(value["candidates"][0]["legacy_archive_sha256"], legacy)
         self.assertEqual(value["candidates"][0]["predecessor"], self.original["candidates"][0]["predecessor"])
 
-    def successor_fixture(self, payload=False):
+    def successor_fixture(self, payload=False, typed=False):
         launch_path = self.outer / "controller-launch.intent.json"
         launch = json.loads(launch_path.read_bytes())
         original_config = Path(launch["config_path"])
@@ -238,6 +238,12 @@ class Unused(unittest.TestCase):
                 gate_pid="NOT_CREATED_BY_FAILED_POPEN",
             )
         )
+        if typed:
+            payload = True
+            failure = dict(schema="original600-host-payload-failure-v1",gate_created=False,
+                           reason="compressed launch payload too large for config transport",
+                           config_path=str(original_config),config_sha256=launch["config_sha256"],
+                           source_ref=json.loads(original_config.read_bytes())["source_ref"])
         failure_path = write(
             self.outer / "bound-continuation-popen-failure.safe.json",
             failure,
@@ -252,6 +258,10 @@ class Unused(unittest.TestCase):
         successor = Path(evidence["successor_output"])
         self.closed.rename(successor)
         self.closed.mkdir(mode=0o700)
+        if typed:
+            failure_path.unlink()
+            failure_path = write(self.closed / "launch-payload-failure.json", failure)
+            evidence["path"] = str(failure_path)
         provenance = dict(
             original_config_path=str(original_config),
             original_config_sha256=launch["config_sha256"],
@@ -270,6 +280,13 @@ class Unused(unittest.TestCase):
         write(successor / "host-operator-provenance.json", provenance)
         self.assertFalse((self.outer / "derived-config.private.json").exists())
         return derived_path, pointer_path, pointer
+
+    def test_typed_refusal_reads_exact_nested_receipt_without_alias(self):
+        self.successor_fixture(typed=True)
+        value = M["prepare"](self.outer, self.inventory)
+        self.assertEqual([row["machine_id"] for row in value["candidates"]], [self.mid])
+        self.assertIn(str(self.closed / "launch-payload-failure.json"), value["archive"]["inputs"])
+        self.assertFalse((self.outer / "launch-payload-failure.json").exists())
 
     def test_successor_uses_recorded_canonical_config_without_alias(self):
         derived_path, pointer_path, pointer = self.successor_fixture()

@@ -427,9 +427,41 @@ def payload_guard_failure(runner, output, evidence, original_config, original_sh
     return dict(path=str(evidence),sha256=digest(raw),prior_output=str(output),successor_output=str(successor))
 
 
+def typed_payload_failure(runner, output, evidence, original_config, original_sha, raw, receipt):
+    config=json.loads(runner['read'](original_config))
+    if (receipt.get('schema')!='original600-host-payload-failure-v1'
+            or receipt.get('gate_created') is not False
+            or receipt.get('reason')!='compressed launch payload too large for config transport'
+            or receipt.get('source_ref')!=config['source_ref']
+            or receipt.get('config_path')!=str(original_config) or receipt.get('config_sha256')!=original_sha
+            or receipt.get('output_directory')!=str(output)):
+        raise ValueError('unbound typed payload refusal')
+    source=subprocess.check_output(['git','--no-replace-objects','-C',str(Path(__file__).resolve().parents[1]),'show',config['source_ref']+':scripts/cloudbench-original600-runner.py'])
+    if digest(source)!='f0da1304a88459677a4f5017c7c8689c73c3441357e635fe9040450637c1ab0f' or receipt.get('host_runner_sha256')!=digest(source):
+        raise ValueError('unrecognized typed payload operator')
+    if output.resolve(strict=True)!=output or {p.name for p in output.iterdir()}!={'authority.private.json','launch-payload-failure.json'}:
+        raise ValueError('typed refusal contains possible gate activity')
+    info=output.stat()
+    if info.st_uid!=os.geteuid() or info.st_mode&0o077 or runner['read'](output/'launch-payload-failure.json')!=raw:
+        raise ValueError('private original typed refusal required')
+    authority=json.loads(runner['read'](output/'authority.private.json'))
+    if (authority.get('source_ref')!=config['source_ref'] or authority.get('output_directory')!=str(output/'export')
+            or authority.get('cleanup_owner_pid')!=receipt.get('owner_pid') or authority.get('cleanup_owner_birth')!=receipt.get('owner_birth')):
+        raise ValueError('typed refusal owner/authority differs')
+    try:alive=runner['birth'](receipt['owner_pid'])==receipt['owner_birth']
+    except (FileNotFoundError,ProcessLookupError,ValueError):alive=False
+    if alive:raise ValueError('typed refusal owner still live')
+    successor=output.parent/('run-after-prelaunch-'+digest(raw)[:16])
+    if os.path.lexists(successor) or (output/'host-launch-successor.json').exists():
+        raise ValueError('prelaunch continuation already claimed')
+    return dict(path=str(evidence),sha256=digest(raw),prior_output=str(output),successor_output=str(successor))
+
+
 def prelaunch_failure(runner, output, evidence, original_config, original_sha):
     """Accept the retained known pre-exec failure, never directory absence alone."""
     raw=runner['read'](evidence);receipt=json.loads(raw)
+    if receipt.get('schema')=='original600-host-payload-failure-v1':
+        return typed_payload_failure(runner,output,evidence,original_config,original_sha,raw,receipt)
     if receipt.get('schema')=='observed-host-prelaunch-refusal-v1':
         return payload_guard_failure(runner,output,evidence,original_config,original_sha,raw,receipt)
     if receipt.get('schema') != 'observed-tool-session-join-v1' or receipt.get('tool_reported_exit_code') != 1:

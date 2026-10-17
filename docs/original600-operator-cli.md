@@ -290,12 +290,19 @@ workload. A future synchronous E2BIG error also writes its own positive pre-exec
 receipt and restores the host signal handlers without claiming a gate started.
 
 Embedded evidence files are individually compressed before base64 encoding,
-then decoded and checked against their original hashes on the guest. This keeps
-large reservation proofs within the existing 256KiB outer transport limit
-without changing their contents. A retained, positively recorded pre-gate
+then decoded and checked against their original hashes on the guest. When that
+envelope exceeds the existing 256KiB config limit, the CLI sends the compressed
+files separately in bounded chunks to the exact owned controller. The small
+envelope contains their hashes and lengths. The guest publishes a file only
+after checking every byte and waits under the original campaign deadline.
+Lost acknowledgements retain their receipts and may only be reconciled by an
+exact read; they never cause a blind write retry. The 16MiB decoded input bound
+is unchanged. A retained, positively recorded pre-gate
 payload-size refusal can use the same `--prelaunch-failure` continuation mode;
 the old output remains preserved and the new run path starts with
 `run-after-prelaunch-`. The original workload and clock remain bound.
+Current operators emit `launch-payload-failure.json` in that original output;
+pass its exact path to `--prelaunch-failure` without copying or renaming it.
 
 
 Within a live strict cohort, the fleet shares one successful read-only app-secret
