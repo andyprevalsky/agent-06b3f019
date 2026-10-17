@@ -55,14 +55,14 @@ Do not delete one consumer's browser to make room for the other.
 
 The original600 harness is versioned separately so its disposable controller,
 ticket accounting and shared relay are not replaced with older main versions.
-The portable operator commit is `4670c2d200c4635758f28334f9597c78dde93dea`, with
+The portable operator commit is `b817f2efae3da6a37561d857bb8a1f86ea4b169d`, with
 immutable parent `b0fbd7742dde51446288c22601825a85981c1d0b`. Fetch the published
 `fix/original600-portable-operator` branch, create a separate worktree at that
 exact commit, and follow its `docs/original600-operator-cli.md`:
 
 ```bash
 git fetch origin fix/original600-portable-operator
-git worktree add --detach "$OPERATOR_CHECKOUT" 4670c2d200c4635758f28334f9597c78dde93dea
+git worktree add --detach "$OPERATOR_CHECKOUT" b817f2efae3da6a37561d857bb8a1f86ea4b169d
 cd "$OPERATOR_CHECKOUT"
 python3 scripts/run-original600-controller.py --help
 ```
@@ -93,3 +93,18 @@ The live fleet aggregator now keeps one unbuffered Python process per existing
 owner, reads fresh files on every tick and retains the original one-second delay
 after each tick. It avoids repeatedly importing dependencies during startup;
 publication, error recovery and exact owner termination remain covered.
+
+Archived original600 runs can now be supplied with repeated `--archive-run`
+arguments. The operator validates their complete ownership/export evidence,
+reserves eligible stopped Machines under native leases, and then re-reads
+organization capacity before counting those reservations. It preserves physical
+Machine IDs, attached volumes, prior data and unresolved claims. Each reused
+task receives a new isolated workspace generation; this is not a fresh physical
+volume. `--reuse-exclude-machine` excludes a changed candidate explicitly.
+
+If admission is interrupted, retain the printed state directory and use the
+same inputs with `--resume-admission`. This retains the original experiment
+clock, reconciles recorded effects without blindly replaying them, and refuses
+to relaunch an already-bound controller. The public status projection preserves
+confirmed infrastructure flags through cancellation while keeping physical
+terminal-attempt statistics separate.
