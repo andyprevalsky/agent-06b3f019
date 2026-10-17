@@ -4,7 +4,9 @@
 import fcntl
 import json
 import os
+import re
 import runpy
+import shlex
 import shutil
 import signal
 import subprocess
@@ -30,7 +32,12 @@ class Environment(unittest.TestCase):
             "cloudbench-campaign-seed.py",
             "cloudbench-port-lease.py",
         ]:
-            shutil.copyfile(ROOT / "scripts" / name, self.helpers / name)
+            source = (
+                os.environ.get("CLOUDBENCH_TEST_CAMPAIGN_ENV_SOURCE")
+                if name == "cloudbench-campaign-env.py"
+                else None
+            )
+            shutil.copyfile(source or ROOT / "scripts" / name, self.helpers / name)
         for directory in ["agents", "back-end", "inventory", "startup-cohorts/cohort"]:
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         for directory in ["agents", "back-end"]:
@@ -125,6 +132,80 @@ PY
         return subprocess.run(
             self.command, capture_output=True, text=True, timeout=8, check=False
         )
+
+    def test_actual_fleet_shell_waits_for_declared_job_pid_publication(self):
+        source = (ROOT / "scripts/run-bench-fleet").read_text()
+        function = re.search(
+            r"^verify_fleet_environment\(\).*?^}\n", source, re.M | re.S
+        ).group()
+        manifest = self.barrier / "manifest.json"
+        manifest.write_text(json.dumps({"cohort_id": "cohort", "jobs": {"job": None}}))
+        values = dict(
+            ROOT_DIR=str(self.root),
+            CLOUDBENCH_SCRIPT_SNAPSHOT=str(self.helpers),
+            CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=str(self.inventory),
+            RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(self.barrier),
+            RUN_BENCH_CAMPAIGN_JOB_ID="job",
+            CLOUDBENCH_PRESTACK_CONTROLLER_REF=self.command[
+                self.command.index("--source-ref") + 1
+            ],
+            FLEET_CONTROLLER_STARTED_EPOCH=str(int(time.time())),
+            START_BARRIER_WAIT_SECONDS="10",
+        )
+        setup = "\n".join(
+            key + "=" + shlex.quote(value) for key, value in values.items()
+        )
+        script = (
+            "set -eu\n"
+            + setup
+            + "\n"
+            + function
+            + '\nprintf "%s" "$$" > '
+            + shlex.quote(str(self.root / "shell.pid"))
+            + "\nif ! verify_fleet_environment; then exit 17; fi\n"
+        )
+        child = subprocess.Popen(
+            ["bash", "-c", script],
+            cwd=self.root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while (
+                not (self.root / "shell.pid").exists() and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            shell_pid = int((self.root / "shell.pid").read_text())
+            self.assertEqual(shell_pid, child.pid)
+            time.sleep(0.25)
+            self.assertFalse((self.root / "calls").exists())
+            next_manifest = manifest.with_suffix(".next")
+            next_manifest.write_text(
+                json.dumps({"cohort_id": "cohort", "jobs": {"job": shell_pid}})
+            )
+            next_manifest.replace(manifest)
+            output, error = child.communicate(timeout=8)
+            self.assertEqual(child.returncode, 0, error + output)
+            self.assertEqual((self.root / "calls").read_text(), "1")
+            result = self.run_check()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((self.root / "calls").read_text(), "1")
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.communicate(timeout=5)
+
+    def test_unpublished_registration_keeps_original_deadline(self):
+        (self.barrier / "manifest.json").write_text(
+            json.dumps({"cohort_id": "cohort", "jobs": {"job": None}})
+        )
+        self.command[self.command.index("--deadline") + 1] = str(time.time() + 0.2)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("registration deadline expired", result.stderr)
+        self.assertFalse((self.root / "calls").exists())
 
     def test_concurrent_canonical_checks_share_success_and_bind_environment(self):
         # Legacy fleet invokes the same canonical verifier separately per job.

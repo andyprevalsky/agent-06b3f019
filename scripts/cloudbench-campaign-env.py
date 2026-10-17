@@ -71,9 +71,28 @@ def identity(args):
     cohort = SEED["manifest"](args.barrier)
     if (
         args.controller_pid != os.getppid()
-        or cohort["jobs"].get(args.job) != args.controller_pid
+        or args.job not in cohort["jobs"]
         or not re.fullmatch("[0-9a-f]{40}", args.source_ref)
     ):
+        raise ValueError("environment check is not owned by this cohort controller")
+    # The campaign launches all children before atomically publishing their
+    # PID projection. A declared-but-unassigned job is pending, not foreign.
+    while cohort["jobs"][args.job] is None:
+        remaining = args.deadline - time.time()
+        if remaining <= 0:
+            raise ValueError("original environment-check registration deadline expired")
+        time.sleep(min(0.1, remaining))
+        current_owner = SEED["owner"](args.inventory, args.barrier)
+        current = SEED["manifest"](args.barrier)
+        if (
+            current_owner != authority
+            or current["cohort_id"] != cohort["cohort_id"]
+            or args.job not in current["jobs"]
+            or os.getppid() != args.controller_pid
+        ):
+            raise ValueError("environment-check owner changed before registration")
+        cohort = current
+    if cohort["jobs"][args.job] != args.controller_pid:
         raise ValueError("environment check is not owned by this cohort controller")
     paths = {
         "agents_env": args.root / "agents/.env",
