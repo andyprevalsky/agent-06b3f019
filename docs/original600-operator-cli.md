@@ -138,6 +138,13 @@ current ownership; it does not delete its Machine or Volume or convert an old
 failure into a success. A later reuse must prove the latest archived owner and
 current native marker, so an older archive cannot reclaim a newer generation.
 
+Successful retained cleanup records the exact stopped successor in the sealed
+teardown audit. Lifecycle and terminal publication verify that receipt while
+leaving the ownership registry intact. For the next campaign, pass the latest
+completed controller's run directory through `--archive-run`; keep older
+archives as evidence, rather than offering stale ownership for the same IDs.
+The normal fresh capacity check still runs before any new allocation.
+
 If a completed controller never assigned some of its reserved Machines, add
 `--unused-reservation-run "$CLOSED_ADMISSION_DIRECTORY"` alongside the original
 `--archive-run` inputs. This operand is the outer admission directory containing

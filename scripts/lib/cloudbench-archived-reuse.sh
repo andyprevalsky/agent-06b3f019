@@ -56,7 +56,7 @@ archived_reuse_retire_all() {
     local out failed=0
     for out in "$FLEET_DIR"/*; do
         [ -f "$out/archived-reuse-proof.json" ] || continue
-        python3 -S "$(archived_reuse_helper)" retire --proof "$out/archived-reuse-proof.json" --journal "$out/archived-reuse-retirement" || failed=1
+        python3 -S "$(archived_reuse_helper)" retire --proof "$out/archived-reuse-proof.json" --journal "$out/archived-reuse-retirement" --audit "$FLEET_TEARDOWN_OWNERSHIP_DIR" || failed=1
     done
     return "$failed"
 }

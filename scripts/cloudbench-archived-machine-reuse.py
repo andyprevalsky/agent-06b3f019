@@ -537,6 +537,7 @@ def main():
     retire = sub.add_parser("retire")
     retire.add_argument("--proof", required=True)
     retire.add_argument("--journal", required=True)
+    retire.add_argument("--audit", type=Path)
     mapping = sub.add_parser("map-command")
     mapping.add_argument("--proof", required=True)
     mapping.add_argument("--command", required=True)
@@ -623,6 +624,10 @@ def main():
             Path(args.journal) / "wire",
         )
         retire_native(api, proof, args.journal)
+        if args.audit is not None:
+            module("cloudbench-retained-successor.py")["record"](
+                args.proof, Path(args.journal) / "retained-terminal.json", args.audit
+            )
         return
     if args.action == "allocate":
         successor = json.loads(private(args.successor))

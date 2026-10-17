@@ -11,6 +11,7 @@ import inspect
 import json
 import math
 import os
+import runpy
 import secrets
 import shlex
 import shutil
@@ -407,7 +408,9 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
             and (fleet / "teardown-ownership/meta").read_bytes() == meta_bytes
             and (fleet / "teardown-ownership/provider-teardown-verified.epoch").read_bytes() == epoch_bytes
             and math.isfinite(float(epoch_bytes)) and float(epoch_bytes) > 0
-            and not registry.exists() and not registry.is_symlink()
+            and ((not registry.exists() and not registry.is_symlink()) or runpy.run_path(
+                str(Path(__file__).with_name("cloudbench-retained-successor.py"))
+            )["released"](registry, audit, fleet, owner, run_id))
             and lifecycle.get("hub_publication_failed") is False
             and task.get("lifecycle_stage") == "released"
         )

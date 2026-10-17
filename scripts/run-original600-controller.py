@@ -26,6 +26,7 @@ PINS = [
     'cloudbench-operator-preflight.py', 'cloudbench-original600-runner.py',
     'run-original600-controller.py', 'cloudbench-archived-machine-reuse.py',
     'cloudbench-archived-reuse-effects.py', 'cloudbench-archived-reuse-transport.py',
+    'cloudbench-retained-successor.py',
     'cloudbench-archived-owner-stop.py', 'cloudbench-stop-all.py',
     'cloudbench-unused-reservations.py',
     'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',

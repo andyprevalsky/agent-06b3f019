@@ -760,6 +760,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-archived-machine-reuse.py" \
        "$ROOT_DIR/scripts/cloudbench-archived-reuse-effects.py" \
        "$ROOT_DIR/scripts/cloudbench-archived-reuse-transport.py" \
+       "$ROOT_DIR/scripts/cloudbench-retained-successor.py" \
        "$ROOT_DIR/scripts/cloudbench-isolated-generation.py" \
        "$ROOT_DIR/scripts/cloudbench-disposable-volume.py" \
        "$ROOT_DIR/scripts/cloudbench-cleanup-tickets.py" \
@@ -6095,6 +6096,13 @@ fleet_registry_remove_if_empty() {  # fleet_registry_remove_if_empty <registry-d
         [ -f "$record" ] && return 0
     done
     rm -rf "$registry"
+}
+
+fleet_registry_release_verified() {
+    if [ ! -e "$FLEET_REGISTRY_DIR" ] && [ ! -L "$FLEET_REGISTRY_DIR" ]; then return 0; fi
+    python3 -S "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-retained-successor.py" verify \
+        --registry "$FLEET_REGISTRY_DIR" --audit "$FLEET_TEARDOWN_OWNERSHIP_DIR" \
+        --fleet "$FLEET_DIR" --owner "$FLEET_OWNER_TOKEN" --run "$RUN_ID"
 }
 
 acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-dir>
@@ -14938,12 +14946,15 @@ cleanup() {
     fi
     # Keep the parent live while releasing resources. Only this post-release
     # projection closes dashboard polling and publishes the final transcripts.
+    local registry_release_verified=0
+    if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ] \
+        && fleet_registry_release_verified; then registry_release_verified=1; fi
     if ! finalize_terminal_projection "$ec"; then
         ec=1
     elif [ "${SELF_MANAGED_HUB_RUN:-0}" = "1" ]; then
         local hub_final_action=--upload-live
         if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ] \
-            && [ ! -e "$FLEET_REGISTRY_DIR" ] && [ ! -L "$FLEET_REGISTRY_DIR" ]; then
+            && [ "$registry_release_verified" = "1" ]; then
             hub_final_action=--upload-final
         fi
         if ! python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
@@ -14964,13 +14975,13 @@ cleanup() {
         if ! python3 - "$FLEET_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" "$ROOT_DIR" \
             "$ec" "$teardown_failed" "$KEEP_CLONES" \
             "$FLEET_EXECUTION_COMPLETED" "${AUTOSCALER_FAILURE:-1}" \
-            "$FLEET_REGISTRY_DIR" "$publication_failed" <<'PY'
+            "$FLEET_REGISTRY_DIR" "$publication_failed" "$registry_release_verified" <<'PY'
 import json
 import os
 import sys
 from pathlib import Path
 
-directory, owner, run_id, workspace, exit_code, teardown, retained, completed, autoscaler, registry, publication_failed = sys.argv[1:]
+directory, owner, run_id, workspace, exit_code, teardown, retained, completed, autoscaler, registry, publication_failed, registry_release_verified = sys.argv[1:]
 root = Path(directory)
 audit_digest = ""
 try:
@@ -14982,7 +14993,7 @@ verified = (
     teardown == "0" and retained != "1" and completed == "1"
     and autoscaler == "0" and len(audit_digest) == 64
     and publication_failed == "0" and exit_code in ("0", "1")
-    and bool(registry) and not Path(registry).exists() and not Path(registry).is_symlink()
+    and bool(registry) and registry_release_verified == "1"
 )
 target = root / "_batch/lifecycle.json"
 temporary = target.with_name(f".lifecycle.{os.getpid()}.tmp")
