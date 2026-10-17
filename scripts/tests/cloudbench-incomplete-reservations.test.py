@@ -298,6 +298,205 @@ class Incomplete(unittest.TestCase):
             with self.assertRaises(ValueError):
                 M["plan"](root, failure_path)
 
+    def test_completed_observer_failed_read_is_bound_without_credit(self):
+        root, failure_path, closed, other = self.closed_fixture()
+        import shutil
+
+        base = root / "archived-reuse-reservations"
+        journal = base / "acknowledged-holds-observation"
+        shutil.rmtree(journal)
+        write = OLD["OLD"]["write"]
+        request = json.loads(
+            (root / "archived-reuse-original.private.json").read_bytes()
+        )["request"]
+        other = request["candidates"][1]
+        before = json.loads((self.directory / "original-native.json").read_bytes())
+        before["id"] = other["machine_id"]
+        before["config"]["mounts"][0]["volume"] = other["volume_id"]
+        other["source_config_sha256"] = H["config_sha"](before["config"])
+        current = copy.deepcopy(before)
+
+        class Transport:
+            app = H["APP"]
+
+            def api(self, method, path, body=None, **kwargs):
+                self_test.assertIn(
+                    (method, path),
+                    (
+                        ("POST", "/machines/" + other["machine_id"] + "/lease"),
+                        ("GET", "/machines/" + other["machine_id"]),
+                        ("POST", "/machines/" + other["machine_id"]),
+                        ("DELETE", "/machines/" + other["machine_id"] + "/lease"),
+                    ),
+                )
+                if method == "POST" and path.endswith("/lease"):
+                    value = {"data": {"nonce": "failed-observer-nonce"}}
+                elif method == "POST":
+                    current.update(
+                        config=body["config"], instance_id="old-positive-ACK"
+                    )
+                    value = current
+                else:
+                    value = current if method == "GET" else {}
+                kwargs["observer"](
+                    method,
+                    path,
+                    201 if method == "POST" else 200,
+                    json.dumps(value).encode(),
+                )
+                return copy.deepcopy(value)
+
+        class Adapter(H["NativeAdapter"]):
+            def _run_wire(self, directory, method, url, body, timeout, headers, errors):
+                H["NativeAdapter"](self.api, directory).perform_wire(
+                    dict(
+                        app=self.api.app,
+                        method=method,
+                        path=url,
+                        body=body,
+                        timeout=timeout,
+                        headers=headers or {},
+                    )
+                )
+
+        self_test = self
+        original_envelope = json.loads(
+            (root / "archived-reuse-original.private.json").read_bytes()
+        )
+        original_envelope.update(
+            request=request,
+            sha256=M["sha"](
+                json.dumps(request, sort_keys=True, allow_nan=False).encode()
+            ),
+        )
+        write(root / "archived-reuse-original.private.json", original_envelope)
+        with tempfile.TemporaryDirectory() as generated:
+            reserved = H["reserve_cohort"](
+                lambda out: Adapter(Transport(), out / "wire"),
+                dict(request, candidates=[other]),
+                Path(generated) / "old-reservation",
+            )
+            self.assertEqual(len(reserved["candidates"]), 1)
+            shutil.rmtree(base / other["machine_id"])
+            shutil.move(
+                str(Path(generated) / "old-reservation" / other["machine_id"]),
+                base / other["machine_id"],
+            )
+        closed = dict(
+            request,
+            candidates=closed["candidates"],
+            held_native_reservations=closed["held_native_reservations"],
+        )
+        write(base / "reserved-request.json", closed)
+        current = before
+        deadline = json.loads((root / "admission-intent.private.json").read_bytes())[
+            "deadline_epoch"
+        ]
+        observed = M["C"]["observe_acknowledged_holds"](
+            lambda out: Adapter(Transport(), out / "wire"),
+            request,
+            closed,
+            journal,
+            deadline,
+        )
+        self.assertEqual(observed["candidates"], closed["candidates"])
+        self.assertEqual(
+            observed["held_native_reservations"], closed["held_native_reservations"]
+        )
+        failure = json.loads(failure_path.read_bytes())
+        failure.update(
+            original_request_sha256=M["sha"](
+                (root / "archived-reuse-original.private.json").read_bytes()
+            ),
+            closed_request_sha256=M["sha"](
+                (base / "reserved-request.json").read_bytes()
+            ),
+            observed_request_sha256=M["sha"]((journal / "request.json").read_bytes()),
+        )
+        write(failure_path, failure)
+        old_bytes = M["subprocess"].check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(ROOT),
+                "show",
+                "2477583b27e84d1213c099718528b29d1e7a3bb8:scripts/cloudbench-incomplete-reservations.py",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary)
+            for dependency in (ROOT / "scripts").glob("*.py"):
+                if dependency.name != "cloudbench-incomplete-reservations.py":
+                    (scripts / dependency.name).symlink_to(dependency)
+            old_path = scripts / "cloudbench-incomplete-reservations.py"
+            old_path.write_bytes(old_bytes)
+            old = runpy.run_path(str(old_path))
+            with (
+                mock.patch.dict(
+                    old["closed_plan"].__globals__,
+                    CLOSED77_SOURCE="a" * 40,
+                    protocol=lambda *_: {},
+                ),
+                mock.patch.object(
+                    M["subprocess"], "check_output", return_value="a" * 40
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "unknown closed admission namespace"
+                ),
+            ):
+                old["plan"](root, failure_path)
+        with (
+            mock.patch.dict(
+                M["closed_plan"].__globals__,
+                CLOSED77_SOURCE="a" * 40,
+                protocol=lambda *_: {},
+            ),
+            mock.patch.object(M["subprocess"], "check_output", return_value="a" * 40),
+        ):
+            value = M["plan"](root, failure_path)
+            self.assertEqual(
+                value["retained_request"]["candidates"], closed["candidates"]
+            )
+            failed = journal / other["machine_id"]
+            for path in failed.rglob("*"):
+                if path.is_file():
+                    self.assertIn(str(path), value["inputs"])
+            raw = next(failed.glob("wire/*/*-wire.json"))
+            original = raw.read_bytes()
+            raw.write_bytes(b"{}")
+            with self.assertRaises((ValueError, KeyError)):
+                M["plan"](root, failure_path)
+            raw.write_bytes(original)
+            get_request = next(
+                path
+                for path in failed.glob("wire/*/request.json")
+                if json.loads(path.read_bytes())["method"] == "GET"
+            )
+            saved_request = get_request.read_bytes()
+            get_raw = next(get_request.parent.glob("*-wire.json"))
+            saved_raw = get_raw.read_bytes()
+            changed_request = json.loads(saved_request)
+            changed_request.update(method="POST", body={"config": {}})
+            write(get_request, changed_request)
+            changed_raw = json.loads(saved_raw)
+            changed_raw["method"] = "POST"
+            write(get_raw, changed_raw)
+            with self.assertRaises(ValueError):
+                M["plan"](root, failure_path)
+            get_request.write_bytes(saved_request)
+            get_raw.write_bytes(saved_raw)
+            extra = failed / "foreign-config-write.json"
+            write(extra, {})
+            with self.assertRaises(ValueError):
+                M["plan"](root, failure_path)
+            extra.unlink()
+            complete = json.loads((journal / "complete.json").read_bytes())
+            complete["diagnostics"] = []
+            write(journal / "complete.json", complete)
+            with self.assertRaisesRegex(ValueError, "diagnostic"):
+                M["plan"](root, failure_path)
+
     def test_typed75_incomplete_config_failure_keeps_closed_rows_and_exact_stack(self):
         root, failure_path, closed, other = self.closed_fixture()
         write = OLD["OLD"]["write"]

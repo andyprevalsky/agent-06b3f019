@@ -368,6 +368,67 @@ def closed_classification(directory, row, request, inputs):
     return entry
 
 
+def failed_observation(directory, mid, inputs):
+    """A completed failed leased read retains evidence, never reservation credit."""
+    reader = runpy.run_path(str(HERE / "cloudbench-recovered-reservations.py"))
+    names = {path.name for path in directory.iterdir()}
+    need(
+        names in ({"wire"}, {"wire", "observed.json"}),
+        "unknown failed observation artifact",
+    )
+    reader["wire_namespace"](directory)
+    records = C["wire"](directory, inputs)
+    need(
+        len(records) == 3 and all(record[1] is not None for record in records),
+        "incomplete failed observation wire",
+    )
+    stamps = [record[1].get("monotonic_ns") for record in records]
+    need(
+        all(type(at) is int for at in stamps) and len(set(stamps)) == 3,
+        "invalid failed observation order",
+    )
+    records.sort(key=lambda record: record[1]["monotonic_ns"])
+    acquire, readback, release = records
+    for request, raw, _, _ in records:
+        need(
+            request["app"] == H["APP"]
+            and type(raw["status"]) is int
+            and 200 <= raw["status"] < 300,
+            "failed observation raw response not successful",
+        )
+    nonce = acquire[2].get("data", {}).get("nonce")
+    need(isinstance(nonce, str) and nonce, "failed observation nonce missing")
+    url = "/machines/" + mid
+    need(
+        acquire[0]["method"] == "POST"
+        and acquire[0]["path"] == url + "/lease"
+        and acquire[0]["body"]
+        == {"description": "archived same-volume successor", "ttl": 180}
+        and readback[0]["method"] == "GET"
+        and readback[0]["path"] == url
+        and readback[0]["body"] is None
+        and release[0]["method"] == "DELETE"
+        and release[0]["path"] == url + "/lease"
+        and release[0]["body"] is None
+        and all(
+            record[0].get("headers", {}).get("fly-machine-lease-nonce") == nonce
+            for record in (readback, release)
+        )
+        and isinstance(readback[2], dict)
+        and readback[2].get("id") == mid,
+        "failed observation is not one closed read-only lease",
+    )
+    if "observed.json" in names:
+        need(
+            C["obj"](directory / "observed.json", inputs) == readback[2],
+            "failed saved observation differs",
+        )
+    for path in directory.rglob("*"):
+        if path.is_file():
+            raw = R["read"](path)
+            inputs[str(path)] = sha(raw)
+
+
 def closed_plan(directory, failure_path, *, historical=False, source=None):
     source = CLOSED_SOURCE if source is None else source
     need(
@@ -601,13 +662,29 @@ def closed_plan(directory, failure_path, *, historical=False, source=None):
     for path, expected in complete["inputs"].items():
         need(private_digest(path) == expected, "old observation proof changed")
         inputs[path] = expected
+    controls = {"intent.json", "complete.json", "request.json"}
+    observer_ids = {p.name for p in observer.iterdir()} - controls
+    old_held = {row["machine_id"] for row in closed["held_native_reservations"]}
+    final_held = {row["machine_id"] for row in observed["held_native_reservations"]}
+    failed_ids = observer_ids - added
     need(
         {p.name for p in base.iterdir()}
         == set(initial) | {"reserved-request.json", "acknowledged-holds-observation"}
-        and {p.name for p in observer.iterdir()}
-        == added | {"intent.json", "complete.json", "request.json"},
+        and added <= observer_ids
+        and failed_ids <= old_held & final_held,
         "unknown closed admission namespace",
     )
+    diagnostics = complete.get("diagnostics", [])
+    for mid in failed_ids:
+        matches = [row for row in diagnostics if row.get("machine_id") == mid]
+        need(
+            len(matches) == 1
+            and isinstance(matches[0].get("reason"), str)
+            and matches[0]["reason"],
+            "failed observation diagnostic missing or duplicated",
+        )
+        C["positive"](base / mid, initial[mid], request, inputs)
+        failed_observation(observer / mid, mid, inputs)
     lanes = {
         mid: "OLD_OBSERVED" if mid in added else "ORIGINAL_CLOSED" for mid in retained
     }
