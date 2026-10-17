@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 import runpy
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -123,6 +124,25 @@ def facts_from(raw):
     return facts
 
 
+def read_inventory(path):
+    """Read a complete native inventory without widening small secret/intent inputs."""
+    path = Path(path).absolute()
+    if path.resolve(strict=True) != path:
+        raise ValueError('physical private inventory required')
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not (stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid()
+                and not before.st_mode & 0o077 and before.st_nlink == 1
+                and 0 < before.st_size <= 256 * 1024 * 1024):
+            raise ValueError('private current-owner inventory required')
+        raw = stream.read(before.st_size + 1)
+        after = os.fstat(stream.fileno())
+        fields = ('st_ino', 'st_dev', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode', 'st_uid', 'st_nlink')
+        if len(raw) != before.st_size or any(getattr(before, field) != getattr(after, field) for field in fields):
+            raise ValueError('native inventory changed during read')
+        return raw
+
+
 def image_identity(value):
     match=re.fullmatch(r'([^@\s]+)@(sha256:[0-9a-f]{64})',value if isinstance(value,str) else '')
     if not match:
@@ -211,7 +231,7 @@ def capacity(api, token, org, directory, extra, reuse_runs=None, harness_ref=Non
         if image_ref is not None:
             reuse['image_ref']=image_ref
         helper['validate_request'](reuse,harness_ref)
-        inventory=json.loads(inventory_path.read_bytes())
+        inventory=json.loads(read_inventory(inventory_path))
         if image_ref is not None:
             verify_reuse_images(reuse,inventory,image_ref)
         eligible=helper['capacity_demand'](reuse,inventory,set())['qualified_reuse_count']
@@ -274,7 +294,7 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
         raise ValueError('original archived reuse request bytes changed')
     if request.get('image_ref') != facts_from(runner['read'](args.facts))['image_ref']:
         raise ValueError('reserved image differs from the admitted immutable image')
-    verify_reuse_images(request,json.loads(runner['read'](snapshot_directory/'navi-whisper-lux-bench.private.json')),request['image_ref'])
+    verify_reuse_images(request,json.loads(read_inventory(snapshot_directory/'navi-whisper-lux-bench.private.json')),request['image_ref'])
     helper['validate_request'](request,args.source_ref)
     if request.get('task_names') != json.loads(runner['read'](args.tasks)):
         raise ValueError('reserved task manifest differs from original ordered200')
@@ -290,7 +310,7 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
     refreshed.mkdir(mode=0o700)
     with runner['bounded'](110):
         final=capacity_snapshot(api,token,args.org,refreshed,args.extra_destroying_count)
-    inventory=json.loads(runner['read'](refreshed/'navi-whisper-lux-bench.private.json'))
+    inventory=json.loads(read_inventory(refreshed/'navi-whisper-lux-bench.private.json'))
     facts=facts_from(runner['read'](args.facts))
     verify_reuse_images(reserved,inventory,facts['image_ref'])
     demand=helper['capacity_demand'](reserved,inventory,set(facts['protected_machines']),require_reserved=True)

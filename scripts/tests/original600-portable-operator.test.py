@@ -31,6 +31,29 @@ def private(path, value):
 
 
 class Portable(unittest.TestCase):
+    def test_inventory_reader_preserves_private_bounds_and_small_reader_limit(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            path = private(root/'native.json', '["' + 'x'*(17*1024*1024) + '"]')
+            with self.assertRaises(ValueError):
+                RUNNER['read'](path)
+            self.assertEqual(len(CLI.read_inventory(path)), path.stat().st_size)
+            path.chmod(0o644)
+            with self.assertRaises(ValueError):
+                CLI.read_inventory(path)
+            path.chmod(0o600)
+            link=root/'linked.json';link.symlink_to(path)
+            with self.assertRaises(ValueError):
+                CLI.read_inventory(link)
+            hard=root/'hard.json';os.link(path,hard)
+            with self.assertRaises(ValueError):
+                CLI.read_inventory(path)
+            hard.unlink()
+            with path.open('r+b') as stream:
+                stream.truncate(256*1024*1024+1)
+            with self.assertRaises(ValueError):
+                CLI.read_inventory(path)
+
     def test_reused_image_binding_uses_immutable_repository_digest(self):
         pin='registry.fly.io/benchmark:expected@sha256:'+'a'*64
         request={'candidates':[{'machine_id':'one'}]}
@@ -114,6 +137,7 @@ class Portable(unittest.TestCase):
             candidates=[{'machine_id':'candidate-'+str(i)} for i in range(375)]
             private(before/'archived-reuse-request.private.json',{'candidates':candidates})
             machines=[{'id':row['machine_id'],'config':{'image':'fixture@sha256:'+'b'*64},'reserved':True} for row in candidates]
+            machines[0]['_fixture_padding']='x'*(17*1024*1024)
             private(before/'navi-whisper-lux-bench.private.json',machines)
             events=[]
             def reserve(factory,request,journal):
