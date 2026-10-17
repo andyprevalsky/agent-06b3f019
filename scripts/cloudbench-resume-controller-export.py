@@ -138,6 +138,86 @@ def file_sha(path):
     return scope["sealed_bytes"](Path(path))[0]
 
 
+def relay_intent_path(original, pins):
+    pointer_path = original.parent / "pre-signal-successor.json"
+    if not pointer_path.exists():
+        return original
+    names = {"intent.json"} | {
+        f"wire-{index:06d}.{suffix}.json"
+        for index in (1, 2)
+        for suffix in ("request", "raw", "decoded")
+    }
+    directory = original.parent
+    need(
+        directory.resolve(strict=True) == directory,
+        "physical prior relay journal required",
+    )
+    need(
+        {path.name for path in directory.iterdir()} == names | {pointer_path.name},
+        "prior relay journal membership differs",
+    )
+    files = {name: sha(read(directory / name)) for name in sorted(names)}
+    digest = sha(
+        json.dumps(
+            files, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+    )
+    pointer = obj(pointer_path)
+    need(
+        set(pointer)
+        == {
+            "schema",
+            "prior_journal_sha256",
+            "new_journal",
+            "intent_sha256",
+            "identity_sha256",
+            "operator_ref",
+            "launch_sha256",
+        },
+        "relay successor pointer schema differs",
+    )
+    target = directory.parent / ("relay-bootstrap-pre-signal-" + digest)
+    need(
+        pointer["schema"] == "relay-pre-signal-successor-v1"
+        and pointer["prior_journal_sha256"] == digest
+        and pointer["new_journal"] == str(target)
+        and target.resolve(strict=True) == target,
+        "relay successor journal differs",
+    )
+    selected = target / "intent.json"
+    raw = read(selected)
+    need(sha(raw) == pointer["intent_sha256"], "relay successor intent hash differs")
+    intent = json.loads(raw)
+    payload = intent["payload"]
+    need(
+        all(
+            payload[key] == pointer[key]
+            for key in ("identity_sha256", "operator_ref", "launch_sha256")
+        ),
+        "relay successor identity differs",
+    )
+    prior = obj(original)
+    refusal = intent["pre_signal_refusal"]
+    need(
+        set(refusal) == {"journal", "files", "prior_journal_sha256", "source_pins"}
+        and {key: refusal[key] for key in ("journal", "files", "prior_journal_sha256")}
+        == {"journal": str(directory), "files": files, "prior_journal_sha256": digest}
+        and isinstance(refusal["source_pins"], dict)
+        and refusal["source_pins"] == prior["relay_source_pins"],
+        "relay successor prior proof differs",
+    )
+    need(
+        payload["launch_sha256"] == obj(original)["payload"]["launch_sha256"]
+        and payload["relay_directory"] == obj(original)["payload"]["relay_directory"],
+        "relay successor target differs",
+    )
+    for path in [directory, pointer_path, target, selected] + [
+        directory / name for name in names
+    ]:
+        pins[str(path)] = B["fingerprint"](path)
+    return selected
+
+
 def local_drain_binding(out, pins):
     directory = out / "registered-orphan-drain"
     if not directory.exists():
@@ -163,6 +243,7 @@ def local_drain_binding(out, pins):
     }
     relay_path = directory / "relay-bootstrap/intent.json"
     if relay_path.exists():
+        relay_path = relay_intent_path(relay_path, pins)
         relay = obj(relay_path)["payload"]
         need(relay["launch_sha256"] == binding["launch_sha256"], "relay launch differs")
         binding["relay"] = {

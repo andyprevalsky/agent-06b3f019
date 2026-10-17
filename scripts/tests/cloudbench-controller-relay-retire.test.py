@@ -14,6 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,6 +180,12 @@ class Relay(unittest.TestCase):
             {k: ready[k] for k in ("pid", "birth", "authority_sha256")},
         )
         write(campaign / "shared-relay-location.json", {"directory": str(self.root)})
+        for public in (
+            self.root / "bootstrap-owner.json",
+            self.root / "broker-owner.json",
+            campaign / "shared-relay-location.json",
+        ):
+            public.chmod(0o644)
         leases = self.root / "leases"
         leases.mkdir()
         lease = leases / ("d" * 32 + ".json")
@@ -205,6 +212,11 @@ class Relay(unittest.TestCase):
                     hashlib.sha256(raw).hexdigest(), checked["records"][name]
                 )
             self.assertEqual(len(checked["evidence"]), 7)
+            public = self.root / "bootstrap-owner.json"
+            public.chmod(0o664)
+            with self.assertRaisesRegex(ValueError, "public relay evidence"):
+                self.ns["relay_state"](value, self.repo, self.custody)
+            public.chmod(0o644)
             row.update(owner_pid=self.child.pid, owner_start=self.identity["birth"])
             write(lease, row)
             with self.assertRaisesRegex(ValueError, "route owner remains live"):
@@ -220,6 +232,166 @@ class Relay(unittest.TestCase):
             lease.chmod(0o644)
             with self.assertRaisesRegex(ValueError, "public relay evidence"):
                 self.ns["relay_state"](value, self.repo, self.custody)
+
+    def test_exact_presignal_refusal_and_closed_namespace(self):
+        old = self.root / "registered-orphan-drain/relay-bootstrap"
+        old.mkdir(parents=True)
+        args = SimpleNamespace(
+            pre_signal_refusal_journal=old,
+            relay_directory=Path("/tmp/cb-relay-iw84qnlh"),
+            operator_ref="f" * 40,
+        )
+        state = {
+            "out": str(self.root),
+            "source_root": str(ROOT),
+            "source_ref": M["OLD_OPERATOR"],
+            "machine_id": "84ed412b11d168",
+            "epoch": 1,
+            "deadline": 2,
+            "machine": {
+                "id": "84ed412b11d168",
+                "instance_id": "original",
+                "config": {},
+                "name": "controller",
+                "region": "iad",
+            },
+            "_drain": {
+                "joined": {},
+                "launch_sha256": "a" * 64,
+                "joined_files": {},
+                "joined_journal": "exact",
+                "pending_path": "pending",
+                "pending_sha256": "b" * 64,
+            },
+        }
+        payload = M["make_payload"](args, state)
+        payload["operator_ref"] = M["OLD_OPERATOR"]
+        payload.pop("identity_sha256")
+        payload["identity_sha256"] = M["sha"](
+            json.dumps(payload, sort_keys=True).encode()
+        )
+        pins = {
+            str(ROOT / "scripts/cloudbench-controller-relay-retire.py"): {
+                "pinned": True
+            }
+        }
+
+        def put(name, value):
+            p = old / name
+            p.write_text(json.dumps(value, sort_keys=True))
+            p.chmod(0o600)
+
+        put(
+            "intent.json",
+            {
+                "payload": payload,
+                "operator": state["_drain"],
+                "relay_source_pins": pins,
+            },
+        )
+        historical = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "show",
+                M["OLD_OPERATOR"] + ":scripts/cloudbench-controller-relay-retire.py",
+            ]
+        )
+        original_drain = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "show",
+                M["OLD_OPERATOR"] + ":scripts/cloudbench-controller-orphan-drain.py",
+            ]
+        )
+        import ast
+
+        def literal(raw, name):
+            return ast.literal_eval(
+                next(
+                    n.value
+                    for n in ast.parse(raw).body
+                    if isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)
+                )
+            )
+
+        guest = literal(original_drain, "GUEST") + literal(historical, "RELAY")
+        package = base64.b64encode(
+            gzip.compress(
+                json.dumps([guest, dict(payload, action="signal")]).encode(), mtime=0
+            )
+        ).decode()
+        loader = "import base64,gzip,json,sys;s,v=json.loads(gzip.decompress(base64.b64decode(sys.argv[1])));exec(s);print(json.dumps(execute(v),sort_keys=True))"
+        body = {
+            "cmd": shlex.join(["python3", "-S", "-c", loader, package]),
+            "timeout": 18,
+            "machine": True,
+        }
+        refusal = {
+            "exit_code": 1,
+            "exit_signal": 0,
+            "stdout": "",
+            "stderr": M["REFUSAL_STDERR"],
+        }
+        for i, method, path, request_body, result in (
+            (1, "GET", "/machines/" + state["machine_id"], None, state["machine"]),
+            (2, "POST", "/machines/" + state["machine_id"] + "/exec", body, refusal),
+        ):
+            put(
+                f"wire-{i:06d}.request.json",
+                {"method": method, "path": path, "body": request_body},
+            )
+            raw = json.dumps(result).encode()
+            put(
+                f"wire-{i:06d}.raw.json",
+                {
+                    "method": method,
+                    "path": path,
+                    "status": 200,
+                    "body_b64": base64.b64encode(raw).decode(),
+                    "bytes": len(raw),
+                    "sha256": M["sha"](raw),
+                },
+            )
+            put(f"wire-{i:06d}.decoded.json", result)
+        with patch.dict(M["B"], {"source_identity": lambda *_a: pins}):
+            proof = M["validate_refusal"](args, state)
+            self.assertEqual(len(proof["files"]), 7)
+            self.assertEqual(
+                proof["prior_journal_sha256"],
+                M["sha"](
+                    json.dumps(
+                        proof["files"],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode()
+                ),
+            )
+            put("unexpected.json", {})
+            with self.assertRaisesRegex(ValueError, "membership"):
+                M["validate_refusal"](args, state)
+            (old / "unexpected.json").unlink()
+            put("wire-000002.decoded.json", dict(refusal, stderr="different failure"))
+            with self.assertRaisesRegex(ValueError, "raw response differs"):
+                M["validate_refusal"](args, state)
+            put("wire-000002.decoded.json", refusal)
+            put("pre-signal-successor.json", {})
+            self.assertEqual(
+                M["validate_refusal"](args, state)["files"], proof["files"]
+            )
+            pointer = M["successor_value"](
+                proof,
+                old.parent
+                / ("relay-bootstrap-pre-signal-" + proof["prior_journal_sha256"]),
+                M["make_payload"](args, state),
+                "c" * 64,
+            )
+            self.assertEqual(pointer["schema"], "relay-pre-signal-successor-v1")
 
     def test_process_uid_and_guest_command_are_bound(self):
         with self.assertRaisesRegex(ValueError, "UID differs"):

@@ -247,6 +247,82 @@ class ExportResume(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "relay intent differs"):
             M["require_recorded_drain"](binding, evidence)
 
+    def test_relay_successor_requires_exact_pointer_manifest_and_new_intent(self):
+        original = self.out / "registered-orphan-drain/relay-bootstrap/intent.json"
+        old_payload = dict(
+            identity_sha256="a" * 64,
+            operator_ref="b" * 40,
+            launch_sha256="c" * 64,
+            relay_directory="/tmp/cb-relay-12345678",
+        )
+        write(
+            original,
+            {
+                "payload": old_payload,
+                "relay_source_pins": {"fixture-source": [1, 2, 3, 4, 5]},
+            },
+        )
+        for index in (1, 2):
+            for suffix in ("request", "raw", "decoded"):
+                write(
+                    original.parent / f"wire-{index:06d}.{suffix}.json",
+                    {"fixture": suffix},
+                )
+        files = {
+            path.name: M["sha"](path.read_bytes()) for path in original.parent.iterdir()
+        }
+        digest = M["sha"](
+            json.dumps(
+                files, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode()
+        )
+        target = original.parent.parent / ("relay-bootstrap-pre-signal-" + digest)
+        payload = dict(old_payload, identity_sha256="d" * 64, operator_ref="e" * 40)
+        selected = write(
+            target / "intent.json",
+            dict(
+                payload=payload,
+                pre_signal_refusal=dict(
+                    journal=str(original.parent),
+                    files=files,
+                    prior_journal_sha256=digest,
+                    source_pins={"fixture-source": [1, 2, 3, 4, 5]},
+                ),
+            ),
+        )
+        pins = {}
+        self.assertEqual(M["relay_intent_path"](original, pins), original)
+        pointer = dict(
+            schema="relay-pre-signal-successor-v1",
+            prior_journal_sha256=digest,
+            new_journal=str(target),
+            intent_sha256=M["sha"](selected.read_bytes()),
+            **{
+                key: payload[key]
+                for key in ("identity_sha256", "operator_ref", "launch_sha256")
+            },
+        )
+        pointer_path = write(original.parent / "pre-signal-successor.json", pointer)
+        self.assertEqual(M["relay_intent_path"](original, pins), selected)
+        self.assertIn(str(pointer_path), pins)
+        for key in (
+            "intent_sha256",
+            "identity_sha256",
+            "new_journal",
+            "prior_journal_sha256",
+        ):
+            write(pointer_path, dict(pointer, **{key: "wrong"}))
+            with self.assertRaises(ValueError):
+                M["relay_intent_path"](original, {})
+        write(pointer_path, pointer)
+        extra = write(original.parent / "foreign.json", {})
+        with self.assertRaisesRegex(ValueError, "membership differs"):
+            M["relay_intent_path"](original, {})
+        extra.unlink()
+        write(original.parent / "wire-000001.raw.json", {"changed": True})
+        with self.assertRaises(ValueError):
+            M["relay_intent_path"](original, {})
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
