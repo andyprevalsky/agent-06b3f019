@@ -206,7 +206,7 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
     async def admitted_call(_task, call):
         return await call()
 
-    async def finalizer(_base_url, results, roots):
+    async def finalizer(_base_url, results, roots, **kwargs):
         assert not admitted and not agents and roots == ({} if path == "skipped" else {task.name: [ROOT]})
         assert results == ([] if path in ("cancelled", "raised") else [returned])
         events.append("batch-finalize")
@@ -223,6 +223,8 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "cloud_batch_cleanup": SimpleNamespace(contract=lambda: (tmp_path / "contract.json", "owned-token")),
         "_task_root_custody": bench._task_root_custody,
         "_admitted_tasks": admitted,
+        "_entered_task_futures": set(),
+        "_never_admitted_results": [],
         "_admitted_agent_ids": agents,
         "_evaluated_task_results": evaluated,
         "_outcome_signatures": signatures,
@@ -1635,3 +1637,123 @@ async def _diagnostic_pipe_case(phase):
 async def test_owned_cleanup_diagnostic_sink_preserves_real_failures():
     for phase in ('provider', 'payment', 'unrelated'):
         await _diagnostic_pipe_case(phase)
+
+async def _cancelled_queue_owning_case(mode="allocated"):
+    """Actual coordinator AST + actual scheduler/finalizer, only external edges fake."""
+    from contextlib import ExitStack
+    import socket
+    source=inspect.getsource(bench)
+    tree=ast.parse(source)
+    wrapper=next(n for n in ast.walk(tree) if isinstance(n,ast.AsyncFunctionDef) and n.name=='_run_reported_task')
+    execution=next(n for n in ast.walk(tree) if isinstance(n,ast.Try) and n.body
+                   and isinstance(n.body[0],ast.If) and isinstance(n.body[0].test,ast.Name)
+                   and n.body[0].test.id=='checkpoint_source_mode')
+    coordinator=ast.AsyncFunctionDef(name='_cancel_coordinator',args=ast.arguments(posonlyargs=[],args=[],kwonlyargs=[],kw_defaults=[],defaults=[]),body=[execution],decorator_list=[])
+    admitted,agents,evaluated,signatures,live={},{},{},{},{}
+    entries=[]; executor_tasks=[]; external=[]; entered=asyncio.Event(); closed=[]; saved=[]
+    # Duplicate names are distinct scheduler occurrences, not a task-name set.
+    tasks=[copy.deepcopy(bench.get_task_by_name('browser-auth-email-otp')) for _ in range(12)]
+    original_finalizer=bench._finalize_owned_cloud_batch
+    def deny(*args,**kwargs):
+        external.append('network'); raise AssertionError('external network forbidden')
+    async def delegate(url,task,*,on_agent_created,on_task_evaluated,**kwargs):
+        entries.append(task);executor_tasks.append(asyncio.current_task())
+        if mode=='allocated':on_agent_created(task.name,ROOT)
+        entered.set()
+        try: await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return bench.TaskResult(name=task.name,passed=False,agent_id=ROOT if mode=='allocated' else '',status='CANCELLED',benchmark_status='CANCELLED',progress_score=0,duration_seconds=0,cost_cents=0,message_count=0,logs={},graded_root_creation_outcome='allocated' if mode=='allocated' else 'unknown')
+    @__import__('contextlib').asynccontextmanager
+    async def blocked_lock(*args):
+        entered.set();await asyncio.Event().wait();yield
+    if mode=='never':
+        for task in tasks:task.tags=[*task.tags,'agentcard-lifecycle-sandbox']
+    async def finalize(url,rows,ids,**kwargs):
+        assert len(entries)==(0 if mode=='never' else 1) and len(rows)==12
+        assert not admitted and not agents
+        queued=[r for r in rows if not r.agent_id]
+        assert len(queued)==(11 if mode=='allocated' else 12) and all(r.status==r.benchmark_status=='CANCELLED' and r.passed is False for r in queued)
+        if mode=='allocated':assert len(ids[tasks[0].name])==1 and ids[tasks[0].name][0]==ROOT
+        else:assert ids=={}
+        assert all(any(token is actual for token in namespace['_entered_task_futures']) for actual in executor_tasks)
+        # Owning contract: real finalizer must release known root and accept the
+        # coordinator's proven nonadmission, while unknown creates stay rejected.
+        await original_finalizer(url,rows,ids,**kwargs)
+        assert all(r.graded_root_creation_outcome=='not_started' for r in queued)
+    async def query_snapshot(url,aid,data,logs,**kwargs):
+        logs['messages']=[];return {'agent':{'id':aid,'status':'PAUSED'},'messages':[]}
+    def query(url,aid,**kwargs):return {'root_user_id':ROOT,'tree_agent_ids':[aid],'browser_sessions':[],'purchase_cleanup':[]}
+    def release(url,aid,before,**kwargs):closed.append(aid);return {'root_agent_id':aid}
+    async def stop_collector():return 0
+    with tempfile.TemporaryDirectory(prefix='queue-cancel-owned-') as tmp:
+        path=Path(tmp)/'run.json'
+        def save():path.write_text('{}');saved.append(True);return path
+        run=SimpleNamespace(task_results=[],save=save)
+        namespace=dict(bench.__dict__)
+        namespace.update({'run_single_task':delegate,'_entered_task_futures':set(),'_never_admitted_results':[],'_admitted_tasks':admitted,'_admitted_agent_ids':agents,
+            '_evaluated_task_results':evaluated,'_outcome_signatures':signatures,
+            '_remember_live_agent':lambda name,aid:live.setdefault(name,[]).append(aid),
+            '_emit_report':lambda **kwargs:None,'checkpoint_source_mode':False,'args':SimpleNamespace(parallel=True,keep_failed_agents=True,max_concurrency=5,prod=False),
+            'tasks':tasks,'run':run,'max_concurrency':5,'base_url':'http://offline.invalid',
+            '_run_with_sandbox_payment_lock':bench._run_with_sandbox_payment_lock,'_report_ticker_task':SimpleNamespace(cancel=lambda:None),
+            'stop_fly_log_collector':stop_collector,'realtime_started':False,'memory_gate_enabled':False,'owned_batch_cleanup':True,
+            '_finalize_owned_cloud_batch':finalize,'_complete_interrupt_cleanup':lambda:None,'_live_task_agent_ids':live,
+            '_fetch_wmh_retrieval_audit':lambda:None,'cloud_batch_cleanup':SimpleNamespace(contract=lambda:None)})
+        code=ast.fix_missing_locations(ast.Module(body=[wrapper,coordinator],type_ignores=[]))
+        exec(compile(code,str(bench.__file__),'exec'),namespace)
+        with ExitStack() as patches:
+            if mode=='never':patches.enter_context(patch.object(bench,'_sandbox_agentcard_payment_lock',blocked_lock))
+            for obj,name,value in [(socket.socket,'connect',deny),(socket,'getaddrinfo',deny),
+                (bench,'pause_agent',AsyncMock(return_value=True)),(cleanup,'exact_root_sessions',query),
+                (bench,'_refresh_browser_archive_snapshot',query_snapshot),
+                (bench,'finalize_archive_and_score_world_model',AsyncMock(return_value=('archive-ref',{}))),
+                (bench,'delete_agent',AsyncMock()),(cleanup,'close_exact_root_sessions',release),
+                (bench,'_finalize_owned_root_payments',AsyncMock(return_value={})),
+                (bench,'fetch_local_worker_logs',lambda *args,**kwargs:[])]:patches.enter_context(patch.object(obj,name,value))
+            task=asyncio.create_task(namespace['_cancel_coordinator']())
+            ready=asyncio.create_task(entered.wait())
+            done,_=await asyncio.wait({task,ready},return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                ready.cancel();await asyncio.gather(ready,return_exceptions=True);await task
+            await ready;await asyncio.sleep(0);task.cancel()
+            with pytest.raises(RuntimeError if mode=='unknown' else asyncio.CancelledError) as stopped:
+                await task
+            if mode=='unknown':assert 'unknown root creation outcome' in str(stopped.value)
+        assert saved==[True] and closed==([ROOT] if mode=='allocated' else []) and external==[]
+
+@async_case
+async def test_cancelled_unknown_create_stays_fail_closed():
+    row=bench.TaskResult(name='browser-auth-email-otp',passed=False,agent_id='',status='CANCELLED',benchmark_status='CANCELLED',progress_score=0,duration_seconds=0,cost_cents=0,message_count=0,graded_root_creation_outcome='unknown')
+    with pytest.raises(RuntimeError,match='unknown root creation outcome'):
+        await bench._finalize_owned_cloud_batch('http://offline.invalid',[row],{})
+    # Status/absence alone and forged not_started are not proof of nonadmission.
+    row.graded_root_creation_outcome='not_started'
+    with pytest.raises(RuntimeError,match='unknown root creation outcome'):
+        await bench._finalize_owned_cloud_batch('http://offline.invalid',[row],{})
+
+
+@async_case
+async def test_cancelled_inbox_waiters_are_proven_never_admitted():
+    await _cancelled_queue_owning_case()
+
+@async_case
+async def test_cancelled_before_any_executor_allocates_nothing():
+    await _cancelled_queue_owning_case('never')
+
+@async_case
+async def test_cancelled_entered_unknown_create_cannot_claim_nonadmission():
+    await _cancelled_queue_owning_case('unknown')
+
+@async_case
+async def test_nonadmission_proof_rejects_copies_and_forged_metadata():
+    row=bench.TaskResult(name='same-name',passed=False,agent_id='',status='CANCELLED',benchmark_status='CANCELLED',progress_score=0,duration_seconds=0,cost_cents=0,message_count=0,graded_root_creation_outcome='not_started',stop_metadata={'runner':'benchmark_coordinator','admission':'not_started','occurrence_index':0})
+    cloned=copy.deepcopy(row)
+    # Equal dataclass values are NOT the same coordinator-owned result object.
+    assert row==cloned and row is not cloned
+    for rows,proof in [([cloned],[row]),([row,cloned],[row]),([row],[]),([row],[row,row])]:
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch('http://offline.invalid',rows,{},never_admitted_results=proof)
+    for key,value in [('runner','foreign'),('admission','unknown'),('occurrence_index',True),('occurrence_index',-1)]:
+        forged=copy.deepcopy(row);forged.stop_metadata[key]=value
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch('http://offline.invalid',[forged],{},never_admitted_results=[forged])

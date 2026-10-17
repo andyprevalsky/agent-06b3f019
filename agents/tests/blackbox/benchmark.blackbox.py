@@ -22627,9 +22627,117 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
         assert result.logs["cloud_cleanup_evidence"]["warnings"] == []
 
 
+# Native elapsed-clock owning regression: real _poll_agent, only external edges fake.
+async def _clock_poll_case(name, wall_delta, elapsed_delta, status='COMPLETED',
+                           expect_timeout=False, mode=None, next_times=()):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from contextlib import ExitStack
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    import socket
+    import hashlib
+    task=deepcopy(get_task_by_name(name))
+    if name.startswith('browser-auth-'):
+        assert task.timeout_seconds in (900,1200)
+    task.approval_handling='ignore'
+    class Clock:
+        def __init__(self):
+            self.calls={'wall':0,'elapsed':0}; self.wall=10000+wall_delta; self.elapsed=20000+elapsed_delta
+        def time(self):
+            self.calls['wall']+=1
+            return 10000 if self.calls['wall']==1 else self.wall
+        def monotonic(self):
+            self.calls['elapsed']+=1
+            return 20000 if self.calls['elapsed']==1 else self.elapsed
+    clock=Clock(); reads=[]; pending=list(next_times); denial=[]; payment=[]
+    async def read(*args):
+        reads.append(1)
+        msgs=([{'role':'USER','text':str(i)} for i in range(len(reads))] if mode=='progress' else [])
+        if mode=='chat': msgs=[{'role':'ASSISTANT','text':'answer'}]
+        if mode=='payment': msgs=[{'role':'TOOL','metadata':{'title':'Payment card ready'}}]
+        return {'agent':{'id':'00000000-0000-4000-8000-000000000001','status':status},'messages':msgs}
+    async def sleep(*args):
+        if not pending: raise AssertionError('poll did not terminate on declared clock schedule')
+        clock.wall,clock.elapsed=pending.pop(0)
+    async def tree(*args):
+        return {'total_messages':len(reads) if mode=='progress' else 0,'agent_count':1,
+                'total_cost_cents':0,'failed_count':0,'error_agents':[],
+                'all_agents':[{'agent_id':'00000000-0000-4000-8000-000000000001',
+                  'message_count':len(reads) if mode=='progress' else 0,'status':status}]}
+    def deny(*args,**kwargs):
+        denial.append('external'); raise AssertionError('external network forbidden')
+    async def start_payment(*args):
+        return {'status':'pending'}
+    async def wait_payment(*args,**kwargs):
+        payment.append(kwargs['timeout_seconds']); return {'status':'reclaimed'}
+    if mode=='chat': task.is_chat_mode=True
+    if mode=='payment': task.payment_card_request_action='abandon'
+    with ExitStack() as stack:
+        for target,attr,value in [
+            (socket.socket,'connect',deny),(socket,'getaddrinfo',deny),
+            (bench,'time',clock),(bench,'get_agent',read),
+            (bench,'get_attention_requests',AsyncMock(return_value=[])),
+            (bench,'_fetch_tree_stats',tree),(bench,'_fetch_message_counts',AsyncMock(return_value={})),
+            (bench,'_detect_infra_errors_from_fly',lambda *args:[]),
+            (bench,'_mark_expected_gate_from_data',lambda *args:None),
+            (bench,'_start_payment_abandonment_with_recovery',start_payment),
+            (bench,'_wait_for_expected_payment_lifecycle',wait_payment),
+            (bench.asyncio,'sleep',sleep),
+        ]: stack.enter_context(patch.object(target,attr,value))
+        result=await bench._poll_agent('http://offline.invalid','00000000-0000-4000-8000-000000000001',task)
+    assert denial==[]
+    assert result[0]['agent']['status']==status
+    reason=result[3]
+    assert bool(reason and reason.startswith('Timeout after')) is expect_timeout, (mode,reason)
+    if mode=='stall': assert reason and 'tree stalled' in reason
+    if mode=='payment': assert reason is None and payment==[min(420,task.timeout_seconds-elapsed_delta)]
+    if mode=='progress': assert len(reads)==3 and reason is not None
+    if mode=='chat': assert len(reads)==2 and reason is None
+    return result
+
+async def _clock_deadline_cases(name,limit):
+    if True:
+        for wall,elapsed,status,expired in [(30,30,'COMPLETED',False), (30,30,'FAILED',False), (2900,30,'COMPLETED',False),
+            (-2900,30,'COMPLETED',False),(limit+1,limit+1,'ACTIVE',True),
+            (limit+1,limit+1,'COMPLETED',True),(-2900,limit+1,'COMPLETED',True)]:
+            await _clock_poll_case(name,wall,elapsed,status,expired)
+
+async def test_poll_elapsed_deadlines_900():
+    await _clock_deadline_cases('browser-auth-signup-already-registered',900)
+
+async def test_poll_elapsed_deadlines_1200():
+    await _clock_deadline_cases('browser-auth-all-options-fail-assistance',1200)
+
+async def test_poll_elapsed_progress_does_not_reset_deadline():
+    await _clock_poll_case('browser-auth-signup-already-registered',30,30,'ACTIVE',True,'progress',
+                          [(10000+899,20000+899),(10000+901,20000+901)])
+
+async def test_poll_elapsed_disabled_polar():
+    from benchmarks.polar_catalog import polar_wall_clock_disabled
+    from benchmarks.benchmark_tasks import get_task_by_name
+    assert polar_wall_clock_disabled(get_task_by_name('polar-bu-001'))
+    await _clock_poll_case('polar-bu-001',100000,100000)
+
+async def test_poll_elapsed_payment_budget():
+    await _clock_poll_case('browser-auth-signup-already-registered',2900,800,'ACTIVE',False,'payment')
+
+async def test_poll_elapsed_stall_and_chat():
+    await _clock_poll_case('browser-auth-signup-already-registered',30,30,'ACTIVE',False,'stall',
+                          [(10000-2900,20000+600)])
+    await _clock_poll_case('browser-auth-signup-already-registered',30,30,'ACTIVE',False,'chat',
+                          [(10000-2900,20000+41)])
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
+    await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
+    await r.record_async("poll_elapsed_progress_does_not_reset_deadline", test_poll_elapsed_progress_does_not_reset_deadline)
+    await r.record_async("poll_elapsed_disabled_polar", test_poll_elapsed_disabled_polar)
+    await r.record_async("poll_elapsed_payment_budget", test_poll_elapsed_payment_budget)
+    await r.record_async("poll_elapsed_stall_and_chat", test_poll_elapsed_stall_and_chat)
     from benchmarks import lantern_people_trace_tests
 
     for name in (

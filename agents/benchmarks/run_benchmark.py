@@ -4518,7 +4518,7 @@ async def _poll_agent(
     stall, context validation error, dynamic timeout). The caller overrides
     pass→fail based on this.
     """
-    start = time.time()
+    start = time.monotonic()
     last_activity_time = start  # tracks ANY activity across the entire tree
     last_cost_change_time = start  # tree LLM cost growth (CC in-place progress)
     prev_tree_message_count = 0
@@ -4555,7 +4555,7 @@ async def _poll_agent(
     step_budget = polar_browser_step_budget(task)
 
     while True:
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
         if not wall_clock_disabled and resolved_timeout and elapsed > resolved_timeout:
             reason = (
                 f"Timeout after {elapsed:.0f}s (task timeout={resolved_timeout}s)"
@@ -4705,7 +4705,7 @@ async def _poll_agent(
                 for message in messages
             )
         ):
-            remaining_task_budget = None if wall_clock_disabled else max(0, resolved_timeout - (time.time() - start))
+            remaining_task_budget = None if wall_clock_disabled else max(0, resolved_timeout - (time.monotonic() - start))
             if remaining_task_budget is not None and remaining_task_budget <= 0:
                 raise RuntimeError(f"Payment reconciliation started after the task timeout ({resolved_timeout}s)")
             try:
@@ -4718,7 +4718,7 @@ async def _poll_agent(
                     if timeout_snapshot is not None:
                         timeout_snapshot.update(data)
                     remaining_task_budget = (
-                        None if wall_clock_disabled else max(0, resolved_timeout - (time.time() - start))
+                        None if wall_clock_disabled else max(0, resolved_timeout - (time.monotonic() - start))
                     )
                     if remaining_task_budget is not None and remaining_task_budget <= 0:
                         raise TimeoutError("Payment abandonment response arrived after the task deadline")
@@ -4735,7 +4735,7 @@ async def _poll_agent(
                 raise RuntimeError(
                     f"Payment reconciliation exceeded the task timeout ({resolved_timeout}s)"
                 ) from timeout_error
-            if not wall_clock_disabled and time.time() - start >= resolved_timeout:
+            if not wall_clock_disabled and time.monotonic() - start >= resolved_timeout:
                 raise RuntimeError(
                     f"Payment reconciliation response arrived after the task timeout ({resolved_timeout}s)"
                 )
@@ -4808,8 +4808,8 @@ async def _poll_agent(
                 if status in TERMINAL_STATUSES:
                     return data, approvals_triggered, approvals_resolved, None
                 if chat_assistant_seen_at is None:
-                    chat_assistant_seen_at = time.time()
-                if time.time() - chat_assistant_seen_at >= 10:
+                    chat_assistant_seen_at = time.monotonic()
+                if time.monotonic() - chat_assistant_seen_at >= 10:
                     return data, approvals_triggered, approvals_resolved, None
 
         if task.success_on_browser_auth_evidence:
@@ -4853,7 +4853,7 @@ async def _poll_agent(
 
         # ── Tree-level stall detection ──────────────────────────────
         # Periodically fetch tree stats (every TREE_POLL_INTERVAL seconds)
-        now = time.time()
+        now = time.monotonic()
         live_phone_call = has_in_progress_phone_call(messages)
         if live_phone_call:
             last_activity_time = now
@@ -6488,7 +6488,7 @@ async def _wait_for_owned_root_seal(
         raise RuntimeError("exact owned tree did not seal before the cleanup deadline") from error
 
 
-async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: dict[str, list[str]]) -> None:
+async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: dict[str, list[str]], *, never_admitted_results: tuple = ()) -> None:
     """Finalize each owned root after all tasks, while workers can still persist cleanup."""
     # A missing create response cannot prove that no root was allocated.
     failures = []
@@ -6586,13 +6586,22 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and r.stop_metadata.get("runner") == "sms"
         and r.stop_metadata.get("owned_cleanup_verified") is True
     ]
-    if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms
+    rootless_queued = [r for r in results if any(r is proof for proof in never_admitted_results)
+        and not r.agent_id and not getattr(r, "owned_roots", None) and not getattr(r, "logs", None)
+        and r.status == r.benchmark_status == "CANCELLED" and r.passed is False
+        and getattr(r, "graded_root_creation_outcome", None) == "not_started"
+        and isinstance(meta := getattr(r, "stop_metadata", None), dict)
+        and meta == {"runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": meta.get("occurrence_index")}
+        and type(meta.get("occurrence_index")) is int and meta["occurrence_index"] >= 0]
+    if len(rootless_queued) != len(never_admitted_results):
+        failures.append("invalid coordinator nonadmission proof")
+    if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms and not any(r is proof for proof in rootless_queued)
            and not (getattr(r, "graded_root_creation_outcome", None) == "not_started"
                     and getattr(r, "owned_roots", None)) for r in results) or any(
                         getattr(r, "graded_root_creation_outcome", None) == "unknown" for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
-        if failures or not rootless_sms:
+        if failures or not (rootless_sms or rootless_queued):
             raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
         return
     snapshots = {}
@@ -16217,11 +16226,15 @@ async def main_async(args):
     # until the very end. Admission state keeps repeated task occurrences
     # distinct without treating pending scheduler waiters as active executors.
 
+    _entered_task_futures: set[asyncio.Task] = set()
+    _never_admitted_results: list[TaskResult] = []
+
     async def _run_reported_task(task: BenchmarkTask, **kwargs) -> TaskResult:
         # The owning task preserves repeated names and retains the evaluated
         # row until the coordinator replaces it with the final cleanup result.
         token = asyncio.current_task()
         assert token is not None
+        _entered_task_futures.add(token)
         _admitted_tasks[token] = task
 
         def remember_agent(task_name: str, agent_id: str) -> None:
@@ -16383,8 +16396,7 @@ async def main_async(args):
                     if isinstance(result, TaskResult):
                         run.task_results.append(result)
                     else:
-                        run.task_results.append(
-                            TaskResult(
+                        cancelled_result = TaskResult(
                                 name=task.name,
                                 passed=False,
                                 agent_id="",
@@ -16395,8 +16407,12 @@ async def main_async(args):
                                 cost_cents=0,
                                 message_count=0,
                                 failure_reason=f"Benchmark interrupted before task produced logs: {result}",
-                            )
                         )
+                        if task_future not in _entered_task_futures:
+                            cancelled_result.graded_root_creation_outcome = "not_started"
+                            cancelled_result.stop_metadata = {"runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": list(pending_results).index(task_future)}
+                            _never_admitted_results.append(cancelled_result)
+                        run.task_results.append(cancelled_result)
                 raise
         else:
             for task in tasks:
@@ -16447,7 +16463,7 @@ async def main_async(args):
         batch_cleanup_error = None
         if owned_batch_cleanup:
             try:
-                await _finalize_owned_cloud_batch(base_url, run.task_results, _live_task_agent_ids)
+                await _finalize_owned_cloud_batch(base_url, run.task_results, _live_task_agent_ids, never_admitted_results=_never_admitted_results)
                 _complete_interrupt_cleanup()
             except Exception as error:
                 batch_cleanup_error = error
