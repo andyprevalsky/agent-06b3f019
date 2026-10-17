@@ -76,6 +76,7 @@ class NativeHTTP:
         self.requests = []
         self.leased = False
         self.lose_update_ack = False
+        self.update_count = 0
         self.on_lease = None
         self.app = app
         self.token = token
@@ -104,9 +105,21 @@ class NativeHTTP:
         if suffix == "/lease" and request.method == "DELETE":
             self.leased = False
             return io.BytesIO(b"{}")
+        if request.method == "GET" and suffix.startswith("/wait?"):
+            from urllib.parse import parse_qs, urlsplit
+
+            query = parse_qs(urlsplit(suffix).query)
+            assert query["instance_id"] == [self.machine["instance_id"]]
+            assert query["state"] == ["stopped"]
+            assert 0 < int(query["timeout"][0]) <= 30
+            self.machine["state"] = "stopped"
+            return io.BytesIO(b'{"ok":true}')
         if request.method == "GET" and not suffix:
             return io.BytesIO(json.dumps(self.machine).encode())
-        if request.method == "POST" and suffix in ("/metadata/" + pool.POOL_KEY, "/metadata/" + pool.CUSTODY_KEY):
+        if request.method == "POST" and suffix in (
+            "/metadata/" + pool.POOL_KEY,
+            "/metadata/" + pool.CUSTODY_KEY,
+        ):
             key = suffix.removeprefix("/metadata/")
             self.machine["config"].setdefault("metadata", {})[key] = data["value"]
             return io.BytesIO(b"")
@@ -115,12 +128,54 @@ class NativeHTTP:
             assert data["skip_launch"] is True
             assert data["config"]["mounts"] == self.machine["config"]["mounts"]
             self.machine["config"] = data["config"]
-            self.machine["instance_id"] = "native-version-2"
+            self.update_count += 1
+            self.machine["instance_id"] = f"native-version-{self.update_count + 1}"
             if self.lose_update_ack:
                 self.lose_update_ack = False
                 raise URLError("fixture lost update acknowledgment")
             return io.BytesIO(json.dumps(self.machine).encode())
         raise AssertionError((request.method, suffix))
+
+
+class CapturedReplacingHTTP(NativeHTTP):
+    """Sanitized native ordering from 2026-10-16 capture: POST new, GET old."""
+
+    def __init__(self, value):
+        super().__init__(value)
+        self.old = None
+        self.waited = False
+
+    def __call__(self, request, timeout):
+        base = f"https://api.machines.dev/v1/apps/{self.app}/machines/{self.machine['id']}"
+        suffix = request.full_url.removeprefix(base)
+        if suffix.startswith("/wait?"):
+            self.assert_wait(request, suffix)
+            self.waited = True
+            return io.BytesIO(b'{"ok":true}')
+        if request.method == "GET" and not suffix and self.old is not None and not self.waited:
+            self.requests.append((request.method, request.full_url, None))
+            stale = copy.deepcopy(self.old)
+            stale["state"] = "replacing"
+            return io.BytesIO(json.dumps(stale).encode())
+        old = copy.deepcopy(self.machine)
+        response = super().__call__(request, timeout)
+        if request.method == "POST" and not suffix:
+            self.old = old
+            self.machine["state"] = "stopped"
+            acknowledged = copy.deepcopy(self.machine)
+            acknowledged["state"] = "created"
+            return io.BytesIO(json.dumps(acknowledged).encode())
+        return response
+
+    def assert_wait(self, request, suffix):
+        from urllib.parse import parse_qs, urlsplit
+
+        assert self.leased and request.method == "GET"
+        query = parse_qs(urlsplit(suffix).query)
+        assert query["instance_id"] == [self.machine["instance_id"]]
+        assert query["state"] == ["stopped"]
+        assert 0 < int(query["timeout"][0]) <= 30
+        self.requests.append((request.method, request.full_url, None))
 
 
 class RetainedWorkerTests(unittest.TestCase):
@@ -176,6 +231,154 @@ class RetainedWorkerTests(unittest.TestCase):
             native = self.retire(value)
             self.assertFalse(pool.eligible(native.machine, "prod", "live"))
             self.assertEqual(native.machine["state"], "stopped")
+
+    def test_captured_update_ack_version_precedes_old_replacing_read(self):
+        # Native 0031 ACK: new instance/created/target; 0034 GET 254ms later:
+        # old instance/replacing/source. IDs/config values are sanitized here.
+        value = self.released()
+        native = CapturedReplacingHTTP(value)
+        self.run_operation(native, args("reuse"), value)
+        self.assertTrue(native.waited)
+        self.assertEqual(native.machine["instance_id"], "native-version-2")
+        self.assertFalse(native.leased)
+        self.assertEqual(
+            sum(method == "POST" and url.endswith("/machines/1234") for method, url, _ in native.requests),
+            1,
+        )
+
+    def test_update_ack_wait_and_postwait_fail_closed(self):
+        for fault in (
+            "no-ack",
+            "wrong-id",
+            "missing-version",
+            "old-version",
+            "wrong-config",
+            "wrong-marker",
+            "wait-false",
+            "wait-timeout",
+            "postwait-version",
+            "postwait-config",
+        ):
+            with self.subTest(fault=fault):
+                value = self.released()
+
+                class FaultHTTP(CapturedReplacingHTTP):
+                    def __call__(self, request, timeout):
+                        result = super().__call__(request, timeout)
+                        suffix = request.full_url.split("/machines/1234", 1)[1]
+                        if request.method == "POST" and not suffix:
+                            if fault == "no-ack":
+                                return io.BytesIO(b"null")
+                            ack = json.loads(result.read())
+                            if fault == "wrong-id":
+                                ack["id"] = "foreign"
+                            elif fault == "missing-version":
+                                ack.pop("instance_id")
+                            elif fault == "old-version":
+                                ack["instance_id"] = value["instance_id"]
+                            elif fault == "wrong-config":
+                                ack["config"]["env"]["OTHER_SETTING"] = "changed"
+                            elif fault == "wrong-marker":
+                                ack["config"]["metadata"][pool.POOL_KEY] = "{}"
+                            return io.BytesIO(json.dumps(ack).encode())
+                        if suffix.startswith("/wait?"):
+                            if fault == "wait-false":
+                                return io.BytesIO(b'{"ok":false}')
+                            if fault == "wait-timeout":
+                                raise URLError("fixture native wait timeout")
+                        if request.method == "GET" and not suffix and self.waited:
+                            actual = json.loads(result.read())
+                            if fault == "postwait-version":
+                                actual["instance_id"] = "foreign-version"
+                            elif fault == "postwait-config":
+                                actual["config"]["env"]["OTHER_SETTING"] = "changed"
+                            return io.BytesIO(json.dumps(actual).encode())
+                        return result
+
+                native = FaultHTTP(value)
+                with self.assertRaises((ValueError, URLError)):
+                    self.run_operation(native, args("reuse"), value)
+                self.assertFalse(native.leased)
+                self.assertEqual(
+                    sum(method == "POST" and url.endswith("/machines/1234") for method, url, _ in native.requests),
+                    1,
+                )
+                if fault in (
+                    "no-ack",
+                    "wrong-id",
+                    "missing-version",
+                    "old-version",
+                    "wrong-config",
+                    "wrong-marker",
+                ):
+                    self.assertFalse(native.waited)
+
+    def test_lost_ack_retry_rejects_empty_or_nonstring_version_before_wait(self):
+        for version in ("", None, 7):
+            with self.subTest(version=version):
+                value = self.released()
+                native = NativeHTTP(value)
+                native.lose_update_ack = True
+                with self.assertRaises(URLError):
+                    self.run_operation(native, args("reuse"), value)
+                native.machine["instance_id"] = version
+                before = len(native.requests)
+                with self.assertRaises(ValueError):
+                    self.run_operation(native, args("reuse"), value)
+                requests = native.requests[before:]
+                self.assertFalse(any("/wait?" in url for _, url, _ in requests))
+                self.assertFalse(any(method == "POST" and not url.endswith("/lease") for method, url, _ in requests))
+                self.assertEqual(native.update_count, 1)
+                self.assertFalse(native.leased)
+
+    def test_lost_ack_retry_waits_exact_version_before_verification_and_custody(self):
+        for fault in ("", "wait-error", "foreign-version", "still-starting"):
+            with self.subTest(fault=fault):
+                value = machine()
+                custody(value)
+                grant = pool.metadata(value, pool.CUSTODY_KEY)
+                grant["rootfs_disposition"] = "stateless"
+                value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(grant)
+                value = self.retire(value).machine
+
+                class LostAckHTTP(NativeHTTP):
+                    def __call__(self, request, timeout):
+                        suffix = request.full_url.split("/machines/1234", 1)[1]
+                        if request.method == "POST" and not suffix:
+                            self.machine["state"] = "replacing"
+                        if suffix.startswith("/wait?") and fault == "wait-error":
+                            raise URLError("fixture wait failed")
+                        response = super().__call__(request, timeout)
+                        if suffix.startswith("/wait?"):
+                            if fault == "foreign-version":
+                                self.machine["instance_id"] = "foreign-version"
+                            elif fault == "still-starting":
+                                self.machine["state"] = "starting"
+                        return response
+
+                native = LostAckHTTP(value)
+                native.lose_update_ack = True
+                with self.assertRaises(URLError):
+                    self.run_operation(native, args("reuse"), value)
+                self.assertEqual(native.update_count, 1)
+                self.assertEqual(native.machine["state"], "replacing")
+                self.assertEqual(pool.metadata(native.machine, pool.CUSTODY_KEY), grant)
+                if fault:
+                    with self.assertRaises((ValueError, URLError)):
+                        self.run_operation(native, args("reuse"), value)
+                    self.assertEqual(pool.metadata(native.machine, pool.CUSTODY_KEY), grant)
+                else:
+                    result = self.run_operation(native, args("reuse"), value)
+                    self.assertTrue(result["verified"])
+                    self.assertEqual(native.machine["state"], "stopped")
+                    self.assertEqual(pool.metadata(native.machine, pool.CUSTODY_KEY)["instance_id"], "native-version-2")
+                self.assertEqual(native.update_count, 1, "retry issued another config POST")
+                waits = [url for method, url, _ in native.requests if "/wait?" in url]
+                if fault != "wait-error":
+                    self.assertEqual(len(waits), 1)
+                    self.assertIn("instance_id=native-version-2", waits[0])
+                self.assertFalse(native.leased)
+                self.assertFalse(any(url.endswith(("/stop", "/start")) for _, url, _ in native.requests))
 
     def test_reuse_keeps_id_volumes_config_and_unrelated_env(self):
         value = self.released()

@@ -342,7 +342,7 @@ def operate(args, expected, fly):
                 )
                 if record(current, args.app) != source or not selected:
                     raise ValueError("Stopped Machine changed before its leased reuse")
-                fly.request(
+                updated = fly.request(
                     "POST",
                     data={
                         "config": config,
@@ -350,9 +350,37 @@ def operate(args, expected, fly):
                         "skip_launch": True,
                     },
                 )
+                if (
+                    not isinstance(updated, dict)
+                    or updated.get("id") != args.id
+                    or not isinstance(updated.get("instance_id"), str)
+                    or not updated["instance_id"]
+                    or updated["instance_id"] == current["instance_id"]
+                    or config_digest(updated.get("config", {})) != config_digest(config)
+                    or metadata(updated, POOL_KEY) != marker
+                ):
+                    raise ValueError("Native update acknowledgement does not match the requested worker configuration")
+                # An accepted update can still expose the old, replacing
+                # instance through GET. Wait for the acknowledged version;
+                # neither another update nor a matching old version is proof.
+                updated_version = updated["instance_id"]
+            else:
+                updated_version = current["instance_id"]
+            if not isinstance(updated_version, str) or not updated_version:
+                raise ValueError("Native updated worker has no exact instance version")
+            # A lost acknowledgement can leave the exact target version still
+            # replacing. Both paths require native stopped-state confirmation.
+            completed = fly.request(
+                "GET",
+                f"/wait?state=stopped&instance_id={quote(updated_version, safe='')}&timeout=10",
+            )
+            if not isinstance(completed, dict) or completed.get("ok") is not True:
+                raise ValueError("Native updated worker did not reach its stopped state")
             verified = fly.request("GET")
             if (
                 verified.get("id") != args.id
+                or verified.get("instance_id") != updated_version
+                or verified.get("state") != "stopped"
                 or config_digest(verified["config"]) != config_digest(config)
                 or metadata(verified, POOL_KEY) != marker
             ):
