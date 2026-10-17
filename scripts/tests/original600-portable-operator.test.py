@@ -269,6 +269,313 @@ class Portable(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'possible gate activity'):
                 CLI.prelaunch_failure(RUNNER,out,evidence,config,CLI.digest(config.read_bytes()))
 
+    def workspace_release_fixture(self, root):
+        out = root / "run"
+        out.mkdir(mode=0o700)
+        export = out / "export"
+        export.mkdir(mode=0o700)
+        workload = "49b792dcc2ea983325c6a25801da6c982f29c206"
+        host = "69aa6ff584588cfaa07d0a875fb9bdf308267c5c"
+
+        def source(ref, name):
+            return CLI.digest(
+                subprocess.check_output(
+                    [
+                        "git",
+                        "--no-replace-objects",
+                        "-C",
+                        str(ROOT),
+                        "show",
+                        ref + ":scripts/" + name,
+                    ]
+                )
+            )
+
+        epoch = time.time() - 60
+        provenance = dict(
+            host_operator_source_ref=host,
+            workload_source_ref=workload,
+            original_started_at_epoch=epoch,
+            host_runner_sha256=source(host, "cloudbench-original600-runner.py"),
+            host_gate_sha256=source(host, "run-cloudbench-controller-gate"),
+            incomplete_admission={"original_plan_sha256": "a" * 64},
+        )
+        config = private(
+            root / "config.private.json",
+            dict(
+                source_ref=workload,
+                started_at_epoch=epoch,
+                host_operator_provenance=provenance,
+                gate_env={"WARM_IMAGE_REF": "image@sha256:" + "1" * 64},
+                source_files={
+                    name: source(workload, name)
+                    for name in (
+                        "cloudbench-disposable-controller.py",
+                        "run-cloudbench-controller-gate",
+                    )
+                },
+            ),
+        )
+        private(out / "host-operator-provenance.json", provenance)
+        gate_caller = dict(pid=99999998, birth="gone-gate", host="fixture")
+        caller_file = private(export / "caller.json", gate_caller)
+        authority = dict(
+            source_ref=workload,
+            app="navi-whisper-lux-bench",
+            output_directory=str(export),
+            cleanup_owner_pid=99999999,
+            cleanup_owner_birth="gone-owner",
+            protected_volumes=[],
+            env_files={},
+        )
+        for key in ("agents", "backend"):
+            path = private(
+                export / ("current-" + key + ".private.env"), "FIXTURE=not-a-token\n"
+            )
+            authority["env_files"][key] = {"sha256": CLI.digest(path.read_bytes())}
+        auth_path = private(out / "authority.private.json", authority)
+        auth_sha = CLI.digest(auth_path.read_bytes())
+        caller = dict(
+            pid=99999999,
+            birth="gone-owner",
+            gate_pid=99999998,
+            gate_birth="gone-gate",
+            authority_sha256=auth_sha,
+            source_ref=workload,
+            epoch=epoch,
+            deadline=epoch + 5400,
+        )
+        private(out / "caller.json", caller)
+        private(
+            out / ("authority.private.json." + auth_sha + ".once"),
+            dict(
+                authority_sha256=auth_sha,
+                driver_pid=caller["gate_pid"],
+                driver_birth=caller["gate_birth"],
+            ),
+        )
+        intent = dict(
+            caller=gate_caller, caller_sha256=CLI.digest(caller_file.read_bytes())
+        )
+        intent_path = private(export / "workspace-volume.intent.json", intent)
+        native = dict(id="vol_fixture", attached_machine_id=None, state="created")
+        native_path = private(export / "workspace-volume-create.private.json", native)
+        workspace = dict(
+            schema="cloudbench-controller-workspace-ownership-v1",
+            source_ref=workload,
+            app=authority["app"],
+            size_gb=256,
+            mount_path="/tmp/gate",
+            volume_id=native["id"],
+            native_create=native,
+            native_create_sha256=CLI.digest(native_path.read_bytes()),
+            intent_sha256=CLI.digest(intent_path.read_bytes()),
+            **intent,
+        )
+        workspace_path = private(export / "workspace-volume.ownership.json", workspace)
+        create = dict(
+            authority_sha256=auth_sha,
+            workspace_sha256=CLI.digest(workspace_path.read_bytes()),
+            image="image@sha256:" + "1" * 64,
+            name="cloudbench-gate-" + workload[:8] + "-fixture",
+        )
+        private(export / "machine-create.intent.json", create)
+        private(
+            export / "disposable-delete-volume.intent.json",
+            dict(authority_sha256=auth_sha, identifier=native["id"], kind="volume"),
+        )
+        release = dict(
+            machine_id=None,
+            volume_id=native["id"],
+            volume_disposition="pending_destroy",
+            no_live_machine_observed=True,
+            command_history_verified=False,
+        )
+        private(export / "disposable-controller.release.json", release)
+        private(
+            export / "workspace-backup.verified.json",
+            dict(native, auto_backup_enabled=False),
+        )
+        private(export / "workspace-volume-create.stderr.private.log", "")
+        private(
+            out / "cleanup-call.intent.json",
+            dict(
+                action="cleanup-workspace",
+                machine=None,
+                gate_joined=True,
+                supervisor_joined=False,
+                export_verified_file=None,
+            ),
+        )
+        private(
+            out / "terminal.json",
+            dict(
+                status="FAILED_STARTUP_WORKSPACE_RELEASED",
+                machine=None,
+                release=release,
+                source_ref=workload,
+                started_at_epoch=epoch,
+                original_deadline=epoch + 5400,
+                gate_exit_code=1,
+                controller_cleanup_exit_code=1,
+                externally_reconciled_after_helper_failure=True,
+                benchmark_success_inferred=False,
+            ),
+        )
+        private(
+            out / "gate.private.log",
+            create["name"]
+            + "\nfailed to forward request\nGATE_WORKSPACE_VOLUME_RETAINED id="
+            + native["id"]
+            + "\n",
+        )
+        private(out / "controller-sidecars.private.json", [])
+        payload = out / "controller-launch-payload.private.json.gz"
+        payload.write_bytes(gzip.compress(b"fixture", mtime=0))
+        payload.chmod(0o600)
+        receipt = dict(
+            schema="original600-observed-closed-v1",
+            run_directory=str(out),
+            original_tool_exit_code=1,
+            release_observer_exit_code=0,
+            caller_live=False,
+            supervisor_published=False,
+            task_attempts=0,
+            original_session=123,
+            release_observer_session=124,
+            observed_epoch=time.time(),
+            caller_pid=caller["pid"],
+        )
+        evidence = private(out / "observed-closure.safe.json", receipt)
+        return out, config, evidence
+
+    def test_canonical_released_workspace_continues_once_without_regrading_unknown_create(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            out, config, evidence = self.workspace_release_fixture(root)
+            before = {
+                str(p.relative_to(out)): p.read_bytes()
+                for p in out.rglob("*")
+                if p.is_file()
+            }
+            old_path = root / "old-operator.py"
+            old_path.write_bytes(
+                subprocess.check_output(
+                    [
+                        "git",
+                        "--no-replace-objects",
+                        "-C",
+                        str(ROOT),
+                        "show",
+                        "69aa6ff584588cfaa07d0a875fb9bdf308267c5c:scripts/run-original600-controller.py",
+                    ]
+                )
+            )
+            old = runpy.run_path(str(old_path))
+            with self.assertRaisesRegex(
+                ValueError, "positive joined Popen failure evidence required"
+            ):
+                old["prelaunch_failure"](
+                    RUNNER, out, evidence, config, CLI.digest(config.read_bytes())
+                )
+            accepted = CLI.prelaunch_failure(
+                RUNNER, out, evidence, config, CLI.digest(config.read_bytes())
+            )
+            self.assertFalse(accepted["creation_history_verified"])
+            self.assertEqual(
+                accepted["stage"], "CANONICAL_WORKSPACE_RELEASED_AFTER_UNKNOWN_CREATE"
+            )
+            self.assertEqual(
+                {
+                    str(p.relative_to(out)): p.read_bytes()
+                    for p in out.rglob("*")
+                    if p.is_file()
+                },
+                before,
+            )
+            self.assertFalse(Path(accepted["successor_output"]).exists())
+
+            def deny_mutation(path, mutate):
+                saved = path.read_bytes()
+                value = json.loads(saved)
+                mutate(value)
+                private(path, value)
+                try:
+                    with self.assertRaises(ValueError):
+                        CLI.prelaunch_failure(
+                            RUNNER,
+                            out,
+                            evidence,
+                            config,
+                            CLI.digest(config.read_bytes()),
+                        )
+                finally:
+                    path.write_bytes(saved)
+
+            deny_mutation(
+                out / "export/disposable-controller.release.json",
+                lambda v: v.update(volume_id="vol_foreign"),
+            )
+            deny_mutation(
+                out / "export/machine-create.intent.json",
+                lambda v: v.update(image="foreign@sha256:" + "2" * 64),
+            )
+            deny_mutation(
+                out / "cleanup-call.intent.json", lambda v: v.update(gate_joined=False)
+            )
+            deny_mutation(evidence, lambda v: v.update(caller_live=True))
+            deny_mutation(
+                out / "host-operator-provenance.json",
+                lambda v: v.update(host_runner_sha256="0" * 64),
+            )
+            terminal = (out / "terminal.json").read_bytes()
+            (out / "terminal.json").unlink()
+            with self.assertRaises(FileNotFoundError):
+                CLI.prelaunch_failure(
+                    RUNNER, out, evidence, config, CLI.digest(config.read_bytes())
+                )
+            (out / "terminal.json").write_bytes(terminal)
+            (out / "terminal.json").chmod(0o600)
+            for relative in (
+                "export/disposable-controller.ownership.json",
+                "supervisor-probe-000001.json",
+                "unknown-effect.json",
+                "host-launch-successor.json",
+            ):
+                path = private(out / relative, {})
+                with self.assertRaises(ValueError):
+                    CLI.prelaunch_failure(
+                        RUNNER, out, evidence, config, CLI.digest(config.read_bytes())
+                    )
+                path.unlink()
+            real_exists = Path.exists
+
+            def live(path):
+                return True if str(path) == "/proc/99999999" else real_exists(path)
+
+            with (
+                patch.object(Path, "exists", live),
+                self.assertRaisesRegex(ValueError, "PID still present"),
+            ):
+                CLI.prelaunch_failure(
+                    RUNNER, out, evidence, config, CLI.digest(config.read_bytes())
+                )
+            epoch = json.loads(config.read_bytes())["started_at_epoch"]
+            with (
+                patch.object(CLI.time, "time", return_value=epoch + 5401),
+                self.assertRaisesRegex(ValueError, "clock expired"),
+            ):
+                CLI.prelaunch_failure(
+                    RUNNER, out, evidence, config, CLI.digest(config.read_bytes())
+                )
+            Path(accepted["successor_output"]).mkdir()
+            with self.assertRaisesRegex(ValueError, "already claimed"):
+                CLI.prelaunch_failure(
+                    RUNNER, out, evidence, config, CLI.digest(config.read_bytes())
+                )
+
     def test_inner_file_compression_preserves_bytes_with_existing_outer_bound(self):
         data=json.dumps({'inputs':{f'/state/original600-123456789/archived-reuse-reservations/old-machine/wire/request-{i}.json':hashlib.sha256(str(i).encode()).hexdigest() for i in range(5500)}}).encode()
         item={'relative_path':'.git/cloudbench-fixture.json','sha256':CLI.digest(data)}

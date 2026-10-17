@@ -590,9 +590,346 @@ def typed_payload_failure(runner, output, evidence, original_config, original_sh
     return dict(path=str(evidence),sha256=digest(raw),prior_output=str(output),successor_output=str(successor))
 
 
+def workspace_release_failure(
+    runner, output, evidence, original_config, original_sha, raw, receipt
+):
+    """A joined failed create with canonical release; never a no-dispatch claim."""
+    workload = "49b792dcc2ea983325c6a25801da6c982f29c206"
+    host = "69aa6ff584588cfaa07d0a875fb9bdf308267c5c"
+
+    def require(value, message):
+        if not value:
+            raise ValueError(message)
+
+    require(
+        output.resolve(strict=True) == output
+        and evidence == output / "observed-closure.safe.json",
+        "exact physical closed workspace output required",
+    )
+    state = output.stat()
+    require(
+        state.st_uid == os.geteuid() and not state.st_mode & 0o077,
+        "private closed workspace output required",
+    )
+    hashes = {}
+
+    def read(path):
+        path = Path(path)
+        info = path.lstat()
+        require(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.geteuid()
+            and info.st_nlink == 1
+            and not info.st_mode & 0o077,
+            "private single-link closure file required",
+        )
+        data = runner["read"](path)
+        hashes[str(path)] = digest(data)
+        return data
+
+    def obj(path):
+        return json.loads(read(path))
+
+    config = obj(original_config)
+    require(
+        hashes[str(original_config)] == original_sha
+        and config["source_ref"] == workload,
+        "closed workspace config/source changed",
+    )
+    epoch = config["started_at_epoch"]
+    require(0 <= time.time() - epoch < 5400, "original campaign clock expired")
+    require(
+        receipt.get("schema") == "original600-observed-closed-v1"
+        and receipt.get("run_directory") == str(output)
+        and receipt.get("original_tool_exit_code") == 1
+        and receipt.get("release_observer_exit_code") == 0
+        and receipt.get("caller_live") is False
+        and receipt.get("supervisor_published") is False
+        and receipt.get("task_attempts") == 0
+        and type(receipt.get("original_session")) is int
+        and type(receipt.get("release_observer_session")) is int
+        and epoch <= receipt["observed_epoch"] <= time.time(),
+        "positive original caller join/closure required",
+    )
+    require(read(evidence) == raw, "closure observation changed")
+    provenance = obj(output / "host-operator-provenance.json")
+    require(
+        provenance == config["host_operator_provenance"]
+        and provenance["host_operator_source_ref"] == host
+        and provenance["workload_source_ref"] == workload
+        and provenance["original_started_at_epoch"] == epoch,
+        "closed workspace host provenance changed",
+    )
+    source_hashes = {}
+    for ref, names in (
+        (host, ("cloudbench-original600-runner.py", "run-cloudbench-controller-gate")),
+        (
+            workload,
+            ("cloudbench-disposable-controller.py", "run-cloudbench-controller-gate"),
+        ),
+    ):
+        for name in names:
+            source = subprocess.check_output(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    str(Path(__file__).resolve().parents[1]),
+                    "show",
+                    ref + ":scripts/" + name,
+                ]
+            )
+            source_hashes[ref + ":" + name] = digest(source)
+    require(
+        source_hashes[host + ":cloudbench-original600-runner.py"]
+        == provenance["host_runner_sha256"]
+        and source_hashes[host + ":run-cloudbench-controller-gate"]
+        == provenance["host_gate_sha256"]
+        and all(
+            config["source_files"][name] == source_hashes[workload + ":" + name]
+            for name in (
+                "cloudbench-disposable-controller.py",
+                "run-cloudbench-controller-gate",
+            )
+        ),
+        "closed workspace producer source changed",
+    )
+    authority = obj(output / "authority.private.json")
+    caller = obj(output / "caller.json")
+    auth_sha = hashes[str(output / "authority.private.json")]
+    require(
+        caller["authority_sha256"] == auth_sha
+        and caller["source_ref"] == authority["source_ref"] == workload
+        and caller["epoch"] == epoch
+        and caller["deadline"] == epoch + 5400
+        and authority["output_directory"] == str(output / "export")
+        and (authority["cleanup_owner_pid"], authority["cleanup_owner_birth"])
+        == (caller["pid"], caller["birth"])
+        and receipt["caller_pid"] == caller["pid"],
+        "closed workspace caller/authority changed",
+    )
+    # A missing or reused original PID is checked separately from the joined
+    # tool receipt. Generic proc read failures do not establish caller closure.
+    if Path("/proc").is_dir():
+        require(
+            not Path("/proc", str(caller["pid"])).exists()
+            and not Path("/proc", str(caller["gate_pid"])).exists(),
+            "original caller or gate PID still present",
+        )
+    else:
+        for pid, birth in (
+            (caller["pid"], caller["birth"]),
+            (caller["gate_pid"], caller["gate_birth"]),
+        ):
+            try:
+                live = runner["birth"](pid) == birth
+            except (FileNotFoundError, ProcessLookupError):
+                live = False
+            require(not live, "original caller or gate still live")
+    export = output / "export"
+    require(
+        export.resolve(strict=True) == export
+        and export.is_dir()
+        and not export.stat().st_mode & 0o077,
+        "physical private released export required",
+    )
+    gate_caller = obj(export / "caller.json")
+    require(
+        (gate_caller["pid"], gate_caller["birth"])
+        == (caller["gate_pid"], caller["gate_birth"]),
+        "original gate custody changed",
+    )
+    workspace = obj(export / "workspace-volume.ownership.json")
+    workspace_intent = obj(export / "workspace-volume.intent.json")
+    native = obj(export / "workspace-volume-create.private.json")
+    require(
+        workspace["schema"] == "cloudbench-controller-workspace-ownership-v1"
+        and workspace["source_ref"] == workload
+        and workspace["app"] == authority["app"] == "navi-whisper-lux-bench"
+        and workspace["size_gb"] == 256
+        and workspace["mount_path"] == "/tmp/gate"
+        and workspace["volume_id"] == native["id"]
+        and workspace["native_create"] == native
+        and workspace["native_create_sha256"]
+        == hashes[str(export / "workspace-volume-create.private.json")]
+        and workspace["intent_sha256"]
+        == hashes[str(export / "workspace-volume.intent.json")]
+        and workspace_intent["caller"] == workspace["caller"] == gate_caller
+        and workspace["caller_sha256"]
+        == workspace_intent["caller_sha256"]
+        == hashes[str(export / "caller.json")],
+        "original workspace custody changed",
+    )
+    volume = workspace["volume_id"]
+    require(
+        volume not in authority["protected_volumes"]
+        and native.get("attached_machine_id") is None
+        and native["state"] == "created",
+        "foreign or originally attached workspace",
+    )
+    create = obj(export / "machine-create.intent.json")
+    delete = obj(export / "disposable-delete-volume.intent.json")
+    require(
+        create["authority_sha256"] == auth_sha
+        and create["workspace_sha256"]
+        == hashes[str(export / "workspace-volume.ownership.json")]
+        and create["image"] == config["gate_env"]["WARM_IMAGE_REF"]
+        and "@sha256:" in create["image"]
+        and create["name"].startswith("cloudbench-gate-" + workload[:8] + "-")
+        and delete == dict(authority_sha256=auth_sha, identifier=volume, kind="volume"),
+        "original create/delete intent changed",
+    )
+    release = obj(export / "disposable-controller.release.json")
+    require(
+        release
+        == dict(
+            machine_id=None,
+            volume_id=volume,
+            volume_disposition=release["volume_disposition"],
+            no_live_machine_observed=True,
+            command_history_verified=False,
+        )
+        and release["volume_disposition"] in ("ABSENT", "pending_destroy", "destroyed"),
+        "canonical workspace release required",
+    )
+    require(
+        obj(output / "cleanup-call.intent.json")
+        == dict(
+            action="cleanup-workspace",
+            machine=None,
+            gate_joined=True,
+            supervisor_joined=False,
+            export_verified_file=None,
+        ),
+        "canonical joined workspace cleanup required",
+    )
+    terminal = obj(output / "terminal.json")
+    require(
+        terminal["status"] == "FAILED_STARTUP_WORKSPACE_RELEASED"
+        and terminal["machine"] is None
+        and terminal["release"] == release
+        and terminal["source_ref"] == workload
+        and terminal["started_at_epoch"] == epoch
+        and terminal["original_deadline"] == epoch + 5400
+        and terminal["gate_exit_code"] == 1
+        and type(terminal["controller_cleanup_exit_code"]) is int
+        and terminal["externally_reconciled_after_helper_failure"]
+        == (terminal["controller_cleanup_exit_code"] != 0)
+        and terminal["benchmark_success_inferred"] is False,
+        "canonical released startup terminal required",
+    )
+    log = read(output / "gate.private.log")
+    require(
+        b"failed to forward request" in log
+        and b"Machine ID:" not in log
+        and ("GATE_WORKSPACE_VOLUME_RETAINED id=" + volume).encode() in log
+        and create["name"].encode() in log,
+        "exact failed startup stream required",
+    )
+    once_name = "authority.private.json." + auth_sha + ".once"
+    require(
+        obj(output / once_name)
+        == dict(
+            authority_sha256=auth_sha,
+            driver_pid=caller["gate_pid"],
+            driver_birth=caller["gate_birth"],
+        ),
+        "original allocation owner changed",
+    )
+    descriptors = obj(output / "controller-sidecars.private.json")
+    sidecars = set()
+    for entry in descriptors:
+        path = output / ("controller-sidecar-" + entry["sha256"] + ".private.gz")
+        data = read(path)
+        require(
+            entry["path"] == str(path)
+            and entry["sha256"] == digest(data)
+            and entry["bytes"] == len(data),
+            "original sidecar custody changed",
+        )
+        sidecars.add(path.name)
+    required = {
+        "authority.private.json",
+        once_name,
+        "caller.json",
+        "cleanup-call.intent.json",
+        "terminal.json",
+        "gate.private.log",
+        "host-operator-provenance.json",
+        "controller-launch-payload.private.json.gz",
+        "controller-sidecars.private.json",
+        "observed-closure.safe.json",
+        "export",
+    } | sidecars
+    optional = {
+        "cleanup.pending.json",
+        "gate.pending.json",
+        "threshold-owner.identity.private.json",
+        "workspace-release-observation.log",
+    }
+    require(
+        required <= {p.name for p in output.iterdir()} <= required | optional,
+        "unknown closed workspace output artifact",
+    )
+    export_required = {
+        "caller.json",
+        "current-agents.private.env",
+        "current-backend.private.env",
+        "disposable-controller.release.json",
+        "disposable-delete-volume.intent.json",
+        "machine-create.intent.json",
+        "workspace-backup.verified.json",
+        "workspace-volume-create.private.json",
+        "workspace-volume-create.stderr.private.log",
+        "workspace-volume.intent.json",
+        "workspace-volume.ownership.json",
+    }
+    require(
+        export_required
+        <= {p.name for p in export.iterdir()}
+        <= export_required | {"workspace-backup.intent.json"},
+        "possible controller/export activity in released workspace",
+    )
+    for key in ("agents", "backend"):
+        require(
+            digest(read(export / ("current-" + key + ".private.env")))
+            == authority["env_files"][key]["sha256"],
+            "original complete env custody changed",
+        )
+    membership = {}
+    for path in sorted(output.rglob("*")):
+        require(not path.is_symlink(), "closed workspace alias")
+        if path == export:
+            membership["export"] = "directory"
+        else:
+            require(path.is_file(), "unknown closed workspace directory")
+            read(path)
+            membership[str(path.relative_to(output))] = hashes[str(path)]
+    successor = output.parent / ("run-after-workspace-release-" + digest(raw)[:16])
+    require(
+        not successor.exists()
+        and not successor.is_symlink()
+        and not (output / "host-launch-successor.json").exists(),
+        "workspace continuation already claimed",
+    )
+    return dict(
+        path=str(evidence),
+        sha256=digest(raw),
+        prior_output=str(output),
+        successor_output=str(successor),
+        stage="CANONICAL_WORKSPACE_RELEASED_AFTER_UNKNOWN_CREATE",
+        creation_history_verified=False,
+        inputs=hashes,
+        membership=membership,
+        producer_sources=source_hashes,
+    )
+
+
 def prelaunch_failure(runner, output, evidence, original_config, original_sha):
     """Accept the retained known pre-exec failure, never directory absence alone."""
     raw=runner['read'](evidence);receipt=json.loads(raw)
+    if receipt.get('schema')=='original600-observed-closed-v1':
+        return workspace_release_failure(runner,output,evidence,original_config,original_sha,raw,receipt)
     if receipt.get('schema')=='original600-host-payload-failure-v1':
         return typed_payload_failure(runner,output,evidence,original_config,original_sha,raw,receipt)
     if receipt.get('schema')=='observed-host-prelaunch-refusal-v1':

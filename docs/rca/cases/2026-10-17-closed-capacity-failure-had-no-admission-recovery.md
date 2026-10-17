@@ -18,7 +18,7 @@ sources:
   - commit 49b792dcc2ea983325c6a25801da6c982f29c206
   - fleet run original600-1792271666901142356
 repro: python3 scripts/tests/cloudbench-incomplete-reservations.test.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -35,7 +35,7 @@ The provider/network causes of the read failures and uncertain responses remain 
 
 Extend the existing incomplete-admission mechanism with an exact closed-capacity-failure proof. Carry the 528 confirmed rows unchanged. Classify only the 23 held IDs. Any new configuration attempt uses a new private journal and a fresh lease, verifies the exact prior native version/configuration, and performs a version-fenced update. A competing late old update must make the new attempt fail or remain held. No old configuration request is replayed with its old nonce, and no uncertain old response is relabeled as an ACK.
 
-The normal fresh capacity check and controller launch remain after verified recovery. The original task set, concurrency, deadlines, exclusions and protected resources remain unchanged. Seven incomplete-admission controls, five recovered-reader controls, and the focused public-CLI continuation control pass. The same valid capacity-failure fixture is rejected by the old public planner and accepted by the new planner. Controls also reject altered carried rows and late old-CAS winners, and validate the full recovered archive and dependency bindings. These are local controls; the live continuation has not run yet.
+The normal fresh capacity check and controller launch remain after verified recovery. The original task set, concurrency, deadlines, exclusions and protected resources remain unchanged. Seven incomplete-admission controls, five recovered-reader controls, and the focused public-CLI continuation control pass. The same valid capacity-failure fixture is rejected by the old public planner and accepted by the new planner. Controls also reject altered carried rows and late old-CAS winners, and validate the full recovered archive and dependency bindings. The exact69aa live continuation then verified all23 new reservations, retained the528 original confirmations and returned551 rows with zero holds. The original 90-minute clock and all prior failures were preserved. This closes the admission-recovery defect; it does not certify the later controller launch or task outcomes.
 
 ## Human feedback
 
