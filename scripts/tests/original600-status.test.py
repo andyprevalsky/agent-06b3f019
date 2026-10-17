@@ -75,6 +75,38 @@ class Status(unittest.TestCase):
             M['bound_source'](self.root,ref,source.name,expected)
 
 
+    def test_continuation_status_verifies_original_config_and_successor_chain(self):
+        original=json.loads(self.cfg.read_bytes())
+        original['authority_template']=str(self.root/'old-authority')
+        write(self.cfg,original)
+        original_sha=M['digest'](self.cfg.read_bytes())
+        write(self.run.parent/'attempt-start.safe.json',dict(source_ref=self.ref,config_sha256=original_sha))
+        previous=self.run.parent/'previous-run';previous.mkdir(mode=0o700)
+        failure=dict(path=str(self.root/'positive-failure'),sha256='e'*64,
+                     prior_output=str(previous),successor_output=str(self.run))
+        provenance=dict(original_config_path=str(self.cfg),original_config_sha256=original_sha,
+                        original_started_at_epoch=self.epoch,workload_source_ref=self.ref,
+                        host_operator_source_ref='b'*40,host_runner_sha256='c'*64,prelaunch_failure=failure)
+        config=write(self.root/'continuation/config.private.json',dict(original,
+                     authority_template=str(self.root/'new-authority'),host_operator_provenance=provenance))
+        write(self.run/'host-operator-provenance.json',provenance)
+        pointer=write(previous/'host-launch-successor.json',dict(schema='original600-host-launch-successor-v1',
+                     evidence=failure,config_path=str(config),config_sha256=M['digest'](config.read_bytes()),
+                     original_started_at_epoch=self.epoch,host_operator_source_ref='b'*40))
+        value=M['binding'](self.run,config)
+        self.assertEqual(value['mode'],'REMOTE')
+        self.assertEqual(value['payload']['epoch'],self.epoch)
+        self.assertEqual(value['source_ref'],self.ref)
+        before=config.read_bytes()
+        write(config,dict(json.loads(before),remote_env={'changed':'task-input'}))
+        with self.assertRaises(ValueError):M['binding'](self.run,config)
+        config.write_bytes(before)
+        saved=pointer.read_bytes();write(pointer,dict(json.loads(saved),config_sha256='0'*64))
+        with self.assertRaises(ValueError):M['binding'](self.run,config)
+        pointer.write_bytes(saved)
+        write(self.run/'host-operator-provenance.json',dict(provenance,original_started_at_epoch=self.epoch+1))
+        with self.assertRaises(ValueError):M['binding'](self.run,config)
+
     def test_actual_guest_exact_path_projection_preserves_unknown_and_unique_infra(self):
         repo=self.root/'guest';repo.mkdir()
         subprocess.run(['git','init','-q',str(repo)],check=True)

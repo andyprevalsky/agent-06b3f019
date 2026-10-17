@@ -111,6 +111,33 @@ def bound_source(root,ref,name,expected):
     return scope
 
 
+def config_receipt(run,config,cfg,recorded):
+    """Follow the recorded host continuation without changing workload identity."""
+    current_sha=digest(read(config))
+    need(recorded['source_ref']==cfg['source_ref'],'original source receipt changed')
+    if recorded['config_sha256']==current_sha:return
+    provenance=cfg.get('host_operator_provenance',{})
+    original_path=Path(provenance.get('original_config_path',''))
+    need(original_path==run.parent/'config.private.json','original config path changed')
+    raw=read(original_path);original=json.loads(raw)
+    need(digest(raw)==recorded['config_sha256']==provenance.get('original_config_sha256'),'original config receipt changed')
+    need(original.get('source_ref')==cfg['source_ref']==provenance.get('workload_source_ref')
+         and original.get('started_at_epoch')==cfg['started_at_epoch']==provenance.get('original_started_at_epoch'),'original workload/clock changed')
+    permitted={'authority_template','host_operator_provenance'}
+    need({k:v for k,v in cfg.items() if k not in permitted}=={k:v for k,v in original.items() if k not in permitted},'continuation changed workload config')
+    need(obj(run/'host-operator-provenance.json')==provenance,'saved continuation provenance changed')
+    failure=provenance.get('prelaunch_failure')
+    if failure:
+        prior=Path(failure['prior_output'])
+        need(prior.parent==run.parent and prior!=run and failure['successor_output']==str(run),'continuation output changed')
+        pointer=obj(prior/'host-launch-successor.json')
+        need(pointer.get('schema')=='original600-host-launch-successor-v1'
+             and pointer.get('evidence')==failure and pointer.get('config_path')==str(config)
+             and pointer.get('config_sha256')==current_sha
+             and pointer.get('original_started_at_epoch')==cfg['started_at_epoch']
+             and pointer.get('host_operator_source_ref')==provenance.get('host_operator_source_ref'),'continuation successor receipt changed')
+
+
 def binding(run,config=None,agents_env=None):
     run=Path(run).absolute();need(run.resolve(strict=True)==run,'physical run directory required')
     config=Path(config).absolute() if config else run.parent/'config.private.json'
@@ -122,7 +149,7 @@ def binding(run,config=None,agents_env=None):
     start=run.parent/'attempt-start.safe.json'
     if start.exists():
         recorded=obj(start)
-        need(recorded['source_ref']==ref and recorded['config_sha256']==digest(read(config)),'original config receipt changed')
+        config_receipt(run,config,cfg,recorded)
     terminal=run/'terminal.json'
     if terminal.exists():
         value=obj(terminal);need(value['source_ref']==ref,'terminal source mismatch')
