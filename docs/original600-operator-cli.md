@@ -370,6 +370,30 @@ An exact native exec `No child process (os error 10)` response to a PROBE is a
 recorded read failure that can be observed again; malformed identity responses
 remain refusals.
 
+If the canonical cleanup child exited before constructing its API client with
+the exact `no Fly credential is available` traceback, preserve its joined
+receipt, log and cleanup intent. The finalizer passes the selected credential
+from the authority's hash-bound agents input in the child's environment. It
+does not depend on a local env-file alias or a login shell.
+
+For the known original operator's pre-client refusal, use the failed child's
+exact journal with a new immutable operator:
+
+```bash
+python3 -S scripts/cloudbench-controller-payload-finalization.py \
+  --check --cleanup-refusal-journal "$FAILED_CLEANUP_JOURNAL" \
+  --operator-ref "$EXACT_FINALIZER_COMMIT" \
+  --config "$EXISTING_CONFIG" --config-sha256 "$EXISTING_CONFIG_SHA256" \
+  --run-directory "$EXISTING_RUN_DIRECTORY"
+```
+
+Replace `--check` with `--resume-cleanup` after the check passes. This route
+requires the exact known helper, transport and resolver source, the positive
+pre-client traceback, the dead child's owned join, unchanged verified export,
+and absence of native deletion intents or a release. It preserves the original
+cleanup invocation and all old journal bytes and creates one exclusive successor
+journal. An unknown or provider-entered cleanup cannot use this route.
+
 
 Within a live strict cohort, the fleet shares one successful read-only app-secret
 verification. The proof is bound to the campaign owner and process births,

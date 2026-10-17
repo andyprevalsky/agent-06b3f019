@@ -235,7 +235,100 @@ def prior_finalizer_dead(intent):
     return current != expected or raw[0] == "Z"
 
 
-def prepare_resume(state, args):
+def cleanup_command(state):
+    out = Path(state["out"])
+    export = out / "export"
+    return [
+        sys.executable,
+        "-S",
+        str(Path(state["source_root"]) / "scripts/cloudbench-disposable-controller.py"),
+        "cleanup",
+        "--authority",
+        str(out / "authority.private.json"),
+        "--root",
+        state["source_root"],
+        "--directory",
+        str(export),
+        "--workspace",
+        str(export / "workspace-volume.ownership.json"),
+    ]
+
+
+def cleanup_closure(state, export_sha):
+    return {
+        "machine": state["machine_id"],
+        "action": "cleanup",
+        "gate_joined": True,
+        "supervisor_joined": True,
+        "export_verified_file": export_sha,
+    }
+
+
+def credential_refusal(state, journal, intent):
+    """Recognize only the known joined pre-client refusal, never a failed API call."""
+    need(
+        intent["finalizer_operator_ref"] == "447bf65e8e4f5b3faf8e02c695ac5f7411d24c39",
+        "credential recovery requires the known original operator",
+    )
+    root = Path(state["source_root"])
+    sources = {
+        "cloudbench-disposable-controller.py": "452488443699467881d2a68b17305867f98539540ddb4602e338caf732721ea8",
+        "cloudbench-original-volume-capture.py": "4006c6ca65a89285614669b747c0d1d01100b5c04f35c36dc89acc84cd5bf49b",
+        "lib/cloudbench-inventory.sh": "6c4483401a301a909cac89757a862e6e7a2bb2dee1562a45cd9309556b261db0",
+    }
+    source_pins = B["source_identity"](root, state["source_ref"], sources)
+    helper = str(root / "scripts/cloudbench-disposable-controller.py")
+    transport = str(root / "scripts/cloudbench-original-volume-capture.py")
+    expected = (
+        "Traceback (most recent call last):\n"
+        f'  File "{helper}", line 221, in <module>\n'
+        "    if __name__=='__main__':main()\n"
+        "                            ^^^^^^\n"
+        f'  File "{helper}", line 205, in main\n'
+        "    client=scope['Fly'](a['app'],os.environ.get('FLY_API_TOKEN')or scope['resolve_token']({'workspace':str(args.root)}))\n"
+        "                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+        f'  File "{transport}", line 936, in resolve_token\n'
+        '    raise Refusal("no Fly credential is available")\n'
+        "disposable_controller_transport.Refusal: no Fly credential is available\n"
+    )
+    need(
+        read(journal / "cleanup.log") == expected.encode(),
+        "not the exact pre-client credential refusal",
+    )
+    need(
+        obj(journal / "cleanup.intent.json")
+        == {
+            "argv": cleanup_command(state),
+            "gate_reap": "OBSERVED_ORIGINAL_PARENT_REAP",
+            "gate_exit_code": None,
+        },
+        "prior cleanup command differs",
+    )
+    child = obj(journal / "cleanup.child.json")
+    need(prior_finalizer_dead(child), "prior cleanup child still live or unknown")
+    need(
+        obj(journal / "cleanup.joined.json") == {"exit_code": 1, "owned_join": True},
+        "prior cleanup was not positively joined with refusal",
+    )
+    out = Path(state["out"])
+    need(
+        obj(out / "cleanup-call.intent.json")
+        == cleanup_closure(state, verified_export(state)),
+        "prior cleanup closure differs",
+    )
+    for name in (
+        "disposable-delete-machine.intent.json",
+        "disposable-delete-volume.intent.json",
+        "disposable-controller.release.json",
+    ):
+        need(
+            not os.path.lexists(out / "export" / name),
+            "native cleanup already entered; no credential retry",
+        )
+    return out / "cleanup-call.intent.json", source_pins
+
+
+def prepare_resume(state, args, cleanup_refusal=False):
     """Authorize a new reader only from a stopped, exclusively read-only journal."""
     out = Path(state["out"])
     roots = {
@@ -266,8 +359,8 @@ def prepare_resume(state, args):
         "private prior journal required",
     )
     need(
-        not (out / "cleanup-call.intent.json").exists()
-        and not (out / "terminal.json").exists(),
+        (cleanup_refusal or not os.path.lexists(out / "cleanup-call.intent.json"))
+        and not os.path.lexists(out / "terminal.json"),
         "cleanup or terminal already exists; reconcile without replay",
     )
     intent = obj(journal / "intent.json")
@@ -311,6 +404,9 @@ def prepare_resume(state, args):
             ]
         )
         need(sha(raw) == digest, "prior operator source differs")
+    closure_path, cleanup_pins = (
+        credential_refusal(state, journal, intent) if cleanup_refusal else (None, {})
+    )
     expected_probe = {
         "cmd": R["exec_command"](
             R["REMOTE_CONTROL"],
@@ -334,6 +430,16 @@ def prepare_resume(state, args):
     for path in entries:
         need(
             path.name == "intent.json"
+            or (
+                cleanup_refusal
+                and path.name
+                in {
+                    "cleanup.intent.json",
+                    "cleanup.child.json",
+                    "cleanup.joined.json",
+                    "cleanup.log",
+                }
+            )
             or re.fullmatch(r"(?:probe|read-pending)-[0-9]{6}\.json", path.name)
             or re.fullmatch(r"wire-[0-9]{6}\.(?:request|raw|decoded)\.json", path.name),
             "prior journal contains an effect or unknown member",
@@ -346,7 +452,7 @@ def prepare_resume(state, args):
             "prior journal changed during read",
         )
         need(total < 256 * 1024 * 1024, "prior journal exceeds bounded bytes")
-        value = json.loads(raw)
+        value = None if path.name == "cleanup.log" else json.loads(raw)
         files[path.name] = sha(raw)
         pins[str(path)] = normalized(before)
         if path.name.endswith(".request.json"):
@@ -388,10 +494,14 @@ def prepare_resume(state, args):
                     )
     hashes, new_pins = operator(args.operator_ref)
     pins.update({path: normalized(value) for path, value in new_pins.items()})
+    pins.update({path: normalized(value) for path, value in cleanup_pins.items()})
+    if closure_path:
+        pins[str(closure_path)] = normalized(B["fingerprint"](closure_path))
     manifest = {
         "journal": str(journal),
         "files": files,
         "operator_ref": args.operator_ref,
+        "cleanup_credential_refusal": cleanup_refusal,
     }
     identity = sha(json.dumps(manifest, sort_keys=True).encode())
     value = dict(state)
@@ -402,6 +512,7 @@ def prepare_resume(state, args):
         operator_hashes=hashes,
         journal_name="payload-finalization-resume-" + identity[:16],
         prior_manifest_sha256=identity,
+        cleanup_credential_refusal=cleanup_refusal,
     )
     return value
 
@@ -477,11 +588,16 @@ def verified_export(state):
     return sha(read(export / "disposable-export.verified.json"))
 
 
-def api_for(state):
+def selected_token(state):
     agents = state["authority"]["env_files"]["agents"]
-    need(sha(read(agents["path"])) == agents["sha256"], "authority env changed")
+    raw = read(agents["path"])
+    need(sha(raw) == agents["sha256"], "authority env changed")
     public = runpy.run_path(str(HERE / "run-original600-controller.py"))
-    token = public["token_from_agents"](read(agents["path"]))
+    return public["token_from_agents"](raw)
+
+
+def api_for(state):
+    token = selected_token(state)
     factory = runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))["Fly"]
     return factory(R["APP"], token)
 
@@ -704,38 +820,20 @@ def finalize(state, args, api_factory=api_for):
                 break
             time.sleep(5)
         export_sha = verified_export(state)
-        closure = {
-            "machine": state["machine_id"],
-            "action": "cleanup",
-            "gate_joined": True,
-            "supervisor_joined": True,
-            "export_verified_file": export_sha,
-        }
+        closure = cleanup_closure(state, export_sha)
         path = out / "cleanup-call.intent.json"
-        need(
-            not path.exists(),
-            "prior cleanup invocation exists: observe exact release, never relaunch helper",
-        )
-        save(path, closure)
+        if state.get("_resume", {}).get("cleanup_credential_refusal"):
+            need(obj(path) == closure, "original cleanup closure changed")
+        else:
+            need(
+                not os.path.lexists(path),
+                "prior cleanup invocation exists: observe exact release, never relaunch helper",
+            )
+            save(path, closure)
         validate_args(state, args)
         export = out / "export"
-        command = [
-            sys.executable,
-            "-S",
-            str(
-                Path(state["source_root"])
-                / "scripts/cloudbench-disposable-controller.py"
-            ),
-            "cleanup",
-            "--authority",
-            str(out / "authority.private.json"),
-            "--root",
-            state["source_root"],
-            "--directory",
-            str(export),
-            "--workspace",
-            str(export / "workspace-volume.ownership.json"),
-        ]
+        command = cleanup_command(state)
+        child_env = dict(os.environ, FLY_API_TOKEN=selected_token(state))
         save(
             journal / "cleanup.intent.json",
             {
@@ -746,7 +844,11 @@ def finalize(state, args, api_factory=api_for):
         )
         with (journal / "cleanup.log").open("xb") as log:
             child = subprocess.Popen(
-                command, cwd=state["source_root"], stdout=log, stderr=subprocess.STDOUT
+                command,
+                cwd=state["source_root"],
+                env=child_env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
             )
             try:
                 birth = R["birth"](child.pid) if child.poll() is None else None
@@ -835,21 +937,41 @@ def main():
         action="store_true",
         help="Resume a proven read-only finalizer journal.",
     )
+    modes.add_argument(
+        "--resume-cleanup",
+        action="store_true",
+        help="Continue only a proven pre-client credential refusal.",
+    )
     parser.add_argument("--resume-journal", type=Path)
+    parser.add_argument("--cleanup-refusal-journal", type=Path)
     parser.add_argument("--operator-ref", required=True)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--config-sha256", required=True)
     parser.add_argument("--run-directory", required=True, type=Path)
     args = parser.parse_args()
     os.umask(0o077)
-    need(not args.capture or not args.resume_journal, "capture cannot resume a journal")
+    need(
+        not (args.resume_journal and args.cleanup_refusal_journal),
+        "select one exact prior journal",
+    )
+    need(
+        not args.capture or not (args.resume_journal or args.cleanup_refusal_journal),
+        "capture cannot resume a journal",
+    )
     if args.capture:
         result = capture(
             args.config, args.config_sha256, args.run_directory, args.operator_ref
         )
     else:
         state = obj(args.run_directory / "payload-finalizer.identities.private.json")
-        if args.resume_journal:
+        if args.cleanup_refusal_journal:
+            need(
+                args.check or args.resume_cleanup,
+                "credential refusal requires check or resume-cleanup",
+            )
+            args.resume_journal = args.cleanup_refusal_journal
+            state = prepare_resume(state, args, cleanup_refusal=True)
+        elif args.resume_journal:
             need(
                 args.check or args.resume_finalize,
                 "resume journal requires check or resume-finalize",
@@ -857,16 +979,21 @@ def main():
             state = prepare_resume(state, args)
         else:
             need(
-                not args.resume_finalize, "resume-finalize requires exact prior journal"
+                not (args.resume_finalize or args.resume_cleanup),
+                "resume requires exact prior journal",
             )
         validate_args(state, args)
         result = (
             finalize(state, args)
-            if args.finalize or args.resume_finalize
+            if args.finalize or args.resume_finalize or args.resume_cleanup
             else {
-                "status": "CHECKED_READ_ONLY_FINALIZER_RESUME"
-                if args.resume_journal
-                else "CHECKED_FINALIZER",
+                "status": "CHECKED_PRECLIENT_CREDENTIAL_CONTINUATION"
+                if args.cleanup_refusal_journal
+                else (
+                    "CHECKED_READ_ONLY_FINALIZER_RESUME"
+                    if args.resume_journal
+                    else "CHECKED_FINALIZER"
+                ),
                 "provider_calls": 0,
             }
         )

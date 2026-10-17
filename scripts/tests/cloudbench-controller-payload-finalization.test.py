@@ -4,9 +4,11 @@
 import argparse
 import base64
 import json
+import os
 import runpy
 import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -393,7 +395,152 @@ class Finalizer(unittest.TestCase):
     def test_resumed_monitor_preserves_prior_journal_and_cannot_restart(self):
         self._monitor_case(resumed=True)
 
-    def _monitor_case(self, resumed):
+    def test_cleanup_refusal_continuation_preserves_old_intent_and_binds_child_token(
+        self,
+    ):
+        self._monitor_case(resumed=True, cleanup_refusal=True)
+
+    def test_selected_child_credential_comes_only_from_bound_agents_bytes(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "agents.env"
+            path.write_text('FLY_API_TOKEN="FlyV1 bound-token"\n')
+            path.chmod(0o600)
+            state = {
+                "authority": {
+                    "env_files": {
+                        "agents": {
+                            "path": str(path),
+                            "sha256": M["sha"](path.read_bytes()),
+                        }
+                    }
+                }
+            }
+            with mock.patch.dict(os.environ, FLY_API_TOKEN="wrong-ambient-token"):
+                self.assertEqual(M["selected_token"](state), "FlyV1 bound-token")
+            path.write_text("FLY_API_TOKEN=changed\n")
+            with self.assertRaisesRegex(ValueError, "authority env changed"):
+                M["selected_token"](state)
+
+    def test_original_cleanup_main_receives_explicit_selected_token(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            (root / "scripts").mkdir()
+            source = (
+                b"class Refusal(Exception): pass\n"
+                b'def resolve_token(_): raise Refusal("no Fly credential is available")\n'
+                b"class Fly:\n"
+                b" def __init__(self, app, token):\n"
+                b'  assert app == "test-app" and token == "FlyV1 bound-token"\n'
+            )
+            (root / "scripts/cloudbench-original-volume-capture.py").write_bytes(source)
+            script = """import runpy, sys
+from pathlib import Path
+m = runpy.run_path(sys.argv[1])
+g = m["main"].__globals__
+root = Path(sys.argv[2])
+g["authority"] = lambda *a, **k: ({"app": "test-app", "source_ref": "ref", "output_directory": str(root)}, "digest")
+g["subprocess"].check_output = lambda *a, **k: (root / "scripts/cloudbench-original-volume-capture.py").read_bytes()
+g["cleanup"] = lambda *a: print("SELECTED_CREDENTIAL_RECEIVED_NO_PROVIDER")
+sys.argv = [sys.argv[1], "cleanup", "--authority", str(root/"authority"), "--root", str(root), "--directory", str(root), "--workspace", str(root/"workspace")]
+m["main"]()
+"""
+            command = [
+                sys.executable,
+                "-S",
+                "-c",
+                script,
+                str(ROOT / "scripts/cloudbench-disposable-controller.py"),
+                str(root),
+            ]
+            env = dict(os.environ)
+            env.pop("FLY_API_TOKEN", None)
+            before = subprocess.run(command, env=env, capture_output=True, check=False)
+            self.assertEqual(before.returncode, 1)
+            self.assertIn(b"Refusal: no Fly credential is available", before.stderr)
+            agents = root / "agents.env"
+            agents.write_text('FLY_API_TOKEN="FlyV1 bound-token"\n')
+            agents.chmod(0o600)
+            state = {
+                "authority": {
+                    "env_files": {
+                        "agents": {
+                            "path": str(agents),
+                            "sha256": M["sha"](agents.read_bytes()),
+                        }
+                    }
+                }
+            }
+            env["FLY_API_TOKEN"] = M["selected_token"](state)
+            after = subprocess.run(command, env=env, capture_output=True, check=False)
+            self.assertEqual(after.returncode, 0, after.stderr)
+            self.assertEqual(
+                after.stdout, b"SELECTED_CREDENTIAL_RECEIVED_NO_PROVIDER\n"
+            )
+
+    def test_exact_preclient_refusal_requires_source_join_and_no_native_intent(self):
+        with tempfile.TemporaryDirectory() as name:
+            out = Path(name)
+            journal = out / "payload-finalization-resume-0123456789abcdef"
+            state = {
+                "out": str(out),
+                "source_root": str(ROOT),
+                "machine_id": "a" * 14,
+                "source_ref": M["B"]["git"](ROOT, "rev-parse", "HEAD"),
+            }
+            helper = str(ROOT / "scripts/cloudbench-disposable-controller.py")
+            transport = str(ROOT / "scripts/cloudbench-original-volume-capture.py")
+            log = (
+                "Traceback (most recent call last):\n"
+                f'  File "{helper}", line 221, in <module>\n'
+                "    if __name__=='__main__':main()\n"
+                "                            ^^^^^^\n"
+                f'  File "{helper}", line 205, in main\n'
+                "    client=scope['Fly'](a['app'],os.environ.get('FLY_API_TOKEN')or scope['resolve_token']({'workspace':str(args.root)}))\n"
+                "                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+                f'  File "{transport}", line 936, in resolve_token\n'
+                '    raise Refusal("no Fly credential is available")\n'
+                "disposable_controller_transport.Refusal: no Fly credential is available\n"
+            )
+            journal.mkdir(mode=0o700)
+            (journal / "cleanup.log").write_text(log)
+            (journal / "cleanup.log").chmod(0o600)
+            write(
+                journal / "cleanup.intent.json",
+                {
+                    "argv": M["cleanup_command"](state),
+                    "gate_exit_code": None,
+                    "gate_reap": "OBSERVED_ORIGINAL_PARENT_REAP",
+                },
+            )
+            write(
+                journal / "cleanup.child.json",
+                {
+                    "pid": 99999999,
+                    "birth": "proc-start:00000000-0000-0000-0000-000000000000:1",
+                },
+            )
+            write(journal / "cleanup.joined.json", {"exit_code": 1, "owned_join": True})
+            write(
+                out / "cleanup-call.intent.json", M["cleanup_closure"](state, "sealed")
+            )
+            intent = {
+                "finalizer_operator_ref": "447bf65e8e4f5b3faf8e02c695ac5f7411d24c39"
+            }
+            with mock.patch.dict(G, verified_export=lambda _: "sealed"):
+                closure, pins = M["credential_refusal"](state, journal, intent)
+                self.assertEqual(closure, out / "cleanup-call.intent.json")
+                self.assertIn(str(ROOT / "scripts/lib/cloudbench-inventory.sh"), pins)
+                write(out / "export/disposable-delete-machine.intent.json", {})
+                with self.assertRaisesRegex(
+                    ValueError, "native cleanup already entered"
+                ):
+                    M["credential_refusal"](state, journal, intent)
+                (out / "export/disposable-delete-machine.intent.json").unlink()
+                (journal / "cleanup.log").write_text(log + "unexpected output\n")
+                with self.assertRaisesRegex(ValueError, "exact pre-client"):
+                    M["credential_refusal"](state, journal, intent)
+
+    def _monitor_case(self, resumed, cleanup_refusal=False):
         with tempfile.TemporaryDirectory() as name:
             out = Path(name)
             state = {
@@ -411,6 +558,12 @@ class Finalizer(unittest.TestCase):
                 write(out / journal_name / "intent.json", {"prior": "immutable"})
                 journal_name = "payload-finalization-resume-" + "a" * 16
                 state["_resume"] = {"journal_name": journal_name, "operator_hashes": {}}
+                if cleanup_refusal:
+                    state["_resume"]["cleanup_credential_refusal"] = True
+                    write(
+                        out / "cleanup-call.intent.json",
+                        M["cleanup_closure"](state, "exportsha"),
+                    )
             write(
                 out / "payload-borrow.complete.json",
                 {"status": "TRANSFER_ONLY_COMPLETE"},
@@ -454,6 +607,7 @@ class Finalizer(unittest.TestCase):
                 "verified_export": lambda _: "exportsha",
                 "RecordedAPI": lambda api, *_: api,
                 "retire_caller": retire,
+                "selected_token": lambda _: "FlyV1 exact-bound-token",
             }
             if resumed:
                 replacements["validate_args"] = lambda *_: True
@@ -465,10 +619,14 @@ class Finalizer(unittest.TestCase):
                     birth=lambda _: "birth",
                     reconciled_release=release,
                 ),
-                mock.patch.object(subprocess, "Popen", return_value=child),
+                mock.patch.object(subprocess, "Popen", return_value=child) as popen,
                 mock.patch("time.sleep", return_value=None),
             ):
                 result = M["finalize"](state, args, api_factory=lambda _: object())
+                self.assertEqual(
+                    popen.call_args.kwargs["env"]["FLY_API_TOKEN"],
+                    "FlyV1 exact-bound-token",
+                )
             self.assertEqual(events, ["term", "joined", "release", "retired"])
             self.assertTrue((out / "payload-finalizer.cancelled.json").exists())
             self.assertTrue(list((out / journal_name).glob("read-pending-*.json")))
