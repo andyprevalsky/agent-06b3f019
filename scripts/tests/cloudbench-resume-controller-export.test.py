@@ -180,6 +180,73 @@ class ExportResume(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "recorded plan"):
             M["require_recorded_drain"](binding, evidence)
 
+    def test_recorded_relay_requires_guest_intent_even_without_result(self):
+        identity, operator, launch = "a" * 64, "b" * 40, "c" * 64
+        directory = self.out / "registered-orphan-drain"
+        write(
+            directory / "intent.json",
+            {
+                "payload": dict(
+                    identity_sha256=identity,
+                    operator_ref=operator,
+                    launch_sha256=launch,
+                )
+            },
+        )
+        guest = {
+            "intent.json": dict(identity_sha256=identity, operator_ref=operator),
+            "plan.json": dict(identity_sha256=identity, launch_sha256=launch),
+        }
+        files = {}
+
+        def encode(name, value):
+            raw = (json.dumps(value, sort_keys=True) + "\n").encode()
+            files[name] = dict(
+                bytes=len(raw),
+                sha256=M["sha"](raw),
+                body_b64=base64.b64encode(raw).decode(),
+            )
+
+        for name, value in guest.items():
+            encode(name, value)
+        write(
+            directory / "result-1.json",
+            dict(status="PLANNED", plan_sha256=files["plan.json"]["sha256"]),
+        )
+        relay = dict(
+            identity_sha256="d" * 64,
+            operator_ref="e" * 40,
+            launch_sha256=launch,
+            relay_directory="/tmp/cb-relay-12345678",
+        )
+        relay_path = write(
+            directory / "relay-bootstrap/intent.json", {"payload": relay}
+        )
+        pins = {}
+        binding = M["local_drain_binding"](self.out, pins)
+        self.assertIn(str(relay_path), pins)
+        evidence = dict(present=True, files=files)
+        with self.assertRaisesRegex(ValueError, "relay intent missing"):
+            M["require_recorded_drain"](binding, evidence)
+        actual = {
+            key: relay[key]
+            for key in ("identity_sha256", "operator_ref", "launch_sha256")
+        }
+        actual["owner"] = dict(relay_directory=relay["relay_directory"])
+        encode("relay-bootstrap/intent.json", actual)
+        M["require_recorded_drain"](binding, evidence)
+        for key in ("identity_sha256", "operator_ref", "launch_sha256"):
+            changed = dict(actual, **{key: "wrong"})
+            encode("relay-bootstrap/intent.json", changed)
+            with self.assertRaisesRegex(ValueError, "relay intent differs"):
+                M["require_recorded_drain"](binding, evidence)
+        encode(
+            "relay-bootstrap/intent.json",
+            dict(actual, owner=dict(relay_directory="/tmp/wrong")),
+        )
+        with self.assertRaisesRegex(ValueError, "relay intent differs"):
+            M["require_recorded_drain"](binding, evidence)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

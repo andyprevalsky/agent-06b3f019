@@ -153,7 +153,7 @@ def local_drain_binding(out, pins):
     plan_path, plan = planned[0]
     for path in (intent_path, plan_path):
         pins[str(path)] = B["fingerprint"](path)
-    return {
+    binding = {
         "identity_sha256": intent["payload"]["identity_sha256"],
         "operator_ref": intent["payload"]["operator_ref"],
         "launch_sha256": intent["payload"]["launch_sha256"],
@@ -161,6 +161,22 @@ def local_drain_binding(out, pins):
         "host_intent_sha256": sha(read(intent_path)),
         "host_plan_receipt_sha256": sha(read(plan_path)),
     }
+    relay_path = directory / "relay-bootstrap/intent.json"
+    if relay_path.exists():
+        relay = obj(relay_path)["payload"]
+        need(relay["launch_sha256"] == binding["launch_sha256"], "relay launch differs")
+        binding["relay"] = {
+            key: relay[key]
+            for key in (
+                "identity_sha256",
+                "operator_ref",
+                "launch_sha256",
+                "relay_directory",
+            )
+        }
+        binding["relay"]["host_intent_sha256"] = sha(read(relay_path))
+        pins[str(relay_path)] = B["fingerprint"](relay_path)
+    return binding
 
 
 def require_recorded_drain(binding, evidence):
@@ -169,7 +185,11 @@ def require_recorded_drain(binding, evidence):
     need(evidence.get("present") is True, "recorded orphan drain evidence missing")
     files = evidence["files"]
     decoded = {}
-    for name in ("intent.json", "plan.json"):
+    names = ["intent.json", "plan.json"]
+    if "relay" in binding:
+        need("relay-bootstrap/intent.json" in files, "recorded relay intent missing")
+        names.append("relay-bootstrap/intent.json")
+    for name in names:
         item = files[name]
         raw = base64.b64decode(item["body_b64"], validate=True)
         need(
@@ -187,6 +207,17 @@ def require_recorded_drain(binding, evidence):
         and files["plan.json"]["sha256"] == binding["plan_sha256"],
         "downloaded orphan drain differs from recorded plan",
     )
+    if "relay" in binding:
+        expected = binding["relay"]
+        relay = decoded["relay-bootstrap/intent.json"]
+        need(
+            all(
+                relay[key] == expected[key]
+                for key in ("identity_sha256", "operator_ref", "launch_sha256")
+            )
+            and relay["owner"]["relay_directory"] == expected["relay_directory"],
+            "downloaded relay intent differs from recorded invocation",
+        )
 
 
 def check(config, config_sha256, run_directory, operator_ref):
