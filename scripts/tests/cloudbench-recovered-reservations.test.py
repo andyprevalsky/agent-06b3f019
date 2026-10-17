@@ -215,6 +215,19 @@ class Recovered(unittest.TestCase):
                 altered.clear()
         self.assertEqual(len(oldref), 40)
 
+    def test_full_archive_entrypoint_still_rejects_unstarted_closure(self):
+        closure = dict(
+            schema="cloudbench-archived-owner-stop-plan-v1",
+            source_ref="a" * 40,
+            no_delete=True,
+            inputs={},
+        )
+        with mock.patch.dict(M["I"], SOURCE="a" * 40):
+            with self.assertRaisesRegex(ValueError, "incomplete closed context"):
+                M["load"](
+                    self.f.outer, self.f.closed, {"source_ref": "a" * 40}, closure, {}
+                )
+
     def test_typed_closed_admission_reconstructs_retained_rows_after_full_closure(self):
         self.load_fixture(typed=True)
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import runpy
 import tarfile
+import time
 
 HERE = Path(__file__).resolve().parent
 H = runpy.run_path(str(HERE / "cloudbench-archived-machine-reuse.py"))
@@ -539,12 +540,447 @@ def normal_hold_partition(outer, original, request, inputs):
         seen.add(scope["archive_sha256"])
     return held, inherited
 
+def released_workspace_request(outer, closed, config, inputs):
+    """A closed unstarted admission has no controller archive to invent."""
+    reader = recovered_reader()
+    need(
+        config["source_ref"] == reader["I"]["CLOSED75_SOURCE"],
+        "unknown unstarted workload",
+    )
+    config_path, original = reader["recovered_launch"](outer, closed, config, inputs)
+    need(
+        original == config and closed == config_path.parent / "run",
+        "unstarted successor not supported",
+    )
+    reader["closed_host"](
+        config["host_operator_provenance"]["host_operator_source_ref"],
+        workload=config["source_ref"],
+    )
+    terminal = obj(closed / "terminal.json", inputs)
+    release = obj(closed / "export/disposable-controller.release.json", inputs)
+    authority = obj(closed / "authority.private.json", inputs)
+    caller = obj(closed / "caller.json", inputs)
+    workspace = obj(closed / "export/workspace-volume.ownership.json", inputs)
+    native_create = obj(closed / "export/workspace-volume-create.private.json", inputs)
+    volume_intent = obj(closed / "export/workspace-volume.intent.json", inputs)
+    gate_caller = obj(closed / "export/caller.json", inputs)
+    epoch = config["started_at_epoch"]
+    authority_sha = inputs[str(closed / "authority.private.json")]
+    need(
+        terminal
+        == dict(
+            status="FAILED_STARTUP_WORKSPACE_RELEASED",
+            machine=None,
+            gate_exit_code=1,
+            controller_cleanup_exit_code=1,
+            externally_reconciled_after_helper_failure=True,
+            release=release,
+            source_ref=config["source_ref"],
+            started_at_epoch=epoch,
+            original_deadline=epoch + 5400,
+            benchmark_success_inferred=False,
+        ),
+        "canonical released unstarted terminal required",
+    )
+    need(
+        release
+        == dict(
+            machine_id=None,
+            volume_id=workspace["volume_id"],
+            volume_disposition=release["volume_disposition"],
+            no_live_machine_observed=True,
+            command_history_verified=False,
+        )
+        and release["volume_disposition"] in ("ABSENT", "pending_destroy", "destroyed"),
+        "unstarted release differs",
+    )
+    need(
+        authority["source_ref"]
+        == caller["source_ref"]
+        == workspace["source_ref"]
+        == config["source_ref"]
+        and caller["authority_sha256"] == authority_sha
+        and caller["epoch"] == epoch
+        and caller["deadline"] == epoch + 5400
+        and authority["output_directory"] == str(closed / "export")
+        and (authority["cleanup_owner_pid"], authority["cleanup_owner_birth"])
+        == (caller["pid"], caller["birth"])
+        and (gate_caller["pid"], gate_caller["birth"])
+        == (caller["gate_pid"], caller["gate_birth"])
+        and workspace["volume_id"] not in authority["protected_volumes"],
+        "unstarted authority/caller differs",
+    )
+    need(
+        workspace["schema"] == "cloudbench-controller-workspace-ownership-v1"
+        and workspace["app"] == authority["app"] == "navi-whisper-lux-bench"
+        and workspace["size_gb"] == 256
+        and workspace["mount_path"] == "/tmp/gate"
+        and workspace["native_create"] == native_create
+        and workspace["native_create_sha256"]
+        == inputs[str(closed / "export/workspace-volume-create.private.json")]
+        and workspace["intent_sha256"]
+        == inputs[str(closed / "export/workspace-volume.intent.json")]
+        and workspace["caller"] == volume_intent["caller"] == gate_caller
+        and workspace["caller_sha256"]
+        == volume_intent["caller_sha256"]
+        == inputs[str(closed / "export/caller.json")]
+        and all(
+            native_create.get(key) == value
+            for key, value in dict(
+                id=workspace["volume_id"],
+                name=workspace["name"],
+                region=authority["region"],
+                size_gb=256,
+                encrypted=True,
+                state="created",
+                attached_machine_id=None,
+            ).items()
+        ),
+        "unstarted workspace allocation differs",
+    )
+    need(
+        obj(closed / "export/disposable-delete-volume.intent.json", inputs)
+        == dict(
+            authority_sha256=authority_sha,
+            kind="volume",
+            identifier=workspace["volume_id"],
+        )
+        and obj(closed / "cleanup-call.intent.json", inputs)
+        == dict(
+            action="cleanup-workspace",
+            machine=None,
+            gate_joined=True,
+            supervisor_joined=False,
+            export_verified_file=None,
+        ),
+        "unstarted cleanup differs",
+    )
+    provenance = obj(closed / "host-operator-provenance.json", inputs)
+    need(
+        provenance == config["host_operator_provenance"],
+        "unstarted host provenance differs",
+    )
+    log = read(closed / "gate.private.log", inputs)
+    need(
+        b"in backup_off" in log
+        and b"native.get(key)" in log
+        and b"AttributeError: 'NoneType' object has no attribute 'get'" in log
+        and b"GATE_WORKSPACE_VOLUME_RETAINED id=" + workspace["volume_id"].encode()
+        in log,
+        "known pre-Machine backup failure required",
+    )
+    closure = obj(closed / "observed-closure.safe.json", inputs)
+    need(
+        closure["schema"] == "original600-observed-closed-v1"
+        and closure["run_directory"] == str(closed)
+        and closure["original_tool_exit_code"] == 1
+        and closure["release_observer_exit_code"] == 0
+        and closure["caller_live"] is False
+        and closure["supervisor_published"] is False
+        and closure["task_attempts"] == 0
+        and closure["caller_pid"] == caller["pid"]
+        and closure["gate_live"] is False
+        and closure["gate_pid"] == caller["gate_pid"]
+        and closure["source_ref"] == config["source_ref"]
+        and closure["started_at_epoch"] == epoch
+        and closure["original_deadline"] == epoch + 5400
+        and closure["terminal_sha256"] == inputs[str(closed / "terminal.json")]
+        and closure["release_sha256"]
+        == inputs[str(closed / "export/disposable-controller.release.json")]
+        and epoch <= closure["observed_epoch"] <= time.time()
+        and type(closure["original_session"]) is int
+        and closure["original_session"] > 0
+        and closure["release_observer_handle_kind"] == "synchronous-terminal-chunk"
+        and re.fullmatch(r"exec:[0-9a-f]+", closure["release_observer_session"]),
+        "positive unstarted caller join required",
+    )
+    observation = closed / "workspace-release-observation"
+    check = obj(observation / "check.json", inputs)
+    intent = obj(observation / "intent.json", inputs)
+    need(
+        {k: v for k, v in intent.items() if k != "observed_epoch"} == check
+        and check["allowed_method"] == "GET"
+        and check["allowed_path"] == "/volumes/" + workspace["volume_id"]
+        and check["source_ref"] == config["source_ref"]
+        and check["volume_id"] == workspace["volume_id"]
+        and check["caller_pid"] == caller["pid"]
+        and check["caller_birth"] == caller["birth"]
+        and check["operator_sha256"]
+        == "4a16af376f7cb613c194f3e6baf4aaeb9e18da020f445658cb61f25fc6bd0f7f",
+        "known GET-only release observation required",
+    )
+    need(
+        set(check["bindings"])
+        == {
+            "authority.private.json",
+            "caller.json",
+            "cleanup-call.intent.json",
+            "cleanup.pending.json",
+            "gate.pending.json",
+            "gate.private.log",
+            "export/disposable-delete-volume.intent.json",
+            "export/workspace-volume.ownership.json",
+        },
+        "release observation bindings incomplete",
+    )
+    need(
+        set(check["source_pins"])
+        == {
+            "cloudbench-controller-export.py",
+            "cloudbench-controller-payload-finalization.py",
+            "cloudbench-disposable-controller.py",
+            "cloudbench-original-volume-capture.py",
+            "cloudbench-original600-runner.py",
+            "cloudbench-resume-controller-payload.py",
+            "run-cloudbench-controller-gate",
+            "run-original600-controller.py",
+        },
+        "release source bindings incomplete",
+    )
+    for name, expected in check["bindings"].items():
+        need(
+            name
+            in {
+                "authority.private.json",
+                "caller.json",
+                "cleanup-call.intent.json",
+                "cleanup.pending.json",
+                "gate.pending.json",
+                "gate.private.log",
+                "export/disposable-delete-volume.intent.json",
+                "export/workspace-volume.ownership.json",
+            }
+            and digest(read(closed / name, inputs)) == expected,
+            "release observation input changed",
+        )
+    for name, expected in check["source_pins"].items():
+        source = reader["subprocess"].check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(HERE.parent),
+                "show",
+                config["source_ref"] + ":scripts/" + name,
+            ]
+        )
+        need(digest(source) == expected, "release observation source changed")
+    for number in (1, 2):
+        prefix = observation / ("wire-%06d" % number)
+        need(
+            obj(Path(str(prefix) + ".request.json"), inputs)
+            == dict(method="GET", path=check["allowed_path"], body=None),
+            "release observation effect forbidden",
+        )
+        raw = obj(Path(str(prefix) + ".raw.json"), inputs)
+        body = base64.b64decode(raw["body_b64"], validate=True)
+        need(
+            raw["method"] == "GET"
+            and raw["path"] == check["allowed_path"]
+            and raw["bytes"] == len(body)
+            and raw["sha256"] == digest(body),
+            "release raw proof differs",
+        )
+        if number == 2 and raw["status"] == 404:
+            need(release["volume_disposition"] == "ABSENT", "release absence differs")
+        else:
+            value = obj(Path(str(prefix) + ".decoded.json"), inputs)
+            need(
+                raw["status"] == 200
+                and json.loads(body) == value
+                and all(
+                    value.get(key) == native_create.get(key)
+                    for key in ("id", "name", "region", "size_gb", "encrypted")
+                )
+                and value.get("attached_machine_id") is None
+                and value.get("state") in ("pending_destroy", "destroyed")
+                and value["state"] == release["volume_disposition"],
+                "positive released workspace observation required",
+            )
+    need(
+        obj(observation / "complete.json", inputs)
+        == dict(
+            status="CANONICAL_RELEASE_WRITTEN",
+            release_sha256=inputs[
+                str(closed / "export/disposable-controller.release.json")
+            ],
+            provider_writes=0,
+        ),
+        "GET-only release completion differs",
+    )
+    once = "authority.private.json." + authority_sha + ".once"
+    need(
+        obj(closed / once, inputs)
+        == dict(
+            authority_sha256=authority_sha,
+            driver_pid=caller["gate_pid"],
+            driver_birth=caller["gate_birth"],
+        ),
+        "original allocation owner differs",
+    )
+    sidecars = obj(closed / "controller-sidecars.private.json", inputs)
+    sidecar_names = set()
+    for item in sidecars:
+        path = closed / ("controller-sidecar-" + item["sha256"] + ".private.gz")
+        raw = read(path, inputs)
+        need(
+            item["path"] == str(path)
+            and len(raw) == item["bytes"]
+            and digest(raw) == item["sha256"],
+            "unstarted sidecar changed",
+        )
+        sidecar_names.add(path.name)
+    expected = {
+        "authority.private.json",
+        once,
+        "caller.json",
+        "cleanup-call.intent.json",
+        "terminal.json",
+        "gate.private.log",
+        "host-operator-provenance.json",
+        "controller-launch-payload.private.json.gz",
+        "controller-sidecars.private.json",
+        "observed-closure.safe.json",
+        "export",
+        "workspace-release-observation",
+    } | sidecar_names
+    optional = {
+        "cleanup.pending.json",
+        "gate.pending.json",
+        "threshold-owner.identity.private.json",
+        "launch-failure.observed.safe.json",
+    }
+    need(
+        expected <= {p.name for p in closed.iterdir()} <= expected | optional,
+        "unknown unstarted output namespace",
+    )
+    export_names = {
+        "caller.json",
+        "current-agents.private.env",
+        "current-backend.private.env",
+        "workspace-volume.intent.json",
+        "workspace-volume.ownership.json",
+        "workspace-volume-create.private.json",
+        "workspace-volume-create.stderr.private.log",
+        "disposable-delete-volume.intent.json",
+        "disposable-controller.release.json",
+    }
+    need(
+        {p.name for p in (closed / "export").iterdir()} == export_names,
+        "possible Machine creation/export activity",
+    )
+    observation_names = {"check.json", "intent.json", "complete.json"} | {
+        "wire-%06d.%s.json" % (i, suffix)
+        for i in (1, 2)
+        for suffix in ("request", "raw", "decoded")
+    }
+    if release["volume_disposition"] == "ABSENT":
+        observation_names.remove("wire-000002.decoded.json")
+    need(
+        {p.name for p in observation.iterdir()} == observation_names,
+        "unknown release observation namespace",
+    )
+    for key in ("agents", "backend"):
+        need(
+            digest(
+                read(closed / "export" / ("current-" + key + ".private.env"), inputs)
+            )
+            == authority["env_files"][key]["sha256"],
+            "unstarted environment custody differs",
+        )
+    before = reader["membership"](closed, inputs)
+    context = reader["recovery_history"](outer, closed, config_path, config, inputs)
+    need(
+        reader["membership"](closed, inputs) == before,
+        "unstarted closure changed while inspected",
+    )
+    proof = dict(
+        schema="cloudbench-closed-unstarted-admission-v1",
+        directory=str(outer),
+        run_directory=str(closed),
+        source_ref=config["source_ref"],
+        epoch=epoch,
+        original_deadline=epoch + 5400,
+        terminal_sha256=inputs[str(closed / "terminal.json")],
+        release_sha256=inputs[
+            str(closed / "export/disposable-controller.release.json")
+        ],
+        recovery_identity_sha256=context["recovery_identity_sha256"],
+        request_sha256=digest(canonical(context["request"])),
+        input_manifest_sha256=digest(canonical(inputs)),
+        membership=before,
+        task_attempts=0,
+        supervisor_published=False,
+        no_archive_claimed=True,
+        old_failure_retained=True,
+    )
+    return context, proof
+
+
+def prepare_released_workspace(outer, closed, config, inventory_path, inputs):
+    context, proof = released_workspace_request(outer, closed, config, inputs)
+    inventory_path = Path(inventory_path).absolute()
+    native_raw = CLOSED["raw"](
+        inventory_path, min(inventory_path.lstat().st_size, 256 * 1024 * 1024)
+    )
+    inputs[str(inventory_path)] = digest(native_raw)
+    native = {row["id"]: row for row in json.loads(native_raw)}
+    need(
+        len(native) == len(json.loads(native_raw)), "duplicate current Machine identity"
+    )
+    archive_sha = digest(canonical(proof))
+    candidates = []
+    authority = obj(closed / "authority.private.json", inputs)
+    for row in context["request"]["candidates"]:
+        mid = row["machine_id"]
+        need(
+            mid not in authority["protected_machines"]
+            and row["volume_id"] not in authority["protected_volumes"],
+            "protected reservation",
+        )
+        need(
+            mid in native and native[mid].get("state") == "stopped",
+            "closed unstarted reservation not stopped",
+        )
+        original = next(
+            value
+            for value in context["original"]["candidates"]
+            if value["machine_id"] == mid
+        )
+        current = recovered_reader()["validate"](
+            context, original, row, native[mid], inputs
+        )
+        candidate = copy.deepcopy(current)
+        candidate.pop("reservation")
+        candidate.setdefault("legacy_archive_sha256", candidate["archive_sha256"])
+        candidate["archive_sha256"] = archive_sha
+        candidate["closed_unstarted_reservation_proof"] = dict(
+            closure_sha256=archive_sha,
+            old_failure_retained=True,
+            capacity_credit=0,
+            reuse_credit=False,
+        )
+        candidates.append(candidate)
+    return dict(
+        candidates=candidates,
+        held_machine_ids=[row["machine_id"] for row in context["held_rows"]],
+        held_reservations=context["held_rows"],
+        inherited_held_scopes=context["inherited_held_scopes"],
+        archive=dict(
+            archive_sha256=archive_sha, inputs=inputs, closed_unstarted_admission=proof
+        ),
+    )
+
+
 def prepare(run, inventory_path):
     """Return only positively unused reserved IDs from one explicit outer state dir."""
     outer = Path(run).absolute()
     need(outer.resolve(strict=True) == outer and outer.is_dir(), "physical admission directory required")
     inputs = {}
     closed, config = closed_run(outer, inputs)
+    terminal = obj(closed / "terminal.json", inputs)
+    if terminal.get("status") == "FAILED_STARTUP_WORKSPACE_RELEASED":
+        return prepare_released_workspace(outer, closed, config, inventory_path, inputs)
     closure = CLOSED["prepare"](closed, inventory_path)
     inputs.update(closure["inputs"])
     request, context = request_for_closed(outer, closed, config, closure, inputs)

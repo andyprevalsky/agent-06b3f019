@@ -494,6 +494,402 @@ class Unused(unittest.TestCase):
         self.assertFalse((self.outer / "derived-config.private.json").exists())
         return derived_path, pointer_path, pointer
 
+    def unstarted_fixture(self, protected=False):
+        reader = M["recovered_reader"]()
+        config_path = self.outer / "launch-1/config.private.json"
+        request = dict(self.request, held_native_reservations=[])
+        raw_request = H["canonical"](request) + b"\n"
+        plan = dict(
+            schema="closed-admission-continuation-v1",
+            request=self.original,
+            classifications=[],
+            inputs={},
+            deadline=5401,
+            started_at=1,
+            retained_request=self.request,
+            retained_lanes={self.mid: "ORIGINAL_CLOSED"},
+        )
+        journal = self.outer / "incomplete-admission-recovery"
+        journal.mkdir(mode=0o700)
+        identity = H["sha"](H["canonical"](plan))
+        write(
+            journal / "intent.json",
+            dict(
+                identity_sha256=identity,
+                original_deadline=5401,
+                old_journal_immutable=True,
+            ),
+        )
+        write(
+            journal / "complete.json",
+            dict(
+                identity_sha256=identity,
+                original_deadline=5401,
+                cancelled_signals=[],
+                old_failures_retained=True,
+                task_credit=0,
+                request_sha256=H["sha"](raw_request),
+                held=[],
+                results=[
+                    dict(
+                        machine_id=self.mid, lane="RETAINED", old_failure_retained=True
+                    )
+                ],
+            ),
+        )
+        (journal / "request.json").write_bytes(raw_request)
+        (journal / "request.json").chmod(0o600)
+        launch_request = config_path.parent / "archived-reuse-request.private.json"
+        launch_request.write_bytes(raw_request)
+        launch_request.chmod(0o600)
+        provenance = dict(
+            host_operator_source_ref="fc005c2075f349b6380f9627c908ac329c6c2be8",
+            workload_source_ref="a" * 40,
+            original_started_at_epoch=1,
+            incomplete_admission=dict(
+                source_ref="fc005c2075f349b6380f9627c908ac329c6c2be8",
+                original_plan_sha256=H["sha"](
+                    json.dumps(plan, sort_keys=True, allow_nan=False).encode()
+                ),
+            ),
+        )
+        config = dict(
+            source_ref="a" * 40,
+            started_at_epoch=1,
+            host_operator_provenance=provenance,
+            remote_files=[
+                dict(
+                    relative_path=".git/cloudbench-archived-reuse-"
+                    + request["cohort"]
+                    + ".json",
+                    source_path=str(launch_request),
+                    sha256=H["sha"](raw_request),
+                )
+            ],
+            remote_env=dict(
+                CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256=H["sha"](raw_request)
+            ),
+        )
+        write(config_path, config)
+        write(
+            self.outer / "controller-launch.intent.json",
+            dict(
+                config_path=str(config_path),
+                config_sha256=H["sha"](config_path.read_bytes()),
+                run_directory=str(self.closed),
+            ),
+        )
+        shutil.rmtree(self.closed)
+        self.closed.mkdir(mode=0o700)
+        export = self.closed / "export"
+        export.mkdir(mode=0o700)
+        env = {"agents": b"AGENT=fixture\n", "backend": b"BACKEND=fixture\n"}
+        for key, raw in env.items():
+            path = export / ("current-" + key + ".private.env")
+            path.write_bytes(raw)
+            path.chmod(0o600)
+        authority = dict(
+            source_ref="a" * 40,
+            app="navi-whisper-lux-bench",
+            region="iad",
+            output_directory=str(export),
+            cleanup_owner_pid=123,
+            cleanup_owner_birth="caller-birth",
+            protected_volumes=[],
+            protected_machines=[self.mid] if protected else [],
+            env_files={k: dict(sha256=H["sha"](v)) for k, v in env.items()},
+        )
+        authpath = write(self.closed / "authority.private.json", authority)
+        authsha = H["sha"](authpath.read_bytes())
+        caller = dict(
+            source_ref="a" * 40,
+            epoch=1,
+            deadline=5401,
+            pid=123,
+            birth="caller-birth",
+            gate_pid=124,
+            gate_birth="gate-birth",
+            authority_sha256=authsha,
+        )
+        write(self.closed / "caller.json", caller)
+        gate_caller = dict(pid=124, birth="gate-birth", host="fixture")
+        gp = write(export / "caller.json", gate_caller)
+        vp = write(
+            export / "workspace-volume.intent.json",
+            dict(caller=gate_caller, caller_sha256=H["sha"](gp.read_bytes())),
+        )
+        native = dict(
+            id="vol_workspace",
+            name="cbgate_fixture",
+            region="iad",
+            size_gb=256,
+            encrypted=True,
+            state="created",
+            attached_machine_id=None,
+        )
+        np = write(export / "workspace-volume-create.private.json", native)
+        workspace = dict(
+            schema="cloudbench-controller-workspace-ownership-v1",
+            source_ref="a" * 40,
+            app=authority["app"],
+            size_gb=256,
+            mount_path="/tmp/gate",
+            volume_id=native["id"],
+            name=native["name"],
+            native_create=native,
+            native_create_sha256=H["sha"](np.read_bytes()),
+            intent_sha256=H["sha"](vp.read_bytes()),
+            caller=gate_caller,
+            caller_sha256=H["sha"](gp.read_bytes()),
+        )
+        write(export / "workspace-volume.ownership.json", workspace)
+        empty = export / "workspace-volume-create.stderr.private.log"
+        empty.write_bytes(b"")
+        empty.chmod(0o600)
+        write(
+            export / "disposable-delete-volume.intent.json",
+            dict(authority_sha256=authsha, kind="volume", identifier=native["id"]),
+        )
+        release = dict(
+            machine_id=None,
+            volume_id=native["id"],
+            volume_disposition="pending_destroy",
+            no_live_machine_observed=True,
+            command_history_verified=False,
+        )
+        release_path = write(export / "disposable-controller.release.json", release)
+        write(
+            self.closed / "terminal.json",
+            dict(
+                status="FAILED_STARTUP_WORKSPACE_RELEASED",
+                machine=None,
+                gate_exit_code=1,
+                controller_cleanup_exit_code=1,
+                externally_reconciled_after_helper_failure=True,
+                release=release,
+                source_ref="a" * 40,
+                started_at_epoch=1,
+                original_deadline=5401,
+                benchmark_success_inferred=False,
+            ),
+        )
+        write(
+            self.closed / "cleanup-call.intent.json",
+            dict(
+                action="cleanup-workspace",
+                machine=None,
+                gate_joined=True,
+                supervisor_joined=False,
+                export_verified_file=None,
+            ),
+        )
+        write(self.closed / "cleanup.pending.json", dict(helper_exit_code=1))
+        write(self.closed / "gate.pending.json", dict(gate_exit_code=1))
+        log = self.closed / "gate.private.log"
+        log.write_bytes(
+            b"in backup_off\nnative.get(key)\nAttributeError: 'NoneType' object has no attribute 'get'\nGATE_WORKSPACE_VOLUME_RETAINED id=vol_workspace\n"
+        )
+        log.chmod(0o600)
+        write(self.closed / "host-operator-provenance.json", provenance)
+        write(
+            self.closed / "observed-closure.safe.json",
+            dict(
+                schema="original600-observed-closed-v1",
+                run_directory=str(self.closed),
+                original_tool_exit_code=1,
+                release_observer_exit_code=0,
+                caller_live=False,
+                supervisor_published=False,
+                task_attempts=0,
+                caller_pid=123,
+                gate_live=False,
+                gate_pid=124,
+                source_ref="a" * 40,
+                started_at_epoch=1,
+                original_deadline=5401,
+                terminal_sha256=H["sha"]((self.closed / "terminal.json").read_bytes()),
+                release_sha256=H["sha"](release_path.read_bytes()),
+                observed_epoch=2,
+                original_session=93834,
+                release_observer_handle_kind="synchronous-terminal-chunk",
+                release_observer_session="exec:b66c27",
+            ),
+        )
+        write(
+            self.closed / ("authority.private.json." + authsha + ".once"),
+            dict(authority_sha256=authsha, driver_pid=124, driver_birth="gate-birth"),
+        )
+        write(self.closed / "controller-sidecars.private.json", [])
+        payload = self.closed / "controller-launch-payload.private.json.gz"
+        payload.write_bytes(b"fixture")
+        payload.chmod(0o600)
+        observation = self.closed / "workspace-release-observation"
+        observation.mkdir(mode=0o700)
+        binding_names = [
+            "authority.private.json",
+            "caller.json",
+            "cleanup-call.intent.json",
+            "cleanup.pending.json",
+            "gate.pending.json",
+            "gate.private.log",
+            "export/disposable-delete-volume.intent.json",
+            "export/workspace-volume.ownership.json",
+        ]
+        source_names = [
+            "cloudbench-controller-export.py",
+            "cloudbench-controller-payload-finalization.py",
+            "cloudbench-disposable-controller.py",
+            "cloudbench-original-volume-capture.py",
+            "cloudbench-original600-runner.py",
+            "cloudbench-resume-controller-payload.py",
+            "run-cloudbench-controller-gate",
+            "run-original600-controller.py",
+        ]
+        source_bytes = {
+            name: subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    str(ROOT),
+                    "show",
+                    "1cec8c1cb20c85e66e10cd49446b44c5e85101f1:scripts/" + name,
+                ]
+            )
+            for name in source_names
+        }
+        check = dict(
+            allowed_method="GET",
+            allowed_path="/volumes/vol_workspace",
+            bindings={
+                n: H["sha"]((self.closed / n).read_bytes()) for n in binding_names
+            },
+            caller_pid=123,
+            caller_birth="caller-birth",
+            operator_sha256="4a16af376f7cb613c194f3e6baf4aaeb9e18da020f445658cb61f25fc6bd0f7f",
+            source_pins={n: H["sha"](v) for n, v in source_bytes.items()},
+            source_ref="a" * 40,
+            volume_id="vol_workspace",
+        )
+        write(observation / "check.json", check)
+        write(observation / "intent.json", dict(check, observed_epoch=2))
+        released = dict(native, state="pending_destroy")
+        for number in (1, 2):
+            prefix = "wire-%06d" % number
+            body = H["canonical"](released)
+            write(
+                observation / (prefix + ".request.json"),
+                dict(method="GET", path=check["allowed_path"], body=None),
+            )
+            write(
+                observation / (prefix + ".raw.json"),
+                dict(
+                    method="GET",
+                    path=check["allowed_path"],
+                    status=200,
+                    body_b64=base64.b64encode(body).decode(),
+                    bytes=len(body),
+                    sha256=H["sha"](body),
+                ),
+            )
+            write(observation / (prefix + ".decoded.json"), released)
+        write(
+            observation / "complete.json",
+            dict(
+                status="CANONICAL_RELEASE_WRITTEN",
+                release_sha256=H["sha"](release_path.read_bytes()),
+                provider_writes=0,
+            ),
+        )
+        return reader, plan, source_bytes
+
+    def test_closed_unstarted_admission_carries_only_proven_reservations_to_new_cohort(
+        self,
+    ):
+        reader, plan, source_bytes = self.unstarted_fixture()
+        real_git = reader["subprocess"].check_output
+
+        def git(command, *args, **kwargs):
+            if command[-1].startswith("a" * 40 + ":scripts/"):
+                return source_bytes[command[-1].split(":scripts/", 1)[1]]
+            return real_git(command, *args, **kwargs)
+
+        module = H["module"]
+        with (
+            mock.patch.dict(M["prepare"].__globals__, recovered_reader=lambda: reader),
+            mock.patch.dict(reader, closed_host=lambda ref, **_kwargs: ref),
+            mock.patch.dict(
+                reader["I"],
+                CLOSED75_SOURCE="a" * 40,
+                historical_plan=lambda *_args: plan,
+            ),
+            mock.patch.dict(
+                reader["recovery_history"].__globals__,
+                closed_host=lambda ref, **_kwargs: ref,
+            ),
+            mock.patch.object(reader["subprocess"], "check_output", side_effect=git),
+            mock.patch.dict(
+                H["prepare_request"].__globals__,
+                module=lambda name: (
+                    M if name == "cloudbench-unused-reservations.py" else module(name)
+                ),
+            ),
+        ):
+            result = M["prepare"](self.outer, self.inventory)
+            self.assertEqual(
+                [r["machine_id"] for r in result["candidates"]], [self.mid]
+            )
+            self.assertNotIn("reservation", result["candidates"][0])
+            self.assertTrue(
+                result["archive"]["closed_unstarted_admission"]["no_archive_claimed"]
+            )
+            self.assertFalse((self.closed / "export/originals.tar.gz").exists())
+            merged = H["prepare_request"](
+                [self.old.run],
+                self.inventory,
+                "e" * 32,
+                "a" * 40,
+                unused_runs=[self.outer],
+            )
+            self.assertEqual(
+                [r["machine_id"] for r in merged["candidates"]], [self.mid]
+            )
+            self.assertNotIn("reservation", merged["candidates"][0])
+            extra = write(self.closed / "export/machine-create.intent.json", {})
+            with self.assertRaises(ValueError):
+                M["prepare"](self.outer, self.inventory)
+            extra.unlink()
+            current = json.loads(self.inventory.read_bytes())
+            current[0]["config"] = None
+            write(self.inventory, current)
+            with self.assertRaises(ValueError):
+                M["prepare"](self.outer, self.inventory)
+
+    def test_closed_unstarted_admission_preserves_protected_machine_exclusion(self):
+        reader, plan, source_bytes = self.unstarted_fixture(protected=True)
+        real_git = reader["subprocess"].check_output
+
+        def git(command, *args, **kwargs):
+            if command[-1].startswith("a" * 40 + ":scripts/"):
+                return source_bytes[command[-1].split(":scripts/", 1)[1]]
+            return real_git(command, *args, **kwargs)
+
+        with (
+            mock.patch.dict(M["prepare"].__globals__, recovered_reader=lambda: reader),
+            mock.patch.dict(reader, closed_host=lambda ref, **_kwargs: ref),
+            mock.patch.dict(
+                reader["I"],
+                CLOSED75_SOURCE="a" * 40,
+                historical_plan=lambda *_args: plan,
+            ),
+            mock.patch.dict(
+                reader["recovery_history"].__globals__,
+                closed_host=lambda ref, **_kwargs: ref,
+            ),
+            mock.patch.object(reader["subprocess"], "check_output", side_effect=git),
+        ):
+            with self.assertRaisesRegex(ValueError, "protected reservation"):
+                M["prepare"](self.outer, self.inventory)
+
     def test_normal_bound_launch_with_null_failure_keeps_original_request_route(self):
         request, context = M["request_for_closed"](
             self.outer,
@@ -575,7 +971,7 @@ class Unused(unittest.TestCase):
                 M["prepare"].__globals__, recovered_reader=lambda: dispatch
             ),
             mock.patch.dict(
-                original_load.__globals__, closed_host=lambda ref, *_args: ref
+                original_load.__globals__, closed_host=lambda ref, *_args, **_kwargs: ref
             ),
             mock.patch.dict(
                 reader["I"]["retained_native"].__globals__, CLOSED_SOURCE="a" * 40

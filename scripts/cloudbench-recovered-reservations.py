@@ -426,6 +426,11 @@ def load(outer, closed, config, closure, inputs):
     # Recovery was completed under the original host. The successor launch only
     # replaces its authority and host provenance; it never rewrites that history.
     config = recovery_config
+    return recovery_history(outer, closed, config_path, config, inputs)
+
+
+def recovery_history(outer, closed, config_path, config, inputs):
+    """Pure retained admission proof, shared only after a typed closure."""
     provenance = config["host_operator_provenance"]
     typed_closed = config["source_ref"] in (I["CLOSED_SOURCE"], I["CLOSED75_SOURCE"])
     host = (

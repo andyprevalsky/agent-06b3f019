@@ -50,3 +50,9 @@ The user requested simpler startup and an explanation of repeated full-paralleli
 ## Reusable lesson
 
 A positive allocation followed by a missing read is an observation problem until classified. Preserve its cleanup obligation and distinguish typed absence, malformed success, and transient read failure before making lifecycle decisions.
+
+## Closed unused admission reuse
+
+The next normal attempt must use the repaired helper, rather than rerun the failed old helper under a new label. Its closed-admission reader validates the known original source, complete host namespace, positive allocation and cleanup bindings, actual caller closure and the two recorded GET200 release responses. It factors the existing pure reservation-history validation from the archive reader while retaining the ordinary full-controller archive requirements. No controller archive existed for this attempt and none is fabricated.
+
+Eighteen unused-reservation controls and nine recovered-history controls pass, including the full unused-reader to recovery-history to next-admission integration. The original reader fails that same fixture at the missing verified-export boundary. Protected identities, a new Machine-create intent, and an incomplete current configuration are rejected. The full551 real reservation history remains for the normal read-only preparation on the owning executor; this local fixture does not claim that live result.
