@@ -699,6 +699,18 @@ def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -
                        "source": {"ref": source_ref, "sha256": hashes}}, sort_keys=True)
 
 
+def bind_mutation_inventory(environment, inventory_directory, mutation_authority):
+    """Pass the same parent-minted feed authority to every owned consumer."""
+    for key, value in (
+        ("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", inventory_directory),
+        ("CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY", mutation_authority),
+    ):
+        if value is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = str(value)
+
+
 def stop_shared_inventory(
     process: subprocess.Popen, log: object, directory: Path
 ) -> bool:
@@ -1322,6 +1334,7 @@ def main() -> int:
                                 ["git", "-C", str(workspace), "rev-parse", requested_ref + "^{commit}"],
                                 text=True,
                             ).strip()
+                            bind_mutation_inventory(policy, inventory_directory, mutation_authority)
                             policy.update(
                                 RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(current_cohort["_directory"]),
                                 RUN_BENCH_CAMPAIGN_COHORT=str(current_cohort["cohort_id"]),
@@ -1446,16 +1459,7 @@ def main() -> int:
                     environment["RUN_BENCH_CAMPAIGN_ATTEMPT"] = str(job["attempt"])
                 else:
                     environment.pop("RUN_BENCH_CAMPAIGN_ATTEMPT", None)
-                if inventory_directory is not None:
-                    environment["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"] = str(
-                        inventory_directory
-                    )
-                else:
-                    environment.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
-                if mutation_authority is not None:
-                    environment["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"] = mutation_authority
-                else:
-                    environment.pop("CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY", None)
+                bind_mutation_inventory(environment, inventory_directory, mutation_authority)
                 if shared_relay is not None:
                     environment.update(shared_relay['environment'])
                 environment.pop("CLOUDBENCH_CAMPAIGN_SEED_PROOF", None)

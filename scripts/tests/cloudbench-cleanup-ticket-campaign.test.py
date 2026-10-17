@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class CampaignTickets(unittest.TestCase):
-    def campaign_fixture(self, mode="pass", old=False):
+    def campaign_fixture(self, mode="pass", old=False, old_mutation=False):
         with tempfile.TemporaryDirectory(
             prefix="cleanup-ticket-campaign-"
         ) as temporary:
@@ -29,6 +29,28 @@ class CampaignTickets(unittest.TestCase):
                 "cloudbench-infra-canary-preflight.py",
             ):
                 shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+            if mode.startswith("mutation"):
+                for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "cloudbench-port-lease.py", "cloudbench-cohort-reconcile.py", "cloudbench-machine-readiness.py", "cloudbench-campaign-machines.py"):
+                    shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                (scripts / "lib").mkdir()
+                for name in ("cloudbench-env.sh", "cloudbench-inventory.sh"):
+                    shutil.copyfile(ROOT / "scripts/lib" / name, scripts / "lib" / name)
+                if old_mutation:
+                    (scripts / "run-bench-campaign.py").write_bytes(subprocess.check_output(
+                        ["git", "show", "0000435cd1fab76a4285e7c97da6e8177eced026:scripts/run-bench-campaign.py"], cwd=ROOT))
+                (scripts / "cloudbench-campaign-inventory.sh").write_text("#!/bin/bash\nexec python3 \"$FIXTURE_ROOT/publisher.py\" \"$2\" \"$3\"\n")
+                (root / "publisher.py").write_text("""import os,sys,time,json
+from pathlib import Path
+p=Path(sys.argv[1]);parent=int(sys.argv[2])
+def birth(pid):return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()[19]
+index=p/'inventory';index.mkdir();generation=index/'.generation-fixture';generation.mkdir()
+(generation/'admission-machines.json').write_text('[]')
+(generation/'health').write_text('publisher_token=fixture\\nvalid_until='+str(int(time.time())+120)+'\\ngeneration=.generation-fixture\\n')
+(index/'current').symlink_to(generation.name)
+(p/'owner').write_text(''.join(k+'='+str(v)+'\\n' for k,v in dict(app='navi-whisper-lux-bench',pid=os.getpid(),pid_start=birth(os.getpid()),token='fixture',parent_pid=parent,parent_start=birth(parent)).items()))
+while not(p/'stop').exists():time.sleep(.01)
+""")
+                (scripts / "cloudbench-campaign-seed.py").write_text("import pathlib,sys\np=pathlib.Path(sys.argv[sys.argv.index('--barrier')+1]);(p/'seed-proof.private.json').write_text('{}')\n")
             if old:
                 (scripts / "run-bench-campaign.py").write_bytes(
                     subprocess.check_output(
@@ -65,6 +87,39 @@ mkdir -p "$(dirname "$CLEANUP_DISK_RESERVE_FILE")"
                 + functions
                 + """
 trap release_cleanup_disk_reserve EXIT
+if [[ "$FIXTURE_CANARY_MODE" != mutation* ]]; then
+ [ -z "${CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY:-}" ] || exit 94
+ [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || exit 95
+fi
+if [[ "$FIXTURE_CANARY_MODE" == mutation* ]]; then
+ source "$FIXTURE_ROOT/scripts/lib/cloudbench-env.sh"
+ source "$FIXTURE_ROOT/production-fly.sh"
+ APP=navi-whisper-lux-bench
+ ROOT_DIR="$FIXTURE_ROOT"
+ clone_timeout=5
+ CLOUDBENCH_CAPACITY_RESERVATION_ROOT="$FIXTURE_ROOT/capacity"
+ private_source_allows_provider_call() { return 0; }
+ archived_reuse_sftp_get() { return 2; }
+ archived_reuse_transport_args() { ARCHIVED_FLY_ARGS=("$@"); }
+ flyctl() { printf 'PROVIDER_BOUNDARY:%s\\n' "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" >> "$FIXTURE_ROOT/events"; }
+ case "$FIXTURE_CANARY_MODE" in
+  mutation-source) printf '\\n# changed source\\n' >> "$FIXTURE_ROOT/scripts/cloudbench-campaign-mutation.py" ;;
+  mutation-foreign) CLOUDBENCH_CAMPAIGN_INVENTORY_DIR="$FIXTURE_ROOT/foreign" ;;
+  mutation-dead) python3 - "$CLOUDBENCH_CAMPAIGN_INVENTORY_DIR" <<'DEAD'
+import os,signal,sys,time
+from pathlib import Path
+p=Path(sys.argv[1])/'owner';owner=dict(line.split('=',1) for line in p.read_text().splitlines());pid=int(owner['pid'])
+os.kill(pid,signal.SIGTERM)
+for unused in range(100):
+ try: state=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()[0]
+ except FileNotFoundError: break
+ time.sleep(.01)
+with (Path(os.environ['FIXTURE_ROOT'])/'events').open('a') as stream:stream.write('PUBLISHER_RETIRED\\n')
+DEAD
+ ;;
+ esac
+ FLY machine clone fixture-source
+fi
 if [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" = 1 ] && [ "$FIXTURE_CANARY_MODE" = foreign ]; then
  RUN_BENCH_CLEANUP_JOB=__foreign_preflight__
 fi
@@ -95,6 +150,10 @@ while not(cohort/'release.json').exists():
 READY
 """
             )
+            if mode.startswith("mutation"):
+                start = source.index("FLY() {")
+                end = source.index("\nis_sim_on()", start)
+                (root / "production-fly.sh").write_text(source[start:end])
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             subprocess.run(["git", "-C", str(root), "add", "."], check=True)
             subprocess.run(
@@ -164,6 +223,9 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 FIXTURE_BENCH_REF=bench_ref,
                 BENCHMARK_HUB_GROUP_RUN_ID="fixture",
                 CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="0",
+                CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="0",
+                CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY="foreign-shell-authority",
+                CLOUDBENCH_CAMPAIGN_INVENTORY_DIR="/foreign-shell-inventory",
                 CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="1",
                 CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB="1",
                 CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB="0",
@@ -173,6 +235,10 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                     "RUN_BENCH_CLEANUP_"
                 ):
                     env.pop(name)
+            if mode.startswith("mutation"):
+                env.pop("CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY", None)
+                env.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
+                env.update(CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="1", CLOUDBENCH_CAMPAIGN_SHARED_RELAY="0", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="1")
             if mode == "fresh":
                 stamp = root / ".context/fleet-infra-canary.last-pass"
                 stamp.parent.mkdir(parents=True, exist_ok=True)
@@ -235,13 +301,32 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
             )
             details = "\n".join(
                 p.read_text()
-                for p in (root / ".context/benchmarks/campaigns").glob("*/*.log")
+                for p in (root / ".context/benchmarks/campaigns").rglob("*.log")
             )
             events = (
                 (root / "events").read_text().splitlines()
                 if (root / "events").exists()
                 else []
             )
+            if mode.startswith("mutation"):
+                if old_mutation or mode != "mutation":
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr + details)
+                    self.assertNotIn("TASK_START", events)
+                    self.assertFalse(any(x.startswith("PROVIDER_BOUNDARY:") for x in events))
+                    if old_mutation:
+                        self.assertIn("KeyError: 'CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY'", details)
+                    elif mode == "mutation-source":
+                        self.assertIn("native mutation authority changed before execution", details)
+                    elif mode == "mutation-foreign":
+                        self.assertIn("foreign mutation admission inventory scope", details)
+                    elif mode == "mutation-dead":
+                        self.assertIn("PUBLISHER_RETIRED", events)
+                    return
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr + details)
+                self.assertEqual(events.count("PROVIDER_BOUNDARY:1"), 1)
+                self.assertEqual(events.count("PROVIDER_BOUNDARY:0"), 6)
+                self.assertLess(events.index("PROVIDER_BOUNDARY:1"), events.index("TASK_START"))
+                return
             if mode not in ("pass", "fresh", "explicit") or old:
                 self.assertNotEqual(
                     result.returncode, 0, result.stdout + result.stderr + details
@@ -299,6 +384,15 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                         / (budget["global_budget_id"] + ".json")
                     ).exists()
                 )
+
+    def test_parent_n2_and_workers_use_same_checked_mutation_authority(self):
+        self.campaign_fixture(mode="mutation")
+        self.campaign_fixture(mode="mutation", old_mutation=True)
+
+    def test_parent_n2_mutation_guards_remain_fail_closed(self):
+        for mode in ("mutation-source", "mutation-foreign", "mutation-dead"):
+            with self.subTest(mode=mode):
+                self.campaign_fixture(mode=mode)
 
     def test_actual_campaign_dispatches_independent_ticket_owners_and_retires_each_cohort(
         self,
