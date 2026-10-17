@@ -1006,7 +1006,8 @@ class IntegratedControls(unittest.TestCase):
             prefix = "git-common/cloudbench-fleet-ownership/" + token
             proof = {"schema": H["SCHEMA"], "machine_id": previous.mid, "volume_id": "vol_owned",
                      "native_name": "cloudbench-exact", "native_marker": {"generation": "current"},
-                     "successor": {"owner_token": token, "controller_id": host, "run_id": "latest-run"}}
+                     "successor": {"owner_token": token, "controller_id": host, "run_id": "latest-run"},
+                     "predecessor_archive_sha256s": [H["sha"]((previous.run / "export/originals.tar.gz").read_bytes())]}
             with tarfile.open(latest.run / "export/originals.tar.gz") as archive:
                 members = {m.name: archive.extractfile(m).read() for m in archive}
             members[prefix + "/meta"] = (
@@ -1060,6 +1061,65 @@ class IntegratedControls(unittest.TestCase):
                         "c" * 32, "d" * 40, expired_runs=[previous.root / "expired"])
                 self.assertEqual([r["machine_id"] for r in inherited_result["candidates"]], [previous.mid])
                 self.assertEqual(inherited_result["candidates"][0]["archive_sha256"], latest_hash)
+                both = copy.deepcopy(inherited)
+                both["inherited_held_scopes"].append({
+                    "archive_sha256": original_hash,
+                    "machine_ids": [previous.mid],
+                    "reuse_credit": False,
+                })
+                with mock.patch.dict(
+                    H["prepare_request"].__globals__,
+                    module=lambda name: {"prepare": lambda *args: both}
+                    if name == "cloudbench-reconcile-reservations.py" else load(name),
+                ):
+                    for archives in ([previous.run, latest.run], [latest.run, previous.run]):
+                        newer = H["prepare_request"](
+                            archives, previous.inventory, "c" * 32, "d" * 40,
+                            expired_runs=[previous.root / "expired"],
+                        )
+                        self.assertEqual(len(newer["candidates"]), 1)
+                        candidate = newer["candidates"][0]
+                        self.assertEqual(candidate["archive_sha256"], latest_hash)
+                        self.assertEqual(
+                            candidate["historical_hold_revalidation"]["held_archive_sha256"],
+                            [original_hash],
+                        )
+                        self.assertFalse(candidate["historical_hold_revalidation"]["old_hold_released"])
+                        self.assertEqual(candidate["historical_hold_revalidation"]["capacity_credit"], 0)
+                        self.assertEqual(len(newer["held_prior_reservations"]), 2)
+                    with self.assertRaisesRegex(ValueError, "no exact archived candidates"):
+                        H["prepare_request"](
+                            [previous.run, latest.run], previous.inventory,
+                            "c" * 32, "d" * 40, excluded=[previous.mid],
+                            expired_runs=[previous.root / "expired"],
+                        )
+                    changed = copy.deepcopy(inventory)
+                    changed[0]["name"] = "foreign"
+                    previous.inventory.write_text(json.dumps(changed))
+                    with self.assertRaisesRegex(ValueError, "no exact archived candidates"):
+                        H["prepare_request"](
+                            [previous.run, latest.run], previous.inventory,
+                            "c" * 32, "d" * 40,
+                            expired_runs=[previous.root / "expired"],
+                        )
+                    previous.inventory.write_text(json.dumps(inventory))
+                unlinked = copy.deepcopy(both)
+                unlinked["inherited_held_scopes"].append({
+                    "archive_sha256": "e" * 64,
+                    "machine_ids": [previous.mid],
+                    "reuse_credit": False,
+                })
+                with mock.patch.dict(
+                    H["prepare_request"].__globals__,
+                    module=lambda name: {"prepare": lambda *args: unlinked}
+                    if name == "cloudbench-reconcile-reservations.py" else load(name),
+                ):
+                    with self.assertRaisesRegex(ValueError, "no exact archived candidates"):
+                        H["prepare_request"](
+                            [previous.run, latest.run], previous.inventory,
+                            "c" * 32, "d" * 40,
+                            expired_runs=[previous.root / "expired"],
+                        )
                 with self.assertRaisesRegex(ValueError, "no exact archived candidates"):
                     H["prepare_request"]([previous.run], previous.inventory, "c" * 32, "d" * 40,
                                          unused_runs=[previous.root / "admission"])

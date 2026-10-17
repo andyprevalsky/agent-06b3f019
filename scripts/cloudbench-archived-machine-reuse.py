@@ -182,11 +182,59 @@ def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=
         archives.append(dict(controller=plan["controller"], archive_sha256=archive, inputs=plan["inputs"]))
         for mid, ownership in plan["archived_ownership"].items():
             legacy_ownership[archive, mid] = ownership
-        for row in plan["targets"]:
+        rows = list(plan["targets"])
+        reconsider = (
+            (prior_holds & plan["archived_ownership"].keys())
+            - set(excluded)
+            - carried_ids
+            - set(plan["protected_machines"])
+        )
+        if reconsider:
+            raw_inventory = owner_module["raw"](inventory_path, 256 * 1024 * 1024)
+            need(
+                sha(raw_inventory) == plan["inputs"][str(Path(inventory_path).absolute())],
+                "native snapshot changed during held-owner validation",
+            )
+            machines = owner_module["BASE"]["inventory"](json.loads(raw_inventory))
+            native = {machine["id"]: machine for machine in machines}
+            need(len(native) == len(machines), "duplicate native inventory identity")
+            for mid in sorted(reconsider):
+                if mid not in native:
+                    continue
+                origins = {
+                    origin
+                    for origin, ids in held_scopes.items()
+                    if origin != archive and mid in ids
+                }
+                proof = plan["archived_ownership"][mid].get("archived_reuse_proof")
+                if not isinstance(proof, dict) or not origins <= set(
+                    proof.get("predecessor_archive_sha256s", [])
+                ):
+                    continue
+                try:
+                    row = owner_module["native_owned_target"](
+                        native[mid], plan["archived_ownership"][mid]
+                    )
+                except ValueError:
+                    continue  # An old hold remains; only exact current custody can add eligibility.
+                rows.append(row)
+        for row in rows:
             if row["machine"]["id"] in excluded:
                 continue
             candidate = target_from(row["machine"], row["ownership"], archive)
             mid = candidate["machine_id"]
+            if mid in reconsider:
+                candidate["historical_hold_revalidation"] = {
+                    "held_archive_sha256": sorted(
+                        origin
+                        for origin, ids in held_scopes.items()
+                        if origin != archive and mid in ids
+                    ),
+                    "current_archive_sha256": archive,
+                    "native_sha256": sha(canonical(row["machine"])),
+                    "old_hold_released": False,
+                    "capacity_credit": 0,
+                }
             need(mid not in targets, "duplicate Machine across predecessor archives")
             targets[mid] = candidate
     legacy_hashes = {archive["archive_sha256"] for archive in archives}

@@ -312,6 +312,34 @@ def acknowledged_create_proofs(
     return proofs
 
 
+def native_owned_target(machine, ownership):
+    """Validate current native custody against one fully verified archive owner."""
+    config = machine.get("config")
+    need(
+        machine.get("id") == ownership["id"]
+        and machine.get("name") == ownership["name"]
+        and isinstance(machine.get("instance_id"), str)
+        and bool(machine["instance_id"])
+        and isinstance(machine.get("created_at"), str)
+        and bool(machine["created_at"])
+        and isinstance(config, dict),
+        "native identity/config incomplete",
+    )
+    need(
+        [v.get("volume") for v in config.get("mounts", [])] == [ownership["volume_id"]],
+        "native owned volume mismatch",
+    )
+    marker = config.get("metadata", {}).get("cloudbench_archived_reuse")
+    reuse = ownership.get("archived_reuse_proof")
+    expected = (
+        json.dumps(reuse["native_marker"], sort_keys=True, separators=(",", ":"))
+        if reuse
+        else None
+    )
+    need(marker == expected, "predecessor superseded by archived successor")
+    return dict(machine=machine, ownership=ownership)
+
+
 def prepare(run, inventory_path, excluded_machines=(), acknowledged_creates=()):
     run=Path(run).absolute(); export=run/'export'
     terminal=obj(run/'terminal.json'); intent=obj(run/'cleanup-call.intent.json')
@@ -434,16 +462,7 @@ def prepare(run, inventory_path, excluded_machines=(), acknowledged_creates=()):
         # Archive integrity remains fully verified; excluded native identities
         # receive no reuse/stop authority and remain in the measured inventory.
         if mid in excluded: continue
-        row=owned[mid]; config=machine.get('config')
-        need(machine.get('name')==row['name'] and isinstance(machine.get('instance_id'),str)
-             and bool(machine['instance_id']) and isinstance(machine.get('created_at'),str)
-             and bool(machine['created_at']) and isinstance(config,dict),'native identity/config incomplete')
-        need([v.get('volume') for v in config.get('mounts',[])]==[row['volume_id']], 'native owned volume mismatch')
-        marker=config.get('metadata',{}).get('cloudbench_archived_reuse')
-        reuse=row.get('archived_reuse_proof')
-        expected=json.dumps(reuse['native_marker'],sort_keys=True,separators=(',',':')) if reuse else None
-        need(marker==expected, 'predecessor superseded by archived successor')
-        targets.append(dict(machine=machine,ownership=row))
+        targets.append(native_owned_target(machine, owned[mid]))
     need(protected<={m['id'] for m in native},'protected native cohort missing')
     paths=[run/'terminal.json',run/'cleanup-call.intent.json',run/'authority.private.json',
            export/'disposable-export.verified.json',export/'manifest.json',export/'launch.json',export/'originals.tar.gz',Path(inventory_path).absolute()]
