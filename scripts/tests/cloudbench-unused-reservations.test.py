@@ -494,6 +494,97 @@ class Unused(unittest.TestCase):
         self.assertFalse((self.outer / "derived-config.private.json").exists())
         return derived_path, pointer_path, pointer
 
+    def test_normal_bound_launch_with_null_failure_keeps_original_request_route(self):
+        request, context = M["request_for_closed"](
+            self.outer,
+            self.closed,
+            {"host_operator_provenance": {"prelaunch_failure": None}},
+            {},
+            {},
+        )
+        self.assertEqual(request, self.request)
+        self.assertIsNone(context)
+
+    def test_workspace_successor_routes_full_closed_recovery_without_outer_fallback(
+        self,
+    ):
+        recovered_owner = runpy.run_path(
+            str(ROOT / "scripts/tests/cloudbench-recovered-reservations.test.py")
+        )
+        fixture = recovered_owner["Recovered"]()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        reader = recovered_owner["M"]
+        original_load = reader["load"]
+        called = []
+
+        def through_unused(outer, closed, config, closure, inputs):
+            # The real successor writes its current provenance and imports the
+            # selected recovery request, not the original partial request.
+            write(
+                closed / "host-operator-provenance.json",
+                config["host_operator_provenance"],
+            )
+            if not called:
+                fixture.f.closed = closed
+                fixture.f.members[fixture.f.imported] = (
+                    fixture.journal / "request.json"
+                ).read_bytes()
+                fixture.f.seal()
+            closure = M["CLOSED"]["prepare"](closed, fixture.f.inventory)
+            # The reused reader fixture measures only R's large-archive hash.
+            # U's existing inventory read is outside that memory assertion.
+            tracing = recovered_owner["tracemalloc"]
+            tracing.stop()
+            result = M["prepare"](outer, fixture.f.inventory)
+            if not called:
+                old_run = Path(
+                    config["host_operator_provenance"]["prelaunch_failure"][
+                        "prior_output"
+                    ]
+                )
+                unexpected = write(old_run / "unrecorded.json", {"unknown": True})
+                try:
+                    with self.assertRaises(ValueError):
+                        M["prepare"](outer, fixture.f.inventory)
+                finally:
+                    unexpected.unlink()
+                pointer_path = old_run / "host-launch-successor.json"
+                pointer = json.loads(pointer_path.read_bytes())
+                write(
+                    pointer_path,
+                    dict(
+                        pointer, config_path=str(outer / "foreign/config.private.json")
+                    ),
+                )
+                try:
+                    with self.assertRaises(ValueError):
+                        M["prepare"](outer, fixture.f.inventory)
+                finally:
+                    write(pointer_path, pointer)
+            called.append(result)
+            self.assertEqual(
+                [row["machine_id"] for row in result["candidates"]], [fixture.f.mid]
+            )
+            tracing.start()
+            return original_load(outer, closed, config, closure, inputs)
+
+        dispatch = dict(reader, load=original_load)
+        with (
+            mock.patch.dict(
+                M["prepare"].__globals__, recovered_reader=lambda: dispatch
+            ),
+            mock.patch.dict(
+                original_load.__globals__, closed_host=lambda ref, *_args: ref
+            ),
+            mock.patch.dict(
+                reader["I"]["retained_native"].__globals__, CLOSED_SOURCE="a" * 40
+            ),
+            mock.patch.dict(reader, load=through_unused),
+        ):
+            fixture.load_fixture(typed=True, successor=True)
+        self.assertTrue(called)
+
     def test_typed_refusal_reads_exact_nested_receipt_without_alias(self):
         self.successor_fixture(typed=True)
         value = M["prepare"](self.outer, self.inventory)

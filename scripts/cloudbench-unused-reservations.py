@@ -28,13 +28,20 @@ def transition_reader():
 def request_for_closed(outer, closed, config, closure, inputs):
     provenance = config.get("host_operator_provenance", {})
     need(isinstance(provenance, dict), "invalid closed host provenance")
-    if "incomplete_admission" in provenance:
+    failure = provenance.get("prelaunch_failure")
+    workspace_successor = (
+        isinstance(failure, dict)
+        and failure.get("stage") == "CANONICAL_WORKSPACE_RELEASED_AFTER_UNKNOWN_CREATE"
+    )
+    if "incomplete_admission" in provenance or workspace_successor:
         context = recovered_reader()["load"](outer, closed, config, closure, inputs)
         return context["request"], context
     return obj(outer / "archived-reuse-request.private.json", inputs), None
 
 
-def validate_reserved(outer, original, reserved, current, cohort, harness_ref, inputs, context=None):
+def validate_reserved(
+    outer, original, reserved, current, cohort, harness_ref, inputs, context=None
+):
     if context is not None:
         return recovered_reader()["validate"](context, original, reserved, current, inputs)
     return validate_candidate(outer, original, reserved, current, cohort, harness_ref, inputs)
@@ -72,17 +79,50 @@ def closed_run(outer, inputs):
     )
     need(re.fullmatch(r"launch-[0-9]+", original_config.parent.name), "invalid bound launch directory")
     local_config = outer / original_config.parent.name / original_config.name
-    need(digest(read(local_config, inputs)) == launch["config_sha256"], "original config bytes changed")
+    need(
+        digest(read(local_config, inputs)) == launch["config_sha256"],
+        "original config bytes changed",
+    )
     original_value = json.loads(read(local_config, inputs))
     local_output = outer / original_config.parent.name / output.name
     successor = local_output / "host-launch-successor.json"
     if successor.exists():
         pointer = obj(successor, inputs)
-        need(pointer.get("schema") == "original600-host-launch-successor-v1", "foreign launch successor")
+        need(
+            pointer.get("schema") == "original600-host-launch-successor-v1",
+            "foreign launch successor",
+        )
         evidence = pointer["evidence"]
+        if evidence.get("stage") == "CANONICAL_WORKSPACE_RELEASED_AFTER_UNKNOWN_CREATE":
+            # This is the exact closed-workspace chain, not a pre-exec refusal.
+            # Its existing reader binds old history and new immutable producer.
+            # Full current controller closure is still required by prepare().
+            current_path = Path(pointer["config_path"])
+            need(
+                original_config == local_config
+                and current_path.parent.parent == outer
+                and re.fullmatch(r"bound-continuation-[0-9]+", current_path.parent.name)
+                and current_path.name == "config.private.json",
+                "invalid workspace successor config layout",
+            )
+            current = obj(current_path, inputs)
+            current_output = Path(evidence["successor_output"])
+            recovered_reader()["recovered_launch"](
+                outer, current_output, current, inputs
+            )
+            need(
+                obj(current_output / "host-operator-provenance.json", inputs)
+                == current["host_operator_provenance"],
+                "closed workspace successor provenance differs",
+            )
+            return current_output, current
         recorded_failure = Path(evidence["path"])
-        if recorded_failure.is_absolute() and recorded_failure.is_relative_to(original_config.parent.parent):
-            relative_failure = recorded_failure.relative_to(original_config.parent.parent)
+        if recorded_failure.is_absolute() and recorded_failure.is_relative_to(
+            original_config.parent.parent
+        ):
+            relative_failure = recorded_failure.relative_to(
+                original_config.parent.parent
+            )
             need(".." not in relative_failure.parts, "unsafe failure path")
             raw = read(outer / relative_failure, inputs)
         else:
