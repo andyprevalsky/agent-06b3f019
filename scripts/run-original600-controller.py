@@ -815,7 +815,8 @@ def resume_incomplete_admission(args, root, runner, github):
         request=plan['request']
         verify_reuse_images(request,inventory,facts_from(runner['read'](args.facts))['image_ref'])
         reservation_disk_headroom(directory,request,inventory,before)
-        if initial['available_slots_conservative']+len(plan['classifications'])<601:
+        retained_count = len(plan.get('retained_request', {}).get('candidates', []))
+        if initial['available_slots_conservative']+retained_count+len(plan['classifications'])<601:
             raise ValueError('incomplete admission has insufficient possible capacity')
         if incomplete_admission_plan(args,runner)[1]!=plan:
             raise ValueError('incomplete admission evidence changed before native effect')

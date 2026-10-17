@@ -887,14 +887,15 @@ class Portable(unittest.TestCase):
             request={'candidates':[{'machine_id':'first'},{'machine_id':'second'}]}
             plan={'directory':str(directory),'source_root':str(directory/'old-workload'),
                 'source_ref':oldref,'started_at':epoch,'deadline':deadline,'request':request,
-                'classifications':[{'machine_id':'first'},{'machine_id':'second'}]}
+                'classifications':[{'machine_id':'second'}],
+                'retained_request':{'candidates':[{'machine_id':'first'}]}}
             machines=[{'id':row['machine_id'],'config':{'image':image}} for row in request['candidates']]
             events=[];snapshots=[];oldpins={'old-source':'pinned'}
             def snapshot(*parameters):
                 snapshots.append(parameters[3])
                 events.append('before-capacity' if len(snapshots)==1 else 'after-capacity')
                 private(parameters[3]/'navi-whisper-lux-bench.private.json',machines)
-                return {'available_slots_conservative':600,'ended_epoch':time.time()}
+                return {'available_slots_conservative':599,'ended_epoch':time.time()}
             def reconcile(factory,received,journal,end):
                 events.append('reconcile')
                 self.assertEqual(received,plan);self.assertEqual(end,deadline)

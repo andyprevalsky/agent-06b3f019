@@ -156,9 +156,62 @@ class Recovered(unittest.TestCase):
                 self.context("PRE_CONFIG"), self.original, self.reserved, {}
             )
 
+    def test_typed_host_pins_effectful_sources_and_observation_dependencies(self):
+        import subprocess
+
+        oldref = M["I"]["CLOSED_SOURCE"]
+        newref = "b" * 40
+        read = subprocess.check_output
+        altered = {}
+
+        def git(command):
+            revision, name = command[-1].split(":scripts/", 1)
+            if revision == newref:
+                return altered.get(name, (ROOT / "scripts" / name).read_bytes())
+            return read(command)
+
+        expected = {
+            name: M["sha"]((ROOT / "scripts" / name).read_bytes())
+            for name in (
+                "cloudbench-incomplete-reservations.py",
+                "run-original600-controller.py",
+            )
+        }
+        with (
+            mock.patch.dict(M["closed_host"].__globals__, CLOSED_HOST_HASHES=expected),
+            mock.patch.object(M["subprocess"], "check_output", side_effect=git),
+        ):
+            self.assertEqual(M["closed_host"](newref), newref)
+            for name in (
+                "cloudbench-incomplete-reservations.py",
+                "cloudbench-archived-reuse-effects.py",
+                "cloudbench-recovered-reservations.py",
+            ):
+                if name.endswith("recovered-reservations.py"):
+                    altered[name] = (
+                        (ROOT / "scripts" / name)
+                        .read_bytes()
+                        .replace(
+                            b"def obj(path, inputs):",
+                            b"def obj(path, inputs):\n    raise ValueError('foreign')",
+                        )
+                    )
+                else:
+                    altered[name] = b"foreign source"
+                with self.assertRaises(ValueError):
+                    M["closed_host"](newref)
+                altered.clear()
+        self.assertEqual(len(oldref), 40)
+
+    def test_typed_closed_admission_reconstructs_retained_rows_after_full_closure(self):
+        self.load_fixture(typed=True)
+
     def test_load_binds_both_plan_serializations_request_partition_and_closed_config(
         self,
     ):
+        self.load_fixture(typed=False)
+
+    def load_fixture(self, typed):
         plan = {
             "request": self.f.original,
             "classifications": [
@@ -168,6 +221,13 @@ class Recovered(unittest.TestCase):
             "deadline": 5401,
             "started_at": 1,
         }
+        if typed:
+            plan.update(
+                schema="closed-admission-continuation-v1",
+                classifications=[],
+                retained_request=self.f.request,
+                retained_lanes={self.f.mid: "ORIGINAL_CLOSED"},
+            )
         request = dict(self.f.request, held_native_reservations=[])
         raw = M["canonical"](request) + b"\n"
         path = self.journal / "request.json"
@@ -191,7 +251,11 @@ class Recovered(unittest.TestCase):
             "request_sha256": M["sha"](raw),
             "held": [],
             "results": [
-                {"machine_id": self.f.mid, "lane": "ACK", "old_failure_retained": True}
+                {
+                    "machine_id": self.f.mid,
+                    "lane": "RETAINED" if typed else "ACK",
+                    "old_failure_retained": True,
+                }
             ],
         }
         write(self.journal / "complete.json", complete)
@@ -256,8 +320,16 @@ class Recovered(unittest.TestCase):
         cleanup["export_verified_file"] = closed_reader["digest_file"](verified_path)
         write(cleanup_path, cleanup)
         closure = closed_reader["prepare"](closed, self.f.inventory)
-        with mock.patch.dict(
-            M["I"], SOURCE="a" * 40, historical_plan=lambda *_args: plan
+        if typed:
+            shutil.rmtree(self.directory)
+        with (
+            mock.patch.dict(
+                M["I"],
+                SOURCE="a" * 40,
+                CLOSED_SOURCE="a" * 40 if typed else M["I"]["CLOSED_SOURCE"],
+                historical_plan=lambda *_args: plan,
+            ),
+            mock.patch.dict(M["load"].__globals__, closed_host=lambda ref: ref),
         ):
             tracemalloc.start()
             try:
@@ -273,6 +345,14 @@ class Recovered(unittest.TestCase):
                     "original_plan_sha256"
                 ],
             )
+            if typed:
+                with mock.patch.dict(
+                    M["I"]["retained_native"].__globals__, CLOSED_SOURCE="a" * 40
+                ):
+                    self.assertEqual(
+                        M["validate_proof"](context, self.original, self.reserved, {}),
+                        self.reserved,
+                    )
             complete["results"][0]["lane"] = "PRE_CONFIG"
             write(self.journal / "complete.json", complete)
             with self.assertRaises(ValueError):

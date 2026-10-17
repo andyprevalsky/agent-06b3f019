@@ -39,6 +39,208 @@ class Incomplete(unittest.TestCase):
         path.chmod(0o600)
         return folder
 
+    def closed_fixture(self):
+        import shutil
+        import time
+
+        write = OLD["OLD"]["write"]
+        root = self.f.outer
+        shutil.rmtree(root / "launch-1")
+        (root / "controller-launch.intent.json").unlink()
+        (root / "archived-reuse-request.private.json").unlink()
+        request = copy.deepcopy(self.f.original)
+        other = copy.deepcopy(self.fixture.row)
+        other.update(machine_id="f" * 14, volume_id="vol_other")
+        other["predecessor"].update(
+            id=other["machine_id"], volume_id=other["volume_id"]
+        )
+        request["candidates"].append(other)
+        (root / "archived-reuse-reservations" / other["machine_id"]).mkdir(mode=0o700)
+        failure_row = {
+            "machine_id": other["machine_id"],
+            "not_credited": True,
+            "error_type": "TimeoutExpired",
+            "error": "retained old read timeout",
+        }
+        closed = dict(
+            request,
+            candidates=self.f.request["candidates"],
+            held_native_reservations=[failure_row],
+        )
+        base = root / "archived-reuse-reservations"
+        write(base / "reserved-request.json", closed)
+        epoch = time.time() - 10
+        facts = {
+            "app": H["APP"],
+            "image_ref": request["image_ref"],
+            "protected_machines": ["p1", "p2", "p3", "p4"],
+            "protected_volumes": [],
+        }
+        values = {
+            "tasks": request["task_names"],
+            "facts": facts,
+            "agents_env": {},
+            "backend_env": {},
+            "snapshot_inventory": [],
+            "warm_deps": {},
+        }
+        bound = {}
+        for name, value in values.items():
+            path = write(root / (name + ".private"), value)
+            bound[name] = {"path": str(path), "sha256": M["sha"](path.read_bytes())}
+        # A real private input above the small receipt reader limit remains streamed.
+        snapshot = Path(bound["snapshot_inventory"]["path"])
+        with snapshot.open("r+b") as stream:
+            stream.truncate(17 * 1024 * 1024)
+        bound["snapshot_inventory"]["sha256"] = M["private_digest"](snapshot)
+        admission = {
+            "binding": {"source_ref": "a" * 40, "inputs": bound},
+            "started_at_epoch": epoch,
+            "deadline_epoch": epoch + 5400,
+        }
+        intent_path = write(root / "admission-intent.private.json", admission)
+        original = write(
+            root / "archived-reuse-original.private.json",
+            {
+                "schema": "original600-archived-admission-request-v1",
+                "request": request,
+                "sha256": M["sha"](
+                    json.dumps(request, sort_keys=True, allow_nan=False).encode()
+                ),
+            },
+        )
+        old_membership = {
+            key.removeprefix("archived-reuse-reservations/"): value
+            for key, value in M["C"]["history_membership"](root).items()
+        }
+        observer = base / "acknowledged-holds-observation"
+        observed_path = write(observer / "request.json", closed)
+        identity = M["sha"](
+            M["canonical"](
+                {"request": request, "closed": closed, "deadline": epoch + 5400}
+            )
+        )
+        write(
+            observer / "intent.json",
+            {
+                "identity_sha256": identity,
+                "original_deadline": epoch + 5400,
+                "config_writes": 0,
+            },
+        )
+        write(
+            observer / "complete.json",
+            {
+                "identity_sha256": identity,
+                "original_deadline": epoch + 5400,
+                "config_writes": 0,
+                "task_credit": 0,
+                "cancelled_signals": [],
+                "request_sha256": M["sha"](observed_path.read_bytes()),
+                "added_machine_ids": [],
+                "prior_failures": [failure_row],
+                "old_membership": old_membership,
+                "inputs": {},
+            },
+        )
+        events = [
+            {
+                "status": "ADMISSION_STARTED",
+                "source_ref": "a" * 40,
+                "directory": str(root),
+            },
+            {
+                "status": "ADMISSION_PENDING",
+                "controller_started": False,
+                "directory": str(root),
+            },
+        ]
+        log = root / "execution.log"
+        log.write_text(
+            "\n".join(json.dumps(e) for e in events)
+            + "\nValueError: fresh capacity after reserved native readback is insufficient\n"
+        )
+        log.chmod(0o600)
+        failure = write(
+            root / "observed-admission-failure.safe.json",
+            {
+                "schema": "original600-observed-admission-failure-v1",
+                "source_ref": "a" * 40,
+                "source_root": str(ROOT),
+                "capture_kind": "original-process-stream",
+                "admission_directory": str(root),
+                "admission_intent_sha256": M["sha"](intent_path.read_bytes()),
+                "original_request_sha256": M["sha"](original.read_bytes()),
+                "joined_observed": True,
+                "tool_reported_exit_code": 1,
+                "controller_created": False,
+                "request_output_absent": True,
+                "launch_directories_absent": True,
+                "observed_error": "fresh capacity after reserved native readback is insufficient",
+                "log_path": str(log),
+                "log_sha256": M["sha"](log.read_bytes()),
+                "closed_request_sha256": M["sha"](
+                    (base / "reserved-request.json").read_bytes()
+                ),
+                "observed_request_sha256": M["sha"](observed_path.read_bytes()),
+            },
+        )
+        return root, failure, closed, other
+
+    def test_closed_capacity_continuation_binds_carried_pool_and_large_inputs(self):
+        root, failure, closed, other = self.closed_fixture()
+        old_bytes = M["subprocess"].check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(ROOT),
+                "show",
+                M["CLOSED_SOURCE"] + ":scripts/cloudbench-incomplete-reservations.py",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary)
+            for dependency in (ROOT / "scripts").glob("*.py"):
+                if dependency.name != "cloudbench-incomplete-reservations.py":
+                    (scripts / dependency.name).symlink_to(dependency)
+            old_path = scripts / "cloudbench-incomplete-reservations.py"
+            old_path.write_bytes(old_bytes)
+            old = runpy.run_path(str(old_path))
+            with (
+                mock.patch.dict(
+                    old["plan"].__globals__, SOURCE="a" * 40, protocol=lambda: {}
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "positive original owner failure/join required"
+                ),
+            ):
+                old["plan"](root, failure)
+        globals_ = M["closed_plan"].__globals__
+        with (
+            mock.patch.dict(globals_, CLOSED_SOURCE="a" * 40, protocol=lambda *_: {}),
+            mock.patch.object(M["subprocess"], "check_output", return_value="a" * 40),
+        ):
+            plan = M["plan"](root, failure)
+            self.assertEqual(plan["retained_request"], closed)
+            self.assertEqual(
+                plan["classifications"][0]["machine_id"], other["machine_id"]
+            )
+            self.assertEqual(plan["classifications"][0]["lane"], "PRE_CONFIG")
+            self.assertEqual(plan["deadline"], plan["started_at"] + 5400)
+            # Both publication and an altered carried row are independently refused.
+            launch = root / "launch-foreign"
+            launch.mkdir()
+            with self.assertRaises(ValueError):
+                M["plan"](root, failure)
+            launch.rmdir()
+            reserved = self.directory / "reserved.json"
+            value = json.loads(reserved.read_bytes())
+            value["source_instance_id"] = "tampered"
+            OLD["OLD"]["write"](reserved, value)
+            with self.assertRaises(ValueError):
+                M["plan"](root, failure)
+
     def test_positive_ack_survives_only_source_proven_unsent_partial_call(self):
         folder = self.partial()
         result = M["classify"](self.directory, self.fixture.row, self.f.request, {})
@@ -336,6 +538,45 @@ class Incomplete(unittest.TestCase):
             self.assertEqual(
                 reserved["candidates"][0]["source_instance_id"], "one-new-CAS"
             )
+
+            class LateOldCAS(NewCAS):
+                def request(self, method, path, body=None, **kwargs):
+                    if method == "POST":
+                        self.posts += 1
+                        # The old version-fenced request wins after our leased
+                        # preGET. The NEW CAS must keep V0 and therefore fails.
+                        old_version = self.current["instance_id"]
+                        self.current["instance_id"] = "late-old-winner"
+                        self_test.assertEqual(body["current_version"], old_version)
+                        raise ValueError("HTTP 409 current_version changed")
+                    return super().request(method, path, body, **kwargs)
+
+            late = LateOldCAS()
+            unknown = dict(
+                preconfig,
+                classifications=[
+                    dict(preconfig["classifications"][0], lane="PRIOR_UNKNOWN_NEW_CAS")
+                ],
+            )
+            with self.assertRaisesRegex(ValueError, "no newly verified"):
+                M["reconcile"](
+                    lambda _: late,
+                    unknown,
+                    root / "late-old-recovery",
+                    value["deadline"],
+                )
+            self.assertEqual(late.posts, 1)
+            self.assertFalse((root / "late-old-recovery/request.json").exists())
+            visible = NewCAS()
+            visible.current["instance_id"] = "already-old-winner"
+            with self.assertRaisesRegex(ValueError, "no newly verified"):
+                M["reconcile"](
+                    lambda _: visible,
+                    unknown,
+                    root / "visible-old-recovery",
+                    value["deadline"],
+                )
+            self.assertEqual(visible.posts, 0)
             broken = root / "broken-recovery"
             broken.mkdir()
             with self.assertRaises(FileNotFoundError):

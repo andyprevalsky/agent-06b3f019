@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Read a closed recovered admission; never infer a native write or replay one."""
 
+import ast
 import copy
 import json
 import re
 import runpy
+import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -12,6 +14,79 @@ I = runpy.run_path(str(HERE / "cloudbench-incomplete-reservations.py"))
 C, H, R = I["C"], I["H"], I["R"]
 need, sha, canonical = I["need"], I["sha"], I["canonical"]
 HOST = "f4ba201ff08041b58a4abebf96f5d797af56cb6c"
+CLOSED_HOST_HASHES = {
+    "cloudbench-incomplete-reservations.py": "8272f61ee9d68d96e301923a7910d8e10f074a8aad4cc16c930b0a7e5f53b94b",
+    "run-original600-controller.py": "77cf28f87d2c913940e9bf15557e3a5f65f4d149e9280c073d61430cc4735988",
+}
+
+
+def closed_host(ref):
+    need(
+        isinstance(ref, str) and re.fullmatch("[0-9a-f]{40}", ref),
+        "invalid recovered operator",
+    )
+    for name, expected in CLOSED_HOST_HASHES.items():
+        raw = subprocess.check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(HERE.parent),
+                "show",
+                ref + ":scripts/" + name,
+            ]
+        )
+        need(sha(raw) == expected, "unknown closed admission host protocol")
+    need(CLOSED_HOST_HASHES, "closed host source bindings missing")
+
+    def source(revision, name):
+        return subprocess.check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(HERE.parent),
+                "show",
+                revision + ":scripts/" + name,
+            ]
+        )
+
+    old_cli = ast.parse(source(I["CLOSED_SOURCE"], "run-original600-controller.py"))
+    pins = next(
+        ast.literal_eval(node.value)
+        for node in old_cli.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "PINS"
+            for target in node.targets
+        )
+    )
+    for name in pins:
+        if (
+            name not in CLOSED_HOST_HASHES
+            and name != "cloudbench-recovered-reservations.py"
+        ):
+            need(
+                source(ref, name) == source(I["CLOSED_SOURCE"], name),
+                "recovered host dependency changed",
+            )
+
+    # The only recovery-reader function used during effects is the unchanged
+    # strict leased-read validator; the remaining reader runs after closure.
+    def observer(raw):
+        return {
+            node.name: ast.dump(node, include_attributes=False)
+            for node in ast.parse(raw).body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"observed", "obj", "wire_namespace"}
+        }
+
+    need(
+        observer(source(ref, "cloudbench-recovered-reservations.py"))
+        == observer(source(I["CLOSED_SOURCE"], "cloudbench-recovered-reservations.py")),
+        "recovered observation protocol changed",
+    )
+    return ref
 
 
 def obj(path, inputs):
@@ -48,7 +123,8 @@ def load(outer, closed, config, closure, inputs):
     outer, closed = Path(outer).absolute(), Path(closed).absolute()
     need(
         closure.get("schema") == "cloudbench-archived-owner-stop-plan-v1"
-        and closure["source_ref"] == config["source_ref"] == I["SOURCE"]
+        and closure["source_ref"] == config["source_ref"]
+        and config["source_ref"] in (I["SOURCE"], I["CLOSED_SOURCE"])
         and closure.get("no_delete") is True,
         "full closed controller context required",
     )
@@ -91,9 +167,11 @@ def load(outer, closed, config, closure, inputs):
     )
     inputs[str(config_path)] = sha(raw_config)
     provenance = config["host_operator_provenance"]
+    typed_closed = config["source_ref"] == I["CLOSED_SOURCE"]
+    host = closed_host(provenance["host_operator_source_ref"]) if typed_closed else HOST
     need(
-        provenance["host_operator_source_ref"] == HOST
-        and provenance["workload_source_ref"] == I["SOURCE"],
+        provenance["host_operator_source_ref"] == host
+        and provenance["workload_source_ref"] == config["source_ref"],
         "unknown recovered host protocol",
     )
     # This is the canonical original receipt, never a fallback basename search.
@@ -120,7 +198,7 @@ def load(outer, closed, config, closure, inputs):
     need(
         provenance["incomplete_admission"]["original_plan_sha256"]
         == sha(json.dumps(plan, sort_keys=True, allow_nan=False).encode())
-        and provenance["incomplete_admission"]["source_ref"] == HOST
+        and provenance["incomplete_admission"]["source_ref"] == host
         and provenance["original_started_at_epoch"]
         == plan["started_at"]
         == config["started_at_epoch"],
@@ -167,6 +245,20 @@ def load(outer, closed, config, closure, inputs):
         unique(complete["held"], "held result"),
     )
     classes = unique(plan["classifications"], "classified row")
+    effect_ids = set(classes)
+    retained = unique(
+        plan.get("retained_request", {}).get("candidates", []), "retained row"
+    )
+    need(not set(retained) & set(classes), "retained row classified for another write")
+    if typed_closed:
+        need(
+            plan.get("schema") == "closed-admission-continuation-v1"
+            and all(rows.get(mid) == row for mid, row in retained.items()),
+            "closed retained request changed",
+        )
+        classes.update(
+            {mid: {"machine_id": mid, "lane": "RETAINED"} for mid in retained}
+        )
     need(
         set(rows) == set(results)
         and not set(rows) & set(held)
@@ -188,7 +280,7 @@ def load(outer, closed, config, closure, inputs):
     need(
         set(before)
         == {"intent.json", "complete.json", "request.json"}
-        | {name for name in before if name.split("/")[0] in classes},
+        | {name for name in before if name.split("/")[0] in effect_ids},
         "foreign recovery namespace",
     )
     need(
@@ -201,7 +293,11 @@ def load(outer, closed, config, closure, inputs):
     for scope in inherited:
         ids = scope["machine_ids"]
         need(
-            scope["archive_sha256"] in origins
+            (
+                re.fullmatch("[0-9a-f]{64}", scope["archive_sha256"])
+                if typed_closed
+                else scope["archive_sha256"] in origins
+            )
             and scope["archive_sha256"] not in seen_origins
             and scope.get("reuse_credit") is False
             and len(ids) == len(set(ids))
@@ -335,6 +431,20 @@ def validate_proof(context, original_row, reserved_row, inputs):
     )
     entry = context["classifications"][mid]
     directory = Path(context["journal"]) / mid
+    if entry["lane"] == "RETAINED":
+        native = I["retained_native"](
+            Path(context["directory"]),
+            original_row,
+            {"row": reserved_row, "_request": context["original"]},
+            context["historical_plan"]["retained_lanes"][mid],
+            inputs,
+        )
+        H["same_source"](reserved_row, native)
+        need(
+            membership(Path(context["journal"]), inputs) == context["membership"],
+            "recovery completion changed",
+        )
+        return copy.deepcopy(reserved_row)
     if entry["lane"] in ("ACK", "PENDING_READ"):
         proof = entry["proof"]
         native = observed(directory, proof, inputs)

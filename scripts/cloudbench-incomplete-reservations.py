@@ -11,6 +11,7 @@ import signal
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import cache
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -18,13 +19,14 @@ C = runpy.run_path(str(HERE / "cloudbench-reconcile-reservations.py"))
 H, R = C["H"], C["R"]
 need, sha, canonical = (H[k] for k in ("need", "sha", "canonical"))
 SOURCE = "724ae71f5bd8756be01ea237de0c2742e4f94b77"
+CLOSED_SOURCE = "49b792dcc2ea983325c6a25801da6c982f29c206"
 
 
 class CancelledAdmission(BaseException):
     """Cancellation after native owners joined cannot authorize launch."""
 
 
-def protocol():
+def protocol(source=SOURCE):
     result = {}
     selections = {
         "cloudbench-archived-reuse-effects.py": {
@@ -43,7 +45,7 @@ def protocol():
                 "-C",
                 str(HERE.parent),
                 "show",
-                SOURCE + ":scripts/" + name,
+                source + ":scripts/" + name,
             ]
         )
 
@@ -265,11 +267,362 @@ def classify(directory, row, request, inputs):
     }
 
 
+@cache
+def private_hasher():
+    return runpy.run_path(str(HERE / "cloudbench-prepare-admission.py"))["file_hash"]
+
+
+def private_digest(path):
+    return private_hasher()(Path(path))["sha256"]
+
+
+def check_plan_inputs(value):
+    if value.get("schema") != "closed-admission-continuation-v1":
+        return C["check_inputs"](value)
+    for path, expected in value["inputs"].items():
+        need(private_digest(path) == expected, "closed continuation input changed")
+
+
+@cache
+def retained_observer():
+    return runpy.run_path(str(HERE / "cloudbench-recovered-reservations.py"))[
+        "observed"
+    ]
+
+
+def retained_native(root, original, reserved, lane, inputs):
+    mid = original["machine_id"]
+    base = root / "archived-reuse-reservations"
+    if lane == "ORIGINAL_CLOSED":
+        proof = C["positive"](base / mid, original, reserved["_request"], inputs)
+        native = proof["ack"]
+        C["U"]["validate_candidate"](
+            root,
+            original,
+            reserved["row"],
+            native,
+            reserved["_request"]["cohort"],
+            CLOSED_SOURCE,
+            inputs,
+        )
+        need(
+            C["obj"](base / mid / "reserved.json", inputs) == reserved["row"],
+            "retained original row changed",
+        )
+        return native
+    need(lane == "OLD_OBSERVED", "unknown retained reservation lane")
+    proof = C["positive"](base / mid, original, reserved["_request"], inputs)
+    return retained_observer()(
+        base / "acknowledged-holds-observation" / mid, proof, inputs
+    )
+
+
+def closed_classification(directory, row, request, inputs):
+    """Potential only: a NEW lease must still observe the unchanged prior version."""
+    entry = classify(directory, row, request, inputs)
+    if entry["lane"] == "PENDING_READ":
+        before = C["obj"](directory / "original-native.json", inputs)
+        records, partials, observations = classified_wire(
+            directory, row["machine_id"], inputs
+        )
+        need(not partials and not observations, "ambiguous old config history")
+        tuples = [
+            (
+                raw.get("monotonic_ns") if raw else None,
+                req,
+                value,
+                raw.get("status") if raw else None,
+            )
+            for req, raw, value, _ in records
+        ]
+        update = next(
+            req
+            for _, req, _, _ in tuples
+            if req["method"] == "POST"
+            and req["path"] == "/machines/" + row["machine_id"]
+        )
+        transition = runpy.run_path(
+            str(HERE / "cloudbench-closed-transition-reservations.py")
+        )
+        proof = transition["unchanged"](
+            before,
+            before,
+            update,
+            C["obj"](directory / "intent.json", inputs),
+            tuples,
+            row["machine_id"],
+            entry["proof"]["expected_native"]["config"],
+        )
+        proof.update(
+            stage="VERSION_FENCED_OLD_HISTORY_ONLY", observed_prior_state=False
+        )
+        return {
+            "lane": "PRIOR_UNKNOWN_NEW_CAS",
+            "candidate": row,
+            "prior_transition": proof,
+            "fresh_prior_state_required": True,
+        }
+    need(entry["lane"] in ("PRE_CONFIG", "ACK"), "unsupported closed continuation lane")
+    return entry
+
+
+def closed_plan(directory, failure_path, *, historical=False):
+    root = Path(directory).absolute()
+    need(
+        root.resolve(strict=True) == root and root.is_dir(),
+        "physical closed admission required",
+    )
+    inputs = {}
+    admission = C["obj"](root / "admission-intent.private.json", inputs)
+    saved = C["obj"](root / "archived-reuse-original.private.json", inputs)
+    request = saved["request"]
+    H["validate_request"](request, CLOSED_SOURCE)
+    need(
+        saved["schema"] == "original600-archived-admission-request-v1"
+        and saved["sha256"]
+        == sha(json.dumps(request, sort_keys=True, allow_nan=False).encode())
+        and admission["binding"]["source_ref"] == CLOSED_SOURCE
+        and admission["deadline_epoch"] == admission["started_at_epoch"] + 5400,
+        "closed source/request/clock differs",
+    )
+    failure = C["obj"](failure_path, inputs)
+    need(
+        Path(failure_path).absolute() == root / "observed-admission-failure.safe.json"
+        and failure["schema"] == "original600-observed-admission-failure-v1"
+        and failure["source_ref"] == CLOSED_SOURCE
+        and failure["capture_kind"] == "original-process-stream"
+        and failure["admission_directory"] == str(root)
+        and failure["admission_intent_sha256"]
+        == inputs[str(root / "admission-intent.private.json")]
+        and failure["original_request_sha256"]
+        == inputs[str(root / "archived-reuse-original.private.json")]
+        and failure["joined_observed"] is True
+        and failure["tool_reported_exit_code"] == 1
+        and failure["controller_created"] is False
+        and failure["request_output_absent"] is True
+        and failure["launch_directories_absent"] is True
+        and failure["observed_error"]
+        == "fresh capacity after reserved native readback is insufficient",
+        "typed joined capacity failure differs",
+    )
+    source_root = Path(failure["source_root"])
+    need(
+        subprocess.check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(source_root),
+                "rev-parse",
+                "HEAD",
+            ],
+            text=True,
+        ).strip()
+        == CLOSED_SOURCE,
+        "original closed operator changed",
+    )
+    log_path = Path(failure["log_path"])
+    log = R["read"](log_path)
+    inputs[str(log_path)] = sha(log)
+    lines = log.decode().splitlines()
+    events = [json.loads(line) for line in lines if line.startswith("{")]
+    need(
+        sha(log) == failure["log_sha256"]
+        and lines[-1]
+        == "ValueError: fresh capacity after reserved native readback is insufficient"
+        and any(
+            e.get("status") == "ADMISSION_STARTED"
+            and e.get("source_ref") == CLOSED_SOURCE
+            and e.get("directory") == str(root)
+            for e in events
+        )
+        and any(
+            e.get("status") == "ADMISSION_PENDING"
+            and e.get("controller_started") is False
+            and e.get("directory") == str(root)
+            for e in events
+        ),
+        "closed capacity stream differs",
+    )
+    bound = admission["binding"]["inputs"]
+    need(
+        set(bound)
+        == {
+            "agents_env",
+            "backend_env",
+            "tasks",
+            "facts",
+            "snapshot_inventory",
+            "warm_deps",
+        },
+        "complete closed input set required",
+    )
+    for item in bound.values():
+        path = str(Path(item["path"]).absolute())
+        need(private_digest(path) == item["sha256"], "closed bound input changed")
+        inputs[path] = item["sha256"]
+    tasks = json.loads(R["read"](bound["tasks"]["path"]))
+    R["campaign_argv"](tasks, admission["started_at_epoch"])
+    facts = runpy.run_path(str(HERE / "run-original600-controller.py"))["facts_from"](
+        R["read"](bound["facts"]["path"])
+    )
+    need(
+        tasks == request["task_names"]
+        and H["immutable_image"](facts["image_ref"])
+        == H["immutable_image"](request["image_ref"]),
+        "closed tasks/image changed",
+    )
+    if not historical:
+        need(
+            not any(root.glob("launch-*"))
+            and not (root / "controller-launch.intent.json").exists()
+            and not (root / "config.private.json").exists()
+            and not (root / "archived-reuse-request.private.json").exists(),
+            "closed admission already published or launched",
+        )
+    base = root / "archived-reuse-reservations"
+    closed = C["obj"](base / "reserved-request.json", inputs)
+    observer = base / "acknowledged-holds-observation"
+    observed_raw = R["read"](observer / "request.json")
+    inputs[str(observer / "request.json")] = sha(observed_raw)
+    observed = json.loads(observed_raw)
+    complete = C["obj"](observer / "complete.json", inputs)
+    intent = C["obj"](observer / "intent.json", inputs)
+    need(
+        failure["closed_request_sha256"] == inputs[str(base / "reserved-request.json")]
+        and failure["observed_request_sha256"]
+        == sha(observed_raw)
+        == complete["request_sha256"]
+        and complete["identity_sha256"]
+        == intent["identity_sha256"]
+        == sha(
+            canonical(
+                {
+                    "request": request,
+                    "closed": closed,
+                    "deadline": admission["deadline_epoch"],
+                }
+            )
+        )
+        and complete["original_deadline"]
+        == intent["original_deadline"]
+        == admission["deadline_epoch"]
+        and complete["cancelled_signals"] == []
+        and complete["config_writes"] == intent["config_writes"] == 0
+        and complete["task_credit"] == 0,
+        "completed original observation differs",
+    )
+    initial = {r["machine_id"]: r for r in request["candidates"]}
+    H["validate_request"](closed, CLOSED_SOURCE)
+    H["validate_request"](observed, CLOSED_SOURCE)
+    for pool in (closed, observed):
+        need(
+            all(pool.get(k) == v for k, v in request.items() if k != "candidates"),
+            "closed pool input changed",
+        )
+        selected = {r["machine_id"]: r for r in pool["candidates"]}
+        held_ids = [r["machine_id"] for r in pool.get("held_native_reservations", [])]
+        need(
+            len(selected) == len(pool["candidates"])
+            and len(held_ids) == len(set(held_ids))
+            and not set(selected).intersection(held_ids)
+            and set(initial) == set(selected) | set(held_ids)
+            and all(
+                r.get("not_credited") is True
+                for r in pool.get("held_native_reservations", [])
+            ),
+            "closed pool partition differs",
+        )
+        for mid, row in selected.items():
+            need(
+                all(
+                    row.get(k) == v
+                    for k, v in initial[mid].items()
+                    if k
+                    not in (
+                        "source_instance_id",
+                        "source_config_sha256",
+                        "prior_marker",
+                    )
+                ),
+                "carried reservation lineage differs",
+            )
+    old = {r["machine_id"]: r for r in closed["candidates"]}
+    retained = {r["machine_id"]: r for r in observed["candidates"]}
+    added = set(retained) - set(old)
+    need(
+        all(retained.get(mid) == row for mid, row in old.items())
+        and len(complete["added_machine_ids"]) == len(added)
+        and set(complete["added_machine_ids"]) == added
+        and complete["prior_failures"] == closed["held_native_reservations"],
+        "carried observation partition changed",
+    )
+    membership = C["history_membership"](root)
+    old_membership = {
+        key.removeprefix("archived-reuse-reservations/"): value
+        for key, value in membership.items()
+        if key != "archived-reuse-reservations/acknowledged-holds-observation"
+        and not key.startswith(
+            "archived-reuse-reservations/acknowledged-holds-observation/"
+        )
+    }
+    need(
+        old_membership == complete["old_membership"],
+        "old native journal membership changed",
+    )
+    for path, expected in complete["inputs"].items():
+        need(private_digest(path) == expected, "old observation proof changed")
+        inputs[path] = expected
+    need(
+        {p.name for p in base.iterdir()}
+        == set(initial) | {"reserved-request.json", "acknowledged-holds-observation"}
+        and {p.name for p in observer.iterdir()}
+        == added | {"intent.json", "complete.json", "request.json"},
+        "unknown closed admission namespace",
+    )
+    lanes = {
+        mid: "OLD_OBSERVED" if mid in added else "ORIGINAL_CLOSED" for mid in retained
+    }
+    for mid, row in retained.items():
+        native = retained_native(
+            root, initial[mid], {"row": row, "_request": request}, lanes[mid], inputs
+        )
+        H["same_source"](row, native)
+    classes, held = [], []
+    for failed in observed["held_native_reservations"]:
+        mid = failed["machine_id"]
+        try:
+            entry = closed_classification(base / mid, initial[mid], request, inputs)
+            classes.append({"machine_id": mid, **entry})
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            held.append(dict(failed, reason=type(error).__name__))
+    return {
+        "schema": "closed-admission-continuation-v1",
+        "directory": str(root),
+        "source_ref": CLOSED_SOURCE,
+        "source_root": str(source_root),
+        "started_at": admission["started_at_epoch"],
+        "deadline": admission["deadline_epoch"],
+        "original_epoch": admission["started_at_epoch"],
+        "request": request,
+        "retained_request": observed,
+        "retained_lanes": lanes,
+        "classifications": classes,
+        "held": held,
+        "inputs": inputs,
+        "membership": membership,
+        "protocol_hashes": protocol(CLOSED_SOURCE),
+        "failure_path": str(Path(failure_path).absolute()),
+    }
+
+
 def _plan(directory, failure_path, *, historical=False):
     root = Path(directory).absolute()
     need(root.resolve(strict=True) == root, "physical admission required")
     inputs = {}
     admission = C["obj"](root / "admission-intent.private.json", inputs)
+    if admission["binding"]["source_ref"] == CLOSED_SOURCE:
+        return closed_plan(root, failure_path, historical=historical)
     saved = C["obj"](root / "archived-reuse-original.private.json", inputs)
     request = saved["request"]
     H["validate_request"](request, SOURCE)
@@ -490,11 +843,11 @@ def reconcile(api_factory, value, journal, deadline):
 
     def unchanged():
         need(
-            protocol() == value["protocol_hashes"]
+            protocol(value.get("source_ref", SOURCE)) == value["protocol_hashes"]
             and C["history_membership"](root) == value["membership"],
             "original reservation evidence changed",
         )
-        C["check_inputs"](value)
+        check_plan_inputs(value)
         need(
             not any(root.glob("launch-*"))
             and not (root / "config.private.json").exists()
@@ -525,7 +878,20 @@ def reconcile(api_factory, value, journal, deadline):
             "old_journal_immutable": True,
         },
     )
-    cancelled, candidates, held, results = [], [], copy.deepcopy(value["held"]), []
+    carried = copy.deepcopy(value.get("retained_request", {}).get("candidates", []))
+    cancelled, candidates, held, results = (
+        [],
+        carried,
+        copy.deepcopy(value["held"]),
+        [
+            {
+                "machine_id": row["machine_id"],
+                "lane": "RETAINED",
+                "old_failure_retained": True,
+            }
+            for row in carried
+        ],
+    )
     handlers = {
         sig: signal.signal(sig, lambda sig, _: cancelled.append(sig))
         for sig in (signal.SIGINT, signal.SIGTERM)
