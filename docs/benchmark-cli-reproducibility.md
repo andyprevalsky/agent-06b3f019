@@ -55,14 +55,14 @@ Do not delete one consumer's browser to make room for the other.
 
 The original600 harness is versioned separately so its disposable controller,
 ticket accounting and shared relay are not replaced with older main versions.
-The portable operator commit is `77f4d6b06cb149584f7fbb98404750af68317599`, with
+The portable operator commit is `4670c2d200c4635758f28334f9597c78dde93dea`, with
 immutable parent `b0fbd7742dde51446288c22601825a85981c1d0b`. Fetch the published
 `fix/original600-portable-operator` branch, create a separate worktree at that
 exact commit, and follow its `docs/original600-operator-cli.md`:
 
 ```bash
 git fetch origin fix/original600-portable-operator
-git worktree add --detach "$OPERATOR_CHECKOUT" 77f4d6b06cb149584f7fbb98404750af68317599
+git worktree add --detach "$OPERATOR_CHECKOUT" 4670c2d200c4635758f28334f9597c78dde93dea
 cd "$OPERATOR_CHECKOUT"
 python3 scripts/run-original600-controller.py --help
 ```
@@ -88,3 +88,8 @@ excluded; their presence does not block cleanup of the current run.
 Standard-library Hub admission probes skip Python site-package initialization.
 The actual Hub server and third-party consumers retain their normal interpreter
 startup; port, process-birth and immutable owner checks are unchanged.
+
+The live fleet aggregator now keeps one unbuffered Python process per existing
+owner, reads fresh files on every tick and retains the original one-second delay
+after each tick. It avoids repeatedly importing dependencies during startup;
+publication, error recovery and exact owner termination remain covered.
