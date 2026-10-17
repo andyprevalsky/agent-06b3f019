@@ -328,6 +328,119 @@ def credential_refusal(state, journal, intent):
     return out / "cleanup-call.intent.json", source_pins
 
 
+def prior_joined_probe(state, journal, requests, files):
+    """Use a prior terminal observation only with its exact raw transport proof."""
+    joined = None
+
+    def recorded(stem):
+        values = []
+        for suffix in ("raw", "decoded"):
+            name = stem + "." + suffix + ".json"
+            need(name in files, "prior JOINED transport proof missing")
+            raw = read(journal / name)
+            need(sha(raw) == files[name], "prior JOINED transport proof changed")
+            values.append(json.loads(raw))
+        wire, value = values
+        raw = base64.b64decode(wire["body_b64"], validate=True)
+        need(
+            wire["status"] == 200
+            and wire["bytes"] == len(raw)
+            and wire["sha256"] == sha(raw)
+            and json.loads(raw) == value,
+            "prior JOINED raw response differs",
+        )
+        return value
+
+    for name in sorted(files):
+        if not re.fullmatch(r"probe-[0-9]{6}\.json", name):
+            continue
+        raw = read(journal / name)
+        value = json.loads(raw)
+        if value.get("state") != "JOINED":
+            continue
+        need(sha(raw) == files[name], "prior JOINED observation changed")
+        identity, terminal = value["identity"], value["terminal"]
+        need(
+            identity.get("schema") == "original600-supervisor-identity-v1"
+            and identity.get("machine") == state["machine_id"]
+            and identity.get("source_ref") == state["source_ref"]
+            and identity.get("epoch") == state["epoch"]
+            and type(identity.get("pid")) is int
+            and identity["pid"] > 1
+            and isinstance(identity.get("birth"), str)
+            and re.fullmatch(r"proc-start:[0-9a-f-]{36}:[0-9]+", identity["birth"])
+            and value["identity_sha256"]
+            == sha((json.dumps(identity, sort_keys=True) + "\n").encode())
+            and all(terminal.get(key) == item for key, item in identity.items())
+            and terminal.get("supervisor_joined") is True
+            and terminal.get("parent_joined") is True
+            and type(terminal.get("parent_pid")) is int
+            and terminal["parent_pid"] > 1
+            and type(terminal.get("supervisor_exit_code")) is int
+            and isinstance(terminal.get("epoch_finished"), (int, float))
+            and terminal["epoch_finished"] >= state["epoch"],
+            "prior JOINED terminal identity differs",
+        )
+        matches = []
+        observations = []
+        for stem, request in requests.items():
+            if request["method"] != "POST" or stem + ".decoded.json" not in files:
+                continue
+            response = recorded(stem)
+            if (
+                not isinstance(response, dict)
+                or response.get("exit_code", 0) != 0
+                or response.get("exit_signal", 0) != 0
+                or response.get("stderr") not in (None, "")
+            ):
+                continue
+            try:
+                observed = json.loads(response.get("stdout", ""))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(observed, dict):
+                observations.append((stem, observed))
+                if observed.get("identity") is not None:
+                    need(
+                        observed["identity"] == identity,
+                        "conflicting supervisor identity in prior history",
+                    )
+                if observed.get("state") == "JOINED":
+                    need(observed == value, "conflicting prior terminal observation")
+            if observed != value:
+                continue
+            previous = "wire-" + str(int(stem[5:]) - 1).zfill(6)
+            need(
+                requests.get(previous)
+                == {
+                    "method": "GET",
+                    "path": "/machines/" + state["machine_id"],
+                    "body": None,
+                },
+                "prior JOINED native observation missing",
+            )
+            native = recorded(previous)
+            need(
+                all(
+                    native.get(key) == state["machine"].get(key)
+                    for key in ("id", "instance_id", "config", "name", "region")
+                ),
+                "prior JOINED native incarnation differs",
+            )
+            matches.append(stem)
+        need(matches, "prior JOINED has no matching raw PROBE")
+        need(
+            all(
+                stem <= min(matches) or item.get("state") == "JOINED"
+                for stem, item in observations
+            ),
+            "prior supervisor became live after JOINED",
+        )
+        need(joined is None or joined == value, "conflicting prior JOINED observations")
+        joined = value
+    return joined
+
+
 def prepare_resume(state, args, cleanup_refusal=False):
     """Authorize a new reader only from a stopped, exclusively read-only journal."""
     out = Path(state["out"])
@@ -513,6 +626,7 @@ def prepare_resume(state, args, cleanup_refusal=False):
         journal_name="payload-finalization-resume-" + identity[:16],
         prior_manifest_sha256=identity,
         cleanup_credential_refusal=cleanup_refusal,
+        joined_probe=prior_joined_probe(state, journal, requests, files),
     )
     return value
 
@@ -790,24 +904,26 @@ def finalize(state, args, api_factory=api_for):
             "action": "PROBE",
         }
         attempt = 0
+        probe = state.get("_resume", {}).get("joined_probe")
         while True:
             gone = validate_args(state, args)
-            attempt += 1
-            try:
-                probe = R["machine_control"](api, state["machine_id"], payload)
-            except (Exception, R["Deadline"]) as error:
-                if (
-                    not isinstance(error, (OSError, R["Deadline"]))
-                    and type(error).__name__ != "CaptureFailure"
-                ):
-                    raise
-                save(
-                    journal / f"read-pending-{attempt:06d}.json",
-                    {"error": type(error).__name__, "write_retry": False},
-                )
-                time.sleep(5)
-                continue
-            save(journal / f"probe-{attempt:06d}.json", probe)
+            if probe is None or probe["state"] != "JOINED":
+                attempt += 1
+                try:
+                    probe = R["machine_control"](api, state["machine_id"], payload)
+                except (Exception, R["Deadline"]) as error:
+                    if (
+                        not isinstance(error, (OSError, R["Deadline"]))
+                        and type(error).__name__ != "CaptureFailure"
+                    ):
+                        raise
+                    save(
+                        journal / f"read-pending-{attempt:06d}.json",
+                        {"error": type(error).__name__, "write_retry": False},
+                    )
+                    time.sleep(5)
+                    continue
+                save(journal / f"probe-{attempt:06d}.json", probe)
             if (cancelled or time.time() >= state["deadline"]) and probe[
                 "state"
             ] == "LIVE":

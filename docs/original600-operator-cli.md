@@ -340,6 +340,17 @@ job, attempt, owner and log/binding-record hashes. It does not rewrite canonical
 classification, infer a task result, or certify cleanup. The CLI still does not
 send signals; the existing exact-owner cancellation procedure applies.
 
+Each remote status observation retains a private request and raw-response
+journal before decoding. A missing or partial response remains explicitly
+unknown; an artifact on disk alone is not proof of a complete response.
+
+The payload finalizer retains a verified supervisor `JOINED` observation while
+waiting for the original gate and verified export. It does not probe or signal
+that retired PID again. Read-only finalizer recovery can carry that observation
+only after checking its original raw PROBE, preceding native identity read,
+supervisor identity, parent join, and immutable journal. Export, resource release,
+and caller-retirement checks still apply; an exit of `-9` is not benchmark success.
+
 Main-thread native lease acquisition and release use the already loaded client
 and the same durable raw-response observer. The complete operation retains its
 25-second absolute budget and 20-second HTTP timeout; worker threads retain the

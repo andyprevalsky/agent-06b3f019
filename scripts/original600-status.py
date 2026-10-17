@@ -382,12 +382,52 @@ def status_command(payload):
     return shlex.join(['python3','-S','-c',loader,package])
 
 
-def observe(api,value):
-    command=status_command(value['payload'])
-    body={'cmd':command,'timeout':20,'machine':True}
+def observation_request(value):
+    body={'cmd':status_command(value['payload']),'timeout':20,'machine':True}
     need(len(json.dumps(body).encode())<=16384,'status exec exceeds bounded JSON transport')
+    return {'method':'POST','path':'/machines/'+value['machine']+'/exec','body':body,'http_timeout':20,'absolute_timeout':25,'outer_timeout':30,'machine':value['machine'],'source_ref':value['source_ref'],'original_epoch':value['payload']['epoch']}
+
+
+def failure_details(error, secrets=()):
+    """Retain the actual exception privately, redacting known credentials."""
+    message=str(error)
+    for secret in secrets:
+        if isinstance(secret,str) and secret:
+            message=message.replace(secret,'<redacted>')
+    return {'error_type':type(error).__name__,'error_module':type(error).__module__,'message':message[:16384],'message_truncated':len(message)>16384}
+
+
+def capture_state(journal):
+    """A pathname alone never proves a complete raw capture."""
+    path=Path(journal)/'wire.json'
+    present=path.exists()
+    complete=False
+    if present:
+        try:
+            wire=obj(path);request=obj(Path(journal)/'request.json')
+            raw=base64.b64decode(wire['body_b64'],validate=True)
+            complete=(wire['sha256']==digest(raw) and wire['method']==request['method']
+                      and wire['path']==request['path'] and type(wire['status']) is int
+                      and type(wire['monotonic_ns']) is int)
+        except (OSError,ValueError,TypeError,KeyError):pass
+    return {'response_observed':complete,'wire_artifact_present':present,
+            'wire_capture_incomplete':present and not complete}
+
+
+def observe(api,value,journal=None):
+    request=observation_request(value);body=request['body']
+    observer=None
+    if journal is not None:
+        journal=Path(journal)
+        request_path=journal/'request.json'
+        if request_path.exists():need(obj(request_path)==request,'status request journal differs')
+        else:save(request_path,request)
+        def observer(method,path,status,raw):
+            need(method==request['method'] and path==request['path'],'status raw response identity differs')
+            save(journal/'wire.json',{'method':method,'path':path,'status':status,'body_b64':base64.b64encode(raw).decode(),'sha256':digest(raw),'monotonic_ns':time.monotonic_ns(),'at_ns':time.time_ns()})
     with bounded(25):
-        response=api.api('POST','/machines/'+value['machine']+'/exec',body,timeout=20)
+        response=api.api('POST','/machines/'+value['machine']+'/exec',body,timeout=20,**({'observer':observer} if journal is not None else {}))
+        if journal is not None:save(journal/'response.json',response)
         need(isinstance(response,dict),'invalid native exec envelope')
         if response.get('exit_code',0)!=0 or response.get('exit_signal',0)!=0 or response.get('stderr') not in (None,''):
             return dict(status='TRANSPORT_UNKNOWN',machine=value['machine'],source_ref=value['source_ref'],original_epoch=value['payload']['epoch'])
@@ -410,15 +450,31 @@ def main(argv=None):
             print(json.dumps(dict(value,provider_calls=0,benchmark_success_inferred=False)));return 0
         output=(a.out_dir or a.run_dir).absolute()
         need(output.resolve(strict=True)==output and output.stat().st_uid==os.getuid() and not output.stat().st_mode&0o077,'private observation directory required')
+        journal=output/('original600-status-wire-'+str(time.time_ns()))
+        journal.mkdir(mode=0o700)
+        fd=os.open(output,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        save(journal/'request.json',observation_request(value))
+        token=None;api=None;failure=None
         try:
             # Credential/session setup shares the same bounded observation clock.
             with bounded(25):
                 parser=bound_source(value['root'],value['source_ref'],'run-original600-controller.py',value['source_files']['run-original600-controller.py'])
                 client=bound_source(value['root'],value['source_ref'],'cloudbench-original-volume-capture.py',value['source_files']['cloudbench-original-volume-capture.py'])
-                api=client['Fly'](value['app'],parser['token_from_agents'](read(value['agents_env'])))
-                result=observe(api,value)
+                token=parser['token_from_agents'](read(value['agents_env']))
+                api=client['Fly'](value['app'],token)
+                result=observe(api,value,journal)
         except (Exception,RUNNER['Deadline']) as error:
+            failure=failure_details(error,(token,getattr(api,'authorization',None)))
             result=dict(status='TRANSPORT_UNKNOWN',machine=value['machine'],source_ref=value['source_ref'],original_epoch=value['payload']['epoch'],error=type(error).__name__)
+        capture=capture_state(journal)
+        if failure is None and result['status']=='TRANSPORT_UNKNOWN':
+            failure={'error_type':'NativeExecFailure','message':'native exec returned an unsuccessful envelope'}
+        if failure is not None:save(journal/'failure.json',dict(failure,**capture,no_retry=True))
+        save(journal/'complete.json',dict(capture,status=result['status'],request_sha256=digest(read(journal/'request.json')),
+             decoded_response_artifact_present=(journal/'response.json').exists(),failed=failure is not None,no_retry=True,no_fabricated_response=True))
+        result=dict(result,journal=str(journal))
         path=output/('original600-status-'+str(time.time_ns())+'.private.json')
         save(path,dict(observation=result,credential_source=str(value['agents_env']),credential_sha256=value['credential_sha256'],
                        source_ref=value['source_ref'],read_only_guest=True,no_signal=True,no_lifecycle_write=True))

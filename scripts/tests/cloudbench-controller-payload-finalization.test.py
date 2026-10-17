@@ -395,6 +395,100 @@ class Finalizer(unittest.TestCase):
     def test_resumed_monitor_preserves_prior_journal_and_cannot_restart(self):
         self._monitor_case(resumed=True)
 
+    def test_joined_supervisor_waits_for_export_without_reprobing_pid(self):
+        self._monitor_case(resumed=True, delayed_gate=True)
+
+    def test_resumed_joined_supervisor_never_reprobes_retired_pid(self):
+        self._monitor_case(resumed=True, prior_joined=True)
+
+    def test_prior_joined_requires_raw_native_and_terminal_identity(self):
+        with tempfile.TemporaryDirectory() as name:
+            journal = Path(name)
+            machine = {
+                "id": "a" * 14,
+                "instance_id": "old-instance",
+                "config": {},
+                "name": "n",
+                "region": "ord",
+            }
+            state = {
+                "machine_id": machine["id"],
+                "machine": machine,
+                "source_ref": "b" * 40,
+                "epoch": 1,
+            }
+            identity = {
+                "schema": "original600-supervisor-identity-v1",
+                "machine": machine["id"],
+                "source_ref": state["source_ref"],
+                "epoch": 1,
+                "pid": 849,
+                "birth": "proc-start:00000000-0000-0000-0000-000000000000:8291",
+            }
+            terminal = dict(
+                identity,
+                supervisor_joined=True,
+                parent_joined=True,
+                parent_pid=3061,
+                parent_birth=identity["birth"],
+                supervisor_exit_code=-9,
+                epoch_finished=2,
+            )
+            joined = {
+                "state": "JOINED",
+                "identity": identity,
+                "terminal": terminal,
+                "identity_sha256": M["sha"](
+                    (json.dumps(identity, sort_keys=True) + "\n").encode()
+                ),
+            }
+            requests = {
+                "wire-000001": {
+                    "method": "GET",
+                    "path": "/machines/" + machine["id"],
+                    "body": None,
+                },
+                "wire-000002": {
+                    "method": "POST",
+                    "path": "/machines/" + machine["id"] + "/exec",
+                    "body": {},
+                },
+            }
+            response = {
+                "exit_code": 0,
+                "exit_signal": 0,
+                "stderr": "",
+                "stdout": json.dumps(joined),
+            }
+            for stem, value in (("wire-000001", machine), ("wire-000002", response)):
+                raw = json.dumps(value).encode()
+                write(journal / (stem + ".decoded.json"), value)
+                write(
+                    journal / (stem + ".raw.json"),
+                    {
+                        "status": 200,
+                        "body_b64": base64.b64encode(raw).decode(),
+                        "sha256": M["sha"](raw),
+                        "bytes": len(raw),
+                    },
+                )
+            write(journal / "probe-000259.json", joined)
+            files = {p.name: M["sha"](p.read_bytes()) for p in journal.iterdir()}
+            self.assertEqual(
+                M["prior_joined_probe"](state, journal, requests, files), joined
+            )
+            for change in ({"parent_joined": False}, {"machine": "c" * 14}):
+                damaged = dict(joined, terminal=dict(terminal, **change))
+                (journal / "probe-000259.json").write_text(json.dumps(damaged))
+                with self.assertRaises(ValueError):
+                    M["prior_joined_probe"](state, journal, requests, files)
+            (journal / "probe-000259.json").write_text(json.dumps(joined))
+            (journal / "wire-000001.decoded.json").write_text(
+                json.dumps(dict(machine, instance_id="foreign"))
+            )
+            with self.assertRaises(ValueError):
+                M["prior_joined_probe"](state, journal, requests, files)
+
     def test_cleanup_refusal_continuation_preserves_old_intent_and_binds_child_token(
         self,
     ):
@@ -540,7 +634,9 @@ m["main"]()
                 with self.assertRaisesRegex(ValueError, "exact pre-client"):
                     M["credential_refusal"](state, journal, intent)
 
-    def _monitor_case(self, resumed, cleanup_refusal=False):
+    def _monitor_case(
+        self, resumed, cleanup_refusal=False, delayed_gate=False, prior_joined=False
+    ):
         with tempfile.TemporaryDirectory() as name:
             out = Path(name)
             state = {
@@ -558,6 +654,8 @@ m["main"]()
                 write(out / journal_name / "intent.json", {"prior": "immutable"})
                 journal_name = "payload-finalization-resume-" + "a" * 16
                 state["_resume"] = {"journal_name": journal_name, "operator_hashes": {}}
+                if prior_joined:
+                    state["_resume"]["joined_probe"] = {"state": "JOINED"}
                 if cleanup_refusal:
                     state["_resume"]["cleanup_credential_refusal"] = True
                     write(
@@ -610,7 +708,13 @@ m["main"]()
                 "selected_token": lambda _: "FlyV1 exact-bound-token",
             }
             if resumed:
-                replacements["validate_args"] = lambda *_: True
+                checks = []
+
+                def validate_args(*_):
+                    checks.append(1)
+                    return not delayed_gate or len(checks) >= 5
+
+                replacements["validate_args"] = validate_args
             with (
                 mock.patch.dict(G, replacements),
                 mock.patch.dict(
@@ -627,9 +731,17 @@ m["main"]()
                     popen.call_args.kwargs["env"]["FLY_API_TOKEN"],
                     "FlyV1 exact-bound-token",
                 )
-            self.assertEqual(events, ["term", "joined", "release", "retired"])
-            self.assertTrue((out / "payload-finalizer.cancelled.json").exists())
-            self.assertTrue(list((out / journal_name).glob("read-pending-*.json")))
+            self.assertEqual(
+                events,
+                ([] if prior_joined else ["term"]) + ["joined", "release", "retired"],
+            )
+            self.assertEqual(
+                (out / "payload-finalizer.cancelled.json").exists(), not prior_joined
+            )
+            self.assertEqual(
+                bool(list((out / journal_name).glob("read-pending-*.json"))),
+                not prior_joined,
+            )
             if resumed:
                 self.assertEqual(
                     M["obj"](out / "payload-finalization/intent.json"),

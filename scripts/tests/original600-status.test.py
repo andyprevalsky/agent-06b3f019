@@ -522,6 +522,85 @@ class Status(unittest.TestCase):
             def api(inner,*args,**kwargs):return dict(exit_code=1,stderr='fixture failure')
         self.assertEqual(M['observe'](Failed(),value)['status'],'TRANSPORT_UNKNOWN')
 
+    def test_private_wire_precedes_decode_and_no_response_capture_failure_stays_unknown(self):
+        import contextlib
+        import io
+
+        value = M['binding'](self.run)
+        value['source_files'] = {'run-original600-controller.py': '1' * 64,
+                                 'cloudbench-original-volume-capture.py': '2' * 64}
+        calls = []
+        state = {'mode': 'malformed'}
+        token = 'fixture-private-token'
+        test = self
+
+        class CaptureFailure(Exception):
+            pass
+
+        class API:
+            authorization = 'Bearer ' + token
+
+            def __init__(self, app, credential):
+                test.assertEqual(credential, token)
+
+            def api(self, method, path, body, timeout, observer):
+                calls.append((method, path, timeout))
+                if state['mode'] != 'timeout':
+                    raw = b'{malformed complete native response'
+                    observer(method, path, 200, raw)
+                    journals = list(test.run.glob('original600-status-wire-*'))
+                    test.assertTrue(any((journal / 'wire.json').exists() for journal in journals))
+                    return json.loads(raw)
+                raise CaptureFailure('Machines API POST /machines/' + test.mid +
+                                     '/exec failed: The read operation timed out; ' + token)
+
+        def source(_root, _ref, name, _expected):
+            return {'Fly': API} if 'volume-capture' in name else {'token_from_agents': lambda _: token}
+
+        original_save = M['save']
+
+        def partial_save(path, value):
+            if state['mode'] == 'partial' and Path(path).name == 'wire.json':
+                Path(path).write_bytes(b'')
+                Path(path).chmod(0o600)
+                raise OSError('fixture ENOSPC during observer save')
+            original_save(path, value)
+
+        with patch.dict(M['main'].__globals__, binding=lambda *_args: value, bound_source=source, save=partial_save):
+            for mode in ('malformed', 'timeout', 'partial'):
+                state['mode'] = mode
+                malformed = mode == 'malformed'
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    self.assertEqual(M['main'](['--run-dir', str(self.run)]), 1)
+                result = json.loads(stdout.getvalue())
+                self.assertEqual(result['status'], 'TRANSPORT_UNKNOWN')
+                journal = Path(result['journal'])
+                request = json.loads((journal / 'request.json').read_text())
+                self.assertEqual((request['http_timeout'], request['absolute_timeout'], request['outer_timeout']), (20, 25, 30))
+                failure = json.loads((journal / 'failure.json').read_text())
+                complete = json.loads((journal / 'complete.json').read_text())
+                self.assertEqual(complete['response_observed'], malformed)
+                self.assertNotIn(token, stdout.getvalue())
+                self.assertNotIn(token, (journal / 'failure.json').read_text())
+                if malformed:
+                    self.assertEqual(failure['error_type'], 'JSONDecodeError')
+                    self.assertTrue((journal / 'wire.json').exists())
+                elif mode == 'timeout':
+                    self.assertEqual(failure['error_type'], 'CaptureFailure')
+                    self.assertIn('read operation timed out', failure['message'])
+                    self.assertFalse((journal / 'wire.json').exists())
+                    self.assertFalse((journal / 'response.json').exists())
+                else:
+                    self.assertEqual(failure['error_type'], 'OSError')
+                    self.assertTrue(complete['wire_artifact_present'])
+                    self.assertTrue(complete['wire_capture_incomplete'])
+                    self.assertEqual((journal / 'wire.json').read_bytes(), b'')
+                    self.assertFalse((journal / 'response.json').exists())
+                self.assertEqual(journal.stat().st_mode & 0o777, 0o700)
+                self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in journal.iterdir()))
+        self.assertEqual(calls, [('POST', '/machines/' + self.mid + '/exec', 20)] * 3)
+
     def test_local_terminal_or_unpublished_controller_requires_no_credential_or_provider(self):
         (self.run/'controller.identity.json').unlink()
         self.assertEqual(M['binding'](self.run)['mode'],'CONTROLLER_NOT_PUBLISHED')
