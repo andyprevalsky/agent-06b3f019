@@ -3831,6 +3831,22 @@ async def test_payment_cleanup_polls_with_reads_after_one_abandonment_post():
     assert lifecycle_reads == 1
 
 
+def _synthetic_production_stripe_provenance(lifecycle: dict) -> dict:
+    """Complete a synthetic live-shaped test input, never amend the retained native capture.
+
+    The historical JSON predates Stripe mode fields. Its transfer mode does not
+    prove Stripe mode; these explicit fields are invented fixture data only.
+    """
+    from copy import deepcopy
+
+    result = deepcopy(lifecycle)
+    assert result["orgTransfer"]["livemode"] is True
+    result["stripeHold"]["livemode"] = True
+    if isinstance(result.get("stripeRefund"), dict):
+        result["stripeRefund"]["paymentIntentLivemode"] = True
+    return result
+
+
 async def _exercise_owned_payment_reconciliation_caller(
     caller: str,
     outcome: str,
@@ -3862,6 +3878,7 @@ async def _exercise_owned_payment_reconciliation_caller(
     terminal["purchase"]["id"] = purchase_id
     terminal["agentCard"].update({"id": card_id, "status": "CLOSED"})
     terminal["orgTransfer"].update({"id": transfer_id, "cardId": card_id})
+    terminal = _synthetic_production_stripe_provenance(terminal)
     pending = deepcopy(terminal)
     pending["purchase"]["status"] = "HELD"
     pending["walletFunding"]["status"] = "RECLAIMING"
@@ -4204,7 +4221,7 @@ async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
 
 
 async def test_production_agentcard_release_stall_is_skippable_by_default():
-    """Replay the retained live allocation through both deadline owners and CI, without an opt-in."""
+    """Exercise both deadline owners with complete synthetic live-shaped Stripe metadata."""
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
@@ -4212,7 +4229,7 @@ async def test_production_agentcard_release_stall_is_skippable_by_default():
     captured = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
     )
-    lifecycle = captured["lifecycle"]
+    lifecycle = _synthetic_production_stripe_provenance(captured["lifecycle"])
     original = json.dumps(lifecycle, sort_keys=True)
     task = get_task_by_name("agent-payment-production-abandonment")
     for owned in (False, True):
@@ -4252,6 +4269,7 @@ def test_agentcard_release_skip_rejects_independent_lifecycle_failures():
     lifecycle = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
     )["lifecycle"]
+    lifecycle = _synthetic_production_stripe_provenance(lifecycle)
     for section, field, value in (
         ("integrity", "cardCount", 2),
         ("attention", "openKinds", ["payment_approval"]),
@@ -4276,6 +4294,7 @@ async def test_agentcard_cleanup_preserves_the_typed_release_skip():
     lifecycle = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
     )["lifecycle"]
+    lifecycle = _synthetic_production_stripe_provenance(lifecycle)
     with (
         patch.object(bench, "_start_payment_abandonment_with_recovery", AsyncMock(return_value=lifecycle)),
         patch.object(
@@ -4300,6 +4319,7 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
     lifecycle = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
     )["lifecycle"]
+    lifecycle = _synthetic_production_stripe_provenance(lifecycle)
     task = get_task_by_name("agent-payment-production-abandonment")
     for failure in (None, "delete", "archive", "seal"):
         cleanup = AsyncMock(side_effect=ConnectionError("a second financial cleanup must not run"))
@@ -4396,6 +4416,8 @@ def _agentcard_release_stall_lifecycle(**transfer) -> dict:
         cardId=card_id,
     )
     lifecycle["orgTransfer"].update(transfer)
+    if transfer.get("livemode") is True:
+        lifecycle = _synthetic_production_stripe_provenance(lifecycle)
     lifecycle["stripeRefund"] = None
     return lifecycle
 

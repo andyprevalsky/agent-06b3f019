@@ -6,7 +6,7 @@ B=Path(__file__).parent; A=B.parents[1]
 sys.path[:0]=[str(A/'tests/blackbox'),str(A)]
 import _test_utils
 spec=importlib.util.spec_from_file_location('owning_browser_tests', A/'tests/blackbox/spawn_browser_agent_v3.blackbox.py');tests=importlib.util.module_from_spec(spec);spec.loader.exec_module(tests)
-async def _pipeline(native, origin, *, unknown=False):
+async def _pipeline(native, origin, *, unknown=False, workflow_root_mode=None):
  from helpers.handle_tool_event import handle_tool_event
  async def serialized_event(event):
   calls=[]
@@ -39,20 +39,44 @@ async def _pipeline(native, origin, *, unknown=False):
    async def finished():return actual
    return finished().__await__()
  wf=SimpleNamespace(user_id='user-1',agent_id='agent-1',is_paused=False,write_lock_enabled=True,system_name='Rose',_signal_responses={},_response_schema_feedback=[],_update_tree_state=AsyncMock())
+ api_row={'status':'ACTIVE'};park_status={}
+ if workflow_root_mode is not None:
+  from workflows.agent_workflow import AgentWorkflow
+  from types import MethodType
+  wf.bus_id='test-owned-bus' if workflow_root_mode=='bus' else None
+  wf._cost_limit_reached=False;wf._has_credits=True;wf.tools_in_use=[];wf.subtree_cost_cents=0;wf.output_schema=None;wf.parent_agent_id=None;wf.goal='Read my member number';wf.message_count=1
+  wf._update_tree_state=MethodType(AgentWorkflow._update_tree_state,wf)
+  async def persist_tree(_fn,**kwargs):
+   assert wf.bus_id=='test-owned-bus'
+   api_row['status']=kwargs['args'][3]['status']
+  actual_tree_activity=AsyncMock(side_effect=persist_tree)
+ else:actual_tree_activity=AsyncMock()
+ park_ready=asyncio.Event();release_wait=asyncio.Event()
+ async def owned_wait(*args,**kwargs):
+  if args and args[0]():return
+  park_status.update(api_row);park_ready.set();await release_wait.wait()
  events=[]
- with patch('domains.spawn_browser_agent_v3.handler.workflow.start_activity',return_value=Handle()), patch('domains.spawn_browser_agent_v3.handler.workflow.wait_condition',AsyncMock()):
+ with patch('workflows.agent_workflow.workflow.execute_activity',actual_tree_activity), patch('domains.spawn_browser_agent_v3.handler.workflow.start_activity',return_value=Handle()), patch('domains.spawn_browser_agent_v3.handler.workflow.wait_condition',AsyncMock(side_effect=owned_wait) if workflow_root_mode is not None else AsyncMock()):
   gen=SpawnBrowserAgentManagerV3().execute_tool(wf,{'goal':'Read my member number'},'tool-1')
   try:
    async for event in gen:
     events.append(event)
     if (event.metadata or {}).get('requestUserAuthentication'):break
-   wf._signal_responses['request-1']='The user signed in'
-   resume_event=await gen.__anext__()
+   if workflow_root_mode is not None:
+    pending=asyncio.create_task(gen.__anext__());await asyncio.wait_for(park_ready.wait(),5)
+    assert wf.is_paused is True
+    assert park_status['status']==('PAUSED' if workflow_root_mode=='bus' else 'ACTIVE')
+    assert actual_tree_activity.await_count==(1 if workflow_root_mode=='bus' else 0)
+    wf._signal_responses['request-1']='The user signed in';release_wait.set();resume_event=await pending
+   else:
+    wf._signal_responses['request-1']='The user signed in'
+    resume_event=await gen.__anext__()
   finally:await gen.aclose()
  parked=next(e for e in events if (e.metadata or {}).get('requestUserAuthentication'))
  import httpx
  original_client=httpx.AsyncClient
  wire=json.loads((B/'fixtures/agent_park_wire.json').read_text())
+ if workflow_root_mode is not None:wire['agent']['status']=park_status['status']
  def transport(request):
   assert request.url.path=='/api/agents/agent-1'
   return httpx.Response(200,json=wire)
@@ -66,6 +90,17 @@ async def _pipeline(native, origin, *, unknown=False):
    from benchmarks.benchmark_tasks import get_task_by_name
    await rb._hydrate_auth_test_site_evidence(data,'http://127.0.0.1:1',task=get_task_by_name('browser-auth-all-options-fail-assistance'))
  finally:auth_test_site.set_active_manifest(None)
+ if workflow_root_mode is not None and not unknown:
+  req={'id':'request-1','agentId':'agent-1','metadata':{'attentionKind':'auth_assistance'}}
+  stats={'total_messages':0,'agent_count':1,'total_cost_cents':0,'all_agents':[],'failed_count':0,'active_count':1}
+  snapshots=AsyncMock(side_effect=[data,asyncio.CancelledError()]);auth_test_site.set_active_manifest({'siteId':'local-owned','entryUrl':origin+'/site/local-owned/','realm':'shop.example'})
+  try:
+   with patch.object(rb,'get_agent',snapshots),patch.object(rb,'get_attention_requests',AsyncMock(return_value=[req])),patch.object(rb,'_fetch_tree_stats',AsyncMock(return_value=stats)),patch.object(rb,'_current_benchmark_user_id',return_value='user-1'),patch.object(rb.asyncio,'sleep',AsyncMock()):
+    try:waited,observed,resolved,poll_error=await rb._poll_agent('http://127.0.0.1:1','agent-1',get_task_by_name('browser-auth-all-options-fail-assistance'))
+    except asyncio.CancelledError:raise AssertionError('OWNING RED: valid task-owned park rejected by normal poll with global '+park_status['status']) from None
+   assert snapshots.await_count==1 and observed==1 and resolved==0 and poll_error is None
+   assert auth_test_site.evaluate_outcome({'expect':'no_session','left_on_sign_in_form':True},waited['_benchmark']['auth_test_site'] if 'auth_test_site' in waited['_benchmark'] else data['_benchmark']['auth_test_site'],'')[0]
+  finally:auth_test_site.set_active_manifest(None)
  out={'activity_status':actual['status'],'activity_has_native_park_observation':'browser_page_observation' in actual,'manager_has_native_park_observation':'browser_page_observation' in parked.metadata,'raw_hosted_report':data['_benchmark']['auth_test_site']['report'],'measurement':data['_benchmark']['auth_test_site'].get('browser_page_observation'),'scope':'Actual activity/detach helper and manager/hydration with fake external edges; actual DOM native target-cache reader populated from real owned Chromium CDP selected target; no real provider'}
  print(json.dumps(out))
  assert out['activity_has_native_park_observation'],'OWNING RED: actual parked activity result loses native focused-page observation before manager/hydration'
@@ -88,6 +123,13 @@ async def _pipeline(native, origin, *, unknown=False):
  from benchmarks.parked_browser_page import parked_page_observation
  import copy
  manifest={'siteId':'local-owned','entryUrl':origin+'/site/local-owned/'}
+ for status in ['COMPLETED','FAILED','ERROR','CANCELLED','ABORTED','UNKNOWN',None,'',True,[],{}]:
+  terminal=copy.deepcopy(data);terminal['agent']['status']=status
+  assert parked_page_observation(terminal,manifest,'user-1') is None,status
+ missing_status=copy.deepcopy(data);missing_status['agent'].pop('status')
+ assert parked_page_observation(missing_status,manifest,'user-1') is None
+ active_without_park=copy.deepcopy(data);active_without_park['agent']['status']='ACTIVE';active_without_park['messages'][0]['metadata'].pop('browser_page_observation')
+ assert parked_page_observation(active_without_park,manifest,'user-1') is None
  for key,value in [('agent_id','foreign'),('user_id','foreign'),('task_id','foreign'),('session_id','foreign'),('request_id','foreign'),('phase','report_time'),('path','/foreign/login'),('path','{{secret:old-url}}'),('origin','http://foreign.invalid'),('target_id','')]:
   bad=copy.deepcopy(data);bad['messages'][0]['metadata']['browser_page_observation'][key]=value
   assert parked_page_observation(bad,manifest,'user-1') is None,key
@@ -159,7 +201,7 @@ async def _pipeline(native, origin, *, unknown=False):
  assert parked_page_observation(missing_id,manifest,'user-1') is None
  print('PIPELINE_AND_BINDING_AND_READINESS_AND_PRIVACY_CONTROLS_PASS')
 
-async def run_pipeline():
+async def run_pipeline(*, workflow_root_mode=None):
  from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
  import threading
  from playwright.async_api import async_playwright
@@ -182,10 +224,10 @@ async def run_pipeline():
     home=await context.new_page();await home.goto(origin+'/site/local-owned/');await login.bring_to_front()
     cdp=await context.new_cdp_session(login);native=(await cdp.send('Target.getTargetInfo'))['targetInfo'];await cdp.detach()
     assert native['url']==login.url
-    await _pipeline(native,origin)
+    await _pipeline(native,origin,workflow_root_mode=workflow_root_mode)
     await login.goto(origin+'/site/local-owned/login/private-query-token')
     cdp=await context.new_cdp_session(login);path_secret=(await cdp.send('Target.getTargetInfo'))['targetInfo'];await cdp.detach()
-    await _pipeline(path_secret,origin,unknown=True)
+    await _pipeline(path_secret,origin,unknown=True,workflow_root_mode=workflow_root_mode)
    finally:await browser.close()
  finally:server.shutdown();server.server_close();thread.join(timeout=5);assert not thread.is_alive()
 

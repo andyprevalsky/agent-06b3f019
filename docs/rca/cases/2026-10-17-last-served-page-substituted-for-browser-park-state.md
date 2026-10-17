@@ -220,3 +220,108 @@ Measure the task-owned parked browser state from its bound native observation, k
 ## Subsequent input-scope correction
 
 Append after the frozen RCA draft when batching: a subsequent input-scope review found the initial candidate added pending attention rows to all polls and null page measurement to all auth hydrations, which compact semantic-judge state would carry. The scoped successor gates both on the unchanged declared left_on_sign_in_form criterion, passing the existing task at both hydration callers. The new normal poll/compact control is RED on the predecessor and GREEN on original/scoped runtime; final explicit/default unrelated hydration absence and unchanged real measurement pipeline pass. Final full auth20/0 + structural4/0; handler/DOM and passing browser804 bytes unchanged. This is a scope correction, not native-after or whole-prompt parity proof. Preserve earlier candidate/proofs and original FAIL576.
+
+
+## Native-after recurrence: task-owned park versus aggregate root status
+
+This entry preserves the complete original `00a422e` case prefix/status and its
+historical failures. It supersedes only the earlier pending-native-after wording
+with new evidence; neither the old FAIL576 nor this new failure becomes a PASS.
+Two archive searches (`parked browser root ACTIVE PAUSED receipt` and `last served
+page park state measurement lifecycle`) and this case's Solution/Human feedback
+identified the same measurement-readiness boundary, so no duplicate case is added.
+
+### Actual outcome and preserved terminal chronology
+
+On source `00a422e282511a7796aa60fccc463d8868e73b2c`, unchanged task
+`browser-auth-all-options-fail-assistance`, group
+`52181983-e5a6-4530-a897-289b920aad27`, root
+`afd1f1cd-b45d-40b7-b742-c1c957f000ea`, failed in **1068.4s**. The trigger was
+TREE STALL: root ACTIVE, 159 messages, silent/cost-idle525s, threshold510s and
+one nonterminal leaf. It was not the original1200s task deadline.
+
+The final real handoff judge scored1.0. The manager published an auth-assistance
+TOOL at07:01:10.766; background browser cleanup finished07:01:11.413. Worker
+state remained globally ACTIVE until the harness PAUSE at07:10:10.504. The last
+credential classifier had completed output under `extra.output`; its absent
+top-level output was not a stuck model call. No prompt or identity inference
+explains away this lifecycle evidence.
+
+The genuine saved export is50,493,965bytes/SHA256
+`82bd27a8c04624d4676d42005007cb4511f058bf934331c31f690ac892124054`.
+Only the failed first task's values were parsed. Message157 carries an actual
+native PARK-TIME `/login/code/verify` record bound to root/user/task/session/
+request/target/parent toolCallId. Message158 is a background recording under a
+**different** call. Message159 at07:10:10.600 is the harness-induced
+`task_complete` ERROR under the **same** parent call. That terminal event MUST
+invalidate a current parked measurement. No event was removed, earlier metadata
+prepended, scalar overwritten or native verdict regraded.
+
+The export reports one attention triggered and zero resolved. Its exported
+`created_at` representation has no USER/TOOL ordering violations. A fresh
+pre-pause pending-request API snapshot is not retained. Thus the park record is
+now observed, but complete as-of consumer validity and **sole native causality
+remain qualified**. The final post-pause dataset correctly supplies no current
+park. Signup221.3s and checkout311.0s passed on this same `00a` run; those results
+do not verify the subsequent measurement correction.
+
+### First bad local contract and bounded correction
+
+`parked_page_observation` rejected any global agent status other thanPAUSED before
+examining task-owned proof. The manager sets internal `workflow.is_paused` and
+calls `_update_tree_state(status="PAUSED")`; the real workflow method returns
+without persistence when `bus_id` is absent. A legitimate waiting root can
+therefore remain globally ACTIVE while its exact browser task is parked.
+The previous permanent pipeline replaced that state owner with AsyncMock and
+supplied a static PAUSED API fixture. It never exercised this root lifecycle.
+
+The new registered owner uses actual local Chromium target information, the
+actual activity/detach helper, manager, event serializer, real no-bus/bus workflow
+state method, API-shaped `get_agent` MockTransport, normal poll, hydration and
+unchanged evaluator. No-bus produces zero persistence calls/ACTIVE; bus-backed
+state emits PAUSED through the mocked external persistence edge. The real wait
+is reached before capturing that state. This remains a controlled local
+integration, not a live Temporal/backend/provider or full browser-use run.
+
+On the exact final test bytes, original runtime fails:
+`OWNING RED: valid task-owned park rejected by normal poll with global ACTIVE`.
+Candidate patchSHA256
+`34409b0389ae867ef628e9ee4e9167ccac1eb074c83364de7dc9568848f5a1c2`
+changes one membership predicate plus its comment: allow exact ACTIVE/PAUSED
+aggregate statuses, then require ALL existing native task-owned park/pending/
+latest-call/privacy/site checks. No global status is changed. Missing, unknown,
+failed, terminal, cancelled and nontyped root states still reject. ACTIVE without
+bound proof also rejects; foreign, absent/answered request, resumed, fenced,
+later USER, closed-target and tied-order negatives remain intact.
+
+The same owning assertion passes. Full registered auth owner: **21PASS/0FAIL,
+7.80s, EXIT0**; normal structural script: **4 suites, EXIT0**. All137 original
+auth and43 fixture assertion ASTs remain in order; the3354-assert browser module,
+handler, DOM and Rose actor bytes are unchanged. Five exact-owned loopback ports
+closed and zero nonowned Python guard attempts were observed. Browser OS
+background networking was not independently instrumented. An initial wait mock
+incorrectly blocked an already-done activity; that invalid setup's graceful
+SIGINT/exit130 and every earlier attempt remain, not counted as the owning RED.
+Independent source peer and root accepted this bounded candidate, not a native
+repair claim.
+
+No handler/DOM producer, LLM policy, model/schema/task/prompt, criterion, deadline,
+stall threshold or recovery/terminal behavior changed. Existing measurement
+inputs may now become usable; whole effective-input parity is not claimed.
+The exact unchanged canonical task must still pass on a new frozen source after
+integration. Full30 and deployment gates remain required; status remains OPEN.
+
+### Recurrence receipts and commands
+
+Private packet:
+`.context/auth-deploy/repair-native-failed3-00a422e-20261017/all-options-stall-rca/`.
+`actual-first-task-capture.json` binds the genuine export/first-task bytes;
+`export-followthrough.json` records157/158/159 without changing their order.
+Under `owning-root-lifecycle/`, `final-proof.json` SHA256
+`8ae356944f17d08064f3b33c3518d48537587d1f197a4c61cc0ef3322757bea2`
+binds final source/test/log/cleanup artifacts and preserved setup attempts.
+Executed before/after selector was the private `run-owning.py --selected` using
+the existing verification venv; final normal owner was `run-owning.py`, and
+structural was `bash scripts/tests/agents-structural.test.sh` with that interpreter.
+No tests/calls were repeated for this docs amendment. No active source, refs,
+index, native histories, Freedom or protected instructions were modified.

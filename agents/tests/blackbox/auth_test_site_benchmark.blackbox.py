@@ -1291,6 +1291,11 @@ async def test_park_time_native_observation_survives_activity_manager_and_hydrat
     from auth_park_measurement_fixture import run_pipeline
     await run_pipeline()
 
+async def test_root_park_measurement_uses_real_workflow_state_owner():
+    from auth_park_measurement_fixture import run_pipeline
+    for mode in ('no_bus', 'bus'):
+        await run_pipeline(workflow_root_mode=mode)
+
 async def test_unrelated_tasks_do_not_acquire_park_measurement_judge_inputs():
     from auth_park_measurement_fixture import check_unrelated_task_measurement_input_absence
     await check_unrelated_task_measurement_input_absence()
@@ -1298,6 +1303,7 @@ async def test_unrelated_tasks_do_not_acquire_park_measurement_judge_inputs():
 async def run_all_tests():
     print("auth-test-site-benchmark blackbox tests:")
     runner = BlackboxResult()
+    await runner.record_async("root_park_measurement_uses_real_workflow_state_owner", test_root_park_measurement_uses_real_workflow_state_owner)
     await runner.record_async(
         "unrelated_tasks_do_not_acquire_park_measurement_judge_inputs",
         test_unrelated_tasks_do_not_acquire_park_measurement_judge_inputs,

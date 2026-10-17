@@ -11,7 +11,8 @@ def measurement_required(task):
 
 def parked_page_observation(data, manifest, user_id):
     agent = data.get("agent") or {}
-    if agent.get("status") != "PAUSED" or not manifest:
+    # Aggregate root status can stay ACTIVE while its exact browser task is parked.
+    if agent.get("status") not in ("ACTIVE", "PAUSED") or not manifest:
         return None
     requests = (data.get("_benchmark") or {}).get("pending_attention_requests") or []
     pending = {row.get("id") for row in requests if isinstance(row, dict)

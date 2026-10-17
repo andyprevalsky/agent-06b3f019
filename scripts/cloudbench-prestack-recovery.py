@@ -266,6 +266,28 @@ RECIPE_PATHS = (
 )
 
 
+
+def recipe_paths(root: Path, ref: str) -> tuple[str, ...]:
+    """Keep historical closures exact; bind the optional new executable by Git ref."""
+    path = "scripts/ensure-playwright-browsers.py"
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-tree", "-z", ref, "--", path],
+        capture_output=True, timeout=15,
+    )
+    if result.returncode:
+        raise ValueError("bound optional executable lookup failed")
+    if not result.stdout:
+        return RECIPE_PATHS
+    rows = result.stdout.split(b"\0")
+    if len(rows) != 2 or rows[-1] or b"\t" not in rows[0]:
+        raise ValueError("unsafe optional executable tree entry")
+    metadata, name = rows[0].split(b"\t", 1)
+    mode, kind, oid = metadata.split()
+    if name != path.encode() or mode not in (b"100644", b"100755") or kind != b"blob":
+        raise ValueError("optional executable must be a regular committed blob")
+    return (*RECIPE_PATHS, path)
+
+
 def native_recipe(meta: dict[str, str], config: dict) -> tuple[str, str, str]:
     if (
         not isinstance(config, dict)
@@ -320,7 +342,7 @@ def native_recipe(meta: dict[str, str], config: dict) -> tuple[str, str, str]:
             raise ValueError("bound source blob is unavailable")
         return result.stdout
 
-    expected = {path: sha(blob(path)) for path in RECIPE_PATHS}
+    expected = {path: sha(blob(path)) for path in recipe_paths(root, ref)}
     injected = {}
     for item in config.get("files", []):
         if (
@@ -444,7 +466,7 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
     result = native_recipe(meta, config)
     ref = result[0]
     expected = {}
-    for path in RECIPE_PATHS:
+    for path in recipe_paths(Path(meta["workspace_root"]), ref):
         blob = subprocess.run(["git", "-C", meta["workspace_root"], "show", f"{ref}:{path}"],
                               capture_output=True, timeout=15)
         if blob.returncode or len(blob.stdout) > 67108864:
