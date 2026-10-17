@@ -4,8 +4,10 @@
 import copy
 import json
 import runpy
+import signal
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -162,6 +164,136 @@ class Reconcile(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 M["validate_handoff"](result["archive"])
+
+    def test_observe_acknowledged_holds_adds_only_fresh_exact_ack_without_config_post(
+        self,
+    ):
+        f = self.f
+        request = f.original
+        request["task_names"] = f.request["task_names"]
+        closed = dict(
+            request,
+            candidates=[],
+            held_native_reservations=[
+                {"machine_id": f.mid, "not_credited": True, "error": "old failure"}
+            ],
+        )
+        # validate_request requires a nonempty closed pool; keep one unchanged
+        # already-credited fixture and one distinct held raw-ACK candidate.
+        other = copy.deepcopy(f.request["candidates"][0])
+        other["machine_id"] = "bbbbccccddddee"
+        other["volume_id"] = "vol_other"
+        other_original = copy.deepcopy(f.original["candidates"][0])
+        other_original.update(
+            machine_id=other["machine_id"], volume_id=other["volume_id"]
+        )
+        request["candidates"].append(other_original)
+        closed["candidates"] = [other]
+        base = f.outer / "archived-reuse-reservations"
+        OLD["write"](base / "reserved-request.json", closed)
+        OLD["write"](
+            f.outer / "archived-reuse-original.private.json",
+            {
+                "request": request,
+                "sha256": H["sha"](
+                    json.dumps(request, sort_keys=True, allow_nan=False).encode()
+                ),
+            },
+        )
+        deadline = time.time() + 120
+        OLD["write"](
+            f.outer / "admission-intent.private.json",
+            {"started_at_epoch": deadline - 5400, "deadline_epoch": deadline},
+        )
+        calls = []
+
+        class API:
+            @contextmanager
+            def lease(self, mid):
+                calls.append(("lease", mid))
+                try:
+                    yield
+                finally:
+                    calls.append(("released", mid))
+
+            def request(self, method, path, **kwargs):
+                calls.append((method, path))
+                self_test.assertEqual(method, "GET")
+                return copy.deepcopy(f.current)
+
+        self_test = self
+        before = (base / "reserved-request.json").read_bytes()
+        result = M["observe_acknowledged_holds"](
+            lambda _: API(),
+            request,
+            closed,
+            base / "acknowledged-holds-observation",
+            deadline,
+        )
+        self.assertEqual(len(result["candidates"]), 2)
+        self.assertEqual(result["candidates"][0], other)
+        self.assertEqual(result["held_native_reservations"], [])
+        self.assertEqual((base / "reserved-request.json").read_bytes(), before)
+        self.assertEqual(
+            calls,
+            [("lease", f.mid), ("GET", "/machines/" + f.mid), ("released", f.mid)],
+        )
+        again = M["observe_acknowledged_holds"](
+            lambda _: (_ for _ in ()).throw(AssertionError("no replay")),
+            request,
+            closed,
+            base / "acknowledged-holds-observation",
+            deadline,
+        )
+        self.assertEqual(again, result)
+        added_unknown = base / f.mid / "unknown-native-request.json"
+        OLD["write"](added_unknown, {"unknown": True})
+        with self.assertRaises(ValueError):
+            M["observe_acknowledged_holds"](
+                lambda _: API(),
+                request,
+                closed,
+                base / "acknowledged-holds-observation",
+                deadline,
+            )
+        added_unknown.unlink()
+
+        # Failed fresh observation remains held, and lease release is joined.
+        class Drift(API):
+            def request(self, *_args, **_kwargs):
+                return dict(f.current, instance_id="foreign")
+
+        denied = M["observe_acknowledged_holds"](
+            lambda _: Drift(), request, closed, base / "negative-observation", deadline
+        )
+        self.assertEqual(denied["candidates"], [other])
+        self.assertEqual(
+            denied["held_native_reservations"], closed["held_native_reservations"]
+        )
+
+        class Cancel(API):
+            def request(self, *_args, **_kwargs):
+                signal.raise_signal(signal.SIGTERM)
+                return copy.deepcopy(f.current)
+
+        cancel_journal = base / "cancel-observation"
+        with self.assertRaises(M["_OBSERVER"]["AdmissionObservationCancelled"]):
+            M["observe_acknowledged_holds"](
+                lambda _: Cancel(), request, closed, cancel_journal, deadline
+            )
+        receipt = json.loads((cancel_journal / "complete.json").read_bytes())
+        self.assertEqual(receipt["cancelled_signals"], [signal.SIGTERM])
+        self.assertEqual(receipt["added_machine_ids"], [])
+        with self.assertRaises(ValueError):
+            M["observe_acknowledged_holds"](
+                lambda _: API(), request, closed, cancel_journal, deadline
+            )
+        incomplete = base / "incomplete-observation"
+        incomplete.mkdir()
+        with self.assertRaises(FileNotFoundError):
+            M["observe_acknowledged_holds"](
+                lambda _: API(), request, closed, incomplete, deadline
+            )
 
     def test_unexpired_launch_drift_or_unjoined_refusal_denies_next_admission(self):
         outer, value, inventory, expiry = self.expired_fixture()

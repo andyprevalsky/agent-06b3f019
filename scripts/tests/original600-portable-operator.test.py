@@ -510,7 +510,7 @@ class Portable(unittest.TestCase):
                   tasks=private(directory/'tasks',tasks),facts=private(directory/'facts',
                   dict(app='navi-whisper-lux-bench',image_ref='fixture@sha256:'+'b'*64,protected_machines=['p1','p2','p3','p4'],protected_volumes=['v1'])))
             candidates=[{'machine_id':'candidate-'+str(i)} for i in range(375)]
-            private(before/'archived-reuse-request.private.json',{'candidates':candidates})
+            private(before/'archived-reuse-request.private.json',{'candidates':candidates,'archives':[]})
             machines=[{'id':row['machine_id'],'config':{'image':'fixture@sha256:'+'b'*64},'reserved':True} for row in candidates]
             machines[0]['_fixture_padding']='x'*(17*1024*1024)
             private(before/'navi-whisper-lux-bench.private.json',machines)
@@ -550,6 +550,67 @@ class Portable(unittest.TestCase):
             with patch.object(CLI,'reuse_module',return_value=helper),self.assertRaisesRegex(ValueError,'task manifest'):
                 CLI.reserve_reuse_capacity(None,'fixture',args,RUNNER,directory,before,{'available_slots_conservative':600})
             self.assertEqual(events,['reserve','fresh-read','verify-reserved'])
+
+    def test_acknowledged_hold_readback_precedes_final_capacity_without_rewriting_closed_request(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory=Path(name);before=directory/'before';before.mkdir()
+            tasks=json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())
+            image='fixture@sha256:'+'b'*64
+            args=argparse.Namespace(source_ref='a'*40,org='personal',extra_destroying_count=1,
+                tasks=private(directory/'tasks',tasks),facts=private(directory/'facts',{
+                    'app':'navi-whisper-lux-bench','image_ref':image,
+                    'protected_machines':['p1','p2','p3','p4'],'protected_volumes':['v1']}))
+            candidates=[{'machine_id':'candidate-'+str(i)} for i in range(375)]
+            private(before/'archived-reuse-request.private.json',{'candidates':candidates,'archives':[]})
+            machines=[{'id':row['machine_id'],'config':{'image':image}} for row in candidates]
+            private(before/'navi-whisper-lux-bench.private.json',machines)
+            events=[];epoch=time.time();closed_bytes=[]
+            def reserve(factory,request,journal):
+                events.append('reserve-joined')
+                journal.mkdir()
+                closed=dict(request,candidates=[dict(row,reservation={'cohort':'fixture'})
+                    for row in candidates[:-1]],held_native_reservations=[candidates[-1]['machine_id']])
+                path=private(journal/'reserved-request.json',closed)
+                closed_bytes.append(path.read_bytes())
+                return closed
+            def observe(factory,request,closed,journal,deadline):
+                events.append('observe-held')
+                self.assertEqual(journal,directory/'archived-reuse-reservations'/'acknowledged-holds-observation')
+                self.assertEqual(deadline,epoch+5400)
+                self.assertEqual(closed['held_native_reservations'],[candidates[-1]['machine_id']])
+                self.assertEqual(request['task_names'],tasks)
+                return dict(closed,candidates=closed['candidates']+[dict(candidates[-1],
+                    reservation={'cohort':'fixture','observed_after_original_failure':True})],
+                    held_native_reservations=[])
+            def snapshot(*parameters):
+                events.append('fresh-all-apps')
+                private(parameters[3]/'navi-whisper-lux-bench.private.json',machines)
+                return {'available_slots_conservative':582,'ended_epoch':time.time()}
+            def demand(request,inventory,protected,*,require_reserved=False):
+                events.append('verify-all-credited')
+                self.assertTrue(require_reserved)
+                self.assertEqual(len(request['candidates']),375)
+                self.assertTrue(request['candidates'][-1]['reservation']['observed_after_original_failure'])
+                return {'qualified_reuse_count':375,'new_machine_demand':226}
+            helper={'validate_request':lambda *unused:None,'reserve_cohort':reserve,
+                'capacity_demand':demand,'NativeAdapter':lambda connection,journal:connection}
+            original_loader=CLI.runpy.run_path
+            def load(path,*args,**kwargs):
+                if Path(path).name=='cloudbench-reconcile-reservations.py':
+                    return {'observe_acknowledged_holds':observe}
+                return original_loader(path,*args,**kwargs)
+            with patch.object(CLI,'reuse_module',return_value=helper), \
+                 patch.object(CLI,'capacity_snapshot',side_effect=snapshot), \
+                 patch.object(CLI.runpy,'run_path',side_effect=load):
+                result=CLI.reserve_reuse_capacity(lambda *unused:object(),'fixture',args,RUNNER,
+                    directory,before,{'available_slots_conservative':582},epoch)
+            self.assertEqual(events,['reserve-joined','observe-held','fresh-all-apps','verify-all-credited'])
+            self.assertEqual((directory/'archived-reuse-reservations'/'reserved-request.json').read_bytes(),closed_bytes[0])
+            derivative=json.loads((directory/'archived-reuse-request.private.json').read_text())
+            self.assertEqual(len(derivative['candidates']),375)
+            self.assertEqual(derivative['held_native_reservations'],[])
+            self.assertEqual(result['reservation_request_sha256'],CLI.digest(
+                (directory/'archived-reuse-request.private.json').read_bytes()))
 
     def test_explicit_complete_github_sources_and_process_precedence_before_launch(self):
         with tempfile.TemporaryDirectory() as name:

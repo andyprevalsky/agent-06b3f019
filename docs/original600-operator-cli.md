@@ -144,9 +144,18 @@ credit.
 
 An individual reservation failure is retained as a held, uncredited candidate;
 it does not cancel unrelated reservations. The closed plan contains only
-confirmed reservations, and its uncertain candidates are never assigned or
-replayed. The final fresh capacity check still requires every remaining new
-Machine slot. Cancellation stops queued work and joins active operations;
+confirmed reservations. After those workers join, the same admission makes one
+bounded observation pass over held rows with a verified successful raw update
+ACK. It acquires a fresh lease and reads the exact acknowledged incarnation and
+configuration; it never sends another configuration update. Only a matching
+inactive readback followed by successful lease release adds capacity credit.
+Unknown, unsuccessful or missing update ACKs remain held. The original closed
+plan and failures stay unchanged; a separate observation journal records the
+derived request. An incomplete observation journal cannot be replayed.
+
+The observation pass retains the original admission deadline and propagates
+cancellation after releasing its owned lease. The final fresh capacity check
+still requires every remaining new Machine slot. Cancellation stops queued work and joins active operations;
 a prepared intent can resume only with its exact durable proof that dispatch
 did not begin. Unknown dispatched writes remain held.
 

@@ -31,6 +31,7 @@ PINS = [
     'cloudbench-unused-reservations.py',
     'cloudbench-parked-reservations.py',
     'cloudbench-reconcile-reservations.py',
+    'cloudbench-observe-reservations.py',
     'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',
     'lib/cloudbench-archived-reuse.sh', 'run-bench-fleet', 'run-bench-cloud',
 ]
@@ -316,7 +317,7 @@ def seal_expired_handoffs(request, directory, runner):
             raise ValueError('expired admission already assigned to another successor')
 
 
-def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directory, cap):
+def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directory, cap, started_at=None):
     """Reserve existing identities before crediting them; retain journals across resume."""
     helper=reuse_module()
     request_path=directory/'archived-reuse-original.private.json'
@@ -346,6 +347,12 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
         return helper['NativeAdapter'](connection,journal/'wire')
     with joined_admission_signals():
         reserved=helper['reserve_cohort'](adapter,request,directory/'archived-reuse-reservations')
+        if reserved.get('held_native_reservations'):
+            if started_at is None:
+                raise ValueError('original admission epoch required for held readback')
+            observer=runpy.run_path(str(Path(__file__).with_name('cloudbench-reconcile-reservations.py')))
+            reserved=observer['observe_acknowledged_holds'](adapter,request,reserved,
+                directory/'archived-reuse-reservations'/'acknowledged-holds-observation',started_at+5400)
     refreshed=directory/('capacity-after-reservation-'+str(time.time_ns()))
     refreshed.mkdir(mode=0o700)
     with runner['bounded'](110):
@@ -739,7 +746,7 @@ def main():
                 cap=capacity(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count,args.archive_run,args.source_ref,args.reuse_exclude_machine,
                              facts_from(runner['read'](args.facts))['image_ref'],args.unused_reservation_run,args.parked_reservation_run,args.expired_reservation_run)
         if args.archive_run:
-            cap=reserve_reuse_capacity(capture['Fly'],token,args,runner,directory,snapshot,cap)
+            cap=reserve_reuse_capacity(capture['Fly'],token,args,runner,directory,snapshot,cap,started_at)
             launch_directory=directory/('launch-'+str(time.time_ns()))
             launch_directory.mkdir(mode=0o700)
             runner['save'](launch_directory/'archived-reuse-request.private.json',json.loads(runner['read'](directory/'archived-reuse-request.private.json')))

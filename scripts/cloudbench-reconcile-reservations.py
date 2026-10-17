@@ -561,3 +561,15 @@ def validate_handoff(archive):
         "expired admission acquired launch artifacts",
     )
     return True
+
+
+_OBSERVER = runpy.run_path(
+    str(HERE / "cloudbench-observe-reservations.py"),
+    init_globals={
+        "CONTRACT": {
+            key: globals()[key]
+            for key in ("H", "R", "need", "sha", "canonical", "config_sha", "positive")
+        }
+    },
+)
+observe_acknowledged_holds = _OBSERVER["observe_acknowledged_holds"]
