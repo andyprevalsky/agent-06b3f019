@@ -125,6 +125,63 @@ def fixture(count=1):
 
 
 class Tests(unittest.TestCase):
+    def test_allocate_releases_full_cohort_before_held_lease_without_changing_proof(self):
+        import tracemalloc
+
+        request, _, successor = fixture(555)
+        request["task_names"] = json.loads(
+            (Path(__file__).parent / "fixtures/original600-tasks.json").read_bytes()
+        )
+        for row in request["candidates"]:
+            row["reservation"] = {"cohort": request["cohort"]}
+        successor.update(task=request["task_names"][0], campaign_job_id="r001-j0001",
+                         campaign_total_jobs=600, campaign_attempt=1)
+        golden = H["canonical"](H["proof_for"](request, request["candidates"][0], successor))
+        measured = {}
+        test = self
+
+        class HeldLease(Exception):
+            pass
+
+        class API:
+            @contextmanager
+            def lease(self, _mid):
+                measured["retained_traced_bytes"] = tracemalloc.get_traced_memory()[0]
+                exclusion = json.loads((root / "archived-reuse-journal/source-exclusion.json").read_bytes())
+                test.assertEqual(H["canonical"](exclusion["proof"]), golden)
+                raise HeldLease()
+                yield
+
+        original_module = H["module"]
+        factory = mock.Mock(return_value=API())
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            path = root / "request.json"
+            raw = H["canonical"](request)
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            original_sha = H["sha"](raw)
+            with mock.patch.dict(H["allocate"].__globals__, NativeAdapter=factory,
+                module=lambda name: {"Fly": lambda *_: None} if name == "cloudbench-original-volume-capture.py" else original_module(name)):
+                tracemalloc.start()
+                try:
+                    with self.assertRaises(HeldLease):
+                        H["allocate"](path, original_sha, 0, successor, root, "no-provider")
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(measured["retained_traced_bytes"], len(raw))
+                factory.reset_mock()
+                with self.assertRaisesRegex(ValueError, "request bytes changed"):
+                    H["allocate"](path, "0" * 64, 0, successor, root, "no-provider")
+                # Invalid nonselected rows still fail full validation before effects.
+                request["candidates"][-1]["source_config_sha256"] = "invalid"
+                changed = H["canonical"](request)
+                path.write_bytes(changed)
+                with self.assertRaises(ValueError):
+                    H["allocate"](path, H["sha"](changed), 0, successor, root, "no-provider")
+                factory.assert_not_called()
+
+
     def test_main_thread_lease_avoids_slow_child_and_keeps_raw_receipts(self):
         with native_read_server({}) as api, tempfile.TemporaryDirectory() as directory:
             adapter = H["NativeAdapter"](api, directory)

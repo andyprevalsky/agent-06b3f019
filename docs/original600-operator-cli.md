@@ -351,6 +351,12 @@ only after checking its original raw PROBE, preceding native identity read,
 supervisor identity, parent join, and immutable journal. Export, resource release,
 and caller-retirement checks still apply; an exit of `-9` is not benchmark success.
 
+After the complete reuse request passes its existing hash, cohort, uniqueness
+and task-index checks, allocation retains only the selected row and the fields
+needed to produce its unchanged claim proof. The raw request and other rows are
+released before creating the native client or waiting on its lease. This reduces
+retained per-helper memory; the full-validation parsing peak is unchanged.
+
 Main-thread native lease acquisition and release use the already loaded client
 and the same durable raw-response observer. The complete operation retains its
 25-second absolute budget and 20-second HTTP timeout; worker threads retain the

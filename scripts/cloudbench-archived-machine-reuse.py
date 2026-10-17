@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+from types import MappingProxyType
 
 HERE = Path(__file__).resolve().parent
 SCHEMA = "cloudbench-archived-reuse-v1"
@@ -446,6 +447,15 @@ def allocate(request_path, request_sha, ordinal, successor, output, token):
         return None
     row = request["candidates"][index]
     need(row.get("reservation"), "unreserved candidate cannot be allocated")
+    # All cohort validation and child selection above remain mandatory. Only
+    # these immutable fields and the selected private row enter the native claim.
+    request = MappingProxyType({
+        "harness_ref": request["harness_ref"],
+        "cohort": request["cohort"],
+        "archives": tuple(MappingProxyType({"archive_sha256": archive["archive_sha256"]})
+                          for archive in request["archives"]),
+    })
+    del raw
     api = NativeAdapter(
         module("cloudbench-original-volume-capture.py")["Fly"](APP, token), Path(output) / "archived-reuse-wire"
     )
