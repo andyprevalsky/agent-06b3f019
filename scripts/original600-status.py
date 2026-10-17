@@ -19,7 +19,7 @@ need,read,save,bounded=(RUNNER[k] for k in ('need','read','save','bounded'))
 # This payload reads one exact summary and its explicitly named job logs. It
 # never walks directories, signals a process, writes a guest file or starts work.
 REMOTE=r'''
-import base64,hashlib,json,os,re,stat,subprocess,sys,time
+import ast,base64,hashlib,json,os,re,stat,subprocess,sys,time
 from pathlib import Path
 
 ORIGINAL_TASK_REF='570830dbf17635e13d16a6f03b4d705f6b6443b1'
@@ -84,6 +84,50 @@ def environment_failure(body,job,ident,pid,campaign,member_ids,budget,reader):
         return dict(reason='shared_environment_identity_changed',cohort_manifest_sha256=hashlib.sha256(raw).hexdigest())
     return None
 
+def reuse_failure(body):
+    markers=(('ValueError: late inactive native version observation\n','archived_reuse_inactive_observation_deadline'),
+             ('<run_path>.ObservationDeadline: inactive native observation deadline\n','archived_reuse_inactive_observation_deadline'))
+    found=[(body.find(marker),marker,reason) for marker,reason in markers if marker in body]
+    timed=re.search(r"^subprocess\.TimeoutExpired: Command (.+) timed out after ([0-9.]+) seconds$",body,re.M)
+    if timed:found.append((timed.start(),timed[0]+'\n','archived_reuse_lease_wire_deadline'))
+    if not found:return None
+    failure,marker,reason=min(found)
+    trace=body[:failure]
+    claim=re.search(r'^  File "/tmp/cloudbench-scripts\.([0-9a-f]{32})/cloudbench-archived-machine-reuse\.py", line [0-9]+, in claim_native$',trace,re.M)
+    if not claim or 'Traceback (most recent call last):\n' not in trace:return None
+    def frame(name):
+        return re.search(r'^  File "/tmp/cloudbench-scripts\.'+claim[1]+r'/cloudbench-archived-reuse-effects\.py", line [0-9]+, in '+name+'$',trace,re.M)
+    if reason=='archived_reuse_lease_wire_deadline':
+        if not all(frame(name) for name in ('lease','wire','_run_wire')) or frame('wait_inactive'):return None
+        command=timed[1]
+        if not (command.startswith("'[") and command.endswith("]'")):return None
+        argv=ast.literal_eval(command[1:-1])
+        if (not isinstance(argv,list) or len(argv)!=5 or argv[1]!='-S' or argv[3]!='wire'
+            or argv[2]!='/tmp/cloudbench-scripts.'+claim[1]+'/cloudbench-archived-machine-reuse.py'
+            or not 20<float(timed[2])<=25):return None
+    else:
+        argv=None
+        if not frame('wait_inactive'):return None
+        if marker.startswith('<run_path>') and not all(frame(name) for name in ('observe_inactive','request','wire','expire')):return None
+    return dict(reason=reason,after=body[failure+len(marker):],wire_argv=argv)
+
+def lease_wire_binding(argv,task_dir,repo,proof,budget,reader):
+    directory=Path(argv[4])
+    if (argv[0]!=str(repo/'agents/venv/bin/python3') or directory.parent!=task_dir/'archived-reuse-wire'
+        or not re.fullmatch('[0-9a-f]{32}',directory.name)):raise ValueError('foreign lease wire process')
+    mid=proof.get('machine_id');marker=proof['native_marker']
+    if (not isinstance(mid,str) or not re.fullmatch('[0-9a-f]{14}',mid) or marker.get('machine_id')!=mid
+        or not re.fullmatch('[0-9a-f]{32}',proof.get('claim_id','')) or marker.get('claim_id')!=proof['claim_id']):
+        raise ValueError('wire target lacks exact claim binding')
+    raw=reader(directory/'request.json',65536,budget);request=json.loads(raw)
+    started=reader(directory/'transport-start.json',65536,budget);transport=json.loads(started)
+    if (request!={'app':'navi-whisper-lux-bench','method':'POST','path':'/machines/'+mid+'/lease',
+                 'body':{'ttl':180,'description':'archived same-volume successor'},'timeout':20,'headers':{}}
+        or transport.get('direct') is not False or type(transport.get('monotonic_ns'))is not int
+        or transport['monotonic_ns']<=0):raise ValueError('foreign lease wire request')
+    return dict(lease_wire_request_sha256=hashlib.sha256(raw).hexdigest(),
+                lease_wire_transport_sha256=hashlib.sha256(started).hexdigest(),native_lease_outcome='unknown')
+
 def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
     budget=[16*1024*1024];proofs=[];unavailable=set();inspected=0
     member_ids={job['job_id'] for job in summary['jobs']}
@@ -111,7 +155,9 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
                 # Direct, bound startup failures only. Generic/cascaded canary
                 # errors and arbitrary copied diagnostic text do not qualify.
                 marker='ValueError: late inactive native version observation\n'
-                if marker not in text and 'ValueError: environment-check identity' not in text:continue
+                if (marker not in text and 'ValueError: environment-check identity' not in text
+                    and '<run_path>.ObservationDeadline: inactive native observation deadline' not in text
+                    and 'subprocess.TimeoutExpired: Command ' not in text):continue
                 headers=list(re.finditer(r'^\s*'+re.escape(str(repo/'scripts/run-bench'))+r' monitor ('+
                     re.escape(str(repo/'.context/fleet/runs'))+r'/([0-9]{8}-[0-9]{6}-[0-9]+))\n'
                     r'\s*owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory\.$',text,re.M))
@@ -127,17 +173,11 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
                         source_ref=payload['source_ref'],original_epoch=payload['epoch'],**env_failure))
                     unavailable.discard(ident)
                     break
-                failure=body.find(marker)
-                if failure<0:continue
-                trace=body[:failure]
-                claim=re.search(r'^  File "/tmp/cloudbench-scripts\.([0-9a-f]{32})/cloudbench-archived-machine-reuse\.py", line [0-9]+, in claim_native$',trace,re.M)
-                if not claim:continue
-                wait=re.search(r'^  File "/tmp/cloudbench-scripts\.'+claim[1]+r'/cloudbench-archived-reuse-effects\.py", line [0-9]+, in wait_inactive$',trace,re.M)
+                failure=reuse_failure(body)
+                if failure is None:continue
                 skipped='❌ ['+task+'] provisioning failed (no machine) — skipping\n'
-                after=body[failure+len(marker):]
-                if not wait or 'Traceback (most recent call last):\n' not in trace or skipped not in after:
-                    continue
-                if '❌ no benches launched (all clones failed).\n' not in after.split(skipped,1)[1]:continue
+                after=failure['after']
+                if skipped not in after or '❌ no benches launched (all clones failed).\n' not in after.split(skipped,1)[1]:continue
                 task_dir=repo/'.context/fleet/runs'/fleet_id/task
                 successor_raw=reader(task_dir/'archived-successor.json',65536,budget)
                 exclusion_raw=reader(task_dir/'archived-reuse-journal/source-exclusion.json',65536,budget)
@@ -154,6 +194,8 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
                     or proof.get('schema')!='cloudbench-archived-reuse-v1' or proof.get('successor')!=successor
                     or proof.get('native_marker',{}).get('successor')!=successor):
                     raise ValueError('source exclusion does not belong to job')
+                wire=(lease_wire_binding(failure['wire_argv'],task_dir,repo,proof,budget,reader)
+                      if failure['wire_argv'] is not None else {})
                 meta_sha=fleet_meta_hash(repo,owner,pid,fleet_id,payload,budget,reader)
                 proofs.append(dict(job_id=ident,task=task,attempt=number,controller_pid=pid,
                     fleet_owner_token=owner,run_id=fleet_id,log_path=str(expected.relative_to(repo)),
@@ -161,10 +203,10 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
                     successor_sha256=hashlib.sha256(successor_raw).hexdigest(),
                     source_exclusion_sha256=hashlib.sha256(exclusion_raw).hexdigest(),
                     source_ref=payload['source_ref'],original_epoch=payload['epoch'],
-                    reason='archived_reuse_inactive_observation_deadline'))
+                    reason=failure['reason'],**wire))
                 unavailable.discard(ident)
                 break
-            except (OSError,ValueError,TypeError,KeyError,UnicodeError):unavailable.add(ident)
+            except (OSError,ValueError,TypeError,KeyError,UnicodeError,SyntaxError):unavailable.add(ident)
     return dict(proofs=proofs,unavailable_jobs=len(unavailable),inspected_logs=inspected,bytes_read=16*1024*1024-budget[0])
 
 def project(summary,startup=None):

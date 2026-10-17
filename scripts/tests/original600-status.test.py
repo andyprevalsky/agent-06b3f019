@@ -427,6 +427,69 @@ class Status(unittest.TestCase):
         self.assertEqual(result["original_startup_infra_affected_jobs"], 29)
         self.assertGreater(result["startup_evidence_unavailable_jobs"], 0)
 
+    def test_observation_and_lease_wire_deadlines_keep_exact_startup_bindings(self):
+        remote = self.root / 'status-fixture.py'
+        remote.write_text(M['REMOTE'])
+        scope = runpy.run_path(str(remote), run_name='offline_status_payload')
+        repo = self.root / 'deadline-guest'
+        campaign = repo / '.context/benchmarks/campaigns/exact'
+        ident, task, pid, owner = ('r001-j0055', 'actual-task', 2907, 'a' * 32)
+        fleet_id = '20261017-094932-2907'
+        fleet = repo / '.context/fleet/runs' / fleet_id
+        task_dir = fleet / task
+        log = campaign / (ident + '.log')
+        snapshot = '/tmp/cloudbench-scripts.' + 'b' * 32
+        module = snapshot + '/cloudbench-archived-machine-reuse.py'
+        effects = snapshot + '/cloudbench-archived-reuse-effects.py'
+        wire = task_dir / 'archived-reuse-wire' / ('c' * 32)
+        successor = {'controller_id': self.mid, 'harness_ref': self.ref, 'task_ref': M['RUNNER']['TASK_REF'], 'owner_token': owner, 'run_id': fleet_id, 'task': task, 'ordinal': 0, 'campaign_job_id': ident, 'campaign_total_jobs': 600, 'campaign_attempt': 1}
+        proof = {'schema': 'cloudbench-archived-reuse-v1', 'successor': successor, 'machine_id': '11111111111111', 'claim_id': 'd' * 32, 'native_marker': {'successor': successor, 'machine_id': '11111111111111', 'claim_id': 'd' * 32}}
+        write(task_dir / 'archived-successor.json', successor)
+        exclusion_path = task_dir / 'archived-reuse-journal/source-exclusion.json'
+        write(exclusion_path, {'proof': proof})
+        request = {'app': 'navi-whisper-lux-bench', 'method': 'POST', 'path': '/machines/11111111111111/lease', 'body': {'ttl': 180, 'description': 'archived same-volume successor'}, 'timeout': 20, 'headers': {}}
+        write(wire / 'request.json', request)
+        write(wire / 'transport-start.json', {'monotonic_ns': 123, 'direct': False})
+        header = f'    {repo}/scripts/run-bench monitor {fleet}\n    owner: {owner}; private controller diagnostics stay in this run directory.\n'
+        prefix = 'Traceback (most recent call last):\n' + f'  File "{module}", line 332, in claim_native\n'
+        suffix = f'❌ [{task}] provisioning failed (no machine) — skipping\n❌ no benches launched (all clones failed).\n'
+        observation = prefix + f'  File "{effects}", line 199, in wait_inactive\n' + f'  File "{effects}", line 145, in observe_inactive\n' + f'  File "{effects}", line 134, in request\n' + f'  File "{effects}", line 86, in wire\n' + f'  File "{module}", line 44, in private\n' + f'  File "{effects}", line 176, in expire\n' + '<run_path>.ObservationDeadline: inactive native observation deadline\n' + suffix
+        save_failure = observation.replace(f'  File "{module}", line 44, in private', f'  File "{effects}", line 102, in perform_wire\n  File "{module}", line 50, in save')
+        argv = [str(repo / 'agents/venv/bin/python3'), '-S', module, 'wire', str(wire)]
+        lease = prefix + f'  File "{effects}", line 149, in lease\n' + f'  File "{effects}", line 85, in wire\n' + f'  File "{effects}", line 108, in _run_wire\n' + '  File "/usr/lib/python3.11/subprocess.py", line 1989, in _wait\n' + f"subprocess.TimeoutExpired: Command '{argv}' timed out after 24.999969649999912 seconds\n" + suffix
+        job = {'job_id': ident, 'task': task, 'log': str(log), 'attempt': 1, 'controller_pid': pid, 'status': 'failed', 'attempts': []}
+        summary = {'total_jobs': 600, 'jobs': [job]}
+        payload = {'machine': self.mid, 'source_ref': self.ref, 'epoch': self.epoch}
+
+        def evidence(body):
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(body)
+            return scope['startup_evidence'](summary, repo, campaign, payload)
+        ssl_failure = observation.replace(f'  File "{module}", line 44, in private', '  File "/usr/lib/python3.11/ssl.py", line 1382, in do_handshake')
+        for failure in (observation, save_failure, ssl_failure, lease):
+            with self.subTest(failure=failure.splitlines()[-3]):
+                actual = evidence(header + failure)
+                self.assertEqual(len(actual['proofs']), 1)
+                self.assertEqual(actual['proofs'][0]['job_id'], ident)
+                canonical = dict(job, attempts=[{'status': 'failed', 'finished_at': 'then', 'infra_failure': True}])
+                counts = scope['project']({'total_jobs': 600, 'jobs': [canonical] + [{'job_id': f'queued-{i}', 'status': 'queued', 'attempts': []} for i in range(599)]}, actual)
+                self.assertEqual(counts['canonical_infra_affected_jobs'], 1)
+                self.assertEqual(counts['combined_infra_affected_jobs'], 1)
+                self.assertEqual(evidence(failure + header)['proofs'], [])
+                self.assertEqual(evidence(header + failure.replace('claim_native', 'retire_native'))['proofs'], [])
+                self.assertEqual(evidence(header + failure.replace(suffix, 'canary already failed\n'))['proofs'], [])
+        for change in ({'method': 'GET'}, {'path': '/machines/22222222222222/lease'}, {'timeout': 30}):
+            write(wire / 'request.json', dict(request, **change))
+            self.assertEqual(evidence(header + lease)['proofs'], [])
+        write(wire / 'request.json', request)
+        self.assertEqual(evidence(header + lease.replace(str(wire), str(wire.parent / ('e' * 32))))['proofs'], [])
+        for key, value in (('harness_ref', 'e' * 40), ('campaign_attempt', 2), ('owner_token', 'f' * 32)):
+            write(task_dir / 'archived-successor.json', dict(successor, **{key: value}))
+            self.assertEqual(evidence(header + lease)['proofs'], [])
+        write(task_dir / 'archived-successor.json', successor)
+        actual = evidence(header + lease + lease)
+        self.assertEqual(len(actual['proofs']), 1)
+
     def test_one_native_exec_is_readonly_and_unknown_envelopes_do_not_fake_summary(self):
         value=M['binding'](self.run);calls=[]
         result=dict(status='SUPERVISOR_NOT_PUBLISHED',machine=self.mid,source_ref=self.ref,original_epoch=self.epoch)
