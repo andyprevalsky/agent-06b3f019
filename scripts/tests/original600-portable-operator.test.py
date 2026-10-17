@@ -3,6 +3,7 @@
 import argparse
 import ast
 import base64
+from contextlib import contextmanager
 import errno
 import gzip
 import hashlib
@@ -500,6 +501,207 @@ class Portable(unittest.TestCase):
                 proof.write_text('changed')
                 with self.assertRaisesRegex(ValueError,'input changed'):
                     CLI.seal_expired_handoffs(request,root/'new-admission',RUNNER)
+
+    def test_native_capacity_window_excludes_local_proof_but_keeps_original_deadline(self):
+        for phase in ("local", "native-timeout", "original-expiry"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as name:
+                now = [1000.0]
+                windows, saved, calls = [], [], []
+
+                @contextmanager
+                def bounded(seconds):
+                    windows.append((now[0], seconds))
+                    try:
+                        yield
+                    finally:
+                        windows.pop()
+
+                def advance(seconds):
+                    now[0] += seconds
+                    if any(now[0] - start >= limit for start, limit in windows):
+                        raise RUNNER["Deadline"]("fixture deadline")
+
+                def native(*unused):
+                    self.assertEqual(
+                        windows[-1][1], 110 if phase != "original-expiry" else 100
+                    )
+                    calls.append("native")
+                    advance(111 if phase == "native-timeout" else 1)
+                    return dict(available_slots_conservative=51)
+
+                def local(*unused):
+                    self.assertGreater(
+                        windows[-1][1], 110 if phase != "original-expiry" else 0
+                    )
+                    calls.append("local")
+                    advance(111)
+                    return dict(candidates=[])
+
+                helper = dict(
+                    prepare_request=local,
+                    validate_request=lambda *args: None,
+                    capacity_demand=lambda *args: dict(qualified_reuse_count=553),
+                )
+                runner = dict(bounded=bounded, save=lambda *args: saved.append(args))
+                with (
+                    patch.object(CLI.time, "time", side_effect=lambda: now[0]),
+                    patch.object(CLI, "capacity_snapshot", side_effect=native),
+                    patch.object(CLI, "reuse_module", return_value=helper),
+                    patch.object(CLI, "read_inventory", return_value=b"[]"),
+                    patch.object(CLI.runpy, "run_path", return_value=runner),
+                ):
+                    if phase == "local":
+                        result = CLI.capacity(
+                            None,
+                            "fixture",
+                            "personal",
+                            Path(name),
+                            1,
+                            [Path(name)],
+                            "a" * 40,
+                            deadline=6400,
+                        )
+                        self.assertEqual(result["qualified_reuse_count"], 0)
+                        self.assertEqual(calls, ["native", "local"])
+                        self.assertEqual(len(saved), 2)
+                    else:
+                        with self.assertRaises(RUNNER["Deadline"]):
+                            CLI.capacity(
+                                None,
+                                "fixture",
+                                "personal",
+                                Path(name),
+                                1,
+                                [Path(name)],
+                                "a" * 40,
+                                deadline=1100 if phase == "original-expiry" else 6400,
+                            )
+                        self.assertEqual(saved, [])
+
+    def test_prepare_only_publishes_original_request_after_bounded_old_proof(self):
+        for expired in (False, True):
+            with self.subTest(expired=expired), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                oldroot = root / "old"
+                directory = root / "admission"
+                directory.mkdir(mode=0o700)
+                original = private(
+                    directory / "admission-intent.private.json", {"retained": True}
+                )
+                original_bytes = original.read_bytes()
+                tasks = private(root / "tasks", ["unchanged-task"])
+                env = private(root / "env", "FLY_API_TOKEN=fixture-token\n")
+                args = argparse.Namespace(
+                    source_ref="b" * 40,
+                    agents_env=env,
+                    facts=env,
+                    tasks=tasks,
+                    org="personal",
+                    extra_destroying_count=1,
+                    archive_run=[root / "archive"],
+                    reuse_exclude_machine=[],
+                    unused_reservation_run=[],
+                    parked_reservation_run=[],
+                    expired_reservation_run=[],
+                )
+                now, windows, calls = [1000.0], [], []
+                plan = dict(
+                    directory=str(directory),
+                    source_root=str(oldroot),
+                    source_ref="a" * 40,
+                    started_at=900,
+                    deadline=1800,
+                )
+                module = {"plan": lambda *unused: plan}
+
+                @contextmanager
+                def bounded(seconds):
+                    windows.append(seconds)
+                    try:
+                        yield
+                    finally:
+                        windows.pop()
+
+                def snapshot(*values):
+                    self.assertEqual(windows[-1], 110)
+                    calls.append("native-read")
+                    return dict(available_slots_conservative=51)
+
+                def proof(*values):
+                    self.assertGreater(windows[-1], 110)
+                    namespace["capacity_snapshot"](*values)
+                    self.assertGreater(windows[-1], 110)
+                    calls.append("old-local-proof")
+                    now[0] = 1801 if expired else 1111
+                    RUNNER["save"](
+                        values[3] / "archived-reuse-request.private.json",
+                        dict(harness_ref="a" * 40, candidates=[]),
+                    )
+                    return {}
+
+                namespace = proof.__globals__
+                prior = namespace.get("capacity_snapshot")
+                namespace["capacity_snapshot"] = snapshot
+                oldrunner = dict(RUNNER, campaign_argv=lambda *unused: [])
+                old = dict(
+                    capacity=proof,
+                    facts_from=lambda *unused: {"image_ref": "image@sha256:fixture"},
+                    reuse_module=lambda: {
+                        "validate_request": lambda request, ref: self.assertEqual(
+                            request["harness_ref"], ref
+                        )
+                    },
+                )
+                runner = dict(RUNNER, bounded=bounded)
+
+                def load(path):
+                    if str(path).endswith("run-original600-controller.py"):
+                        return old
+                    if str(path).endswith("cloudbench-original600-runner.py"):
+                        return oldrunner
+                    if str(path).endswith("cloudbench-original-volume-capture.py"):
+                        return {"Fly": object()}
+                    raise AssertionError(path)
+
+                try:
+                    with (
+                        patch.object(CLI, "preparation_plan", return_value=(module, plan)),
+                        patch.object(CLI.time, "time", side_effect=lambda: now[0]),
+                        patch.object(CLI.runpy, "run_path", side_effect=load),
+                        patch.object(CLI, "facts_from", side_effect=old["facts_from"]),
+                        patch("sys.stdout", new_callable=io.StringIO),
+                    ):
+                        if expired:
+                            with self.assertRaisesRegex(ValueError, "clock expired"):
+                                CLI.prepare_admission_request(args, root, runner)
+                        else:
+                            self.assertEqual(
+                                CLI.prepare_admission_request(args, root, runner), 0
+                            )
+                    published = directory / "archived-reuse-original.private.json"
+                    self.assertEqual(published.exists(), not expired)
+                    self.assertEqual(original.read_bytes(), original_bytes)
+                    self.assertEqual(calls, ["native-read", "old-local-proof"])
+                    self.assertIs(namespace["capacity_snapshot"], snapshot)
+                    self.assertFalse((directory / "controller-launch.intent.json").exists())
+                    self.assertFalse((directory / "archived-reuse-reservations").exists())
+                    if not expired:
+                        value = json.loads(published.read_bytes())
+                        self.assertEqual(value["request"]["harness_ref"], "a" * 40)
+                        self.assertEqual(value["request"]["task_names"], ["unchanged-task"])
+                        self.assertEqual(
+                            value["sha256"],
+                            CLI.digest(
+                                json.dumps(
+                                    value["request"], sort_keys=True, allow_nan=False
+                                ).encode()
+                            ),
+                        )
+                finally:
+                    if prior is None:
+                        namespace.pop("capacity_snapshot", None)
+                    else:
+                        namespace["capacity_snapshot"] = prior
 
     def test_archived_eligibility_is_not_reserved_capacity(self):
         with tempfile.TemporaryDirectory() as name:

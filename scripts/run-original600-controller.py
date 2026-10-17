@@ -38,6 +38,7 @@ PINS = [
     'cloudbench-incomplete-reservations.py',
     'cloudbench-recovered-reservations.py',
     'cloudbench-closed-transition-reservations.py',
+    'cloudbench-prepare-admission.py',
     'cloudbench-reuse-index.py',
     'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',
     'lib/cloudbench-archived-reuse.sh', 'run-bench-fleet', 'run-bench-cloud',
@@ -234,8 +235,51 @@ def capacity_snapshot(api, token, org, directory, extra):
                 new_controller_slots=1, requested_original_primary_slots=600)
 
 
-def capacity(api, token, org, directory, extra, reuse_runs=None, harness_ref=None, excluded=(), image_ref=None, unused_runs=(), parked_runs=(), expired_runs=()):
-    proof = capacity_snapshot(api, token, org, directory, extra)
+def admission_remaining(deadline):
+    remaining = deadline - time.time()
+    if not 0 < remaining <= 5400:
+        raise ValueError("original admission clock expired")
+    return remaining
+
+
+def capacity(
+    api,
+    token,
+    org,
+    directory,
+    extra,
+    reuse_runs=None,
+    harness_ref=None,
+    excluded=(),
+    image_ref=None,
+    unused_runs=(),
+    parked_runs=(),
+    expired_runs=(),
+    *,
+    deadline=None,
+):
+    deadline = time.time() + 5400 if deadline is None else deadline
+    runner = runpy.run_path(
+        str(Path(__file__).with_name("cloudbench-original600-runner.py"))
+    )
+    with runner["bounded"](min(110, admission_remaining(deadline))):
+        proof = capacity_snapshot(api, token, org, directory, extra)
+    with runner["bounded"](admission_remaining(deadline)):
+        return capacity_from_snapshot(
+            proof,
+            directory,
+            reuse_runs,
+            harness_ref,
+            excluded,
+            image_ref,
+            unused_runs,
+            parked_runs,
+            expired_runs,
+        )
+
+
+def capacity_from_snapshot(proof, directory, reuse_runs, harness_ref, excluded,
+                           image_ref, unused_runs, parked_runs, expired_runs):
     if reuse_runs:
         helper=reuse_module()
         import secrets
@@ -812,6 +856,145 @@ def resume_incomplete_admission(args, root, runner, github):
         os.close(fd)
 
 
+def preparation_plan(args, runner):
+    module = runpy.run_path(
+        str(Path(__file__).with_name("cloudbench-prepare-admission.py"))
+    )
+    return module, module["plan"](args, runner)
+
+
+def prepare_admission_request(args, root, runner):
+    """Publish the first request; the original operator still owns reservation and launch."""
+    module, plan = preparation_plan(args, runner)
+    directory = Path(plan["directory"])
+    lock = directory / "pre-reservation-preparation.lock"
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or info.st_nlink != 1
+        ):
+            raise ValueError("private preparation lock required")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if module["plan"](args, runner) != plan:
+            raise ValueError("pre-reservation evidence changed")
+        journal = directory / "pre-reservation-preparation"
+        journal.mkdir(mode=0o700)
+        runner["save"](
+            journal / "intent.json",
+            {
+                "schema": "original600-pre-reservation-preparation-v1",
+                "operator_ref": args.source_ref,
+                "operator_root": str(root),
+                "plan": plan,
+            },
+        )
+        oldroot = Path(plan["source_root"])
+        old = runpy.run_path(str(oldroot / "scripts/run-original600-controller.py"))
+        oldrunner = runpy.run_path(
+            str(oldroot / "scripts/cloudbench-original600-runner.py")
+        )
+        token = token_from_agents(runner["read"](args.agents_env))
+        os.environ["FLY_API_TOKEN"] = token
+        api = runpy.run_path(
+            str(oldroot / "scripts/cloudbench-original-volume-capture.py")
+        )["Fly"]
+        snapshot = journal / "capacity"
+        snapshot.mkdir(mode=0o700)
+        function = old["capacity"]
+        namespace = function.__globals__
+        native_snapshot = namespace["capacity_snapshot"]
+
+        def bounded_snapshot(*values):
+            with runner["bounded"](min(110, admission_remaining(plan["deadline"]))):
+                return native_snapshot(*values)
+
+        namespace["capacity_snapshot"] = bounded_snapshot
+        try:
+            with (
+                joined_admission_signals(),
+                runner["bounded"](admission_remaining(plan["deadline"])),
+            ):
+                old["capacity"](
+                    api,
+                    token,
+                    args.org,
+                    snapshot,
+                    args.extra_destroying_count,
+                    args.archive_run,
+                    plan["source_ref"],
+                    args.reuse_exclude_machine,
+                    facts_from(runner["read"](args.facts))["image_ref"],
+                    args.unused_reservation_run,
+                    args.parked_reservation_run,
+                    args.expired_reservation_run,
+                )
+        finally:
+            namespace["capacity_snapshot"] = native_snapshot
+        request = json.loads(
+            oldrunner["read"](snapshot / "archived-reuse-request.private.json")
+        )
+        request["task_names"] = json.loads(oldrunner["read"](args.tasks))
+        request["image_ref"] = old["facts_from"](oldrunner["read"](args.facts))[
+            "image_ref"
+        ]
+        oldrunner["campaign_argv"](request["task_names"], plan["started_at"])
+        old["reuse_module"]()["validate_request"](request, plan["source_ref"])
+        if module["plan"](args, runner) != plan:
+            raise ValueError("pre-reservation evidence changed before publication")
+        admission_remaining(plan["deadline"])
+        envelope = dict(
+            schema="original600-archived-admission-request-v1",
+            request=request,
+            sha256=digest(
+                json.dumps(request, sort_keys=True, allow_nan=False).encode()
+            ),
+        )
+        envelope_sha = digest(
+            (json.dumps(envelope, sort_keys=True, allow_nan=False) + "\n").encode()
+        )
+        runner["save"](
+            journal / "ready.json",
+            {
+                "status": "READY_FOR_REQUEST_PUBLICATION",
+                "request_sha256": envelope_sha,
+                "source_ref": plan["source_ref"],
+                "operator_ref": args.source_ref,
+                "original_started_at_epoch": plan["started_at"],
+                "deadline_epoch": plan["deadline"],
+            },
+        )
+        admission_remaining(plan["deadline"])
+        oldrunner["save"](directory / "archived-reuse-original.private.json", envelope)
+        if (
+            digest(
+                oldrunner["read"](directory / "archived-reuse-original.private.json")
+            )
+            != envelope_sha
+        ):
+            raise ValueError("published preparation request changed")
+        print(
+            json.dumps(
+                dict(
+                    status="REQUEST_PREPARED",
+                    directory=str(directory),
+                    source_ref=plan["source_ref"],
+                    operator_ref=args.source_ref,
+                    request_sha256=envelope_sha,
+                    started_at_epoch=plan["started_at"],
+                    deadline_epoch=plan["deadline"],
+                )
+            ),
+            flush=True,
+        )
+        return 0
+    finally:
+        os.close(fd)
+
+
 def main():
     if sys.argv[1:2] == ['--status']:
         status = runpy.run_path(str(Path(__file__).with_name('original600-status.py')))
@@ -831,6 +1014,8 @@ def main():
     parser.add_argument('--resume-admission', type=Path, help='Reconcile the same prelaunch archived-reservation state; never restart a bound controller')
     parser.add_argument('--resume-incomplete-admission',type=Path,help='Continue a proven joined pre-controller failure without rewriting its partial journals')
     parser.add_argument('--incomplete-admission-failure',type=Path,help='Positive source-bound joined admission failure receipt')
+    parser.add_argument('--prepare-admission-request', type=Path, help='Prepare only the first request for a joined pre-reservation admission; preserve its original operator and clock')
+    parser.add_argument('--pre-reservation-failure', type=Path, help='Positive joined pre-reservation failure receipt')
     parser.add_argument('--org', choices=['personal'], default='personal')
     parser.add_argument('--extra-destroying-count', type=int, default=1)
     args = parser.parse_args()
@@ -868,12 +1053,16 @@ def main():
         raise ValueError('original controller requires the pinned Fly CLI v0.4.115')
     if args.prelaunch_failure and not args.resume_bound_launch:
         raise ValueError('--prelaunch-failure requires --resume-bound-launch')
-    if sum(bool(v) for v in (args.resume_bound_launch,args.resume_admission,args.resume_incomplete_admission))>1:
+    if sum(bool(v) for v in (args.resume_bound_launch,args.resume_admission,args.resume_incomplete_admission,args.prepare_admission_request))>1:
         raise ValueError('select one continuation mode')
     if bool(args.resume_incomplete_admission)!=bool(args.incomplete_admission_failure):
         raise ValueError('incomplete admission requires its explicit failure receipt')
     if args.resume_incomplete_admission:
         incomplete_admission_plan(args,runner)
+    if bool(args.prepare_admission_request) != bool(args.pre_reservation_failure):
+        raise ValueError('request preparation requires its explicit joined failure receipt')
+    if args.prepare_admission_request:
+        preparation_plan(args, runner)
     bound = bound_launch_plan(args, runner) if args.resume_bound_launch else None
     if not args.run:
         print(json.dumps(dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=0)))
@@ -882,6 +1071,8 @@ def main():
         return resume_bound_launch(args, root, runner, bound, github)
     if args.resume_incomplete_admission:
         return resume_incomplete_admission(args,root,runner,github)
+    if args.prepare_admission_request:
+        return prepare_admission_request(args, root, runner)
     parent = args.state_dir.absolute()
     if parent.resolve(strict=True) != parent or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
         raise ValueError('private physical current-owner state directory required')
@@ -895,12 +1086,14 @@ def main():
     if snapshot != directory: snapshot.mkdir(mode=0o700)
     print(json.dumps(dict(directory=str(directory),source_ref=args.source_ref,status='ADMISSION_STARTED',resume_option='--resume-admission '+str(directory))),flush=True)
     try:
-        with runner['bounded'](110):
-            if (directory/'archived-reuse-original.private.json').exists():
+        if (directory/'archived-reuse-original.private.json').exists():
+            with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
                 cap=capacity_snapshot(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count)
-            else:
-                cap=capacity(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count,args.archive_run,args.source_ref,args.reuse_exclude_machine,
-                             facts_from(runner['read'](args.facts))['image_ref'],args.unused_reservation_run,args.parked_reservation_run,args.expired_reservation_run)
+        else:
+            cap=capacity(capture['Fly'],token,args.org,snapshot,args.extra_destroying_count,args.archive_run,args.source_ref,args.reuse_exclude_machine,
+                         facts_from(runner['read'](args.facts))['image_ref'],args.unused_reservation_run,args.parked_reservation_run,args.expired_reservation_run,
+                         deadline=started_at + 5400)
+        admission_remaining(started_at + 5400)
         if args.archive_run:
             cap=reserve_reuse_capacity(capture['Fly'],token,args,runner,directory,snapshot,cap,started_at)
             launch_directory=directory/('launch-'+str(time.time_ns()))
