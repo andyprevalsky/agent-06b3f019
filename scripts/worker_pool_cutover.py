@@ -17,12 +17,18 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import retained_agent_machine as pool
+from worker_pool_runtime import RUNTIME_QUEUE_PROBE, WorkerRuntime, machine_identity
+from worker_pool_runtime import runtime_queue_matches as _runtime_queue_matches
 
 
 ROOT = Path(__file__).resolve().parents[1]
 QUEUE_CLI = ROOT / "back-end/scripts/worker-deployment-queue.ts"
 DRAIN_TIMEOUT_SECONDS = 2700
 MACHINE_STOP_TIMEOUT_SECONDS = 120
+
+
+def runtime_queue_matches(health, identity, job_id, expected_queue=None, pool_queue=None):
+    return _runtime_queue_matches(health, identity, expected_queue or deployment_queue(identity, job_id), pool_queue)
 
 
 class PoolCapacityPending(Exception):
@@ -57,6 +63,15 @@ class Ledger:
     def assert_owned(self):
         self.call("assert")
 
+    def assert_mutable(self, machine_id):
+        return self.call("assert-mutable", machine_id=machine_id)
+
+    def verify_native_pollers(self, identities, machine_records):
+        return self.call("verify-native-pollers", {"identities": identities, "machineRecords": machine_records})
+
+    def retained_status(self):
+        return self.call("retained-status")
+
     def prepare(self, pointer, ids, evidence):
         return self.call(
             "prepare",
@@ -84,32 +99,38 @@ class Ledger:
         return self.call("abandon", {"machineRecords": machines, "reason": "Explicit unpublished candidate retirement"})
 
 
-def machine_identity(machine):
-    return {
-        "id": machine["id"],
-        "instanceId": machine["instance_id"],
-        "configSHA256": pool.config_digest(machine["config"]),
-    }
-
-
 def deployment_queue(identity, job_id):
     suffix = hashlib.sha256(job_id.encode()).hexdigest()[:12]
     return f"navi-agent-tasks-pool-{suffix}@{identity['surfaceHash']}"
 
 
-class NativePool:
+class NativePool(WorkerRuntime):
     def __init__(self, identity, ledger):
         self.identity = identity
         self.ledger = ledger
         self.app = identity["app"]
+        self.runtime_observations = {}
+
+    def runtime_queue(self):
+        return deployment_queue(self.identity, self.ledger.job_id)
 
     def client(self, machine_id):
         ledger = self.ledger
 
         class OwnedFly(pool.Fly):
+            def assert_managed_mutable(self):
+                ledger.assert_owned()
+                ledger.assert_mutable(machine_id)
+
             def request(self, method, suffix="", data=None):
                 if method != "GET":
                     ledger.assert_owned()
+                    if not (
+                        method == "POST"
+                        and suffix == "/exec"
+                        and data == {"command": ["python", "-I", "-B", "-c", RUNTIME_QUEUE_PROBE], "timeout": 10}
+                    ):
+                        ledger.assert_mutable(machine_id)
                 return super().request(method, suffix, data)
 
         return OwnedFly(self.app, machine_id)
@@ -160,6 +181,8 @@ class NativePool:
             and env.get("TEMPORAL_WORKER_BUILD_ID") == self.identity["buildId"]
             and env.get("TEMPORAL_WORKER_DEPLOYMENT_TOKEN") == self.identity["attempt"]
             and env.get("TEMPORAL_WORKER_POOL_QUEUE") == deployment_queue(self.identity, self.ledger.job_id)
+            and machine["config"].get("init", {}).get("exec")
+            == pool.managed_worker_command(deployment_queue(self.identity, self.ledger.job_id))
             and env.get("AUTOSCALER_ACTUATE") == "0"
             and env.get("PEOPLE_CREDENTIAL_BROKER_URL") == "https://navi-j9a9.onrender.com"
             and machine["config"].get("image") == self.identity["imageRef"]
@@ -214,33 +237,14 @@ class NativePool:
             elif current["state"] not in ("started", "starting"):
                 raise ValueError("Prepared Machine is in an unresolved native state")
 
-    def healthy(self, machine_id):
-        machine = self.get(machine_id)
-        if machine["state"] != "started" or not self.target(machine):
-            return False
-        script = (
-            "import json,urllib.request; "
-            "print(urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=5).read().decode())"
-        )
-        reply = self.client(machine_id).request(
-            "POST",
-            "/exec",
-            {
-                "command": ["python", "-I", "-B", "-c", script],
-                "timeout": 10,
-            },
-        )
-        if reply.get("exit_code") != 0 or reply.get("exit_signal"):
-            return False
-        health = json.loads(reply["stdout"])
-        return (
-            health.get("healthy") is True
-            and health.get("phase") == "running"
-            and health.get("build_id") == self.identity["buildId"]
-            and machine_identity(self.get(machine_id)) == machine_identity(machine)
-        )
-
     def retire(self, expected, previous, live=None):
+        self.ledger.assert_mutable(expected["id"])
+        before = self.get(expected["id"])
+        if (
+            before["state"] == "started"
+            and self.observe_route(expected, previous["taskQueue"])["actualQueue"] != previous["taskQueue"]
+        ):
+            raise ValueError("Old bank serves a different actual queue and cannot be retired")
         client = self.client(expected["id"])
         allow_created = live is not None
         live = live or {
@@ -403,12 +407,22 @@ def prepare_bank(job, ledger, native, minimum):
             or any(record.get("managedJobId") != pointer["updatedBy"] for record in previous)
         ):
             raise ValueError("Current managed bank does not match its complete native ownership set")
+    mismatch_records = []
+    managed = [record for record in previous if record.get("managedJobId")]
+    observations = [(record, native.observe_route(record, pointer["taskQueue"])) for record in managed]
+    if any(proof["actualQueue"] != pointer["taskQueue"] for _, proof in observations):
+        if len(observations) != minimum or any(
+            proof["actualQueue"] == pointer["taskQueue"] for _, proof in observations
+        ):
+            raise ValueError("Mixed or incomplete old-bank route mismatch evidence")
+        mismatch_records = [{**record, "routeEvidence": proof} for record, proof in observations]
     return ledger.prepare(
         {key: pointer[key] for key in ("taskQueue", "surfaceHash")},
         [m["id"] for m in selected],
         {
             "candidateRecords": selected,
             "previousRecords": previous,
+            "retainedRouteMismatchRecords": mismatch_records,
         },
     )
 
@@ -442,7 +456,10 @@ def run(ledger=None, native_factory=NativePool):
         for expected in job["evidence"]["PREPARING"]["candidateRecords"]:
             native.prepare(expected, job["priorPointer"])
         deadline = time.monotonic() + 300
-        while not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
+        while not (
+            all(native.healthy(mid) for mid in job["candidateMachineIds"])
+            and native.native_pollers_ready(job["candidateMachineIds"])
+        ):
             ledger.assert_owned()
             if time.monotonic() >= deadline:
                 raise TimeoutError("The complete reserved bank did not become healthy")
@@ -452,6 +469,8 @@ def run(ledger=None, native_factory=NativePool):
         ledger.assert_owned()
         if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
             raise ValueError("The reserved bank changed before pointer publication")
+        if not native.native_pollers_ready(job["candidateMachineIds"]):
+            raise PoolCapacityPending("Native candidate pollers are not ready for pointer publication")
         identity = job["identity"]
         backend_command(
             "set-agent-queue-pointer.ts",
@@ -470,14 +489,16 @@ def run(ledger=None, native_factory=NativePool):
     if job["stage"] == "DRAINING":
         previous = job["priorPointer"]
         prior_records = job["evidence"]["PREPARING"]["previousRecords"]
-        managed = [record for record in prior_records if record.get("managedJobId")]
+        mismatch_records = job["evidence"]["PREPARING"].get("retainedRouteMismatchRecords", [])
+        held_ids = {record["id"] for record in mismatch_records}
+        managed = [record for record in prior_records if record.get("managedJobId") and record["id"] not in held_ids]
         retained = [record["id"] for record in prior_records if not record.get("managedJobId")]
         retired = []
         for expected in job["evidence"]["PREPARING"]["candidateRecords"]:
             native.prepare(expected, previous)
         if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
             raise PoolCapacityPending("Serving bank is not ready; every old worker is retained")
-        if managed:
+        if managed or mismatch_records:
             backend_command(
                 "retire-agent-queue.ts", "--begin", "--queue", previous["taskQueue"], "--owner", ledger.job_id
             )
@@ -520,8 +541,12 @@ def run(ledger=None, native_factory=NativePool):
                         if row["id"] in ids
                     },
                 )
-        if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
-            raise ValueError("New bank lost health before deployment completion")
+        if not all(native.healthy(mid) for mid in job["candidateMachineIds"]) or not native.native_pollers_ready(
+            job["candidateMachineIds"]
+        ):
+            raise ValueError("New bank lost health or native pollers before deployment completion")
+        if mismatch_records:
+            native.revalidate_retained_routes(mismatch_records)
         job = ledger.stage(
             "DRAINING",
             "SUCCEEDED",
@@ -530,7 +555,10 @@ def run(ledger=None, native_factory=NativePool):
                 "retiredMachines": retired,
                 "activeMachineIds": job["candidateMachineIds"],
                 "candidateHealthy": True,
-                "priorDisposition": "RETIRED" if managed else "RETAINED_LEGACY",
+                "priorDisposition": "RETAINED_ROUTE_MISMATCH"
+                if mismatch_records
+                else ("RETIRED" if managed else "RETAINED_LEGACY"),
+                "retainedRouteMismatchMachineIds": sorted(held_ids),
             },
         )
     return job

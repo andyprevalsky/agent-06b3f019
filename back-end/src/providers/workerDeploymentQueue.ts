@@ -1,13 +1,18 @@
+export * from './workerDeploymentMachineAdmission';
+import {
+  installWorkerRouteRetention,
+  requireWorkerMachineNotRetained,
+  requireRetainedDisposition,
+  WORKER_PRIOR_DISPOSITIONS,
+  requireRetainedPreparation,
+  requireRetiredQueue,
+} from './workerDeploymentRetention';
 /** Durable deploy control plane only: no agent hot-path reads or native side effects. */
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
-import {
-  lockQueueAdmission,
-  queueAdmissionKey,
-  type QueueAdmission,
-} from './workflowQueueAdmission';
+import { lockQueueAdmission } from './workflowQueueAdmission';
 import { WORKFLOW_DEPLOYMENT_LEASE_KEY } from './workflowDeploymentLease';
 
 const JOB = 'WORKER_DEPLOYMENT_JOB';
@@ -90,7 +95,10 @@ function decode(value: Prisma.JsonValue | null): WorkerDeploymentJob {
 async function now(tx: Transaction): Promise<Date> {
   return (await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`)[0].now;
 }
-async function owned(tx: Transaction, ownerId: string): Promise<void> {
+export async function requireWorkerDeploymentLease(
+  tx: Transaction,
+  ownerId: string
+): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${WORKFLOW_DEPLOYMENT_LEASE_KEY}))`;
   const lease = await tx.toolSideEffect.findUnique({
     where: { operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY },
@@ -171,7 +179,7 @@ async function mutation(
   fn: (tx: Transaction, job: WorkerDeploymentJob) => Promise<WorkerDeploymentJob>
 ): Promise<WorkerDeploymentJob> {
   return runTransactionWithRetry(async (tx) => {
-    await owned(tx, ownerId);
+    await requireWorkerDeploymentLease(tx, ownerId);
     const row = await tx.toolSideEffect.findUnique({ where: { operationKey: key(jobId) } });
     if (!row || row.operationType !== JOB) throw new Error('Deployment job does not exist');
     const job = decode(row.request);
@@ -246,6 +254,7 @@ export async function prepareWorkerDeployment(
     if (job.stage !== 'QUEUED') {
       if (!samePreparation(job, plan))
         throw new Error('Prepared deployment bank and prior pointer are immutable');
+      await requireRetainedPreparation(tx, job);
       return { ...job, ownerId, failure: null };
     }
     await lockQueueAdmission(tx);
@@ -255,6 +264,8 @@ export async function prepareWorkerDeployment(
       pointer?.surfaceHash !== plan.priorPointer?.surfaceHash
     )
       throw new Error('Prior pointer changed before atomic bank reservation');
+    for (const id of ids) await requireWorkerMachineNotRetained(tx, job.identity.app, id);
+    await installWorkerRouteRetention(tx, job, plan);
     for (const id of [...ids].sort()) {
       const operationKey = reservationKey(job.identity.app, id);
       const prior = await tx.toolSideEffect.findUnique({ where: { operationKey } });
@@ -324,12 +335,13 @@ export async function transitionWorkerDeployment(
     if (next === 'SUCCEEDED') {
       if (
         evidence.candidateHealthy !== true ||
-        !['RETIRED', 'RETAINED_LEGACY'].includes(String(evidence.priorDisposition))
+        !WORKER_PRIOR_DISPOSITIONS.includes(String(evidence.priorDisposition))
       )
         throw new Error(
           'Deployment completion needs explicit active bank and prior disposition evidence'
         );
-      if (evidence.priorDisposition === 'RETIRED') await requireRetiredQueue(tx, job);
+      await requireRetainedDisposition(tx, job, evidence);
+      if (evidence.priorDisposition !== 'RETAINED_LEGACY') await requireRetiredQueue(tx, job);
       const oldRecords = (
         job.evidence.PREPARING as { previousRecords?: Array<{ managedJobId?: string }> } | undefined
       )?.previousRecords;
@@ -374,34 +386,6 @@ export async function recordWorkerDeploymentFailure(
     };
   });
 }
-async function requireRetiredQueue(
-  tx: Transaction,
-  job: WorkerDeploymentJob,
-  overrideQueue?: string
-): Promise<void> {
-  if (!overrideQueue && !job.priorPointer)
-    throw new Error('Source queue retirement certificate required');
-  await lockQueueAdmission(tx);
-  const queue = overrideQueue ?? job.priorPointer!.taskQueue;
-  const row = await tx.toolSideEffect.findUnique({
-    where: { operationKey: queueAdmissionKey(queue) },
-  });
-  const gate = row?.request as unknown as QueueAdmission | undefined;
-  if (
-    row?.operationType !== 'AGENT_QUEUE_ADMISSION' ||
-    row?.status !== 'RETIRED' ||
-    gate?.version !== 1 ||
-    gate.queue !== queue ||
-    gate.owner !== job.jobId ||
-    !gate.incarnation ||
-    gate?.phase !== 'RETIRED' ||
-    gate.legacyCoverage !== 'QUALIFIED' ||
-    !gate.legacyCertificate?.producerTransition ||
-    !gate.legacyCertificate?.cohortManifest ||
-    gate.legacyCertificate.unresolved !== 0
-  )
-    throw new Error('Source queue retirement is unqualified');
-}
 export async function releaseRetiredWorkerMachines(
   jobId: string,
   machines: Array<{
@@ -417,6 +401,8 @@ export async function releaseRetiredWorkerMachines(
   return mutation(jobId, ownerId, async (tx, job) => {
     if (!['DRAINING', 'SUCCEEDED'].includes(job.stage))
       throw new Error('Machine release requires draining deployment');
+    for (const machine of machines)
+      await requireWorkerMachineNotRetained(tx, job.identity.app, machine.machineId);
     await requireRetiredQueue(tx, job);
     for (const machine of machines) {
       const previous = await tx.toolSideEffect.findUnique({
@@ -503,7 +489,7 @@ export async function assertWorkerDeploymentOwned(
   ownerId: string
 ): Promise<WorkerDeploymentJob> {
   return runTransactionWithRetry(async (tx) => {
-    await owned(tx, ownerId);
+    await requireWorkerDeploymentLease(tx, ownerId);
     const row = await tx.toolSideEffect.findUnique({ where: { operationKey: key(jobId) } });
     if (!row || row.operationType !== JOB) throw new Error('Deployment job does not exist');
     const job = decode(row.request);
@@ -577,6 +563,7 @@ export async function abortPreparedWorkerDeployment(
     )
       throw new Error('Abandonment needs exact eight native retirement records');
     for (const record of records) {
+      await requireWorkerMachineNotRetained(tx, job.identity.app, record.id);
       const changed = await tx.toolSideEffect.updateMany({
         where: {
           operationKey: reservationKey(job.identity.app, record.id),

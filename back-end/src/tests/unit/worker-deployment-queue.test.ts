@@ -1,3 +1,4 @@
+import { retainedRouteMismatchCases } from './worker-route-retention.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
@@ -424,6 +425,29 @@ async function main() {
       atomic(lease.ownerId));
     await test('two managed banks retain ACTIVE custody and release only certified old bank idempotently', () =>
       banks(lease.ownerId));
+    await test('route mismatch retention is atomic, owned, non-destructive and reported honestly', async () => {
+      const pointer = await prisma.agentQueuePointer.findUniqueOrThrow({
+        where: { id: 'singleton' },
+      });
+      try {
+        await retainedRouteMismatchCases({
+          api,
+          prisma,
+          owner: lease.ownerId,
+          app: appFor('retention'),
+          identity,
+        });
+      } finally {
+        await prisma.agentQueuePointer.update({
+          where: { id: 'singleton' },
+          data: {
+            taskQueue: pointer.taskQueue,
+            surfaceHash: pointer.surfaceHash,
+            updatedBy: pointer.updatedBy,
+          },
+        });
+      }
+    });
     await test('explicit QUEUED-only abort unblocks FIFO, prepared abort stays fenced', () =>
       abort(lease.ownerId));
     await test('unpublished prepared abort requires real target tombstone and releases exact bank idempotently', () =>
