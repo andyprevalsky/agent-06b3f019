@@ -2480,8 +2480,19 @@ the user for them. If the run fails closed on a missing identity, provision it:
 cd back-end && set -a && . ./.env && set +a && \
   DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \
   BENCHMARK_ALLOW_LIVE_STRIPE=1 BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=1 \
-  npx tsx scripts/setup-benchmark-payment.ts --live
+  npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107 \
+  --agentcard-cardholder-id "$DEDICATED_AGENTCARD_CARDHOLDER_ID"
 ```
+
+Use `npx tsx scripts/setup-benchmark-payment.ts --help` for the effect-free CLI reference.
+Choose an **existing dedicated** benchmark cardholder; never select Andy's or another actor's
+cardholder, create an identity automatically, or bypass pending KYC. `--agentcard-cardholder-id`
+binds that exact ID after environment fallback resolution. Live setup prefers the complete local
+`AGENTCARD_ORG_OAUTH_CLIENT_ID_LIVE` / `AGENTCARD_ORG_OAUTH_CLIENT_SECRET_LIVE` pair process-locally;
+an incomplete pair fails before any provider or DB call. If both are absent, the existing generic
+production pair remains supported. No global env file or Stripe billing key is changed.
+`--stripe-customer-id` can reuse an existing owned live fixture customer; ownership, live-wallet,
+and KYC checks still apply. Existing purchase history is preserved.
 
 Use `DIRECT_URL`; the 6543 pooler fails with `Can't reach database server`. The only step an
 agent cannot perform is saving a card on the live Stripe customer (entering a card number is
