@@ -529,6 +529,52 @@ cleanup invocation and all old journal bytes and creates one exclusive successor
 journal. An unknown or provider-entered cleanup cannot use this route.
 
 
+### Drain registered orphan owners before completing export
+
+If the original campaign parent has exited and the original deadline has
+expired, a verified supervisor JOINED receipt can authorize termination of
+only its exact registered fleet controllers. Keep the finalizer alive and
+retain the complete pending-export receipt. From the new immutable checkout:
+
+```bash
+python3 -S scripts/cloudbench-controller-orphan-drain.py \
+  --check --operator-ref "$EXACT_RECOVERY_COMMIT" \
+  --config "$EXISTING_CONFIG" --config-sha256 "$EXISTING_CONFIG_SHA256" \
+  --run-directory "$EXISTING_RUN_DIRECTORY" \
+  --joined-journal "$EXISTING_RUN_DIRECTORY/payload-finalization" \
+  --pending "$PRIVATE_COMPLETE_PENDING_RECEIPT"
+```
+
+Replace `--check` with `--run` after the local check passes. The helper binds
+source, registry, campaign membership, UID and process birth, then sends one
+TERM through each exact process descriptor. It does not signal process groups
+or unregistered helpers. `--observe` returns retained signal receipts without
+repeating TERM; those receipts do not prove every writer has exited.
+
+If the original gate returned export-pending, the export recovery helper uses
+the unchanged original collector and caller authority. Its local `--check`
+makes no provider requests. Retain the original finalizer, which alone owns
+controller cleanup after the verified-export marker appears.
+
+```bash
+python3 -S scripts/cloudbench-resume-controller-export.py \
+  --check --operator-ref "$EXACT_RECOVERY_COMMIT" \
+  --config "$EXISTING_CONFIG" --config-sha256 "$EXISTING_CONFIG_SHA256" \
+  --run-directory "$EXISTING_RUN_DIRECTORY"
+```
+
+After the local check passes, use `--observe` for a read-only readiness check.
+A pending result retains the exact writer list without consuming an export
+intent; observe again only as needed. Once READY, replace the mode with `--run`
+for the once-only export.
+
+Export recovery checks the original driver and command join, preserves the
+complete orphan-drain journal, requires the canonical writer check, downloads
+into private staging and verifies every original archive member. It publishes
+the canonical verified-export marker only after all remote helpers have joined.
+An uncertain export dispatch never authorizes repeating that export.
+
+
 Within a live strict cohort, the fleet shares one successful read-only app-secret
 verification. The proof is bound to the campaign owner and process births,
 cohort membership, app, source, verifier bytes, complete environment hashes and
