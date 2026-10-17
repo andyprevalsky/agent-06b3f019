@@ -26,6 +26,18 @@ const { coalesceHubRunPuts } = require(
   path.join(project, "back-end/src/providers/benchmarkHubInFlight.ts"),
 );
 const sourceRoot = process.env.ROSE_GROUPING_SOURCE_ROOT ?? project;
+const storage = require(
+  path.join(sourceRoot, "back-end/src/providers/benchmarkHubStorage.ts"),
+);
+const ownership = require(
+  path.join(
+    sourceRoot,
+    "back-end/src/providers/benchmarkHubStorageOwnership.ts",
+  ),
+);
+const { BenchmarkHubUnavailableError } = require(
+  path.join(sourceRoot, "back-end/src/providers/benchmarkHubErrors.ts"),
+);
 const workRoot =
   process.env.ROSE_GROUPING_CONTROL_ROOT ??
   path.join(project, ".context", `campaign-grouping-control-${process.pid}`);
@@ -104,6 +116,20 @@ function owningBoundary() {
       ).statements,
     );
   }
+  // Follow the actual catalog/parser extraction while keeping object I/O in
+  // this boundary's in-memory external storage fixture.
+  const bundlesFilename = path.join(
+    path.dirname(filename),
+    "benchmarkHubRunBundles.ts",
+  );
+  declarations.push(
+    ...ts.createSourceFile(
+      bundlesFilename,
+      readFileSync(bundlesFilename, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+    ).statements,
+  );
   const named = new Map<string, TypeScript.Statement>();
   for (const node of declarations) {
     if (ts.isFunctionDeclaration(node) && node.name)
@@ -115,6 +141,14 @@ function owningBoundary() {
   const bindings: Record<string, unknown> = {
     Promise,
     coalesceHubRunPuts,
+    hubStorageDomain: storage.hubStorageDomain,
+    hubWritesEnabled: storage.hubWritesEnabled,
+    hubOverlayEnabled: storage.hubOverlayEnabled,
+    beginHubPublications: storage.beginHubPublications,
+    withHubStorageOwnership: ownership.withHubStorageOwnership,
+    assertHubStorageOwnership: ownership.assertHubStorageOwnership,
+    HUB_SQL_TIMEOUT_MS: ownership.HUB_SQL_TIMEOUT_MS,
+    BenchmarkHubUnavailableError,
     prisma: {
       $transaction: (operation: (value: unknown) => unknown) =>
         operation({ $executeRaw: async () => {} }),
