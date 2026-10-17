@@ -272,6 +272,10 @@ with tempfile.TemporaryDirectory() as tmp:
 print("ok publisher recovers and verifies archived dumps before upload")
 PY
 
+# Exercise the real Python -> TypeScript CLI contract against encrypted local
+# archive files, with network access forbidden in every Node child.
+"$PYTHON_BIN" "$ROOT/scripts/tests/publisher-archive-integration.test.py" || fail "publisher archive CLI integration"
+
 # 3) Approval format still demands durable FE + no invalid recordings.
 FORMAT="$ROOT/.claude/shared/approval-format.md"
 grep -Fq 'https://roselabs.ai/?agent-id=' "$FORMAT" || fail "approval format missing durable FE"
