@@ -55,14 +55,14 @@ Do not delete one consumer's browser to make room for the other.
 
 The original600 harness is versioned separately so its disposable controller,
 ticket accounting and shared relay are not replaced with older main versions.
-The portable operator commit is `2bacd15761af82b3b5112df7daf84b621adf2109`, with
+The portable operator commit is `1fc5b729ced76dda398f997650b8ba5d08eb522b`, with
 immutable parent `b0fbd7742dde51446288c22601825a85981c1d0b`. Fetch the published
 `fix/original600-portable-operator` branch, create a separate worktree at that
 exact commit, and follow its `docs/original600-operator-cli.md`:
 
 ```bash
 git fetch origin fix/original600-portable-operator
-git worktree add --detach "$OPERATOR_CHECKOUT" 2bacd15761af82b3b5112df7daf84b621adf2109
+git worktree add --detach "$OPERATOR_CHECKOUT" 1fc5b729ced76dda398f997650b8ba5d08eb522b
 cd "$OPERATOR_CHECKOUT"
 python3 scripts/run-original600-controller.py --help
 ```
@@ -108,3 +108,11 @@ clock, reconciles recorded effects without blindly replaying them, and refuses
 to relaunch an already-bound controller. The public status projection preserves
 confirmed infrastructure flags through cancellation while keeping physical
 terminal-attempt statistics separate.
+
+The pinned CLI also supports resuming a recorded finalizer probe failure and
+the exact pre-provider cleanup credential refusal. Follow its documented
+receipt-bound continuation commands; retain the original journals and caller.
+Cleanup receives the credential from the explicitly bound complete env file.
+Native observation keeps its original deadline while loading immutable I/O
+helpers once, and status counts directly proven startup failures separately
+from canonical infrastructure flags.
