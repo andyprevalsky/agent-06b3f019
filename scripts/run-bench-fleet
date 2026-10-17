@@ -7150,26 +7150,50 @@ reconcile_stale_fleet_registries() {
     if [ -z "${RUN_BENCH_CLEANUP_COHORT_DIR:-}" ] || [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         reconcile_stale_fleet_registries_full; return $?
     fi
-    local fd status=0 job="${RUN_BENCH_CLEANUP_JOB:-${RUN_BENCH_CAMPAIGN_JOB_ID:-}}"
+    local fd status=0 receipt="" prior="" recovery_deadline="" job="${RUN_BENCH_CLEANUP_JOB:-${RUN_BENCH_CAMPAIGN_JOB_ID:-}}"
     [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" != 1 ] || job="__infra_canary__"
     local helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-cohort-reconcile.py"
     local -a args=(--cohort "$RUN_BENCH_CLEANUP_COHORT_DIR" --cohort-id "$RUN_BENCH_CLEANUP_COHORT_ID" --job "$job" --owner-pid "$$" --owner-start "$FLEET_OWNER_PID_START" --app "$APP" --ownership-root "$FLEET_OWNERSHIP_ROOT")
+    if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+        args+=(--inventory-index "$INVENTORY_INDEX" --publisher-token "$SNAPSHOT_LOOP_TOKEN")
+    fi
+    FLEET_STALE_RECONCILIATION_INVENTORY_SATISFIED=0
     # The persistent kernel inode is never replaced; inherited FD keeps the
     # winner exclusive through all destructive reconciliation and its receipt.
     (umask 077; : >> "$RUN_BENCH_CLEANUP_COHORT_DIR/stale-reconcile.lock") || return 1
     exec {fd}<> "$RUN_BENCH_CLEANUP_COHORT_DIR/stale-reconcile.lock" || return 1
-    python3 "$helper" acquire "${args[@]}" --fd "$fd" || status=$?
+    receipt="$(python3 -S "$helper" acquire "${args[@]}" --fd "$fd")" || status=$?
     if [ "$status" = 10 ]; then
+        case "$receipt" in ''|*[!0-9]*) exec {fd}>&-; return 1 ;; esac
+        recovery_deadline=$((SECONDS + receipt))
+        if [ -n "${CAPACITY_ADMISSION_DEADLINE:-}" ] && [ "$CAPACITY_ADMISSION_DEADLINE" -lt "$recovery_deadline" ]; then
+            recovery_deadline="$CAPACITY_ADMISSION_DEADLINE"
+        fi
         status=0
         reconcile_stale_fleet_registries_full || status=$?
         # Preserve startup order: historical recovery, then the unchanged
         # app-scoped orphan sweep, before publishing cohort completion.
         if [ "$status" = 0 ]; then reap_orphaned_fleet_proxies || true; fi
-        python3 "$helper" complete "${args[@]}" --fd "$fd" --status "$status" || status=1
+        # Only the actual recovery winner pays the post-mutation barrier.
+        # Its completed receipt carries the evidence to every later peer.
+        if [ "$status" = 0 ] && [ "${FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED:-1}" != 0 ] \
+            && [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+            inventory_index_healthy || status=1
+            prior="$(machines_snapshot_identity)"
+            if [ "$status" = 0 ]; then refresh_machines_snapshot_after "$prior" "$recovery_deadline" || status=1; fi
+            inventory_index_healthy || status=1
+        fi
+        receipt="$(python3 -S "$helper" complete "${args[@]}" --fd "$fd" --status "$status" \
+            --may-have-mutated "${FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED:-1}" --prior-generation "$prior")" || status=1
     fi
     exec {fd}>&-
-    # The winner may have changed inventory; borrowed readers must observe it.
-    FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=1
+    [ "$status" = 0 ] || return "$status"
+    case "$receipt" in 0|1) ;; *) return 1 ;; esac
+    FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED="$receipt"
+    if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+        inventory_index_healthy || return 1
+        FLEET_STALE_RECONCILIATION_INVENTORY_SATISFIED=1
+    fi
     [ "$status" = 0 ]
 }
 
@@ -15530,7 +15554,8 @@ fi
 # Recovery may have removed active machines. Capacity must classify the
 # post-reconciliation provider state, not the earlier warm-source lookup.
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
-    if [ "${FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED:-1}" != 0 ] \
+    if { [ "${FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED:-1}" != 0 ] \
+        && [ "${FLEET_STALE_RECONCILIATION_INVENTORY_SATISFIED:-0}" != 1 ]; } \
         || [ "${FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED:-1}" != 0 ]; then
         refresh_machines_snapshot_after "$(machines_snapshot_identity)" || {
             echo "❌ App capacity guard could not refresh machine state after stale-fleet recovery." >&2
