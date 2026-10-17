@@ -188,7 +188,32 @@ fi
 if [ -z "$GITHUB_TOKEN_VALUE" ]; then
   GITHUB_TOKEN_VALUE="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
 fi
-[ -n "$GITHUB_TOKEN_VALUE" ] || { echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)" >&2; exit 1; }
+if [ -z "$GITHUB_TOKEN_VALUE" ]; then
+  echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)" >&2
+  if [ -n "${CLOUDBENCH_GATE_NO_EFFECT_RECEIPT:-}" ]; then
+    # This explicit failure precedes workspace/create intents and every
+    # provider allocation. Unknown later failures never get this receipt.
+    python3 -I -B - "$CLOUDBENCH_GATE_NO_EFFECT_RECEIPT" "$GATE_REF" "$$" <<'PY_NO_EFFECT'
+import json, os
+from pathlib import Path
+import sys
+path=Path(sys.argv[1]).absolute()
+assert path.parent.resolve(strict=True)==path.parent
+info=path.parent.stat()
+assert info.st_uid==os.getuid() and not info.st_mode&0o077
+value=dict(schema='original600-gate-preallocation-failure-v1',
+           reason='github-token-missing',source_ref=sys.argv[2],gate_pid=int(sys.argv[3]),
+           allocation_attempted=False)
+fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+try:os.fsync(fd)
+finally:os.close(fd)
+PY_NO_EFFECT
+  fi
+  exit 1
+fi
 
 IMAGE_REF="${WARM_IMAGE_REF:-}"
 if [ -z "$IMAGE_REF" ]; then

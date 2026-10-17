@@ -80,3 +80,24 @@ fabricate resource ownership or cleanup receipts. Successful exit alone is not
 an original600 success: inspect the canonical600 outcomes and unique-infra count.
 Local offline fixture passes do not qualify actual capacity, R2 publication,
 provider allocation or the five-consecutive-run goal.
+
+
+### Launcher credentials and no-effect failures
+
+Both complete `--backend-env` and `--agents-env` inputs are resolved explicitly,
+so a sparse harness checkout does not need copied `.env` files. CHECK resolves a
+literal GitHub credential using the existing controller precedence (explicit
+base64 override, Git credential rewrite, local gh login, process token, selected
+complete backend then agents file) before any capacity read or allocation. It
+never prints credentials. Only the owned gate receives the selected token in its
+process environment; no whole environment/DB variables or secret subset files
+are copied and no token is serialized into the launch config.
+
+If the joined gate explicitly refuses a missing GitHub credential before any
+export/allocation stage, it writes a private typed preallocation receipt. The
+runner binds its exact gate PID, source, reason and exit status, requires the
+entire export path to be absent, then records `FAILED_BEFORE_PROVIDER_DISPATCH`
+and joins. Missing ownership/intent files or a generic failed gate alone never
+prove no effect: ambiguous CREATE/export/provider failures keep their original
+live cleanup owner and pending evidence. This terminal classification does not
+retroactively relabel an older launch or benchmark outcome.

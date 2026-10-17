@@ -1154,8 +1154,10 @@ cloudbench_git_insteadof_github_token() {
 }
 
 cloudbench_resolve_controller_github_token() {
-  local token="" dotenv
+  local token="" dotenv backend_env agents_env
   local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}"
+  backend_env="${2:-$workspace_root/back-end/.env}"
+  agents_env="${3:-$workspace_root/agents/.env}"
   if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
     token="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
     [ -n "$token" ] && { printf '%s' "$token"; return 0; }
@@ -1171,7 +1173,7 @@ cloudbench_resolve_controller_github_token() {
   fi
   token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [ -z "$token" ]; then
-    for dotenv in "$workspace_root/back-end/.env" "$workspace_root/agents/.env"; do
+    for dotenv in "$backend_env" "$agents_env"; do
       [ -f "$dotenv" ] || continue
       token="$(cloudbench_env_value "$dotenv" GITHUB_TOKEN 2>/dev/null || true)"
       [ -z "$token" ] || break

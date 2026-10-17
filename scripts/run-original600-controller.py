@@ -65,6 +65,19 @@ def token_header(token):
     return token if token.startswith(('FlyV1 ', 'Bearer ')) else 'Bearer ' + token
 
 
+def github_token(root, backend_env, agents_env):
+    # Use the existing controller precedence, passing complete explicit input
+    # paths instead of materializing secret subsets in a sparse checkout.
+    result = subprocess.run(['bash', '-c',
+        'source "$1"; cloudbench_resolve_controller_github_token "$2" "$3" "$4"',
+        'github-preflight', str(root/'scripts/lib/cloudbench-env.sh'), str(root),
+        str(backend_env), str(agents_env)], cwd=root, capture_output=True, timeout=15)
+    token = result.stdout.decode().strip()
+    if result.returncode != 0 or not re.fullmatch(r'[A-Za-z0-9_./+=:\-]+', token):
+        raise ValueError('GitHub credential unavailable or malformed in selected controller inputs')
+    return token
+
+
 def facts_from(raw):
     facts = json.loads(raw)
     if (facts.get('app') != 'navi-whisper-lux-bench'
@@ -193,6 +206,7 @@ def main():
     runner['campaign_argv'](json.loads(runner['read'](args.tasks)), time.time())
     facts_from(runner['read'](args.facts))
     token_from_agents(runner['read'](args.agents_env))
+    github = github_token(root, args.backend_env, args.agents_env)
     if args.extra_destroying_count < 1:
         raise ValueError('conservative unlisted/destroying allowance must be at least one')
     subprocess.run([sys.executable, '-I', '-B', str(root/'scripts/cloudbench-operator-preflight.py'), '--require-flyctl'], check=True)
@@ -214,7 +228,7 @@ def main():
         cap = capacity(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
     config = prepare(args, root, pins, runner, directory, cap)
     print(json.dumps(dict(directory=str(directory), source_ref=args.source_ref, status='LAUNCHING_ORIGINAL600')), flush=True)
-    return runner['run'](config, digest(runner['read'](config)), directory/'run')
+    return runner['run'](config, digest(runner['read'](config)), directory/'run', github_token=github)
 
 
 if __name__ == '__main__':

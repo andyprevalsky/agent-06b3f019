@@ -30,6 +30,58 @@ def private(path, value):
 
 
 class Portable(unittest.TestCase):
+    def test_explicit_complete_github_sources_and_process_precedence_before_launch(self):
+        with tempfile.TemporaryDirectory() as name:
+            base=Path(name);root=base/'sparse';(root/'scripts/lib').mkdir(parents=True)
+            (root/'scripts/lib/cloudbench-env.sh').write_bytes((ROOT/'scripts/lib/cloudbench-env.sh').read_bytes())
+            backend=private(base/'backend.env','COMPLETE=fixture\nGITHUB_TOKEN=fixture_backend\n')
+            agents=private(base/'agents.env','COMPLETE=fixture\nGITHUB_TOKEN=fixture_agents\n')
+            binary=base/'bin';binary.mkdir()
+            for command in ['git','gh']:
+                file=binary/command;file.write_text('#!/bin/sh\nexit 1\n');file.chmod(0o700)
+            environment=dict(os.environ,PATH=str(binary)+':'+os.environ['PATH'])
+            for key in ['GITHUB_TOKEN','GH_TOKEN','CLOUDBENCH_GITHUB_TOKEN_B64']:environment.pop(key,None)
+            with patch.dict(os.environ,environment,clear=True):
+                self.assertEqual(CLI.github_token(root,backend,agents),'fixture_backend')
+                with patch.dict(os.environ,GITHUB_TOKEN='fixture_process'):
+                    self.assertEqual(CLI.github_token(root,backend,agents),'fixture_process')
+                backend.write_text('COMPLETE=fixture\n')
+                self.assertEqual(CLI.github_token(root,backend,agents),'fixture_agents')
+                agents.write_text('COMPLETE=fixture\n')
+                with self.assertRaisesRegex(ValueError,'GitHub credential unavailable'):
+                    CLI.github_token(root,backend,agents)
+            self.assertFalse((root/'back-end/.env').exists())
+            self.assertFalse((root/'agents/.env').exists())
+
+    def test_actual_gate_typed_preallocation_refusal_terminates_only_joined_no_effect(self):
+        source=Path(os.environ.get('ORIGINAL600_GATE_SOURCE',ROOT/'scripts/run-cloudbench-controller-gate')).read_text()
+        message=source.index('echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)"')
+        # Old source used a one-line || refusal; run that exact old statement.
+        start=source.rfind('\n',0,message)+1
+        if source[start:message].lstrip().startswith('[ -n '):
+            block=source[start:source.index('\n',message)]
+        else:
+            start=source.rfind('if [ -z "$GITHUB_TOKEN_VALUE" ]; then',0,message)
+            block=source[start:source.index('\nfi\n',message)+3]
+        with tempfile.TemporaryDirectory() as name:
+            out=Path(name);out.chmod(0o700);receipt=out/'early.json';export=out/'export';ref='a'*40
+            env=dict(os.environ,CLOUDBENCH_GATE_NO_EFFECT_RECEIPT=str(receipt),GATE_REF=ref)
+            child=subprocess.Popen(['bash','-c','GITHUB_TOKEN_VALUE=""\n'+block],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            stdout,stderr=child.communicate(timeout=3)
+            self.assertEqual(child.returncode,1)
+            self.assertIn(b'No GitHub token',stderr)
+            value=RUNNER['preallocation_terminal'](True,1,child.pid,ref,export,receipt)
+            self.assertIsNotNone(value,'actual preallocation gate refusal must not strand cleanup owner')
+            self.assertEqual(value['status'],'FAILED_BEFORE_PROVIDER_DISPATCH')
+            self.assertFalse(value['allocation_attempted'])
+            self.assertIsNone(RUNNER['preallocation_terminal'](False,1,child.pid,ref,export,receipt))
+            self.assertIsNone(RUNNER['preallocation_terminal'](True,1,child.pid+1,ref,export,receipt))
+            self.assertIsNone(RUNNER['preallocation_terminal'](True,2,child.pid,ref,export,receipt))
+            export.mkdir();private(export/'workspace-volume.intent.json',dict(unknown_create=True))
+            self.assertIsNone(RUNNER['preallocation_terminal'](True,1,child.pid,ref,export,receipt))
+            receipt.unlink()
+            self.assertIsNone(RUNNER['preallocation_terminal'](True,1,child.pid,ref,out/'absent',receipt))
+
     def test_literal_token_accepts_canonical_scheme_without_nested_authorization(self):
         for value in ['opaque-token', 'FlyV1 fm2_fixture+/=', 'Bearer opaque-token',
                       '"FlyV1 fm2_fixture+/="', "'Bearer opaque-token'"]:
@@ -96,7 +148,10 @@ class Portable(unittest.TestCase):
             root = Path(name)/'checkout'
             (root/'scripts').mkdir(parents=True)
             for member in CLI.PINS:
-                (root/'scripts'/member).write_bytes((ROOT/'scripts'/member).read_bytes())
+                selected=Path(SPEC.origin) if member=='run-original600-controller.py' else ROOT/'scripts'/member
+                (root/'scripts'/member).write_bytes(selected.read_bytes())
+            (root/'scripts/lib').mkdir()
+            (root/'scripts/lib/cloudbench-env.sh').write_bytes((ROOT/'scripts/lib/cloudbench-env.sh').read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             subprocess.run(['git', '-C', str(root), 'add', 'scripts'], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
@@ -117,15 +172,25 @@ class Portable(unittest.TestCase):
             tasks = json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())
             facts = dict(app='navi-whisper-lux-bench', image_ref='registry.fly.io/fixture@sha256:'+'a'*64,
                          protected_machines=['m1', 'm2', 'm3', 'm4'], protected_volumes=['v1'])
-            for flag, data in [('facts', facts), ('agents-env', 'FLY_API_TOKEN=FlyV1 fixture\n'), ('backend-env', 'COMPLETE=fixture\n'),
+            for flag, data in [('facts', facts), ('agents-env', 'FLY_API_TOKEN=FlyV1 fixture\n'), ('backend-env', 'COMPLETE=fixture\nGITHUB_TOKEN=fixture_github\n'),
                                ('tasks', tasks), ('snapshot-inventory', {}), ('warm-deps', 'fixture')]:
                 args += ['--'+flag, str(private(inputs/flag, data))]
-            env = dict(os.environ, PATH=str(fakebin)+':'+os.environ['PATH'], PROVIDER_MARKER=str(marker))
+            gh=fakebin/'gh';gh.write_text('#!/bin/sh\nexit 1\n');gh.chmod(0o700)
+            env = dict(os.environ, PATH=str(fakebin)+':'+os.environ['PATH'], PROVIDER_MARKER=str(marker),
+                       GIT_CONFIG_GLOBAL='/dev/null',GIT_CONFIG_NOSYSTEM='1')
+            for key in ['GITHUB_TOKEN','GH_TOKEN','CLOUDBENCH_GITHUB_TOKEN_B64']:env.pop(key,None)
             result = subprocess.run(args, cwd='/', env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)['status'], 'CHECKED_NOT_LAUNCHED')
             self.assertFalse(marker.exists())
             self.assertEqual(list(state.iterdir()), [])
+            (inputs/'backend-env').write_text('COMPLETE=fixture\n')
+            missing=subprocess.run(args,cwd='/',env=env,capture_output=True,text=True,timeout=10)
+            self.assertNotEqual(missing.returncode,0,'missing explicit launcher credential must fail during CHECK')
+            self.assertIn('GitHub credential unavailable',missing.stderr)
+            self.assertFalse(marker.exists())
+            self.assertEqual(list(state.iterdir()),[])
+            (inputs/'backend-env').write_text('COMPLETE=fixture\nGITHUB_TOKEN=fixture_github\n')
             # Same public command must refuse changed committed source before a provider call.
             with (root/'scripts/cloudbench-shared-relay.py').open('a') as f:
                 f.write('\n# altered fixture\n')

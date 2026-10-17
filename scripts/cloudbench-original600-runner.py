@@ -140,7 +140,21 @@ def reconciled_release(out,export,authority,mid,action,gate_joined,probe):
   need(action=='cleanup-workspace' and r['machine_id']is None and r['no_live_machine_observed']is True and r['command_history_verified']is False,'wrong partial external release')
  return r
 
-def run(config_path,config_sha,out):
+def preallocation_terminal(joined,gate_code,gate_pid,ref,export,receipt):
+ # Directory/intent absence alone NEVER proves no allocation was attempted.
+ # Only the exact gate's explicit early-failure receipt can end this owner.
+ if not joined or gate_code!=1 or os.path.lexists(export) or not Path(receipt).exists():return None
+ try:
+  value=json.loads(read(receipt))
+  need(value==dict(schema='original600-gate-preallocation-failure-v1',reason='github-token-missing',
+       source_ref=ref,gate_pid=gate_pid,allocation_attempted=False),'unbound early gate failure')
+ except (OSError,ValueError,KeyError):return None
+ return dict(status='FAILED_BEFORE_PROVIDER_DISPATCH',reason=value['reason'],gate_exit_code=gate_code,
+             source_ref=ref,allocation_attempted=False,no_provider_cleanup_required=True,
+             benchmark_success_inferred=False,receipt_sha256=sha(read(receipt)))
+
+
+def run(config_path,config_sha,out,*,github_token=None):
  os.umask(0o077);raw=read(config_path);need(sha(raw)==config_sha,'root config bytes changed');v=json.loads(raw)
  need(v['schema']=='original600-controller-runner-v1'and v['allowed']is True,'explicit root operation config required')
  root=Path(v['source_root']).resolve(strict=True);ref=v['source_ref'];need(re.fullmatch('[0-9a-f]{40}',ref or''),'UNBOUND final source')
@@ -167,7 +181,12 @@ def run(config_path,config_sha,out):
  remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']
  identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote=dict(source_ref=ref,supervisor_sha256=v['source_files']['cloudbench-original600-supervisor.py'],identity_name=identity_name,tasks=tasks,epoch=epoch,campaign_argv=argv,remote_env=remote_env,remote_files=files)
  export=out/'export';log=out/'gate.private.log';command=['bash',str(root/'scripts/run-cloudbench-controller-gate'),'--disposable-controller',str(authority),'--','python3','-c',REMOTE_LAUNCH,base64.b64encode(json.dumps(remote,sort_keys=True).encode()).decode()]
- env=dict(os.environ,**v.get('gate_env',{}));env.update(CLOUDBENCH_GATE_REF=ref,CLOUDBENCH_GATE_EXPORT_DIR=str(export),CLOUDBENCH_GATE_RETAIN_HOST='1',CLOUDBENCH_GATE_EXPORT_HOST='1',CLOUDBENCH_GATE_VM_SIZE='performance-8x',CLOUDBENCH_GATE_VM_MEMORY='32768',CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB='256')
+ env=dict(os.environ,**v.get('gate_env',{}))
+ if github_token is not None:
+  need(isinstance(github_token,str)and re.fullmatch(r'[A-Za-z0-9_./+=:\-]+',github_token),'invalid owned gate GitHub credential')
+  env['GITHUB_TOKEN']=github_token
+ env['CLOUDBENCH_GATE_NO_EFFECT_RECEIPT']=str(out/'gate.preallocation-failure.json')
+ env.update(CLOUDBENCH_GATE_REF=ref,CLOUDBENCH_GATE_EXPORT_DIR=str(export),CLOUDBENCH_GATE_RETAIN_HOST='1',CLOUDBENCH_GATE_EXPORT_HOST='1',CLOUDBENCH_GATE_VM_SIZE='performance-8x',CLOUDBENCH_GATE_VM_MEMORY='32768',CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB='256')
  need(int(env.get('CLOUDBENCH_GATE_TIMEOUT_S','0'))>5400,'explicit host watchdog must outlive benchmark cleanup')
  capture=root/'scripts/cloudbench-original-volume-capture.py';scope={'__file__':str(capture),'__name__':'bound_external_controller'};exec(compile(capture.read_bytes(),str(capture),'exec'),scope)
  token=scope['resolve_token']({'workspace':str(root)});api=scope['Fly'](APP,token)
@@ -180,7 +199,12 @@ def run(config_path,config_sha,out):
   save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=TASK_REF,epoch=epoch,deadline=epoch+5400,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))
   while True:
    joined=gate.poll()is not None
-   if joined:gate.wait();stream.close()
+   if joined:
+    gate.wait();stream.close()
+    early=preallocation_terminal(True,gate.returncode,gate.pid,ref,export,out/'gate.preallocation-failure.json')
+    if early is not None:
+     save(out/'terminal.json',dict(early,started_at_epoch=epoch,original_deadline=epoch+5400))
+     return gate.returncode
    ownership=export/'disposable-controller.ownership.json'
    if mid is None and ownership.exists():
     record=json.loads(read(ownership));need(record['authority_sha256']==sha(authority.read_bytes()),'wrong controller ownership');mid=record['machine']['id'];need(mid not in auth['protected_machines'],'protected controller ID')
@@ -220,6 +244,11 @@ def run(config_path,config_sha,out):
   try:print(json.dumps(dict(status='PENDING_EXTERNAL_OWNER_LIVE',error=type(e).__name__,gate_pid=gate.pid,no_gate_or_vm_kill=True)),flush=True)
   except BaseException:pass
   while True:
+   if gate.poll() is not None:
+    early=preallocation_terminal(True,gate.returncode,gate.pid,ref,export,out/'gate.preallocation-failure.json')
+    if early is not None:
+     save(out/'terminal.json',dict(early,started_at_epoch=epoch,original_deadline=epoch+5400))
+     return gate.wait()
    if mid is None:
     try:
      candidate=export/'disposable-controller.ownership.json'
