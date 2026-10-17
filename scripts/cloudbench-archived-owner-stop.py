@@ -6,6 +6,8 @@ most one stop per identity. Never deletes, edits config, detaches volumes,
 releases ownership, or certifies benchmark/guest/provider-session cleanup.
 """
 import argparse
+import ast
+import base64
 from datetime import datetime
 import hashlib
 import json
@@ -15,6 +17,7 @@ from pathlib import Path
 import re
 import runpy
 import stat
+import subprocess
 import tarfile
 import time
 
@@ -340,6 +343,389 @@ def native_owned_target(machine, ownership):
     return dict(machine=machine, ownership=ownership)
 
 
+STARTUP_OPERATOR = "2a4624e8388c526b290cf9cbfe21f5f2143cf007"
+STARTUP_SOURCE = "59ab01b35aa91521e105a3d48e1587007aa347ad"
+STARTUP_PRODUCER_SHA = (
+    "6335250eb296ae7be79d65f4fed1f8d8dfaaf8791aa25f7f05d7d57a9004f421"
+)
+
+
+def historical_source(ref, name):
+    return subprocess.check_output(
+        [
+            "git",
+            "--no-replace-objects",
+            "-C",
+            str(HERE.parent),
+            "show",
+            ref + ":scripts/" + name,
+        ]
+    )
+
+
+STARTUP_RELEASE_SHA = "f3c8d493b8713e71132e262feebd832f7b663cad65c1dc04d0dc02f47d45b796"
+
+
+def startup_release_observation(run, terminal, operator, proof):
+    """Read the explicit GET-only successor; the original cleanup is not replayed."""
+    old = run / "startup-finalization"
+    new = run / "startup-release-observation"
+    names = {
+        "intent.json",
+        "failure-proof.json",
+        "cleanup.intent.json",
+        "cleanup.child.json",
+        "cleanup.joined.json",
+        "cleanup.log",
+    } | {
+        f"wire-{n:06d}.{kind}.json"
+        for n in (1, 2)
+        for kind in ("request", "raw", "decoded")
+    }
+    need(
+        {p.name for p in old.iterdir()} == names,
+        "startup prior journal membership differs",
+    )
+    files = {name: sha(raw(old / name)) for name in sorted(names)}
+    successor = obj(new / "intent.json")
+    ref = terminal["finalizer_operator_ref"]
+    need(
+        re.fullmatch("[0-9a-f]{40}", ref)
+        and sha(historical_source(ref, "cloudbench-startup-finalization.py"))
+        == STARTUP_RELEASE_SHA,
+        "unknown startup release producer",
+    )
+    need(
+        set(successor) == {"operator_ref", "operator_pins", "prior", "no_effect_replay"}
+        and successor["operator_ref"] == ref
+        and successor["no_effect_replay"] is True
+        and terminal.get("no_effect_replay") is True
+        and terminal["prior_finalizer_operator_ref"] == STARTUP_OPERATOR
+        and obj(new / "complete.json") == terminal,
+        "startup release completion differs",
+    )
+    for name, digest in operator["operator_hashes"].items():
+        if name != "cloudbench-startup-finalization.py":
+            need(sha(historical_source(ref, name)) == digest, "startup release dependency differs")
+    need({Path(path).name for path in successor["operator_pins"] if "/scripts/" in path} == set(operator["operator_hashes"]), "startup release source set differs")
+    prior = successor["prior"]
+    need(
+        set(prior)
+        == {"files", "operator_ref", "proof", "source_root", "operator_hashes"}
+        and prior["files"] == files
+        and prior["proof"] == proof
+        and prior["operator_ref"] == operator["operator_ref"] == STARTUP_OPERATOR
+        and prior["operator_hashes"] == operator["operator_hashes"],
+        "startup prior proof differs",
+    )
+    roots = [
+        str(Path(path).parent.parent)
+        for path in operator["operator_pins"]
+        if path.endswith("/scripts/cloudbench-startup-finalization.py")
+    ]
+    need(roots == [prior["source_root"]], "startup prior operator root differs")
+    required = {"intent.json", "complete.json", "SIGTERM.intent.json"} | {
+        f"wire-{n:06d}.{kind}.json" for n in (1, 2) for kind in ("request", "raw")
+    }
+    allowed = required | {
+        "SIGKILL.intent.json",
+        "wire-000001.decoded.json",
+        "wire-000002.decoded.json",
+    }
+    present = {p.name for p in new.iterdir()}
+    need(required <= present <= allowed, "startup release journal membership differs")
+    ownership = run / "export/disposable-controller.ownership.json"
+    machine = obj(ownership)["machine"]
+    identity = ("id", "instance_id", "config", "name", "region")
+
+    def observation(directory, n, path, statuses):
+        request = obj(directory / f"wire-{n:06d}.request.json")
+        response = obj(directory / f"wire-{n:06d}.raw.json")
+        body = base64.b64decode(response["body_b64"], validate=True)
+        need(
+            request == {"method": "GET", "path": path, "body": None}
+            and response["method"] == "GET"
+            and response["path"] == path
+            and response["status"] in statuses
+            and response["bytes"] == len(body)
+            and response["sha256"] == sha(body),
+            "startup release raw GET differs",
+        )
+        decoded = directory / f"wire-{n:06d}.decoded.json"
+        if response["status"] == 404:
+            need(not decoded.exists(), "404 has fabricated decoded success")
+            return None
+        value = json.loads(body)
+        need(
+            isinstance(value, dict) and obj(decoded) == value,
+            "startup release decoded GET differs",
+        )
+        return value
+
+    path = "/machines/" + terminal["machine"]
+    first = observation(old, 1, path, (200,))
+    tombstone = observation(old, 2, path, (200,))
+    need(
+        all(first.get(k) == machine.get(k) for k in identity)
+        and tombstone.get("state") == "destroyed"
+        and all(tombstone.get(k) == machine.get(k) for k in identity),
+        "startup prior tombstone differs",
+    )
+    fresh = observation(new, 1, path, (200, 404))
+    need(
+        fresh is None
+        or fresh.get("state") == "destroyed"
+        and all(fresh.get(k) == machine.get(k) for k in identity),
+        "startup release Machine remains live",
+    )
+    volume = terminal["release"]["volume_id"]
+    fresh = observation(new, 2, "/volumes/" + volume, (200, 404))
+    need(
+        fresh is None
+        or fresh.get("id") == volume
+        and fresh.get("state") in ("pending_destroy", "destroyed"),
+        "startup release volume remains live",
+    )
+    for name in present & {"SIGTERM.intent.json", "SIGKILL.intent.json"}:
+        need(
+            obj(new / name)
+            == {
+                "pid": proof["caller"]["pid"],
+                "birth": proof["caller"]["birth"],
+                "signal": name.split(".")[0],
+                "resources_release_verified": True,
+            },
+            "startup caller retirement differs",
+        )
+    return [
+        ownership,
+        *[old / name for name in sorted(names)],
+        *[new / name for name in sorted(present)],
+    ]
+
+
+def startup_closure(run, terminal, intent, authority, verified, manifest, record):
+    """A typed failure before publication is never a joined supervisor."""
+    journal = run / "startup-finalization"
+    paths = [
+        journal / name
+        for name in ("intent.json", "failure-proof.json", "cleanup.joined.json")
+    ]
+    producer = historical_source(STARTUP_OPERATOR, "cloudbench-startup-finalization.py")
+    need(sha(producer) == STARTUP_PRODUCER_SHA, "unknown startup closure producer")
+    step = ast.literal_eval(
+        next(
+            n.value
+            for n in ast.parse(producer).body
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "STEP" for t in n.targets)
+        )
+    )
+    proof_raw = raw(journal / "failure-proof.json")
+    proof = json.loads(proof_raw)
+    operator = obj(journal / "intent.json")
+    need(
+        terminal["status"] == "FAILED_BEFORE_SUPERVISOR"
+        and operator["operator_ref"] == proof["operator_ref"] == STARTUP_OPERATOR,
+        "startup completion/operator differs",
+    )
+    continuation = terminal.get("no_effect_replay") is True
+    if continuation:
+        paths.extend(startup_release_observation(run, terminal, operator, proof))
+    else:
+        need(
+            obj(journal / "complete.json") == terminal
+            and terminal["finalizer_operator_ref"] == STARTUP_OPERATOR
+            and not (run / "startup-release-observation").exists(),
+            "startup completion/operator differs",
+        )
+        paths.extend([journal / "complete.json", journal / "release.verified.json"])
+    need(
+        terminal["failure_proof_path"]
+        == intent["failure_proof_path"]
+        == str(journal / "failure-proof.json")
+        and terminal["failure_proof_sha256"]
+        == intent["failure_proof_sha256"]
+        == sha(proof_raw),
+        "startup proof bytes differ",
+    )
+    need(
+        proof["schema"] == "expired-before-supervisor-proof-v1"
+        and proof["source_ref"]
+        == terminal["source_ref"]
+        == authority["source_ref"]
+        == record["source_ref"]
+        == STARTUP_SOURCE,
+        "startup source differs",
+    )
+    need(
+        all(
+            value.get("supervisor_joined") is False
+            and value.get("supervisor_published") is False
+            for value in (terminal, intent, proof)
+        )
+        and terminal["gate_reap"]
+        == proof["gate_reap"]
+        == "OBSERVED_ORIGINAL_PARENT_REAP"
+        and intent["gate_joined"] is True,
+        "startup supervisor disposition differs",
+    )
+    need(
+        terminal["machine"] == intent["machine"] == record["machine_id"]
+        and intent["action"] == "cleanup"
+        and terminal["controller_cleanup_exit_code"] == 0
+        and terminal["benchmark_success_inferred"] is False
+        and terminal["caller_disposition"] == "EXITED_PIDFD_OBSERVED_NOT_OWNED_JOIN",
+        "startup cleanup disposition differs",
+    )
+    need(
+        obj(journal / "cleanup.joined.json")
+        == {"exit_code": 0, "owned_join": True, "cancelled_signals": []},
+        "startup cleanup child not joined",
+    )
+    config_path = Path(proof["config_path"])
+    need(
+        config_path.is_absolute() and config_path.parent / "run" == run,
+        "startup config path differs",
+    )
+    config_raw = raw(config_path)
+    config = json.loads(config_raw)
+    need(
+        sha(config_raw) == proof["config_sha256"]
+        and config["source_ref"] == STARTUP_SOURCE
+        and config["source_root"] == proof["source_root"],
+        "startup config/source binding differs",
+    )
+    public_source = historical_source(STARTUP_SOURCE, "run-original600-controller.py")
+    source_names = ast.literal_eval(
+        next(
+            n.value
+            for n in ast.parse(public_source).body
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "PINS" for t in n.targets)
+        )
+    )
+    need(
+        set(config["source_files"]) == set(source_names),
+        "incomplete historical startup source set",
+    )
+    for name, digest in config["source_files"].items():
+        need(
+            sha(historical_source(STARTUP_SOURCE, name)) == digest,
+            "historical startup source differs",
+        )
+    expected_names = {
+        "cloudbench-startup-finalization.py",
+        "cloudbench-controller-payload-finalization.py",
+        "cloudbench-resume-controller-payload.py",
+        "cloudbench-original600-runner.py",
+        "cloudbench-original-volume-capture.py",
+        "run-original600-controller.py",
+    }
+    need(
+        set(operator["operator_hashes"]) == expected_names
+        and operator["operator_pins"] == proof["operator_pins"],
+        "startup operator source set differs",
+    )
+    for name, digest in operator["operator_hashes"].items():
+        need(
+            sha(historical_source(STARTUP_OPERATOR, name)) == digest,
+            "historical startup operator differs",
+        )
+    caller_path = run / "caller.json"
+    capture_path = run / "threshold-owner.identity.private.json"
+    caller, capture = obj(caller_path), obj(capture_path)
+    need(
+        caller == proof["caller"] == capture["caller"]
+        and sha(raw(caller_path)) == proof["caller_sha256"]
+        and sha(raw(capture_path)) == proof["owner_capture_sha256"]
+        and capture["config_sha256"] == proof["config_sha256"]
+        and capture["owner"] == operator["owner"],
+        "startup caller capture differs",
+    )
+    need(
+        caller["authority_sha256"]
+        == proof["authority_sha256"]
+        == sha(raw(run / "authority.private.json"))
+        and authority["cleanup_owner_pid"] == caller["pid"]
+        and authority["cleanup_owner_birth"] == caller["birth"]
+        and authority["output_directory"] == str(run / "export"),
+        "startup authority differs",
+    )
+    need(
+        caller["source_ref"] == STARTUP_SOURCE
+        and caller["epoch"]
+        == config["started_at_epoch"]
+        == proof["started_at_epoch"]
+        == terminal["started_at_epoch"]
+        and caller["deadline"]
+        == caller["epoch"] + 5400
+        == proof["original_deadline"]
+        == terminal["original_deadline"],
+        "startup original clock differs",
+    )
+    need(
+        record["caller"] == obj(run / "export/caller.json")
+        and record["caller"]["pid"] == caller["gate_pid"]
+        and record["caller"]["birth"] == caller["gate_birth"],
+        "startup gate capture differs",
+    )
+    export = run / "export"
+    release_path, workspace_path = (
+        export / "disposable-controller.release.json",
+        export / "workspace-volume.ownership.json",
+    )
+    release, workspace = obj(release_path), obj(workspace_path)
+    need(
+        release == terminal["release"]
+        and (continuation or release == obj(journal / "release.verified.json"))
+        and release["machine_id"] == record["machine_id"]
+        and release["machine_deleted"] is True
+        and release["volume_id"] == workspace["volume_id"]
+        and release["volume_disposition"] in ("ABSENT", "pending_destroy", "destroyed"),
+        "startup canonical release differs",
+    )
+    hashes = {
+        "export_marker_sha256": export / "disposable-export.verified.json",
+        "manifest_sha256": export / "manifest.json",
+        "launch_sha256": export / "launch.json",
+        "gate_log_sha256": run / "gate.private.log",
+        "remote_gate_log_sha256": Path(proof["remote_gate_log_path"]),
+    }
+    for key, path in hashes.items():
+        need(
+            sha(raw(path, 64 * 1024 * 1024)) == proof[key],
+            "startup closure input changed: " + key,
+        )
+    need(
+        proof["export_marker_sha256"] == intent["export_verified_file"]
+        and proof["archive_sha256"] == manifest["archive_sha256"]
+        and proof["step1_sha256"] == sha(step),
+        "startup archive binding differs",
+    )
+    paths.extend(
+        [
+            config_path,
+            caller_path,
+            capture_path,
+            release_path,
+            workspace_path,
+            export / "caller.json",
+            *hashes.values(),
+        ]
+    )
+    metadata = {
+        "schema": proof["schema"],
+        "operator_ref": STARTUP_OPERATOR,
+        "producer_sha256": STARTUP_PRODUCER_SHA,
+        "failure_proof_sha256": sha(proof_raw),
+        "supervisor_joined": False,
+        "supervisor_published": False,
+        "owned_job_authority": False,
+        "reuse_credit": False,
+    }
+    return metadata, paths, step
+
 def prepare(run, inventory_path, excluded_machines=(), acknowledged_creates=()):
     run=Path(run).absolute(); export=run/'export'
     terminal=obj(run/'terminal.json'); intent=obj(run/'cleanup-call.intent.json')
@@ -347,11 +733,17 @@ def prepare(run, inventory_path, excluded_machines=(), acknowledged_creates=()):
     manifest=json.loads(manifest_bytes(export/'manifest.json')); record=obj(export/'launch.json')
     app=record['app']; host=record['machine_id']
     need(app=='navi-whisper-lux-bench' and record['host']==host,'original app/controller mismatch')
-    need(terminal['status']=='CONTROLLER_RELEASE_VERIFIED' and terminal['machine']==host
-         and terminal['source_ref']==record['source_ref'] and terminal['release']['machine_deleted'] is True,
-         'joined released original controller required')
-    need(intent['gate_joined'] is True and intent['supervisor_joined'] is True and intent['machine']==host
-         and intent['export_verified_file']==sha(raw(export/'disposable-export.verified.json')),'joined export receipt mismatch')
+    startup = None
+    startup_paths, startup_step = [], None
+    if terminal['status'] == 'FAILED_BEFORE_SUPERVISOR':
+        need(not acknowledged_creates, 'startup failure cannot own created jobs')
+        startup, startup_paths, startup_step = startup_closure(run, terminal, intent, authority, verified, manifest, record)
+    else:
+        need(terminal['status']=='CONTROLLER_RELEASE_VERIFIED' and terminal['machine']==host
+             and terminal['source_ref']==record['source_ref'] and terminal['release']['machine_deleted'] is True,
+             'joined released original controller required')
+        need(intent['gate_joined'] is True and intent['supervisor_joined'] is True and intent['machine']==host
+             and intent['export_verified_file']==sha(raw(export/'disposable-export.verified.json')),'joined export receipt mismatch')
     need(verified['machine_id']==host and verified['authority_sha256']==sha(raw(run/'authority.private.json')),
          'export authority mismatch')
     need(authority['app']==app and authority['source_ref']==record['source_ref'],'source authority mismatch')
@@ -372,12 +764,20 @@ def prepare(run, inventory_path, excluded_machines=(), acknowledged_creates=()):
     need(set(verified['files'])=={'caller.json','launch.json','manifest.json','originals.tar.gz'},'incomplete export receipt')
     need(digest_file(export/'originals.tar.gz')==manifest['archive_sha256'],'archive digest mismatch')
     selected={}; extra={}; claimed=set(); seen=set(); joined=False
+    startup_step_seen=False
     # Never extract paths from the archive; read only hash-bound regular records.
     with tarfile.open(export/'originals.tar.gz','r:gz') as archive:
         for member in archive:
             need(member.name not in seen and not member.name.startswith('/') and '..' not in Path(member.name).parts,
                  'unsafe archive membership')
             seen.add(member.name)
+            if startup is not None:
+                need(not member.name.startswith(('context/original600-supervisor.', 'context/fleet/', 'context/benchmarks/campaigns/', 'git-common/cloudbench-fleet-ownership', 'git-common/cloudbench-fleet-audit', 'git-common/cloudbench-archived-reuse/current/', 'git-common/cloudbench-native-effect-fences/')), 'startup archive has runtime publication')
+                if member.name == 'controller-output/step-1.log':
+                    expected_step=manifest['files'].get(member.name,{})
+                    need(member.isfile() and member.size==len(startup_step) and expected_step.get('bytes')==len(startup_step) and expected_step.get('sha256')==sha(startup_step), 'startup archive step differs')
+                    need(archive.extractfile(member).read(len(startup_step)+1)==startup_step, 'startup archive step bytes differ')
+                    startup_step_seen=True
             owner_record=re.fullmatch(r'git-common/cloudbench-fleet-ownership/[0-9a-f]{32}/(?:meta|clones/[^/]+|archived-reuse/[0-9a-f]{14}\.json)',member.name)
             supervisor=member.name.startswith('context/original600-supervisor.') and member.name.endswith('.terminal.json')
             sensitive=bool(acknowledged) and (member.name.startswith(('git-common/cloudbench-archived-reuse/current/','git-common/cloudbench-native-effect-fences/'))
@@ -409,7 +809,7 @@ def prepare(run, inventory_path, excluded_machines=(), acknowledged_creates=()):
                      and proof['supervisor_joined'] is True and proof['parent_joined'] is True,
                      'archived original supervisor not joined')
                 joined=True
-    need(joined and seen==set(manifest['files']),'archive membership/join proof incomplete')
+    need(seen==set(manifest['files']) and (joined if startup is None else startup_step_seen and not joined), 'archive membership/typed closure incomplete')
     owned={}; skipped=0
     for name,row in selected.items():
         match=re.fullmatch(r'(git-common/cloudbench-fleet-ownership/([0-9a-f]{32}))/clones/([^/]+)',name)
@@ -466,12 +866,16 @@ def prepare(run, inventory_path, excluded_machines=(), acknowledged_creates=()):
     need(protected<={m['id'] for m in native},'protected native cohort missing')
     paths=[run/'terminal.json',run/'cleanup-call.intent.json',run/'authority.private.json',
            export/'disposable-export.verified.json',export/'manifest.json',export/'launch.json',export/'originals.tar.gz',Path(inventory_path).absolute()]
+    paths.extend(startup_paths)
     plan=dict(schema='cloudbench-archived-owner-stop-plan-v1',app=app,controller=host,
                 source_ref=record['source_ref'],protected_machines=sorted(protected),
                 protected_volumes=sorted(protected_volumes),inputs={str(p):digest_file(p) for p in paths},
                 archived_ownership=owned,
                 targets=targets,unsealed_intents_skipped=skipped,unrelated_native_machines_skipped=unrelated,no_delete=True,no_volume_change=True,
                 no_claim_release=True,benchmark_success_inferred=False)
+    if startup is not None:
+        need(not owned and not targets, 'startup failure has no owned job authority')
+        plan['startup_closure']=startup
     if acknowledged: plan.update(acknowledged_create_only=sorted(acknowledged),reuse_credit=False)
     return plan
 

@@ -21,7 +21,7 @@ sources:
   - fleet run original600-1792263746104190724
   - agent 01a137e6-c4c8-7691-a3dd-52540286a46c
 repro: scripts/tests/cloudbench-startup-finalization.test.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -63,9 +63,26 @@ original authority. Verify native release before retiring the exact caller
 through its pinned process descriptor. Preserve all prior records and reject
 replay, ambiguous ownership, changed exports and any supervisor publication.
 
-The owning tests and the actual run73 closure must establish this path before
-the case can close. Future archive consumers must recognize its explicit
-failure proof without synthesizing a joined-supervisor result.
+The owning tests and actual run73 closure establish this path. Archive
+consumers recognize its explicit failure proof without synthesizing a
+joined-supervisor result.
+
+## Actual run73 verification
+
+The canonical disposal child exited zero. Its first post-delete Machine GET
+returned the exact original incarnation with state `destroyed`, which the
+initial wrapper rejected because it accepted only HTTP 404 for a Machine.
+The original cleanup and its receipts were preserved. An explicit continuation
+validated that closed journal, made only new GET observations, and retired
+the exact caller through its process descriptor. The continuation exited
+zero with `FAILED_BEFORE_SUPERVISOR`, both supervisor flags false and
+`no_effect_replay: true`; the original caller then joined. No task ran and no
+successful benchmark was inferred.
+
+The ordinary finalizer must also accept the same exact destroyed incarnation,
+while rejecting changed identity/configuration and HTTP 200 null responses.
+The historical continuation remains separately bound to its original
+producer and immutable cleanup journal.
 
 ## Human feedback
 

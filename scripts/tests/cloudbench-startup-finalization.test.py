@@ -244,7 +244,7 @@ class Startup(unittest.TestCase):
         ):
             M["finalize"](SimpleNamespace(operator_ref="f" * 40), self.state)
 
-    def test_success_records_raw_absence_then_retires_caller(self):
+    def normal_release(self, observation="ABSENT", error=None):
         self.state.update(
             operator_hashes={},
             input_pins={},
@@ -266,6 +266,9 @@ class Startup(unittest.TestCase):
                 raw = json.dumps(self.state["machine"]).encode()
                 observer(method, path, 200, raw)
                 return self.state["machine"]
+            if len(calls) == 2 and observation != "ABSENT":
+                observer(method, path, 200, json.dumps(observation).encode())
+                return observation
             observer(method, path, 404, b"not found")
             raise NotFound()
 
@@ -295,7 +298,8 @@ class Startup(unittest.TestCase):
             self.assertEqual(len(calls), 3)
             for number in (2, 3):
                 self.assertEqual(
-                    M["obj"](journal / f"wire-{number:06d}.raw.json")["status"], 404
+                    M["obj"](journal / f"wire-{number:06d}.raw.json")["status"],
+                    200 if number == 2 and observation != "ABSENT" else 404,
                 )
             return "PIDFD_EXIT_OBSERVED"
 
@@ -313,6 +317,11 @@ class Startup(unittest.TestCase):
             ),
             patch.object(M["subprocess"], "Popen", return_value=Child()),
         ):
+            if error:
+                with self.assertRaisesRegex(ValueError, error):
+                    M["finalize"](SimpleNamespace(operator_ref="f" * 40), self.state)
+                self.assertFalse((self.out / "terminal.json").exists())
+                return
             terminal = M["finalize"](SimpleNamespace(operator_ref="f" * 40), self.state)
         self.assertEqual(terminal["status"], "FAILED_BEFORE_SUPERVISOR")
         self.assertFalse(terminal["supervisor_joined"])
@@ -321,6 +330,20 @@ class Startup(unittest.TestCase):
             M["sha"](
                 (self.out / "startup-finalization/failure-proof.json").read_bytes()
             ),
+        )
+
+    def test_success_records_raw_absence_then_retires_caller(self):
+        self.normal_release()
+
+    def test_normal_destroyed_tombstone_retires_after_raw_observation(self):
+        self.normal_release({"id": self.state["machine_id"], "state": "destroyed"})
+
+    def test_normal_http200_null_is_not_absence(self):
+        self.normal_release(None, "non404 native observation")
+
+    def test_normal_foreign_tombstone_does_not_retire(self):
+        self.normal_release(
+            {"id": "foreign", "state": "destroyed"}, "resource release still pending"
         )
 
     def test_release_continuation_never_spawns_cleanup(self):

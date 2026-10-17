@@ -433,6 +433,9 @@ def finalize(args, state):
             need(not cancelled, "cancelled before release observation")
             try:
                 native = api.request("GET", "/" + kind + "/" + identifier)
+                need(
+                    isinstance(native, dict), "non404 native observation must be object"
+                )
             except not_found:
                 raw = obj(journal / f"wire-{api.sequence:06d}.raw.json")
                 need(
@@ -443,10 +446,7 @@ def finalize(args, state):
                 )
                 native = None
             need(
-                native is None
-                or kind == "volumes"
-                and native.get("id") == identifier
-                and native.get("state") in ("pending_destroy", "destroyed"),
+                released_native(native, state, kind, identifier),
                 "resource release still pending",
             )
         save(journal / "release.verified.json", release)

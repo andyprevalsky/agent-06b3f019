@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline archive ownership plan + actual once-only canonical stop semantics."""
 import copy
+import ast
+import base64
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -101,6 +103,382 @@ class ArchivedStop(unittest.TestCase):
         )
         write(self.run / "cleanup-call.intent.json", intent)
 
+    def startup_fixture(self):
+        export = self.run / "export"
+        journal = self.run / "startup-finalization"
+        journal.mkdir(mode=0o700)
+        source = S["historical_source"](
+            S["STARTUP_OPERATOR"], "cloudbench-startup-finalization.py"
+        )
+        step = ast.literal_eval(
+            next(
+                n.value
+                for n in ast.parse(source).body
+                if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "STEP" for t in n.targets)
+            )
+        )
+        public = S["historical_source"](
+            S["STARTUP_SOURCE"], "run-original600-controller.py"
+        )
+        names = ast.literal_eval(
+            next(
+                n.value
+                for n in ast.parse(public).body
+                if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "PINS" for t in n.targets)
+            )
+        )
+        hashes = {
+            name: S["sha"](S["historical_source"](S["STARTUP_SOURCE"], name))
+            for name in names
+        }
+        config_path = self.root / "config.private.json"
+        config = dict(
+            source_ref=S["STARTUP_SOURCE"],
+            source_root="/recorded/old",
+            source_files=hashes,
+            started_at_epoch=1000000000,
+        )
+        write(config_path, config)
+        caller = dict(
+            pid=10,
+            birth="caller-birth",
+            gate_pid=11,
+            gate_birth="gate-birth",
+            epoch=config["started_at_epoch"],
+            deadline=config["started_at_epoch"] + 5400,
+            source_ref=S["STARTUP_SOURCE"],
+            identity_path="/tmp/gate/repo/.context/original600-supervisor.fixture.json",
+        )
+        auth = json.loads((self.run / "authority.private.json").read_text())
+        auth.update(
+            source_ref=S["STARTUP_SOURCE"],
+            cleanup_owner_pid=10,
+            cleanup_owner_birth="caller-birth",
+            output_directory=str(export),
+        )
+        write(self.run / "authority.private.json", auth)
+        caller["authority_sha256"] = S["digest_file"](
+            self.run / "authority.private.json"
+        )
+        write(self.run / "caller.json", caller)
+        owner = dict(pid=10, birth="caller-birth", argv=["original-caller"])
+        write(
+            self.run / "threshold-owner.identity.private.json",
+            dict(
+                caller=caller, owner=owner, config_sha256=S["digest_file"](config_path)
+            ),
+        )
+        record = json.loads((export / "launch.json").read_text())
+        record.update(
+            source_ref=S["STARTUP_SOURCE"], caller=dict(pid=11, birth="gate-birth")
+        )
+        write(export / "launch.json", record)
+        write(export / "caller.json", record["caller"])
+        manifest = json.loads((export / "manifest.json").read_text())
+        manifest["record"] = record
+        write(export / "manifest.json", manifest)
+        verified = json.loads((export / "disposable-export.verified.json").read_text())
+        verified["authority_sha256"] = caller["authority_sha256"]
+        write(export / "disposable-export.verified.json", verified)
+        members = {"controller-output/step-1.log": step}
+        self.reseal(members)
+        manifest = json.loads((export / "manifest.json").read_text())
+        write(
+            export / "workspace-volume.ownership.json", dict(volume_id="vol_workspace")
+        )
+        release = dict(
+            machine_id=record["machine_id"],
+            machine_deleted=True,
+            volume_id="vol_workspace",
+            volume_disposition="pending_destroy",
+        )
+        write(export / "disposable-controller.release.json", release)
+        write(self.run / "gate.private.log", dict(original="gate-output"))
+        remote = write(self.root / "remote.private.log", dict(original="remote-output"))
+        operator_names = {
+            "cloudbench-startup-finalization.py",
+            "cloudbench-controller-payload-finalization.py",
+            "cloudbench-resume-controller-payload.py",
+            "cloudbench-original600-runner.py",
+            "cloudbench-original-volume-capture.py",
+            "run-original600-controller.py",
+        }
+        operator = dict(
+            operator_ref=S["STARTUP_OPERATOR"],
+            operator_hashes={
+                n: S["sha"](S["historical_source"](S["STARTUP_OPERATOR"], n))
+                for n in operator_names
+            },
+            operator_pins={
+                "/recorded/operator/scripts/cloudbench-startup-finalization.py": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                ]
+            },
+            owner=owner,
+        )
+        write(journal / "intent.json", operator)
+        proof = dict(
+            schema="expired-before-supervisor-proof-v1",
+            source_ref=S["STARTUP_SOURCE"],
+            config_path=str(config_path),
+            config_sha256=S["digest_file"](config_path),
+            source_root=config["source_root"],
+            caller=caller,
+            operator_ref=S["STARTUP_OPERATOR"],
+            operator_pins=operator["operator_pins"],
+            caller_sha256=S["digest_file"](self.run / "caller.json"),
+            owner_capture_sha256=S["digest_file"](
+                self.run / "threshold-owner.identity.private.json"
+            ),
+            authority_sha256=caller["authority_sha256"],
+            started_at_epoch=caller["epoch"],
+            original_deadline=caller["deadline"],
+            supervisor_published=False,
+            supervisor_joined=False,
+            gate_reap="OBSERVED_ORIGINAL_PARENT_REAP",
+            step1_sha256=S["sha"](step),
+            export_marker_sha256=S["digest_file"](
+                export / "disposable-export.verified.json"
+            ),
+            archive_sha256=manifest["archive_sha256"],
+            manifest_sha256=S["digest_file"](export / "manifest.json"),
+            launch_sha256=S["digest_file"](export / "launch.json"),
+            gate_log_sha256=S["digest_file"](self.run / "gate.private.log"),
+            remote_gate_log_path=str(remote),
+            remote_gate_log_sha256=S["digest_file"](remote),
+        )
+        write(journal / "failure-proof.json", proof)
+        proof_sha = S["digest_file"](journal / "failure-proof.json")
+        closure = dict(
+            action="cleanup",
+            machine=record["machine_id"],
+            gate_joined=True,
+            supervisor_published=False,
+            supervisor_joined=False,
+            failure_proof_path=str(journal / "failure-proof.json"),
+            failure_proof_sha256=proof_sha,
+            export_verified_file=proof["export_marker_sha256"],
+        )
+        write(self.run / "cleanup-call.intent.json", closure)
+        terminal = dict(
+            status="FAILED_BEFORE_SUPERVISOR",
+            source_ref=S["STARTUP_SOURCE"],
+            machine=record["machine_id"],
+            started_at_epoch=caller["epoch"],
+            original_deadline=caller["deadline"],
+            supervisor_published=False,
+            supervisor_joined=False,
+            gate_reap=proof["gate_reap"],
+            failure_proof_path=closure["failure_proof_path"],
+            failure_proof_sha256=proof_sha,
+            finalizer_operator_ref=S["STARTUP_OPERATOR"],
+            controller_cleanup_exit_code=0,
+            release=release,
+            caller_disposition="EXITED_PIDFD_OBSERVED_NOT_OWNED_JOIN",
+            benchmark_success_inferred=False,
+        )
+        write(self.run / "terminal.json", terminal)
+        write(journal / "complete.json", terminal)
+        write(
+            journal / "cleanup.joined.json",
+            dict(exit_code=0, owned_join=True, cancelled_signals=[]),
+        )
+        write(journal / "release.verified.json", release)
+        return members
+
+    def startup_continuation_fixture(self):
+        members = self.startup_fixture()
+        old = self.run / "startup-finalization"
+        new = self.run / "startup-release-observation"
+        new.mkdir(mode=0o700)
+        for name in ("complete.json", "release.verified.json"):
+            (old / name).unlink()
+        for name in ("cleanup.intent.json", "cleanup.child.json"):
+            write(old / name, {"original": name})
+        (old / "cleanup.log").write_bytes(b"original cleanup output")
+        (old / "cleanup.log").chmod(0o600)
+        terminal = json.loads((self.run / "terminal.json").read_text())
+        machine = dict(
+            id=terminal["machine"],
+            instance_id="original-native",
+            config={"unchanged": True},
+            name="original-controller",
+            region="iad",
+        )
+        write(
+            self.run / "export/disposable-controller.ownership.json",
+            {"machine": machine},
+        )
+
+        def wire(directory, n, path, value, status=200):
+            body = json.dumps(value).encode()
+            write(
+                directory / f"wire-{n:06d}.request.json",
+                {"method": "GET", "path": path, "body": None},
+            )
+            write(
+                directory / f"wire-{n:06d}.raw.json",
+                {
+                    "method": "GET",
+                    "path": path,
+                    "status": status,
+                    "bytes": len(body),
+                    "sha256": S["sha"](body),
+                    "body_b64": base64.b64encode(body).decode(),
+                },
+            )
+            if status == 200:
+                write(directory / f"wire-{n:06d}.decoded.json", value)
+
+        path = "/machines/" + machine["id"]
+        wire(old, 1, path, machine)
+        wire(old, 2, path, dict(machine, state="destroyed"))
+        wire(new, 1, path, dict(machine, state="destroyed"))
+        wire(
+            new,
+            2,
+            "/volumes/vol_workspace",
+            {"id": "vol_workspace", "state": "pending_destroy"},
+        )
+        proof = json.loads((old / "failure-proof.json").read_text())
+        operator = json.loads((old / "intent.json").read_text())
+        prior = dict(
+            files={p.name: S["sha"](p.read_bytes()) for p in old.iterdir()},
+            operator_ref=S["STARTUP_OPERATOR"],
+            proof=proof,
+            source_root="/recorded/operator",
+            operator_hashes=operator["operator_hashes"],
+        )
+        ref = "e3595737a0292e4b6ee494e6d120b0ecb381c3e1"
+        write(
+            new / "intent.json",
+            dict(
+                operator_ref=ref,
+                operator_pins={"/recorded/new/scripts/" + name: [1, 2, 3] for name in operator["operator_hashes"]},
+                prior=prior,
+                no_effect_replay=True,
+            ),
+        )
+        write(
+            new / "SIGTERM.intent.json",
+            dict(
+                pid=proof["caller"]["pid"],
+                birth=proof["caller"]["birth"],
+                signal="SIGTERM",
+                resources_release_verified=True,
+            ),
+        )
+        terminal.update(
+            finalizer_operator_ref=ref,
+            prior_finalizer_operator_ref=S["STARTUP_OPERATOR"],
+            no_effect_replay=True,
+        )
+        write(self.run / "terminal.json", terminal)
+        write(new / "complete.json", terminal)
+        return members
+
+    def test_startup_release_continuation_preserves_failed_journal_and_checks_raw_gets(
+        self,
+    ):
+        self.startup_continuation_fixture()
+        old = self.run / "startup-finalization"
+        before = {p.name: p.read_bytes() for p in old.iterdir()}
+        plan = S["prepare"](self.run, self.inventory)
+        self.assertEqual(plan["targets"], [])
+        self.assertFalse(plan["startup_closure"]["supervisor_joined"])
+        self.assertEqual(before, {p.name: p.read_bytes() for p in old.iterdir()})
+        path = self.run / "startup-release-observation/wire-000001.request.json"
+        write(path, dict(method="POST", path="/machines/11112222333344", body=None))
+        with self.assertRaisesRegex(ValueError, "raw GET differs"):
+            S["prepare"](self.run, self.inventory)
+
+    def test_expired_before_supervisor_is_typed_closure_without_owned_jobs(self):
+        self.startup_fixture()
+        plan = S["prepare"](self.run, self.inventory)
+        self.assertEqual(plan["targets"], [])
+        self.assertEqual(plan["archived_ownership"], {})
+        self.assertFalse(plan["startup_closure"]["supervisor_joined"])
+        self.assertFalse(plan["startup_closure"]["reuse_credit"])
+        self.assertIn(
+            str(self.run / "startup-finalization/failure-proof.json"), plan["inputs"]
+        )
+        baseline = self.root / "old-scripts"
+        baseline.mkdir()
+        for path in (ROOT / "scripts").glob("*.py"):
+            if path.name != "cloudbench-archived-owner-stop.py":
+                (baseline / path.name).symlink_to(path)
+        old = baseline / "cloudbench-archived-owner-stop.py"
+        old.write_bytes(
+            subprocess.check_output(
+                [
+                    "git",
+                    "show",
+                    "2a4624e8388c526b290cf9cbfe21f5f2143cf007:scripts/cloudbench-archived-owner-stop.py",
+                ],
+                cwd=ROOT,
+            )
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                str(old),
+                "--run-dir",
+                str(self.run),
+                "--inventory",
+                str(self.inventory),
+                "--out-dir",
+                str(self.root / "old-out"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("joined released original controller required", result.stderr)
+
+    def test_startup_proof_tamper_and_runtime_publication_are_rejected(self):
+        members = self.startup_fixture()
+        proof_path = self.run / "startup-finalization/failure-proof.json"
+        original = proof_path.read_bytes()
+        changed = json.loads(original)
+        changed["supervisor_joined"] = True
+        write(proof_path, changed)
+        with self.assertRaisesRegex(ValueError, "proof bytes differ"):
+            S["prepare"](self.run, self.inventory)
+        proof_path.write_bytes(original)
+        members["context/original600-supervisor.other.json"] = b"{}"
+        self.reseal(members)
+        proof = json.loads(original)
+        export = self.run / "export"
+        proof.update(
+            archive_sha256=S["digest_file"](export / "originals.tar.gz"),
+            manifest_sha256=S["digest_file"](export / "manifest.json"),
+            export_marker_sha256=S["digest_file"](
+                export / "disposable-export.verified.json"
+            ),
+        )
+        write(proof_path, proof)
+        digest = S["digest_file"](proof_path)
+        for path in (
+            self.run / "terminal.json",
+            self.run / "startup-finalization/complete.json",
+            self.run / "cleanup-call.intent.json",
+        ):
+            value = json.loads(path.read_text())
+            value["failure_proof_sha256"] = digest
+            if "export_verified_file" in value:
+                value["export_verified_file"] = proof["export_marker_sha256"]
+            write(path, value)
+        # Exact input hashes still cannot turn publication into a no-supervisor closure.
+        with self.assertRaisesRegex(ValueError, "runtime publication"):
+            S["prepare"](self.run, self.inventory)
     def acknowledged_fixture(self):
         with tarfile.open(self.run / "export/originals.tar.gz") as archive:
             members = {m.name: archive.extractfile(m).read() for m in archive}
