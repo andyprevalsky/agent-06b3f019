@@ -16,11 +16,13 @@ HERE=Path(__file__).resolve().parent
 RUNNER=runpy.run_path(str(HERE/'cloudbench-original600-runner.py'))
 need,read,save,bounded=(RUNNER[k] for k in ('need','read','save','bounded'))
 
-# This payload reads ONE exact supervisor-derived summary; it never walks the
-# campaign directories, signals a process, writes a guest file or starts work.
+# This payload reads one exact summary and its explicitly named job logs. It
+# never walks directories, signals a process, writes a guest file or starts work.
 REMOTE=r'''
-import base64,hashlib,json,os,stat,subprocess,sys,time
+import base64,hashlib,json,os,re,stat,subprocess,sys,time
 from pathlib import Path
+
+ORIGINAL_TASK_REF='570830dbf17635e13d16a6f03b4d705f6b6443b1'
 
 def read_json(path):
     if path.parent.resolve(strict=True)!=path.parent:raise ValueError('unsafe status parent path')
@@ -31,7 +33,106 @@ def read_json(path):
             raise ValueError('unsafe bounded status input')
         return json.loads(stream.read(info.st_size+1))
 
-def project(summary):
+def evidence_bytes(path,limit,budget):
+    if path.parent.resolve(strict=True)!=path.parent:raise ValueError('unsafe evidence parent')
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as stream:
+        before=os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>limit or before.st_size>budget[0]:
+            raise ValueError('unsafe or oversized evidence')
+        budget[0]-=before.st_size
+        raw=stream.read(before.st_size+1)
+        after=os.fstat(stream.fileno())
+        identity=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+        if len(raw)!=before.st_size or identity(before)!=identity(after) or identity(after)!=identity(path.lstat()):
+            raise ValueError('changing evidence')
+        return raw
+
+def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
+    budget=[16*1024*1024];proofs=[];unavailable=set();inspected=0
+    for job in summary['jobs']:
+        ident=job['job_id'];task=job.get('task')
+        candidates=[job]+list(reversed(job.get('attempts',[])))
+        visited=set()
+        for attempt in candidates:
+            name=attempt.get('log')
+            if name is None:continue
+            try:
+                number=attempt.get('attempt',1);pid=attempt.get('controller_pid')
+                if pid is None and attempt.get('started_at') is None and attempt.get('status') in ('queued','pending'):
+                    continue
+                if (not re.fullmatch(r'r[0-9]{3}-j[0-9]{4}',ident) or type(number)is not int or number<1
+                    or type(pid)is not int or pid<=1 or not isinstance(task,str)
+                    or not re.fullmatch(r'[A-Za-z0-9_.-]{1,200}',task)):
+                    raise ValueError('invalid job evidence identity')
+                expected=campaign/(ident+('' if number==1 else '.attempt-'+str(number))+'.log')
+                if name!=str(expected):raise ValueError('job log path changed')
+                key=(name,pid)
+                if key in visited:continue
+                visited.add(key)
+                raw=reader(expected,256*1024,budget);text=raw.decode();inspected+=1
+                # Only a direct failed claim's complete startup failure sequence
+                # qualifies. Generic/cascaded canary errors do not establish it.
+                marker='ValueError: late inactive native version observation\n'
+                if marker not in text:continue
+                headers=list(re.finditer(r'^\s*'+re.escape(str(repo/'scripts/run-bench'))+r' monitor ('+
+                    re.escape(str(repo/'.context/fleet/runs'))+r'/([0-9]{8}-[0-9]{6}-[0-9]+))\n'
+                    r'\s*owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory\.$',text,re.M))
+                if len(headers)!=1:raise ValueError('ambiguous fleet monitor binding')
+                header=headers[0];body=text[header.end():];fleet_id=header[2];owner=header[3]
+                failure=body.find(marker)
+                if failure<0:continue
+                trace=body[:failure]
+                claim=re.search(r'^  File "/tmp/cloudbench-scripts\.([0-9a-f]{32})/cloudbench-archived-machine-reuse\.py", line [0-9]+, in claim_native$',trace,re.M)
+                if not claim:continue
+                wait=re.search(r'^  File "/tmp/cloudbench-scripts\.'+claim[1]+r'/cloudbench-archived-reuse-effects\.py", line [0-9]+, in wait_inactive$',trace,re.M)
+                skipped='❌ ['+task+'] provisioning failed (no machine) — skipping\n'
+                after=body[failure+len(marker):]
+                if not wait or 'Traceback (most recent call last):\n' not in trace or skipped not in after:
+                    continue
+                if '❌ no benches launched (all clones failed).\n' not in after.split(skipped,1)[1]:continue
+                task_dir=repo/'.context/fleet/runs'/fleet_id/task
+                successor_raw=reader(task_dir/'archived-successor.json',65536,budget)
+                exclusion_raw=reader(task_dir/'archived-reuse-journal/source-exclusion.json',65536,budget)
+                successor=json.loads(successor_raw);exclusion=json.loads(exclusion_raw)
+                if not isinstance(successor,dict) or not isinstance(exclusion,dict):raise ValueError('invalid source binding')
+                proof=exclusion.get('proof',{})
+                if not isinstance(proof,dict) or not isinstance(proof.get('native_marker'),dict):raise ValueError('invalid claim binding')
+                expected_successor=dict(controller_id=payload['machine'],harness_ref=payload['source_ref'],
+                    owner_token=owner,run_id=fleet_id,task=task,campaign_job_id=ident,
+                    campaign_total_jobs=600,campaign_attempt=number)
+                if (any(successor.get(k)!=v for k,v in expected_successor.items())
+                    or any(type(successor.get(k))is not int for k in ('ordinal','campaign_total_jobs','campaign_attempt'))
+                    or successor.get('ordinal')!=0 or successor.get('task_ref')!=ORIGINAL_TASK_REF
+                    or proof.get('schema')!='cloudbench-archived-reuse-v1' or proof.get('successor')!=successor
+                    or proof.get('native_marker',{}).get('successor')!=successor):
+                    raise ValueError('source exclusion does not belong to job')
+                meta_path=repo/'.git/cloudbench-fleet-ownership'/owner/'meta'
+                meta_sha=None
+                if os.path.lexists(meta_path):
+                    meta_raw=reader(meta_path,65536,budget)
+                    pairs=[line.split('=',1) for line in meta_raw.decode().splitlines()]
+                    if any(len(pair)!=2 for pair in pairs):raise ValueError('invalid fleet meta')
+                    meta=dict(pairs)
+                    if len(meta)!=len(pairs) or any(meta.get(k)!=v for k,v in dict(version='2',
+                        app='navi-whisper-lux-bench',host=payload['machine'],pid=str(pid),
+                        fleet_owner_token=owner,run_id=fleet_id,workspace_root=str(repo)).items()):
+                        raise ValueError('fleet meta does not belong to job')
+                    meta_sha=hashlib.sha256(meta_raw).hexdigest()
+                if not fleet_id.endswith('-'+str(pid)):raise ValueError('fleet process identity differs')
+                proofs.append(dict(job_id=ident,task=task,attempt=number,controller_pid=pid,
+                    fleet_owner_token=owner,run_id=fleet_id,log_path=str(expected.relative_to(repo)),
+                    log_sha256=hashlib.sha256(raw).hexdigest(),meta_sha256=meta_sha,
+                    successor_sha256=hashlib.sha256(successor_raw).hexdigest(),
+                    source_exclusion_sha256=hashlib.sha256(exclusion_raw).hexdigest(),
+                    source_ref=payload['source_ref'],original_epoch=payload['epoch'],
+                    reason='archived_reuse_inactive_observation_deadline'))
+                unavailable.discard(ident)
+                break
+            except (OSError,ValueError,TypeError,KeyError,UnicodeError):unavailable.add(ident)
+    return dict(proofs=proofs,unavailable_jobs=len(unavailable),inspected_logs=inspected,bytes_read=16*1024*1024-budget[0])
+
+def project(summary,startup=None):
     jobs=summary['jobs']
     if not isinstance(jobs,list) or type(summary.get('total_jobs')) is not int or summary['total_jobs']!=600 or len(jobs)!=600:
         raise ValueError('invalid original600 canonical jobs')
@@ -61,6 +162,16 @@ def project(summary):
                observed_jobs=len(jobs),benchmark_success_inferred=False)
     for key in ('campaign_id','total_jobs','startup_cohorts','finished_at','started_at'):
         if key in summary:value[key]=summary[key]
+    if startup is not None:
+        roots={proof['job_id'] for proof in startup['proofs']}
+        value.update(startup_evidence_schema='original600-startup-failure-v1',
+                     original_startup_infra_affected_jobs=len(roots),
+                     combined_infra_affected_jobs=len(infra|roots),infra_stop_threshold=30,
+                     infra_stop_required=len(infra|roots)>=30,
+                     original_startup_failure_evidence=startup['proofs'],
+                     startup_evidence_unavailable_jobs=startup['unavailable_jobs'],
+                     startup_evidence_inspected_logs=startup['inspected_logs'],
+                     startup_evidence_bytes_read=startup['bytes_read'])
     return value
 
 def guest_status(payload,repo,boot_id):
@@ -84,7 +195,10 @@ def guest_status(payload,repo,boot_id):
     except FileNotFoundError:return dict(base,status='SUMMARY_NOT_PUBLISHED',campaign_id=campaign)
     if summary.get('campaign_id')!=campaign or summary.get('e2e_started_at_epoch')!=payload['epoch']:
         raise ValueError('canonical campaign/original epoch mismatch')
-    return dict(base,status='SUMMARY',summary=project(summary))
+    # Validate the canonical shape before using any job-selected evidence paths.
+    project(summary)
+    startup=startup_evidence(summary,repo,path.parent,payload)
+    return dict(base,status='SUMMARY',summary=project(summary,startup))
 
 if __name__=='__main__':
     payload=json.loads(base64.b64decode(sys.argv[1]))

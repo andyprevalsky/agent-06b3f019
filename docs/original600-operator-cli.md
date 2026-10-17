@@ -225,6 +225,27 @@ local terminal and status output never infer benchmark success or full resource
 cleanup. This is a one-shot diagnostic, not an automatic threshold owner or
 five-experiment qualification loop.
 
+Status also checks the exact log paths listed for this campaign's jobs and
+attempts, without scanning other campaigns. A complete archived-reuse claim
+trace ending in `late inactive native version observation`, followed by that
+task's provisioning failure, counts as original startup-infra evidence once its
+pre-claim successor/source-exclusion records bind the source, owner, run, job,
+task and attempt; any extant registry metadata must also agree. Copied text before the fleet
+header, generic errors and propagated canary failures do not count. The bounded
+reader rejects aliases, changing files and oversized inputs; it reports missing
+or unreadable evidence as unavailable.
+
+`original_startup_infra_affected_jobs` reports those unique logical jobs.
+`combined_infra_affected_jobs` unions them with the unchanged canonical infra
+jobs, including across retries. `infra_stop_required: true` means that union has
+reached the original 30/600 threshold. A false value only means that the observed
+evidence has not reached it; check `startup_evidence_unavailable_jobs` and the
+canonical unknown counts before treating coverage as complete. The saved
+`original_startup_failure_evidence` binds each finding to its source, epoch,
+job, attempt, owner and log/binding-record hashes. It does not rewrite canonical
+classification, infer a task result, or certify cleanup. The CLI still does not
+send signals; the existing exact-owner cancellation procedure applies.
+
 ### Continue a bound launch rejected before controller creation
 
 If a corrected host operator must continue an already prepared admission, use

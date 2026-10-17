@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[2]
-M=runpy.run_path(str(ROOT/'scripts/original600-status.py'))
+M=runpy.run_path(os.environ.get('CLOUDBENCH_TEST_ORIGINAL600_STATUS_MODULE',str(ROOT/'scripts/original600-status.py')))
 
 
 def write(path,value):
@@ -185,6 +185,227 @@ class Status(unittest.TestCase):
         self.assertEqual(value['machine'],self.mid)
         self.assertEqual(value['source_ref'],self.ref)
         self.assertEqual(value['original_epoch'],self.epoch)
+
+    def test_bound_startup_logs_drive_threshold_without_changing_canonical_counts(self):
+        repo = self.root / "startup-guest"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "source").write_text("fixture")
+        subprocess.run(["git", "-C", str(repo), "add", "source"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+        ref = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+        scope = {"__name__": "offline_status_payload"}
+        exec(M["REMOTE"], scope)
+        payload = dict(
+            machine=self.mid,
+            source_ref=ref,
+            epoch=self.epoch,
+            identity_path="/tmp/gate/repo/.context/original600-supervisor.fixture.json",
+        )
+        write(
+            repo / ".context/original600-supervisor.fixture.json",
+            dict(
+                schema="original600-supervisor-identity-v1",
+                machine=self.mid,
+                source_ref=ref,
+                epoch=self.epoch,
+                pid=812,
+            ),
+        )
+        ns = hashlib.sha256(
+            (float(self.epoch).hex() + ":boot-fixture").encode()
+        ).hexdigest()[:24]
+        campaign = (
+            repo
+            / ".context/benchmarks/campaigns"
+            / ("campaign-qualified600-" + ns + "-812")
+        )
+        jobs = []
+        metas = []
+        logs = []
+        for index in range(1, 35):
+            ident = f"r001-j{index:04d}"
+            task = f"task-{index}"
+            pid = 2000 + index
+            owner = f"{index:032x}"
+            run_id = f"20261017-083021-{pid}"
+            fleet = repo / ".context/fleet/runs" / run_id
+            log = campaign / (ident + ".log")
+            logs.append(log)
+            meta = repo / ".git/cloudbench-fleet-ownership" / owner / "meta"
+            meta.parent.mkdir(parents=True)
+            meta.write_text(
+                f"version=2\napp=navi-whisper-lux-bench\nhost={self.mid}\npid={pid}\nfleet_owner_token={owner}\nrun_id={run_id}\nworkspace_root={repo}\n"
+            )
+            metas.append(meta)
+            successor = dict(
+                controller_id=self.mid,
+                harness_ref=ref,
+                task_ref=M['RUNNER']['TASK_REF'],
+                owner_token=owner,
+                run_id=run_id,
+                task=task,
+                ordinal=0,
+                campaign_job_id=ident,
+                campaign_total_jobs=600,
+                campaign_attempt=1,
+            )
+            write(fleet / task / "archived-successor.json", successor)
+            write(
+                fleet / task / "archived-reuse-journal/source-exclusion.json",
+                dict(
+                    proof=dict(
+                        schema="cloudbench-archived-reuse-v1",
+                        successor=successor,
+                        native_marker=dict(successor=successor),
+                    )
+                ),
+            )
+            header = f"    {repo}/scripts/run-bench monitor {fleet}\n    owner: {owner}; private controller diagnostics stay in this run directory.\n"
+            failure = (
+                "Traceback (most recent call last):\n"
+                '  File "/tmp/cloudbench-scripts.'
+                + "a"
+                * 32
+                + '/cloudbench-archived-machine-reuse.py", line 364, in claim_native\n'
+                "    observed = wait_inactive(api, url, ack)\n"
+                '  File "/tmp/cloudbench-scripts.'
+                + "a"
+                * 32
+                + '/cloudbench-archived-reuse-effects.py", line 128, in wait_inactive\n'
+                '    need(time.monotonic() <= deadline, "late inactive native version observation")\n'
+                "ValueError: late inactive native version observation\n"
+                f"❌ [{task}] provisioning failed (no machine) — skipping\n"
+                "❌ no benches launched (all clones failed).\n"
+            )
+            if index == 31:
+                body = header + "infra canary already failed; aborting follower\n"
+            elif index == 32:
+                body = failure + header + "healthy startup\n"
+            elif index == 33:
+                body = header + failure.replace(
+                    "ValueError: late inactive native version observation",
+                    "ValueError: unrelated",
+                )
+            elif index == 34:
+                body = header + "❌ no benches launched (all clones failed).\n"
+            else:
+                body = header + failure
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(body)
+            attempts = (
+                [
+                    dict(
+                        attempt=1,
+                        log=str(log),
+                        controller_pid=pid,
+                        infra_failure=True,
+                        status="cancelled",
+                    )
+                ]
+                if index == 1
+                else []
+            )
+            jobs.append(
+                dict(
+                    job_id=ident,
+                    task=task,
+                    controller_pid=pid,
+                    attempt=1,
+                    log=str(log),
+                    status="running",
+                    attempts=attempts,
+                )
+            )
+        jobs += [
+            dict(job_id=f"r001-j{i:04d}", task=f"task-{i}", status="queued", attempts=[],
+                 controller_pid=None,started_at=None,log=str(campaign/f"r001-j{i:04d}.log"))
+            for i in range(35, 601)
+        ]
+        summary = dict(
+            total_jobs=600,
+            campaign_id=campaign.name,
+            e2e_started_at_epoch=self.epoch,
+            jobs=jobs,
+        )
+        write(campaign / "summary.json", summary)
+
+        def observe():
+            with patch.dict(os.environ, FLY_MACHINE_ID=self.mid):
+                return scope["guest_status"](payload, repo, "boot-fixture")["summary"]
+
+        counts = observe()
+        self.assertEqual(counts["canonical_infra_affected_jobs"], 1)
+        self.assertEqual(counts["original_startup_infra_affected_jobs"], 30)
+        self.assertEqual(counts["combined_infra_affected_jobs"], 30)
+        self.assertTrue(counts["infra_stop_required"])
+        self.assertEqual(len(counts["original_startup_failure_evidence"]), 30)
+        self.assertEqual(counts["terminal_attempts"], 0)
+        self.assertFalse(counts["benchmark_success_inferred"])
+        # A changed owner/PID, arbitrary summary log path and task mismatch
+        # cannot turn nearby failure text into evidence for this exact job.
+        original = metas[1].read_text()
+        metas[1].write_text(original.replace("pid=2002", "pid=9999"))
+        self.assertEqual(observe()["original_startup_infra_affected_jobs"], 29)
+        metas[1].write_text(original)
+        # The immutable source-exclusion/successor pair survives registry
+        # retirement; a missing meta is not a missing binding.
+        metas[1].unlink()
+        self.assertEqual(observe()["original_startup_infra_affected_jobs"], 30)
+        metas[1].write_text(original)
+        successor_path = (
+            repo / ".context/fleet/runs/20261017-083021-2002/task-2/archived-successor.json"
+        )
+        successor_bytes = successor_path.read_bytes()
+        write(successor_path, dict(json.loads(successor_bytes), harness_ref="0" * 40))
+        self.assertEqual(observe()["original_startup_infra_affected_jobs"], 29)
+        successor_path.write_bytes(successor_bytes)
+        wrong_ref=dict(json.loads(successor_bytes),task_ref='b'*40)
+        exclusion_path=successor_path.parent/'archived-reuse-journal/source-exclusion.json'
+        exclusion_bytes=exclusion_path.read_bytes();exclusion=json.loads(exclusion_bytes)
+        exclusion['proof']['successor']=wrong_ref
+        exclusion['proof']['native_marker']['successor']=wrong_ref
+        write(exclusion_path,exclusion)
+        write(successor_path,wrong_ref)
+        self.assertEqual(observe()['original_startup_infra_affected_jobs'],29)
+        successor_path.write_bytes(successor_bytes)
+        exclusion_path.write_bytes(exclusion_bytes)
+        jobs[1]["log"] = str(logs[0])
+        write(campaign / "summary.json", summary)
+        self.assertEqual(observe()["original_startup_infra_affected_jobs"], 29)
+        jobs[1]["log"] = str(logs[1])
+        jobs[1]["task"] = "wrong-task"
+        write(campaign / "summary.json", summary)
+        self.assertEqual(observe()["original_startup_infra_affected_jobs"], 29)
+        jobs[1]["task"] = "task-2"
+        write(campaign / "summary.json", summary)
+        # No symlink following, even inside the right campaign directory.
+        raw = logs[1].read_bytes()
+        logs[1].unlink()
+        logs[1].symlink_to(logs[0])
+        self.assertEqual(observe()["original_startup_infra_affected_jobs"], 29)
+        logs[1].unlink()
+        logs[1].write_bytes(raw)
+        logs[1].write_bytes(b"x" * (256 * 1024 + 1))
+        result = observe()
+        self.assertEqual(result["original_startup_infra_affected_jobs"], 29)
+        self.assertGreater(result["startup_evidence_unavailable_jobs"], 0)
 
     def test_one_native_exec_is_readonly_and_unknown_envelopes_do_not_fake_summary(self):
         value=M['binding'](self.run);calls=[]
