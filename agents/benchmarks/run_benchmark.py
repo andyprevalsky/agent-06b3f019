@@ -1632,6 +1632,13 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
         detail = benchmark_state.get("payment_lifecycle_error")
         return f"missing payment lifecycle snapshot{f': {detail}' if detail else ''}"
 
+    if task.production_only:
+        for section, field in (("stripeHold", "livemode"), ("stripeRefund", "paymentIntentLivemode")):
+            if isinstance(expected.get(section), dict):
+                observed = actual.get(section)
+                if not isinstance(observed, dict) or observed.get(field) is not True:
+                    return f"payment_lifecycle.{section}.{field} must be true for a production lifecycle"
+
     def compare(expected_value, actual_value, path: str) -> Optional[str]:
         if isinstance(expected_value, dict):
             if not isinstance(actual_value, dict):
