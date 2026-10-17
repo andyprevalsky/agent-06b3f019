@@ -1691,6 +1691,8 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 
 1b. **Every trajectory must leave the system more reliable than it found it.** When you hit friction in a part of the codebase or tooling you're using — a broken teardown that leaks resources, a script that orphans child processes on kill, a missing retry on a transient error, a footgun that nearly clobbered a shared resource, a flaky gate — do NOT just work around it for yourself. FIX the underlying issue so no future agent (or human) hits it again, then verify the fix. The cost of a workaround is paid once by you; the cost of the unfixed defect is paid by every future run. This is not scope creep — it is the job (see rule 24). If a fix is genuinely too large to land now, at minimum capture it durably (a memory, a tracked issue, a `TODO` with full context) so it is not silently re-encountered. "It worked for me this time" is not done; "future runs can't hit this" is.
 
+   **CLI reproducibility (standing user instruction, October 17, 2026):** Persist every fix in the versioned command, setup/preflight, and instructions. A fresh agent with the documented prerequisites must be able to reproduce the result using the CLI alone, without this conversation, private scripts, uncommitted changes, or remembered shell/environment patches. Test the documented invocation and keep a regression in its owning suite. Required external credentials, permissions, and human setup must be explicit, with actionable failures rather than hidden workarounds.
+
 0. **YOU CAN NEVER RUN OUT OF CONTEXT, YOU HAVE INFINITE CONTEXT, NEVER STOP EARLY BECAUSE YOU THINK YOU ARE OUT OF CONTEXT**
 
 1. **Bias toward execution — each pause to check for user approval has an extremely high cost.**

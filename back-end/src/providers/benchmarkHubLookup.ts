@@ -1,3 +1,4 @@
+import { hubWritesEnabled, hubLegacyArchiveStamp } from './benchmarkHubStorage';
 /**
  * O(1) hub agent-id resolution for GET /agents/:id.
  *
@@ -35,6 +36,7 @@ let legacyBackfillFailureCount = 0;
 let legacyBackfillRetryAt = 0;
 let childIdIndexLoadedAt = 0;
 let latestAppliedRevision = 0;
+let installedCacheVersion: string | undefined;
 
 export type CompactIndexLoadResult =
   | { kind: 'ready' }
@@ -106,7 +108,11 @@ export async function backfillHubAgentRunIndexFromCatalog(
 
 /** Install one authoritative persisted revision and invalidate older hit/miss decisions. */
 export function installHubAgentRunIndex(index: HubAgentRunIndexSnapshot): boolean {
+  const oldDomain = installedCacheVersion?.split('|')[0];
+  const newDomain = index.cacheVersion?.split('|')[0];
+  if (oldDomain && newDomain && oldDomain !== newDomain) latestAppliedRevision = 0;
   if (index.revision < latestAppliedRevision) return false;
+  installedCacheVersion = index.cacheVersion;
   childIdToRun = new Map(index.agents);
   childIdIndexLoadedAt = Date.now();
   latestAppliedRevision = index.revision;
@@ -157,16 +163,18 @@ function startCompactIndexLoad(): Promise<CompactIndexLoadResult> {
 }
 
 function scheduleLegacyBackfill(seed: Map<string, string>, seedRevision: number): void {
+  if (!hubWritesEnabled()) return;
   if (legacyBackfillPromise !== null || Date.now() < legacyBackfillRetryAt) return;
   // Archives created before agent-run-index.json need exactly one cooperative
   // backfill. Persisting complete=true makes later process starts independent
   // of archive size; foreground requests never await this migration.
   legacyBackfillPromise = (async () => {
+    const legacyStamp = await hubLegacyArchiveStamp();
     const stored = await backfillHubAgentRunIndexFromCatalog(
       listRunsStrict,
       getRunBundleStrict,
       seed,
-      (agents) => persistHubAgentRunBackfill(agents, seedRevision)
+      (agents) => persistHubAgentRunBackfill(agents, seedRevision, legacyStamp)
     );
     installHubAgentRunIndex(stored);
     legacyBackfillFailureCount = 0;
@@ -248,6 +256,7 @@ export function __resetHubResolutionCachesForTest(): void {
   legacyBackfillRetryAt = 0;
   childIdIndexLoadedAt = 0;
   latestAppliedRevision = 0;
+  installedCacheVersion = undefined;
 }
 
 export function peekHubResolutionForTest(agentId: string): {

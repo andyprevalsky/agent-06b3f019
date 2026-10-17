@@ -664,7 +664,10 @@ def evaluate_outcome(check: dict, evidence: Any, deliverable: str) -> tuple[bool
         else:
             problem = _check_event_rules(check["after_marker"], attempts[marker + 1 :], manifest, " in the second run")
     if problem is None and check.get("left_on_sign_in_form"):
-        last_page = str(report.get("lastPagePath") or "")
+        observation = evidence.get("browser_page_observation")
+        if not isinstance(observation, dict) or observation.get("phase") != "park_time":
+            return failed("Native PARK-TIME browser page observation is unavailable")
+        last_page = str(observation.get("path") or "")
         if not last_page.startswith("/login"):
             problem = f"The browser was left on {last_page or 'no page'}, not on the sign-in form"
     if problem is None and "accounts_created" in check:

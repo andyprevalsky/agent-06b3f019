@@ -22499,13 +22499,13 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         patch(handler + "prepare_browser_auth", AsyncMock(return_value={"auth_realm": "shop.example", "auth_options": {"realm": "shop.example"}, "passwords": [], "passkeys": []})),
         patch(handler + "create_user_auth_assistance_request", create_auth),
         patch(handler + "extract_session_files", AsyncMock(return_value=[])),
-        patch(handler + "disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(handler + "disconnect_browser_after_passkey_capture", (auth_review or {}).get("disconnect", AsyncMock())),
         patch(handler + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
         patch(handler + "close_browser_session", AsyncMock()),
         patch(handler + "save_browser_action_message", AsyncMock()),
         patch(handler + "save_browser_assistant_message", AsyncMock()),
         patch(handler + "save_browser_credential_ref_message", persist_otp),
-        patch(handler + "persist_resume_context", AsyncMock(return_value={})),
+        patch(handler + "persist_resume_context", (auth_review or {}).get("persist_resume", AsyncMock(return_value={}))),
         patch("browser_tools.dom_service.DOMService", HandoffDomService),
         patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
         patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
@@ -28871,6 +28871,28 @@ async def test_fresh_browser_retains_user_input_before_activity_scheduling():
     replay["generator"].assert_awaited_once()
 
 
+@_in_browser_activity_context
+async def test_private_raster_policy_matches_actual_advertised_browser_tools():
+    from private_raster_policy_fixture import run
+    await run(_fake_config())
+
+async def test_disallowed_native_browser_call_is_model_validation():
+    from private_raster_policy_fixture import check_disallowed_output
+    await check_disallowed_output(True)
+
+async def test_disallowed_legacy_browser_call_is_model_validation():
+    from private_raster_policy_fixture import check_disallowed_output
+    await check_disallowed_output(False)
+
+@_in_browser_activity_context
+async def test_private_raster_capability_neighbor_controls():
+    from private_raster_policy_fixture import check_neighbor_controls
+    await check_neighbor_controls(_fake_config())
+
+async def test_capability_validation_preserves_printable_key_batch():
+    from private_raster_policy_fixture import check_printable_batch_contract
+    await check_printable_batch_contract()
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     from browser_operational_projection_fixtures import (
@@ -28878,6 +28900,11 @@ async def run_all_tests():
         test_notification_source_normalization_and_preview,
     )
     r = BlackboxResult()
+    await r.record_async("capability_validation_preserves_printable_key_batch", test_capability_validation_preserves_printable_key_batch)
+    await r.record_async("private_raster_capability_neighbor_controls", test_private_raster_capability_neighbor_controls)
+    await r.record_async("disallowed_native_browser_call_is_model_validation", test_disallowed_native_browser_call_is_model_validation)
+    await r.record_async("disallowed_legacy_browser_call_is_model_validation", test_disallowed_legacy_browser_call_is_model_validation)
+    await r.record_async("private_raster_policy_matches_actual_advertised_browser_tools", test_private_raster_policy_matches_actual_advertised_browser_tools)
     await r.record_async("operational_source_activity_manager_json_hydration", lambda: test_activity_manager_projection(SimpleNamespace(**globals())))
     r.record("operational_source_type_privacy_and_numeric_policy", test_typed_source_guards_and_scalar_policy)
     await r.record_async("operational_notification_source_preview_fallback", lambda: test_notification_source_normalization_and_preview(SimpleNamespace(**globals())))

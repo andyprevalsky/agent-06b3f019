@@ -497,14 +497,17 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
         _attempt("password", SAVED[2], "rejected", "wrong_password"),
     ]
     rejected = {
+        "browser_page_observation": {"phase": "park_time", "path": "/login/methods"},
         "manifest": _manifest("all_fail", mintedEmail=MINTED),
         "report": {"attempts": ladder, "sessions": [], "lastPagePath": "/login/methods"},
     }
     ok, detail = evaluate_outcome(all_fail, rejected, "")
     assert ok, detail
 
-    def all_fail_with(**report) -> tuple[bool, str]:
-        return evaluate_outcome(all_fail, {**rejected, "report": {**rejected["report"], **report}}, "")
+    def all_fail_with(*, parked_path="/login/methods", **report) -> tuple[bool, str]:
+        return evaluate_outcome(all_fail, {**rejected,
+            "browser_page_observation": {"phase": "park_time", "path": parked_path},
+            "report": {**rejected["report"], **report}}, "")
 
     ok, detail = all_fail_with(attempts=ladder[:4])
     assert not ok and SAVED[1] in detail
@@ -514,7 +517,7 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
     assert not ok and "passkey:rejected was tried before the rung above it" in detail, detail
     ok, detail = all_fail_with(attempts=[*ladder, _attempt("signup", MINTED, "rejected", "signup_unavailable")])
     assert not ok and "minted identity was used" in detail, detail
-    ok, detail = all_fail_with(lastPagePath="/account")
+    ok, detail = all_fail_with(parked_path="/account")
     assert not ok and "not on the sign-in form" in detail, detail
 
     minted = _outcome_check("browser-auth-minted-email-otp")
@@ -1282,9 +1285,23 @@ async def test_runner_routes_app_approval_to_the_real_auth_request() -> None:
         auth_test_site.set_active_manifest(None)
 
 
+
+
+async def test_park_time_native_observation_survives_activity_manager_and_hydration():
+    from auth_park_measurement_fixture import run_pipeline
+    await run_pipeline()
+
+async def test_unrelated_tasks_do_not_acquire_park_measurement_judge_inputs():
+    from auth_park_measurement_fixture import check_unrelated_task_measurement_input_absence
+    await check_unrelated_task_measurement_input_absence()
+
 async def run_all_tests():
     print("auth-test-site-benchmark blackbox tests:")
     runner = BlackboxResult()
+    await runner.record_async(
+        "unrelated_tasks_do_not_acquire_park_measurement_judge_inputs",
+        test_unrelated_tasks_do_not_acquire_park_measurement_judge_inputs,
+    )
     runner.record(
         "daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts",
         test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts,
@@ -1357,4 +1374,5 @@ async def run_all_tests():
         "runner_routes_app_approval_to_the_real_auth_request",
         test_runner_routes_app_approval_to_the_real_auth_request,
     )
+    await runner.record_async("park_time_native_observation_survives_activity_manager_and_hydration", test_park_time_native_observation_survives_activity_manager_and_hydration)
     return runner.all_passed

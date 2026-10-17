@@ -3661,6 +3661,34 @@ def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
         == "payment_lifecycle.orgTransfer.releasedCents mismatch: expected 0, got 4396"
     )
 
+    # Production-only lifecycle contracts require native LIVE Stripe provenance even
+    # when the catalog lists only terminal amounts/statuses. Sandbox stays unchanged.
+    from copy import deepcopy
+    from dataclasses import replace
+
+    expected = {"stripeHold": {"status": "succeeded"}, "stripeRefund": {"status": "succeeded"}}
+    production = replace(task, production_only=True, expected_payment_lifecycle=expected)
+    live = {
+        "stripeHold": {"status": "succeeded", "livemode": True},
+        "stripeRefund": {"status": "succeeded", "paymentIntentLivemode": True},
+    }
+    assert _validate_payment_lifecycle(production, {"_benchmark": {"payment_lifecycle": live}}) is None
+    for section, field in (("stripeHold", "livemode"), ("stripeRefund", "paymentIntentLivemode")):
+        for invalid in (False, None, 1, "true"):
+            mixed = deepcopy(live)
+            mixed[section][field] = invalid
+            error = _validate_payment_lifecycle(production, {"_benchmark": {"payment_lifecycle": mixed}})
+            assert error and f"{section}.{field}" in error, (section, invalid, error)
+        missing = deepcopy(live)
+        del missing[section][field]
+        assert _validate_payment_lifecycle(production, {"_benchmark": {"payment_lifecycle": missing}})
+    sandbox = replace(production, production_only=False)
+    test_mode = deepcopy(live)
+    test_mode["stripeHold"]["livemode"] = False
+    test_mode["stripeRefund"]["paymentIntentLivemode"] = False
+    assert _validate_payment_lifecycle(sandbox, {"_benchmark": {"payment_lifecycle": test_mode}}) is None
+    assert expected == {"stripeHold": {"status": "succeeded"}, "stripeRefund": {"status": "succeeded"}}
+
 
 def test_payment_lifecycle_merchant_allows_environment_suffix():
     """Catalog merchant must match free-form labels with environment suffixes.

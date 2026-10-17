@@ -57,6 +57,7 @@ from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
+from utils.explore_evidence import render_native_grep
 from utils.oai_demo_july import apply_oai_demo_july_for_each
 from utils.tool_call_ids import spawn_group_id
 
@@ -923,7 +924,6 @@ class SpawnAgentManager(ToolManager):
             # error_reason / ERROR status.
             event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
             if "native_grep_evidence" in result:
-                from domains.spawn_agent.evidence import render_native_grep
                 grep_evidence = render_native_grep(result["native_grep_evidence"], {"agent_id": workflow_instance.agent_id, "user_id": workflow_instance.user_id, "task_id": task_id, "parent_tool_call_id": tool_call_id})
             else:
                 grep_evidence = compile_explore_grep_evidence(explore_tool_call_results)

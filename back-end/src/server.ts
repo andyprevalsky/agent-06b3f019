@@ -570,6 +570,15 @@ app.use(
       stack: errObj.stack,
     });
 
+    const retryAfter = (err as { retryAfterSeconds?: unknown }).retryAfterSeconds;
+    if (
+      statusCode === 503 &&
+      typeof retryAfter === 'number' &&
+      Number.isFinite(retryAfter) &&
+      retryAfter > 0
+    )
+      res.setHeader('Retry-After', String(Math.ceil(retryAfter)));
+
     // Return appropriate status code
     res.status(statusCode).json({
       error: errObj.message || 'Internal server error',

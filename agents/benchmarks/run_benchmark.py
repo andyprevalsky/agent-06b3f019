@@ -1632,6 +1632,13 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
         detail = benchmark_state.get("payment_lifecycle_error")
         return f"missing payment lifecycle snapshot{f': {detail}' if detail else ''}"
 
+    if task.production_only:
+        for section, field in (("stripeHold", "livemode"), ("stripeRefund", "paymentIntentLivemode")):
+            if isinstance(expected.get(section), dict):
+                observed = actual.get(section)
+                if not isinstance(observed, dict) or observed.get(field) is not True:
+                    return f"payment_lifecycle.{section}.{field} must be true for a production lifecycle"
+
     def compare(expected_value, actual_value, path: str) -> Optional[str]:
         if isinstance(expected_value, dict):
             if not isinstance(actual_value, dict):
@@ -4609,6 +4616,12 @@ async def _poll_agent(
             "approvals_resolved": approvals_resolved,
             "attention_requests_seen": list(attention_requests_seen),
         }
+        from benchmarks.parked_browser_page import measurement_required, parked_page_observation
+        if measurement_required(task):
+            data["_benchmark"]["pending_attention_requests"] = [
+                {**_attention_request_evidence(req), "agent_id": req.get("agentId") or req.get("agent_id")}
+                for req in _pending_attention if _attention_request_is_open(req)
+            ]
         if subscription_checkout_evidence:
             data["_benchmark"]["subscription_checkout"] = subscription_checkout_evidence
         if timeout_snapshot is not None:
@@ -4621,6 +4634,10 @@ async def _poll_agent(
                 data["_benchmark"]["expected_attention_kind_any_of"] = list(task.expected_attention_kind_any_of)
             if task.expected_attention_kinds:
                 data["_benchmark"]["expected_attention_kinds_seen"] = list(seen_attention_kinds)
+        if (task.approval_handling == "ignore" and measurement_required(task)
+                and seen_attention_kinds and parked_page_observation(
+                    data, auth_test_site.active_manifest(), _current_benchmark_user_id())):
+            return data, approvals_triggered, approvals_resolved, None
         if validated_payment_receipt_request_id:
             data["_benchmark"]["expected_payment_receipt_seen"] = True
             data["_benchmark"]["expected_payment_receipt_request_id"] = validated_payment_receipt_request_id
@@ -5269,6 +5286,9 @@ async def _poll_agent(
                                 approvals_resolved += 1
                                 continue
                             if task.approval_handling == "ignore":
+                                if measurement_required(task) and not parked_page_observation(
+                                        data, auth_test_site.active_manifest(), _current_benchmark_user_id()):
+                                    continue  # Attention publication precedes the native parked receipt.
                                 kind_label = (
                                     f" ({observed_kind})"
                                     if (
@@ -8968,7 +8988,9 @@ async def _release_auth_test_site(base_url: str, manifest: Optional[dict]) -> No
         print(f"    ⚠ Failed to delete Rose Shop site {manifest.get('siteId')}: {exc}")
 
 
-async def _hydrate_auth_test_site_evidence(data: dict, base_url: Optional[str]) -> None:
+async def _hydrate_auth_test_site_evidence(
+    data: dict, base_url: Optional[str], *, task: Optional[BenchmarkTask] = None
+) -> None:
     manifest = auth_test_site.active_manifest()
     evidence: dict = {"manifest": manifest, "report": None, "report_error": None}
     if not manifest:
@@ -8982,6 +9004,11 @@ async def _hydrate_auth_test_site_evidence(data: dict, base_url: Optional[str]) 
             )
         except Exception as exc:
             evidence["report_error"] = str(exc)
+    from benchmarks.parked_browser_page import measurement_required, parked_page_observation
+    if task is not None and measurement_required(task):
+        evidence["browser_page_observation"] = parked_page_observation(
+            data, manifest, _current_benchmark_user_id()
+        )
     data.setdefault("_benchmark", {})["auth_test_site"] = evidence
 
 
@@ -13658,7 +13685,7 @@ async def _run_declared_evaluators(
         await _hydrate_completion_sms_events(data)
 
     if _task_declares_static_check(task, auth_test_site.AUTH_TEST_SITE_OUTCOME_CHECK):
-        await _hydrate_auth_test_site_evidence(data, base_url)
+        await _hydrate_auth_test_site_evidence(data, base_url, task=task)
 
     from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
 
@@ -14552,7 +14579,7 @@ async def _run_single_task_as_run_user(
         if not auth_test_site_evidence and auth_test_site.active_manifest():
             # A run that failed before its evaluators still needs the site's own
             # record: it is the only account of what the agent actually tried.
-            await _hydrate_auth_test_site_evidence(data, base_url)
+            await _hydrate_auth_test_site_evidence(data, base_url, task=task)
             auth_test_site_evidence = (data.get("_benchmark") or {}).get("auth_test_site")
         if auth_test_site_evidence:
             logs["auth_test_site"] = auth_test_site_evidence

@@ -436,7 +436,7 @@ async def _await_bounded_browser_cleanup(
     timeout_s: float,
     timeout_message: str,
     failure_message: str,
-) -> None:
+) -> bool:
     """Run cleanup under a hard deadline that does not await cancellation.
 
     ``asyncio.wait_for`` cancels the inner awaitable and then waits for that
@@ -452,7 +452,7 @@ async def _await_bounded_browser_cleanup(
         exc = None if task.cancelled() else task.exception()
         if exc is not None:
             logger.warning(failure_message, error=extract_error_message(exc))
-        return
+        return not task.cancelled() and exc is None
     task.cancel()
     # Keep a strong reference + retrieve the eventual result so a late
     # non-CancelledError from session.stop() is not logged as "Task exception
@@ -467,11 +467,13 @@ async def _await_bounded_browser_cleanup(
     task.add_done_callback(_discard)
     logger.warning(timeout_message, timeout_s=timeout_s)
 
+    return False
 
 async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
-) -> None:
+    *, observe_parked_page: Any = None,
+) -> Any:
     """Capture credential evidence before a terminal browser disconnect.
 
     Both the passkey readback and BrowserSession.stop() talk to CDP. When the
@@ -482,18 +484,25 @@ async def disconnect_browser_after_passkey_capture(
     only BROWSER_CURSOR broadcasts, never reaching "Creating approval request").
     Bound both steps so approval/handoff paths always resume.
     """
-    await _await_bounded_browser_cleanup(
+    capture_complete = await _await_bounded_browser_cleanup(
         capture_passkey_usage(),
         timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
         timeout_message="Passkey usage capture timed out before disconnect",
         failure_message="Passkey usage capture failed before disconnect",
     )
-    await _await_bounded_browser_cleanup(
+    observation = None
+    if capture_complete and observe_parked_page is not None:
+        try:
+            observation = observe_parked_page()
+        except (RuntimeError, AttributeError):
+            pass  # Missing native observation is unknown; cleanup must still run.
+    detached = await _await_bounded_browser_cleanup(
         dom_service.disconnect(),
         timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
         timeout_message="Browser disconnect timed out; continuing terminal return",
         failure_message="Browser disconnect failed; continuing terminal return",
     )
+    return observation if detached else None
 
 
 def _patch_cdp_use_websocket_proxy_default() -> None:
@@ -2999,7 +3008,10 @@ async def _call_browser_use_with_rotation(
         task=task,
         browser_state=browser_state_for_llm,
         action_history=action_entries,
-        available_actions=AVAILABLE_ACTIONS,
+        available_actions=[
+            action for action in AVAILABLE_ACTIONS
+            if action != "screenshot" or getattr(dom_service, "secret_values_used", False) is not True
+        ],
         dynamic_system_context=dynamic_system_context,
         turn_messages=turn_messages,
         agent_id=agent_id,
@@ -7146,6 +7158,13 @@ async def _spawn_browser_agent_activity_v3_real(
                     result[key] = project_operational_source(source, _redact_activity_value)
                 else:
                     result[key] = _redact_activity_value(result[key])
+        observation = result.get("browser_page_observation")
+        if isinstance(observation, dict):
+            # Routing/phase keys remain exact protocol; only location is page data.
+            result["browser_page_observation"] = {
+                **observation, "origin": _redact_activity_value(observation.get("origin")),
+                "path": _redact_activity_value(observation.get("path")),
+            }
         if "browser_output_schema" in result:
             result["browser_output_schema"] = _model_visible_browser_output_schema(
                 result["browser_output_schema"], _redact_activity_value
@@ -9844,7 +9863,14 @@ async def _spawn_browser_agent_activity_v3_real(
                     tool_call_id=tool_call_id_action,
                 )
 
-                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
+                parked_page = await disconnect_browser_after_passkey_capture(
+                    dom_service, record_passkey_usage_once,
+                    observe_parked_page=lambda: {
+                        **dom_service.get_parked_page_identity(), "phase": "park_time",
+                        "agent_id": agent_id, "user_id": user_id, "task_id": task_id,
+                        "session_id": session_id, "request_id": request_id, "tool_call_id": tool_call_id,
+                    },
+                )
                 dom_service = None
                 await _stop_playwright_resources(
                     playwright_browser,
@@ -9879,8 +9905,25 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
                 await browser_stream.finish_tools(status="FINISHED")
 
+                # Public evidence needs location, not private URL query/fragment/userinfo.
+                public_parked_page = None
+                if isinstance(parked_page, dict) and isinstance(parked_page.get("url"), str):
+                    from urllib.parse import urlsplit
+                    try:
+                        page_parts = urlsplit(parked_page["url"])
+                        public_parked_page = {
+                            **{key: parked_page.get(key) for key in (
+                                "target_id", "phase", "agent_id", "user_id", "task_id",
+                                "session_id", "request_id", "tool_call_id",
+                            )},
+                            "origin": page_parts.scheme + "://" + page_parts.netloc.rsplit("@", 1)[-1],
+                            "path": page_parts.path,
+                        }
+                    except ValueError:
+                        pass  # Invalid optional measurement cannot fail the auth handoff.
                 resume_result = {
                     "status": "awaiting_auth_assistance",
+                    "browser_page_observation": public_parked_page,
                     "request_id": request_id,
                     "auth_assistance_request": request_info,
                     "auth_assessment": (unified_action.get("params") or {})["auth_assessment"],
@@ -13121,6 +13164,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "toolName": "spawn_browser_agent",
                                 "action_type": "auth_assistance",
+                                "browser_page_observation": result.get("browser_page_observation"),
                                 **({"auth_assessment": result["auth_assessment"]} if result.get("auth_assessment") else {}),
                                 "task_id": result.get("task_id"),
                                 "requestUserAuthentication": {

@@ -2,7 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
-from typing import Any, TypedDict
+from typing import Any, TypedDict, List
 
 class EvidenceOwner(TypedDict):
     agent_id: str
@@ -78,7 +78,6 @@ def admit_grep_records(owner: EvidenceOwner, units: list[NativeToolUnit], budget
             if len(_json(envelope)) > budget:
                 group['records'].pop(); group['omitted_records'] += 1
     for entry, result in legacy:
-        from domains.spawn_agent.service import _bounded_explore_parts
         remaining = max(0, budget - len(_json(envelope)) - 64)
         text = result if isinstance(result, str) else _json(result)
         excerpt = _bounded_explore_parts([text], remaining)
@@ -121,3 +120,35 @@ def render_native_grep(envelope: Any, expected_owner: EvidenceOwner, budget: int
                 return invalid[:max(0, budget)]
     rendered = _json(envelope)
     return rendered if len(rendered) <= budget else invalid[:max(0, budget)]
+
+
+def _bounded_explore_parts(parts: List[str], budget: int) -> str:
+    """Share the payload budget across results so late evidence stays visible."""
+    if not parts or budget <= 0:
+        return ""
+    separator = "\n\n"
+    separator_cost = len(separator) * (len(parts) - 1)
+    if separator_cost >= budget:
+        return parts[-1][:budget]
+    available = budget - separator_cost
+    lo, hi = 0, max(len(part) for part in parts)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if sum(min(len(part), mid) for part in parts) <= available:
+            lo = mid
+        else:
+            hi = mid - 1
+    cap = lo
+    marker = "\n[...truncated...]\n"
+    excerpts: List[str] = []
+    for part in parts:
+        if len(part) <= cap:
+            excerpts.append(part)
+        elif cap > len(marker) + 2:
+            head = (cap - len(marker)) // 2
+            tail = cap - len(marker) - head
+            excerpts.append(part[:head] + marker + part[-tail:])
+        else:
+            excerpts.append(part[:cap])
+    return separator.join(excerpts)
+

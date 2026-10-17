@@ -39,6 +39,7 @@ from helpers.activity_heartbeat import heartbeat_resume_details
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
+from utils.explore_evidence import _bounded_explore_parts, admit_grep_records, legacy_traces
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import get_explore_agent_tools
 
@@ -174,35 +175,6 @@ def _fallback_trace_text(item: Any) -> str:
     return raw
 
 
-def _bounded_explore_parts(parts: List[str], budget: int) -> str:
-    """Share the payload budget across results so late evidence stays visible."""
-    if not parts or budget <= 0:
-        return ""
-    separator = "\n\n"
-    separator_cost = len(separator) * (len(parts) - 1)
-    if separator_cost >= budget:
-        return parts[-1][:budget]
-    available = budget - separator_cost
-    lo, hi = 0, max(len(part) for part in parts)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if sum(min(len(part), mid) for part in parts) <= available:
-            lo = mid
-        else:
-            hi = mid - 1
-    cap = lo
-    marker = "\n[...truncated...]\n"
-    excerpts: List[str] = []
-    for part in parts:
-        if len(part) <= cap:
-            excerpts.append(part)
-        elif cap > len(marker) + 2:
-            head = (cap - len(marker)) // 2
-            tail = cap - len(marker) - head
-            excerpts.append(part[:head] + marker + part[-tail:])
-        else:
-            excerpts.append(part[:cap])
-    return separator.join(excerpts)
 
 
 def compile_explore_wrap_up(
@@ -537,7 +509,6 @@ async def spawn_explore_agent_activity(
     explore_cache_sequence_id = f"agent:{agent_id}:task:{explore_task_key}:call:explore_agent"
 
     # Collect raw tool call results for callers that need evidence
-    from domains.spawn_agent.evidence import admit_grep_records, legacy_traces
     tool_evidence_units = []
     evidence_owner = {"agent_id": agent_id, "user_id": user_id, "task_id": task_id, "parent_tool_call_id": init_tool_call_id}
     # The local summary is fetched by a trusted backend activity before this

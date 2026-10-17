@@ -2226,6 +2226,17 @@ class DOMService:
         """Return private browser identity for navigation/auth mechanics only."""
         return self._runtime_current_url or fallback
 
+    def get_parked_page_identity(self) -> Dict[str, Any]:
+        """One event-loop snapshot of the native selected target, not page text."""
+        session = self._session
+        if session is None or not session.agent_focus_target_id:
+            raise RuntimeError("No focused browser target")
+        target_id = session.agent_focus_target_id
+        target = session.session_manager.get_target(target_id)
+        if target is None or target.target_id != target_id or target.target_type != "page":
+            raise RuntimeError("Focused browser target is unavailable")
+        return {"url": str(target.url), "target_id": str(target_id)}
+
     async def get_page_identity(self) -> Dict[str, Any]:
         """Return ``{url, title}`` of the focused tab without touching the renderer.
 
