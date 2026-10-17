@@ -167,6 +167,25 @@ class Status(unittest.TestCase):
         self.assertEqual(result['job_statuses'],dict(cancelled=2,running=1,queued=597))
         self.assertFalse(result['benchmark_success_inferred'])
 
+    def test_actual_remote_entrypoint_decodes_payload_and_reports_guest_mismatch(self):
+        import base64
+        payload=dict(machine=self.mid,source_ref=self.ref,epoch=self.epoch,
+                     identity_path='/tmp/gate/repo/.context/original600-supervisor.fixture.json')
+        # Execute the exact production -S/-c body, including __main__. A wrong
+        # guest identity returns UNKNOWN before Git or any other external call.
+        result=subprocess.run(['python3','-S','-c',M['REMOTE'],
+                               base64.b64encode(json.dumps(payload).encode()).decode()],
+                              env=dict(os.environ,FLY_MACHINE_ID='ffffffffffffff'),
+                              capture_output=True,text=True,timeout=3)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(result.stderr,'')
+        value=json.loads(result.stdout)
+        self.assertEqual(value['status'],'UNKNOWN')
+        self.assertEqual(value['error'],'ValueError')
+        self.assertEqual(value['machine'],self.mid)
+        self.assertEqual(value['source_ref'],self.ref)
+        self.assertEqual(value['original_epoch'],self.epoch)
+
     def test_one_native_exec_is_readonly_and_unknown_envelopes_do_not_fake_summary(self):
         value=M['binding'](self.run);calls=[]
         result=dict(status='SUPERVISOR_NOT_PUBLISHED',machine=self.mid,source_ref=self.ref,original_epoch=self.epoch)

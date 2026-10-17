@@ -19,7 +19,7 @@ need,read,save,bounded=(RUNNER[k] for k in ('need','read','save','bounded'))
 # This payload reads ONE exact supervisor-derived summary; it never walks the
 # campaign directories, signals a process, writes a guest file or starts work.
 REMOTE=r'''
-import hashlib,json,os,stat,subprocess,sys,time
+import base64,hashlib,json,os,stat,subprocess,sys,time
 from pathlib import Path
 
 def read_json(path):
