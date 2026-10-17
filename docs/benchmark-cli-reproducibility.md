@@ -55,14 +55,14 @@ Do not delete one consumer's browser to make room for the other.
 
 The original600 harness is versioned separately so its disposable controller,
 ticket accounting and shared relay are not replaced with older main versions.
-The portable operator commit is `a82f959dbc72737a8a5584a24f3ba90022cc2703`, with
+The portable operator commit is `77f4d6b06cb149584f7fbb98404750af68317599`, with
 immutable parent `b0fbd7742dde51446288c22601825a85981c1d0b`. Fetch the published
 `fix/original600-portable-operator` branch, create a separate worktree at that
 exact commit, and follow its `docs/original600-operator-cli.md`:
 
 ```bash
 git fetch origin fix/original600-portable-operator
-git worktree add --detach "$OPERATOR_CHECKOUT" a82f959dbc72737a8a5584a24f3ba90022cc2703
+git worktree add --detach "$OPERATOR_CHECKOUT" 77f4d6b06cb149584f7fbb98404750af68317599
 cd "$OPERATOR_CHECKOUT"
 python3 scripts/run-original600-controller.py --help
 ```
@@ -84,3 +84,7 @@ An already running experiment retains its recorded commit until it terminates.
 Archive-based cleanup targets only the current archive's sealed Machine IDs.
 Unrelated active or stopped Machines remain untouched and are counted as
 excluded; their presence does not block cleanup of the current run.
+
+Standard-library Hub admission probes skip Python site-package initialization.
+The actual Hub server and third-party consumers retain their normal interpreter
+startup; port, process-birth and immutable owner checks are unchanged.
