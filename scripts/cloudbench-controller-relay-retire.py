@@ -287,7 +287,10 @@ def validate_refusal(args, state):
         "cloudbench-controller-relay-retire.py": OLD_SOURCE_SHA,
         "cloudbench-controller-orphan-drain.py": sha(original_drain),
     }
-    pins = B["source_identity"](root, OLD_OPERATOR, hashes)
+    pins = {
+        path: list(value) if value is not None else None
+        for path, value in B["source_identity"](root, OLD_OPERATOR, hashes).items()
+    }
     need(pins == old["relay_source_pins"], "old relay source fingerprint differs")
 
     def literal(raw, name):

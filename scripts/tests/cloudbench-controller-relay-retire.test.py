@@ -271,9 +271,7 @@ class Relay(unittest.TestCase):
             json.dumps(payload, sort_keys=True).encode()
         )
         pins = {
-            str(ROOT / "scripts/cloudbench-controller-relay-retire.py"): {
-                "pinned": True
-            }
+            str(ROOT / "scripts/cloudbench-controller-relay-retire.py"): (1, 2, 3, 4, 5)
         }
 
         def put(name, value):
@@ -361,6 +359,13 @@ class Relay(unittest.TestCase):
         with patch.dict(M["B"], {"source_identity": lambda *_a: pins}):
             proof = M["validate_refusal"](args, state)
             self.assertEqual(len(proof["files"]), 7)
+            self.assertEqual(proof["source_pins"], json.loads(json.dumps(pins)))
+            changed_pins = {
+                path: (*value[:-1], value[-1] + 1) for path, value in pins.items()
+            }
+            with patch.dict(M["B"], {"source_identity": lambda *_a: changed_pins}):
+                with self.assertRaisesRegex(ValueError, "fingerprint differs"):
+                    M["validate_refusal"](args, state)
             self.assertEqual(
                 proof["prior_journal_sha256"],
                 M["sha"](
