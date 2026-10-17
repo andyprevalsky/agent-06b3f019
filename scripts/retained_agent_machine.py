@@ -37,6 +37,36 @@ def config_digest(config):
     return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def managed_worker_command(queue):
+    """Bind the worker selector after Fly merges app secrets over config.env."""
+    base, separator, surface = queue.rpartition("@")
+    if not separator or not re.fullmatch(r"[A-Za-z0-9._-]+", base) or not surface:
+        raise ValueError("Managed worker startup requires an exact generation queue")
+    return ["/usr/bin/env", f"TEMPORAL_TASK_QUEUE={base}", "python", "worker.py"]
+
+
+def bind_managed_worker_startup(config, queue):
+    if config.get("processes") or config.get("containers"):
+        raise ValueError("Managed worker process/container layout is not canonical")
+    init = config.setdefault("init", {})
+    if not isinstance(init, dict):
+        raise ValueError("Managed worker init layout is not canonical")
+    existing = init.get("exec")
+    known = (
+        isinstance(existing, list)
+        and len(existing) == 4
+        and existing[0] == "/usr/bin/env"
+        and isinstance(existing[1], str)
+        and re.fullmatch(r"TEMPORAL_TASK_QUEUE=[A-Za-z0-9._-]+", existing[1])
+        and existing[2:] == ["python", "worker.py"]
+    )
+    if init.get("entrypoint") or init.get("cmd") not in (None, [], ["python", "worker.py"]):
+        raise ValueError("Managed worker image startup contract is not canonical")
+    if existing not in (None, []) and not known:
+        raise ValueError("Managed worker init.exec is not canonical")
+    init["exec"] = managed_worker_command(queue)
+
+
 def record(machine, app):
     config = machine["config"]
     env = config.get("env", {})
@@ -203,6 +233,11 @@ class Fly:
 def operate(args, expected, fly):
     if expected.get("id") != args.id:
         raise ValueError("Expected Machine ID does not match the owned snapshot")
+    if args.action != "enroll":
+        owned_mutation = getattr(fly, "assert_managed_mutable", None)
+        if not callable(owned_mutation):
+            raise ValueError("Pool mutations require the lease-owned canonical controller")
+        owned_mutation()
     with fly.lease():
         current = fly.request("GET")
         if current.get("id") != args.id:
@@ -306,6 +341,7 @@ def operate(args, expected, fly):
             )
             config["env"].pop("TEMPORAL_WORKER_POOL_SPARE", None)
             if getattr(args, "job", None):
+                bind_managed_worker_startup(config, args.queue)
                 config["env"].update(
                     {
                         "TEMPORAL_TASK_QUEUE": args.queue.rsplit("@", 1)[0],

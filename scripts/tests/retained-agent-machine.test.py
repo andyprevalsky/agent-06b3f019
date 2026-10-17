@@ -6,6 +6,8 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -185,8 +187,12 @@ class RetainedWorkerTests(unittest.TestCase):
         self.addCleanup(self.env.stop)
 
     def run_operation(self, native, parameters, expected):
+        class OwnedFixtureFly(pool.Fly):
+            def assert_managed_mutable(self):
+                return None
+
         with patch.object(pool, "urlopen", native):
-            return pool.operate(parameters, expected, pool.Fly(parameters.app, parameters.id))
+            return pool.operate(parameters, expected, OwnedFixtureFly(parameters.app, parameters.id))
 
     def retire(self, value):
         native = NativeHTTP(value)
@@ -197,6 +203,88 @@ class RetainedWorkerTests(unittest.TestCase):
         value = machine()
         custody(value)
         return self.retire(value).machine
+
+    def test_managed_startup_overrides_app_secret_without_changing_other_environment(self):
+        value = self.released()
+        native = NativeHTTP(value)
+        full_queue = "navi-agent-tasks-pool-fixture@new"
+        self.run_operation(native, args("reserve", job="route-job", queue=full_queue), value)
+        self.run_operation(native, args("reuse", job="route-job", queue=full_queue), copy.deepcopy(native.machine))
+        config = native.machine["config"]
+        # Native app secrets override Machine config.env, as observed on the failed bank.
+        effective = {
+            **os.environ,
+            **config["env"],
+            "TEMPORAL_TASK_QUEUE": "navi-agent-tasks",
+            "UNRELATED_SECRET": "keep",
+        }
+        command = config.get("init", {}).get("exec", ["python", "worker.py"])
+        self.assertEqual(command[-2:], ["python", "worker.py"])
+        probe = (
+            "import importlib.util,json,os,sys; "
+            "s=importlib.util.spec_from_file_location('generation',sys.argv[1]); "
+            "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+            "print(json.dumps([m.resolve_production_task_queue(os.environ['TEMPORAL_TASK_QUEUE'], "
+            "os.environ['TEMPORAL_WORKER_SURFACE_HASH']),os.environ['UNRELATED_SECRET']]))"
+        )
+        result = subprocess.run(
+            [*command[:-2], sys.executable, "-I", "-c", probe, str(ROOT / "agents/helpers/worker_generation.py")],
+            env=effective,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(json.loads(result.stdout), [full_queue, "keep"])
+        self.assertEqual(effective["TEMPORAL_TASK_QUEUE"], "navi-agent-tasks")
+        self.assertEqual(config["env"]["TEMPORAL_TASK_QUEUE"], full_queue.rsplit("@", 1)[0])
+        self.assertFalse(native.leased)
+
+    def test_managed_startup_rejects_foreign_init_before_native_configuration_update(self):
+        for init in (
+            {"exec": ["sh", "-c", "python worker.py"]},
+            {"cmd": ["foreign"]},
+            {"entrypoint": ["foreign"]},
+            None,
+            [],
+        ):
+            with self.subTest(init=init):
+                value = self.released()
+                value["config"]["init"] = init
+                # The source reservation and custody bind this exact donor config.
+                source = pool.record(value, "prod")
+                marker = pool.metadata(value, pool.POOL_KEY)
+                marker["source"] = source
+                value["config"]["metadata"][pool.POOL_KEY] = json.dumps(marker)
+                proof = pool.metadata(value, pool.CUSTODY_KEY)
+                proof["config_sha256"] = source["config_sha256"]
+                value["config"]["metadata"][pool.CUSTODY_KEY] = json.dumps(proof)
+                native = NativeHTTP(value)
+                self.run_operation(native, args("reserve", job="route-job"), value)
+                with self.assertRaisesRegex(ValueError, "startup contract|init.exec|init layout"):
+                    self.run_operation(native, args("reuse", job="route-job"), copy.deepcopy(native.machine))
+                self.assertFalse(any(method == "POST" and url.endswith("/1234") for method, url, _ in native.requests))
+                self.assertFalse(native.leased)
+
+    def test_managed_startup_rejects_container_or_process_override(self):
+        for field in ("containers", "processes"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "layout"):
+                pool.bind_managed_worker_startup({field: [{"command": "foreign"}]}, "unique@hash")
+
+    def test_standalone_mutation_cannot_relabel_a_held_managed_machine(self):
+        value = machine()
+        custody(value)
+        value["config"]["metadata"][pool.POOL_KEY] = json.dumps({"job": "retained-original", "phase": "active"})
+        native = NativeHTTP(value)
+        with patch.object(pool, "urlopen", native), self.assertRaisesRegex(ValueError, "canonical controller"):
+            pool.operate(args("retire", hash="old", queue="navi-agent-tasks@old"), value, pool.Fly("prod", "1234"))
+        self.assertFalse(native.requests)
+        self.assertEqual(pool.metadata(native.machine, pool.POOL_KEY)["job"], "retained-original")
+
+    def test_managed_startup_is_bound_to_the_canonical_image_command(self):
+        instructions = (ROOT / "agents/Dockerfile").read_text().splitlines()
+        self.assertEqual([line for line in instructions if line.startswith("CMD ")], ['CMD ["python", "worker.py"]'])
+        self.assertFalse(any(line.startswith("ENTRYPOINT ") for line in instructions))
 
     def test_retirement_only_updates_metadata_and_keeps_machine_data_and_version(self):
         value = machine()
