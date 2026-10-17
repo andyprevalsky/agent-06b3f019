@@ -12,6 +12,7 @@ import runpy
 import signal
 import stat
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -66,6 +67,43 @@ def save(path, value):
         os.close(fd)
 
 
+def selected_authentication(root):
+    """Match run-bench-cloud's resolver without binding ignored config fields."""
+
+    def result(source, value):
+        return {"source": source, "credential_sha256": digest(value.encode())}
+
+    def first_value(raw, prefix, spaces=False):
+        for line in raw.decode().split("\n"):
+            if not line.startswith(prefix):
+                continue
+            value = line[len(prefix) :]
+            if spaces:
+                value = value.lstrip(" ")
+            if value[:1] in ("'", '"'):
+                value = value[1:]
+            if value[-1:] in ("'", '"'):
+                value = value[:-1]
+            return value
+        return ""
+
+    bench = os.environ.get("FLY_BENCH_API_TOKEN", "")
+    if len(bench) >= 20:
+        return result("FLY_BENCH_API_TOKEN", bench)
+    config = Path.home() / ".fly/config.yml"
+    if config.is_file():
+        token = first_value(
+            file_bytes(config.resolve(strict=True)), "access_token:", spaces=True
+        )
+        if token:
+            return result("config.access_token", token)
+    token = os.environ.get("FLY_API_TOKEN", "")
+    if token:
+        return result("FLY_API_TOKEN", token)
+    token = first_value(file_bytes(root / "agents/.env"), "FLY_API_TOKEN=")
+    return result("agents.env.FLY_API_TOKEN" if token else "none", token)
+
+
 def identity(args):
     authority = SEED["owner"](args.inventory, args.barrier)
     cohort = SEED["manifest"](args.barrier)
@@ -100,16 +138,6 @@ def identity(args):
         "helper": Path(__file__),
         "verifier": Path(__file__).with_name("run-bench-cloud"),
     }
-    auth_path = Path.home() / ".fly/config.yml"
-    authentication = {
-        "environment": {
-            key: digest(os.environ.get(key, "").encode())
-            for key in ("FLY_API_TOKEN", "FLY_BENCH_API_TOKEN")
-        },
-        "config_sha256": digest(file_bytes(auth_path.resolve(strict=True)))
-        if auth_path.exists()
-        else None,
-    }
     return {
         "owner": authority,
         "cohort_id": cohort["cohort_id"],
@@ -120,7 +148,7 @@ def identity(args):
             role: digest(file_bytes(path.resolve(strict=True)))
             for role, path in paths.items()
         },
-        "authentication": authentication,
+        "authentication": selected_authentication(args.root),
     }
 
 
@@ -137,6 +165,40 @@ def private_directory(path):
         or info.st_mode & 0o077
     ):
         raise ValueError("private cohort env directory required")
+
+
+def same_identity(args, expected, directory, phase):
+    current = identity(args)
+    if current == expected:
+        return True
+
+    def changes(before, after, prefix=""):
+        if isinstance(before, dict) and isinstance(after, dict):
+            return [
+                item
+                for key in sorted(before.keys() | after.keys())
+                for item in changes(before.get(key), after.get(key), prefix + "." + key)
+            ]
+        return [prefix.removeprefix(".")] if before != after else []
+
+    receipt = directory / ("identity-mismatch-" + uuid.uuid4().hex + ".json")
+    save(
+        receipt,
+        {
+            "phase": phase,
+            "job": args.job,
+            "controller_pid": args.controller_pid,
+            "observed_epoch": time.time(),
+            "changed_fields": changes(expected, current),
+            "expected": expected,
+            "current": current,
+        },
+    )
+    print(
+        "Environment identity mismatch; private diagnostic: " + str(receipt),
+        file=sys.stderr,
+    )
+    return False
 
 
 def check(args):
@@ -186,7 +248,7 @@ def check(args):
                 break
             except BlockingIOError:
                 time.sleep(0.2)
-        if identity(args) != expected:
+        if not same_identity(args, expected, directory, "after-lock"):
             raise ValueError("environment-check identity changed while waiting")
         if proof.exists():
             value = json.loads(file_bytes(proof))
@@ -249,7 +311,11 @@ def check(args):
                 + str(attempt)
             )
             return code if code > 0 else 128 - code
-        if stopped[0] or time.time() >= args.deadline or identity(args) != expected:
+        if (
+            stopped[0]
+            or time.time() >= args.deadline
+            or not same_identity(args, expected, directory, "before-publication")
+        ):
             raise ValueError(
                 "environment-check identity/deadline changed before publication"
             )

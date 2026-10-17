@@ -246,6 +246,14 @@ job, attempt, owner and log/binding-record hashes. It does not rewrite canonical
 classification, infer a task result, or certify cleanup. The CLI still does not
 send signals; the existing exact-owner cancellation procedure applies.
 
+The reader also recognizes the direct shared-environment identity refusal while waiting
+followed by the canonical no-Machine-started message. That earlier startup
+stage is bound through the exact campaign cohort manifest and job PID, because
+it has not created a claim yet. It uses the same separate counts and deduplication;
+generic environment errors and propagated canary failures remain unclassified.
+The combined identity/deadline prepublication message is also unclassified:
+that message alone cannot distinguish identity drift from cancellation.
+
 ### Continue a bound launch rejected before controller creation
 
 If a corrected host operator must continue an already prepared admission, use
@@ -299,3 +307,11 @@ cached: its stdout, stderr and exit status remain private under the cohort's
 `environment-preflight` directory. Waiting and cancellation retain the original
 startup deadline and join the owned verifier. This does not refresh app secrets
 or infer that a failed read means the app is missing.
+
+Authentication identity follows the canonical verifier's effective credential
+selection: a valid explicit benchmark token, config access token, process token,
+then the agents env token. It hashes that selected credential and its source.
+Unselected credentials and unrelated Fly config metadata do not invalidate a
+waiting check. A change to the selected credential, environment files, source
+or owner still refuses reuse. A private `identity-mismatch-*.json` receipt records
+the differing field names and hashed bindings, without token or config contents.

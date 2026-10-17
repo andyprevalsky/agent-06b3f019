@@ -48,8 +48,45 @@ def evidence_bytes(path,limit,budget):
             raise ValueError('changing evidence')
         return raw
 
+def fleet_meta_hash(repo,owner,pid,fleet_id,payload,budget,reader):
+    path=repo/'.git/cloudbench-fleet-ownership'/owner/'meta'
+    if not os.path.lexists(path):return None
+    raw=reader(path,65536,budget)
+    pairs=[line.split('=',1) for line in raw.decode().splitlines()]
+    if any(len(pair)!=2 for pair in pairs):raise ValueError('invalid fleet meta')
+    meta=dict(pairs)
+    if len(meta)!=len(pairs) or any(meta.get(k)!=v for k,v in dict(version='2',
+        app='navi-whisper-lux-bench',host=payload['machine'],pid=str(pid),
+        fleet_owner_token=owner,run_id=fleet_id,workspace_root=str(repo)).items()):
+        raise ValueError('fleet meta does not belong to job')
+    return hashlib.sha256(raw).hexdigest()
+
+def environment_failure(body,job,ident,pid,campaign,member_ids,budget,reader):
+    # The prepublication error also covers user cancellation and deadline
+    # expiry, so its text alone is deliberately not classified as infra.
+    markers=('ValueError: environment-check identity changed while waiting\n',)
+    for marker in markers:
+        failure=body.find(marker)
+        if failure<0:continue
+        trace=body[:failure]
+        if ('Traceback (most recent call last):\n' not in trace
+            or not re.search(r'^  File "/tmp/cloudbench-scripts\.[0-9a-f]{32}/cloudbench-campaign-env\.py", line [0-9]+, in check$',trace,re.M)
+            or '❌ Cloud benchmark environment is not ready; no benchmark machine was started.\n' not in body[failure+len(marker):]):
+            continue
+        cohort_id=job.get('startup_cohort','')
+        if not isinstance(cohort_id,str) or not re.fullmatch(r'c[0-9]{3}',cohort_id):raise ValueError('invalid startup cohort')
+        raw=reader(campaign/'startup-cohorts'/cohort_id/'manifest.json',65536,budget)
+        cohort=json.loads(raw)
+        if (not isinstance(cohort,dict) or cohort.get('cohort_id')!=cohort_id
+            or not isinstance(cohort.get('jobs'),dict) or set(cohort['jobs'])!=member_ids
+            or type(cohort['jobs'].get(ident))is not int or cohort['jobs'][ident]!=pid):
+            raise ValueError('startup cohort does not own job process')
+        return dict(reason='shared_environment_identity_changed',cohort_manifest_sha256=hashlib.sha256(raw).hexdigest())
+    return None
+
 def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
     budget=[16*1024*1024];proofs=[];unavailable=set();inspected=0
+    member_ids={job['job_id'] for job in summary['jobs']}
     for job in summary['jobs']:
         ident=job['job_id'];task=job.get('task')
         candidates=[job]+list(reversed(job.get('attempts',[])))
@@ -71,15 +108,25 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
                 if key in visited:continue
                 visited.add(key)
                 raw=reader(expected,256*1024,budget);text=raw.decode();inspected+=1
-                # Only a direct failed claim's complete startup failure sequence
-                # qualifies. Generic/cascaded canary errors do not establish it.
+                # Direct, bound startup failures only. Generic/cascaded canary
+                # errors and arbitrary copied diagnostic text do not qualify.
                 marker='ValueError: late inactive native version observation\n'
-                if marker not in text:continue
+                if marker not in text and 'ValueError: environment-check identity' not in text:continue
                 headers=list(re.finditer(r'^\s*'+re.escape(str(repo/'scripts/run-bench'))+r' monitor ('+
                     re.escape(str(repo/'.context/fleet/runs'))+r'/([0-9]{8}-[0-9]{6}-[0-9]+))\n'
                     r'\s*owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory\.$',text,re.M))
                 if len(headers)!=1:raise ValueError('ambiguous fleet monitor binding')
                 header=headers[0];body=text[header.end():];fleet_id=header[2];owner=header[3]
+                if not fleet_id.endswith('-'+str(pid)):raise ValueError('fleet process identity differs')
+                env_failure=environment_failure(body,job,ident,pid,campaign,member_ids,budget,reader)
+                if env_failure is not None:
+                    meta_sha=fleet_meta_hash(repo,owner,pid,fleet_id,payload,budget,reader)
+                    proofs.append(dict(job_id=ident,task=task,attempt=number,controller_pid=pid,
+                        fleet_owner_token=owner,run_id=fleet_id,log_path=str(expected.relative_to(repo)),
+                        log_sha256=hashlib.sha256(raw).hexdigest(),meta_sha256=meta_sha,
+                        source_ref=payload['source_ref'],original_epoch=payload['epoch'],**env_failure))
+                    unavailable.discard(ident)
+                    break
                 failure=body.find(marker)
                 if failure<0:continue
                 trace=body[:failure]
@@ -107,19 +154,7 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
                     or proof.get('schema')!='cloudbench-archived-reuse-v1' or proof.get('successor')!=successor
                     or proof.get('native_marker',{}).get('successor')!=successor):
                     raise ValueError('source exclusion does not belong to job')
-                meta_path=repo/'.git/cloudbench-fleet-ownership'/owner/'meta'
-                meta_sha=None
-                if os.path.lexists(meta_path):
-                    meta_raw=reader(meta_path,65536,budget)
-                    pairs=[line.split('=',1) for line in meta_raw.decode().splitlines()]
-                    if any(len(pair)!=2 for pair in pairs):raise ValueError('invalid fleet meta')
-                    meta=dict(pairs)
-                    if len(meta)!=len(pairs) or any(meta.get(k)!=v for k,v in dict(version='2',
-                        app='navi-whisper-lux-bench',host=payload['machine'],pid=str(pid),
-                        fleet_owner_token=owner,run_id=fleet_id,workspace_root=str(repo)).items()):
-                        raise ValueError('fleet meta does not belong to job')
-                    meta_sha=hashlib.sha256(meta_raw).hexdigest()
-                if not fleet_id.endswith('-'+str(pid)):raise ValueError('fleet process identity differs')
+                meta_sha=fleet_meta_hash(repo,owner,pid,fleet_id,payload,budget,reader)
                 proofs.append(dict(job_id=ident,task=task,attempt=number,controller_pid=pid,
                     fleet_owner_token=owner,run_id=fleet_id,log_path=str(expected.relative_to(repo)),
                     log_sha256=hashlib.sha256(raw).hexdigest(),meta_sha256=meta_sha,

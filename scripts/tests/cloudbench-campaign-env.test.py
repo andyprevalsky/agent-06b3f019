@@ -14,6 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SEED = runpy.run_path(str(ROOT / "scripts/cloudbench-campaign-seed.py"))
@@ -136,22 +137,22 @@ PY
     def test_actual_fleet_shell_waits_for_declared_job_pid_publication(self):
         source = (ROOT / "scripts/run-bench-fleet").read_text()
         function = re.search(
-            r"^verify_fleet_environment\(\).*?^}\n", source, re.M | re.S
+            r"^verify_fleet_environment\(\).*?^}\n", source, re.MULTILINE | re.DOTALL
         ).group()
         manifest = self.barrier / "manifest.json"
         manifest.write_text(json.dumps({"cohort_id": "cohort", "jobs": {"job": None}}))
-        values = dict(
-            ROOT_DIR=str(self.root),
-            CLOUDBENCH_SCRIPT_SNAPSHOT=str(self.helpers),
-            CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=str(self.inventory),
-            RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(self.barrier),
-            RUN_BENCH_CAMPAIGN_JOB_ID="job",
-            CLOUDBENCH_PRESTACK_CONTROLLER_REF=self.command[
+        values = {
+            "ROOT_DIR": str(self.root),
+            "CLOUDBENCH_SCRIPT_SNAPSHOT": str(self.helpers),
+            "CLOUDBENCH_CAMPAIGN_INVENTORY_DIR": str(self.inventory),
+            "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(self.barrier),
+            "RUN_BENCH_CAMPAIGN_JOB_ID": "job",
+            "CLOUDBENCH_PRESTACK_CONTROLLER_REF": self.command[
                 self.command.index("--source-ref") + 1
             ],
-            FLEET_CONTROLLER_STARTED_EPOCH=str(int(time.time())),
-            START_BARRIER_WAIT_SECONDS="10",
-        )
+            "FLEET_CONTROLLER_STARTED_EPOCH": str(int(time.time())),
+            "START_BARRIER_WAIT_SECONDS": "10",
+        }
         setup = "\n".join(
             key + "=" + shlex.quote(value) for key, value in values.items()
         )
@@ -269,6 +270,178 @@ PY
         self.assertEqual(result.returncode, 1)
         self.assertIn("native-read-fixture", result.stderr)
         self.assertIn("read exit=9", result.stderr)
+
+    def test_selected_authentication_matches_canonical_shell_resolver(self):
+        helper = runpy.run_path(str(self.helpers / "cloudbench-campaign-env.py"))
+        source = (ROOT / "scripts/run-bench-cloud").read_text()
+        resolver = re.search(
+            r"^resolve_fly_token\(\) \{.*?^}", source, re.MULTILINE | re.DOTALL
+        ).group()
+        home = self.root / "auth-home"
+        (home / ".fly").mkdir(parents=True)
+        config = home / ".fly/config.yml"
+        agents = self.root / "agents/.env"
+        cases = [
+            (
+                "bench-token-long-enough-fixture",
+                "process-fixture",
+                "access_token: config-fixture\n",
+                "agents-fixture",
+            ),
+            (
+                "short",
+                "process-fixture",
+                "access_token: 'config-fixture'\n",
+                "agents-fixture",
+            ),
+            (
+                "",
+                "process-fixture",
+                'access_token: ""\nother: metadata\n',
+                "agents-fixture",
+            ),
+            ("", "", "other: metadata\n", "agents-fixture"),
+            ("", "", "access_token:\tconfig-tab\n", "agents-fixture"),
+            ("", "", "other: metadata\n", ""),
+        ]
+        for bench, process, content, agent in cases:
+            config.write_text(content)
+            agents.write_text('FLY_API_TOKEN="' + agent + '"\n')
+            env = dict(
+                os.environ,
+                HOME=str(home),
+                FLY_BENCH_API_TOKEN=bench,
+                FLY_API_TOKEN=process,
+            )
+            shell = subprocess.run(
+                ["bash", "-c", resolver + "\nresolve_fly_token"],
+                cwd=self.root,
+                env=env,
+                capture_output=True,
+                check=True,
+            )
+            import hashlib
+
+            expected = hashlib.sha256(shell.stdout.rstrip(b"\n")).hexdigest()
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(
+                    helper["selected_authentication"](self.root)["credential_sha256"],
+                    expected,
+                )
+
+    def concurrent_config_change(self, selected_changes):
+        home = self.root / "concurrent-home"
+        (home / ".fly").mkdir(parents=True)
+        config = home / ".fly/config.yml"
+        config.write_text("last_check: first\n")
+        env = dict(
+            os.environ,
+            HOME=str(home),
+            FLY_API_TOKEN="process-fixture",
+            FLY_BENCH_API_TOKEN="",
+        )
+        verifier = self.helpers / "run-bench-cloud"
+        verifier.write_text(
+            verifier.read_text().replace(
+                "time.sleep(0.25)",
+                "\nend=time.monotonic()+5\nwhile not (p/'release').exists() and time.monotonic()<end:time.sleep(0.01)\n",
+            )
+        )
+        children = []
+        try:
+            children.append(
+                subprocess.Popen(
+                    self.command,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+            end = time.monotonic() + 4
+            while not (self.root / "child.pid").exists() and time.monotonic() < end:
+                time.sleep(0.01)
+            self.assertTrue((self.root / "child.pid").exists())
+            children.append(
+                subprocess.Popen(
+                    self.command,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+
+            def waiting(process):
+                try:
+                    return any(
+                        str(path.readlink()).endswith(".lock")
+                        and "environment-preflight" in str(path.readlink())
+                        for path in (Path("/proc") / str(process.pid) / "fd").iterdir()
+                    )
+                except FileNotFoundError:
+                    return False
+
+            while (
+                not all(waiting(child) for child in children) and time.monotonic() < end
+            ):
+                time.sleep(0.01)
+            self.assertTrue(
+                all(waiting(child) for child in children),
+                "both helpers must have bound old identity before rewrite",
+            )
+            replacement = config.with_suffix(".next")
+            replacement.write_text(
+                "access_token: changed-credential\n"
+                if selected_changes
+                else "last_check: second\n"
+            )
+            replacement.replace(config)
+            (self.root / "release").touch()
+            outputs = [child.communicate(timeout=8) for child in children]
+            if selected_changes:
+                self.assertTrue(all(child.returncode for child in children), outputs)
+                self.assertFalse(
+                    list((self.barrier / "environment-preflight").glob("*.pass.json"))
+                )
+                mismatches = list(
+                    (self.barrier / "environment-preflight").glob(
+                        "identity-mismatch-*.json"
+                    )
+                )
+                self.assertTrue(mismatches)
+                self.assertTrue(
+                    any(
+                        "authentication"
+                        in str(json.loads(path.read_text())["changed_fields"])
+                        for path in mismatches
+                    )
+                )
+            else:
+                self.assertTrue(
+                    all(child.returncode == 0 for child in children), outputs
+                )
+                self.assertEqual((self.root / "calls").read_text(), "1")
+                self.assertEqual(
+                    len(
+                        list(
+                            (self.barrier / "environment-preflight").glob("*.pass.json")
+                        )
+                    ),
+                    1,
+                )
+        finally:
+            (self.root / "release").touch()
+            for child in children:
+                if child.poll() is None:
+                    child.terminate()
+                child.communicate(timeout=8)
+
+    def test_unselected_config_rewrite_does_not_invalidate_waiting_cohort(self):
+        self.concurrent_config_change(False)
+
+    def test_changed_selected_credential_refuses_and_retains_mismatch(self):
+        self.concurrent_config_change(True)
 
     def test_failure_is_not_cached_and_private_diagnostic_is_retained(self):
         (self.root / "fail").touch()

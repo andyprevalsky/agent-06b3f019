@@ -304,7 +304,16 @@ class Status(unittest.TestCase):
                     "ValueError: unrelated",
                 )
             elif index == 34:
-                body = header + "❌ no benches launched (all clones failed).\n"
+                body=header+('Traceback (most recent call last):\n'
+                    '  File "/tmp/cloudbench-scripts.'+'a'*32+'/cloudbench-campaign-env.py", line 253, in check\n'
+                    'ValueError: environment-check identity/deadline changed before publication\n'
+                    '❌ Cloud benchmark environment is not ready; no benchmark machine was started.\n')
+            elif index in (29,30):
+                body=header+('Traceback (most recent call last):\n'
+                    '  File "/tmp/cloudbench-scripts.'+'a'*32+'/cloudbench-campaign-env.py", line 190, in check\n'
+                    '    raise ValueError("environment-check identity changed while waiting")\n'
+                    'ValueError: environment-check identity changed while waiting\n'
+                    '❌ Cloud benchmark environment is not ready; no benchmark machine was started.\n')
             else:
                 body = header + failure
             log.parent.mkdir(parents=True, exist_ok=True)
@@ -330,6 +339,7 @@ class Status(unittest.TestCase):
                     attempt=1,
                     log=str(log),
                     status="running",
+                    startup_cohort="c001",
                     attempts=attempts,
                 )
             )
@@ -345,6 +355,9 @@ class Status(unittest.TestCase):
             jobs=jobs,
         )
         write(campaign / "summary.json", summary)
+        cohort_path=campaign/'startup-cohorts/c001/manifest.json'
+        cohort=dict(cohort_id='c001',jobs={job['job_id']:job.get('controller_pid') for job in jobs})
+        write(cohort_path,cohort)
 
         def observe():
             with patch.dict(os.environ, FLY_MACHINE_ID=self.mid):
@@ -358,6 +371,13 @@ class Status(unittest.TestCase):
         self.assertEqual(len(counts["original_startup_failure_evidence"]), 30)
         self.assertEqual(counts["terminal_attempts"], 0)
         self.assertFalse(counts["benchmark_success_inferred"])
+        self.assertEqual(sum(p['reason']=='shared_environment_identity_changed' for p in counts['original_startup_failure_evidence']),2)
+        cohort['jobs']['r001-j0029']=9999;write(cohort_path,cohort)
+        self.assertEqual(observe()['original_startup_infra_affected_jobs'],29)
+        cohort['jobs']['r001-j0029']=2029;write(cohort_path,cohort)
+        meta29=metas[28].read_bytes();metas[28].unlink()
+        self.assertEqual(observe()['original_startup_infra_affected_jobs'],30)
+        metas[28].write_bytes(meta29)
         # A changed owner/PID, arbitrary summary log path and task mismatch
         # cannot turn nearby failure text into evidence for this exact job.
         original = metas[1].read_text()
