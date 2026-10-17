@@ -309,6 +309,25 @@ the old output remains preserved and the new run path starts with
 Current operators emit `launch-payload-failure.json` in that original output;
 pass its exact path to `--prelaunch-failure` without copying or renaming it.
 
+If an already-created controller rejected the old large exec request before
+receiving its payload, keep the original operator alive. The recovery command
+uses that same controller, configuration, source and original deadline:
+
+```bash
+python3 scripts/cloudbench-resume-controller-payload.py \
+  --operator-ref "$EXACT_RECOVERY_OPERATOR_COMMIT" \
+  --config "$EXISTING_CONFIG" --config-sha256 "$EXISTING_CONFIG_SHA256" \
+  --run-directory "$EXISTING_RUN_DIRECTORY" --check
+```
+
+After this local check passes, replace `--check` with `--run` to transfer the
+remaining bytes. The command verifies the retained rejection and readback,
+original caller and gate, source files, authority and payload hashes. It creates
+one durable borrower intent and preserves the original transfer journal. A
+successful transfer does not certify task execution or cleanup. An incomplete
+borrower intent refuses a fresh transfer attempt; retain its evidence for
+reconciliation.
+
 
 Within a live strict cohort, the fleet shares one successful read-only app-secret
 verification. The proof is bound to the campaign owner and process births,
