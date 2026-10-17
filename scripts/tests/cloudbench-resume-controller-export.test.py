@@ -323,6 +323,107 @@ class ExportResume(unittest.TestCase):
         with self.assertRaises(ValueError):
             M["relay_intent_path"](original, {})
 
+    def test_only_exact_idle_child_is_scoped_out_of_both_writer_scans(self):
+        fixture = self.root / "idle-remote.py"
+        fixture.write_text(M["REMOTE"])
+        remote = runpy.run_path(str(fixture))
+        proc = self.root / "proc"
+        repo = self.root / "repo"
+        repo.mkdir()
+        for pid in (710, 5854):
+            base = proc / str(pid)
+            (base / "task" / str(pid)).mkdir(parents=True)
+            (base / "fd").mkdir()
+            (base / "status").write_text("Uid:\t0\t0\t0\t0\n")
+            (base / "cwd").symlink_to(repo)
+            for number, target in (
+                ("0", "/dev/null"),
+                ("1", "pipe:[4956]"),
+                ("2", "pipe:[4957]"),
+            ):
+                (base / "fd" / number).symlink_to(target)
+        child = proc / "5854"
+        children = proc / "710/task/710/children"
+        children.write_text("5854")
+        (child / "task/5854/children").write_text("")
+        (child / "stat").write_text("5854 (sleep) S 710 0 0")
+        (child / "exe").symlink_to("/usr/bin/sleep")
+        record = dict(driver_pid=710, driver_birth="parent-birth")
+        scope = dict(
+            birth=lambda pid: "parent-birth" if pid == 710 else "child-birth",
+            process_argv=lambda _: ["sleep", "60"],
+        )
+
+        def validate():
+            return remote["idle_children"](scope, record, repo, proc)
+
+        self.assertEqual(validate()[0]["pid"], 5854)
+
+        collector = runpy.run_path(str(self.collector))
+        canonical_writers = collector["writers"]
+        foreign = proc / "9999"
+        (foreign / "fd").mkdir(parents=True)
+        (foreign / "cwd").symlink_to(repo)
+        for pid in (710, 5854, 9999):
+            (proc / str(pid) / "maps").write_text("")
+
+        def old(roots, permitted):
+            with mock.patch.dict(
+                canonical_writers.__globals__,
+                Path=lambda value: proc if str(value) == "/proc" else Path(value),
+                birth=lambda _: "child-birth",
+            ):
+                return canonical_writers([repo], permitted)
+
+        self.assertEqual(len(old([], {710})), 2)
+        scope["writers"] = old
+        with mock.patch.dict(
+            remote["scoped_idle_writers"].__globals__,
+            idle_children=lambda *_: validate(),
+        ):
+            observations = remote["scoped_idle_writers"](scope, record, repo)
+            collector = runpy.run_path(str(self.collector))
+            with mock.patch.dict(
+                collector["controller_active_writers"].__globals__,
+                writers=scope["writers"],
+            ):
+                self.assertEqual(
+                    collector["controller_active_writers"](repo, [], {710}),
+                    [dict(pid=9999, birth="child-birth")],
+                )
+            self.assertEqual(
+                scope["writers"]([], {710}), [dict(pid=9999, birth="child-birth")]
+            )
+            self.assertEqual(len(observations), 2)
+            original = scope["writers"]
+
+            def changed_scan(roots, permitted):
+                children.write_text("")
+                return old(roots, permitted)
+
+            scope2 = dict(scope, writers=changed_scan)
+            remote["scoped_idle_writers"](scope2, record, repo)
+            with self.assertRaisesRegex(AssertionError, "changed during writer scan"):
+                scope2["writers"]([], {710})
+            scope["writers"] = original
+        children.write_text("5854")
+        for path, bad, good in (
+            (child / "stat", "5854 (sleep) S 711 0 0", "5854 (sleep) S 710 0 0"),
+            (child / "status", "Uid: 1 1 1 1", "Uid: 0 0 0 0"),
+            (child / "task/5854/children", "6000", ""),
+        ):
+            path.write_text(bad)
+            with self.assertRaises(AssertionError):
+                validate()
+            path.write_text(good)
+        (child / "fd/9").symlink_to("/dev/null")
+        with self.assertRaises(AssertionError):
+            validate()
+        (child / "fd/9").unlink()
+        scope["process_argv"] = lambda _: ["sleep", "600"]
+        with self.assertRaises(AssertionError):
+            validate()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

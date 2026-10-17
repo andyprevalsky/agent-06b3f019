@@ -43,6 +43,39 @@ def readonly_hubs(scope,source,repo,directory):
  module=ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[]));namespace=dict(scope);exec(compile(module,'<readonly-old-Hub-validator>','exec'),namespace)
  return namespace['readonly_hubs'](repo,directory)or[]
 
+def idle_children(scope,record,repo,proc=Path('/proc')):
+ driver=record['driver_pid'];parent=proc/str(driver)
+ assert scope['birth'](driver)==record['driver_birth']
+ children=(parent/'task'/str(driver)/'children').read_text().split();assert len(children)<=1
+ result=[]
+ for value in children:
+  pid=int(value);path=proc/value;birth=scope['birth'](pid);assert birth
+  fields=(path/'stat').read_text().rsplit(') ',1)[1].split()
+  status=dict(line.split(':',1)for line in(path/'status').read_text().splitlines()if ':'in line)
+  assert int(fields[1])==driver and fields[0]not in('Z','X')and [int(x)for x in status['Uid'].split()]==[0]*4
+  assert [int(x)for x in(parent/'status').read_text().split('Uid:',1)[1].splitlines()[0].split()]==[0]*4
+  assert scope['process_argv'](pid)==['sleep','60'] and os.readlink(path/'cwd')==os.readlink(parent/'cwd')==str(repo)
+  executable=Path('/usr/bin/sleep').resolve(strict=True)
+  assert Path(os.readlink(path/'exe')).resolve(strict=True)==executable and os.path.samefile(path/'exe',executable)
+  assert not(path/'task'/value/'children').read_text().strip()
+  descriptors={p.name:os.readlink(p)for p in(path/'fd').iterdir()}
+  assert set(descriptors)=={'0','1','2'}and descriptors=={n:os.readlink(parent/'fd'/n)for n in descriptors}
+  assert scope['birth'](pid)==birth
+  result.append({'pid':pid,'birth':birth,'ppid':driver,'uid':0,'argv':['sleep','60'],'cwd':str(repo),'executable':str(executable),'stdio':descriptors})
+ assert children==(parent/'task'/str(driver)/'children').read_text().split()and scope['birth'](driver)==record['driver_birth']
+ return result
+
+def scoped_idle_writers(scope,record,repo):
+ original=scope['writers'];observations=[]
+ def writers(roots,permitted):
+  before=idle_children(scope,record,repo)
+  active=original(roots,set(permitted)|{row['pid']for row in before})
+  assert idle_children(scope,record,repo)==before,'idle driver child changed during writer scan'
+  observations.append({'idle_children':before,'non_idle_writers':active})
+  return active
+ scope['writers']=writers
+ return observations
+
 def drain_evidence(scope):
  phase('DRAIN_START')
  root=Path('/tmp/gate/controller-host-custody/registered-orphan-drain')
@@ -87,6 +120,7 @@ def main(v):
  _,pending_raw=scope['sealed_bytes'](custody/'pending.json',1048576);pending=json.loads(pending_raw)
  assert pending['status']=='pending'and pending.get('record_sha256')==record_sha
  roots=[repo,Path(record['common_git']),*[Path(p)for p in record['temp_state_roots']if Path(p).exists()]]
+ idle_observations=scoped_idle_writers(scope,record,repo)
  phase('LAUNCH_DONE')
  phase('HUB_START')
  hubs=readonly_hubs(scope,source,repo,custody);phase('HUB_DONE');permitted={os.getpid(),driver,*[h['pid']for h in hubs]}
@@ -94,9 +128,9 @@ def main(v):
  active=scope['controller_active_writers'](Path(record['common_git']),roots,permitted)
  phase('WRITERS_DONE')
  if active:
-  print(json.dumps({'status':'PENDING_WRITERS','non_hub_writers':active,'machine':v['machine'],'launch_sha256':record_sha}),flush=True)
+  print(json.dumps({'status':'PENDING_WRITERS','non_hub_writers':active,'machine':v['machine'],'launch_sha256':record_sha,'idle_writer_observations':idle_observations}),flush=True)
   raise SystemExit(75)
- result={'machine':v['machine'],'launch_sha256':record_sha,'driver_pid':driver,'driver_birth':record['driver_birth'],'joined':joined,'hubs':hubs,'non_hub_writers':[]}
+ result={'machine':v['machine'],'launch_sha256':record_sha,'driver_pid':driver,'driver_birth':record['driver_birth'],'joined':joined,'hubs':hubs,'non_hub_writers':[],'idle_writer_observations':idle_observations}
  if v['action']=='check':
   encoded=json.dumps(dict(result,drain_evidence=drain_evidence(scope)));phase('RESPONSE_READY');print(encoded);return
  assert v['action']=='export'
@@ -107,7 +141,7 @@ def main(v):
  active=scope['controller_active_writers'](Path(record['common_git']),roots,permitted)
  phase('WRITERS_DONE')
  if active:
-  print(json.dumps({'status':'PENDING_WRITERS','non_hub_writers':active,'machine':v['machine'],'launch_sha256':record_sha}),flush=True)
+  print(json.dumps({'status':'PENDING_WRITERS','non_hub_writers':active,'machine':v['machine'],'launch_sha256':record_sha,'idle_writer_observations':idle_observations}),flush=True)
   raise SystemExit(75)
  intent=custody/'export-resume.intent.json'
  scope['sync_json'](intent,{'binding_sha256':v['binding_sha256'],'launch_sha256':record_sha,'source_ref':v['source_ref']})
