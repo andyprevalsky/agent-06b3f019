@@ -101,3 +101,40 @@ and joins. Missing ownership/intent files or a generic failed gate alone never
 prove no effect: ambiguous CREATE/export/provider failures keep their original
 live cleanup owner and pending evidence. This terminal classification does not
 retroactively relabel an older launch or benchmark outcome.
+
+
+### Read one bound status observation
+
+From a checkout containing this public helper, use either form:
+
+```bash
+python3 scripts/run-original600-controller.py --status --run-dir "$RUN_DIR"
+# Equivalent standalone entry point:
+python3 scripts/original600-status.py --run-dir "$RUN_DIR"
+```
+
+The command defaults to the adjacent `config.private.json`, the complete agents
+input path/SHA256 already bound by `authority.private.json`, and a new private
+observation file in the run directory. Optional `--config`, `--agents-env` and
+`--out-dir` accept explicit physical paths; the selected complete agents bytes
+must still match the original authority. A separate output directory must
+already exist, be private and belong to the current user. No `.env` file is
+required in the source checkout. Keep the selected authenticated `flyctl` on
+PATH for canonical session refresh; credentials are never printed.
+
+Run/config/caller/authority/controller/source/epoch bindings are checked before
+one bounded read-only guest exec. It uses the exact supervisor-derived campaign
+summary path, not a directory scan. Guest Python runs with `-S` because this
+payload is entirely standard library. The command cannot signal, cancel,
+restart, stop or delete anything. Only its local private observation is written.
+An original local terminal or unpublished controller returns without a provider
+call. An unpublished supervisor/summary is reported explicitly; transport,
+identity, malformed-data or freshness uncertainty never becomes a fake result.
+
+Canonical infra counts deduplicate only terminal attempts with an explicit true
+infra flag. Terminal attempts with missing/null infra classification are counted
+separately as unknown, as are failed jobs without a terminal attempt. A zero
+confirmed-infra count never means those unknown jobs were error free. Attempt-record counts are separate from completed attempts;
+local terminal and status output never infer benchmark success or full resource
+cleanup. This is a one-shot diagnostic, not an automatic threshold owner or
+five-experiment qualification loop.

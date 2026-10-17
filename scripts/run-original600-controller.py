@@ -186,6 +186,9 @@ def prepare(args, root, pins, runner, directory, cap):
 
 
 def main():
+    if sys.argv[1:2] == ['--status']:
+        status = runpy.run_path(str(Path(__file__).with_name('original600-status.py')))
+        return status['main'](sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true', help='perform fresh capacity reads, then allocate and own one original600 controller')
     parser.add_argument('--source-ref', required=True)

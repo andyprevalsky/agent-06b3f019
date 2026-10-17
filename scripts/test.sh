@@ -329,6 +329,7 @@ run_suite "Benchmark Live Results" python3 scripts/tests/benchmark-live-results.
 run_suite "Benchmark Campaign Grouping" bash scripts/tests/campaign-hub-grouping.test.sh
 run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
 run_suite "Original600 Portable Operator" python3 scripts/tests/original600-portable-operator.test.py
+run_suite "Original600 Public Status" python3 scripts/tests/original600-status.test.py
 run_suite "Cloud Benchmark Stdlib Startup" python3 scripts/tests/cloudbench-site-startup.test.py
 run_suite "Cloud Benchmark Native Stdlib Startup" python3 scripts/tests/cloudbench-native-site-startup.test.py
 run_suite "Cloud Benchmark Start Accounting" python3 scripts/tests/cloudbench-start-accounting.test.py
