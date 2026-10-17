@@ -435,18 +435,33 @@ def campaign_candidate_index(request, successor):
     return index
 
 
-def allocate(request_path, request_sha, ordinal, successor, output, token):
-    raw = private(request_path)
-    need(sha(raw) == request_sha, "reuse request bytes changed")
-    request = validate_request(json.loads(raw), successor["harness_ref"])
-    need(successor["ordinal"] == ordinal, "successor ordinal mismatch")
-    index = campaign_candidate_index(request, successor)
+def selected_request(request_path, request_sha, successor):
+    index_path = os.environ.get("CLOUDBENCH_ARCHIVED_REUSE_INDEX")
+    index_sha = os.environ.get("CLOUDBENCH_ARCHIVED_REUSE_INDEX_SHA256")
+    need(bool(index_path) == bool(index_sha), "incomplete reuse index binding")
+    if index_path:
+        match = re.fullmatch(r"r(\d{3})-j(\d{4})", successor.get("campaign_job_id", ""))
+        need(match is not None, "exact original600 campaign child required")
+        selected = int(match[2]) - 1
+        request, row = module("cloudbench-reuse-index.py")["select"](
+            request_path, request_sha, index_path, index_sha, selected
+        )
+        need(
+            successor.get("harness_ref") in (None, request["harness_ref"]),
+            "indexed harness pin mismatch",
+        )
+        index = campaign_candidate_index(request, successor)
+        need(index == selected, "indexed campaign selection differs")
+    else:
+        raw = private(request_path)
+        need(sha(raw) == request_sha, "reuse request bytes changed")
+        request = validate_request(json.loads(raw), successor.get("harness_ref"))
+        index = campaign_candidate_index(request, successor)
+        row = request["candidates"][index] if index < len(request["candidates"]) else None
     # A retry has a different native task lifetime. It cannot steal its prior
     # attempt's Machine or generation; normal fresh retry admission still applies.
-    if successor["campaign_attempt"] > 1 or index >= len(request["candidates"]):
-        return None
-    row = request["candidates"][index]
-    need(row.get("reservation"), "unreserved candidate cannot be allocated")
+    if successor["campaign_attempt"] > 1:
+        row = None
     # All cohort validation and child selection above remain mandatory. Only
     # these immutable fields and the selected private row enter the native claim.
     request = MappingProxyType({
@@ -455,7 +470,16 @@ def allocate(request_path, request_sha, ordinal, successor, output, token):
         "archives": tuple(MappingProxyType({"archive_sha256": archive["archive_sha256"]})
                           for archive in request["archives"]),
     })
-    del raw
+    return request, row
+
+
+def allocate(request_path, request_sha, ordinal, successor, output, token):
+    need(successor["ordinal"] == ordinal, "successor ordinal mismatch")
+    need(successor.get("harness_ref") is not None, "successor harness pin required")
+    request, row = selected_request(request_path, request_sha, successor)
+    if row is None:
+        return None
+    need(row.get("reservation"), "unreserved candidate cannot be allocated")
     api = NativeAdapter(
         module("cloudbench-original-volume-capture.py")["Fly"](APP, token), Path(output) / "archived-reuse-wire"
     )
@@ -640,22 +664,23 @@ def main():
             sys.stdout.buffer.write(value.encode() + b"\0")
         return
     if args.action == "capacity-credit":
-        raw = private(os.environ["CLOUDBENCH_ARCHIVED_REUSE_REQUEST"])
-        need(sha(raw) == os.environ["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"], "reuse request bytes changed")
-        request = validate_request(json.loads(raw))
         successor = dict(
             ordinal=0,
             task=args.task,
+            harness_ref=os.environ.get("REVIEWED_OPERATOR_SOURCE_REF"),
             campaign_job_id=os.environ.get("RUN_BENCH_CAMPAIGN_JOB_ID"),
             campaign_total_jobs=int(os.environ.get("RUN_BENCH_CAMPAIGN_TOTAL_JOBS", "0")),
             campaign_attempt=int(os.environ.get("RUN_BENCH_CAMPAIGN_ATTEMPT", "1")),
         )
-        index = campaign_candidate_index(request, successor)
-        if successor["campaign_attempt"] > 1 or index >= len(request["candidates"]):
+        request, row = selected_request(
+            os.environ["CLOUDBENCH_ARCHIVED_REUSE_REQUEST"],
+            os.environ["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"], successor,
+        )
+        if row is None:
             print(0)
         else:
             need(
-                request["candidates"][index].get("reservation", {}).get("cohort") == request["cohort"],
+                row.get("reservation", {}).get("cohort") == request["cohort"],
                 "capacity requires exact reserved native candidate",
             )
             print(1)

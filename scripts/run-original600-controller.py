@@ -37,6 +37,7 @@ PINS = [
     'cloudbench-observe-reservations.py',
     'cloudbench-incomplete-reservations.py',
     'cloudbench-recovered-reservations.py',
+    'cloudbench-reuse-index.py',
     'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',
     'lib/cloudbench-archived-reuse.sh', 'run-bench-fleet', 'run-bench-cloud',
 ]
@@ -433,10 +434,24 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
         files.append(dict(source_path=str(path), relative_path=relative, sha256=digest(read(path))))
     reuse_env = {}
     if cap.get('qualified_reuse_count'):
-        reuse_path=directory/'archived-reuse-request.private.json';reuse_sha=digest(read(reuse_path))
-        relative='.git/cloudbench-archived-reuse-'+str(json.loads(read(reuse_path))['cohort'])+'.json'
+        reuse_path=directory/'archived-reuse-request.private.json';reuse_raw=read(reuse_path);reuse_sha=digest(reuse_raw)
+        relative='.git/cloudbench-archived-reuse-'+str(json.loads(reuse_raw)['cohort'])+'.json'
         files.append(dict(source_path=str(reuse_path),relative_path=relative,sha256=reuse_sha))
         reuse_env=dict(CLOUDBENCH_ARCHIVED_REUSE_REQUEST='/tmp/gate/repo/'+relative,CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256=reuse_sha)
+        if 'cloudbench-reuse-index.py' in pins:
+            indexer=runpy.run_path(str(root/'scripts/cloudbench-reuse-index.py'))
+            index_raw=indexer['build'](reuse_raw,reuse_sha,args.source_ref,reuse_module()['validate_request'])
+            index_path=directory/'archived-reuse-index.private.json'
+            fd=os.open(index_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            with os.fdopen(fd,'wb') as stream:
+                stream.write(index_raw);stream.flush();os.fsync(stream.fileno())
+            fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+            try:os.fsync(fd)
+            finally:os.close(fd)
+            index_relative=relative.removesuffix('.json')+'.index.json'
+            files.append({'source_path':str(index_path),'relative_path':index_relative,'sha256':digest(index_raw)})
+            reuse_env.update(CLOUDBENCH_ARCHIVED_REUSE_INDEX='/tmp/gate/repo/'+index_relative,
+                             CLOUDBENCH_ARCHIVED_REUSE_INDEX_SHA256=digest(index_raw))
     config = dict(schema='original600-controller-runner-v1', allowed=True, source_root=str(root),
                   source_ref=args.source_ref, source_files=pins, tasks_path=str(args.tasks),
                   started_at_epoch=stamp, authority_template=str(directory/'authority-template.private.json'),

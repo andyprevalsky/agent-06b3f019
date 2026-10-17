@@ -142,6 +142,14 @@ in the organization's measured total. All qualified candidates are considered
 before creating fresh Machines; protected or unproven candidates receive no
 credit.
 
+New source snapshots also bind a private byte-offset index to the exact reserved
+request. The parent validates every candidate before building it. Both index
+and request hashes enter the launch configuration; each worker streams the
+whole request hash and decodes only its assigned row. Missing legacy indexes
+retain the original validation path. A supplied invalid index refuses work and
+cannot fall back to full-request parsing. This reduces worker memory without
+changing the 600-job concurrency, task identities, deadlines or native leases.
+
 An individual reservation failure is retained as a held, uncredited candidate;
 it does not cancel unrelated reservations. The closed plan contains only
 confirmed reservations. After those workers join, the same admission makes one

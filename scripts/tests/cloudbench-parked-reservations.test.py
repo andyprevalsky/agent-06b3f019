@@ -185,6 +185,45 @@ class Parked(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             M["protocol"](ref)
+        changed_selector = original.replace(
+            b"index = campaign_candidate_index(request, successor)", b"index = 0", 1
+        )
+        with (
+            mock.patch.object(
+                M["subprocess"], "check_output", return_value=changed_selector
+            ),
+            self.assertRaises(ValueError),
+        ):
+            M["protocol"](ref)
+        with (
+            mock.patch.object(
+                M["subprocess"],
+                "check_output",
+                side_effect=[original, b"foreign index"],
+            ),
+            self.assertRaisesRegex(ValueError, "indexed selection protocol"),
+        ):
+            M["protocol"](ref)
+        legacy = M["subprocess"].check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(ROOT),
+                "show",
+                ref + ":scripts/cloudbench-archived-machine-reuse.py",
+            ]
+        )
+        changed = legacy.replace(
+            b'need(row.get("reservation"), "unreserved candidate cannot be allocated")',
+            b"pass  # missing selected reservation validation",
+        )
+        self.assertNotEqual(changed, legacy)
+        with (
+            mock.patch.object(M["subprocess"], "check_output", return_value=changed),
+            self.assertRaises(ValueError),
+        ):
+            M["protocol"](ref)
 
     def test_pre_call_and_pre_config_keep_original_reservation_proof(self):
         result = self.prepare()

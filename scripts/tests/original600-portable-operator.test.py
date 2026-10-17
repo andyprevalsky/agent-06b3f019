@@ -897,6 +897,43 @@ class Portable(unittest.TestCase):
                     with self.subTest(name=bad),self.assertRaises(ValueError):
                         RUNNER['validate_source_members'](root,'a'*40,dict(pins,**{bad:'f'*64}))
 
+    def test_prepared_index_is_hash_bound_and_old_source_keeps_legacy_path(self):
+        helper=runpy.run_path(str(ROOT/'scripts/tests/cloudbench-archived-machine-reuse.test.py'))
+        request,_,_=helper['fixture'](2)
+        tasks=json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_bytes())
+        request['task_names']=tasks
+        for row in request['candidates']:row['reservation']={'cohort':request['cohort']}
+        indexer=runpy.run_path(str(ROOT/'scripts/cloudbench-reuse-index.py'))
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name)
+            args=argparse.Namespace(source_ref=request['harness_ref'],tasks=private(root/'tasks',tasks),
+                facts=private(root/'facts',{'app':'navi-whisper-lux-bench','image_ref':request['image_ref'],
+                    'protected_machines':['p1','p2','p3','p4'],'protected_volumes':['v1']}),
+                agents_env=private(root/'agents','fixture'),backend_env=private(root/'backend','fixture'),
+                snapshot_inventory=private(root/'inventory',{}),warm_deps=private(root/'deps','fixture'))
+            cap={'ended_epoch':time.time(),'available_slots_conservative':601,'new_machine_demand':599,
+                'machine_limit':1000,'total_active_inventory_objects':400,'conservative_extra_destroying_bench_objects':1,
+                'qualified_reuse_count':2}
+            for indexed in (True,False):
+                directory=root/str(indexed);directory.mkdir(mode=0o700)
+                RUNNER['save'](directory/'capacity-proof.private.json',cap)
+                request_path=directory/'archived-reuse-request.private.json'
+                RUNNER['save'](request_path,request)
+                pins={'cloudbench-reuse-index.py':CLI.digest((ROOT/'scripts/cloudbench-reuse-index.py').read_bytes())} if indexed else {}
+                config=json.loads(CLI.prepare(args,ROOT,pins,RUNNER,directory,cap).read_bytes())
+                env=config['remote_env']
+                if indexed:
+                    item=next(row for row in config['remote_files'] if row['relative_path'].endswith('.index.json'))
+                    self.assertEqual(env['CLOUDBENCH_ARCHIVED_REUSE_INDEX'],'/tmp/gate/repo/'+item['relative_path'])
+                    self.assertEqual(env['CLOUDBENCH_ARCHIVED_REUSE_INDEX_SHA256'],item['sha256'])
+                    header,row=indexer['select'](request_path,CLI.digest(request_path.read_bytes()),
+                        item['source_path'],item['sha256'],1)
+                    self.assertEqual(row,request['candidates'][1])
+                    self.assertEqual(header['task_names'],tasks)
+                else:
+                    self.assertNotIn('CLOUDBENCH_ARCHIVED_REUSE_INDEX',env)
+                    self.assertEqual(len(config['remote_files']),3)
+
     def test_bound_launch_preserves_workload_clock_and_rejects_existing_output(self):
         with tempfile.TemporaryDirectory() as name:
             root=Path(name);directory=root/'admission';directory.mkdir(mode=0o700)

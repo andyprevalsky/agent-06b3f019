@@ -758,6 +758,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-original-volume-capture.py" \
        "$ROOT_DIR/scripts/cloudbench-original600-runner.py" \
        "$ROOT_DIR/scripts/cloudbench-archived-machine-reuse.py" \
+       "$ROOT_DIR/scripts/cloudbench-reuse-index.py" \
        "$ROOT_DIR/scripts/cloudbench-archived-reuse-effects.py" \
        "$ROOT_DIR/scripts/cloudbench-archived-reuse-transport.py" \
        "$ROOT_DIR/scripts/cloudbench-retained-successor.py" \

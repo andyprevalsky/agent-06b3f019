@@ -125,6 +125,53 @@ def fixture(count=1):
 
 
 class Tests(unittest.TestCase):
+    def test_indexed_allocation_preserves_proof_and_never_falls_back(self):
+        indexer = runpy.run_path(str(Path(__file__).resolve().parents[1] / "cloudbench-reuse-index.py"))
+        request, _, successor = fixture(2)
+        request["task_names"] = json.loads((Path(__file__).parent / "fixtures/original600-tasks.json").read_bytes())
+        for row in request["candidates"]:
+            row["reservation"] = {"cohort": request["cohort"]}
+        successor.update(task=request["task_names"][0], campaign_job_id="r001-j0001",
+                         campaign_total_jobs=600, campaign_attempt=1)
+        golden = H["canonical"](H["proof_for"](request, request["candidates"][0], successor))
+
+        class HeldLease(Exception):
+            pass
+
+        class API:
+            @contextmanager
+            def lease(inner, mid):
+                self.assertEqual(mid, request["candidates"][0]["machine_id"])
+                saved = json.loads((root / "archived-reuse-journal/source-exclusion.json").read_bytes())
+                self.assertEqual(H["canonical"](saved["proof"]), golden)
+                raise HeldLease()
+                yield
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            path, index = root / "request.json", root / "index.json"
+            raw = indexer["encoded"](request)
+            path.write_bytes(raw); path.chmod(0o600)
+            index.write_bytes(indexer["build"](raw, H["sha"](raw), request["harness_ref"], H["validate_request"]))
+            index.chmod(0o600)
+            factory = mock.Mock(return_value=API())
+            with (
+                mock.patch.dict(os.environ, CLOUDBENCH_ARCHIVED_REUSE_INDEX=str(index),
+                                CLOUDBENCH_ARCHIVED_REUSE_INDEX_SHA256=H["sha"](index.read_bytes())),
+                mock.patch.dict(H["allocate"].__globals__, NativeAdapter=factory,
+                                validate_request=mock.Mock(side_effect=AssertionError("worker reparsed cohort"))),
+            ):
+                with self.assertRaises(HeldLease):
+                    H["allocate"](path, H["sha"](raw), 0, successor, root, "no-provider")
+                factory.reset_mock()
+                os.environ["CLOUDBENCH_ARCHIVED_REUSE_INDEX_SHA256"] = "0" * 64
+                with self.assertRaises(ValueError):
+                    H["allocate"](path, H["sha"](raw), 0, successor, root, "no-provider")
+                factory.assert_not_called()
+                del os.environ["CLOUDBENCH_ARCHIVED_REUSE_INDEX_SHA256"]
+                with self.assertRaisesRegex(ValueError, "incomplete reuse index"):
+                    H["allocate"](path, H["sha"](raw), 0, successor, root, "no-provider")
+
     def test_allocate_releases_full_cohort_before_held_lease_without_changing_proof(self):
         import tracemalloc
 
