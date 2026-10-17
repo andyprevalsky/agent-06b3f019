@@ -11892,6 +11892,25 @@ async def test_execute_action_request_payment_card_accepts_image_urls_rendered_o
     dom.get_page_image_urls.assert_awaited_once()
 
 
+    # Actual member-discount receipt shape must also survive the real private DOM
+    # action projection; MagicMock above intentionally has no production policy.
+    from browser_tools.dom_service import DOMService
+    private_dom = DOMService("ws://offline-private-receipt-control")
+    private_dom.register_secret_refs({"password": "fixture-password"})
+    private_dom.mark_secret_used()
+    private_dom._session = SimpleNamespace()
+    private_dom.get_page_image_urls = AsyncMock(return_value=list(_TEST_SHOP_PAGE_IMAGES))
+    private_receipt = _test_shop_receipt([_TEST_SHOP_PAGE_IMAGES[i] for i in (0, 2, 3)])
+    private_out = await execute_action(
+        private_dom, ah, {"action": "request_payment_card", "params": private_receipt},
+        current_url=f"{_TEST_SHOP_ORIGIN}/test_payment",
+        trusted_page_urls=[f"{_TEST_SHOP_ORIGIN}/test_payment"],
+    )
+    assert "payment_request" in private_out, private_out
+    assert private_out["payment_request"] == private_receipt, "private action projection dropped typed receipt"
+    assert private_out["payment_request"]["line_items"][2]["image_url"].endswith("Canvas+Tote")
+
+
 async def test_execute_action_request_payment_card_without_image_urls_skips_page_read():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -21128,6 +21147,7 @@ class _FakeDomService:
     secret_redaction_state = _PrivacyPolicyDOMService.secret_redaction_state
     restore_secret_redaction_state = _PrivacyPolicyDOMService.restore_secret_redaction_state
     model_visible_value = _PrivacyPolicyDOMService.model_visible_value
+    model_visible_action_result = _PrivacyPolicyDOMService.model_visible_action_result
 
     def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
         self.cdp_url = cdp_url
@@ -22545,6 +22565,7 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             }}
 
         action = ("request_user_assistance_for_authentication" if pause == "auth" else
+                  "request_payment_card" if pause == "payment" else
                   "attempt_completion" if pause == "completed" else "scroll")
         session_info = {"session_id": "session-1", "ws_url": "ws://fixture", "debug_url": "https://kernel.fixture/view",
                         "same_session_available": True, "auth_options": {"realm": realm},

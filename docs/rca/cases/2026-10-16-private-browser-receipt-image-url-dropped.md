@@ -3,10 +3,10 @@ id: 2026-10-16-private-browser-receipt-image-url-dropped
 date: 2026-10-16
 title: Private browser media filtering removed a model-provided payment receipt image URL
 surface: agents
-component: spawn-browser-agent-v3 payment activity return
+component: private browser action service and payment activity receipt projection
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: handler.py _visible_activity_result applied the generic private-media projection to typed payment_request line-item image_url text
+first_bad_boundary: service_actions.py execute_action.visible invokes DOMService.model_visible_action_result and drops typed payment_request line-item image_url before the activity return
 symptoms:
   - Canvas Tote imageUrl mismatch
   - Agent status ACTIVE expected COMPLETED
@@ -154,3 +154,86 @@ inferred from the offline repair.
 Keep privacy projections scoped to their consumer. A raster-suppression rule
 must not silently delete typed text fields from an operational receipt; retain
 the field's protocol shape while applying the same secret-value policy.
+
+
+## October 17 recurrence: earlier service projection
+
+This appendix corrects the first-bad-boundary diagnosis above without rewriting
+its original clocks, failed attempt, C10 repair or historical stop instruction.
+On source `66702e8a4abe202d883e633a56ddbc38f863d6b4`, which includes that
+repair, the same unchanged task failed again: the smoke report was ten passed
+and one failed. Failed root `fff04cac-e9f8-4268-b703-507e90b67c62`, run
+`e8703cc1-b2d3-4c0c-959e-07788e593379`, browser task
+`0ef16271-baa8-5d3c-be94-16987c64d979` retained the Canvas Tote imageUrl
+mismatch and ACTIVE-versus-COMPLETED error after 182.9 seconds and 83 messages.
+This is an actual recurrence, not a waived outcome.
+
+Root captured all 34 original model dumps (6,074,077 bytes), each bound by
+SHA-256, size and original metadata in
+`/dev/shm/rose-whm-deploy-gates-20261015/root-c13-member-discount-rca-v1/original-byte-index.json`.
+The step-20 original
+`1792271785736-6166ca41786b-browser_use_step_20.json` has SHA-256
+`7b2ad06d93f2dd0f4e1c184ca32e8142b209b67ca4a4a4f162691482439228f4`.
+Its `/output/action/params/line_items/0/image_url` is exactly
+`https://placehold.co/320x220/png?text=Canvas+Tote`; the decoded arguments at
+`/output/tool_calls/0/arguments` equal those action parameters. The notification
+fork original, SHA-256
+`3a2323b1cd9374dde816ad986f73b6a745da397a6ad3fb94dfff58691d21bf20`,
+also contains the URL. The separately captured, read-only root GET in that
+same evidence directory, `agent-get.original.json`, instead has null at
+`/messages/82/metadata/requestUserApproval/requestPaymentCard/lineItems/0/imageUrl`.
+Its merchant RoseShop, total 1960 cents and root identity match the model
+request. No archived activity-wire packet is claimed.
+
+The real `service_actions.execute_action` calls
+`DOMService.model_visible_action_result` before returning the action result.
+After private credential entry, its generic media projection removes the
+snake-case `image_url` from the operational `payment_request`. The handler
+projects the result again before the existing C10 late restoration can see
+it. The final payment normalizer then produces camel-case `imageUrl: null`.
+Action-history redaction is a separate copied projection and remains
+intentional. The actual model supplied the field; omission by the model is
+refuted. Camel-case support is controlled separately, not asserted as the
+cause of this recorded snake-case failure.
+
+The earlier registered activity test passed because its FakeDOM omitted the
+real action-result projection and its mocked execute path returned a payment
+request under a different action. It proved the late repair, but bypassed the
+earlier production boundary. The original C10 callback still passes on the
+broken baseline and is retained as a false-green control.
+
+The component repair preserves only existing HTTP(S) `image_url` strings in
+typed `request_payment_card` receipt items at the first DOM action-result
+projection. Each string passes through the same secret redactor. It preserves
+schema list-alias precedence and repeated-projection behavior; generic media,
+raster, history, prompts, schemas, evaluator, bounds and timeouts stay unchanged.
+No field is synthesized and no extra network request is introduced.
+
+Frozen causal evidence is in
+`/dev/shm/rose-whm-deploy-gates-20261015/task-private/c13-member-transport-rca-01a136f6`.
+The exact same strengthened registered callbacks gave baseline two failures
+and three passes, then candidate five passes. A real-service replay of the
+recorded parameters failed on the baseline and passed all 21 candidate controls,
+including repeated projections, normalization, aliases, immutability and
+secret/non-HTTP/media negatives. The owning activity callback exercises the
+actual handler; supplementary extracted-boundary replay is not substituted
+for it. Socket, DNS and HTTPX access were denied in these HOST-only tests.
+
+Independent review in
+`/home/boxes/rose-wmh-resumed/.context/deploy-rejected-caps-20261015/c13-typed-receipt-independent-review-01a136f6`
+reran the five callbacks, 21 recorded-receipt controls and two existing
+privacy/screenshot callbacks: all passed. No existing assertion was removed;
+all other DOM methods were AST-identical. The reviewed two-file candidate diff
+SHA-256 is `f05c75a1f3d6f7976e915f40136a731cc206b2bb1d4d61f176d66116503ef4a7`.
+Root reports exact application of those component bytes to the worktree.
+This is component qualification only: the same funded benchmark outcome and
+new full coverage remain OPEN. The original failure, financial liabilities
+and cleanup qualifications are retained; no LIVE billing or cleanup pass is
+inferred from these hermetic tests.
+
+The stop statement above records the earlier campaign's instruction. Current
+explicit authorization to finish deployment permits necessary testing within
+the coordinated protected-820 scope; it does not rewrite the old stop clock
+or authorize this RCA worker to operate the VM. Root retains operational
+custody. No additional allowance question is introduced. Case status remains
+OPEN until the unchanged task and deployment requirements actually qualify.
