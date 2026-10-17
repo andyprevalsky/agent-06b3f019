@@ -150,8 +150,17 @@ If a completed controller never assigned some of its reserved Machines, add
 `--archive-run` inputs. This operand is the outer admission directory containing
 the original request and reservation journals. Keep its complete verified
 controller archive, launch lineage and raw native receipts available. The CLI
-rejects any reservation with an assignment, claim or unresolved effect in that
-archive. It also requires the original native reservation to remain unchanged.
+holds any reservation with an assignment, claim or unresolved effect in that
+archive at zero unused-reservation credit. Untouched rows retain every original
+lineage, wire-receipt and unchanged-native-reservation check. A malformed or
+changed untouched row still rejects preparation.
+
+For a mixed run, include its newly closed archive and the original archive
+needed to prove untouched rows' lineage. Claimed rows suppress only older
+archives' stale native comparisons. The matching closed archive must independently
+prove current ownership before offering such a Machine as an ordinary archived
+candidate. Explicit user exclusions apply everywhere. Held IDs and their source
+archive hashes remain in the request; no old claim is cleared or granted credit.
 The old reservation is never cleared or counted directly: only a new exclusive
 reservation and fresh native readback can give the new cohort capacity credit.
 Explicit `--reuse-exclude-machine` exclusions still apply. Missing evidence

@@ -126,7 +126,10 @@ def archive_members(run, closure, request, config, inputs):
     manifest = obj(run / "export/manifest.json", inputs)
     need(not manifest.get("excluded"), "archive exclusions cannot prove claim absence")
     imported = "git-common/cloudbench-archived-reuse-" + request["cohort"] + ".json"
-    seen, claimed, imported_raw = set(), set(), None
+    seen, claimed, imported_raw = set(), {}, None
+    def hold(mid, name, expected):
+        need(isinstance(mid, str) and re.fullmatch("[0-9a-f]{14}", mid), "invalid archived claim Machine")
+        claimed.setdefault(mid, {})[name] = {"path": name, **expected}
     with tarfile.open(run / "export/originals.tar.gz", "r:gz") as archive:
         for member in archive:
             name = member.name
@@ -149,10 +152,12 @@ def archive_members(run, closure, request, config, inputs):
             ):
                 need(not member.issym() and not member.islnk(), "claim namespace contains an alias")
             if name.startswith("git-common/cloudbench-native-effect-fences/"):
-                claimed.update(part for part in Path(name).parts if re.fullmatch("[0-9a-f]{14}", part))
+                for part in Path(name).parts:
+                    if re.fullmatch("[0-9a-f]{14}", part):
+                        hold(part, name, expected)
             current_claim = name.startswith("git-common/cloudbench-archived-reuse/current/")
             if current_claim and re.fullmatch("[0-9a-f]{14}", Path(name).stem):
-                claimed.add(Path(name).stem)
+                hold(Path(name).stem, name, expected)
             sensitive = (
                 current_claim
                 or name == imported
@@ -177,7 +182,7 @@ def archive_members(run, closure, request, config, inputs):
             if name.endswith("/.cid"):
                 fields = raw.decode().split()
                 need(len(fields) == 2, "malformed allocation identity")
-                claimed.add(fields[1])
+                hold(fields[1], name, expected)
             else:
                 value = json.loads(raw)
                 for entry in (
@@ -187,12 +192,12 @@ def archive_members(run, closure, request, config, inputs):
                     value.get("native_marker", {}),
                 ):
                     if isinstance(entry, dict) and entry.get("machine_id"):
-                        claimed.add(entry["machine_id"])
+                        hold(entry["machine_id"], name, expected)
                 # A journal carries its candidate in archived-successor's bound campaign index.
                 if name.endswith("/archived-successor.json"):
                     index = H["campaign_candidate_index"](request, value)
                     if index < len(request["candidates"]):
-                        claimed.add(request["candidates"][index]["machine_id"])
+                        hold(request["candidates"][index]["machine_id"], name, expected)
     need(seen == set(manifest["files"]), "incomplete closed-world archive")
     need(
         imported_raw is not None and json.loads(imported_raw) == request,
@@ -395,10 +400,11 @@ def prepare(run, inventory_path):
     machines = {row["id"]: row for row in json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))}
     need(len(machines) == len(json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))), "duplicate inventory")
     need(closure["controller"] not in machines, "closed controller still present in native inventory")
-    candidates = []
+    candidates, held = [], []
+    archive_sha = closure["inputs"][str((closed / "export/originals.tar.gz").absolute())]
     for row in request["candidates"]:
         mid = row["machine_id"]
-        need(mid in initial and mid not in claimed, "reservation was allocated or has unresolved claim intent")
+        need(mid in initial, "reservation absent from original admission")
         need(
             mid not in closure["protected_machines"] and row["volume_id"] not in closure["protected_volumes"],
             "protected reservation",
@@ -412,6 +418,14 @@ def prepare(run, inventory_path):
             ),
             "reservation lineage changed",
         )
+        if mid in claimed:
+            held.append({
+                "machine_id": mid, "volume_id": row["volume_id"], "capacity_credit": 0,
+                "reason": "allocated_or_unresolved_claim", "closed_archive_sha256": archive_sha,
+                "imported_request_sha256": imported_sha, "original_request_sha256": original_envelope["sha256"],
+                "claim_evidence": [claimed[mid][path] for path in sorted(claimed[mid])],
+            })
+            continue
         need(mid in machines, "reserved Machine missing from native inventory")
         candidate = validate_candidate(
             outer, before, row, machines[mid], request["cohort"], request["harness_ref"], inputs
@@ -428,6 +442,8 @@ def prepare(run, inventory_path):
         candidates.append(candidate)
     return dict(
         candidates=candidates,
+        held_machine_ids=sorted(row["machine_id"] for row in held),
+        held_reservations=sorted(held, key=lambda row: row["machine_id"]),
         archive=dict(
             controller=closure["controller"],
             archive_sha256=closure["inputs"][str((closed / "export/originals.tar.gz").absolute())],

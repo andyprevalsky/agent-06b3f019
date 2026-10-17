@@ -313,9 +313,63 @@ class Unused(unittest.TestCase):
             name = "context/fleet/runs/new/task/" + suffix
             self.members[name] = payload.encode() if isinstance(payload, str) else H["canonical"](payload)
             self.seal()
-            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
-                M["prepare"](self.outer, self.inventory)
+            with self.subTest(suffix=suffix):
+                result = M["prepare"](self.outer, self.inventory)
+                self.assertEqual(result["candidates"], [])
+                self.assertEqual(result["held_machine_ids"], [self.mid])
+                self.assertEqual(result["held_reservations"][0]["capacity_credit"], 0)
             del self.members[name]
+
+    def test_mixed_claimed_and_untouched_reservations_partition_without_credit(self):
+        held = "bbbbccccddddee"
+        original = copy.deepcopy(self.original["candidates"][0])
+        original.update(machine_id=held, volume_id="vol_held")
+        original["predecessor"].update(id=held, volume_id="vol_held")
+        reserved = copy.deepcopy(self.request["candidates"][0])
+        reserved.update(machine_id=held, volume_id="vol_held", predecessor=original["predecessor"])
+        self.original["candidates"].append(original)
+        self.request["candidates"].append(reserved)
+        write(self.request_path, self.request)
+        write(self.outer / "archived-reuse-original.private.json", {
+            "schema": "original600-archived-admission-request-v1", "request": self.original,
+            "sha256": hashlib.sha256(json.dumps(self.original, sort_keys=True, allow_nan=False).encode()).hexdigest(),
+        })
+        self.members[self.imported] = self.request_path.read_bytes()
+        claim_path = "context/fleet/runs/claimed/task/archived-reuse-journal/source-exclusion.json"
+        self.members[claim_path] = H["canonical"]({"proof": {"machine_id": held}})
+        self.seal()
+        config_path = self.outer / "launch-1/config.private.json"
+        config = json.loads(config_path.read_bytes())
+        digest = H["sha"](self.request_path.read_bytes())
+        config["remote_files"][0]["sha256"] = digest
+        config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"] = digest
+        write(config_path, config)
+        launch_path = self.outer / "controller-launch.intent.json"
+        launch = json.loads(launch_path.read_bytes())
+        launch["config_sha256"] = H["sha"](config_path.read_bytes())
+        write(launch_path, launch)
+        # No current native row or unused journal for the claimed member: it
+        # remains held, never eligibility or capacity credit.
+        result = M["prepare"](self.outer, self.inventory)
+        self.assertEqual([r["machine_id"] for r in result["candidates"]], [self.mid])
+        self.assertEqual(result["held_machine_ids"], [held])
+        self.assertEqual(result["held_reservations"][0]["machine_id"], held)
+        self.assertEqual(result["held_reservations"][0]["capacity_credit"], 0)
+        self.assertEqual(result["held_reservations"][0]["claim_evidence"][0]["path"], claim_path)
+        self.assertNotIn("reservation", result["candidates"][0])
+        # A malformed untouched row still denies the request rather than being
+        # hidden by the held partition.
+        path = self.wire / "2/0001-wire.json"
+        before = path.read_bytes()
+        path.unlink()
+        with self.assertRaises((ValueError, FileNotFoundError)):
+            M["prepare"](self.outer, self.inventory)
+        path.write_bytes(before)
+        # Unknown archive aliases still prevent the closed-world proof.
+        self.members["context/fleet/runs/unknown/task/.cid"] = b"malformed"
+        self.seal()
+        with self.assertRaises(ValueError):
+            M["prepare"](self.outer, self.inventory)
 
     def test_missing_or_tampered_native_receipts_fail_closed(self):
         for path in [
@@ -354,8 +408,11 @@ class Unused(unittest.TestCase):
         ]:
             self.members[name] = H["canonical"]({"machine_id": self.mid})
             self.seal()
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                M["prepare"](self.outer, self.inventory)
+            with self.subTest(name=name):
+                result = M["prepare"](self.outer, self.inventory)
+                self.assertEqual(result["candidates"], [])
+                self.assertEqual(result["held_machine_ids"], [self.mid])
+                self.assertEqual(result["held_reservations"][0]["capacity_credit"], 0)
             del self.members[name]
 
     def test_protected_changed_native_and_request_mismatch_are_denied(self):

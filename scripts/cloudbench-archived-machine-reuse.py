@@ -128,10 +128,23 @@ def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=
     carried_archives = []
     carried_ids = set()
     carried_volumes = set()
+    held_scopes = {}
+    unused_ids = set()
     for run in unused_runs:
         result = module("cloudbench-unused-reservations.py")["prepare"](run, inventory_path)
         archive = result["archive"]
         carried_archives.append(archive)
+        held = result.get("held_machine_ids", [])
+        need(isinstance(held, list) and len(set(held)) == len(held)
+             and all(isinstance(mid, str) and re.fullmatch('[0-9a-f]{14}', mid) for mid in held),
+             "invalid held reservation partition")
+        result_ids = set(held) | {candidate["machine_id"] for candidate in result["candidates"]}
+        need(len(result_ids) == len(held) + len(result["candidates"]),
+             "overlapping unused reservation partition")
+        need(not result_ids & unused_ids, "duplicate unused Machine/Volume")
+        unused_ids.update(result_ids)
+        if held:
+            held_scopes.setdefault(archive["archive_sha256"], set()).update(held)
         for candidate in result["candidates"]:
             mid, volume = candidate["machine_id"], candidate["volume_id"]
             need(mid not in carried_ids and volume not in carried_volumes, "duplicate unused Machine/Volume")
@@ -143,12 +156,16 @@ def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=
     targets = {}
     archives = []
     legacy_ownership = {}
-    validator = module("cloudbench-archived-owner-stop.py")["prepare"]
+    owner_module = module("cloudbench-archived-owner-stop.py")
+    validator = owner_module["prepare"]
     for run in archive_runs:
+        archive = owner_module["digest_file"](Path(run) / "export/originals.tar.gz")
+        prior_holds = set().union(*(ids for origin, ids in held_scopes.items() if origin != archive))
         plan = validator(
-            run, inventory_path, excluded_machines=set(excluded) | carried_ids
+            run, inventory_path, excluded_machines=set(excluded) | carried_ids | prior_holds
         )  # Full archive hashes, membership, joined/deleted controller, protections.
-        archive = next(d for name, d in plan["inputs"].items() if name.endswith("/originals.tar.gz"))
+        need(archive == next(d for name, d in plan["inputs"].items() if name.endswith("/originals.tar.gz")),
+             "archive changed during scoped eligibility validation")
         archives.append(dict(controller=plan["controller"], archive_sha256=archive, inputs=plan["inputs"]))
         for mid, ownership in plan["archived_ownership"].items():
             legacy_ownership[archive, mid] = ownership
@@ -178,7 +195,7 @@ def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=
     archives.extend(carried_archives)
     need(len({row["volume_id"] for row in targets.values()}) == len(targets), "duplicate candidate Volume")
     need(targets, "no exact archived candidates")
-    return dict(
+    result = dict(
         schema=SCHEMA,
         storage_mode=STORAGE,
         app=APP,
@@ -192,6 +209,12 @@ def prepare_request(archive_runs, inventory_path, cohort, harness_ref, excluded=
         benchmark_success_inferred=False,
         excluded_machine_ids=sorted(set(excluded)),
     )
+    if held_scopes:
+        result["held_prior_reservations"] = [
+            {"archive_sha256": origin, "machine_ids": sorted(ids), "reuse_credit": False}
+            for origin, ids in sorted(held_scopes.items())
+        ]
+    return result
 
 
 def validate_request(value, harness_ref=None):

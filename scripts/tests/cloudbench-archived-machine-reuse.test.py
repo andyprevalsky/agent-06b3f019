@@ -797,6 +797,76 @@ class IntegratedControls(unittest.TestCase):
         finally:
             previous.doCleanups()
 
+    def test_claimed_rows_skip_only_older_archive_and_keep_latest_native_checks(self):
+        import tarfile
+
+        owner = runpy.run_path(str(Path(__file__).with_name("cloudbench-archived-owner-stop.test.py")))[
+            "ArchivedStop"
+        ]
+        previous, latest = owner(), owner()
+        previous.setUp()
+        latest.setUp()
+        try:
+            host = "77778888999900"
+            token = "b" * 32
+            prefix = "git-common/cloudbench-fleet-ownership/" + token
+            proof = {"schema": H["SCHEMA"], "machine_id": previous.mid, "volume_id": "vol_owned",
+                     "native_name": "cloudbench-exact", "native_marker": {"generation": "current"},
+                     "successor": {"owner_token": token, "controller_id": host, "run_id": "latest-run"}}
+            with tarfile.open(latest.run / "export/originals.tar.gz") as archive:
+                members = {m.name: archive.extractfile(m).read() for m in archive}
+            members[prefix + "/meta"] = (
+                f"host={host}\napp=navi-whisper-lux-bench\nfleet_owner_token={token}\n"
+                "cleanup_policy=retain\nrun_id=latest-run\n").encode()
+            members[prefix + "/archived-reuse/" + previous.mid + ".json"] = json.dumps(proof).encode()
+            member = "context/original600-supervisor.token.terminal.json"
+            terminal = json.loads(members[member]); terminal["machine"] = host
+            members[member] = json.dumps(terminal).encode()
+            export = latest.run / "export"
+            for path in (export / "launch.json", latest.run / "terminal.json", latest.run / "cleanup-call.intent.json",
+                         export / "disposable-export.verified.json"):
+                value = json.loads(path.read_text())
+                for key in ("machine", "machine_id", "host"):
+                    if key in value:
+                        value[key] = host
+                path.write_text(json.dumps(value))
+            manifest = json.loads((export / "manifest.json").read_text())
+            manifest["record"] = json.loads((export / "launch.json").read_text())
+            (export / "manifest.json").write_text(json.dumps(manifest))
+            latest.reseal(members)
+            inventory = json.loads(previous.inventory.read_text())
+            inventory[0].update(state="stopped", region="iad")
+            inventory[0]["config"]["metadata"] = {H["MARKER"]: H["canonical"](proof["native_marker"]).decode()}
+            previous.inventory.write_text(json.dumps(inventory))
+            original_hash = H["sha"]((previous.run / "export/originals.tar.gz").read_bytes())
+            latest_hash = H["sha"]((export / "originals.tar.gz").read_bytes())
+            partition = {"candidates": [], "held_machine_ids": [previous.mid],
+                         "archive": {"controller": host, "archive_sha256": latest_hash, "inputs": {}}}
+            load = H["prepare_request"].__globals__["module"]
+
+            def modules(name):
+                return {"prepare": lambda *args: copy.deepcopy(partition)} if name == "cloudbench-unused-reservations.py" else load(name)
+
+            with mock.patch.dict(H["prepare_request"].__globals__, module=modules):
+                result = H["prepare_request"]([previous.run, latest.run], previous.inventory,
+                                              "c" * 32, "d" * 40, unused_runs=[previous.root / "admission"])
+                self.assertEqual([r["machine_id"] for r in result["candidates"]], [previous.mid])
+                self.assertEqual(result["candidates"][0]["archive_sha256"], latest_hash)
+                self.assertEqual({r["archive_sha256"] for r in result["archives"]}, {original_hash, latest_hash})
+                self.assertFalse(result["held_prior_reservations"][0]["reuse_credit"])
+                self.assertEqual(result["excluded_machine_ids"], [])
+                with self.assertRaisesRegex(ValueError, "no exact archived candidates"):
+                    H["prepare_request"]([previous.run], previous.inventory, "c" * 32, "d" * 40,
+                                         unused_runs=[previous.root / "admission"])
+                inventory[0]["config"]["metadata"][H["MARKER"]] = "unknown-later-claim"
+                previous.inventory.write_text(json.dumps(inventory))
+                with self.assertRaisesRegex(ValueError, "predecessor superseded"):
+                    H["prepare_request"]([previous.run, latest.run], previous.inventory,
+                                         "c" * 32, "d" * 40, unused_runs=[previous.root / "admission"])
+        finally:
+            previous.doCleanups()
+            latest.doCleanups()
+
     def test_native_wire_reuses_auth_and_unique_durable_journals_on_resume(self):
         import http.server
         import threading
