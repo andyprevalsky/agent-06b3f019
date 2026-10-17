@@ -1992,7 +1992,7 @@ warm_source_volume_size_from_inventory() {  # <exact-machine-id> <exact-volume-i
         status=0
         machines="$(fleet_admission_machines_json)" || status=$?
         if [ "$status" = 0 ]; then
-            python3 -c '
+            python3 -S -c '
 import json, sys
 try:
     inventory = json.load(sys.stdin)
