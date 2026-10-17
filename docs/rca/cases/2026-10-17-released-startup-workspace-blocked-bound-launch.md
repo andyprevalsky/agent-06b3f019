@@ -46,3 +46,9 @@ The user asked to simplify startup and explain why full parallelization was fail
 ## Reusable lesson
 
 An uncertain allocation followed by canonical release is a distinct state from an operation that never started. A continuation should prove closure and preserve that distinction rather than erase the old attempt or invent success.
+
+## Successor archive continuity
+
+The bound launch records its new configuration through the fixed host-launch-successor pointer while retaining the original admission configuration and reservation request. The recovered-reservation reader must follow this exact chain after full current-archive closure. It verifies both configurations and source identities, the complete old input hash map and membership, the canonical prior release, and the original request descriptor. It preserves the old recovery host proof rather than treating the successor as a fresh reservation. Seven owning controls cover the full closed successor archive, the previous reader rejection, and altered pointers, clocks, configurations, source identities and recorded input hashes. These are local reader controls, not task success credit.
+
+The actual bound continuation created controller80eeed0b5537d8 and verified its bulk transfer in a42.592-second observed file window. The earlier forwarding error remains unexplained; this does not change the old failure or prove task completion.

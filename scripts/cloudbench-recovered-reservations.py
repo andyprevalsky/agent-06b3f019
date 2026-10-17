@@ -20,12 +20,19 @@ CLOSED_HOST_HASHES = {
 }
 
 
-def closed_host(ref):
+SUCCESSOR_CLI_SHA256 = (
+    "d416cf4098387dd44005bda0c982804957aac765a0f67b79e557edf5d8b6d2f4"
+)
+
+
+def closed_host(ref, cli_sha256=None):
     need(
         isinstance(ref, str) and re.fullmatch("[0-9a-f]{40}", ref),
         "invalid recovered operator",
     )
     for name, expected in CLOSED_HOST_HASHES.items():
+        if name == "run-original600-controller.py" and cli_sha256 is not None:
+            expected = cli_sha256
         raw = subprocess.check_output(
             [
                 "git",
@@ -118,6 +125,259 @@ def unique(rows, label):
     return result
 
 
+def recovered_launch(outer, closed, config, inputs):
+    launch = obj(outer / "controller-launch.intent.json", inputs)
+    original_path = Path(launch["config_path"])
+    original_run = original_path.parent / "run"
+    need(
+        original_path.parent.parent == outer
+        and original_path.name == "config.private.json"
+        and launch["run_directory"] == str(original_run),
+        "exact recovered launch required",
+    )
+    raw = R["read"](original_path)
+    need(sha(raw) == launch["config_sha256"], "original recovered config changed")
+    inputs[str(original_path)] = sha(raw)
+    original = json.loads(raw)
+    if closed == original_run:
+        need(original == config, "recovered config binding differs")
+        return original_path, original
+    need(original["source_ref"] == I["CLOSED_SOURCE"], "unknown successor workload")
+    need(
+        original["host_operator_provenance"]["host_operator_source_ref"]
+        == "69aa6ff584588cfaa07d0a875fb9bdf308267c5c",
+        "unknown original recovery host",
+    )
+    closed_host(original["host_operator_provenance"]["host_operator_source_ref"])
+    pointer = obj(original_run / "host-launch-successor.json", inputs)
+    need(
+        set(pointer)
+        == {
+            "schema",
+            "evidence",
+            "config_path",
+            "config_sha256",
+            "original_started_at_epoch",
+            "host_operator_source_ref",
+        }
+        and pointer["schema"] == "original600-host-launch-successor-v1",
+        "unknown successor pointer",
+    )
+    proof = pointer["evidence"]
+    need(
+        set(proof)
+        == {
+            "path",
+            "sha256",
+            "prior_output",
+            "successor_output",
+            "stage",
+            "creation_history_verified",
+            "inputs",
+            "membership",
+            "producer_sources",
+        }
+        and proof["stage"] == "CANONICAL_WORKSPACE_RELEASED_AFTER_UNKNOWN_CREATE"
+        and proof["creation_history_verified"] is False
+        and proof["prior_output"] == str(original_run)
+        and proof["path"] == str(original_run / "observed-closure.safe.json")
+        and proof["successor_output"] == str(closed)
+        and closed
+        == original_run.parent
+        / ("run-after-workspace-release-" + proof["sha256"][:16]),
+        "unknown released-workspace successor",
+    )
+    expected_sources = {}
+    for ref, names in (
+        (
+            "69aa6ff584588cfaa07d0a875fb9bdf308267c5c",
+            ("cloudbench-original600-runner.py", "run-cloudbench-controller-gate"),
+        ),
+        (
+            "49b792dcc2ea983325c6a25801da6c982f29c206",
+            ("cloudbench-disposable-controller.py", "run-cloudbench-controller-gate"),
+        ),
+    ):
+        for name in names:
+            source = subprocess.check_output(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    str(HERE.parent),
+                    "show",
+                    ref + ":scripts/" + name,
+                ]
+            )
+            expected_sources[ref + ":" + name] = sha(source)
+    need(
+        proof["producer_sources"] == expected_sources, "old workspace producer changed"
+    )
+    evidence = obj(Path(proof["path"]), inputs)
+    need(
+        inputs[proof["path"]] == proof["sha256"]
+        and evidence["schema"] == "original600-observed-closed-v1"
+        and evidence["run_directory"] == str(original_run)
+        and evidence["original_tool_exit_code"] == 1
+        and evidence["release_observer_exit_code"] == 0
+        and evidence["caller_live"] is False
+        and evidence["supervisor_published"] is False
+        and evidence["task_attempts"] == 0,
+        "successor closure observation differs",
+    )
+    expected_files = {
+        str(original_run / name): value
+        for name, value in proof["membership"].items()
+        if value != "directory"
+    }
+    need(
+        proof["inputs"]
+        == {**expected_files, str(original_path): launch["config_sha256"]},
+        "successor input namespace differs",
+    )
+
+    def old_membership():
+        actual_membership = {}
+        for path in sorted(original_run.rglob("*")):
+            need(not path.is_symlink(), "old successor journal alias")
+            if path == original_run / "host-launch-successor.json":
+                continue
+            relative = str(path.relative_to(original_run))
+            if path.is_dir():
+                need(relative == "export", "unknown old successor directory")
+                actual_membership[relative] = "directory"
+            else:
+                data = R["read"](path)
+                actual_membership[relative] = sha(data)
+                inputs[str(path)] = sha(data)
+        return actual_membership
+
+    actual_membership = old_membership()
+    need(
+        actual_membership == proof["membership"]
+        and all(inputs[path] == digest for path, digest in expected_files.items()),
+        "old successor history changed",
+    )
+    release = obj(original_run / "export/disposable-controller.release.json", inputs)
+    terminal = obj(original_run / "terminal.json", inputs)
+    need(
+        release.get("machine_id") is None
+        and release.get("no_live_machine_observed") is True
+        and release.get("command_history_verified") is False
+        and release.get("volume_disposition")
+        in ("ABSENT", "pending_destroy", "destroyed")
+        and terminal["status"] == "FAILED_STARTUP_WORKSPACE_RELEASED"
+        and terminal["release"] == release
+        and terminal["source_ref"] == original["source_ref"]
+        and terminal["started_at_epoch"] == original["started_at_epoch"]
+        and terminal["original_deadline"] == original["started_at_epoch"] + 5400
+        and terminal["benchmark_success_inferred"] is False,
+        "canonical old workspace release required",
+    )
+    need(
+        obj(original_run / "host-operator-provenance.json", inputs)
+        == original["host_operator_provenance"],
+        "old workspace host provenance changed",
+    )
+    authority = obj(original_run / "authority.private.json", inputs)
+    caller = obj(original_run / "caller.json", inputs)
+    workspace = obj(original_run / "export/workspace-volume.ownership.json", inputs)
+    create = obj(original_run / "export/machine-create.intent.json", inputs)
+    delete = obj(original_run / "export/disposable-delete-volume.intent.json", inputs)
+    authority_sha = inputs[str(original_run / "authority.private.json")]
+    need(
+        caller["authority_sha256"] == authority_sha
+        and caller["source_ref"] == authority["source_ref"] == original["source_ref"]
+        and caller["epoch"] == original["started_at_epoch"]
+        and caller["deadline"] == original["started_at_epoch"] + 5400
+        and authority["output_directory"] == str(original_run / "export")
+        and (authority["cleanup_owner_pid"], authority["cleanup_owner_birth"])
+        == (caller["pid"], caller["birth"])
+        and workspace["volume_id"] == release["volume_id"]
+        and create["authority_sha256"] == authority_sha
+        and create["workspace_sha256"]
+        == inputs[str(original_run / "export/workspace-volume.ownership.json")]
+        and delete
+        == dict(
+            authority_sha256=authority_sha,
+            identifier=release["volume_id"],
+            kind="volume",
+        )
+        and obj(original_run / "cleanup-call.intent.json", inputs)
+        == dict(
+            action="cleanup-workspace",
+            machine=None,
+            gate_joined=True,
+            supervisor_joined=False,
+            export_verified_file=None,
+        ),
+        "old workspace authority chain differs",
+    )
+    current_path = Path(pointer["config_path"])
+    need(
+        current_path.parent.parent == outer
+        and current_path.parent.name.startswith("bound-continuation-")
+        and current_path.name == "config.private.json",
+        "fixed successor config required",
+    )
+    current_raw = R["read"](current_path)
+    need(
+        sha(current_raw) == pointer["config_sha256"]
+        and json.loads(current_raw) == config,
+        "successor config changed",
+    )
+    inputs[str(current_path)] = sha(current_raw)
+    allowed = {"authority_template", "host_operator_provenance"}
+    need(
+        {key: value for key, value in original.items() if key not in allowed}
+        == {key: value for key, value in config.items() if key not in allowed},
+        "successor changed original workload",
+    )
+    provenance = config["host_operator_provenance"]
+    need(
+        pointer["original_started_at_epoch"] == config["started_at_epoch"]
+        and pointer["host_operator_source_ref"]
+        == provenance["host_operator_source_ref"]
+        and provenance["workload_source_ref"] == original["source_ref"]
+        and provenance["original_started_at_epoch"] == original["started_at_epoch"]
+        and provenance["original_config_path"] == str(original_path)
+        and provenance["original_config_sha256"] == launch["config_sha256"]
+        and provenance["original_launch_intent_sha256"]
+        == inputs[str(outer / "controller-launch.intent.json")]
+        and provenance["prelaunch_failure"] == proof,
+        "successor host provenance differs",
+    )
+    closed_host(provenance["host_operator_source_ref"], SUCCESSOR_CLI_SHA256)
+    for field, name in (
+        ("host_runner_sha256", "cloudbench-original600-runner.py"),
+        ("host_gate_sha256", "run-cloudbench-controller-gate"),
+    ):
+        source = subprocess.check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(HERE.parent),
+                "show",
+                provenance["host_operator_source_ref"] + ":scripts/" + name,
+            ]
+        )
+        need(provenance[field] == sha(source), "successor runtime provenance differs")
+    authority_path = Path(config["authority_template"])
+    need(
+        authority_path == current_path.parent / "authority-template.private.json",
+        "successor authority template path differs",
+    )
+    obj(authority_path, inputs)
+    need(
+        old_membership() == actual_membership
+        and sha(R["read"](original_path)) == launch["config_sha256"]
+        and obj(original_run / "host-launch-successor.json", inputs) == pointer,
+        "successor chain changed while inspected",
+    )
+    return original_path, original
+
+
 def load(outer, closed, config, closure, inputs):
     """Called only after CLOSED.prepare; bind its complete inputs before replay."""
     outer, closed = Path(outer).absolute(), Path(closed).absolute()
@@ -150,22 +410,10 @@ def load(outer, closed, config, closure, inputs):
             observed = sha(C["U"]["CLOSED"]["raw"](Path(path), limit))
         need(observed == expected, "closed context bytes changed")
         inputs[path] = expected
-    launch = obj(outer / "controller-launch.intent.json", inputs)
-    config_path = Path(launch["config_path"])
-    need(
-        config_path.parent.parent == outer
-        and closed == config_path.parent / "run"
-        and config_path.name == "config.private.json",
-        "exact recovered launch required",
-    )
-    raw_config = R["read"](config_path)
-    need(
-        sha(raw_config) == launch["config_sha256"]
-        and json.loads(raw_config) == config
-        and launch["run_directory"] == str(closed),
-        "recovered config binding differs",
-    )
-    inputs[str(config_path)] = sha(raw_config)
+    config_path, recovery_config = recovered_launch(outer, closed, config, inputs)
+    # Recovery was completed under the original host. The successor launch only
+    # replaces its authority and host provenance; it never rewrites that history.
+    config = recovery_config
     provenance = config["host_operator_provenance"]
     typed_closed = config["source_ref"] == I["CLOSED_SOURCE"]
     host = closed_host(provenance["host_operator_source_ref"]) if typed_closed else HOST

@@ -211,7 +211,24 @@ class Recovered(unittest.TestCase):
     ):
         self.load_fixture(typed=False)
 
-    def load_fixture(self, typed):
+    def test_successor_host_requires_frozen_cli_and_unchanged_effect_sources(self):
+        self.assertEqual(
+            M["closed_host"](
+                "dbc3cbad0f3324cf0ec8a77a6950a22c270d828b", M["SUCCESSOR_CLI_SHA256"]
+            ),
+            "dbc3cbad0f3324cf0ec8a77a6950a22c270d828b",
+        )
+        with self.assertRaisesRegex(
+            ValueError, "unknown closed admission host protocol"
+        ):
+            M["closed_host"](
+                "69aa6ff584588cfaa07d0a875fb9bdf308267c5c", M["SUCCESSOR_CLI_SHA256"]
+            )
+
+    def test_released_workspace_successor_preserves_full_recovery(self):
+        self.load_fixture(typed=True, successor=True)
+
+    def load_fixture(self, typed, successor=False):
         plan = {
             "request": self.f.original,
             "classifications": [
@@ -267,11 +284,15 @@ class Recovered(unittest.TestCase):
             "source_ref": "a" * 40,
             "started_at_epoch": 1,
             "host_operator_provenance": {
-                "host_operator_source_ref": M["HOST"],
+                "host_operator_source_ref": "69aa6ff584588cfaa07d0a875fb9bdf308267c5c"
+                if successor
+                else M["HOST"],
                 "workload_source_ref": "a" * 40,
                 "original_started_at_epoch": 1,
                 "incomplete_admission": {
-                    "source_ref": M["HOST"],
+                    "source_ref": "69aa6ff584588cfaa07d0a875fb9bdf308267c5c"
+                    if successor
+                    else M["HOST"],
                     "original_plan_sha256": M["sha"](
                         json.dumps(plan, sort_keys=True, allow_nan=False).encode()
                     ),
@@ -322,6 +343,207 @@ class Recovered(unittest.TestCase):
         closure = closed_reader["prepare"](closed, self.f.inventory)
         if typed:
             shutil.rmtree(self.directory)
+        pointer_path = None
+        if successor:
+            original_config = copy.deepcopy(config)
+            original_raw = config_path.read_bytes()
+            original_launch = self.f.outer / "controller-launch.intent.json"
+            old_run = closed
+            proof_raw = (
+                M["canonical"](
+                    {
+                        "schema": "original600-observed-closed-v1",
+                        "run_directory": str(old_run),
+                        "original_tool_exit_code": 1,
+                        "release_observer_exit_code": 0,
+                        "caller_live": False,
+                        "supervisor_published": False,
+                        "task_attempts": 0,
+                    }
+                )
+                + b"\n"
+            )
+            proof_sha = M["sha"](proof_raw)
+            closed = old_run.parent / ("run-after-workspace-release-" + proof_sha[:16])
+            shutil.move(old_run, closed)
+            old_run.mkdir(mode=0o700)
+            (old_run / "export").mkdir(mode=0o700)
+            evidence = old_run / "observed-closure.safe.json"
+            evidence.write_bytes(proof_raw)
+            evidence.chmod(0o600)
+            release = dict(
+                machine_id=None,
+                volume_id="vol_old",
+                volume_disposition="pending_destroy",
+                no_live_machine_observed=True,
+                command_history_verified=False,
+            )
+            write(old_run / "export/disposable-controller.release.json", release)
+            write(
+                old_run / "terminal.json",
+                dict(
+                    status="FAILED_STARTUP_WORKSPACE_RELEASED",
+                    release=release,
+                    source_ref=config["source_ref"],
+                    started_at_epoch=1,
+                    original_deadline=5401,
+                    benchmark_success_inferred=False,
+                ),
+            )
+            write(
+                old_run / "host-operator-provenance.json",
+                original_config["host_operator_provenance"],
+            )
+            authority = dict(
+                source_ref=original_config["source_ref"],
+                output_directory=str(old_run / "export"),
+                cleanup_owner_pid=123,
+                cleanup_owner_birth="old-birth",
+            )
+            authority_path = write(old_run / "authority.private.json", authority)
+            authority_sha = M["sha"](authority_path.read_bytes())
+            write(
+                old_run / "caller.json",
+                dict(
+                    authority_sha256=authority_sha,
+                    source_ref=original_config["source_ref"],
+                    epoch=1,
+                    deadline=5401,
+                    pid=123,
+                    birth="old-birth",
+                ),
+            )
+            workspace_path = write(
+                old_run / "export/workspace-volume.ownership.json",
+                dict(volume_id="vol_old"),
+            )
+            write(
+                old_run / "export/machine-create.intent.json",
+                dict(
+                    authority_sha256=authority_sha,
+                    workspace_sha256=M["sha"](workspace_path.read_bytes()),
+                ),
+            )
+            write(
+                old_run / "export/disposable-delete-volume.intent.json",
+                dict(
+                    authority_sha256=authority_sha, identifier="vol_old", kind="volume"
+                ),
+            )
+            write(
+                old_run / "cleanup-call.intent.json",
+                dict(
+                    action="cleanup-workspace",
+                    machine=None,
+                    gate_joined=True,
+                    supervisor_joined=False,
+                    export_verified_file=None,
+                ),
+            )
+            sources = {}
+            for ref, names in (
+                (
+                    "69aa6ff584588cfaa07d0a875fb9bdf308267c5c",
+                    (
+                        "cloudbench-original600-runner.py",
+                        "run-cloudbench-controller-gate",
+                    ),
+                ),
+                (
+                    "49b792dcc2ea983325c6a25801da6c982f29c206",
+                    (
+                        "cloudbench-disposable-controller.py",
+                        "run-cloudbench-controller-gate",
+                    ),
+                ),
+            ):
+                for name in names:
+                    sources[ref + ":" + name] = M["sha"](
+                        M["subprocess"].check_output(
+                            [
+                                "git",
+                                "--no-replace-objects",
+                                "-C",
+                                str(ROOT),
+                                "show",
+                                ref + ":scripts/" + name,
+                            ]
+                        )
+                    )
+            members = {
+                str(path.relative_to(old_run)): "directory"
+                if path.is_dir()
+                else M["sha"](path.read_bytes())
+                for path in old_run.rglob("*")
+            }
+            proof_inputs = {
+                str(old_run / name): digest
+                for name, digest in members.items()
+                if digest != "directory"
+            }
+            proof_inputs[str(config_path)] = M["sha"](original_raw)
+            proof = dict(
+                path=str(evidence),
+                sha256=proof_sha,
+                prior_output=str(old_run),
+                successor_output=str(closed),
+                stage="CANONICAL_WORKSPACE_RELEASED_AFTER_UNKNOWN_CREATE",
+                creation_history_verified=False,
+                inputs=proof_inputs,
+                membership=members,
+                producer_sources=sources,
+            )
+            current_dir = self.f.outer / "bound-continuation-123"
+            current_dir.mkdir(mode=0o700)
+            current_path = current_dir / "config.private.json"
+            config = dict(
+                original_config,
+                authority_template=str(current_dir / "authority-template.private.json"),
+                host_operator_provenance=dict(
+                    host_operator_source_ref="dbc3cbad0f3324cf0ec8a77a6950a22c270d828b",
+                    workload_source_ref=original_config["source_ref"],
+                    original_config_path=str(config_path),
+                    original_config_sha256=M["sha"](original_raw),
+                    original_launch_intent_sha256=M["sha"](
+                        original_launch.read_bytes()
+                    ),
+                    original_started_at_epoch=1,
+                    prelaunch_failure=proof,
+                ),
+            )
+            for field, name in (
+                ("host_runner_sha256", "cloudbench-original600-runner.py"),
+                ("host_gate_sha256", "run-cloudbench-controller-gate"),
+            ):
+                config["host_operator_provenance"][field] = M["sha"](
+                    M["subprocess"].check_output(
+                        [
+                            "git",
+                            "--no-replace-objects",
+                            "-C",
+                            str(ROOT),
+                            "show",
+                            "dbc3cbad0f3324cf0ec8a77a6950a22c270d828b:scripts/" + name,
+                        ]
+                    )
+                )
+            write(
+                current_dir / "authority-template.private.json",
+                {"capacity_proof": "fixture"},
+            )
+            write(current_path, config)
+            pointer_path = old_run / "host-launch-successor.json"
+            pointer = dict(
+                schema="original600-host-launch-successor-v1",
+                evidence=proof,
+                config_path=str(current_path),
+                config_sha256=M["sha"](current_path.read_bytes()),
+                original_started_at_epoch=1,
+                host_operator_source_ref="dbc3cbad0f3324cf0ec8a77a6950a22c270d828b",
+            )
+            write(pointer_path, pointer)
+            closure = closed_reader["prepare"](closed, self.f.inventory)
+            archive = closed / "export/originals.tar.gz"
         with (
             mock.patch.dict(
                 M["I"],
@@ -329,7 +551,7 @@ class Recovered(unittest.TestCase):
                 CLOSED_SOURCE="a" * 40 if typed else M["I"]["CLOSED_SOURCE"],
                 historical_plan=lambda *_args: plan,
             ),
-            mock.patch.dict(M["load"].__globals__, closed_host=lambda ref: ref),
+            mock.patch.dict(M["load"].__globals__, closed_host=lambda ref, *_args: ref),
         ):
             tracemalloc.start()
             try:
@@ -339,12 +561,49 @@ class Recovered(unittest.TestCase):
                 tracemalloc.stop()
             self.assertLess(peak, 64 * 1024 * 1024)
             self.assertEqual(context["request"], request)
+            historical_config = original_config if successor else config
             self.assertNotEqual(
                 identity,
-                config["host_operator_provenance"]["incomplete_admission"][
+                historical_config["host_operator_provenance"]["incomplete_admission"][
                     "original_plan_sha256"
                 ],
             )
+            if successor:
+                for field, value in (
+                    ("original_started_at_epoch", 2),
+                    ("host_operator_source_ref", "c" * 40),
+                    ("config_sha256", "0" * 64),
+                ):
+                    changed = dict(pointer, **{field: value})
+                    write(pointer_path, changed)
+                    with self.assertRaises(ValueError):
+                        M["load"](self.f.outer, closed, config, closure, {})
+                write(pointer_path, pointer)
+                bad_proof = copy.deepcopy(proof)
+                bad_proof["inputs"][str(evidence)] = "0" * 64
+                bad_config = copy.deepcopy(config)
+                bad_config["host_operator_provenance"]["prelaunch_failure"] = bad_proof
+                write(current_path, bad_config)
+                write(
+                    pointer_path,
+                    dict(
+                        pointer,
+                        evidence=bad_proof,
+                        config_sha256=M["sha"](current_path.read_bytes()),
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "successor input namespace differs"
+                ):
+                    M["load"](self.f.outer, closed, bad_config, closure, {})
+                write(current_path, config)
+                write(pointer_path, pointer)
+                changed_old = dict(original_config, started_at_epoch=2)
+                write(config_path, changed_old)
+                with self.assertRaises(ValueError):
+                    M["load"](self.f.outer, closed, config, closure, {})
+                config_path.write_bytes(original_raw)
+
             if typed:
                 with mock.patch.dict(
                     M["I"]["retained_native"].__globals__, CLOSED_SOURCE="a" * 40
