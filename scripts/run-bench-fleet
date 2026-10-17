@@ -1752,9 +1752,7 @@ FLY() {
     case "${1:-}:${2:-}" in
         machine:destroy|machines:destroy|machine:stop|machines:stop)
             if [ "$APP" != navi-whisper-lux-bench ]; then flyctl "$@"; return $?; fi
-            case "${3:-}" in ''|*[!0-9a-f]*) return 1 ;; esac
-            python3 "$(archived_reuse_helper)" fenced-effect --machine "$3" --operation "$2" \
-                --journal "$GIT_COMMON_DIR/cloudbench-native-effect-fences/$3/$2"
+            archived_reuse_fenced_effect "$@"
             return $? ;;
     esac
     case "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" in 0|1) ;; *) return 1 ;; esac

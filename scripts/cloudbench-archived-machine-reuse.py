@@ -434,6 +434,39 @@ def external_command(proof, command):
     return module("cloudbench-archived-reuse-transport.py")["external_command"](proof, command, canonical(proof))
 
 
+def fenced_native_effect(api, mid, operation, journal):
+    """Fence a predecessor effect by owner, native incarnation and durable intent."""
+    need(operation in ("stop", "destroy"), "unsupported predecessor effect")
+    journal = Path(journal)
+    journal.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with api.lease(mid):
+        url = "/machines/" + mid
+        current = api.request("GET", url)
+        need(current["id"] == mid and current.get("instance_id"), "exact native identity required")
+        need(
+            not current["config"].get("metadata", {}).get(MARKER),
+            "archived successor forbids predecessor native effect",
+        )
+        # A config update creates a new incarnation; its separately owned effect
+        # must not overwrite the earlier operation's receipt or unknown outcome.
+        incarnation = sha(canonical([mid, current["instance_id"], current["config"]]))
+        out = journal / incarnation
+        out.mkdir(mode=0o700, exist_ok=True)
+        intent = out / "intent.json"
+        if operation == "stop" and current["state"] in ("stopped", "created"):
+            exact_or_save(
+                out / "stopped.json",
+                dict(machine_id=mid, instance_id=current["instance_id"], config_sha256=config_sha(current["config"])),
+            )
+            return
+        need(not intent.exists(), "unknown predecessor native effect; reconcile only")
+        save(intent, dict(machine=current, operation=operation))
+        result = api.request(
+            "DELETE" if operation == "destroy" else "POST", url + ("?force=true" if operation == "destroy" else "/stop")
+        )
+        save(out / "ack.json", result)
+
+
 def main():
     import sys
 
@@ -498,20 +531,7 @@ def main():
         api = NativeAdapter(
             module("cloudbench-original-volume-capture.py")["Fly"](APP, os.environ["FLY_API_TOKEN"]), journal / "wire"
         )
-        with api.lease(args.machine):
-            url = "/machines/" + args.machine
-            current = api.request("GET", url)
-            need(
-                not current["config"].get("metadata", {}).get(MARKER),
-                "archived successor forbids predecessor native effect",
-            )
-            need(not (journal / "intent.json").exists(), "unknown predecessor native effect; reconcile only")
-            save(journal / "intent.json", dict(machine=current, operation=args.operation))
-            result = api.request(
-                "DELETE" if args.operation == "destroy" else "POST",
-                url + ("?force=true" if args.operation == "destroy" else "/stop"),
-            )
-            save(journal / "ack.json", result)
+        fenced_native_effect(api, args.machine, args.operation, journal)
         return
     if args.action == "export-file":
         module("cloudbench-archived-reuse-transport.py")["export_file"](

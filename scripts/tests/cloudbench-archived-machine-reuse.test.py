@@ -158,6 +158,107 @@ class Tests(unittest.TestCase):
 
 
 class IntegratedControls(unittest.TestCase):
+    def test_actual_fly_mutation_grammar_and_owner_journals(self):
+        import shlex
+
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "scripts/run-bench-fleet").read_text()
+        function = "FLY() {" + source.split("FLY() {", 1)[1].split("\nis_sim_on()", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            capture = Path(tmp) / "calls"
+            prefix = (
+                "source "
+                + shlex.quote(str(root / "scripts/lib/cloudbench-archived-reuse.sh"))
+                + "\n"
+                + "APP=navi-whisper-lux-bench; ROOT_DIR="
+                + shlex.quote(str(root))
+                + "\n"
+                + "GIT_COMMON_DIR="
+                + shlex.quote(tmp)
+                + "; FLEET_OWNER_TOKEN="
+                + "a" * 32
+                + "; RUN_ID=first; CAPTURE="
+                + shlex.quote(str(capture))
+                + "\n"
+                + "private_source_allows_provider_call(){ return 0; }\n"
+                + 'python3(){ printf "%s\\n" "$*" >> "$CAPTURE"; }\n'
+                + function
+            )
+            for args in (
+                "machine destroy --force 1234567890abcd -a navi-whisper-lux-bench",
+                "machines destroy 1234567890abcd --app=navi-whisper-lux-bench -f",
+                "machine stop 1234567890abcd -a navi-whisper-lux-bench",
+            ):
+                result = subprocess.run(["bash", "-c", prefix + "\nFLY " + args], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            lines = capture.read_text().splitlines()
+            self.assertTrue(all("--machine 1234567890abcd --operation" in line for line in lines))
+            self.assertTrue(all("/" + "a" * 32 + "/first/" in line for line in lines))
+            capture.unlink()
+            for args in (
+                "machine destroy --force 1234567890abcd 1234567890abce -a navi-whisper-lux-bench",
+                "machine stop 1234567890abcd --unknown -a navi-whisper-lux-bench",
+                "machine stop 1234567890abcd -a navi-whisper-lux",
+            ):
+                result = subprocess.run(["bash", "-c", prefix + "\nFLY " + args], capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(capture.exists())
+            script = (
+                prefix
+                + "\nFLY machine stop 1234567890abcd -a navi-whisper-lux-bench\nFLEET_OWNER_TOKEN="
+                + "b" * 32
+                + "; RUN_ID=second\nFLY machine stop 1234567890abcd -a navi-whisper-lux-bench"
+            )
+            subprocess.run(["bash", "-c", script], check=True)
+            first, second = capture.read_text().splitlines()
+            self.assertNotEqual(first, second)
+
+    def test_predecessor_effect_reconciles_stop_but_never_replays_unknown(self):
+        _, machines, _ = fixture()
+        current = copy.deepcopy(machines[0])
+        current["state"] = "started"
+        posts = []
+        lost = False
+
+        class API:
+            @contextmanager
+            def lease(self, mid):
+                yield
+
+            def request(self, method, url, body=None):
+                if method == "GET":
+                    return copy.deepcopy(current)
+                posts.append((method, url))
+                if lost:
+                    raise TimeoutError("lost ACK")
+                current["state"] = "stopped"
+                return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first"
+            second = Path(tmp) / "second"
+            H["fenced_native_effect"](API(), current["id"], "stop", first)
+            H["fenced_native_effect"](API(), current["id"], "stop", first)
+            self.assertEqual(len(posts), 1)
+            current["state"] = "started"
+            H["fenced_native_effect"](API(), current["id"], "stop", second)
+            self.assertEqual(len(posts), 2)
+            current["state"] = "started"
+            lost = True
+            unknown = Path(tmp) / "unknown"
+            with self.assertRaises(TimeoutError):
+                H["fenced_native_effect"](API(), current["id"], "stop", unknown)
+            with self.assertRaises(ValueError):
+                H["fenced_native_effect"](API(), current["id"], "stop", unknown)
+            self.assertEqual(len(posts), 3)
+            current["state"] = "stopped"
+            H["fenced_native_effect"](API(), current["id"], "stop", unknown)
+            self.assertEqual(len(posts), 3)
+            current["config"]["metadata"] = {H["MARKER"]: "successor"}
+            with self.assertRaises(ValueError):
+                H["fenced_native_effect"](API(), current["id"], "stop", Path(tmp) / "foreign")
+            self.assertEqual(len(posts), 3)
+
     def test_actual600_single_task_children_and_retry_indices(self):
         request, machines, successor = fixture(376)
         names = json.loads((Path(__file__).parent / "fixtures/original600-tasks.json").read_text())

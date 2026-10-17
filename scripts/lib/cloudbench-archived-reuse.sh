@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 # Explicit archived reuse; never add these identities to the generic warm pool.
 archived_reuse_helper() { printf '%s/cloudbench-archived-machine-reuse.py' "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}"; }
+archived_reuse_fenced_effect() {
+    local operation="${2:-}" mid="" requested_app="$APP" seen_app=0
+    shift 2
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --force|-f) [ "$operation" = destroy ] || return 1; shift ;;
+            -a|--app)
+                [ "$#" -ge 2 ] && [ "$seen_app" = 0 ] || return 1
+                requested_app="$2"; seen_app=1; shift 2 ;;
+            --app=*)
+                [ "$seen_app" = 0 ] || return 1
+                requested_app="${1#--app=}"; seen_app=1; shift ;;
+            *)
+                [[ "$1" =~ ^[0-9a-f]{14}$ ]] && [ -z "$mid" ] || return 1
+                mid="$1"; shift ;;
+        esac
+    done
+    [ -n "$mid" ] && [ "$requested_app" = "$APP" ] || return 1
+    [[ "${FLEET_OWNER_TOKEN:-}" =~ ^[0-9a-f]{32}$ ]] || return 1
+    case "${RUN_ID:-}" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+    python3 -S "$(archived_reuse_helper)" fenced-effect --machine "$mid" --operation "$operation" \
+        --journal "$GIT_COMMON_DIR/cloudbench-native-effect-fences/$FLEET_OWNER_TOKEN/$RUN_ID/$mid/$operation"
+}
 archived_reuse_allocate() { # task output vm-profile; success+empty means no reserved candidate for ordinal
     [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" != 1 ] || return 0
     [ -n "${CLOUDBENCH_ARCHIVED_REUSE_REQUEST:-}" ] || return 0
