@@ -1,5 +1,12 @@
+import './benchmark-hub-overlay-env.fixture';
 /** Two backend processes must preserve a committed run across delayed startup retries. */
 import assert from 'node:assert/strict';
+import {
+  commitObject,
+  logicalObject,
+  objectETag,
+  type HubObjectInput,
+} from './benchmark-hub-r2.fixture';
 import { fork, type ChildProcess } from 'node:child_process';
 import { S3Client } from '@aws-sdk/client-s3';
 import { prisma } from '../../providers/database';
@@ -10,6 +17,10 @@ type Packet = {
   id?: number;
   key?: string;
   body?: string;
+  etag?: string;
+  ifMatch?: string;
+  ifNoneMatch?: string;
+  errorName?: string;
   value?: unknown;
   error?: string;
   bundle?: Record<string, unknown>;
@@ -30,15 +41,23 @@ export async function startingRetryWorker(): Promise<void> {
   let nextStorageId = 0;
   const sender = S3Client.prototype as unknown as { send: (command: unknown) => Promise<unknown> };
   sender.send = async (command) => {
-    const input = (command as { input: { Key: string; Body?: string } }).input;
+    const input = (command as { input: HubObjectInput }).input;
     const id = ++nextStorageId;
     const reply = new Promise<Packet>((resolve) => replies.set(id, resolve));
-    process.send!({ kind: 'storage', id, key: input.Key, body: input.Body });
+    process.send!({
+      kind: 'storage',
+      id,
+      key: input.Key,
+      body: input.Body,
+      ifMatch: input.IfMatch,
+      ifNoneMatch: input.IfNoneMatch,
+    });
     const result = await reply;
-    if (result.error) throw Object.assign(new Error(result.error), { name: 'NoSuchKey' });
+    if (result.error)
+      throw Object.assign(new Error(result.error), { name: result.errorName ?? 'NoSuchKey' });
     return command?.constructor?.name === 'GetObjectCommand'
-      ? { Body: Buffer.from(String(result.value)) }
-      : {};
+      ? { Body: Buffer.from(String(result.value)), ETag: result.etag }
+      : { ETag: result.etag };
   };
   process.on('message', (raw) => {
     const message = packet(raw);
@@ -108,7 +127,7 @@ export async function delayedStartingRetryAcrossProcesses(
     const value = objects.get(input.Key);
     if (value === undefined)
       throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
-    return { Body: Buffer.from(value) };
+    return { Body: Buffer.from(value), ETag: objectETag(value) };
   };
 
   const start = () =>
@@ -134,14 +153,29 @@ export async function delayedStartingRetryAcrossProcesses(
         else if (message.kind === 'accepted') admissions.get(message.id!)!();
         else if (message.kind === 'storage') {
           if (message.body !== undefined) {
-            objects.set(message.key!, message.body);
-            child.send({ kind: 'storage-reply', id: message.id });
+            try {
+              const committed = commitObject(objects, {
+                Key: message.key!,
+                Body: message.body,
+                IfMatch: message.ifMatch,
+                IfNoneMatch: message.ifNoneMatch,
+              });
+              child.send({ kind: 'storage-reply', id: message.id, etag: committed.ETag });
+            } catch (error) {
+              child.send({
+                kind: 'storage-reply',
+                id: message.id,
+                error: String(error),
+                errorName: 'PreconditionFailed',
+              });
+            }
           } else {
             const value = objects.get(message.key!);
             child.send({
               kind: 'storage-reply',
               id: message.id,
               value,
+              ...(value === undefined ? {} : { etag: objectETag(value) }),
               ...(value === undefined ? { error: 'fixture absent' } : {}),
             });
           }
@@ -182,7 +216,8 @@ export async function delayedStartingRetryAcrossProcesses(
     const changed = { ...starting, marker: 'new pre-agent content' };
     await request(peer, { kind: 'publish', bundle: changed, live: true }).result;
     assert.equal(
-      JSON.parse(objects.get(`benchmark-hub/runs/${runId}.json`)!).marker,
+      JSON.parse(logicalObject(objects.get(`benchmark-hub-v2/pg_owner/runs/${runId}.json`)!))
+        .marker,
       changed.marker
     );
     const progress = {
@@ -199,17 +234,17 @@ export async function delayedStartingRetryAcrossProcesses(
       ],
     };
     await request(peer, { kind: 'publish', bundle: progress, live: true }).result;
-    const committedBundle = objects.get(`benchmark-hub/runs/${runId}.json`)!;
-    const committedIndex = objects.get('benchmark-hub/agent-run-index.json')!;
+    const committedBundle = objects.get(`benchmark-hub-v2/pg_owner/runs/${runId}.json`)!;
+    const committedIndex = objects.get('benchmark-hub-v2/pg_owner/agent-run-index.json')!;
     original.send({ kind: 'release', id: delayed.id });
     await delayed.result;
     assert.equal(
-      objects.get(`benchmark-hub/runs/${runId}.json`),
+      objects.get(`benchmark-hub-v2/pg_owner/runs/${runId}.json`),
       committedBundle,
       'Delayed original starting registration erased the acknowledged peer progress'
     );
     assert.equal(
-      objects.get('benchmark-hub/agent-run-index.json'),
+      objects.get('benchmark-hub-v2/pg_owner/agent-run-index.json'),
       committedIndex,
       'Delayed original starting registration changed the committed agent mapping/revision'
     );
@@ -219,12 +254,14 @@ export async function delayedStartingRetryAcrossProcesses(
     // A final upload is a different protocol operation even when no task
     // obtained an agent; it must remain authoritative and publish normally.
     await request(peer, { kind: 'publish', bundle: starting, live: false }).result;
-    const index = JSON.parse(objects.get('benchmark-hub/index.json')!) as Array<{
+    const index = JSON.parse(
+      logicalObject(objects.get('benchmark-hub-v2/pg_owner/index.json')!)
+    ) as Array<{
       run_id: string;
       live: boolean;
     }>;
     assert.equal(index.find((run) => run.run_id === runId)?.live, false);
-    assert.notEqual(objects.get('benchmark-hub/agent-run-index.json'), committedIndex);
+    assert.notEqual(objects.get('benchmark-hub-v2/pg_owner/agent-run-index.json'), committedIndex);
     return children.map((child) => child.pid!);
   } finally {
     for (const child of children) {

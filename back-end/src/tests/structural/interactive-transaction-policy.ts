@@ -68,9 +68,9 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
   {
     file: 'providers/benchmarkHubStore.ts',
     scope: 'withIndexLock',
-    fingerprint: '19952f6e5ed95ad9',
+    fingerprint: '34e5d3bbbfe61fd1',
     reason:
-      'transaction-scoped advisory lock with explicit maxWait/timeout for bounded index writes',
+      'epoch-scoped advisory lock with SQL-budget cancellation/drain for bounded Hub publication cohorts; external conditional writes are not replayed by a SQL retry',
   },
   {
     file: 'providers/computeCredentials.ts',
