@@ -84,6 +84,13 @@ while rejecting changed identity/configuration and HTTP 200 null responses.
 The historical continuation remains separately bound to its original
 producer and immutable cleanup journal.
 
+The closed startup also lacks a guest-imported reservation request. Its unused
+reservation reader therefore accepts the actual launch and outer request bytes
+only under the verified no-supervisor closure, with an empty claim scan and
+exact configuration path and hash bindings. This evidence is labeled
+`HOST_BOUND_NOT_IMPORTED`; ordinary archives still require their imported
+request. No file is inserted into the original archive.
+
 ## Human feedback
 
 Finish the authorized cleanup while preserving the original run, deadline,

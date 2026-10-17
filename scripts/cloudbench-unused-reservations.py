@@ -230,18 +230,56 @@ def archive_members(run, closure, request, config, inputs):
                     if index < len(request["candidates"]):
                         hold(request["candidates"][index]["machine_id"], name, expected)
     need(seen == set(manifest["files"]), "incomplete closed-world archive")
+    custody = "ARCHIVED_IMPORT"
+    expected_file = [
+        row
+        for row in config["remote_files"]
+        if row["relative_path"] == ".git/" + Path(imported).name
+    ]
+    if imported_raw is None:
+        startup = closure.get("startup_closure", {})
+        need(
+            startup.get("schema") == "expired-before-supervisor-proof-v1"
+            and startup.get("supervisor_published") is False
+            and startup.get("supervisor_joined") is False
+            and startup.get("owned_job_authority") is False
+            and not closure["archived_ownership"]
+            and not closure["targets"]
+            and not claimed,
+            "closed controller imported another reservation request",
+        )
+        outer = run.parent.parent
+        launch = obj(outer / "controller-launch.intent.json", inputs)
+        recorded_config = Path(launch["config_path"])
+        need(
+            recorded_config.parent.name == run.parent.name
+            and recorded_config.name == "config.private.json"
+            and len(expected_file) == 1
+            and expected_file[0]["source_path"]
+            == str(recorded_config.parent / "archived-reuse-request.private.json")
+            and config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST"]
+            == "/tmp/gate/repo/" + expected_file[0]["relative_path"],
+            "startup host reservation path differs",
+        )
+        imported_raw = read(run.parent / "archived-reuse-request.private.json", inputs)
+        need(
+            imported_raw == read(outer / "archived-reuse-request.private.json", inputs),
+            "startup host reservation copies differ",
+        )
+        custody = "HOST_BOUND_NOT_IMPORTED"
     need(
-        imported_raw is not None and json.loads(imported_raw) == request,
+        json.loads(imported_raw) == request,
         "closed controller imported another reservation request",
     )
-    expected_file = [row for row in config["remote_files"] if row["relative_path"] == ".git/" + Path(imported).name]
     need(
         len(expected_file) == 1
         and expected_file[0]["sha256"] == digest(imported_raw)
-        and config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"] == digest(imported_raw),
+        and config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"]
+        == digest(imported_raw),
         "controller reservation input hash differs",
     )
-    return claimed, digest(imported_raw)
+    return claimed, digest(imported_raw), custody
+
 
 
 def wire_records(directory, mid, inputs):
@@ -429,7 +467,8 @@ def prepare(run, inventory_path):
         closure["source_ref"] == request["harness_ref"] == config["source_ref"],
         "closed controller source differs from admission",
     )
-    claimed, imported_sha = archive_members(closed, closure, request, config, inputs)
+    claimed, imported_sha, request_custody = archive_members(closed, closure, request, config, inputs)
+    request_binding = ({"imported_request_sha256": imported_sha} if request_custody == "ARCHIVED_IMPORT" else {"request_sha256": imported_sha, "request_custody": request_custody})
     machines = {row["id"]: row for row in json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))}
     need(len(machines) == len(json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))), "duplicate inventory")
     need(closure["controller"] not in machines, "closed controller still present in native inventory")
@@ -451,7 +490,7 @@ def prepare(run, inventory_path):
                 candidate = transition_reader()["omitted"](context, initial[mid], machines[mid], inputs, claimed)
             except (ValueError, KeyError, TypeError, OSError):
                 held.append(dict(omitted, capacity_credit=0, closed_archive_sha256=archive_sha,
-                                 imported_request_sha256=imported_sha,
+                                 **request_binding,
                                  original_request_sha256=original_envelope["sha256"]))
             else:
                 candidate["archive_sha256"] = archive_sha
@@ -476,7 +515,7 @@ def prepare(run, inventory_path):
             held.append({
                 "machine_id": mid, "volume_id": row["volume_id"], "capacity_credit": 0,
                 "reason": "allocated_or_unresolved_claim", "closed_archive_sha256": archive_sha,
-                "imported_request_sha256": imported_sha, "original_request_sha256": original_envelope["sha256"],
+                **request_binding, "original_request_sha256": original_envelope["sha256"],
                 "claim_evidence": [claimed[mid][path] for path in sorted(claimed[mid])],
             })
             continue
@@ -490,7 +529,7 @@ def prepare(run, inventory_path):
         candidate["unused_reservation_proof"] = dict(
             controller=closure["controller"],
             old_cohort=request["cohort"],
-            imported_request_sha256=imported_sha,
+            **request_binding,
             original_request_sha256=original_envelope["sha256"],
         )
         candidates.append(candidate)
@@ -504,6 +543,8 @@ def prepare(run, inventory_path):
             inputs=inputs,
         ),
     )
+    if request_custody == "HOST_BOUND_NOT_IMPORTED":
+        result["archive"].update(request_binding)
     if context is not None:
         result["inherited_held_scopes"] = copy.deepcopy(context["inherited_held_scopes"])
     return result

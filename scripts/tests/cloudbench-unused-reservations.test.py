@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import runpy
 import shutil
+import subprocess
 import tarfile
 import unittest
 from unittest import mock
@@ -174,6 +175,61 @@ class Unused(unittest.TestCase):
         cleanup["export_verified_file"] = H["sha"]((export / "disposable-export.verified.json").read_bytes())
         write(self.closed / "cleanup-call.intent.json", cleanup)
 
+    def test_closed_startup_binds_real_host_request_without_claiming_import(self):
+        config = json.loads((self.outer / "launch-1/config.private.json").read_bytes())
+        self.old.root = self.outer / "launch-1"
+        self.old.run = self.closed
+        self.old.startup_fixture()
+        closure = M["CLOSED"]["prepare"](self.closed, self.inventory)
+        source = self.closed.parent / "archived-reuse-request.private.json"
+        source.write_bytes(self.request_path.read_bytes())
+        source.chmod(0o600)
+        config["remote_files"][0]["source_path"] = str(source)
+        config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST"] = (
+            "/tmp/gate/repo/.git/" + Path(self.imported).name
+        )
+        inputs = {}
+        claimed, digest, custody = M["archive_members"](
+            self.closed, closure, self.request, config, inputs
+        )
+        self.assertEqual(claimed, {})
+        self.assertEqual(custody, "HOST_BOUND_NOT_IMPORTED")
+        self.assertEqual(digest, H["sha"](self.request_path.read_bytes()))
+        self.assertIn(str(source), inputs)
+        self.assertNotIn(
+            self.imported,
+            json.loads((self.closed / "export/manifest.json").read_bytes())["files"],
+        )
+        baseline = self.outer / "baseline"
+        baseline.mkdir(mode=0o700)
+        for path in (ROOT / "scripts").glob("*.py"):
+            if path.name != "cloudbench-unused-reservations.py":
+                (baseline / path.name).symlink_to(path)
+        old = baseline / "cloudbench-unused-reservations.py"
+        old.write_bytes(
+            subprocess.check_output(
+                [
+                    "git",
+                    "show",
+                    "0ec5672c3f98f8c553f1430dd2ce8d0f427ea255:scripts/cloudbench-unused-reservations.py",
+                ],
+                cwd=ROOT,
+            )
+        )
+        previous = runpy.run_path(str(old))
+        with self.assertRaisesRegex(ValueError, "imported another reservation"):
+            previous["archive_members"](self.closed, closure, self.request, config, {})
+        ordinary = dict(closure)
+        ordinary.pop("startup_closure")
+        with self.assertRaisesRegex(ValueError, "imported another reservation"):
+            M["archive_members"](self.closed, ordinary, self.request, config, {})
+        altered = copy.deepcopy(config)
+        altered["remote_files"][0]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "input hash differs"):
+            M["archive_members"](self.closed, closure, self.request, altered, {})
+        source.write_bytes(self.request_path.read_bytes() + b" ")
+        with self.assertRaisesRegex(ValueError, "copies differ"):
+            M["archive_members"](self.closed, closure, self.request, config, {})
     def test_closed_unused_reservation_preserves_lineage_without_credit(self):
         value = M["prepare"](self.outer, self.inventory)
         self.assertEqual(len(value["candidates"]), 1)
