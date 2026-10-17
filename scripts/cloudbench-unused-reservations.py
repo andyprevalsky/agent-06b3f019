@@ -63,9 +63,19 @@ def closed_run(outer, inputs):
         )
         expected = output.parent / ("run-after-popen-" + digest(raw)[:16])
         need(evidence["successor_output"] == str(expected), "unexpected successor output")
-        derived = obj(outer / "derived-config.private.json", inputs)
-        # Canonical runner persists ordinary sorted JSON plus a newline.
-        derived_raw = read(outer / "derived-config.private.json", inputs)
+        # Follow the recorded canonical path, preserving its layout when reading
+        # an offline copy of the admission. No ad-hoc alias is an input contract.
+        recorded_config = Path(pointer["config_path"])
+        need(recorded_config.is_absolute() and ".." not in recorded_config.parts, "invalid successor config path")
+        relative = recorded_config.relative_to(original_config.parent.parent)
+        need(
+            len(relative.parts) == 2
+            and re.fullmatch(r"bound-continuation-[0-9]+", relative.parts[0])
+            and relative.name == "config.private.json",
+            "unexpected successor config layout",
+        )
+        derived_raw = read(outer / relative, inputs)
+        derived = json.loads(derived_raw)
         need(digest(derived_raw) == pointer["config_sha256"], "successor config checksum differs")
         provenance = derived["host_operator_provenance"]
         need(

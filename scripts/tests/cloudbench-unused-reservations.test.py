@@ -6,6 +6,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import runpy
 import shutil
@@ -13,7 +14,9 @@ import tarfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-M = runpy.run_path(str(ROOT / "scripts/cloudbench-unused-reservations.py"))
+M = runpy.run_path(
+    os.environ.get("CLOUDBENCH_UNUSED_RESERVATIONS_SOURCE", str(ROOT / "scripts/cloudbench-unused-reservations.py"))
+)
 H = M["H"]
 OLD = runpy.run_path(str(ROOT / "scripts/tests/cloudbench-archived-owner-stop.test.py"))
 
@@ -181,6 +184,53 @@ class Unused(unittest.TestCase):
         self.assertIn("UNRESOLVED", row["prior_liabilities"])
         self.assertEqual(row["source_instance_id"], self.current["instance_id"])
         self.assertIn(str(self.wire / "2/0001-wire.json"), value["archive"]["inputs"])
+
+    def test_successor_uses_recorded_canonical_config_without_alias(self):
+        launch_path = self.outer / "controller-launch.intent.json"
+        launch = json.loads(launch_path.read_bytes())
+        original_config = Path(launch["config_path"])
+        failure_path = write(
+            self.outer / "bound-continuation-popen-failure.safe.json",
+            dict(
+                schema="observed-tool-session-join-v1",
+                tool_reported_exit_code=1,
+                log_contains_synchronous_popen_errno=7,
+                gate_pid="NOT_CREATED_BY_FAILED_POPEN",
+            ),
+        )
+        evidence = dict(
+            path=str(failure_path),
+            sha256=H["sha"](failure_path.read_bytes()),
+            prior_output=str(self.closed),
+            successor_output=str(self.closed.parent / ("run-after-popen-" + H["sha"](failure_path.read_bytes())[:16])),
+        )
+        successor = Path(evidence["successor_output"])
+        self.closed.rename(successor)
+        self.closed.mkdir(mode=0o700)
+        provenance = dict(
+            original_config_path=str(original_config),
+            original_config_sha256=launch["config_sha256"],
+            original_launch_intent_sha256=H["sha"](launch_path.read_bytes()),
+            prelaunch_failure=evidence,
+        )
+        derived = dict(json.loads(original_config.read_bytes()), host_operator_provenance=provenance)
+        derived_path = write(self.outer / "bound-continuation-123/config.private.json", derived)
+        pointer = dict(
+            schema="original600-host-launch-successor-v1",
+            config_path=str(derived_path),
+            config_sha256=H["sha"](derived_path.read_bytes()),
+            evidence=evidence,
+        )
+        pointer_path = write(self.closed / "host-launch-successor.json", pointer)
+        write(successor / "host-operator-provenance.json", provenance)
+        self.assertFalse((self.outer / "derived-config.private.json").exists())
+        value = M["prepare"](self.outer, self.inventory)
+        self.assertEqual([row["machine_id"] for row in value["candidates"]], [self.mid])
+        self.assertIn(str(derived_path), value["archive"]["inputs"])
+        pointer["config_path"] = str(self.outer.parent / "bound-continuation-123/config.private.json")
+        write(pointer_path, pointer)
+        with self.assertRaises(ValueError):
+            M["prepare"](self.outer, self.inventory)
 
     def test_allocation_or_pre_effect_claim_blocks_unused_classification(self):
         for suffix, payload in [
