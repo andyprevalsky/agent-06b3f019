@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """One explicitly admitted disposable controller; root caller retains teardown ownership."""
-import argparse,hashlib,json,os,re,signal,stat,subprocess,time
+import argparse,base64,hashlib,json,os,re,signal,stat,subprocess,time
 from contextlib import contextmanager
 from pathlib import Path
 
 class Deadline(Exception):pass
+
+class VolumeNotFound(Exception):
+    pass
 
 def need(value,message):
     if not value:raise ValueError(message)
@@ -91,21 +94,35 @@ def admit(a,api):
     need(set(a['protected_machines'])<=set(ids),'protected inventory changed')
     return rows
 
-def volume(a,path,api):
+def volume(a,path,api,read_pending=False,allow_absent=False):
     need(Path(path)==Path(a['output_directory'])/'workspace-volume.ownership.json','workspace outside exact authority directory')
-    v=json.loads(read(path));native=api('GET','/volumes/'+v['volume_id'])
+    v=json.loads(read(path))
     need(v['schema']=='cloudbench-controller-workspace-ownership-v1' and v['app']==a['app'] and v['source_ref']==a['source_ref'] and v['size_gb']==256,'wrong workspace ownership')
     need(v['volume_id']not in a['protected_volumes'],'protected workspace Volume')
+    end=time.monotonic()+180
+    while True:
+        try:
+            native=api('GET','/volumes/'+v['volume_id'])
+        except VolumeNotFound:
+            need(read_pending,'workspace native observation absent')
+            need(time.monotonic()<end,'workspace native observation pending')
+            time.sleep(min(1,max(0,end-time.monotonic())))
+            continue
+        if native is None and allow_absent:
+            return v,None
+        need(isinstance(native,dict),'workspace native response must be an object')
+        need(time.monotonic()<end,'late workspace native observation')
+        break
     for key,expected in [('id',v['volume_id']),('name',v['name']),('region',a['region']),('size_gb',256),('encrypted',True)]:need(native.get(key)==expected,'workspace native mismatch: '+key)
     return v,native
 
 def backup_off(a,path,directory,api):
-    v,before=volume(a,path,api);need(before.get('attached_machine_id')is None and before['state']=='created','new workspace must be detached and ready')
+    v,before=volume(a,path,api,read_pending=True);need(before.get('attached_machine_id')is None and before['state']=='created','new workspace must be detached and ready')
     need(type(before.get('auto_backup_enabled'))is bool,'unknown backup setting')
     if before['auto_backup_enabled']:
         save(directory/'workspace-backup.intent.json',dict(volume=v['volume_id'],auto_backup_enabled=False))
         api('PUT','/volumes/'+v['volume_id'],dict(auto_backup_enabled=False))
-    unused,after=volume(a,path,api)
+    unused,after=volume(a,path,api,read_pending=True)
     need(after.get('auto_backup_enabled')is False and after.get('attached_machine_id')is None,'workspace backup disable not verified')
     save(directory/'workspace-backup.verified.json',after)
 
@@ -165,12 +182,19 @@ def cleanup(a,auth_sha,path,directory,api):
 def cleanup_workspace(a,auth_sha,path,directory,api):
     """Only a provably detached allocation with no matching live Machine."""
     need(not (directory/'disposable-controller.ownership.json').exists(),'sealed host needs export cleanup')
-    v,native=volume(a,path,api)
+    marker=directory/'disposable-delete-volume.intent.json'
+    existing=json.loads(read(marker))if marker.exists()else None
+    v,native=volume(a,path,api,allow_absent=existing is not None)
+    value=dict(authority_sha256=auth_sha,kind='volume',identifier=v['volume_id'])
+    if existing is not None:
+        need(existing==value,'wrong Volume deletion intent')
     intent_path=directory/'machine-create.intent.json'
     if intent_path.exists():
         intent=json.loads(read(intent_path));need(intent['authority_sha256']==auth_sha and intent['workspace_sha256']==hashlib.sha256(read(path)).hexdigest(),'wrong Machine creation intent')
         rows=api('GET','/machines');need(isinstance(rows,list),'complete inventory required')
         need(all(m.get('name')!=intent['name'] and all(x.get('volume')!=v['volume_id']for x in (m.get('config')or{}).get('mounts',[]))for m in rows),'Machine allocation exists or is ambiguous; seal/export required')
+    if native is None:
+        save(directory/'disposable-controller.release.json',dict(machine_id=None,volume_id=v['volume_id'],volume_disposition='ABSENT',no_live_machine_observed=True,command_history_verified=False));return
     need(native.get('attached_machine_id')is None and native.get('state')in('created','pending_destroy','destroyed'),'workspace not provably detached')
     marker=directory/'disposable-delete-volume.intent.json';value=dict(authority_sha256=auth_sha,kind='volume',identifier=v['volume_id'])
     if marker.exists():need(json.loads(read(marker))==value,'wrong Volume deletion intent')
@@ -203,10 +227,29 @@ def main():
         source=args.root/'scripts/cloudbench-original-volume-capture.py';expected=subprocess.check_output(['git','--no-replace-objects','-C',str(args.root),'show',a['source_ref']+':scripts/cloudbench-original-volume-capture.py']);need(source.read_bytes()==expected,'native transport source changed')
         scope={'__file__':str(source),'__name__':'disposable_controller_transport'};exec(compile(expected,str(source),'exec'),scope)
         client=scope['Fly'](a['app'],os.environ.get('FLY_API_TOKEN')or scope['resolve_token']({'workspace':str(args.root)}))
+        observations=None
+        if args.directory is not None:
+            observations=args.directory/('native-'+args.action+'-'+str(time.monotonic_ns()))
+            observations.mkdir(mode=0o700)
+        sequence=0
         def api(method,path,body=None):
+            nonlocal sequence
+            sequence+=1
+            prefix=observations/('observation-%06d'%sequence)if observations is not None else None
+            if prefix is not None:
+                save(prefix.with_suffix('.request.json'),dict(method=method,path=path,body=body))
+            def observed(observed_method,observed_path,status,payload):
+                need(observed_method==method and observed_path==path,'native observation request changed')
+                save(prefix.with_suffix('.raw.json'),dict(method=method,path=path,status=status,body_base64=base64.b64encode(payload).decode(),body_sha256=hashlib.sha256(payload).hexdigest()))
             with bounded(20,reconcile_timeout=True):
-                try:return client.api(method,path,body,timeout=20)
+                try:
+                    value=client.api(method,path,body,timeout=20,observer=observed if prefix is not None else None)
+                    if method=='GET' and path.startswith('/volumes/'):
+                        need(isinstance(value,dict),'native response must be an object')
+                    return value
                 except scope['NotFound']:
+                    if method=='GET' and path.startswith('/volumes/') and args.action=='backup-off':
+                        raise VolumeNotFound() from None
                     if method=='GET':return None
                     raise
         if args.action=='admit':admit(a,api)

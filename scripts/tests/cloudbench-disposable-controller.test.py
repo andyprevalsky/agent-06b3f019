@@ -78,16 +78,23 @@ class DisposableController(unittest.TestCase):
         self.api = FakeAPI()
         boundary = types.ModuleType('disposable_controller_test_boundary')
         boundary.API = self.api
+        boundary.NotFound = type("NotFound", (Exception,), {})
         self.modules = patch.dict(sys.modules, disposable_controller_test_boundary=boundary)
         self.modules.start()
         self.addCleanup(self.modules.stop)
         transport = '''from disposable_controller_test_boundary import API
-class NotFound(Exception): pass
+NotFound=__import__("disposable_controller_test_boundary").NotFound
 class Fly:
  def __init__(self, app, token): assert app == "navi-whisper-lux-bench" and token == "fixture-token"
- def api(self, method, path, body=None, timeout=None):
+ def api(self, method, path, body=None, timeout=None, observer=None):
   assert timeout == 20
-  return API(method, path, body)
+  import json
+  try: value=API(method, path, body)
+  except NotFound:
+   if observer is not None: observer(method,path,404,b"not found")
+   raise
+  if observer is not None: observer(method,path,200,json.dumps(value).encode())
+  return value
 def resolve_token(request): raise AssertionError("no credential fallback in fixture")
 '''
         exporter = '''def verify(args):
@@ -207,6 +214,97 @@ def resolve_token(request): raise AssertionError("no credential fallback in fixt
             self.entry('env-files')
         self.assertFalse(list(other.iterdir()))
         self.assertEqual(self.api.calls, [])
+
+    def test_workspace_read_pending_is_readonly_and_null_is_not_absence(self):
+        original = self.api.__call__
+        calls = []
+        missing = sys.modules['disposable_controller_test_boundary'].NotFound
+        def pending(method, path, body=None):
+            calls.append((method, path))
+            if len(calls) == 1:
+                raise missing()
+            return original(method, path, body)
+        sys.modules['disposable_controller_test_boundary'].API = pending
+        with patch('time.sleep'):
+            self.entry('backup-off')
+        self.assertEqual([x[0] for x in calls], ['GET', 'GET', 'PUT', 'GET'])
+        self.assertTrue((self.out / 'workspace-backup.verified.json').exists())
+        raws = [json.loads(p.read_bytes()) for p in self.out.glob('native-backup-off-*/*.raw.json')]
+        self.assertEqual(sorted(x['status'] for x in raws), [200, 200, 200, 404])
+
+    def test_workspace_positive_null_and_wrong_identity_never_write(self):
+        for value in (None, dict(self.api.volume, id='vol_wrong')):
+            sys.modules['disposable_controller_test_boundary'].API = lambda *args: value
+            with self.assertRaisesRegex(ValueError, 'response must be an object|native mismatch'):
+                self.entry('backup-off')
+        self.assertFalse((self.out / 'workspace-backup.intent.json').exists())
+        self.assertFalse((self.out / 'workspace-backup.verified.json').exists())
+
+    def test_workspace_pending_read_is_bounded_without_mutation(self):
+        missing = sys.modules['disposable_controller_test_boundary'].NotFound
+        def absent(*args):
+            raise missing()
+        sys.modules['disposable_controller_test_boundary'].API = absent
+        clock = iter([0, 0, 0, 181, 181, 181, 181, 181, 181, 181, 181, 181])
+        with patch('time.monotonic', side_effect=lambda: next(clock, 181)), patch('time.sleep'):
+            with self.assertRaises((ValueError, S['Deadline'])):
+                self.entry('backup-off')
+        self.assertFalse((self.out / 'workspace-backup.intent.json').exists())
+
+    def test_backup_verification_missing_read_never_replays_put(self):
+        original = self.api.__call__
+        missing = sys.modules['disposable_controller_test_boundary'].NotFound
+        reads = 0
+        def pending(method, path, body=None):
+            nonlocal reads
+            if method == 'GET':
+                reads += 1
+                if reads == 2:
+                    raise missing()
+            return original(method, path, body)
+        sys.modules['disposable_controller_test_boundary'].API = pending
+        with patch('time.sleep'):
+            self.entry('backup-off')
+        self.assertEqual(sum(c[0] == 'PUT' for c in self.api.calls), 1)
+        with self.assertRaises(FileExistsError):
+            self.api.volume['auto_backup_enabled'] = True
+            self.entry('backup-off')
+        self.assertEqual(sum(c[0] == 'PUT' for c in self.api.calls), 1)
+
+    def test_workspace_pending_cancellation_never_writes(self):
+        missing = sys.modules['disposable_controller_test_boundary'].NotFound
+        def absent(*args):
+            raise missing()
+        sys.modules['disposable_controller_test_boundary'].API = absent
+        with patch('time.sleep', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.entry('backup-off')
+        self.assertFalse((self.out / 'workspace-backup.intent.json').exists())
+        self.assertFalse((self.out / 'workspace-backup.verified.json').exists())
+
+    def test_workspace_absence_cleanup_requires_existing_delete_and_raw_404(self):
+        marker = self.out / 'disposable-delete-volume.intent.json'
+        self.write_json(marker, dict(authority_sha256=digest(self.authpath.read_bytes()),
+                                    kind='volume', identifier=VID))
+        missing = sys.modules['disposable_controller_test_boundary'].NotFound
+        def absent(*args):
+            raise missing()
+        sys.modules['disposable_controller_test_boundary'].API = absent
+        self.entry('cleanup-workspace')
+        released = json.loads((self.out / 'disposable-controller.release.json').read_bytes())
+        self.assertEqual(released['volume_disposition'], 'ABSENT')
+        self.assertIs(released['command_history_verified'], False)
+        raws = list(self.out.glob('native-cleanup-workspace-*/*.raw.json'))
+        self.assertEqual([json.loads(p.read_bytes())['status'] for p in raws], [404])
+
+    def test_actual_gate_admit_without_directory_does_not_create_output(self):
+        import shutil
+        shutil.rmtree(self.out)
+        argv = ['helper', 'admit', '--authority', str(self.authpath), '--root', str(self.root)]
+        with patch.object(sys, 'argv', argv):
+            S['main']()
+        self.assertFalse(self.out.exists())
+        self.assertEqual([x[:2] for x in self.api.calls], [('GET', '/machines')])
 
     def test_backup_disabled_and_verified_before_host_seal(self):
         self.seal()

@@ -58,3 +58,7 @@ The user asked to simplify startup and explain repeated full-parallelization fai
 ## Reusable lesson
 
 A partial provider observation is not an absent resource or an empty valid configuration. Keep the original observation, resolve missing fields through bounded authoritative evidence, and fail closed if complete identity cannot be established.
+
+## Later live observation
+
+The normal same-admission continuation later obtained complete list configurations for all three affected identities, retaining their prior instance IDs. Its final capacity check and both fresh first-CAS reservations succeeded. The selected-row additional-GET path was not needed in that observation because the list itself was complete. Original75 then failed at the separate workspace-volume read boundary before Machine creation; it is not a passing task run. The original incomplete observations and three diagnostic timeouts remain unchanged.
