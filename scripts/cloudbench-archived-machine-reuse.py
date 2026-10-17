@@ -458,6 +458,7 @@ NativeAdapter = _EFFECTS["NativeAdapter"]
 reserve_cohort = _EFFECTS["reserve_cohort"]
 retire_native = _EFFECTS["retire_native"]
 wait_inactive = _EFFECTS["wait_inactive"]
+ObservationDeadline = _EFFECTS["ObservationDeadline"]
 
 
 def external_command(proof, command):
@@ -510,15 +511,7 @@ def main():
         api.base = os.environ["CLOUDBENCH_WIRE_BASE"]
         api.loopback = os.environ["CLOUDBENCH_WIRE_LOOPBACK"] == "1"
         observer = NativeAdapter(api, directory)
-        result = api.api(
-            request["method"],
-            request["path"],
-            request["body"],
-            timeout=request["timeout"],
-            headers=request["headers"],
-            observer=observer.observe,
-        )
-        save(directory / "result.json", result)
+        observer.perform_wire(request)
         return
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)

@@ -10,7 +10,56 @@ import os
 import subprocess
 from unittest import mock
 
-H = runpy.run_path(str(Path(__file__).resolve().parents[1] / "cloudbench-archived-machine-reuse.py"))
+H = runpy.run_path(
+    os.environ.get(
+        "CLOUDBENCH_TEST_REUSE_MODULE",
+        str(Path(__file__).resolve().parents[1] / "cloudbench-archived-machine-reuse.py"),
+    )
+)
+
+
+@contextmanager
+def native_read_server(expected, *, drip=False):
+    import http.server
+    import threading
+    import time
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = expected if isinstance(expected, bytes) else json.dumps(expected).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                if drip:
+                    for byte in body:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.03)
+                else:
+                    self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    api = object.__new__(H["module"]("cloudbench-original-volume-capture.py")["Fly"])
+    api.app = H["APP"]
+    api.base = f"http://127.0.0.1:{server.server_port}"
+    api.authorization = "Bearer private-fixture"
+    api.loopback = True
+    api.env = dict(os.environ)
+    try:
+        yield api
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 def fixture(count=1):
@@ -58,6 +107,102 @@ def fixture(count=1):
 
 
 class Tests(unittest.TestCase):
+    def test_claim_observation_avoids_slow_child_startup(self):
+        import time
+
+        _, machines, _ = fixture()
+        expected = machines[0]
+        with native_read_server(expected) as api, tempfile.TemporaryDirectory() as directory:
+            adapter = H["NativeAdapter"](api, directory)
+            original = adapter._run_wire
+            starts = []
+
+            def delayed_start(*args):
+                starts.append(True)
+                time.sleep(10.05)  # Scheduling before the old child's first HTTP request.
+                return original(*args)
+
+            with mock.patch.object(adapter, "_run_wire", side_effect=delayed_start):
+                observed = H["wait_inactive"](adapter, "/machines/" + expected["id"], expected)
+            self.assertEqual(observed, expected)
+            self.assertEqual(starts, [])
+            wire = json.loads(next(Path(directory).glob("*/0001-wire.json")).read_bytes())
+            self.assertEqual(wire["status"], 200)
+            http = json.loads(next(Path(directory).glob("*/http-start.json")).read_bytes())
+            self.assertLessEqual(http["monotonic_ns"], wire["monotonic_ns"])
+
+    def test_direct_observation_bounds_drip_and_restores_caller_alarm(self):
+        import signal
+        import time
+
+        _, machines, _ = fixture()
+        with native_read_server(machines[0], drip=True) as api, tempfile.TemporaryDirectory() as directory:
+            adapter = H["NativeAdapter"](api, directory)
+            prior = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, lambda *args: self.fail("longer caller alarm fired"))
+            handler = signal.getsignal(signal.SIGALRM)
+            signal.setitimer(signal.ITIMER_REAL, 2)
+            start = time.monotonic()
+            try:
+                with self.assertRaises(H["ObservationDeadline"]):
+                    adapter.observe_inactive("/machines/" + machines[0]["id"], start + 0.15)
+                self.assertLess(time.monotonic() - start, 1)
+                self.assertIs(signal.getsignal(signal.SIGALRM), handler)
+                self.assertGreater(signal.getitimer(signal.ITIMER_REAL)[0], 0.5)
+                self.assertFalse(list(Path(directory).glob("*/result.json")))
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, prior)
+
+    def test_thread_observation_keeps_owned_child_transport(self):
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        _, machines, _ = fixture()
+        with native_read_server(machines[0]) as api, tempfile.TemporaryDirectory() as directory:
+            adapter = H["NativeAdapter"](api, directory)
+            with (
+                mock.patch.object(adapter, "_run_wire", wraps=adapter._run_wire) as launch,
+                ThreadPoolExecutor(max_workers=1) as workers,
+            ):
+                result = workers.submit(
+                    adapter.observe_inactive, "/machines/" + machines[0]["id"], time.monotonic() + 10
+                ).result()
+            self.assertEqual(result, machines[0])
+            self.assertEqual(launch.call_count, 1)
+
+    def test_direct_observation_never_retries_malformed_success(self):
+        with native_read_server(b"invalid-json") as api, tempfile.TemporaryDirectory() as directory:
+            adapter = H["NativeAdapter"](api, directory)
+            with (
+                mock.patch.object(adapter, "_run_wire", side_effect=AssertionError("no fallback")),
+                self.assertRaises(json.JSONDecodeError),
+            ):
+                adapter.observe_inactive("/machines/" + "a" * 14, __import__("time").monotonic() + 10)
+            records = list(Path(directory).glob("*/0001-wire.json"))
+            self.assertEqual(len(records), 1)
+            self.assertEqual(json.loads(records[0].read_bytes())["status"], 200)
+            self.assertFalse(list(Path(directory).glob("*/result.json")))
+
+    def test_direct_observation_refuses_periodic_caller_before_io(self):
+        import signal
+        import time
+
+        _, machines, _ = fixture()
+        with native_read_server(machines[0]) as api, tempfile.TemporaryDirectory() as directory:
+            adapter = H["NativeAdapter"](api, directory)
+            before = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, lambda *args: None)
+            signal.setitimer(signal.ITIMER_REAL, 5, 5)
+            try:
+                with self.assertRaisesRegex(ValueError, "periodic"):
+                    adapter.observe_inactive("/machines/" + machines[0]["id"], time.monotonic() + 10)
+                self.assertEqual(signal.getitimer(signal.ITIMER_REAL)[1], 5)
+                self.assertEqual(list(Path(directory).iterdir()), [])
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, before)
+
     def test_capacity_all376_preserves_original600(self):
         request, machines, _ = fixture(376)
         result = H["capacity_demand"](request, machines, {"f" * 14})

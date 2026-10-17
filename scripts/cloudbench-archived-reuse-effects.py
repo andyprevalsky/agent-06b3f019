@@ -6,6 +6,8 @@ from contextlib import contextmanager
 import copy
 import json
 from pathlib import Path
+import signal
+import threading
 import time
 import uuid
 
@@ -24,6 +26,10 @@ validate_request = _contract["validate_request"]
 same_source = _contract["same_source"]
 MARKER = _contract["MARKER"]
 SCHEMA = _contract["SCHEMA"]
+
+
+class ObservationDeadline(Exception):
+    """Escape HTTP's OSError conversion when the whole observation expires."""
 
 
 class NativeAdapter:
@@ -52,7 +58,7 @@ class NativeAdapter:
                 ),
             )
 
-    def wire(self, method, url, body=None, timeout=30, headers=None):
+    def wire(self, method, url, body=None, timeout=30, headers=None, *, direct=False):
         # A socket timeout does not bound drip-fed headers/bodies. Each exact
         # request has an owned subprocess, absolute deadline, and mandatory join.
         import uuid
@@ -60,15 +66,40 @@ class NativeAdapter:
         need(self.journal is not None, "durable native response journal required")
         directory = self.journal / uuid.uuid4().hex
         directory.mkdir(parents=True, mode=0o700)
-        save(
-            directory / "request.json",
-            dict(app=self.api.app, method=method, path=url, body=body, timeout=timeout, headers=headers or {}),
-        )
+        request = {
+            "app": self.api.app,
+            "method": method,
+            "path": url,
+            "body": body,
+            "timeout": timeout,
+            "headers": headers or {},
+        }
+        save(directory / "request.json", request)
+        save(directory / "transport-start.json", {"monotonic_ns": time.monotonic_ns(), "direct": direct})
         with open(
             directory / "stderr.private.log", "xb", opener=lambda path, flags: __import__("os").open(path, flags, 0o600)
         ) as errors:
-            self._run_wire(directory, method, url, body, timeout, headers, errors)
+            if direct:
+                NativeAdapter(self.api, directory).perform_wire(request)
+            else:
+                self._run_wire(directory, method, url, body, timeout, headers, errors)
         return json.loads(private(directory / "result.json"))
+
+    def perform_wire(self, request):
+        """Identical HTTP/raw receipt path in the caller or the bounded child."""
+        save(
+            self.journal / "http-start.json",
+            {"monotonic_ns": time.monotonic_ns(), "phase": "before-http-call-including-journal-fsync"},
+        )
+        result = self.api.api(
+            request["method"],
+            request["path"],
+            request["body"],
+            timeout=request["timeout"],
+            headers=request["headers"],
+            observer=self.observe,
+        )
+        save(self.journal / "result.json", result)
 
     def _run_wire(self, directory, method, url, body, timeout, headers, errors):
         import subprocess
@@ -88,15 +119,30 @@ class NativeAdapter:
             stderr=errors,
         )
 
-    def request(self, method, url, body=None, *, timeout=30):
+    def request(self, method, url, body=None, *, timeout=30, direct=False):
         headers = {"fly-machine-lease-nonce": self.nonce} if self.nonce else {}
         need(method == "GET" or self.nonce, "native write without exclusive lease")
         need(0 < timeout <= 30, "native request budget outside original bound")
         need(
+            not direct or method == "GET" and threading.current_thread() is threading.main_thread(),
+            "direct native observation requires main-thread GET",
+        )
+        need(
             not self.nonce or time.monotonic() + timeout + 10 < self.lease_end,
             "native lease budget exhausted before operation",
         )
-        return self.wire(method, url, body, timeout=timeout, headers=headers)
+        return self.wire(method, url, body, timeout=timeout, headers=headers, direct=direct)
+
+    def observe_inactive(self, url, deadline):
+        remaining = deadline - time.monotonic()
+        need(remaining > 0, "inactive native version observation deadline")
+        if threading.current_thread() is not threading.main_thread():
+            return self.request("GET", url, timeout=min(10, remaining))
+        # A fresh interpreter per poll can consume the observation window before
+        # HTTP begins. Main-thread GETs use the same API and receipts directly;
+        # the alarm bounds startup, body reads, parsing, fsync and result reads.
+        with observation_window(deadline):
+            return self.request("GET", url, timeout=min(10, deadline - time.monotonic()), direct=True)
 
     @contextmanager
     def lease(self, mid):
@@ -117,6 +163,31 @@ class NativeAdapter:
             self.nonce = None
 
 
+@contextmanager
+def observation_window(deadline):
+    started = time.monotonic()
+    prior = signal.getitimer(signal.ITIMER_REAL)
+    handler = signal.getsignal(signal.SIGALRM)
+    need(prior[1] == 0, "periodic observation caller alarm refused")
+    end = min(deadline, started + prior[0]) if prior[0] else deadline
+    need(end > started, "inactive native observation deadline")
+
+    def expire(*args):
+        raise ObservationDeadline("inactive native observation deadline")
+
+    signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, end - started)
+    try:
+        yield
+        if time.monotonic() >= end:
+            raise ObservationDeadline("late inactive native observation")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, handler)
+        if prior[0]:
+            signal.setitimer(signal.ITIMER_REAL, max(0.000001, prior[0] - (time.monotonic() - started)))
+
+
 def wait_inactive(api, url, acknowledged):
     """Observe the exact inactive incarnation; /wait does not accept created."""
     deadline = time.monotonic() + 10
@@ -124,7 +195,8 @@ def wait_inactive(api, url, acknowledged):
     while True:
         remaining = deadline - time.monotonic()
         need(remaining > 0, "inactive native version observation deadline")
-        observed = api.request("GET", url, timeout=min(10, remaining))
+        observer = getattr(api, "observe_inactive", None)
+        observed = observer(url, deadline) if observer else api.request("GET", url, timeout=min(10, remaining))
         need(time.monotonic() <= deadline, "late inactive native version observation")
         if (
             observed.get("id") == acknowledged["id"]
