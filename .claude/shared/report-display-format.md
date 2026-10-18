@@ -124,6 +124,9 @@ checkpoint fields together; do not create competing URL aliases.
 
 This is the default for every future CLI benchmark run (cloud, local, eval,
 campaign and production-only), its progress updates and final report.
+Render it only with `scripts/run-bench scorecard <run-dir> --html <file>` and
+publish that file unchanged; the CLI applies every rule in this section from
+recorded artifacts. Hand-written or edited benchmark cards are non-compliant.
 
 - Lead with **QUEUED**, **IN_PROGRESS** and **COMPLETED** logical task counts.
   Keep `QUEUED + IN_PROGRESS + COMPLETED = scheduled total`. COMPLETED means a

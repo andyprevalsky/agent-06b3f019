@@ -15,6 +15,12 @@ if [[ "${1:-}" == "report-format" ]]; then
     benchmark_agent_instructions
     exit 0
 fi
+# The mandatory progress card, rendered only from recorded run artifacts and the
+# experiments ledger. Stdlib-only, so it also works from a scripts-only checkout.
+if [[ "${1:-}" == "scorecard" ]]; then
+    shift
+    exec python3 "$ROOT_DIR/scripts/cloudbench-scorecard.py" "$@"
+fi
 # Explicit app maintenance, before catalog, campaign, or fleet setup.
 if [[ "${1:-}" == stop-all ]]; then
     shift
@@ -225,6 +231,7 @@ usage() {
 Usage: scripts/run-bench <slice-or-task...> [options]
        scripts/run-bench stop-all --app APP --execute --out-dir NEW_PRIVATE_DIR
        scripts/run-bench report-format
+       scripts/run-bench scorecard <run-dir> [--html OUT] [--text] [--json] | --validate <card.html>
        scripts/run-bench monitor <exact-run-directory>
        scripts/run-bench image-build [--no-cache] [--builder native|depot]
        scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]
@@ -283,6 +290,8 @@ Startup reuse:
 Monitoring:
   Launches print the mandatory parent-agent card format and maintenance policy.
   report-format retrieves that same contract without starting services or tasks.
+  Every launch also prints its exact `scripts/run-bench scorecard <run-dir> --html <file>`
+  command. Publish that CLI-rendered card; hand-written cards are non-compliant.
   Every launch prints its exact monitoring handle. Poll every 30 seconds,
   checking terminal lifecycle on every observation, including stale cards.
   Controller status is separate from task PASS/FAIL; retain genuine task FAIL.

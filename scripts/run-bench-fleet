@@ -15266,6 +15266,9 @@ PY
             ec=1
         fi
     fi
+    if declare -F fleet_scorecard_report >/dev/null; then
+        if [ "$ec" = 0 ] || [ "$ec" = 1 ]; then fleet_scorecard_report end ENDED; else fleet_scorecard_report end FAILED; fi
+    fi
     if [ "$publication_failed" = "1" ]; then
         finalize_terminal_projection "$ec" || ec=1
     fi
@@ -15322,6 +15325,25 @@ printf '\n'
 printf '    owner: %s; private controller diagnostics stay in this run directory.\n' "$FLEET_OWNER_TOKEN"
 echo "    PASS/FAIL is the evaluated task result; lifecycle.json records final cleanup."
 echo "    On stale/missing observations, inspect exact owner liveness and private logs; do not restart."
+# Reporting aids only: the mandatory CLI scorecard command and one ledger line per
+# standalone launch (campaign children belong to their campaign). Never blocks.
+fleet_scorecard_report() {
+    [ -f "$ROOT_DIR/scripts/cloudbench-scorecard.py" ] || return 0
+    python3 "$ROOT_DIR/scripts/cloudbench-scorecard.py" --instruction "$FLEET_DIR" 2>/dev/null || true
+    [ -z "${RUN_BENCH_CAMPAIGN_CHILD:-}" ] && [ -z "${CLOUDBENCH_FAKE_DIR:-}" ] && [ -z "$PROVISION_POOL" ] || return 0
+    local goal="${RUN_BENCH_GOAL:-fleet:$(printf '%s\n' "${BENCHES[@]}" | sort -u | paste -sd, - | cut -c1-120)}"
+    local fields=(--field "kind=fleet" --field "run_dir=$FLEET_DIR")
+    if [ "$1" = launch ]; then
+        fields+=(--field "triggered_at=$(date +%s)" --field "scheduled_total=${#BENCHES[@]}" --field "tasks=${#BENCHES[@]}" --field "runs=1")
+        fields+=(--field "slice=${RUN_BENCH_EXPERIMENT_LABEL:-$(printf '%s' "${BENCHES[0]:-fleet}")$([ "${#BENCHES[@]}" -gt 1 ] && printf ' +%s' "$(( ${#BENCHES[@]} - 1 ))")}")
+    else
+        fields+=(--field "ended_at=$(date +%s)" --field "state=$2")
+    fi
+    CLOUDBENCH_EXPERIMENTS_LEDGER="${CLOUDBENCH_EXPERIMENTS_LEDGER:-$GIT_COMMON_DIR/cloudbench-experiments.jsonl}" \
+        python3 "$ROOT_DIR/scripts/cloudbench_experiments.py" record --event "$1" --id "$RUN_ID" \
+        --goal "$goal" "${fields[@]}" >/dev/null 2>&1 || true
+}
+fleet_scorecard_report launch
 reserve_cleanup_disk_space || {
     echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
     exit 1

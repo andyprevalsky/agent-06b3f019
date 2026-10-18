@@ -299,8 +299,27 @@ class Shard(unittest.TestCase):
     repo=Path(name);(repo/'agents').mkdir();shard=shard_fixture(self.tasks,**({}if threshold is None else dict(infra_threshold=threshold)))
     result,campaigns,children,identity=self.run_main(repo,shard,{},infra)
     self.assertEqual(result,expected_code);self.assertEqual((campaigns[0]/'ending').read_text(),ending)
-    status=json.loads(identity.with_suffix('.infra.json').read_bytes());self.assertEqual({k:status[k] for k in ('schema','infra_true','unique_jobs')},dict(schema='original600-shard-infra-v1',infra_true=infra,unique_jobs=9))
+    raw=identity.with_suffix('.infra.json').read_bytes();status=json.loads(raw);self.assertEqual({k:status[k] for k in ('schema','infra_true','unique_jobs')},dict(schema='original600-shard-infra-v1',infra_true=infra,unique_jobs=9))
+    progress=status['progress'];self.assertEqual((progress['jobs'],sum(c[3] for c in progress['combos'])),(9,9),'live scorecard counters cover every logical job')
+    self.assertLess(len(raw),16384,'the runner PROBE reads at most 16 KiB')
     self.assertEqual(identity.with_suffix('.infra.json').stat().st_mode&0o777,0o600);self.assertEqual(sorted(x.name for x in identity.parent.iterdir() if x.name.startswith('.original600')),[])
+ def test_progress_counters_are_bounded_and_read_each_terminal_card_once(self):
+  with tempfile.TemporaryDirectory()as name:
+   fleet=Path(name)/'fleet';(fleet/'_batch').mkdir(parents=True)
+   (fleet/'_batch/report-card.json').write_text(json.dumps(dict(per_task=[dict(name='t0',failure_reason='Timeout after 480s (backstop=480s) | Agent status: PAUSED 0b6f7c6e-1111-2222-3333-444455556666')])))
+   jobs=[dict(job_id=f'r001-j{i:04d}',task=f't{i}',status=s,task_status=v,infra_failure=f,attempts=[dict(attempt=1,status=s,finished_at='x',infra_failure=f)] if s in ('passed','failed') else [])
+         for i,(s,v,f) in enumerate([('failed','FAILED',False),('passed','PASSED',False),('running',None,None),('queued',None,None),('failed','INFRA_ERROR',True)])]
+   jobs[0]['fleet_dir']=str(fleet)
+   jobs+= [dict(job_id=f'r002-j{i:04d}',task='x',status='failed',task_status=f'S{i}',infra_failure=None,attempts=[]) for i in range(80)]
+   cache={};reads=[]
+   real=Path.read_bytes
+   def counted(path):reads.append(path.name);return real(path)
+   with patch.object(Path,'read_bytes',counted):
+    first=S['progress_counters'](dict(jobs=jobs),cache);second=S['progress_counters'](dict(jobs=jobs),cache)
+   self.assertEqual(first,second);self.assertEqual(reads.count('report-card.json'),1,'a terminal card is read once')
+   self.assertEqual(first['reasons'],[['AGENT FAIL','Timeout after 480s (backstop=480s)',1]])
+   self.assertEqual((first['terminal_attempts'],first['infra_attempts'],first['jobs']),(3,1,85))
+   self.assertEqual(len(first['combos']),S['PROGRESS_COMBOS']);self.assertLess(len(json.dumps(first)),16384)
  def test_shard_controls_and_inputs_refused_before_campaign_spawn(self):
   for environment in (dict(RUN_BENCH_CAMPAIGN_TASK_INDEXES='1,50'),dict(BENCHMARK_HUB_GROUP_RUN_ID='other'),dict(RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER='/tmp/elsewhere'),
                       dict(CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='0'),dict(REVIEWED_OPERATOR_SHARD_SHA256='0'*64)):
