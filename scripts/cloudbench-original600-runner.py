@@ -6,6 +6,14 @@ from pathlib import Path
 TASK_REF='c9875959893737ed352b6ccd08372faa94a4745d'
 TASK_NAMES_SHA='660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bcb0a8987f1b59f5'
 APP='navi-whisper-lux-bench'
+# One pinned warm donor dependency snapshot. Fly keeps volume snapshots for
+# their retention_days only: the operator preflight proves this exact ID still
+# exists, is complete, is the donor's recorded dependency proof and outlives the
+# whole run before any allocation. Rebind it only from a normal --refresh-deps.
+WARM_MACHINE_NAME='cloudbench-warm-t10-ord-85a7e2c'
+WARM_MACHINE_ID='8ed16dc75ee958'
+WARM_VOLUME_NAME='cloudbench_t10_ord_85a7e2c'
+WARM_SNAPSHOT_ID='vs_xA6B3617AO9TaeovZ3OKN42'
 class Deadline(BaseException):pass
 
 def need(v,m):
@@ -569,7 +577,7 @@ def run(config_path,config_sha,out,*,github_token=None):
  out=Path(out).absolute();out.mkdir(mode=0o700);need(out.resolve()==out,'physical new output')
  if v.get('host_operator_provenance'):save(out/'host-operator-provenance.json',v['host_operator_provenance'])
  auth=dict(authority_template,cleanup_owner_pid=os.getpid(),cleanup_owner_birth=birth(os.getpid()),output_directory=str(out/'export'));authority=out/'authority.private.json';save(authority,auth)
- fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME='cloudbench-warm-t10-ord-85a7e2c',CLOUDBENCH_WARM_VOLUME_NAME='cloudbench_t10_ord_85a7e2c',CLOUDBENCH_REGION='ord',CLOUDBENCH_FRESH_TARGET_REGION='iad',CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE='false',CLOUDBENCH_SNAPSHOT_ID='vs_xA6B3617AO9TaeovZ3OKN42',CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
+ fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME=WARM_MACHINE_NAME,CLOUDBENCH_WARM_VOLUME_NAME=WARM_VOLUME_NAME,CLOUDBENCH_REGION='ord',CLOUDBENCH_FRESH_TARGET_REGION='iad',CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE='false',CLOUDBENCH_SNAPSHOT_ID=WARM_SNAPSHOT_ID,CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
  remote_env=dict(v.get('remote_env',{}))
  need(remote_env.get('CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP',policy)==policy,'infrastructure early-stop policy differs')
  remote_env['CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP']=policy
@@ -579,7 +587,7 @@ def run(config_path,config_sha,out,*,github_token=None):
   need(re.fullmatch(r'\.git/cloudbench-[A-Za-z0-9_.-]+',item['relative_path']),'only bound benchmark Git metadata may be staged')
   data=read(item['source_path']);need(sha(data)==item['sha256'],'remote metadata source changed')
   files.append(encode_remote_file(item,data))
- snapshot_name='.git/cloudbench-warm-snapshot-inventory.cloudbench-warm-t10-ord-85a7e2c.json'
+ snapshot_name='.git/cloudbench-warm-snapshot-inventory.'+WARM_MACHINE_NAME+'.json'
  snapshot=next((i for i in files if i['relative_path']==snapshot_name),None);need(snapshot is not None,'authentic selected warm snapshot inventory required')
  remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']
  identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote_env=shard_env(remote_env,shard,identity_name)

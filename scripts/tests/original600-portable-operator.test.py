@@ -40,6 +40,46 @@ def private(path, value):
     return path
 
 
+def warm_fixture(now=None, listed=True, status='created', created_age=86400, retention=5, metadata_snapshot=None):
+    """Producer-shaped donor Machine, snapshot listing and the two operator inputs."""
+    now = time.time() if now is None else now
+    pin, machine_id, app = RUNNER['WARM_SNAPSHOT_ID'], RUNNER['WARM_MACHINE_ID'], RUNNER['APP']
+    epoch = int(now - created_age - 120)
+    proof = ['a'*64, 'b'*64, str(epoch), pin]
+    created = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - created_age))
+    row = dict(id=pin, size=16029535571, volume_size=42949672960, digest='c'*64, created_at=created,
+               status=status, retention_days=retention)
+    recorded = proof[:3] + [metadata_snapshot or pin, 'vol_fixture', machine_id, app]
+    machine = dict(id=machine_id, name=RUNNER['WARM_MACHINE_NAME'], state='stopped',
+                   config=dict(mounts=[dict(volume='vol_fixture', path='/data')],
+                               metadata={'rose_cloudbench_deps_fixture': ' '.join(recorded)}))
+    later = dict(row, id='vs_laterautomatic', size=407977)
+    return dict(machine=machine, snapshots=([row] if listed else []) + [later],
+                warm_deps=' '.join(proof) + '\n', inventory=[dict(row, status='created')])
+
+
+class FakeMachines:
+    """Records every Machines API request; serves only the two read-only GETs."""
+    def __init__(self, fixture):
+        self.fixture, self.requests = fixture, []
+
+    def __call__(self, app, token):
+        self.app = app
+        return self
+
+    def machine(self, machine_id):
+        self.requests.append(('GET', '/machines/' + machine_id))
+        if machine_id != self.fixture['machine']['id']:
+            raise AssertionError('unexpected donor read')
+        return json.loads(json.dumps(self.fixture['machine']))
+
+    def api(self, method, path, body=None, timeout=60, **unused):
+        self.requests.append((method, path))
+        if (method, path) != ('GET', '/volumes/vol_fixture/snapshots'):
+            raise AssertionError('preflight must stay read-only: ' + method + ' ' + path)
+        return json.loads(json.dumps(self.fixture['snapshots']))
+
+
 class Portable(unittest.TestCase):
     def large_sidecar(self, root):
         raw='\n'.join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(14000)).encode()
@@ -1605,7 +1645,31 @@ class Portable(unittest.TestCase):
                 server.server_close()
             self.assertFalse(thread.is_alive())
 
-    def test_public_check_is_path_independent_and_no_provider_or_state_creation(self):
+    def test_public_check_is_path_independent_read_only_and_creates_no_state(self):
+        now = time.time()
+        fixture = warm_fixture(now)
+        requests = []
+        class Machines(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append(('GET', self.path, self.headers.get('Authorization')))
+                base = '/v1/apps/' + RUNNER['APP']
+                body = {base + '/machines/' + RUNNER['WARM_MACHINE_ID']: fixture['machine'],
+                        base + '/volumes/vol_fixture/snapshots': fixture['snapshots']}.get(self.path)
+                raw = json.dumps(body).encode()
+                self.send_response(200 if body is not None else 404)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            def do_POST(self):
+                requests.append(('POST', self.path, None))
+                self.send_response(405)
+                self.end_headers()
+            def log_message(self, *unused):
+                pass
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Machines)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(timeout=5)))
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)/'checkout'
             (root/'scripts').mkdir(parents=True)
@@ -1635,18 +1699,37 @@ class Portable(unittest.TestCase):
                     '--state-dir', str(state)]
             tasks = json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())
             facts = dict(app='navi-whisper-lux-bench', image_ref='registry.fly.io/fixture@sha256:'+'a'*64,
-                         protected_machines=['m1', 'm2', 'm3', 'm4'], protected_volumes=['v1'])
+                         protected_machines=[RUNNER['WARM_MACHINE_ID'], 'm2', 'm3', 'm4'], protected_volumes=['v1'])
             for flag, data in [('facts', facts), ('agents-env', 'FLY_API_TOKEN=FlyV1 fixture\n'), ('backend-env', 'COMPLETE=fixture\nGITHUB_TOKEN=fixture_github\n'),
-                               ('tasks', tasks), ('snapshot-inventory', {}), ('warm-deps', 'fixture')]:
+                               ('tasks', tasks), ('snapshot-inventory', fixture['inventory']), ('warm-deps', fixture['warm_deps'])]:
                 args += ['--'+flag, str(private(inputs/flag, data))]
             gh=fakebin/'gh';gh.write_text('#!/bin/sh\nexit 1\n');gh.chmod(0o700)
             env = dict(os.environ, PATH=str(fakebin)+':'+os.environ['PATH'], PROVIDER_MARKER=str(marker),
-                       GIT_CONFIG_GLOBAL='/dev/null',GIT_CONFIG_NOSYSTEM='1')
+                       GIT_CONFIG_GLOBAL='/dev/null',GIT_CONFIG_NOSYSTEM='1',
+                       FLY_API_HOSTNAME='http://127.0.0.1:'+str(server.server_port))
             for key in ['GITHUB_TOKEN','GH_TOKEN','CLOUDBENCH_GITHUB_TOKEN_B64']:env.pop(key,None)
             result = subprocess.run(args, cwd='/', env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout)['status'], 'CHECKED_NOT_LAUNCHED')
-            self.assertEqual(json.loads(result.stdout)['infra_early_stop'], 'enabled')
+            check = json.loads(result.stdout)
+            self.assertEqual(check['status'], 'CHECKED_NOT_LAUNCHED')
+            self.assertEqual(check['infra_early_stop'], 'enabled')
+            self.assertEqual(check['provider_calls'], 2)
+            self.assertEqual(check['warm_snapshot']['snapshot_id'], RUNNER['WARM_SNAPSHOT_ID'])
+            self.assertGreater(check['warm_snapshot']['retention_after_deadline_s'], CLI.SNAPSHOT_RETENTION_MARGIN_S)
+            base = '/v1/apps/' + RUNNER['APP']
+            self.assertEqual(requests, [('GET', base+'/machines/'+RUNNER['WARM_MACHINE_ID'], 'FlyV1 fixture'),
+                                        ('GET', base+'/volumes/vol_fixture/snapshots', 'FlyV1 fixture')])
+            requests.clear()
+            # The original failure: Fly retention removed the pinned snapshot.
+            fixture.update(warm_fixture(now, listed=False))
+            expired = subprocess.run(args, cwd='/', env=env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(expired.returncode, 0)
+            self.assertIn('pinned warm snapshot ' + RUNNER['WARM_SNAPSHOT_ID'] + ' no longer exists', expired.stderr)
+            self.assertIn('--refresh-deps', expired.stderr)
+            self.assertNotIn('CHECKED_NOT_LAUNCHED', expired.stdout)
+            self.assertEqual([r[0] for r in requests], ['GET', 'GET'])
+            fixture.update(warm_fixture(now))
+            requests.clear()
             disabled = subprocess.run(args + ['--infra-early-stop', 'disabled'], cwd='/', env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(disabled.returncode, 0, disabled.stderr)
             self.assertEqual(json.loads(disabled.stdout)['infra_early_stop'], 'disabled')
@@ -1667,6 +1750,59 @@ class Portable(unittest.TestCase):
             refused = subprocess.run(args, cwd='/', env=env, capture_output=True, timeout=10)
             self.assertNotEqual(refused.returncode, 0)
             self.assertFalse(marker.exists())
+            # Disabled/invalid policy runs read twice each; local refusals read nothing.
+            self.assertEqual(len(requests), 2)
+            self.assertEqual(list(state.iterdir()), [])
+
+    def test_warm_snapshot_preflight_refuses_expired_or_unproven_pin_before_allocation(self):
+        now = time.time()
+        protected = [RUNNER['WARM_MACHINE_ID'], 'm2', 'm3', 'm4']
+        def run(fixture, warm_deps=None, inventory=None, machines=protected, deadline=now + 5400):
+            fly = FakeMachines(fixture)
+            call = lambda: CLI.warm_snapshot_preflight(
+                fly, 'FlyV1 fixture', RUNNER, (warm_deps or fixture['warm_deps']).encode(),
+                json.dumps(fixture['inventory'] if inventory is None else inventory).encode(), machines, deadline)
+            return fly, call
+        fly, call = run(warm_fixture(now))
+        receipt = call()
+        self.assertEqual((receipt['snapshot_id'], receipt['volume_id'], receipt['provider_calls']),
+                         (RUNNER['WARM_SNAPSHOT_ID'], 'vol_fixture', 2))
+        self.assertLess(abs(receipt['expires_epoch'] - (now + 4 * 86400)), 2)
+        self.assertEqual(receipt['retention_after_deadline_s'], int(receipt['expires_epoch'] - (now + 5400)))
+        self.assertEqual(fly.requests, [('GET', '/machines/'+RUNNER['WARM_MACHINE_ID']), ('GET', '/volumes/vol_fixture/snapshots')])
+        self.assertEqual(fly.app, RUNNER['APP'])
+        online = [
+            (warm_fixture(now, listed=False), 'no longer exists on donor volume vol_fixture'),
+            # Created 5 days minus 1 hour ago: expires inside the 5,400 s run.
+            (warm_fixture(now, created_age=5*86400 - 3600), 'expires .* before the run deadline'),
+            # Expires after the deadline but inside the clock-skew margin.
+            (warm_fixture(now, created_age=5*86400 - 5400 - 300), 'plus 600s'),
+            (warm_fixture(now, status='pending'), 'is not complete'),
+            (warm_fixture(now, retention=None), 'no measured retention'),
+            (warm_fixture(now, metadata_snapshot='vs_newerrefresh'), 'donor dependency proof names vs_newerrefresh'),
+        ]
+        for fixture, message in online:
+            fly, call = run(fixture)
+            with self.assertRaisesRegex(ValueError, message):
+                call()
+            self.assertTrue(all(method == 'GET' for method, _ in fly.requests))
+        fixture = warm_fixture(now)
+        fixture['machine']['config']['mounts'] = [dict(volume='vol_foreign', path='/data')]
+        fly, call = run(fixture)
+        with self.assertRaisesRegex(ValueError, 'donor dependency proof names none'):
+            call()
+        offline = [
+            (dict(warm_deps='a'*64 + ' ' + 'b'*64 + ' 1791903927 vs_otherpin\n'), '--warm-deps proves snapshot vs_otherpin'),
+            (dict(warm_deps='fixture'), 'not one producer dependency proof line'),
+            (dict(inventory=[]), '--snapshot-inventory does not contain one complete row'),
+            (dict(inventory=[dict(warm_fixture(now)['inventory'][0], status='pending')]), 'one complete row'),
+            (dict(machines=['m1', 'm2', 'm3', 'm4']), 'must remain a protected Machine'),
+        ]
+        for override, message in offline:
+            fly, call = run(warm_fixture(now), **override)
+            with self.assertRaisesRegex(ValueError, message):
+                call()
+            self.assertEqual(fly.requests, [], 'local input refusal must precede any provider read')
 
     def test_prepared_source_members_include_canonical_shell_pins_only(self):
         with tempfile.TemporaryDirectory() as name:

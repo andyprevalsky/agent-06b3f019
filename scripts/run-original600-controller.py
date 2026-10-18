@@ -402,6 +402,68 @@ def capacity_snapshot(api, token, org, directory, extra, summary=False):
                 new_controller_slots=1, requested_original_primary_slots=600)
 
 
+SNAPSHOT_COMPLETE = frozenset({'created', 'complete', 'completed', 'ready'})
+SNAPSHOT_RETENTION_MARGIN_S = 600
+
+
+def warm_snapshot_preflight(fly, token, runner, warm_deps_raw, inventory_raw, protected_machines, deadline_epoch):
+    """Read-only: the pinned donor snapshot must exist, be complete, remain the
+    donor's recorded dependency proof and outlive the run deadline. Two GETs."""
+    import datetime
+    pin, machine_id, app = runner['WARM_SNAPSHOT_ID'], runner['WARM_MACHINE_ID'], runner['APP']
+    refresh = ('refresh the donor through `scripts/run-bench-cloud --refresh-deps` and rebind '
+               'WARM_SNAPSHOT_ID with new --warm-deps/--snapshot-inventory inputs')
+    fields = warm_deps_raw.decode('ascii', 'replace').split()
+    if (len(fields) != 4 or not all(re.fullmatch('[0-9a-f]{64}', value) for value in fields[:2])
+            or not re.fullmatch('[1-9][0-9]*', fields[2])):
+        raise ValueError('--warm-deps is not one producer dependency proof line')
+    if fields[3] != pin:
+        raise ValueError(f'--warm-deps proves snapshot {fields[3]}, not the pinned {pin}')
+    rows = json.loads(inventory_raw)
+    rows = [r for r in rows if isinstance(r, dict) and r.get('id') == pin] if isinstance(rows, list) else []
+    if len(rows) != 1 or str(rows[0].get('status') or '').lower() not in SNAPSHOT_COMPLETE or int(rows[0].get('size') or 0) <= 0:
+        raise ValueError(f'--snapshot-inventory does not contain one complete row for the pinned {pin}')
+    if machine_id not in protected_machines:
+        raise ValueError('the pinned warm donor must remain a protected Machine')
+    api = fly(app, token)
+    machine = api.machine(machine_id)
+    mounts = (machine.get('config') or {}).get('mounts') or []
+    if machine.get('name') != runner['WARM_MACHINE_NAME'] or len(mounts) != 1 or not mounts[0].get('volume'):
+        raise ValueError('pinned warm donor identity or volume changed')
+    volume_id = mounts[0]['volume']
+    if not re.fullmatch('vol_[A-Za-z0-9]+', volume_id):
+        raise ValueError('pinned warm donor volume identity is invalid')
+    metadata = (machine.get('config') or {}).get('metadata') or {}
+    recorded = [value.split() for value in metadata.values() if isinstance(value, str)]
+    recorded = [value for value in recorded if len(value) == 7 and value[:2] == fields[:2] and value[4:] == [volume_id, machine_id, app]]
+    if [fields[2], pin] not in [value[2:4] for value in recorded]:
+        named = sorted({value[3] for value in recorded}) or ['none']
+        raise ValueError(f'donor dependency proof names {", ".join(named)}, not the pinned {pin}; {refresh}')
+    snapshots = api.api('GET', f'/volumes/{volume_id}/snapshots', timeout=20)
+    match = [s for s in snapshots if isinstance(s, dict) and s.get('id') == pin] if isinstance(snapshots, list) else None
+    if match is None:
+        raise ValueError('donor volume snapshot listing is not a list')
+    if len(match) != 1:
+        raise ValueError(f'pinned warm snapshot {pin} no longer exists on donor volume {volume_id} '
+                         f'(retention expired or deleted); {refresh}')
+    snapshot = match[0]
+    if str(snapshot.get('status') or '').lower() not in SNAPSHOT_COMPLETE or int(snapshot.get('size') or 0) <= 0:
+        raise ValueError(f'pinned warm snapshot {pin} is not complete (status {snapshot.get("status")!r})')
+    created = datetime.datetime.fromisoformat(str(snapshot.get('created_at') or '').replace('Z', '+00:00')).timestamp()
+    if created < int(fields[2]) - 60:
+        raise ValueError(f'pinned warm snapshot {pin} predates its dependency proof')
+    retention = snapshot.get('retention_days')
+    if type(retention) is not int or retention <= 0:
+        raise ValueError(f'pinned warm snapshot {pin} has no measured retention')
+    expires = created + retention * 86400
+    if expires < deadline_epoch + SNAPSHOT_RETENTION_MARGIN_S:
+        stamp = lambda value: datetime.datetime.fromtimestamp(value, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        raise ValueError(f'pinned warm snapshot {pin} expires {stamp(expires)}, before the run deadline '
+                         f'{stamp(deadline_epoch)} plus {SNAPSHOT_RETENTION_MARGIN_S}s; {refresh}')
+    return dict(snapshot_id=pin, volume_id=volume_id, created_at=snapshot['created_at'], retention_days=retention,
+                expires_epoch=expires, retention_after_deadline_s=int(expires - deadline_epoch), provider_calls=2)
+
+
 def admission_remaining(deadline):
     remaining = deadline - time.time()
     if not 0 < remaining <= 5400:
@@ -1817,8 +1879,14 @@ def main():
     if args.prepare_admission_request:
         preparation_plan(args, runner)
     bound = bound_launch_plan(args, runner) if args.resume_bound_launch else None
+    # Last local refusal precedes this; it is the first provider read for every mode.
+    warm = warm_snapshot_preflight(runpy.run_path(str(root/'scripts/cloudbench-original-volume-capture.py'))['Fly'],
+                                   token_from_agents(runner['read'](args.agents_env)), runner,
+                                   runner['read'](args.warm_deps), runner['read'](args.snapshot_inventory),
+                                   facts_from(runner['read'](args.facts))['protected_machines'], time.time() + 5400)
     if not args.run:
-        check = dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=0, infra_early_stop=args.infra_early_stop)
+        check = dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=warm.pop('provider_calls'),
+                     warm_snapshot=warm, infra_early_stop=args.infra_early_stop)
         plan = None if (args.archive_run or args.resume_admission) else shard_selection(args, runner)
         if plan is not None:
             check.update(controllers=plan['controllers'], copies=plan['copies'],
