@@ -143,12 +143,112 @@ def test_set_queue_metrics():
     assert "observed_task_capacity" not in snapshot
 
 
+def test_unobserved_queue_metrics_are_unknown_not_zero():
+    """A follower or a throttled observer must publish an unknown backlog, never 0.
+
+    A 0 backlog is a scale-down signal; publishing it for a queue nobody observed
+    lets dashboards and trace metadata report an idle queue that may be saturated.
+    """
+    from health_server import (
+        app,
+        get_queue_metrics_snapshot,
+        set_queue_metrics,
+        set_queue_observation,
+    )
+
+    set_queue_observation(None, None, desired_machines=8, current_machines=25)
+    text = app.test_client().get("/metrics").get_data(as_text=True)
+    assert "task_queue_backlog NaN" in text, text
+    assert "running_workflow_count NaN" in text, text
+    assert "task_queue_metrics_present 0" in text, text
+    assert "task_queue_metrics_age_seconds NaN" in text, text
+    assert "desired_machine_count 8" in text, text
+    snapshot = get_queue_metrics_snapshot()
+    assert "task_queue_backlog" not in snapshot, snapshot
+    assert "running_workflow_count" not in snapshot, snapshot
+
+    set_queue_observation(0, 3, desired_machines=8, current_machines=25, age_seconds=2.0, source="leader")
+    text = app.test_client().get("/metrics").get_data(as_text=True)
+    assert "task_queue_backlog 0" in text, text
+    assert "task_queue_metrics_present 1" in text, text
+    snapshot = get_queue_metrics_snapshot()
+    assert snapshot["task_queue_backlog"] == 0 and snapshot["running_workflow_count"] == 3, snapshot
+    assert snapshot["task_queue_metrics_source"] == "leader", snapshot
+    assert snapshot["task_queue_metrics_age_seconds"] >= 2.0, snapshot
+
+    set_queue_metrics(0, 0, 2, 1)
+
+
+def test_autoscaler_peer_view_reports_identity_liveness_and_local_readings():
+    """Peers elect the observing leader from this view; it must not need Temporal."""
+    import os
+
+    import health_server
+    from health_server import (
+        app,
+        set_autoscaler_role,
+        set_local_autoscaler_metrics,
+        set_queue_metrics,
+        set_queue_observation,
+    )
+
+    saved = os.environ.get("TEMPORAL_WORKER_SURFACE_HASH")
+    os.environ["TEMPORAL_WORKER_SURFACE_HASH"] = "gen-a"
+    try:
+        set_queue_observation(None, None, desired_machines=2, current_machines=1)
+        set_autoscaler_role("follower", leader_eligible=False, observes_queue=False)
+        view = app.test_client().get("/autoscaler/peer").get_json()
+        assert view["surface_hash"] == "gen-a", view
+        assert view["leader_eligible"] is False, view
+        assert view["queue"] is None, view
+
+        set_local_autoscaler_metrics(
+            machine_memory_used_percent=63.5,
+            activity_slots_used=4,
+            activity_slots_available=246,
+            activity_admission_open=False,
+            activity_admission_memory_percent=63.5,
+        )
+        set_autoscaler_role("leader", leader_eligible=True, observes_queue=True)
+        set_queue_observation(12, 30, desired_machines=10, current_machines=9)
+        view = app.test_client().get("/autoscaler/peer").get_json()
+        assert view["role"] == "leader" and view["leader_eligible"] is True, view
+        assert 0 <= view["heartbeat_age_seconds"] < 5, view
+        assert view["machine_memory_used_percent"] == 63.5, view
+        assert view["activity_admission_open"] is False and view["activity_slots_used"] == 4, view
+        assert view["queue"]["backlog"] == 12 and view["queue"]["workflow_count"] == 30, view
+        assert view["queue"]["desired_machines"] == 10 and view["queue"]["source"] == "self", view
+
+        # A mirrored (leader-sourced) observation is never re-advertised as this
+        # worker's own, so a stale copy cannot propagate down a follower chain.
+        set_queue_observation(12, 30, desired_machines=10, current_machines=9, source="leader")
+        assert app.test_client().get("/autoscaler/peer").get_json()["queue"] is None
+
+        metrics = app.test_client().get("/metrics").get_data(as_text=True)
+        assert "autoscaler_is_leader 1" in metrics, metrics
+        assert "autoscaler_observes_queue 1" in metrics, metrics
+        assert "autoscaler_leadership_known 1" in metrics, metrics
+        set_autoscaler_role("unknown", leader_eligible=True, observes_queue=True)
+        metrics = app.test_client().get("/metrics").get_data(as_text=True)
+        assert "autoscaler_is_leader 0" in metrics and "autoscaler_leadership_known 0" in metrics, metrics
+        assert health_server.get_queue_metrics_snapshot()["autoscaler_role"] == "unknown"
+    finally:
+        if saved is None:
+            os.environ.pop("TEMPORAL_WORKER_SURFACE_HASH", None)
+        else:
+            os.environ["TEMPORAL_WORKER_SURFACE_HASH"] = saved
+        set_autoscaler_role(None, leader_eligible=False, observes_queue=False)
+        set_queue_metrics(0, 0, 2, 1)
+
+
 async def run_all_tests():
     print("health-server blackbox tests:")
     r = BlackboxResult()
     r.record("health_endpoint", test_health_endpoint)
     r.record("metrics_endpoint", test_metrics_endpoint)
     r.record("set_queue_metrics", test_set_queue_metrics)
+    r.record("unobserved_queue_metrics_are_unknown", test_unobserved_queue_metrics_are_unknown_not_zero)
+    r.record("autoscaler_peer_view", test_autoscaler_peer_view_reports_identity_liveness_and_local_readings)
     teardown_mock()
     return r.summary()
 
