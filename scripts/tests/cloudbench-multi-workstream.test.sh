@@ -598,7 +598,7 @@ echo "PASS: volume teardown survives transient restore-time provider absence"
 registry_retirement_during_scan_contract() (
     local root registry meta signal owner_pid owner_start
     local registry_meta_source cleanup_state_source registry_alive_source
-    local reconcile_source race_error malformed_error
+    local reconcile_source reconcile_full_source race_error malformed_error
     root="$TMP_ROOT/registry-retirement-race"
     registry="$root/retiring-owner"
     meta="$registry/meta"
@@ -609,18 +609,25 @@ registry_retirement_during_scan_contract() (
     cleanup_state_source="$(fleet_production_function fleet_registry_cleanup_state)"
     registry_alive_source="$(fleet_production_function registry_owner_alive)"
     reconcile_source="$(fleet_production_function reconcile_stale_fleet_registries)"
+    # The cohort-aware entrypoint delegates an ordinary scan to the full
+    # reconciler; load both so the contract exercises the real scan.
+    reconcile_full_source="$(fleet_production_function reconcile_stale_fleet_registries_full)"
     [ -n "$registry_meta_source" ] && [ -n "$cleanup_state_source" ] \
         && [ -n "$registry_alive_source" ] \
-        && [ -n "$reconcile_source" ] \
+        && [ -n "$reconcile_source" ] && [ -n "$reconcile_full_source" ] \
         || fail "could not load the production fleet-registry reconciliation boundary"
     registry_meta_source="${registry_meta_source/registry_meta_value()/production_registry_meta_value()}"
     eval "$registry_meta_source"
     eval "$cleanup_state_source"
     eval "$registry_alive_source"
     eval "$reconcile_source"
+    eval "$reconcile_full_source"
 
     (
-        while [ ! -e "$signal" ]; do sleep 0.01; done
+        # Bounded: a scan that never reads the owner's host must fail this
+        # contract, not leave the suite waiting on an unsignalled owner.
+        owner_deadline=$((SECONDS + 60))
+        while [ ! -e "$signal" ] && [ "$SECONDS" -lt "$owner_deadline" ]; do sleep 0.01; done
         rm -rf "$registry"
     ) &
     owner_pid=$!
