@@ -2734,6 +2734,48 @@ def test_campaign_inventory_native_completion_evidence_preserves_eof_contract(tm
         assert protected.read_text() == 'UNCHANGED'
 
 
+@pytest.mark.parametrize('child', ['term-ignored', 'term-handled-then-blocked'])
+def test_campaign_inventory_timeout_reaps_native_child_that_survives_term(tmp_path, child):
+    """A deadline must not return while its native child survives TERM.
+
+    2026-10-18 shard-03: flyctl ssh console/sftp children (PIDs 755, 4721,
+    18956) outlived their 20-second wrapper by more than 40 minutes with ppid 1.
+    TERM to the wrapper subshell reparented them before the KILL escalation.
+    """
+    source = producer_source(ROOT)
+    start = source.index('fly_with_timeout() {')
+    function = source[start:source.index('\n}\n', start)+3]
+    pidfile = tmp_path/'native.pid'
+    body = {
+        'term-ignored': 'trap "" TERM; echo $$ > "$1"; exec sleep 30',
+        # Like flyctl: TERM cancels a context, but a blocked session read never observes it.
+        'term-handled-then-blocked': 'trap "echo cancelled >&2" TERM; echo $$ > "$1"; while :; do sleep 0.2; done',
+    }[child]
+    script = ('set -u\n'+function+'\n'
+              + 'FLY() { bash -c '+shlex.quote(body)+' native '+shlex.quote(str(pidfile))+'; }\n'
+              + 'fly_with_timeout 1 ssh console -a fixture --machine worker -C true\n')
+    started = time.monotonic()
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    elapsed = time.monotonic() - started
+    native_pid = int(pidfile.read_text())
+    try:
+        alive = True
+        try:
+            state = Path('/proc', str(native_pid), 'stat').read_text().rsplit(') ', 1)[1].split()[0]
+            alive = state not in ('Z', 'X')
+        except FileNotFoundError:
+            alive = False
+        assert not alive, 'native child outlived its fly_with_timeout deadline'
+        assert result.returncode == 142, result.stderr
+        assert 'FLY_COMPLETION_TIMEOUT' in result.stderr
+        assert elapsed < 10, elapsed
+    finally:
+        try:
+            os.kill(native_pid, 9)
+        except ProcessLookupError:
+            pass
+
+
 def test_campaign_inventory_completion_evidence_preserves_fly_noclobber_for_exit(tmp_path):
     source = producer_source(ROOT)
     start = source.index('fly_with_timeout() {')

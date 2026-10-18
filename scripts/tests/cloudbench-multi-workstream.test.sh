@@ -1914,6 +1914,8 @@ elif args[:2] == ["ssh", "console"]:
         sys.exit(result.returncode)
     elif "http://127.0.0.1:3103/health" in command:
         if not os.path.exists(os.path.join(mdir, "worker.ready")):
+            # The real probe's remote shell reports its own negative verdict.
+            print("cloudbench-worker-health=unhealthy")
             sys.exit(1)
     elif "setsid bash" in command and "rb.sh" in command:
         # Detached driver launch: run the fake driver contract in the background.

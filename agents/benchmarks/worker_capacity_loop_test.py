@@ -416,3 +416,132 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
         )
     )
     assert receipt["passed"] == receipt["total"], receipt["cases"]
+
+
+FINAL_HEALTH_TRANSPORT_ERROR = (
+    'Error: tunnel unavailable: Error contacting Fly.io API when probing "personal": '
+    "timed out (context deadline exceeded)"
+)
+
+
+def test_autoscaler_runtime_handoff_capacity_final_health_separates_transport_from_worker_death(tmp_path):
+    """A failed controller SSH transport is not evidence that the worker died.
+
+    2026-10-18 shard-03 r001-j0068: the final-acceptance probe of worker
+    827446c7710178 failed inside the controller's Fly agent tunnel
+    ("tunnel unavailable ... probing personal") before reaching the worker, and
+    the fleet reported "worker became unhealthy before final acceptance". The
+    real probe command runs through a POSIX shell-word split (as hallpass
+    does) against fake pgrep/curl, so its remote verdict text is exercised.
+    """
+    from benchmarks.cloudbench_dependency_sync_test import _extract_fleet_function, fleet_source_text
+
+    fleet = fleet_source_text()
+    # The complete production worker-health block, including any helpers it
+    # defines between the probe and the ready-worker aggregation.
+    start = fleet.index("worker_operational() {")
+    end_function = _extract_fleet_function(fleet, "ready_workers_operational() {")
+    end = fleet.index(end_function) + len(end_function)
+    subject = tmp_path / "subject.sh"
+    subject.write_text(fleet[start:end] + "\n")
+    remote_bin = tmp_path / "remote-bin"
+    remote_bin.mkdir()
+    for tool, body in {
+        "pgrep": '#!/bin/sh\n[ "$*" = "-f python [w]orker.py" ] && [ -e "$REMOTE/$MACHINE.process" ]\n',
+        "curl": '#!/bin/sh\ncase "$*" in *"http://127.0.0.1:3103/health"*) ;; *) exit 2 ;; esac\n[ -e "$REMOTE/$MACHINE.health" ] || exit 22\n',
+    }.items():
+        (remote_bin / tool).write_text(body)
+        (remote_bin / tool).chmod(0o755)
+    harness = r"""set -uo pipefail
+source "$1"
+CASE="$2"
+OUT="$CASE/bench"
+APP=fixture-app
+FLEET_WORKER_HEALTH_PORT=3103
+CLOUDBENCH_FINAL_WORKER_HEALTH_RETRY_SECONDS=0
+fly_with_timeout() {
+    shift
+    local cmd="" prev="" arg machine="" mode calls
+    for arg in "$@"; do
+        [ "$prev" = -C ] && cmd="$arg"
+        [ "$prev" = --machine ] && machine="$arg"
+        prev="$arg"
+    done
+    printf '%s\n' "$machine" >> "$CASE/fly.calls"
+    calls="$(grep -cx "$machine" "$CASE/fly.calls")"
+    mode="$(sed -n "${calls}p" "$CASE/$machine.transport")"
+    [ -n "$mode" ] || mode="$(tail -1 "$CASE/$machine.transport")"
+    case "$mode" in
+        fail) echo "$TRANSPORT_ERROR"; return 1 ;;
+        hang) echo "[warn] FLY_COMPLETION_TIMEOUT shell_pid=1 shell_start_ticks=1 fly_return_status=unknown fifo_read_status=142"; return 142 ;;
+    esac
+    MACHINE="$machine" REMOTE="$CASE/remote" PATH="$REMOTE_BIN:$PATH" python3 -c 'import shlex,subprocess,sys; sys.exit(subprocess.run(shlex.split(sys.argv[1])).returncode)' "$cmd"
+}
+rc=0
+ready_workers_operational "$OUT" > "$CASE/stdout" 2> "$CASE/stderr" || rc=$?
+printf '%s\n' "$rc" > "$CASE/rc"
+"""
+    (tmp_path / "harness.sh").write_text(harness)
+    cases = {
+        # mode: ({machine: (transport schedule, process alive, health 200)}, expected rc)
+        "healthy": ({"827446c7710178": (["ok"], True, True)}, 0),
+        "transport-then-healthy": ({"827446c7710178": (["fail", "ok"], True, True)}, 0),
+        "timeout-then-healthy": ({"827446c7710178": (["hang", "ok"], True, True)}, 0),
+        "remote-process-missing": ({"827446c7710178": (["ok"], False, True)}, 1),
+        "remote-health-503": ({"827446c7710178": (["ok"], True, False)}, 1),
+        "transport-persistent": ({"827446c7710178": (["fail"], True, True)}, 75),
+        "remote-unhealthy-beats-transport": (
+            {"827446c7710178": (["fail"], True, True), "83dd001f7040e8": (["ok"], False, False)}, 1),
+    }
+    expected_calls = {
+        "healthy": {"827446c7710178": 1},
+        "transport-then-healthy": {"827446c7710178": 2},
+        "timeout-then-healthy": {"827446c7710178": 2},
+        "remote-process-missing": {"827446c7710178": 1},
+        "remote-health-503": {"827446c7710178": 1},
+        "transport-persistent": {"827446c7710178": 3},
+        "remote-unhealthy-beats-transport": {"827446c7710178": 3, "83dd001f7040e8": 1},
+    }
+    observed = {}
+    for mode, (machines, _expected) in cases.items():
+        case = tmp_path / mode
+        (case / "bench").mkdir(parents=True)
+        (case / "remote").mkdir()
+        (case / "bench/worker-ready.ids").write_text("".join(m + "\n" for m in machines))
+        for machine, (schedule, process, health) in machines.items():
+            (case / f"{machine}.transport").write_text("".join(s + "\n" for s in schedule))
+            if process:
+                (case / "remote" / f"{machine}.process").write_text("")
+            if health:
+                (case / "remote" / f"{machine}.health").write_text("")
+        env = dict(os.environ, REMOTE_BIN=str(remote_bin), TRANSPORT_ERROR=FINAL_HEALTH_TRANSPORT_ERROR)
+        env.pop("CLOUDBENCH_FINAL_WORKER_HEALTH_ATTEMPTS", None)
+        subprocess.run(["bash", str(tmp_path / "harness.sh"), str(subject), str(case)],
+                       env=env, check=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+        calls = (case / "fly.calls").read_text().split() if (case / "fly.calls").exists() else []
+        observed[mode] = (int((case / "rc").read_text()), {m: calls.count(m) for m in machines})
+    assert observed == {mode: (rc, expected_calls[mode]) for mode, (_machines, rc) in cases.items()}
+
+    # Final acceptance reports the observed class, preserving the raw transport
+    # output privately instead of discarding it.
+    acceptance = _extract_fleet_function(fleet, "mandatory_worker_health_acceptable() {")
+    for mode, message in {
+        "remote-health-503": "mandatory autoscaler worker became unhealthy before final acceptance",
+        "transport-persistent": "mandatory autoscaler worker health unobservable before final acceptance",
+    }.items():
+        case = tmp_path / mode
+        (case / "fly.calls").unlink()
+        (case / "bench/worker-827446c7710178.health.log").unlink()
+        script = (harness.replace('ready_workers_operational "$OUT"', 'mandatory_worker_health_acceptable "$OUT" fixture-bench')
+                  + "\n" + acceptance + "\n")
+        (tmp_path / "acceptance.sh").write_text(script.replace('source "$1"\n', 'source "$1"\n' + acceptance + "\n", 1))
+        subprocess.run(["bash", str(tmp_path / "acceptance.sh"), str(subject), str(case)],
+                       env=dict(os.environ, REMOTE_BIN=str(remote_bin), TRANSPORT_ERROR=FINAL_HEALTH_TRANSPORT_ERROR),
+                       check=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert (case / "rc").read_text().strip() == "1"
+        stderr = (case / "stderr").read_text()
+        assert message in stderr, stderr
+        assert ("became unhealthy" in stderr) == (mode == "remote-health-503"), stderr
+        log = (case / "bench/worker-827446c7710178.health.log").read_text()
+        if mode == "transport-persistent":
+            assert log.count("tunnel unavailable") == 3, log

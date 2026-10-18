@@ -125,15 +125,29 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
         # invalid/read-error statuses must never fall through to an unbounded
         # successful wait. A shell job check avoids signalling a reused PID if
         # an unsupported detached descendant retained a FIFO descriptor.
+        # Signal the native children first and keep their wrapper shell alive:
+        # while it runs, `-P "$pid"` still names exactly this invocation's
+        # children. Terminating the wrapper first reparents a TERM-surviving
+        # flyctl to init, where the KILL escalation can no longer reach it.
         running="$(jobs -pr)"
         if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
             pkill -TERM -P "$pid" 2>/dev/null || true
-            kill -TERM "$pid" 2>/dev/null || true
-            sleep 2
-            running="$(jobs -pr)"
+            local grace
+            for grace in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                running="$(jobs -pr)"
+                [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]] || break
+                sleep 0.1
+            done
             if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
                 pkill -KILL -P "$pid" 2>/dev/null || true
-                kill -KILL "$pid" 2>/dev/null || true
+                for grace in 1 2 3 4 5 6 7 8 9 10; do
+                    running="$(jobs -pr)"
+                    [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]] || break
+                    sleep 0.1
+                done
+                if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
+                    kill -KILL "$pid" 2>/dev/null || true
+                fi
             fi
         fi
         wait "$pid" 2>/dev/null || true
