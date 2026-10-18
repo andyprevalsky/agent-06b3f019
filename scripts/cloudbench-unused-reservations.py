@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import stat
 import runpy
 import tarfile
 import time
@@ -16,6 +17,8 @@ HERE = Path(__file__).resolve().parent
 H = runpy.run_path(str(HERE / "cloudbench-archived-machine-reuse.py"))
 CLOSED = runpy.run_path(str(HERE / "cloudbench-archived-owner-stop.py"))
 need, canonical, config_sha = (H[key] for key in ("need", "canonical", "config_sha"))
+
+
 @cache
 def recovered_reader():
     return runpy.run_path(str(HERE / "cloudbench-recovered-reservations.py"))
@@ -31,8 +34,7 @@ def request_for_closed(outer, closed, config, closure, inputs):
     need(isinstance(provenance, dict), "invalid closed host provenance")
     failure = provenance.get("prelaunch_failure")
     workspace_successor = (
-        isinstance(failure, dict)
-        and failure.get("stage") == "CANONICAL_WORKSPACE_RELEASED_AFTER_UNKNOWN_CREATE"
+        isinstance(failure, dict) and failure.get("stage") == "CANONICAL_WORKSPACE_RELEASED_AFTER_UNKNOWN_CREATE"
     )
     if "incomplete_admission" in provenance or workspace_successor:
         context = recovered_reader()["load"](outer, closed, config, closure, inputs)
@@ -40,9 +42,7 @@ def request_for_closed(outer, closed, config, closure, inputs):
     return obj(outer / "archived-reuse-request.private.json", inputs), None
 
 
-def validate_reserved(
-    outer, original, reserved, current, cohort, harness_ref, inputs, context=None
-):
+def validate_reserved(outer, original, reserved, current, cohort, harness_ref, inputs, context=None):
     if context is not None:
         return recovered_reader()["validate"](context, original, reserved, current, inputs)
     return validate_candidate(outer, original, reserved, current, cohort, harness_ref, inputs)
@@ -108,22 +108,15 @@ def closed_run(outer, inputs):
             )
             current = obj(current_path, inputs)
             current_output = Path(evidence["successor_output"])
-            recovered_reader()["recovered_launch"](
-                outer, current_output, current, inputs
-            )
+            recovered_reader()["recovered_launch"](outer, current_output, current, inputs)
             need(
-                obj(current_output / "host-operator-provenance.json", inputs)
-                == current["host_operator_provenance"],
+                obj(current_output / "host-operator-provenance.json", inputs) == current["host_operator_provenance"],
                 "closed workspace successor provenance differs",
             )
             return current_output, current
         recorded_failure = Path(evidence["path"])
-        if recorded_failure.is_absolute() and recorded_failure.is_relative_to(
-            original_config.parent.parent
-        ):
-            relative_failure = recorded_failure.relative_to(
-                original_config.parent.parent
-            )
+        if recorded_failure.is_absolute() and recorded_failure.is_relative_to(original_config.parent.parent):
+            relative_failure = recorded_failure.relative_to(original_config.parent.parent)
             need(".." not in relative_failure.parts, "unsafe failure path")
             raw = read(outer / relative_failure, inputs)
         else:
@@ -149,14 +142,18 @@ def closed_run(outer, inputs):
             and recorded_failure == output / "launch-payload-failure.json"
         )
         need(
-            typed_refusal or ((legacy or payload_refusal)
-            and failure.get("tool_reported_exit_code") == 1 and (
-                payload_refusal
-                or (
-                    failure.get("log_contains_synchronous_popen_errno") == 7
-                    and failure.get("gate_pid") == "NOT_CREATED_BY_FAILED_POPEN"
+            typed_refusal
+            or (
+                (legacy or payload_refusal)
+                and failure.get("tool_reported_exit_code") == 1
+                and (
+                    payload_refusal
+                    or (
+                        failure.get("log_contains_synchronous_popen_errno") == 7
+                        and failure.get("gate_pid") == "NOT_CREATED_BY_FAILED_POPEN"
+                    )
                 )
-            )),
+            ),
             "unproven pre-exec successor",
         )
         prefix = "run-after-popen-" if legacy else "run-after-prelaunch-"
@@ -193,9 +190,7 @@ def closed_run(outer, inputs):
     return local_output, json.loads(read(local_config, inputs))
 
 
-INVENTORY_PRODUCER_SHA256 = (
-    "f8c22753a9498de5cd9e6c01f672556f8ee3caf6ea13415dd49b73bac8b03163"
-)
+INVENTORY_PRODUCER_SHA256 = "f8c22753a9498de5cd9e6c01f672556f8ee3caf6ea13415dd49b73bac8b03163"
 
 
 def inventory_pointer_members(manifest, config):
@@ -204,31 +199,26 @@ def inventory_pointer_members(manifest, config):
     pointers, generations = {}, set()
     for name, entry in files.items():
         if (
-            not re.fullmatch(
-                r"context/fleet/runs/[0-9]{8}-[0-9]{6}-[0-9]+/inventory/current", name
-            )
+            not re.fullmatch(r"context/fleet/runs/[0-9]{8}-[0-9]{6}-[0-9]+/inventory/current", name)
             or entry.get("kind") != "symlink"
         ):
             continue
         target = entry.get("target")
         need(
-            isinstance(target, str)
-            and re.fullmatch(r"[.]generation-[A-Za-z0-9._-]+", target),
+            isinstance(target, str) and re.fullmatch(r"[.]generation-[A-Za-z0-9._-]+", target),
             "unsafe inventory generation pointer",
         )
         parent = str(Path(name).parent)
         generation = parent + "/" + target
         need(
-            files.get(parent) == {"kind": "directory"}
-            and files.get(generation) == {"kind": "directory"},
+            files.get(parent) == {"kind": "directory"} and files.get(generation) == {"kind": "directory"},
             "inventory pointer target is not a physical directory",
         )
         source = files.get("source/scripts/cloudbench-machine-readiness.py", {})
         need(
             source.get("kind") == "file"
             and source.get("sha256") == INVENTORY_PRODUCER_SHA256
-            and config.get("source_files", {}).get("cloudbench-machine-readiness.py")
-            == INVENTORY_PRODUCER_SHA256,
+            and config.get("source_files", {}).get("cloudbench-machine-readiness.py") == INVENTORY_PRODUCER_SHA256,
             "unknown inventory pointer producer",
         )
         required = {
@@ -240,10 +230,7 @@ def inventory_pointer_members(manifest, config):
             generation + "/admission-machines.json": "file",
         }
         need(
-            all(
-                files.get(path, {}).get("kind") == kind
-                for path, kind in required.items()
-            ),
+            all(files.get(path, {}).get("kind") == kind for path, kind in required.items()),
             "incomplete inventory generation",
         )
         for path, value in files.items():
@@ -265,14 +252,69 @@ def inventory_pointer_members(manifest, config):
     return pointers, generations
 
 
+RESERVE_COLLECTOR_SHA256 = "ff7681d3eefde5df2c678cb0f900b66cb2427cf39180c0ed9a5c28e7dd721c1b"
+
+
+def excluded_cleanup_reserves(manifest, config):
+    excluded = manifest.get("excluded", {})
+    need(isinstance(excluded, dict), "invalid archive exclusions")
+    if not excluded:
+        return {}
+    record, files = manifest["record"], manifest["files"]
+    common = record.get("common_git")
+    need(
+        isinstance(common, str) and Path(common).is_absolute() and ".." not in Path(common).parts,
+        "invalid reserve source root",
+    )
+    anchor = record.get("root_anchors", {}).get(common, {})
+    source = files.get("source/scripts/cloudbench-controller-export.py", {})
+    need(
+        record.get("collector_sha256") == RESERVE_COLLECTOR_SHA256
+        and config.get("source_files", {}).get("cloudbench-controller-export.py") == RESERVE_COLLECTOR_SHA256
+        and source.get("kind") == "file"
+        and source.get("sha256") == RESERVE_COLLECTOR_SHA256,
+        "unknown cleanup reserve collector",
+    )
+    for name, value in excluded.items():
+        need(
+            re.fullmatch(r"git-common/cloudbench-fleet-ownership/[0-9a-f]{32}/cleanup-disk-reserve", name)
+            and set(value) == {"source_path", "stat", "reason"}
+            and value["reason"] == "physical cleanup reserve; payload never read"
+            and value["source_path"] == str(Path(common).joinpath(*Path(name).parts[1:]))
+            and name not in files,
+            "foreign archive exclusion",
+        )
+        metadata = value["stat"]
+        need(
+            isinstance(metadata, dict)
+            and set(metadata)
+            == {"allocated_bytes", "bytes", "device", "gid", "inode", "mode", "mtime_ns", "nlink", "uid"}
+            and all(type(v) is int and v >= 0 for v in metadata.values())
+            and metadata["inode"] > 0
+            and stat.S_ISREG(metadata["mode"])
+            and not metadata["mode"] & 0o077
+            and metadata["nlink"] == 1
+            and metadata["uid"] == anchor.get("uid")
+            and metadata["gid"] == anchor.get("gid"),
+            "unsafe cleanup reserve metadata",
+        )
+        need(
+            all(
+                files.get(str(parent)) == {"kind": "directory"}
+                for parent in Path(name).parents
+                if str(parent) not in (".", "git-common")
+            ),
+            "cleanup reserve parent is not physical",
+        )
+    return excluded
+
+
 def archive_members(run, closure, request, config, inputs):
     """The full verified archive is the closed world for allocation absence."""
     manifest = archive_manifest(run, inputs)
-    need(not manifest.get("excluded"), "archive exclusions cannot prove claim absence")
+    reserve_exclusions = excluded_cleanup_reserves(manifest, config)
     imported = "git-common/cloudbench-archived-reuse-" + request["cohort"] + ".json"
-    inventory_pointers, inventory_generations = inventory_pointer_members(
-        manifest, config
-    )
+    inventory_pointers, inventory_generations = inventory_pointer_members(manifest, config)
     inventory_parents = {str(Path(name).parent) for name in inventory_pointers}
     seen, claimed, imported_raw = set(), {}, None
 
@@ -287,9 +329,7 @@ def archive_members(run, closure, request, config, inputs):
         for member in archive:
             name = member.name
             need(
-                name not in seen
-                and not name.startswith("/")
-                and ".." not in Path(name).parts,
+                name not in seen and not name.startswith("/") and ".." not in Path(name).parts,
                 "unsafe archive membership",
             )
             seen.add(name)
@@ -306,21 +346,17 @@ def archive_members(run, closure, request, config, inputs):
                 )
                 continue  # Do not dereference/extract/cache-credit this pointer.
             inventory_member = name in inventory_parents or any(
-                name == root or name.startswith(root + "/")
-                for root in inventory_generations
+                name == root or name.startswith(root + "/") for root in inventory_generations
             )
             producer_member = (
-                bool(inventory_pointers)
-                and name == "source/scripts/cloudbench-machine-readiness.py"
-            )
+                bool(inventory_pointers) and name == "source/scripts/cloudbench-machine-readiness.py"
+            ) or (bool(reserve_exclusions) and name == "source/scripts/cloudbench-controller-export.py")
             if inventory_member or producer_member:
                 if expected.get("kind") == "directory":
                     need(member.isdir(), "inventory directory is not physical")
                 else:
                     need(
-                        member.isfile()
-                        and expected.get("kind") == "file"
-                        and member.size == expected["bytes"],
+                        member.isfile() and expected.get("kind") == "file" and member.size == expected["bytes"],
                         "inventory member is not a physical file",
                     )
                     stream = archive.extractfile(member)
@@ -330,8 +366,7 @@ def archive_members(run, closure, request, config, inputs):
                         total += len(block)
                         digest_value.update(block)
                     need(
-                        total == member.size
-                        and digest_value.hexdigest() == expected["sha256"],
+                        total == member.size and digest_value.hexdigest() == expected["sha256"],
                         "inventory member bytes differ",
                     )
             # Any alias under task/claim roots makes a missing record ambiguous.
@@ -352,9 +387,7 @@ def archive_members(run, closure, request, config, inputs):
                 for part in Path(name).parts:
                     if re.fullmatch("[0-9a-f]{14}", part):
                         hold(part, name, expected)
-            current_claim = name.startswith(
-                "git-common/cloudbench-archived-reuse/current/"
-            )
+            current_claim = name.startswith("git-common/cloudbench-archived-reuse/current/")
             if current_claim and re.fullmatch("[0-9a-f]{14}", Path(name).stem):
                 hold(Path(name).stem, name, expected)
             sensitive = (
@@ -362,9 +395,7 @@ def archive_members(run, closure, request, config, inputs):
                 or name == imported
                 or "/archived-reuse/" in name
                 or "/archived-reuse-journal/" in name
-                or name.endswith(
-                    ("/.cid", "/archived-reuse-proof.json", "/archived-successor.json")
-                )
+                or name.endswith(("/.cid", "/archived-reuse-proof.json", "/archived-successor.json"))
             )
             if not sensitive or member.isdir():
                 continue
@@ -401,14 +432,25 @@ def archive_members(run, closure, request, config, inputs):
                         hold(request["candidates"][index]["machine_id"], name, expected)
     need(seen == set(manifest["files"]), "incomplete closed-world archive")
     if inventory_pointers:
-        closure["inventory_pointer_proof"] = dict(schema="cloudbench-archived-inventory-pointer-v1", pointers=inventory_pointers,
-            producer_sha256=INVENTORY_PRODUCER_SHA256, followed=False, capacity_credit=0, claim_credit=0)
+        closure["inventory_pointer_proof"] = dict(
+            schema="cloudbench-archived-inventory-pointer-v1",
+            pointers=inventory_pointers,
+            producer_sha256=INVENTORY_PRODUCER_SHA256,
+            followed=False,
+            capacity_credit=0,
+            claim_credit=0,
+        )
+    if reserve_exclusions:
+        closure["cleanup_reserve_exclusions"] = dict(
+            schema="canonical-cleanup-reserve-exclusions-v1",
+            excluded=reserve_exclusions,
+            collector_sha256=RESERVE_COLLECTOR_SHA256,
+            payload_read=False,
+            capacity_credit=0,
+            claim_credit=0,
+        )
     custody = "ARCHIVED_IMPORT"
-    expected_file = [
-        row
-        for row in config["remote_files"]
-        if row["relative_path"] == ".git/" + Path(imported).name
-    ]
+    expected_file = [row for row in config["remote_files"] if row["relative_path"] == ".git/" + Path(imported).name]
     if imported_raw is None:
         startup = closure.get("startup_closure", {})
         need(
@@ -428,8 +470,7 @@ def archive_members(run, closure, request, config, inputs):
             recorded_config.parent.name == run.parent.name
             and recorded_config.name == "config.private.json"
             and len(expected_file) == 1
-            and expected_file[0]["source_path"]
-            == str(recorded_config.parent / "archived-reuse-request.private.json")
+            and expected_file[0]["source_path"] == str(recorded_config.parent / "archived-reuse-request.private.json")
             and config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST"]
             == "/tmp/gate/repo/" + expected_file[0]["relative_path"],
             "startup host reservation path differs",
@@ -447,12 +488,10 @@ def archive_members(run, closure, request, config, inputs):
     need(
         len(expected_file) == 1
         and expected_file[0]["sha256"] == digest(imported_raw)
-        and config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"]
-        == digest(imported_raw),
+        and config["remote_env"]["CLOUDBENCH_ARCHIVED_REUSE_REQUEST_SHA256"] == digest(imported_raw),
         "controller reservation input hash differs",
     )
     return claimed, digest(imported_raw), custody
-
 
 
 def wire_records(directory, mid, inputs):
@@ -618,9 +657,7 @@ def normal_hold_partition(outer, original, request, inputs):
     failed = request.get("held_native_reservations", [])
     ids = [row["machine_id"] for row in failed]
     need(
-        len(ids) == len(set(ids))
-        and not selected.intersection(ids)
-        and set(initial) == selected | set(ids),
+        len(ids) == len(set(ids)) and not selected.intersection(ids) and set(initial) == selected | set(ids),
         "normal reservation held partition differs",
     )
     held = []
@@ -663,14 +700,12 @@ def normal_hold_partition(outer, original, request, inputs):
             and scope["archive_sha256"] not in seen
             and scope.get("reuse_credit") is False
             and len(ids) == len(set(ids))
-            and all(
-                isinstance(mid, str) and re.fullmatch("[0-9a-f]{14}", mid)
-                for mid in ids
-            ),
+            and all(isinstance(mid, str) and re.fullmatch("[0-9a-f]{14}", mid) for mid in ids),
             "invalid inherited normal hold scope",
         )
         seen.add(scope["archive_sha256"])
     return held, inherited
+
 
 def released_workspace_request(outer, closed, config, inputs):
     """A closed unstarted admission has no controller archive to invent."""
@@ -727,18 +762,13 @@ def released_workspace_request(outer, closed, config, inputs):
         "unstarted release differs",
     )
     need(
-        authority["source_ref"]
-        == caller["source_ref"]
-        == workspace["source_ref"]
-        == config["source_ref"]
+        authority["source_ref"] == caller["source_ref"] == workspace["source_ref"] == config["source_ref"]
         and caller["authority_sha256"] == authority_sha
         and caller["epoch"] == epoch
         and caller["deadline"] == epoch + 5400
         and authority["output_directory"] == str(closed / "export")
-        and (authority["cleanup_owner_pid"], authority["cleanup_owner_birth"])
-        == (caller["pid"], caller["birth"])
-        and (gate_caller["pid"], gate_caller["birth"])
-        == (caller["gate_pid"], caller["gate_birth"])
+        and (authority["cleanup_owner_pid"], authority["cleanup_owner_birth"]) == (caller["pid"], caller["birth"])
+        and (gate_caller["pid"], gate_caller["birth"]) == (caller["gate_pid"], caller["gate_birth"])
         and workspace["volume_id"] not in authority["protected_volumes"],
         "unstarted authority/caller differs",
     )
@@ -748,14 +778,10 @@ def released_workspace_request(outer, closed, config, inputs):
         and workspace["size_gb"] == 256
         and workspace["mount_path"] == "/tmp/gate"
         and workspace["native_create"] == native_create
-        and workspace["native_create_sha256"]
-        == inputs[str(closed / "export/workspace-volume-create.private.json")]
-        and workspace["intent_sha256"]
-        == inputs[str(closed / "export/workspace-volume.intent.json")]
+        and workspace["native_create_sha256"] == inputs[str(closed / "export/workspace-volume-create.private.json")]
+        and workspace["intent_sha256"] == inputs[str(closed / "export/workspace-volume.intent.json")]
         and workspace["caller"] == volume_intent["caller"] == gate_caller
-        and workspace["caller_sha256"]
-        == volume_intent["caller_sha256"]
-        == inputs[str(closed / "export/caller.json")]
+        and workspace["caller_sha256"] == volume_intent["caller_sha256"] == inputs[str(closed / "export/caller.json")]
         and all(
             native_create.get(key) == value
             for key, value in dict(
@@ -797,8 +823,7 @@ def released_workspace_request(outer, closed, config, inputs):
         b"in backup_off" in log
         and b"native.get(key)" in log
         and b"AttributeError: 'NoneType' object has no attribute 'get'" in log
-        and b"GATE_WORKSPACE_VOLUME_RETAINED id=" + workspace["volume_id"].encode()
-        in log,
+        and b"GATE_WORKSPACE_VOLUME_RETAINED id=" + workspace["volume_id"].encode() in log,
         "known pre-Machine backup failure required",
     )
     closure = obj(closed / "observed-closure.safe.json", inputs)
@@ -817,8 +842,7 @@ def released_workspace_request(outer, closed, config, inputs):
         and closure["started_at_epoch"] == epoch
         and closure["original_deadline"] == epoch + 5400
         and closure["terminal_sha256"] == inputs[str(closed / "terminal.json")]
-        and closure["release_sha256"]
-        == inputs[str(closed / "export/disposable-controller.release.json")]
+        and closure["release_sha256"] == inputs[str(closed / "export/disposable-controller.release.json")]
         and epoch <= closure["observed_epoch"] <= time.time()
         and type(closure["original_session"]) is int
         and closure["original_session"] > 0
@@ -837,8 +861,7 @@ def released_workspace_request(outer, closed, config, inputs):
         and check["volume_id"] == workspace["volume_id"]
         and check["caller_pid"] == caller["pid"]
         and check["caller_birth"] == caller["birth"]
-        and check["operator_sha256"]
-        == "4a16af376f7cb613c194f3e6baf4aaeb9e18da020f445658cb61f25fc6bd0f7f",
+        and check["operator_sha256"] == "4a16af376f7cb613c194f3e6baf4aaeb9e18da020f445658cb61f25fc6bd0f7f",
         "known GET-only release observation required",
     )
     need(
@@ -921,8 +944,7 @@ def released_workspace_request(outer, closed, config, inputs):
                 raw["status"] == 200
                 and json.loads(body) == value
                 and all(
-                    value.get(key) == native_create.get(key)
-                    for key in ("id", "name", "region", "size_gb", "encrypted")
+                    value.get(key) == native_create.get(key) for key in ("id", "name", "region", "size_gb", "encrypted")
                 )
                 and value.get("attached_machine_id") is None
                 and value.get("state") in ("pending_destroy", "destroyed")
@@ -933,9 +955,7 @@ def released_workspace_request(outer, closed, config, inputs):
         obj(observation / "complete.json", inputs)
         == dict(
             status="CANONICAL_RELEASE_WRITTEN",
-            release_sha256=inputs[
-                str(closed / "export/disposable-controller.release.json")
-            ],
+            release_sha256=inputs[str(closed / "export/disposable-controller.release.json")],
             provider_writes=0,
         ),
         "GET-only release completion differs",
@@ -956,9 +976,7 @@ def released_workspace_request(outer, closed, config, inputs):
         path = closed / ("controller-sidecar-" + item["sha256"] + ".private.gz")
         raw = read(path, inputs)
         need(
-            item["path"] == str(path)
-            and len(raw) == item["bytes"]
-            and digest(raw) == item["sha256"],
+            item["path"] == str(path) and len(raw) == item["bytes"] and digest(raw) == item["sha256"],
             "unstarted sidecar changed",
         )
         sidecar_names.add(path.name)
@@ -1002,9 +1020,7 @@ def released_workspace_request(outer, closed, config, inputs):
         "possible Machine creation/export activity",
     )
     observation_names = {"check.json", "intent.json", "complete.json"} | {
-        "wire-%06d.%s.json" % (i, suffix)
-        for i in (1, 2)
-        for suffix in ("request", "raw", "decoded")
+        "wire-%06d.%s.json" % (i, suffix) for i in (1, 2) for suffix in ("request", "raw", "decoded")
     }
     if release["volume_disposition"] == "ABSENT":
         observation_names.remove("wire-000002.decoded.json")
@@ -1014,9 +1030,7 @@ def released_workspace_request(outer, closed, config, inputs):
     )
     for key in ("agents", "backend"):
         need(
-            digest(
-                read(closed / "export" / ("current-" + key + ".private.env"), inputs)
-            )
+            digest(read(closed / "export" / ("current-" + key + ".private.env"), inputs))
             == authority["env_files"][key]["sha256"],
             "unstarted environment custody differs",
         )
@@ -1034,9 +1048,7 @@ def released_workspace_request(outer, closed, config, inputs):
         epoch=epoch,
         original_deadline=epoch + 5400,
         terminal_sha256=inputs[str(closed / "terminal.json")],
-        release_sha256=inputs[
-            str(closed / "export/disposable-controller.release.json")
-        ],
+        release_sha256=inputs[str(closed / "export/disposable-controller.release.json")],
         recovery_identity_sha256=context["recovery_identity_sha256"],
         request_sha256=digest(canonical(context["request"])),
         input_manifest_sha256=digest(canonical(inputs)),
@@ -1052,36 +1064,25 @@ def released_workspace_request(outer, closed, config, inputs):
 def prepare_released_workspace(outer, closed, config, inventory_path, inputs):
     context, proof = released_workspace_request(outer, closed, config, inputs)
     inventory_path = Path(inventory_path).absolute()
-    native_raw = CLOSED["raw"](
-        inventory_path, min(inventory_path.lstat().st_size, 256 * 1024 * 1024)
-    )
+    native_raw = CLOSED["raw"](inventory_path, min(inventory_path.lstat().st_size, 256 * 1024 * 1024))
     inputs[str(inventory_path)] = digest(native_raw)
     native = {row["id"]: row for row in json.loads(native_raw)}
-    need(
-        len(native) == len(json.loads(native_raw)), "duplicate current Machine identity"
-    )
+    need(len(native) == len(json.loads(native_raw)), "duplicate current Machine identity")
     archive_sha = digest(canonical(proof))
     candidates = []
     authority = obj(closed / "authority.private.json", inputs)
     for row in context["request"]["candidates"]:
         mid = row["machine_id"]
         need(
-            mid not in authority["protected_machines"]
-            and row["volume_id"] not in authority["protected_volumes"],
+            mid not in authority["protected_machines"] and row["volume_id"] not in authority["protected_volumes"],
             "protected reservation",
         )
         need(
             mid in native and native[mid].get("state") == "stopped",
             "closed unstarted reservation not stopped",
         )
-        original = next(
-            value
-            for value in context["original"]["candidates"]
-            if value["machine_id"] == mid
-        )
-        current = recovered_reader()["validate"](
-            context, original, row, native[mid], inputs
-        )
+        original = next(value for value in context["original"]["candidates"] if value["machine_id"] == mid)
+        current = recovered_reader()["validate"](context, original, row, native[mid], inputs)
         candidate = copy.deepcopy(current)
         candidate.pop("reservation")
         candidate.setdefault("legacy_archive_sha256", candidate["archive_sha256"])
@@ -1098,9 +1099,7 @@ def prepare_released_workspace(outer, closed, config, inventory_path, inputs):
         held_machine_ids=[row["machine_id"] for row in context["held_rows"]],
         held_reservations=context["held_rows"],
         inherited_held_scopes=context["inherited_held_scopes"],
-        archive=dict(
-            archive_sha256=archive_sha, inputs=inputs, closed_unstarted_admission=proof
-        ),
+        archive=dict(archive_sha256=archive_sha, inputs=inputs, closed_unstarted_admission=proof),
     )
 
 
@@ -1137,7 +1136,11 @@ def prepare(run, inventory_path):
         "closed controller source differs from admission",
     )
     claimed, imported_sha, request_custody = archive_members(closed, closure, request, config, inputs)
-    request_binding = ({"imported_request_sha256": imported_sha} if request_custody == "ARCHIVED_IMPORT" else {"request_sha256": imported_sha, "request_custody": request_custody})
+    request_binding = (
+        {"imported_request_sha256": imported_sha}
+        if request_custody == "ARCHIVED_IMPORT"
+        else {"request_sha256": imported_sha, "request_custody": request_custody}
+    )
     machines = {row["id"]: row for row in json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))}
     need(len(machines) == len(json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))), "duplicate inventory")
     need(closure["controller"] not in machines, "closed controller still present in native inventory")
@@ -1152,20 +1155,27 @@ def prepare(run, inventory_path):
         seen_held = set()
         for omitted in omitted_rows:
             mid = omitted["machine_id"]
-            need(mid in initial and mid not in selected and mid not in seen_held,
-                 "invalid recovered held partition")
+            need(mid in initial and mid not in selected and mid not in seen_held, "invalid recovered held partition")
             seen_held.add(mid)
-            need(omitted["volume_id"] == initial[mid]["volume_id"]
-                 and mid not in closure["protected_machines"]
-                 and omitted["volume_id"] not in closure["protected_volumes"],
-                 "protected or mismatched recovered hold")
+            need(
+                omitted["volume_id"] == initial[mid]["volume_id"]
+                and mid not in closure["protected_machines"]
+                and omitted["volume_id"] not in closure["protected_volumes"],
+                "protected or mismatched recovered hold",
+            )
             try:
                 need(context is not None, "normal failed reservation remains held")
                 candidate = transition_reader()["omitted"](context, initial[mid], machines[mid], inputs, claimed)
             except (ValueError, KeyError, TypeError, OSError):
-                held.append(dict(omitted, capacity_credit=0, closed_archive_sha256=archive_sha,
-                                 **request_binding,
-                                 original_request_sha256=original_envelope["sha256"]))
+                held.append(
+                    dict(
+                        omitted,
+                        capacity_credit=0,
+                        closed_archive_sha256=archive_sha,
+                        **request_binding,
+                        original_request_sha256=original_envelope["sha256"],
+                    )
+                )
             else:
                 candidate["archive_sha256"] = archive_sha
                 candidates.append(candidate)
@@ -1186,12 +1196,18 @@ def prepare(run, inventory_path):
             "reservation lineage changed",
         )
         if mid in claimed:
-            held.append({
-                "machine_id": mid, "volume_id": row["volume_id"], "capacity_credit": 0,
-                "reason": "allocated_or_unresolved_claim", "closed_archive_sha256": archive_sha,
-                **request_binding, "original_request_sha256": original_envelope["sha256"],
-                "claim_evidence": [claimed[mid][path] for path in sorted(claimed[mid])],
-            })
+            held.append(
+                {
+                    "machine_id": mid,
+                    "volume_id": row["volume_id"],
+                    "capacity_credit": 0,
+                    "reason": "allocated_or_unresolved_claim",
+                    "closed_archive_sha256": archive_sha,
+                    **request_binding,
+                    "original_request_sha256": original_envelope["sha256"],
+                    "claim_evidence": [claimed[mid][path] for path in sorted(claimed[mid])],
+                }
+            )
             continue
         need(mid in machines, "reserved Machine missing from native inventory")
         candidate = validate_reserved(
@@ -1217,6 +1233,8 @@ def prepare(run, inventory_path):
             inputs=inputs,
         ),
     )
+    if closure.get("cleanup_reserve_exclusions"):
+        result["archive"]["cleanup_reserve_exclusions"] = closure["cleanup_reserve_exclusions"]
     if closure.get("inventory_pointer_proof"):
         result["archive"]["inventory_pointer_proof"] = closure["inventory_pointer_proof"]
     if request_custody == "HOST_BOUND_NOT_IMPORTED":
