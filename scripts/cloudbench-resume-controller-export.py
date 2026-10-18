@@ -1734,7 +1734,11 @@ def _download_verified(value, fly, cancelled):
     unchanged(value)
     need(not (out / "controller-export-recovery").exists(), "export recovery already owns this run")
     log = read(out / "gate.private.log")
-    need(b"GATE_EXPORT_PENDING machine=" + value["state"]["machine_id"].encode() in log, "gate did not retain the export")
+    if value["state"].get("dead_owner") is True:
+        # check() proved the killed gate verified nothing; the remote canonical check binds the export.
+        need(b"GATE_EXPORT_VERIFIED" not in log, "dead gate already verified an export")
+    else:
+        need(b"GATE_EXPORT_PENDING machine=" + value["state"]["machine_id"].encode() in log, "gate did not retain the export")
     journal.mkdir(mode=0o700)  # one owned download recovery; never replayed
     fd = os.open(out, os.O_RDONLY | os.O_DIRECTORY)
     try:

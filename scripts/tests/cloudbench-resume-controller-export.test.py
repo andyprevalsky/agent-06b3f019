@@ -1276,6 +1276,43 @@ class ExportResume(unittest.TestCase):
                     operation(self.value, api)
             self.assertEqual(len(api.calls), count)
 
+    def test_dead_owner_download_needs_no_gate_pending_marker_and_wraps_export_ready(self):
+        # polar70: the killed gate logged only GATE_START; the remote canonical check binds the export.
+        (self.out / "gate.private.log").write_text("GATE_START fixture\n")
+        (self.out / "gate.private.log").chmod(0o600)
+        self.value["state"].update(dead_owner=True, source_ref="b" * 40,
+                                   authority=dict(cleanup_owner_pid=4242, cleanup_owner_birth="proc-start:fixture:1"),
+                                   owner=dict(pid=4242, birth="proc-start:fixture:1"))
+        api = self.api()
+
+        def ready(argv, **kwargs):
+            self.assertEqual(argv[1:3], ["-S", "-c"])
+            self.assertEqual(argv[3], M["DEAD_OWNER_HELPER"])
+            self.assertEqual(argv[6], "export-ready")
+            write(self.export / "disposable-export.verified.json", {
+                "authority_sha256": M["sha"](self.auth.read_bytes()), "machine_id": self.mid,
+                "files": {name: M["file_sha"](self.export / name) for name in (*self.payloads, "caller.json")}})
+            api.marker = True
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        with (
+            mock.patch.dict(M["execute"].__globals__, unchanged=lambda _: None),
+            mock.patch("subprocess.run", side_effect=ready),
+            mock.patch.object(M["subprocess"], "check_output", return_value=b"pinned helper"),
+        ):
+            result = M["download_verified"](self.value, api)
+        self.assertEqual(result["status"], "EXPORT_VERIFIED")
+        complete = json.loads((self.out / "controller-export-download/complete.json").read_bytes())
+        self.assertFalse(complete["controller_cleanup_owned_elsewhere"])
+        # The ordinary owner still needs its gate's own export-pending result.
+        self.temp.cleanup()
+        self.setUp()
+        (self.out / "gate.private.log").write_text("GATE_START fixture\n")
+        (self.out / "gate.private.log").chmod(0o600)
+        with mock.patch.dict(M["execute"].__globals__, unchanged=lambda _: None):
+            with self.assertRaisesRegex(ValueError, "did not retain"):
+                M["download_verified"](self.value, self.api())
+
     def test_explicit_cleanup_window_binds_one_controller_clock_and_expires(self):
         epoch = time.time() - 6000
         window = dict(schema="controller-export-cleanup-window-v1", run_directory=str(self.out), machine_id=self.mid,
