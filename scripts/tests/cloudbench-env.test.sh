@@ -708,7 +708,8 @@ fleet_production_function() {
 # production disposable-Volume bridge; outside a disposable lifecycle that
 # bridge is an exact no-op, so load it rather than stubbing the call away.
 for function_name in machine_creation_admission fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release \
-  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots; do
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots \
+  clone_volume_receipt_field clone_attach_failure_prelaunch clone_retire_owned_volume clone_create_owned_volume; do
   function_source="$(fleet_production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
   eval "$function_source"
@@ -733,7 +734,15 @@ python3 "$ROOT_DIR/scripts/cloudbench-machine-readiness.py" --publish-index \
 fleet_registry_record_name() { return 0; }
 fleet_registry_record_id() { return 0; }
 fleet_registry_release_name() { return 0; }
-machine_volume_id() { printf 'vol-primary-owned'; }
+machine_volume_id() { printf 'vol_primaryowned'; }
+# Fake Machines API for the exact owned Volume created before the clone.
+volume_args="$TMP_ROOT/primary-volume.args"
+fleet_clone_volume_request() {
+  shift
+  printf '%s\n' "$*" > "$volume_args"
+  printf '{"outcome":"created","id":"vol_primaryowned"}\n'
+}
+fleet_registry_record_volume() { return 0; }
 machine_storage_ready() { return 0; }
 machine_storage_failed() { return 1; }
 fly_with_timeout() {
@@ -765,6 +774,10 @@ require_text "$clone_args" "--vm-size shared-cpu-2x" \
   "primary clone must avoid both the running CPU ceiling and performance reservation ceiling"
 require_text "$clone_args" "--vm-memory 4096" \
   "primary clone memory must fit Fly's shared-cpu-2x memory ceiling"
+require_text "$clone_args" "--attach-volume vol_primaryowned" \
+  "primary clone must attach its exact pre-created owned Volume"
+require_text "$volume_args" "--vm-size shared-cpu-2x --vm-memory 4096" \
+  "owned Volume placement must request the same primary compute shape"
 primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
 [ -n "$primary_cpus" ] || fail "capacity replay could not parse primary CPU allocation"
 [ $((16 + 37 * primary_cpus)) -le 160 ] ||
@@ -772,7 +785,9 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
 unset -f clone_machine_target machine_creation_admission fleet_registry_record_name fleet_registry_record_id \
   fleet_registry_release_name machine_volume_id machine_storage_ready machine_storage_failed fly_with_timeout \
   fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
-  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots \
+  clone_volume_receipt_field clone_attach_failure_prelaunch clone_retire_owned_volume clone_create_owned_volume \
+  fleet_clone_volume_request fleet_registry_record_volume
 unset INVENTORY_INDEX INVENTORY_CLOCK_EPOCH INVENTORY_CLOCK_SECONDS SNAPSHOT_LOOP_PID SNAPSHOT_LOOP_TOKEN
 
 resize_function_source="$(awk '

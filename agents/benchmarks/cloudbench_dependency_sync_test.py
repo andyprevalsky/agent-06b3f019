@@ -8392,6 +8392,8 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
         )
         + "\n"
         + fleet[function_start:function_end]
+        # The range includes the real Machines API helpers; use the fake provider.
+        + "\n" + _FAKE_OWNED_VOLUME_REQUEST
     )
     clone_function += "\nmachine_creation_admission() { return 0; }\n"
     source_id = "6834251fe05798"
@@ -8438,7 +8440,7 @@ fleet_registry_record_name() {{ return 0; }}
 fleet_registry_record_id() {{ return 0; }}
 fleet_registry_release_name() {{ return 0; }}
 fleet_audit_update_fresh_clone() {{ return 0; }}
-machine_volume_id() {{ printf 'vol-owned-target'; }}
+machine_volume_id() {{ printf 'vol_ownedfixture'; }}
 machine_storage_ready() {{ return 0; }}
 machine_storage_failed() {{ return 1; }}
 {_clone_index_adapter_fixture()}
@@ -8710,7 +8712,7 @@ def test_failed_clone_captures_owned_volume_before_machine_name_reconciliation(
             "fleet_clone_with_queue_admission() {",
             "clone_machine_target() {",
         )
-    )
+    ) + "\n" + _owned_volume_bundle(fleet)
     registry = tmp_path / "registry"
     (registry / "clones").mkdir(parents=True)
     ledger = tmp_path / "owned.ids"
@@ -8723,6 +8725,7 @@ REGION=iad
 WARM_ID=683e47df5094d8
 WARM_VOLUME_ID=vol_warm
 SNAP_ID=vs_D7yODvl0BVgi9JajQpkR
+export CLONE_FAKE_VOLUME_ID=vol_vz8m80el8w7dwqxv
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 LEDGER={shlex.quote(str(ledger))}
 CALLS={shlex.quote(str(calls))}
@@ -8787,6 +8790,10 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
         "volumes show vol_vz8m80el8w7dwqxv -a bench-app --json",
     ]
     diagnostic_lines = ledger.with_suffix(".log").read_text().splitlines()
+    # The exact Volume create receipt precedes the attached clone attempt.
+    assert diagnostic_lines.pop(0).startswith(
+        "clone volume name=cloudbench-54c419a2a76f4b27bfc46694 volume_name=<source mount> mode=snapshot status=0 "
+        'receipt={"outcome":"created","id":"vol_vz8m80el8w7dwqxv"}')
     assert diagnostic_lines[:5] == [
         "clone name=cloudbench-54c419a2a76f4b27bfc46694 source=683e47df5094d8 status=1 attempt=1/1",
         "Cloning Machine 683e47df5094d8 into region iad",
@@ -8830,7 +8837,7 @@ def test_failed_clone_retains_exact_owner_when_delete_absence_is_unknown(
             "fleet_clone_with_queue_admission() {",
             "clone_machine_target() {",
         )
-    )
+    ) + "\n" + _owned_volume_bundle(fleet)
 
     for show_mode in ("failure", "invalid-json", "present"):
         case_root = tmp_path / show_mode
@@ -8845,6 +8852,7 @@ REGION=iad
 WARM_ID=feedface000000
 WARM_VOLUME_ID=vol_warm
 SNAP_ID=snapshot-1
+export CLONE_FAKE_VOLUME_ID=vol_exactowned
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 LEDGER={shlex.quote(str(ledger))}
 CALLS={shlex.quote(str(calls))}
@@ -8938,7 +8946,7 @@ def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
             "fleet_clone_with_queue_admission() {",
             "clone_machine_target() {",
         )
-    ) + "\n" + _disposable_volume_backup_function(fleet)
+    ) + "\n" + _owned_volume_bundle(fleet) + "\n" + _disposable_volume_backup_function(fleet)
     registry = tmp_path / "registry"
     (registry / "clones").mkdir(parents=True)
     ledger = tmp_path / "owned.ids"
@@ -8950,12 +8958,14 @@ def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
     for path in (calls, clone_count, show_count, uuid_count, audit):
         path.write_text("0\n" if path != calls and path != audit else "")
 
+    (tmp_path / "volume-sequence").write_text("vol_delayed123\nvol_success123\n")
     script = f"""set -uo pipefail
 APP=bench-app
 REGION=iad
 WARM_ID=683e47df5094d8
 WARM_VOLUME_ID=vol_warm
 SNAP_ID=vs_D7yODvl0BVgi9JajQpkR
+export CLONE_FAKE_VOLUME_SEQUENCE="{shlex.quote(str(tmp_path / 'volume-sequence'))}"
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 LEDGER={shlex.quote(str(ledger))}
 CALLS={shlex.quote(str(calls))}
@@ -10655,10 +10665,44 @@ def _disposable_volume_backup_function(source: str) -> str:
     return source[start : source.index("\n)\n", start) + 3]
 
 
+_OWNED_VOLUME_SIGNATURES = (
+    "clone_volume_receipt_field() {",
+    "clone_attach_failure_prelaunch() {",
+    "clone_retire_owned_volume() {",
+    "clone_create_owned_volume() {",
+)
+
+# Fake Machines API for the clone's owned Volume create. CLONE_FAKE_VOLUME_ID
+# pins the provider-returned ID; CLONE_VOLUME_CALLS records each request argv.
+# Defaults apply only where a fixture defines no registry/reap function.
+_FAKE_OWNED_VOLUME_REQUEST = r"""
+fleet_clone_volume_request() {
+  local seconds="$1"; shift
+  [ -z "${CLONE_VOLUME_CALLS:-}" ] || printf '%s\n' "$*" >> "$CLONE_VOLUME_CALLS"
+  if [ "$1" = find ]; then printf '{"outcome":"found","ids":[]}\n'; return 0; fi
+  local id="${CLONE_FAKE_VOLUME_ID:-vol_ownedfixture}"
+  if [ -s "${CLONE_FAKE_VOLUME_SEQUENCE:-}" ]; then
+    id="$(head -n 1 "$CLONE_FAKE_VOLUME_SEQUENCE")"
+    sed -i 1d "$CLONE_FAKE_VOLUME_SEQUENCE"
+  fi
+  printf '{"outcome":"created","id":"%s"}\n' "$id"
+}
+declare -F fleet_registry_record_volume >/dev/null || fleet_registry_record_volume() { return 0; }
+declare -F fleet_registry_release_name >/dev/null || fleet_registry_release_name() { return 0; }
+declare -F fleet_audit_update_fresh_clone >/dev/null || fleet_audit_update_fresh_clone() { return 0; }
+declare -F reap_volume >/dev/null || reap_volume() { return 0; }
+"""
+
+
+def _owned_volume_bundle(source: str) -> str:
+    return "\n".join((_FAKE_OWNED_VOLUME_REQUEST, *(
+        _extract_fleet_function(source, signature) for signature in _OWNED_VOLUME_SIGNATURES)))
+
+
 def _clone_machine_bundle(source: str) -> str:
     return "\n".join(
         (
-            "machine_volume_id() { printf 'vol-owned-fixture'; }",
+            "machine_volume_id() { printf '%s' \"${CLONE_FAKE_VOLUME_ID:-vol_ownedfixture}\"; }",
             "inventory_machine_field() { printf '1'; }",
             "reap_volume() { :; }",
             "fleet_audit_update_fresh_clone() { return 0; }",
@@ -10667,6 +10711,7 @@ def _clone_machine_bundle(source: str) -> str:
             _extract_fleet_function(source, "clone_failure_definitively_unallocated() {"),
             _extract_fleet_function(source, "clone_failure_owned_volume_id() {"),
             _extract_fleet_function(source, "fleet_clone_with_queue_admission() {"),
+            _owned_volume_bundle(source),
             _extract_fleet_function(source, "clone_machine_target() {"),
         )
     )
@@ -10995,6 +11040,228 @@ clone_machine_target "$LEDGER"
     assert ambiguous.returncode == 1, ambiguous.stderr
     assert attempt_file.read_text().strip() == "1"
     assert worker_ledger.with_suffix(".names").read_text().strip(), "ambiguous name ownership lost"
+
+
+def _owned_volume_launch_failure_script(fleet: str, provider: Path, unique_zone: str) -> str:
+    return f"""set -uo pipefail
+APP=bench-app; REGION=iad; WARM_ID=warm-1; SNAP_ID=vs_test; FRESH_VOLUMES=1
+P={shlex.quote(str(provider))}
+{"export CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE=" + unique_zone if unique_zone else "unset CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE"}
+fresh_volume_placement_admission() {{ return 0; }}
+FLY() {{
+  if [ "$1 $2" = "machine clone" ]; then
+    printf '%s\\n' "$*" >> "$P/clones"
+    local name="" volume="" n
+    while [ $# -gt 0 ]; do
+      case "$1" in --name) name="$2"; shift 2; continue ;; --attach-volume) volume="$2"; shift 2; continue ;; esac
+      shift
+    done
+    n=$(( $(cat "$P/attempts" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$P/attempts"
+    echo "Cloning Machine warm-1 into region iad"; echo "Attaching existing volume $volume"
+    if [ "$n" -lt 2 ]; then
+      echo "Error: failed to launch VM: volume not found (Request ID: 01M588E4AD20ZDW2V6D1NAD1TH-iad)"; return 1
+    fi
+    printf '{{"id":"c%s","name":"%s","volume":"%s"}}\\n' "$n" "$name" "$volume" >> "$P/machines"
+    echo "  Machine c$n has been created..."; return 0
+  fi
+  if [ "$1 $2" = "machines list" ]; then
+    python3 -c 'import sys; ls=[l.strip() for l in open(sys.argv[1]) if l.strip()]; print("["+",".join(ls)+"]")' "$P/machines"
+    return 0
+  fi
+  return 0
+}}
+CLOUDBENCH_CLONE_RETRY_SECONDS=0; CLOUDBENCH_CLONE_LOOKUP_SECONDS=0; CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+{_extract_fleet_function(fleet, "fly_with_timeout() {")}
+fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
+fleet_registry_record_name() {{ printf 'name %s\\n' "$1" >> "$P/owned"; }}
+fleet_registry_release_name() {{ printf 'release %s\\n' "$1" >> "$P/owned"; }}
+fleet_registry_record_id() {{ printf 'machine %s %s %s\\n' "$1" "$2" "$3" >> "$P/owned"; }}
+machine_storage_ready() {{ return 0; }}
+machine_storage_failed() {{ return 1; }}
+{_clone_index_adapter_fixture()}
+{_extract_fleet_function(fleet, "machine_id_for_clone_name() {")}
+{_extract_fleet_function(fleet, "registry_resolve_name() {")}
+{_clone_machine_bundle(fleet)}
+# Fake Machines API: the provider allocates a Volume for every accepted create.
+fleet_clone_volume_request() {{
+  local seconds="$1" n; shift
+  printf '%s\\n' "$*" >> "$P/volume-requests"
+  if [ "$1" = find ]; then printf '{{"outcome":"found","ids":[%s]}}\\n' "$(cat "$P/find" 2>/dev/null)"; return 0; fi
+  n=$(( $(cat "$P/volume-count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$P/volume-count"
+  printf 'vol_fork%s\\n' "$n" >> "$P/volumes"
+  if [ -e "$P/ambiguous" ]; then printf '{{"outcome":"ambiguous","reason":"TimeoutError"}}\\n'; return 0; fi
+  printf '{{"outcome":"created","id":"vol_fork%s"}}\\n' "$n"
+}}
+fleet_registry_record_volume() {{ printf 'volume %s %s\\n' "$1" "$2" >> "$P/owned"; }}
+machine_volume_id() {{ sed -nE "s/.*\\"id\\":\\"$1\\".*\\"volume\\":\\"([^\\"]+)\\".*/\\\\1/p" "$P/machines"; }}
+reap_volume() {{ printf '%s\\n' "$1" >> "$P/reaped"; }}
+clone_machine_target "$P/primary.ids" warm-1 shared-cpu-2x 4096 vs_test fresh
+"""
+
+
+@pytest.mark.parametrize("unique_zone", ["", "false"])
+def test_clone_launch_failure_after_volume_create_leaves_no_unowned_volume(tmp_path: Path, unique_zone: str) -> None:
+    """2026-10-18 polar-bu-020 attempt 1: flyctl clone forked a Volume, then
+    `failed to launch VM: volume not found`. flyctl prints no Volume ID, so the
+    fork had no owner. Every provider-allocated Volume must now be durably owned
+    by exact ID before its launch, attached by that ID, and left for teardown."""
+    fleet = fleet_source_text()
+    provider = tmp_path / "provider"
+    provider.mkdir()
+    (provider / "machines").write_text("")
+    result = subprocess.run(
+        ["bash", "-c", "machine_creation_admission() { return 0; }\n"
+         + _owned_volume_launch_failure_script(fleet, provider, unique_zone)],
+        env={"PATH": os.environ["PATH"]}, text=True, capture_output=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "c2"
+    forked = (provider / "volumes").read_text().split()
+    owned = (provider / "owned").read_text().splitlines()
+    clones = (provider / "clones").read_text().splitlines()
+    assert forked == ["vol_fork1", "vol_fork2"]
+    names = [line.split()[1] for line in owned if line.startswith("name ")]
+    assert len(names) == 2
+    for index, volume in enumerate(forked):
+        # Owned by exact ID before the launch that attaches it.
+        record = f"volume {names[index]} {volume}"
+        assert record in owned, owned
+        assert owned.index(record) < owned.index(f"name {names[1]}") if index == 0 else True
+        assert f"--attach-volume {volume}" in clones[index]
+        assert "--from-snapshot" not in clones[index] and "unique-zone" not in clones[index]
+    # The ambiguous launch's Volume keeps exact ownership for teardown: never
+    # released, never guessed by name; the successful Machine binds its own.
+    assert f"release {names[0]}" not in owned
+    assert f"machine {names[1]} c2 vol_fork2" in owned
+    assert not (provider / "reaped").exists()
+    requests = (provider / "volume-requests").read_text().splitlines()
+    assert [line.split()[0] for line in requests] == ["create", "create"]
+    for name, request in zip(names, requests):
+        if unique_zone == "false":
+            assert f"--name cbv_{name.removeprefix('cloudbench-')}" in request
+            assert "--require-unique-zone false" in request
+        else:
+            assert "--name" not in request and "--require-unique-zone true" in request
+
+
+@pytest.mark.parametrize("found", ['"vol_fork1"', ""])
+def test_ambiguous_unique_volume_create_reconciles_by_exact_name_without_duplicate(tmp_path: Path, found: str) -> None:
+    fleet = fleet_source_text()
+    provider = tmp_path / "provider"
+    provider.mkdir()
+    (provider / "machines").write_text("")
+    (provider / "ambiguous").write_text("")
+    (provider / "find").write_text(found)
+    script = _owned_volume_launch_failure_script(fleet, provider, "false")
+    # Succeed the first launch so only the create outcome is under test.
+    script = script.replace('if [ "$n" -lt 2 ]; then', 'if [ "$n" -lt 1 ]; then')
+    result = subprocess.run(
+        ["bash", "-c", "machine_creation_admission() { return 0; }\n" + script],
+        env={"PATH": os.environ["PATH"]}, text=True, capture_output=True, timeout=60,
+    )
+    requests = (provider / "volume-requests").read_text().splitlines()
+    assert [line.split()[0] for line in requests] == ["create", "find"]
+    name = (provider / "owned").read_text().splitlines()[0].split()[1]
+    assert requests[1].startswith(f"find --name cbv_{name.removeprefix('cloudbench-')}")
+    owned = (provider / "owned").read_text()
+    if found:
+        assert result.returncode == 0, result.stderr
+        assert f"volume {name} vol_fork1" in owned
+        assert "--attach-volume vol_fork1" in (provider / "clones").read_text()
+    else:
+        # No exact outcome: keep the durable name, no second create, no launch.
+        assert result.returncode != 0
+        assert "without another create" in result.stderr
+        assert not (provider / "clones").exists()
+        assert f"release {name}" not in owned
+
+
+def test_clone_volume_helper_sends_flyctl_clone_create_request(tmp_path: Path) -> None:
+    """The Machines API helper mirrors flyctl v0.4.115 clone's CreateVolumeRequest
+    and classifies only complete 4xx responses as non-allocating."""
+    import http.server
+    import threading
+
+    helper = ROOT / "scripts/cloudbench-clone-volume.py"
+    inventory = tmp_path / "admission-machines.json"
+    inventory.write_text(json.dumps([{
+        "id": "src1", "image_ref": {"registry": "registry.fly.io", "repository": "bench",
+                                    "tag": "warm", "digest": "sha256:abc"},
+        "config": {"guest": {"cpu_kind": "performance", "cpus": 8, "memory_mb": 1, "kernel_args": ["x"]},
+                   "mounts": [{"name": "cloudbench_t10_ord_85a7e2c", "size_gb": 40, "encrypted": True,
+                               "path": "/data", "volume": "vol_src"}]}}]))
+    seen: list = []
+    replies: list = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _reply(self):
+            status, body = replies.pop(0)
+            if status == "hang":
+                time.sleep(3)
+                status, body = 200, b"{}"
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            length = int(self.headers["Content-Length"])
+            seen.append((self.path, self.headers["Authorization"], json.loads(self.rfile.read(length))))
+            self._reply()
+
+        def do_GET(self):
+            seen.append((self.path, self.headers["Authorization"], None))
+            self._reply()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    env = dict(os.environ, FLY_FLAPS_BASE_URL=f"http://127.0.0.1:{server.server_port}", FLY_API_TOKEN="Bearer secret-token")
+
+    def run(*args):
+        output = subprocess.run([sys.executable, str(helper), *args], env=env, text=True,
+                                capture_output=True, timeout=30)
+        assert output.returncode == 0, output.stderr
+        assert "secret-token" not in output.stdout + output.stderr
+        return json.loads(output.stdout)
+
+    create = ["create", "--app", "bench-app", "--source", "src1", "--inventory", str(inventory),
+              "--region", "iad", "--vm-size", "shared-cpu-2x", "--vm-memory", "4096",
+              "--require-unique-zone", "true", "--snapshot-id", "vs_1", "--timeout", "1"]
+    try:
+        replies.append((200, json.dumps({"id": "vol_new1", "name": "cloudbench_t10_ord_85a7e2c", "region": "iad"}).encode()))
+        assert run(*create) == {"outcome": "created", "id": "vol_new1", "name": "cloudbench_t10_ord_85a7e2c", "region": "iad"}
+        path, auth, body = seen[-1]
+        assert path == "/v1/apps/bench-app/volumes" and auth == "Bearer secret-token"
+        assert body == {
+            "name": "cloudbench_t10_ord_85a7e2c", "region": "iad", "size_gb": 40, "encrypted": True,
+            "require_unique_zone": True, "unique_zone_app_wide": None, "snapshot_retention": None,
+            "auto_backup_enabled": None, "fstype": None, "snapshot_id": "vs_1", "source_volume_id": None,
+            "compute": {"cpu_kind": "shared", "cpus": 2, "memory_mb": 4096, "kernel_args": ["x"]},
+            "compute_image": "registry.fly.io/bench:warm@sha256:abc",
+        }
+        replies.append((429, b'{"error":"rate limit exceeded"}'))
+        assert run(*create) == {"outcome": "rejected", "status": 429, "message": "rate limit exceeded"}
+        unique = [arg for arg in create if arg not in ("--snapshot-id", "vs_1")]
+        unique[unique.index("true")] = "false"
+        replies.append((503, b'{"error":"unavailable"}'))
+        assert run(*unique, "--name", "cbv_" + "a" * 24)["outcome"] == "ambiguous"
+        assert seen[-1][2]["name"] == "cbv_" + "a" * 24 and seen[-1][2]["snapshot_id"] is None
+        assert seen[-1][2]["require_unique_zone"] is False
+        replies.append((200, b'{"id":"vol_x","name":"other","region":"iad"}'))
+        assert run(*create)["outcome"] == "ambiguous"
+        replies.append(("hang", b""))
+        assert run(*create)["outcome"] == "ambiguous"
+        replies.append((200, json.dumps([{"id": "vol_a", "name": "cbv_x"}, {"id": "vol_b", "name": "cbv_y"}]).encode()))
+        assert run("find", "--app", "bench-app", "--name", "cbv_x", "--timeout", "5") == {"outcome": "found", "ids": ["vol_a"]}
+        bad = list(create)
+        bad[bad.index("src1")] = "absent"
+        before = len(seen)
+        assert run(*bad)["outcome"] == "refused" and len(seen) == before
+    finally:
+        server.shutdown()
 
 
 def test_clone_gives_up_after_max_attempts(tmp_path: Path) -> None:
@@ -12489,7 +12756,7 @@ reap_volume vol_exact || reap_status=$?
             "inventory_machine_record_path() {",
             "inventory_machine_field() {",
         )
-    )
+    ) + "\n" + _owned_volume_bundle(fleet)
     ownership_root = tmp_path / "ownership"
     registry = ownership_root / ("a" * 32)
     (registry / "clones").mkdir(parents=True)
@@ -12540,6 +12807,7 @@ REGION=iad
 WARM_ID=feedface000000
 WARM_VOLUME_ID=vol_warm
 SNAP_ID=snapshot-1
+export CLONE_FAKE_VOLUME_ID=vol_exact
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
@@ -12729,7 +12997,7 @@ def test_ambiguous_408_clone_absent_at_lookup_is_reaped_at_teardown(
             "fleet_reap_registry_record() {",
             "reap_registry_clones() {",
         )
-    ) + "\n" + _disposable_volume_backup_function(fleet)
+    ) + "\n" + _disposable_volume_backup_function(fleet) + "\n" + _owned_volume_bundle(fleet)
     ownership_root = tmp_path / "ownership"
     registry = ownership_root / ("a" * 32)
     (registry / "clones").mkdir(parents=True)
@@ -12745,6 +13013,8 @@ def test_ambiguous_408_clone_absent_at_lookup_is_reaped_at_teardown(
     for path in (clone_count, uuid_count):
         path.write_text("0\n")
     late = "cloudbench-111111111111111111111111"
+    # Each attempt's attached Volume is created and owned before its launch.
+    (tmp_path / "volume-sequence").write_text("vol_late\nvol_success\n")
 
     script = f"""set -uo pipefail
 APP=bench-app
@@ -12752,6 +13022,7 @@ REGION=iad
 WARM_ID=8ed16dc75ee958
 WARM_VOLUME_ID=vol_warm
 SNAP_ID=vs_xA6B3617AO9TaeovZ3OKN42
+export CLONE_FAKE_VOLUME_SEQUENCE={shlex.quote(str(tmp_path / "volume-sequence"))}
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 LEDGER={shlex.quote(str(ledger))}
@@ -12841,6 +13112,8 @@ late_record="$FLEET_REGISTRY_DIR/clones/{late}"
 # (a) An unresolved name keeps its exact durable ownership.
 [ -f "$late_record" ] || exit 92
 [ -z "$(registry_meta_value "$late_record" id)" ] || exit 93
+# The pre-created Volume is exactly owned before the ambiguous launch.
+[ "$(registry_meta_value "$late_record" volume_id)" = vol_late ] || exit 89
 if grep -F 'update {late}' "$AUDIT" | grep -Fq not-allocated-verified; then exit 94; fi
 if grep -Fxq {late} "${{LEDGER%.ids}}.names"; then exit 95; fi
 grep -Fq 'clone name={late} absent after ambiguous failure; exact name ownership retained for teardown' "${{LEDGER%.ids}}.log" || exit 96
@@ -31305,7 +31578,8 @@ fleet_registry_record_name() {{ return 0; }}
 fleet_registry_record_id() {{ return 0; }}
 fleet_registry_release_name() {{ return 0; }}
 machine_storage_failed() {{ return 1; }}
-machine_storage_ready() {{ ! {shlex.quote(sys.executable)} -c 'import json,sys;sys.exit(0 if "--from-snapshot" in json.load(open(sys.argv[1])) else 1)' {shlex.quote(str(args_path))}; }}
+export CLONE_VOLUME_CALLS={shlex.quote(str(tmp_path / "volume-calls"))}
+machine_storage_ready() {{ ! grep -q -- '--snapshot-id' "$CLONE_VOLUME_CALLS"; }}
 {_clone_machine_bundle(source)}
 fly_with_timeout() {{ shift; {shlex.quote(sys.executable)} {shlex.quote(str(provider))} {shlex.quote(str(args_path))} "$@"; }}
 clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" shared-cpu-2x 4096 "$SNAP_ID" {storage_mode}
@@ -31323,12 +31597,17 @@ clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" share
     assert "--detach" in args
     assert (tmp_path / "owned.ids").read_text().split() == ["feedface000002"]
     assert (tmp_path / "owned.names").read_text() == ""
+    # Restore choice belongs to the exact owned Volume create; clone attaches it.
+    volume_calls = (tmp_path / "volume-calls").read_text().splitlines()
+    assert len(volume_calls) == 1 and volume_calls[0].startswith("create --source feedface000001 ")
+    assert "--from-snapshot" not in args
+    assert args[args.index("--attach-volume") + 1] == "vol_ownedfixture"
     if storage_mode == "fresh":
-        assert "--from-snapshot" not in args
+        assert "--snapshot-id" not in volume_calls[0]
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "feedface000002"
     else:
-        assert args[args.index("--from-snapshot") + 1] == "vs_fixture"
+        assert "--snapshot-id vs_fixture" in volume_calls[0]
         assert result.returncode == 1
         assert "storage was not mountable" in result.stderr
 
@@ -33736,6 +34015,7 @@ def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tm
     helpers = "\n".join(fn(name) if name + "() {" in source else name + "() { :; }"
                          for name in ["is_sim_on", "primary_clone_storage_mode", "fresh_target_region_admission", "fresh_target_region_bind_destination"])
     trace = tmp_path / "native-args"
+    volume_trace = tmp_path / "volume-args"
     touched = tmp_path / "registry"
     pool = tmp_path / "pool.ids"
     if case == "pool":
@@ -33755,7 +34035,9 @@ def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tm
         + "fleet_registry_record_name() { printf %s \"$2\" > " + shlex.quote(str(touched)) + "; }\n"
         + "fleet_registry_release_name() { :; }\nfleet_audit_update_fresh_clone() { :; }\n"
         + "clone_failure_owned_volume_id() { :; }\nclone_failure_definitively_unallocated() { return 0; }\n"
-        + "fleet_clone_with_queue_admission() { printf '%s\\n' \"$@\" > " + shlex.quote(str(trace)) + "; printf fixture-refusal; return 9; }\n"
+        + "fleet_clone_with_queue_admission() { if [ \"$3\" = clone-volume ]; then printf '%s\\n' \"$@\" > " + shlex.quote(str(volume_trace))
+        + "; printf '{\"outcome\":\"created\",\"id\":\"vol_region\"}\\n'; return 0; fi; printf '%s\\n' \"$@\" > " + shlex.quote(str(trace)) + "; printf fixture-refusal; return 9; }\n"
+        + _owned_volume_bundle(source) + "\n"
         + fn("clone_machine_target") + "\n"
         + "fresh_target_region_admission || exit 17\nfresh_target_region_bind_destination || exit 18\n"
         + "child_region=\"$(bash -c 'printf %s \"$CLOUDBENCH_REGION\"')\"\n"
@@ -33771,6 +34053,11 @@ def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tm
         args = trace.read_text().splitlines()
         assert args[args.index("--region") + 1] == ("ord" if case == "default" else "iad")
         assert "--from-snapshot" not in args
+        # The owned Volume is created in the same routed region it attaches in.
+        volume_args = volume_trace.read_text().splitlines()
+        assert volume_args[volume_args.index("--region") + 1] == args[args.index("--region") + 1]
+        assert "--snapshot-id" not in volume_args
+        assert args[args.index("--attach-volume") + 1] == "vol_region"
         assert args[args.index("clone") + 1] == ("def" if case == "worker" else "abc")
         assert touched.read_text() == ("def" if case == "worker" else "abc")
         assert "donor=ord child=" + ("ord" if case == "default" else "iad") in result.stdout
@@ -33911,6 +34198,7 @@ def test_private_fleet_source_fresh_volume_placement_routes_only_eligible_clones
     helpers = "\n".join(fn(name) if name + "() {" in source else name + "() { :; }"
                          for name in ["is_sim_on", "primary_clone_storage_mode", "fresh_target_region_admission", "fresh_target_region_bind_destination", "fresh_volume_placement_admission"])
     trace = tmp_path / "native-args"
+    volume_trace = tmp_path / "volume-args"
     touched = tmp_path / "registry"
     pool = tmp_path / "pool.ids"
     if case == "pool":
@@ -33931,7 +34219,9 @@ def test_private_fleet_source_fresh_volume_placement_routes_only_eligible_clones
         + "fleet_registry_record_name() { printf %s \"$2\" > " + shlex.quote(str(touched)) + "; }\n"
         + "fleet_registry_release_name() { :; }\nfleet_audit_update_fresh_clone() { :; }\n"
         + "clone_failure_owned_volume_id() { :; }\nclone_failure_definitively_unallocated() { return 0; }\n"
-        + "fleet_clone_with_queue_admission() { printf '%s\\n' \"$@\" > " + shlex.quote(str(trace)) + "; printf fixture-refusal; return 9; }\n"
+        + "fleet_clone_with_queue_admission() { if [ \"$3\" = clone-volume ]; then printf '%s\\n' \"$@\" > " + shlex.quote(str(volume_trace))
+        + "; printf '{\"outcome\":\"created\",\"id\":\"vol_placement\"}\\n'; return 0; fi; printf '%s\\n' \"$@\" > " + shlex.quote(str(trace)) + "; printf fixture-refusal; return 9; }\n"
+        + _owned_volume_bundle(source) + "\n"
         + fn("clone_machine_target") + "\n"
         + "fresh_volume_placement_admission || exit 19\nfresh_target_region_admission || exit 17\nfresh_target_region_bind_destination || exit 18\n"
         + "child_region=\"$(bash -c 'printf %s \"$CLOUDBENCH_REGION\"')\"\n"
@@ -33947,7 +34237,20 @@ def test_private_fleet_source_fresh_volume_placement_routes_only_eligible_clones
         args = trace.read_text().splitlines()
         assert args[args.index("--region") + 1] == ("ord" if case == "default" else "iad")
         assert "--from-snapshot" not in args
-        assert ("--volume-requires-unique-zone=false" in args) == (case in ("primary", "worker"))
+        # The exact owned Volume carries the placement policy; clone attaches it.
+        volume_args = volume_trace.read_text().splitlines()
+        assert volume_args[volume_args.index("--region") + 1] == args[args.index("--region") + 1]
+        assert "--snapshot-id" not in volume_args
+        unique_name = case in ("primary", "worker")
+        assert volume_args[volume_args.index("--require-unique-zone") + 1] == ("false" if unique_name else "true")
+        assert ("--name" in volume_args) == unique_name
+        if unique_name:
+            assert re.fullmatch(r"cbv_[0-9a-f]{24}", volume_args[volume_args.index("--name") + 1])
+        assert volume_args[volume_args.index("--source") + 1] == ("def" if case == "worker" else "abc")
+        assert volume_args[volume_args.index("--vm-size") + 1] == "shared-cpu-2x"
+        assert volume_args[volume_args.index("--vm-memory") + 1] == "4096"
+        assert args[args.index("--attach-volume") + 1] == "vol_placement"
+        assert not any("unique-zone" in arg for arg in args)
         assert args[args.index("clone") + 1] == ("def" if case == "worker" else "abc")
         assert touched.read_text() == ("def" if case == "worker" else "abc")
         assert args[args.index("--vm-size") + 1] == "shared-cpu-2x"
@@ -34252,6 +34555,7 @@ clone_failure_owned_volume_id() {{ :; }}
 clone_failure_definitively_unallocated() {{ return 0; }}
 fleet_clone_with_queue_admission() {{ printf '%s\n' "$1" > {shlex.quote(str(trace))}; printf fixture-refusal; return 9; }}
 FLY() {{ echo FORBIDDEN_NATIVE >&2; return 99; }}
+{_owned_volume_bundle(source)}
 {function}
 # Unrelated healthy work must not consume any pending/native allowance.
 [ "$CASE" != healthy-work-first-pending ] || SECONDS=301

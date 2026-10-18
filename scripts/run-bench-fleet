@@ -797,6 +797,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-machines.py" \
+       "$ROOT_DIR/scripts/cloudbench-clone-volume.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-mutation.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-seed.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-env.py" \
@@ -5990,25 +5991,11 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
                     id="$resolved"
                     ;;
                 1)
-                    if [ -n "$volume_id" ]; then
-                        # A failed clone can create a volume without a Machine.
-                        # Its provider-returned ID in this exact-owner record is
-                        # sufficient cleanup authority; global inventory is not.
-                        echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
-                        if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
-                        terminal_disposition=""
-                        [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
-                        [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
-                        if [ "$cleanup_status" -eq 75 ]; then
-                            unresolved=1
-                            continue
-                        fi
-                        [ -n "$terminal_disposition" ] || return 1
-                        fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
-                            "$terminal_disposition" || return 1
-                        rm -f "$record"
-                        continue
-                    fi
+                    # A Volume created before its Machine (owned clone Volume or
+                    # a rejected launch) leaves volume-only ownership. The clone
+                    # name may still become visible attached to it, so the same
+                    # name visibility rules below decide when the name retires;
+                    # only then is the exact recorded Volume reaped.
                     # A successful Fly clone request may become list-visible only
                     # after our lookup deadline. For the CURRENT (live-owner)
                     # registry the name-only ledger is the sole durable ownership
@@ -6045,6 +6032,24 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
                                 || { [ "$mode" = "current" ] \
                                      && [ "${FLEET_CLONE_PRODUCERS_JOINED:-0}" = 1 ]; }; } \
                             && registry_record_is_stale_phantom "$record"; then
+                            if [ -n "$volume_id" ]; then
+                                # Its provider-returned ID in this exact-owner record is
+                                # sufficient cleanup authority; global inventory is not.
+                                echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
+                                if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+                                terminal_disposition=""
+                                [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+                                [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
+                                if [ "$cleanup_status" -eq 75 ]; then
+                                    unresolved=1
+                                    continue
+                                fi
+                                [ -n "$terminal_disposition" ] || return 1
+                                fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
+                                    "$terminal_disposition" || return 1
+                                rm -f "$record"
+                                continue
+                            fi
                             echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; mode=$mode, no clone request in flight)"
                             fleet_audit_update_registry_clone "$registry" "$clone_name" "" "" \
                                 not-allocated-verified || return 1
@@ -12677,13 +12682,17 @@ fleet_clone_with_queue_admission() {  # <native-seconds> <ledger> <clone-args...
     (
         local native_seconds="$1" ledger_path="$2" remaining
         shift 2
-        [ "${1:-}:${2:-}" = machine:clone ] || exit 2
+        case "${1:-}:${2:-}" in machine:clone|clone-volume:create) ;; *) exit 2 ;; esac
         if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" != 1 ] \
             || [ -z "${RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC:-}" ] \
             || [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] \
             || [ -z "${RUN_BENCH_CAMPAIGN_COHORT:-}" ] \
             || [ -z "${RUN_BENCH_CAMPAIGN_JOB_ID:-}" ] \
             || [ "${ledger_path##*/}" != primary.ids ]; then
+            if [ "$1" = clone-volume ]; then
+                fleet_clone_volume_request "$native_seconds" "${@:2}"
+                exit $?
+            fi
             fly_with_timeout "$native_seconds" "$@"
             exit $?
         fi
@@ -12694,9 +12703,156 @@ fleet_clone_with_queue_admission() {  # <native-seconds> <ledger> <clone-args...
             --wait-seconds "$native_seconds" --strict-primary --task-root "${ledger_path%/*}")" || exit $?
         case "$remaining" in ''|*[!0-9]*|0) exit 1 ;; esac
         [ "$remaining" -le "$native_seconds" ] || exit 1
+        if [ "$1" = clone-volume ]; then
+            fleet_clone_volume_request "$remaining" "${@:2}"
+            exit $?
+        fi
         FLY() { private_source_allows_provider_call "$@" || return $?; flyctl "$@"; }
         fly_with_timeout "$remaining" "$@"
     )
+}
+
+fleet_clone_volume_request() {  # <seconds> create|find <helper args...>; one JSON receipt on stdout
+    local seconds="$1"
+    shift
+    case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
+    python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-clone-volume.py" "$@" \
+        --app "$APP" --timeout "$seconds"
+}
+
+clone_volume_receipt_field() {  # <receipt-json> <field>; scalar or space-joined list
+    python3 -c '
+import json, sys
+try:
+    value = json.loads(sys.argv[1]).get(sys.argv[2], "")
+except (ValueError, AttributeError):
+    raise SystemExit(1)
+if isinstance(value, list):
+    value = " ".join(str(item) for item in value)
+print(value if isinstance(value, (str, int)) and not isinstance(value, bool) else "")
+' "$1" "$2"
+}
+
+clone_attach_failure_prelaunch() {  # <clone-status> <combined-output>
+    # With --attach-volume, flyctl reads the exact Volume before Launch. One
+    # complete rejection of that read (or of its region/attachment checks) is
+    # proof that no Machine was requested; timeouts and mixed output are not.
+    local error_count
+    [ "$1" = 1 ] || return 1
+    ! grep -qi 'timed out' <<<"$2" || return 1
+    error_count="$(grep -Ec '^[[:space:]]*Error:' <<<"$2")"
+    [ "$error_count" = 1 ] || return 1
+    grep -Eq '^[[:space:]]*Error: (could not get existing volume: |volume vol_[A-Za-z0-9]+ is already attached to a machine|specified region [a-z0-9]+ but volume is in region )' <<<"$2"
+}
+
+clone_retire_owned_volume() {  # <clone-name> <volume-id> <names-ledger> <diagnostic-log>; 0 retired, 75 pending
+    local clone_name="$1" volume_id="$2" names_ledger="$3" diagnostic_log="$4" reap_status=0 disposition
+    reap_volume "$volume_id" "$diagnostic_log" || reap_status=$?
+    case "$reap_status" in
+        0|74)
+            disposition=destroyed-verified-absent
+            [ "$reap_status" -eq 74 ] && disposition=destroyed-provider-retained
+            fleet_audit_update_fresh_clone "$clone_name" "" "$volume_id" "$disposition" || return 1
+            fleet_registry_release_name "$clone_name" || return 1
+            grep -Fxv "$clone_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+            mv "$names_ledger.tmp" "$names_ledger"
+            ;;
+        75)
+            printf 'clone volume=%s destroy accepted; exact absence pending under durable owner name=%s\n' \
+                "$volume_id" "$clone_name" >> "$diagnostic_log"
+            return 75
+            ;;
+        *)
+            echo "❌ clone volume $volume_id destroy was rejected or ambiguous; retaining exact ownership" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Pinned flyctl `machine clone` creates the target Volume, then launches the
+# Machine, and never prints the Volume ID: a rejected launch ("volume not
+# found") left a Volume no owner could attribute. Send the same create request
+# first, persist its exact ID, and only then clone with --attach-volume.
+# 0 = created and durably owned (CLONE_VOLUME_ID); 1 = complete provider
+# rejection, nothing allocated (CLONE_VOLUME_OUT is flyctl's error line);
+# 3 = nothing sent and name released; 4 = unresolved or unrecorded outcome
+# retained for exact teardown, so no duplicate create may follow.
+clone_create_owned_volume() {  # <ledger> <clone> <source> <region> <vm-size> <vm-memory> <snapshot|fresh> <snapshot-id> <seconds> <names-ledger> <log>
+    local ledger="$1" clone_name="$2" source_id="$3" region="$4" vm_size="$5" vm_memory="$6"
+    local storage_mode="$7" snapshot_id="$8" seconds="$9" names_ledger="${10}" diagnostic_log="${11}"
+    local unique_zone=true volume_name="" receipt outcome volume_id status matches
+    local -a request=(create --source "$source_id" --region "$region" --vm-size "$vm_size" --vm-memory "$vm_memory"
+        --inventory "${INVENTORY_INDEX:-}/current/admission-machines.json")
+    CLONE_VOLUME_ID=""
+    CLONE_VOLUME_OUT=""
+    # Shared donor mount names keep the native same-name host anti-affinity.
+    # The explicit no-anti-affinity policy names each Volume after its durable
+    # clone name instead, so even an unanswered create is exactly attributable.
+    if [ "${CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE:-}" = false ]; then
+        unique_zone=false
+        volume_name="cbv_${clone_name#cloudbench-}"
+        case "$volume_name" in cbv_*[!0-9a-f]*|cbv_) return 3 ;; esac
+        [ "${#volume_name}" -le 30 ] || return 3
+        request+=(--name "$volume_name")
+    fi
+    request+=(--require-unique-zone "$unique_zone")
+    # flyctl sends no snapshot for an empty --from-snapshot value.
+    case "$storage_mode" in
+        snapshot) [ -z "$snapshot_id" ] || request+=(--snapshot-id "$snapshot_id") ;;
+        fresh) ;;
+        *) return 3 ;;
+    esac
+    status=0
+    receipt="$(fleet_clone_with_queue_admission "$seconds" "$ledger" clone-volume "${request[@]}")" || status=$?
+    printf 'clone volume name=%s volume_name=%s mode=%s status=%s receipt=%s\n' \
+        "$clone_name" "${volume_name:-<source mount>}" "$storage_mode" "$status" "$receipt" >> "$diagnostic_log"
+    outcome="$(clone_volume_receipt_field "$receipt" outcome 2>/dev/null)" || outcome=""
+    [ "$status" -eq 0 ] || [ -z "$outcome" ] || outcome=ambiguous
+    case "$outcome" in
+        created)
+            volume_id="$(clone_volume_receipt_field "$receipt" id)" || volume_id=""
+            ;;
+        rejected)
+            CLONE_VOLUME_OUT="Error: failed to create volume: request returned non-2xx status, $(clone_volume_receipt_field "$receipt" status): $(clone_volume_receipt_field "$receipt" message)"
+            return 1
+            ;;
+        refused)
+            # The helper proved that it issued no provider request. An empty or
+            # foreign receipt (admission exhaustion, a killed helper) is not
+            # such proof and is reconciled below like any ambiguous create.
+            echo "❌ clone volume request was not sent for '$clone_name'; refusing allocation" >&2
+            fleet_audit_update_fresh_clone "$clone_name" "" "" not-allocated-verified || return 4
+            fleet_registry_release_name "$clone_name" || return 4
+            grep -Fxv "$clone_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+            mv "$names_ledger.tmp" "$names_ledger"
+            return 3
+            ;;
+        *)
+            volume_id=""
+            if [ -n "$volume_name" ]; then
+                receipt="$(fleet_clone_volume_request "$seconds" find --name "$volume_name")" || receipt=""
+                printf 'clone volume name=%s reconcile=%s\n' "$volume_name" "$receipt" >> "$diagnostic_log"
+                [ "$(clone_volume_receipt_field "$receipt" outcome 2>/dev/null)" = found ] \
+                    && matches="$(clone_volume_receipt_field "$receipt" ids)" || matches="unknown unknown"
+                case "$matches" in
+                    vol_*' '*|unknown*) ;;
+                    vol_*) volume_id="$matches" ;;
+                esac
+            fi
+            if [ -z "$volume_id" ]; then
+                echo "❌ clone volume create for '$clone_name' (Volume name ${volume_name:-shared donor mount name}) has no exact outcome; retaining ownership without another create" >&2
+                return 4
+            fi
+            ;;
+    esac
+    case "$volume_id" in vol_*) ;; *) return 4 ;; esac
+    case "${volume_id#vol_}" in ''|*[!a-zA-Z0-9]*) return 4 ;; esac
+    if ! fleet_registry_record_volume "$clone_name" "$volume_id"; then
+        echo "❌ could not persist exact owned volume $volume_id for clone '$clone_name'; reaping it before any launch" >&2
+        reap_volume "$volume_id" "$diagnostic_log" || true
+        return 4
+    fi
+    CLONE_VOLUME_ID="$volume_id"
 }
 
 machine_creation_admission() {  # <target-ledger>; ordinary disposable lifecycle, existing capacity still applies
@@ -12718,16 +12874,13 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
         [ "$storage_mode" = fresh ] && fresh_target_region_admission || return 1
         clone_region="$FRESH_TARGET_REGION"
     fi
-    local -a volume_placement_args=()
+    # The owned Volume create carries the admitted placement policy and the
+    # snapshot restore (clone_create_owned_volume); the clone only attaches it.
     if [ "${CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE+x}" = x ]; then
         [ "$storage_mode" = fresh ] && fresh_volume_placement_admission || return 1
-        if [ "$CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE" = false ]; then
-            volume_placement_args=(--volume-requires-unique-zone=false)
-        fi
     fi
-    local -a snapshot_args=()
     case "$storage_mode" in
-        snapshot) snapshot_args=(--from-snapshot "$clone_snapshot") ;;
+        snapshot) ;;
         fresh) [ "${FRESH_VOLUMES:-0}" = 1 ] || return 2 ;;
         *) return 2 ;;
     esac
@@ -12735,6 +12888,8 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
     local storage_deadline storage_status failed_storage_status preallocation_failure reap_status terminal_disposition
     local attempt max_attempts retry_delay clone_timeout
     local charged_attempts rate_limit_window rate_window_deadline
+    local owned_volume="" carry_name="" carry_volume="" volume_status
+    local -a clone_volume_args
     # --detach still launches the clone. CMD can be made inert at creation only
     # when no inherited exec/entrypoint takes precedence; use the shared native
     # inventory and reject unknown shapes before creating any provider resource.
@@ -12806,6 +12961,11 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
         if [ "${ledger##*/}" = "worker-clones.ids" ] \
             && { [ -e "${ledger%/*}/benchmark-child.finished" ] \
                 || [ -e "${ledger%/*}/autoscaler.runtime-completed" ]; }; then
+            if [ -n "$carry_name" ]; then
+                clone_retire_owned_volume "$carry_name" "$carry_volume" "$names_ledger" "$diagnostic_log" \
+                    || return 1
+                carry_name=""
+            fi
             [ ! -s "$names_ledger" ] || return 1
             return 75
         fi
@@ -12818,15 +12978,25 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             return 1
         fi
         target_volume=""
-        target_name="cloudbench-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:24])')"
-        # Record the provider target name durably BEFORE asking Fly to allocate,
-        # so a successor can bind a late-appearing machine to this dead fleet even
-        # if this process is SIGKILLed mid-clone (survives workspace deletion).
-        if ! fleet_registry_record_name "$target_name" "$source_id"; then
-            echo "❌ could not persist durable ownership for clone name '$target_name'; refusing provider allocation" >&2
-            return 1
+        owned_volume=""
+        if [ -n "$carry_name" ]; then
+            # The previous attempt was proven to request no Machine: keep its
+            # exact owned Volume and durable name instead of creating another.
+            target_name="$carry_name"
+            owned_volume="$carry_volume"
+            carry_name=""
+            carry_volume=""
+        else
+            target_name="cloudbench-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:24])')"
+            # Record the provider target name durably BEFORE asking Fly to allocate,
+            # so a successor can bind a late-appearing machine to this dead fleet even
+            # if this process is SIGKILLed mid-clone (survives workspace deletion).
+            if ! fleet_registry_record_name "$target_name" "$source_id"; then
+                echo "❌ could not persist durable ownership for clone name '$target_name'; refusing provider allocation" >&2
+                return 1
+            fi
+            printf '%s\n' "$target_name" >> "$names_ledger"
         fi
-        printf '%s\n' "$target_name" >> "$names_ledger"
         first_clone_timeout="$clone_timeout"
         if [ "$attempt" = 1 ] && [ -n "$source_pending_deadline" ]; then
             first_clone_timeout=$((source_pending_deadline - SECONDS))
@@ -12842,11 +13012,32 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
                 return 1
             fi
         fi
-        clone_out="$(fleet_clone_with_queue_admission "$first_clone_timeout" "$ledger" machine clone "$source_id" -a "$APP" \
-            "${snapshot_args[@]}" "${volume_placement_args[@]}" --region "${clone_region:-$REGION}" --name "$target_name" \
-            --vm-size "$vm_size" --vm-memory "$vm_memory" \
-            --override-cmd "sleep infinity" --detach 2>&1)"
-        clone_status=$?
+        volume_status=0
+        if [ -z "$owned_volume" ]; then
+            clone_create_owned_volume "$ledger" "$target_name" "$source_id" "${clone_region:-$REGION}" \
+                "$vm_size" "$vm_memory" "$storage_mode" "$clone_snapshot" "$first_clone_timeout" \
+                "$names_ledger" "$diagnostic_log" || volume_status=$?
+            owned_volume="$CLONE_VOLUME_ID"
+        fi
+        case "$volume_status" in
+            0)
+                clone_volume_args=(--attach-volume "$owned_volume")
+                clone_out="$(fleet_clone_with_queue_admission "$first_clone_timeout" "$ledger" machine clone "$source_id" -a "$APP" \
+                    "${clone_volume_args[@]}" --region "${clone_region:-$REGION}" --name "$target_name" \
+                    --vm-size "$vm_size" --vm-memory "$vm_memory" \
+                    --override-cmd "sleep infinity" --detach 2>&1)"
+                clone_status=$?
+                ;;
+            1)
+                # A complete provider rejection of the Volume create allocated
+                # nothing; the existing single-error classifier releases the name.
+                clone_out="$CLONE_VOLUME_OUT"
+                clone_status=1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
         {
             printf 'clone name=%s source=%s status=%s attempt=%s/%s\n' \
                 "$target_name" "$source_id" "$clone_status" "$attempt" "$max_attempts"
@@ -12868,6 +13059,10 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             # reserved name. Persist that exact ID before cleanup so interruption
             # remains recoverable without an app-wide volume guess.
             target_volume="$(clone_failure_owned_volume_id "$clone_status" "$clone_out")"
+            if [ -n "$owned_volume" ] && [ -n "$target_volume" ] && [ "$target_volume" != "$owned_volume" ]; then
+                echo "❌ clone rejection named Volume $target_volume, not the attached owned $owned_volume; retaining exact ownership" >&2
+                return 1
+            fi
             if [ -n "$target_volume" ]; then
                 if ! fleet_registry_record_volume "$target_name" "$target_volume"; then
                     echo "❌ could not persist exact owned volume $target_volume for failed clone '$target_name'" >&2
@@ -12896,7 +13091,8 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
                         ;;
                 esac
             elif clone_failure_definitively_unallocated \
-                "$clone_status" "$source_id" "$clone_out"; then
+                "$clone_status" "$source_id" "$clone_out" \
+                || { [ -n "$owned_volume" ] && clone_attach_failure_prelaunch "$clone_status" "$clone_out"; }; then
                 preallocation_failure=1
             fi
         fi
@@ -12906,6 +13102,13 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
         fi
         if [ "$clone_status" -ne 0 ] && [ -z "$target_id" ] \
+            && [ -z "$target_volume" ] && [ -n "$owned_volume" ] \
+            && [ "$preallocation_failure" -eq 1 ]; then
+            # No Machine was requested. Retry with the same exact Volume and
+            # name; teardown still owns both if no later attempt succeeds.
+            carry_name="$target_name"
+            carry_volume="$owned_volume"
+        elif [ "$clone_status" -ne 0 ] && [ -z "$target_id" ] \
             && [ -z "$target_volume" ] \
             && [ "$preallocation_failure" -eq 1 ]; then
             # The provider explicitly rejected this attempt before allocating a
@@ -12940,7 +13143,7 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
         # used to abort
         # the retry loop after attempt 1 and surface as "unresolved clone name"
         # / "provisioning failed (no machine)" under capacity pressure.
-        if [ -z "$target_id" ] && [ -z "$target_volume" ]; then
+        if [ -z "$target_id" ] && [ -z "$target_volume" ] && [ -z "$carry_name" ]; then
             local reconciled_id reconcile_status reconcile_record already_cleaned=0
             if ! grep -Fxq "$target_name" "$names_ledger" 2>/dev/null; then
                 already_cleaned=1
@@ -12977,6 +13180,10 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             target_volume=""
             while [ -z "$target_volume" ]; do
                 target_volume="$(machine_volume_id "$target_id")"
+                if [ -n "$target_volume" ] && [ -n "$owned_volume" ] && [ "$target_volume" != "$owned_volume" ]; then
+                    echo "❌ clone $target_id mounted $target_volume instead of the attached owned $owned_volume; retaining exact ownership" >&2
+                    return 1
+                fi
                 [ -n "$target_volume" ] && break
                 if [ "$SECONDS" -ge "$storage_deadline" ]; then
                     echo "❌ clone $target_id volume identity was not visible within the provisioning deadline; retaining name ownership" >&2
@@ -13125,12 +13332,16 @@ Error: snapshot storage entered terminal failed state"
             if [ "$this_delay" -lt 1 ]; then
                 echo "❌ Fly clone provider rate limit persisted before allocation for the bounded ${rate_limit_window}s window after $attempt attempt(s) (last name=$target_name, source=$source_id, status=$clone_status)" >&2
                 printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
+                [ -z "$carry_name" ] || clone_retire_owned_volume "$carry_name" "$carry_volume" \
+                    "$names_ledger" "$diagnostic_log" || true
                 return 1
             fi
             echo "⏳ provider rate limit before allocation (attempt $attempt, not charged to the $max_attempts-attempt cap; ${rate_window_remaining}s of ${rate_limit_window}s window left); retrying in ${this_delay}s ..." >&2
         elif [ "$charged_attempts" -ge "$max_attempts" ]; then
             echo "❌ Fly clone did not return a distinct authoritative target after $attempt attempt(s) (last name=$target_name, source=$source_id, status=$clone_status)" >&2
             printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
+            [ -z "$carry_name" ] || clone_retire_owned_volume "$carry_name" "$carry_volume" \
+                "$names_ledger" "$diagnostic_log" || true
             return 1
         else
             echo "⏳ transient clone failure (attempt $attempt, $charged_attempts/$max_attempts charged, status=$clone_status); retrying in ${this_delay}s ..." >&2
