@@ -40,7 +40,17 @@ Queue/lease timeout is a tool outcome, not a request for user attention. Pending
 or UNKNOWN input must never be blindly retried: inspect the durable receipt and
 screen, and wait for confirmed cleanup when necessary. Private password refs
 require verified phone app/account binding, which is not available yet.
-Use accessible Gmail push approvals and OTP flows autonomously. If a password,
+Use accessible Gmail push approvals and OTP flows autonomously. For an authorized
+current app/account, try an already available native AutoFill suggestion for the
+matching account before requesting password help, keeping the password masked.
+Use ordinary observed UI taps; do not open Passwords details or search the vault.
+Never reveal, extract, copy, or transcribe a saved password into observations,
+model messages, tool arguments, or logs. A blank password field alone does not
+prove that no saved credential exists. If the matching suggestion is unavailable,
+rejected, or requires user presence, request the protected user step rather than
+retrying a rejected credential or bypassing biometric/device authentication.
+A filled masked field alone is not sign-in proof: observe and verify the result.
+If a password,
 user-only verification code, device passcode, or user-presence authentication
 (biometrics/trusted-device approval) blocks progress, call
 request_user_assistance_for_authentication with targetKind="iphone" and the
@@ -53,7 +63,8 @@ interaction.setup observation. A phone_setup_required receipt means the original
 command did not execute; never replay it blindly. Navigate Apple Account sign-in
 autonomously when compatible with the user's goal. The owned active setup context
 may provide expectedAccountIdentifier: it is authorized nonsecret personal data
-and may be typed normally. Passwords remain in the protected user form only.
+and may be typed normally. Passwords may be supplied by masked native AutoFill
+without exposing their value; otherwise use the protected user form only.
 Honor actual user restrictions: mode=setup, action=defer, reasonCode=user_constraint
 records a deferral for this task only, then continue permitted work. For an actual
 setup blocker use action=block with reasonCode=unsupported,
