@@ -18,7 +18,11 @@ These tests drive the real client with a hanging backend and the real
 """
 
 import asyncio
+import json
+from contextlib import suppress
 from datetime import timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from _test_utils import BlackboxResult, teardown_mock
 
@@ -137,7 +141,7 @@ async def test_cancelled_waiter_does_not_poison_shared_get_position():
         except asyncio.CancelledError:
             raise AssertionError(
                 "retry attempt raised CancelledError: the cancelled waiter poisoned the shared get-position future"
-            )
+            ) from None
         assert attempts == 2, f"expected timeout then retry, got {attempts} attempts"
         assert retried == ({"tool_calls": [{"name": "web_search"}]}, "k-pos"), retried
 
@@ -159,16 +163,16 @@ async def test_cancelled_owner_still_resolves_waiters():
         await asyncio.sleep(0)
 
         owner.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await owner
-        except asyncio.CancelledError:
-            pass
         backend.release.set()
 
         try:
             result = await asyncio.wait_for(waiter, timeout=5)
         except asyncio.TimeoutError:
-            raise AssertionError("waiter hung: the cancelled owner never resolved the shared get-position future")
+            raise AssertionError(
+                "waiter hung: the cancelled owner never resolved the shared get-position future"
+            ) from None
         assert result == ({"tool_calls": [{"name": "web_search"}]}, "k-pos"), result
         assert backend.posts.count(("explore_agent", 7)) == 1, (
             f"slot 7 must stay single-flighted, posts={backend.posts}"
@@ -217,9 +221,160 @@ async def test_shared_fetch_failure_is_a_plain_exception_for_every_waiter():
         cache_client._GET_RETRY_BACKOFF_S = orig_backoff
 
 
+async def _native_demo_recording_case(*, compatibility: bool, recording: bool, status: int):
+    """Exercise the real native context, cache write policy and Rose completion.
+
+    Only the external model stream and cache HTTP server are controlled. A
+    successful model response is not a persisted replay entry when the frozen
+    namespace or the server rejects its write.
+    """
+    import benchmarks.wmh_rose_provider as native
+    import providers.fast_cache.client as cache_client
+    import providers.fast_cache.rose_cache as cache_wrapper
+    import providers.rose.client as rose_module
+    from providers.fast_cache.context import reset_context, set_context
+    from providers.rose.types import StreamChunk
+
+    rows, events, provider_calls = {}, [], []
+
+    class _CacheBackend:
+        async def post(self, url, *, json, **kwargs):
+            del kwargs
+            assert url == "http://cache.test/api/fast-cache/set", url
+            if status == 200:
+                rows[json["key"]] = json["value"]
+            return type("Response", (), {"status_code": status, "json": lambda self: {"ok": status == 200, "stored": status == 200}})()
+
+    async def read_first(keys):
+        return next(((rows[key], key) for key in keys if key in rows), (None, None))
+
+    async def stream(**kwargs):
+        provider_calls.append(kwargs)
+        yield StreamChunk(kind="content", data={"text": "offline native prediction"})
+        yield StreamChunk(kind="done", data={})
+
+    tasks = json.loads((Path(__file__).parents[2] / "benchmarks/tasks.json").read_text())
+    goal = next(task["prompt"] for task in tasks if task["name"] == "raise-5m-rose-labs-brex")
+    context = native._WMHFastCacheContext(
+        enabled=True, goal=goal, root_goal=goal, write_enabled=True, provider_fast_mode=False,
+    )
+    assert context.read_enabled and context.soft_complete_allowed
+    client = rose_module.RoseClient(openrouter_key="offline")
+    env = {
+        "FAST_MODE_CACHE_RECORD_DEMO": "1" if recording else "0",
+        "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH": "0",
+        "BENCHMARK_DEMO_CACHE_READ_ONLY": "0",
+    }
+    with patch.dict("os.environ", env), \
+            patch.object(cache_client, "_backend", return_value=("http://cache.test", "offline")), \
+            patch.object(cache_client, "_shared_client", return_value=_CacheBackend()), \
+            patch.object(cache_client, "_archive_cache_write", new=AsyncMock()), \
+            patch.object(cache_client, "cache_get_first", side_effect=read_first), \
+            patch.object(cache_client, "cache_get_position_fallback", new=AsyncMock(return_value=(None, None))), \
+            patch.object(client, "_complete_impl", new=stream), \
+            patch.object(rose_module.logger, "info", side_effect=lambda event, **kw: events.append(event)), \
+            patch.object(cache_wrapper.logger, "info", side_effect=lambda event, **kw: events.append(event)):
+        token = set_context(context)
+        try:
+            for _ in range(2):
+                kwargs = {
+                    "pool": "rose-1-flash", "messages": [{"role": "user", "content": "same request"}],
+                    "dump_context": False,
+                }
+                if compatibility:
+                    result = [chunk async for chunk in cache_wrapper.cached_complete(
+                        client, call_site="wmh_world_model_timed_distribution_v1", **kwargs)]
+                else:
+                    result = [chunk async for chunk in client.complete(
+                        call_site="wmh_world_model_timed_distribution_v1", **kwargs)]
+                assert result[-1].kind == "done"
+                assert any(chunk.kind == "content" for chunk in result)
+        finally:
+            reset_context(token)
+    accepted = recording and status == 200
+    assert len(rows) == int(accepted), rows
+    assert events.count("llm.cache.stored") == int(accepted), (
+        "Rose reported a stored response without an accepted cache write", events)
+    assert events.count("llm.cache.store_skipped") == (0 if accepted else 2), events
+    assert events.count("llm.cache.replay") == int(accepted), events
+    assert len(provider_calls) == (1 if accepted else 2), provider_calls
+    assert all(call["provider_fast_mode"] is False for call in provider_calls)
+
+
+async def test_native_frozen_namespace_never_reports_a_store():
+    await _native_demo_recording_case(compatibility=False, recording=False, status=200)
+
+
+async def test_compatibility_native_frozen_namespace_never_reports_a_store():
+    await _native_demo_recording_case(compatibility=True, recording=False, status=200)
+
+
+async def test_native_rejected_cache_write_never_reports_a_store():
+    await _native_demo_recording_case(compatibility=False, recording=True, status=503)
+
+
+async def test_compatibility_native_rejected_cache_write_never_reports_a_store():
+    await _native_demo_recording_case(compatibility=True, recording=True, status=503)
+
+
+async def test_native_recording_replays_exact_key_with_provider_fast_button_off():
+    await _native_demo_recording_case(compatibility=False, recording=True, status=200)
+
+
+async def test_compatibility_native_recording_replays_exact_key_with_provider_fast_button_off():
+    await _native_demo_recording_case(compatibility=True, recording=True, status=200)
+
+
+async def test_http_200_skipped_persistence_never_reports_store():
+    import providers.fast_cache.client as client
+    class Response:
+        status_code = 200
+        def json(self):
+            return {"ok": True, "stored": False}
+    backend = AsyncMock()
+    backend.post.return_value = Response()
+    with patch.object(client, "_shared_client", return_value=backend), patch.object(
+        client, "_backend", return_value=("http://cache.test", "offline")
+    ), patch.object(client, "_archive_cache_write", new=AsyncMock()):
+        assert await client.cache_set("ack-control", "llm", "ack-control", {}) is False
+def test_candidate_exclusions_shape_cache_request_material():
+    from providers.fast_cache.rose_cache import request_key_material
+    from providers.rose.truncation import model_key
+
+    original = {"pool": "rose-1-flash", "messages": [{"role": "user", "content": "same request"}]}
+    base = request_key_material(original)
+    assert request_key_material({**original, "_skip_models": frozenset()}) == base
+    excluded = request_key_material({**original, "_skip_models": {"qwen/qwen3.8-27b", "qwen-3.8-27b", "gpt-6-sol-gpt"}})
+    assert excluded != base
+    assert excluded["skip_models"] == sorted({model_key("qwen-3.8-27b"), model_key("gpt-6-sol")})
+    assert "skip_models" not in base
+
+
+async def test_excluded_cached_actual_candidate_is_not_replayed():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from providers.fast_cache.rose_cache import lookup_llm_cache
+    import providers.fast_cache.rose_cache as owner
+
+    ctx = SimpleNamespace(llm_lookup_keys=lambda *args: ["key"])
+    for actual, expected in (("candidate-a-gpt", False), ("unknown", False), ("candidate-b-gpt", True)):
+        stored = {"actual_model": actual}
+        with (
+            patch.object(owner.cache_client, "cache_get_first", AsyncMock(return_value=(stored, "key"))),
+            patch.object(owner, "july_gp_resolve_execute", AsyncMock(return_value=(stored, "key"))),
+            patch.object(owner, "july_explore_resolve", AsyncMock(return_value=(stored, "key"))),
+        ):
+            value, _ = await lookup_llm_cache(ctx, "test", {"skip_models": ["candidatea"]})
+        assert (value is not None) is expected
+
+
 async def run_all_tests():
     print("fast-cache-client blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "excluded_cached_candidate_not_replayed", test_excluded_cached_actual_candidate_is_not_replayed
+    )
+    r.record("candidate_exclusions_cache_material", test_candidate_exclusions_shape_cache_request_material)
     await r.record_async(
         "cancelled_waiter_does_not_poison_shared_get_position",
         test_cancelled_waiter_does_not_poison_shared_get_position,
@@ -229,6 +384,29 @@ async def run_all_tests():
         "shared_fetch_failure_is_a_plain_exception_for_every_waiter",
         test_shared_fetch_failure_is_a_plain_exception_for_every_waiter,
     )
+    await r.record_async(
+        "native_frozen_namespace_never_reports_a_store", test_native_frozen_namespace_never_reports_a_store,
+    )
+    await r.record_async(
+        "compatibility_native_frozen_namespace_never_reports_a_store",
+        test_compatibility_native_frozen_namespace_never_reports_a_store,
+    )
+    await r.record_async(
+        "native_rejected_cache_write_never_reports_a_store", test_native_rejected_cache_write_never_reports_a_store,
+    )
+    await r.record_async(
+        "compatibility_native_rejected_cache_write_never_reports_a_store",
+        test_compatibility_native_rejected_cache_write_never_reports_a_store,
+    )
+    await r.record_async(
+        "native_recording_replays_exact_key_with_provider_fast_button_off",
+        test_native_recording_replays_exact_key_with_provider_fast_button_off,
+    )
+    await r.record_async(
+        "compatibility_native_recording_replays_exact_key_with_provider_fast_button_off",
+        test_compatibility_native_recording_replays_exact_key_with_provider_fast_button_off,
+    )
+    await r.record_async("http_200_skipped_persistence_never_reports_store", test_http_200_skipped_persistence_never_reports_store)
     teardown_mock()
     return r.all_passed
 

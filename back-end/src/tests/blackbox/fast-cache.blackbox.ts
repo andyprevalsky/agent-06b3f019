@@ -13,6 +13,8 @@
  * Requires a running backend (BASE_URL) + local Postgres.
  */
 
+import express from 'express';
+import fastCacheRoutes from '../../domains/fast-cache/routes';
 import { config } from 'dotenv';
 import { execFileSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
@@ -61,6 +63,40 @@ async function post(path: string, body: unknown): Promise<{ status: number; json
 }
 
 async function main(): Promise<void> {
+  await test('read-only cache route acknowledges skipped persistence', async () => {
+    const previous = process.env.FAST_MODE_CACHE_DISABLE_WRITE_THROUGH;
+    process.env.FAST_MODE_CACHE_DISABLE_WRITE_THROUGH = '1';
+    const app = express();
+    app.use(express.json());
+    app.use('/api/fast-cache', fastCacheRoutes);
+    const server = app.listen(0, '127.0.0.1');
+    try {
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('missing loopback listener');
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/fast-cache/set`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          key: 'readonly-regression',
+          kind: 'llm',
+          goalHash: 'readonly',
+          value: { json: '{}' },
+        }),
+      });
+      const body = (await response.json()) as JsonObject;
+      assert(
+        response.status === 200 && body.stored === false,
+        'Skipped writes must acknowledge stored:false'
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      );
+      if (previous === undefined) delete process.env.FAST_MODE_CACHE_DISABLE_WRITE_THROUGH;
+      else process.env.FAST_MODE_CACHE_DISABLE_WRITE_THROUGH = previous;
+    }
+  });
   const goalHash = `bbtest${Date.now().toString(16)}`;
   const key = `fastmode:v23:llm:${goalHash}:execute_loop:0:0`;
 

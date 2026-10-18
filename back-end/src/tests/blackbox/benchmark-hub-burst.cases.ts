@@ -1,3 +1,4 @@
+import './benchmark-hub-overlay-env.fixture';
 /** A fleet-wide burst of terminal uploads must share catalog cycles at the single Hub writer. */
 import assert from 'node:assert/strict';
 import {
@@ -7,7 +8,12 @@ import {
   type HubObjectInput,
 } from './benchmark-hub-r2.fixture';
 import { S3Client } from '@aws-sdk/client-s3';
-import { _resetForTests, loadHubAgentRunIndex, putRun } from '../../providers/benchmarkHubStore';
+import {
+  _resetForTests,
+  loadHubAgentRunIndex,
+  listRunsStrict,
+  putRun,
+} from '../../providers/benchmarkHubStore';
 
 function deferred() {
   let resolve!: () => void;
@@ -56,6 +62,8 @@ export async function concurrentFinalBurst(count = 40): Promise<void> {
   const releaseHolder = deferred();
   let catalogReads = 0;
   let catalogWrites = 0;
+  let pendingWrites = 0;
+  let publishedWrites = 0;
   let activeBundleWrites = 0;
   let peakBundleWrites = 0;
   const cycleSizes: number[] = [];
@@ -70,26 +78,33 @@ export async function concurrentFinalBurst(count = 40): Promise<void> {
       return { ETag: objectETag(value) };
     }
     if (command?.constructor?.name === 'GetObjectCommand') {
-      if (input.Key === 'benchmark-hub/index.json') catalogReads += 1;
+      if (input.Key === 'benchmark-hub-v2/pg_owner/index.json') catalogReads += 1;
       const value = objects.get(input.Key);
       if (value === undefined)
         throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
       return { Body: Buffer.from(value), ETag: objectETag(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
-    if (input.Key === 'benchmark-hub/index.json') {
+    if (input.Key === 'benchmark-hub-v2/pg_owner/index.json') {
       catalogWrites += 1;
+      const document = JSON.parse(JSON.parse(input.Body!).payload);
+      const pending = Object.values(document.claims).filter(
+        (claim) => (claim as { state: string }).state === 'pending'
+      ).length;
+      assert.ok(pending <= 64, 'one pending cohort may claim at most64 uploads');
+      if (pending) pendingWrites++;
+      else publishedWrites++;
       const entries = JSON.parse(logicalObject(input.Body!)) as Array<{ run_id: string }>;
       cycleSizes.push(entries.filter((run) => !publishedRunIds.has(run.run_id)).length);
       publishedRunIds = new Set(entries.map((run) => run.run_id));
     }
-    if (input.Key.startsWith('benchmark-hub/runs/')) {
+    if (input.Key.startsWith('benchmark-hub-v2/pg_owner/runs/')) {
       activeBundleWrites += 1;
       peakBundleWrites = Math.max(peakBundleWrites, activeBundleWrites);
       await new Promise((resolve) => setImmediate(resolve));
       activeBundleWrites -= 1;
     }
-    if (input.Key === `benchmark-hub/runs/${prefix}-holder.json`) {
+    if (input.Key === `benchmark-hub-v2/pg_owner/runs/${prefix}-holder.json`) {
       holderWriting.resolve();
       await releaseHolder.promise;
     }
@@ -150,10 +165,17 @@ export async function concurrentFinalBurst(count = 40): Promise<void> {
     );
     assert.equal(
       catalogWrites,
-      1 + Math.ceil((count + 1) / 64),
+      2 * (1 + Math.ceil((count + 1) / 64)),
       `${count} queued finals must share bounded catalog cycles after the holder; saw ${catalogWrites} catalog writes`
     );
-    assert.equal(catalogReads, catalogWrites, 'each catalog cycle reads the catalog once');
+    const cycles = 1 + Math.ceil((count + 1) / 64);
+    assert.equal(pendingWrites, cycles);
+    assert.equal(publishedWrites, cycles);
+    assert.equal(
+      catalogReads,
+      4 * cycles,
+      'one logical snapshot, pending CAS observation, published CAS observation, plus paired metadata claim read per cohort'
+    );
     assert.ok(
       cycleSizes.every((size) => size <= 64),
       'a publication may store at most 64 uploads'
@@ -161,7 +183,7 @@ export async function concurrentFinalBurst(count = 40): Promise<void> {
     assert.ok(peakBundleWrites <= 8, 'bundle publication must use at most eight lanes');
     assert.equal(activeBundleWrites, 0, 'all write lanes settle before acknowledgement');
     assert.ok(results.every((summary) => summary.live === false));
-    const index = JSON.parse(logicalObject(objects.get('benchmark-hub/index.json')!)) as Array<{
+    const index = (await listRunsStrict()) as Array<{
       run_id: string;
       live: boolean;
       tasks: Array<{ status: string }>;
@@ -172,12 +194,15 @@ export async function concurrentFinalBurst(count = 40): Promise<void> {
       assert.equal(run?.live, false);
       assert.equal(run?.tasks[0]?.status, 'INFRA_ERROR');
       assert.deepEqual(
-        JSON.parse(logicalObject(objects.get(`benchmark-hub/runs/${prefix}-final-${i}.json`)!))
-          .tasks,
+        JSON.parse(
+          logicalObject(objects.get(`benchmark-hub-v2/pg_owner/runs/${prefix}-final-${i}.json`)!)
+        ).tasks,
         final(i).tasks
       );
       assert.equal(
-        logicalObject(objects.get(`benchmark-hub/visibility/${prefix}-final-${i}.json`)!),
+        logicalObject(
+          objects.get(`benchmark-hub-v2/pg_owner/visibility/${prefix}-final-${i}.json`)!
+        ),
         'true'
       );
     }

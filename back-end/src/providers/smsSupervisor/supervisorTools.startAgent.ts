@@ -1,3 +1,4 @@
+import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
 /**
  * SMS supervisor start_new_agent commit + web_search execution.
  * Split from supervisorTools.ts to stay under max-lines.
@@ -31,6 +32,7 @@ export type StartPhase = 'plan' | 'execute';
 
 export interface StartNewAgentArgs {
   goal: string;
+  notification_message?: string | null;
   budget_dollars?: number;
   start_phase?: StartPhase | null;
 }
@@ -132,6 +134,9 @@ export async function commitStartNewAgent(
           text: goal,
           role: 'USER',
           timestamp: new Date(),
+          metadata: {
+            startNotification: { message: args.notification_message?.trim() || "I'm on it." },
+          },
         },
       });
 
@@ -260,6 +265,14 @@ export async function commitStartNewAgent(
       workflowId,
     });
   } catch (error) {
+    if (isWorkflowStartAdmissionPending(error)) {
+      return {
+        tool: 'start_new_agent',
+        success: false,
+        result: '',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
     const errorMsg = error instanceof Error ? error.message : String(error);
     log.error('Failed to start workflow', {
       phase: 'start',

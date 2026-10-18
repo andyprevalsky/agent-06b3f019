@@ -80,7 +80,7 @@ Both planned user-input gates, and any unplanned human approval permitted by
 the composed commands, must follow `.claude/shared/approval-format.md`.
 Read it completely immediately before composing the request. The
 response-contract fields below add benchmark and lifecycle context, but never
-replace the shared Before Behavior, After Behavior, TL;DR, Evidence, Detail,
+replace the shared Before Behavior, After Behavior, How, TL;DR, Evidence, Detail,
 and Downstream Implications sections or their code-block presentation.
 
 ## Hard rules
@@ -1085,10 +1085,11 @@ visible even when their failure is accepted for a separate infrastructure goal.
 
 All HARNESS_FIX_DECISION and DEPLOY_ADMIN_APPROVAL requests are emitted by the
 main thread using `.claude/shared/approval-format.md`, separate from progress
-cards. Read that file completely before composing a request. Use its six
-sections, exact inline diff, durable failing-run evidence, pre/post causal
-measurements, golden reference, full unchanged exemplar task prompt, required
-Links list and explicit decision syntax (`Approve: <row ID> approve`).
+cards. Read that file completely before composing a request. Use its seven
+sections (How: immediately before TL;DR:), exact inline diff, durable
+failing-run evidence, pre/post causal measurements, golden reference, full
+unchanged exemplar task prompt, required Links list and explicit decision
+syntax (`Approve: <row ID> approve`).
 
 The core claim identifies the issue class and proven first-bad boundary: the
 issue is the measured root cause, not a timeout label. State the wrong observed

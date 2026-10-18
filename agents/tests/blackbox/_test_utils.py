@@ -223,3 +223,22 @@ class BlackboxResult:
     @property
     def all_passed(self) -> bool:
         return self.failed == 0
+
+
+async def native_browser_start_source(timestamp: str, *, tool_call_id: str = "tool-1", mode: str = "real"):
+    """Capture the actual manager/ToolEvent source before any activity is scheduled."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+    from helpers.handle_tool_event import handle_tool_event
+
+    workflow = SimpleNamespace(user_id="user-1", agent_id="agent-1", world_model_mode=mode)
+    events = SpawnBrowserAgentManagerV3().execute_tool(workflow, {"goal": "Read the shared calendar"}, tool_call_id)
+    try:
+        event = await anext(events)
+    finally:
+        await events.aclose()
+    persistence = AsyncMock()
+    await handle_tool_event(event, "agent-1", tool_call_id, "spawn_browser_agent", persistence)
+    args = persistence.await_args.kwargs["args"]
+    return {"id": "native-browser-origin", "role": args[2], "text": args[1], "metadata": args[3], "timestamp": timestamp}

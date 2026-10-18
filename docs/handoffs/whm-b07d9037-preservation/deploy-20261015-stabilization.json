@@ -1,0 +1,76 @@
+{
+  "format": "rose.whm.deploy-stabilization.v1",
+  "utc": "2026-10-15T18:19:10.809030+00:00",
+  "baseline_source": "e495585aea7f3659caf17a0d9148ba42c204d63f",
+  "user_context_caps": "REJECTED andWITHDRAWN; still main-byte-identical",
+  "accepted_infrastructure_candidates": [
+    {
+      "folder": "rca-trace-archive",
+      "diff_sha256": "4478f8d3b0c989381e392a4433e6cdf81621da77359a298ac210fa76a2377f38"
+    },
+    {
+      "folder": "rca-pipefail",
+      "diff_sha256": "85b60c73073963cb3204c8760aa3628e5eb5dca6b3d1512651ff419e043da750"
+    },
+    {
+      "folder": "rca-prestack-policy",
+      "diff_sha256": "3dbbd84f81cebd9a67a7ad1b0477b61df8c65b83d16ac31efe4bc4ffa1efdb8d"
+    },
+    {
+      "folder": "rca-backend-hub-index",
+      "diff_sha256": "c51a8cbca7edf5daec7d9790d6dad1fa035a0251ea7b73e9b3806b6947cec551"
+    }
+  ],
+  "scope": [
+    "Explicitstored:true successmock only; allassertions retained",
+    "Two samegrep assertions usehere-string insteadproducerpipe",
+    "New exactcurrent reviewedsource fingerprint for2existingpre-servicephases; no validators weakened",
+    "InstallknownincompleteHubmapping whileunknownIDs continuecoalescedreload; archivedviewer/bugreportIO only"
+  ],
+  "prestack_independent_review": {
+    "reviewer": "independent trace_fixture_review managed subagent",
+    "reviewed_source": "e495585aea7f3659caf17a0d9148ba42c204d63f",
+    "previous_reviewed_source": "de189146623c5955251259e609386b111b73513a",
+    "fingerprint": "73c02e5107d749dcd6a27eb7b00e8d1929b886b75dc09303d2e986ea3edb53d0",
+    "phases": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "qualification": "Exact frozen current source only, conditioned on unchanged actual capture, native ownership, original ACK/absence, and final cleanup proofs. No recovery instance or paid operation authorized.",
+    "findings": [
+      "35 unique paths hash-match actual working files; full unreviewed 12022-byte delta read.",
+      "Only run-bench-cloud, run-bench-fleet and run.sh differ from reviewed baseline.",
+      "Cloud changes validate/transport WHM launch configuration, app-scoped lookup, refresh branch; no new bootstrap provider launch. Refresh route is outside authorized phase.",
+      "Fleet change captures worker log after readiness timeout; later than pre-service phases.",
+      "run.sh export guard only tests environment and exports target, at2253 after index1133; service startup unchanged.",
+      "Kill-tree changes are teardown only and cannot establish native retirement.",
+      "Policy still requires committed helper/policy/provenance byte identity; instance marker cannot authorize arbitrary source."
+    ],
+    "limitation": "New runpy pools.py dependency is outside recipe paths. Its current full module inspected: stdlib dataclass/typing plus registry/get_pool, no provider/service effects. Fingerprint does NOT bind future changes of this dependency; complete transitive closure not claimed.",
+    "additional_reviewed_dependency": {
+      "path": "agents/providers/rose/pools.py",
+      "sha256": "d9992f7e13bbba441ead96c9d9a5a70b4f012f5a548577b1fadfff47ebed3b98"
+    }
+  },
+  "current_pools_dependency_sha256": "d9992f7e13bbba441ead96c9d9a5a70b4f012f5a548577b1fadfff47ebed3b98",
+  "env_only_repairs": {
+    "private_python": "3.11.9; offlinepip24.0/bundledsetuptools65.5.0 addedonlyprivatevenv",
+    "native": "existingoriginalPython3.12.3/experiential0.7.158+rose.bf75987e selected; no recoveredmodelrebuild",
+    "lsof": "installed exactmissinghosttool"
+  },
+  "cycle1_full_gate_status": "FAILED retainedunchanged; frontendpassed,196/197backenddomains+272unitfilespassed,107/110agentsdomains; fullcoverage thresholdsbackend/agentsnotreached",
+  "cycle1_evidence": {
+    "receipt": "docs/handoffs/whm-b07d9037-preservation/deploy-20261015-cycle1-private-receipt.json",
+    "all1561_members_sha256_size_authenticated": true,
+    "ciphertext_gzip_hashes_verified": true,
+    "verification": {
+      "authenticated_original_files": 1561,
+      "key": "whm-preservation/e9afcffd/deploy-cycle1-e495585ae-20261015.tar.gz.aesgcm"
+    }
+  },
+  "candidate_proof_not_deploy_certification": true,
+  "next": "Newfullrequiredverificationcycle oncommittedrepairbatch",
+  "production": "NOT MERGED OR DEPLOYED",
+  "R18_SCHEMA_STANDARD_2": "UNAPPLIED",
+  "protected_instructions_and_originals": "unchanged; fulloriginalsource preserved"
+}

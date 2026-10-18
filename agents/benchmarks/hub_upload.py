@@ -478,6 +478,67 @@ def _load_tree_helpers():
     return _fallback_canonicalize_agent_tree, _fallback_tree_child_transcript_count
 
 
+
+def project_archived_diagnostics(bundle: dict, reference: dict, *, verify_archive) -> dict:
+    """Project duplicated native diagnostics only after full archive verification.
+
+    The verifier owns authenticated decryption/readback, not an upload ACK.
+    Its returned manifest must match the public reference digest exactly.
+    """
+    receipt, manifest, verified_bindings = verify_archive(reference)
+    if receipt.get("full_readback_verified") is not True:
+        raise HubVisibilityError("Full forensic archive readback is required")
+    for key in ("bucket", "key", "encryption_key_id", "ciphertext_sha256", "manifest_sha256"):
+        if reference.get(key) != receipt.get(key):
+            raise HubVisibilityError("Forensic archive identity differs")
+    digest = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+    if digest != receipt.get("manifest_sha256") or len(manifest) != receipt.get("files"):
+        raise HubVisibilityError("Forensic archive manifest differs")
+    members = {row["path"]: row for row in manifest}
+    canonical = reference.get("canonical", {})
+    if members.get(canonical.get("path")) != canonical:
+        raise HubVisibilityError("Original canonical member is missing or differs")
+    if verified_bindings.get("canonical") != canonical or verified_bindings.get("run_id") != bundle.get("run_id"):
+        raise HubVisibilityError("Authenticated canonical run binding differs")
+    if verified_bindings.get("bundle_sha256") != hashlib.sha256(
+        json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest():
+        raise HubVisibilityError("Authenticated canonical bundle content differs")
+    body = dict(bundle)
+    tasks = []
+    for original in bundle.get("tasks", []):
+        task = dict(original)
+        logs = dict(task.get("logs") or {})
+        if "wmh_retirement" in logs:
+            binding = reference.get("retirements", {}).get(task.get("agent_id"), {})
+            if verified_bindings.get("retirements", {}).get(task.get("agent_id")) != binding:
+                raise HubVisibilityError("Authenticated retirement binding differs")
+            if binding.get("run_id") != bundle.get("run_id"):
+                raise HubVisibilityError("Forensic retirement root/run differs")
+            member = binding.get("member", {})
+            if members.get(member.get("path")) != member:
+                raise HubVisibilityError("Original native retirement member differs")
+            if binding.get("diagnostic_sha256") != hashlib.sha256(
+                json.dumps(logs["wmh_retirement"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest():
+                raise HubVisibilityError("Forensic diagnostic projection differs")
+            logs.pop("wmh_retirement")
+            logs["forensic_archive_ref"] = {
+                key: reference[key] for key in (
+                    "bucket", "key", "encryption_key_id", "ciphertext_sha256", "manifest_sha256"
+                )
+            }
+            logs["forensic_archive_ref"].update(
+                canonical=canonical, native_retirement=member,
+                diagnostic_sha256=binding["diagnostic_sha256"],
+                run_id=bundle.get("run_id"), root_agent_id=task.get("agent_id"),
+            )
+        task["logs"] = logs
+        tasks.append(task)
+    body["tasks"] = tasks
+    return body
+
+
 def prepare_run_bundle_for_upload(bundle: dict, *, live: bool = False, required: bool = False) -> dict:
     """Drop tool-usage-shaped logs.tree and refuse empty fan-out publishes.
 

@@ -1,21 +1,17 @@
+import '../blackbox/benchmark-hub-overlay-env.fixture';
 import assert from 'node:assert/strict';
 import test, { TestContext } from 'node:test';
 import { createHash } from 'node:crypto';
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
-  GetObjectCommand,
-  HeadObjectCommand,
-  PutObjectCommand,
-  S3Client,
-} from '@aws-sdk/client-s3';
-import {
-  getObjectStrict,
-  putObject,
+  getHubObjectVersion as getObjectStrict,
+  putHubObjectVersion as putObject,
   resetHubObjectStorageForTests,
 } from '../../providers/benchmarkHubStorage';
 import { withHubStorageOwnership } from '../../providers/benchmarkHubStorageOwnership';
 function remote(t: TestContext, initial?: string, objectKey = 'index.json') {
   const objects = new Map<string, string>();
-  if (initial !== undefined) objects.set(`benchmark-hub/${objectKey}`, initial);
+  if (initial !== undefined) objects.set(`benchmark-hub-v2/pg_owner/${objectKey}`, initial);
   const etag = (body: string) => `"${createHash('md5').update(body).digest('hex')}"`;
   const writes: PutObjectCommand['input'][] = [];
   let delayed: (() => boolean) | undefined;
@@ -46,11 +42,11 @@ function remote(t: TestContext, initial?: string, objectKey = 'index.json') {
     S3Client.prototype,
     'send',
     async (
-      command: GetObjectCommand | HeadObjectCommand | PutObjectCommand,
+      command: GetObjectCommand | PutObjectCommand,
       options?: { abortSignal?: AbortSignal }
     ) => {
       const key = command.input.Key!;
-      if (command instanceof GetObjectCommand || command instanceof HeadObjectCommand) {
+      if (command instanceof GetObjectCommand) {
         const body = objects.get(key);
         if (body === undefined) throw Object.assign(new Error('missing'), { name: 'NoSuchKey' });
         return { Body: Buffer.from(body), ETag: etag(body) };
@@ -123,7 +119,7 @@ for (const key of [
     });
   }
 }
-test('all mutable keys preserve full logical payload and legacy plain reads', async (t) => {
+test('all mutable physical keys preserve full payload and pre-existing plain reads', async (t) => {
   remote(t, '[{"legacy":true}]');
   assert.equal(await getObjectStrict('index.json'), '[{"legacy":true}]');
   const values: Record<string, string> = {
@@ -145,7 +141,7 @@ test('changed observed ETag refuses once without refreshing or acknowledging', a
   await assert.rejects(
     withHubStorageOwnership(async () => {
       assert.equal(await getObjectStrict('index.json'), 'before');
-      server.objects.set('benchmark-hub/index.json', 'foreign');
+      server.objects.set('benchmark-hub-v2/pg_owner/index.json', 'foreign');
       await putObject('index.json', 'stale');
     }),
     /CAS failed/

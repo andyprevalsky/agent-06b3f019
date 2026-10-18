@@ -1,6 +1,6 @@
 import { callOrgTool } from '../../providers/agentcard/org-runtime';
 import { getOrgManagedCardholderId } from '../../providers/agentcard/store';
-import { stripe } from '../../providers/stripe';
+import { getStripeClientForLivemode } from '../../providers/stripe';
 import { TestPaymentError } from './errors';
 import {
   agentCardSummaryFromMcpResult,
@@ -56,7 +56,8 @@ function buildAttention(attentionRequests: LifecycleAttention): TestPaymentLifec
 }
 
 function resolveDependencies(
-  dependencies: TestPaymentLifecycleDependencies
+  dependencies: TestPaymentLifecycleDependencies,
+  livemode: boolean
 ): Required<
   Pick<
     TestPaymentLifecycleDependencies,
@@ -75,11 +76,15 @@ function resolveDependencies(
       ((_userId: string, cardId: string) => getOrgCardSummary(cardId)),
     retrieveStripeHold:
       dependencies.retrieveStripeHold ??
-      ((paymentIntentId: string) => stripe.paymentIntents.retrieve(paymentIntentId)),
+      ((paymentIntentId: string) =>
+        getStripeClientForLivemode(livemode).paymentIntents.retrieve(paymentIntentId)),
     listStripeRefunds:
       dependencies.listStripeRefunds ??
       ((paymentIntentId: string) =>
-        stripe.refunds.list({ payment_intent: paymentIntentId, limit: 10 })),
+        getStripeClientForLivemode(livemode).refunds.list({
+          payment_intent: paymentIntentId,
+          limit: 10,
+        })),
     listOrgTransfers:
       dependencies.listOrgTransfers ?? ((args) => callOrgTool('list_transfers', args)),
     listOrgCards: dependencies.listOrgCards ?? ((args) => callOrgTool('list_cards', args)),
@@ -87,7 +92,7 @@ function resolveDependencies(
     searchStripeHolds:
       dependencies.searchStripeHolds ??
       ((agentId, page) =>
-        stripe.paymentIntents.search({
+        getStripeClientForLivemode(livemode).paymentIntents.search({
           query: `metadata['agentId']:'${agentId}'`,
           limit: 100,
           ...(page !== undefined ? { page } : {}),
@@ -99,6 +104,7 @@ function mapStripeHold(hold: StripeHold | null): TestPaymentLifecycle['stripeHol
   if (hold === null) return null;
   return {
     id: hold.id,
+    livemode: hold.livemode,
     status: hold.status,
     amountCents: hold.amount,
     amountCapturableCents: hold.amount_capturable,
@@ -106,15 +112,30 @@ function mapStripeHold(hold: StripeHold | null): TestPaymentLifecycle['stripeHol
   };
 }
 
-function mapStripeRefund(refunds: StripeRefundList): TestPaymentLifecycle['stripeRefund'] {
-  // Prefer a succeeded refund, but still surface a failed/pending refund when that is all we have.
-  const refund =
-    refunds.data.find((entry) => entry.status === 'succeeded') ?? refunds.data[0] ?? null;
-  if (refund === null) return null;
+function mapStripeRefund(
+  refunds: StripeRefundList,
+  hold: StripeHold | null,
+  purchasePaymentIntentId: string | null
+): TestPaymentLifecycle['stripeRefund'] {
+  if (refunds.data.length === 0) return null;
+  // Refund has no native livemode; derive provenance only from its verified native PI link.
+  if (hold === null || typeof hold.livemode !== 'boolean' || hold.id !== purchasePaymentIntentId) {
+    throw new TestPaymentError('Stripe refund does not match the purchase PaymentIntent', 502);
+  }
+  for (const refund of refunds.data) {
+    const linkedId =
+      typeof refund.payment_intent === 'string' ? refund.payment_intent : refund.payment_intent?.id;
+    if (linkedId !== hold.id) {
+      throw new TestPaymentError('Stripe refund does not match the purchase PaymentIntent', 502);
+    }
+  }
+  const refund = refunds.data.find((entry) => entry.status === 'succeeded') ?? refunds.data[0];
   return {
     id: refund.id,
     status: refund.status ?? 'unknown',
     amountCents: refund.amount,
+    paymentIntentId: hold.id,
+    paymentIntentLivemode: hold.livemode,
   };
 }
 
@@ -181,7 +202,7 @@ async function buildLoadedLifecycle(
     listOrgCards,
     getOrgCardholderId,
     searchStripeHolds,
-  } = resolveDependencies(dependencies);
+  } = resolveDependencies(dependencies, purchase.stripeLivemode);
   const cardId = purchase.cardId;
   const intentId = purchase.stripePaymentIntentId;
   const emptyRefunds: StripeRefundList = { data: [] };
@@ -219,7 +240,7 @@ async function buildLoadedLifecycle(
     },
     walletFunding: mapWalletFunding(purchase),
     stripeHold: mapStripeHold(stripeHold),
-    stripeRefund: mapStripeRefund(stripeRefunds),
+    stripeRefund: mapStripeRefund(stripeRefunds, stripeHold, purchase.stripePaymentIntentId),
     agentCard: mapAgentCard(purchase, cardDetails),
     orgTransfer: mapOrgTransfer(purchase, transferResults),
     attention: buildAttention(attentionRequests),

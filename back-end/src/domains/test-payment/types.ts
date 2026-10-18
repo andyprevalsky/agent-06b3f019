@@ -92,6 +92,7 @@ export interface TestPaymentLifecycle {
   };
   stripeHold: null | {
     id: string;
+    livemode: boolean;
     status: string;
     amountCents: number;
     amountCapturableCents: number;
@@ -99,6 +100,9 @@ export interface TestPaymentLifecycle {
   };
   stripeRefund: null | {
     id: string;
+    /** Authoritative mode of the verified linked native PaymentIntent, not a Refund field. */
+    paymentIntentId: string;
+    paymentIntentLivemode: boolean;
     status: string;
     amountCents: number;
   };

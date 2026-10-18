@@ -1,7 +1,8 @@
-/** Benchmark Hub run-bundle reads: exact-run objects, independent of the catalog writer. */
-
+import { normalizeAgentId } from './benchmarkHubRunProjection';
+import type { HubRunSummary } from './benchmarkHubTypes';
+/** Exact run-bundle reads, independent of catalog mutation scheduling. */
 import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
-import { getObject, getObjectStrict } from './benchmarkHubStorage';
+import { getObject, getObjectStrict, hubOverlayEnabled } from './benchmarkHubStorage';
 import { createLogger } from './logger';
 
 const log = createLogger('BenchmarkHubStore');
@@ -13,6 +14,8 @@ export async function getRunBundle(runId: string): Promise<Record<string, unknow
   try {
     return parseHubRunBundle(raw);
   } catch {
+    if (hubOverlayEnabled())
+      throw new BenchmarkHubUnavailableError('Hub run bundle is temporarily unavailable');
     return null;
   }
 }
@@ -74,4 +77,25 @@ export async function getRunBundleStrict(
   const raw = await getObjectStrict(`runs/${runId}.json`);
   if (raw === null) throw new Error(`Missing Hub run bundle: ${runId}`);
   return parseHubRunBundle(raw, catalogSummary);
+}
+
+export function parseRunCatalog(raw: string): HubRunSummary[] {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) throw new Error('Invalid Benchmark Hub run catalog');
+  return parsed.map((value) => {
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      typeof (value as Partial<HubRunSummary>).run_id !== 'string' ||
+      !/^[A-Za-z0-9._-]+$/.test((value as Partial<HubRunSummary>).run_id as string) ||
+      !Array.isArray((value as Partial<HubRunSummary>).tasks)
+    ) {
+      throw new Error('Invalid Benchmark Hub run catalog entry');
+    }
+    const run = value as HubRunSummary;
+    return {
+      ...run,
+      tasks: run.tasks.map((task) => ({ ...task, agent_id: normalizeAgentId(task.agent_id) })),
+    };
+  });
 }

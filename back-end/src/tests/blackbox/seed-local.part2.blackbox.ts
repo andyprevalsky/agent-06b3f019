@@ -308,8 +308,8 @@ test('compute-token overlay must not restore AgentCard setup fixtures', async ()
     'computeTokensOnly branch must filter to claude_code/gpt_code'
   );
   assert(
-    !/name:\s*\{/.test(computeBranch?.[2] ?? ''),
-    'full-seed branch may still import every Integration (including agentcard)'
+    /name:\s*\{\s*not:\s*'lantern_people'/.test(computeBranch?.[2] ?? ''),
+    'full seed must exclude rotating Lantern grants while ordinary providers retain full-mode coverage'
   );
   assert(
     helper.includes('agentcard-setup') || helper.includes('AgentCard'),

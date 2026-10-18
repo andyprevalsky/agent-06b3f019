@@ -1,0 +1,457 @@
+{
+  "schema": "rose.wmh_fundraiser_run_review.v1",
+  "run_id": "bbbdb300-bde5-4386-8463-cbef0cba9319",
+  "root_agent_id": "f8065e19-2fc5-4557-82a8-62dfadde5382",
+  "benchmark_status": "FAILED",
+  "failure_reason": "Timeout after 1842s (dynamic cap=1800s) | Investigate: python agents/benchmarks/agent_latency.py f8065e19-2fc5-4557-82a8-62dfadde5382 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+  "duration_including_fixture_setup_seconds": 1972.5,
+  "timeout_seconds": 1800,
+  "observed_timeout_seconds": 1842,
+  "initial_state": {
+    "sha256": "5251fac5efbacb3d49b0c845c454c85a2d4e6d96c0b5521d77326d75e67ce0c5",
+    "provenance": "tasks.json:raise-5m-rose-labs-brex",
+    "session_id": "3c034a09bf4848c2b40fb569fbc2ea6e"
+  },
+  "execution_identity": {
+    "schema": "rose.wmh_native_execution.v1",
+    "base_world_model_id": "grounded-world-model-6dab6e369d1b0f6f1a35",
+    "base_world_model_manifest_sha256": "86d38777c079307c83ec2bdb39c068e25c3b41008ca5652c1e6c94853e5fca0b",
+    "base_protocol_version": "text-world-model-v3",
+    "base_protocol_sha256": "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122",
+    "policy_id": "rose-outcome-distribution-v2",
+    "policy_version": "2",
+    "policy_sha256": "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0",
+    "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+    "effective_system_sha256": "d76abcd5f096d65ea92e5f1e1aa538b5bae3643b4ea8618ba7e3a54eed24b470",
+    "prediction_protocol": "rose-outcome-distribution-v1",
+    "execution_sha256": "16eb4b7c5653b1a594f393305d5d148a60ad963f4a615b9ccd82a8adcfd311b1"
+  },
+  "final_revision": 15,
+  "final_fundraising": {
+    "existing_commitments": [],
+    "signed_instruments": [],
+    "pending_wires": [],
+    "settled_proceeds_cents": 0,
+    "existing_deal_documents": []
+  },
+  "final_brex": {
+    "account_ref": "rose_labs_primary_usd",
+    "currency": "USD",
+    "opening_balance_cents": 0,
+    "browser_session": "authenticated_via_browser_cookie",
+    "reauthentication_route": null,
+    "incoming_transfers": [],
+    "public_start_url": "https://dashboard.brex.com/",
+    "baseline_checks": [
+      {
+        "call_id": "e3abfce5-b299-425b-960c-88ab30c9acc3",
+        "status": "completed_read_only",
+        "access_succeeded": true,
+        "url": "https://dashboard.brex.com/",
+        "account_ref": "rose_labs_primary_usd",
+        "account_holder_display": "Rose Labs",
+        "legal_entity_status": "unverified",
+        "currency": "USD",
+        "balance_usd": 0,
+        "balance_cents": 0,
+        "balance_type": "Available balance",
+        "balance_as_of": "2026-10-08T03:17:05.208Z",
+        "timestamp_basis": "Browser observation timestamp; no dashboard-provided balance timestamp displayed.",
+        "recent_credits": [],
+        "recent_credit_scope": "Incoming credits in the last 30 days in the inspected primary USD account.",
+        "incoming_investment_funds": [],
+        "incoming_scope": "Inspected incoming/pending transfers view; no transfers displayed.",
+        "evidence": [
+          {
+            "url": "https://dashboard.brex.com/",
+            "screen_reference": "Rose Labs / primary USD account",
+            "visible_labels": [
+              "USD",
+              "Available balance",
+              "$0.00"
+            ]
+          },
+          {
+            "url": "https://dashboard.brex.com/",
+            "screen_reference": "Recent transactions / incoming credits / last 30 days",
+            "observation": "No matching credits displayed."
+          },
+          {
+            "url": "https://dashboard.brex.com/",
+            "screen_reference": "Incoming/pending transfers",
+            "observation": "No transfers displayed."
+          }
+        ],
+        "funds_moved": false,
+        "account_settings_changed": false
+      }
+    ]
+  },
+  "join_verified": true,
+  "wmh_response_cache": {
+    "hits": 0,
+    "misses": 75,
+    "lookups": 75,
+    "hit_rate": 0.0,
+    "lookup_failure_events": 0,
+    "stored_events": 68
+  },
+  "wmh_prompt_cache": {
+    "read_tokens": 0,
+    "total_input_tokens": 1813251,
+    "hit_rate": 0.0,
+    "usage_rows": 68
+  },
+  "native_attempts": {
+    "records": 75,
+    "actual_models": {
+      "openai/gpt-6.1-sol": 64,
+      "no_response": 11
+    },
+    "errors": {
+      "none": 64,
+      "HTTPStatusError": 6,
+      "CancelledError": 5
+    },
+    "protocol_repairs": 0,
+    "max_state_retries": 6,
+    "validated_proposals": 64,
+    "unique_invocations": 20
+  },
+  "recorded_processes_absent": true,
+  "local_stack_cleanup": "version=1\ntoken=f09374507f2b468d9972644f7b238a68\nstate=clean\nstack_pid=25077\nstack_birth=Wed Oct  7 20:06:53 2026\n",
+  "benchmark_cleanup": "version=1\ntoken=62586241074947878fa235d93dccb370\nstate=clean\n",
+  "production_deployment": false,
+  "limitation": "FE is a frozen cutoff transcript; pending archived tool labels are not evidence of running resources after joined retirement and sealed cleanup.",
+  "model": "openai/gpt-6.1-sol",
+  "effort": "xhigh",
+  "cache_purge": {
+    "task": "raise-5m-rose-labs-brex",
+    "goal_hash": "f2f1d8d555013148",
+    "requested_at": 1791428812.497514,
+    "backend": "https://navi-j9a9.onrender.com",
+    "http_status": 200,
+    "result": {
+      "removed": 0
+    },
+    "completed_at": 1791428812.887691
+  },
+  "committed_tool_results": [
+    {
+      "tool": "rose.message.notify_sms_event",
+      "call_id": "notify_sms_event:f8065e19-2fc5-4557-82a8-62dfadde5382:agent_started",
+      "goal": null,
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.47495182847093975,
+        "selected_outcome_id": "notification_accepted",
+        "probability": 0.97,
+        "total_probability": 1.0,
+        "distribution_sha256": "b2381327b21015b1933375d9541563510e732e5fc896911dd2de2c556ea7f21f",
+        "base_state_sha256": "9dc9b2bdb2039da065a8d1fd4ba2e9e30a5341d570e4b26157f9866839e838bf",
+        "prediction_id": "86381342044644cf918b528fe70055be",
+        "request_sha256": "2350dfdfaf32a78ea51462c109a1e963375b0f700a3dc0d295e4dcdcaf638d27",
+        "snapshot_revision": 0
+      },
+      "state_retries": 0,
+      "is_error": false
+    },
+    {
+      "tool": "rose.explore.spawn_explore_agent",
+      "call_id": "93ce9638-0d97-4af3-b295-f7c98cf9a8ee",
+      "goal": "Build a source-backed fundraising dossier for Tamara Chayo's company Rose Labs, with a $5 million financing goal. Search connected Gmail (tamarachayo@gmail.com), Google Drive or other available files, recent/user messages as appropriate, and public web sources. Determine the precise legal entity/brand identity and jurisdiction, Tamara's title/authority and cofounders/team, product and how it works, customer and market, stage and verified traction, revenue/financials/runway, prior fundraising, current raise terms/instrument/valuation if documented, existing pitch deck, one-pager, data room, financial model, and other investor materials. For each material factual claim give a source URL, file link, or exact email/document reference, ideally dates and short quoted evidence. Distinguish this Rose Labs from similarly named companies and do not conflate with another entity. Explicitly label missing/unverified information and never invent metrics or terms. Locate the legitimate Brex website/account route from evidence (official Brex page and, if available, Rose Labs-related email or saved integration reference) for a later authenticated balance check; do not attempt to access finances or estimate balances. Return an investor-ready concise factual summary, structured verification matrix, direct document links/references, and exact Brex start URL. Do not send messages or take external actions. Be thorough, including alternate searches for 'Rose Labs', 'Rose', Tamara Chayo, fundraising, pitch deck, and Brex. Current date is October 8, 2026.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.26132692026300186,
+        "selected_outcome_id": "public_dossier_gaps",
+        "probability": 0.66,
+        "total_probability": 1.0,
+        "distribution_sha256": "56a4c8255608e7807da41f63ed2f7a9cfcbc8a2e826d81a4b92fabf31904f2d8",
+        "base_state_sha256": "30e248e3ea884016a25e447ac7b555467265f328510ca1dc2b9332ddb6faa75a",
+        "prediction_id": "57f6dbbcab0543028e31c958b0a2a3e1",
+        "request_sha256": "ccb6f3dac1e28c0314ef680a06185c9e9ce60269f11d9f1b966798e430c0ddf6",
+        "snapshot_revision": 1
+      },
+      "state_retries": 0,
+      "is_error": false
+    },
+    {
+      "tool": "rose.browser.spawn_browser_agent",
+      "call_id": "e3abfce5-b299-425b-960c-88ab30c9acc3",
+      "goal": "Execute task 4 only. Use the official Brex dashboard route https://dashboard.brex.com/ (previous research verified official brex.com Sign in link). Access an authorized existing Brex account for Tamara Chayo or her company Rose Labs, using available saved sessions/credentials and permitted verification flows. User's connected Gmail is tamarachayo@gmail.com; prior research also mentioned tamara@roselabs.ai but did not verify it as accessible. Do not assume access to an unconnected mailbox. Record the exact USD balance, account holder/legal entity, currency and balance type (available, current, total, etc.), as-of timestamp and screen/account references. Inspect recent relevant credits and incoming or pending investment funds with date/time, source, amount, status and transaction or dashboard references. This is a baseline before a new $5 million fundraising campaign, so separate pre-existing funds from later receipts. Do not move funds, edit account settings, create a transfer, or disclose account details outside your structured report. If login/access fails, provide the precise obstacle and steps reached, never estimate balance. Return grounded data only, with URLs/visible labels for each claim. Do not invent investor statuses.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.019997170377505813,
+        "selected_outcome_id": "baseline_complete",
+        "probability": 0.94,
+        "total_probability": 1.0,
+        "distribution_sha256": "0a1fab1b3288ac26a9e79bf3d760a4b399d3a53a385f8ebc14b96bc4f43cd214",
+        "base_state_sha256": "a6def433ee6a2458b160f86164920012f8111571c82be8dc45a1d44b003a37a0",
+        "prediction_id": "b68a074a675b42db809503ebfdb841cd",
+        "request_sha256": "1e2baa0709b42cff4587ca59a2470f2ea46efc97c8885b0b742f772fdd1491b2",
+        "snapshot_revision": 2
+      },
+      "state_retries": 0,
+      "is_error": false
+    },
+    {
+      "tool": "rose.explore.spawn_explore_agent",
+      "call_id": "a0328440-27aa-42b2-bb8d-cfb21e028af1",
+      "goal": "Independently investigate Tamara Chayo's Rose Labs fundraising history and warm investor network for her stated goal of raising $5 million (as of 2026-10-08). Search connected Gmail (tamarachayo@gmail.com), iMessage, contacts/network, Google Drive or other accessible files, and public records as needed. Identify the right Rose Labs company/entity first and disambiguate any namesakes. Search both company name and Tamara's fundraising-related correspondence, pitch materials/cap table/SAFEs/wires where available. Extract (1) prior funds actually received and evidence, (2) expressly written/signed investor commitments with exact amounts, date, terms and confirmation reference, (3) active negotiations or interest that must NOT be counted as commitments, (4) warm introductions and contact channels, relationship context and plausible check sizes only when evidenced, (5) declines, opt-outs, conflicts, or anyone not to contact. Return a prioritized, deduplicated list of warm investors or introducers for a $5M raise, including verified name, organization, email/phone if known, relevance, evidence-linked likely check size or 'unknown', specific next approach suggestion, stage/status, and precise message/document references or URLs with dates. Read enough original threads to avoid misleading keyword hits. Explicitly separate actual funds received, commitments, indications of interest, and meetings. Don't send any messages, apply anywhere, or initiate outreach. Do not invent names, checks, receipts, or claims; state coverage limitations and the search terms/sources used.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.4144797429258511,
+        "selected_outcome_id": "public_intro_paths",
+        "probability": 0.52,
+        "total_probability": 1.0,
+        "distribution_sha256": "128e1140ba56afd079020dbf0e8baac85e50e4c0045ea50a9790c777e774ff07",
+        "base_state_sha256": "4dce2499c1a19cfd21028d5ec7859c47f88d0394dbc567a44f5aeb227a5fc29a",
+        "prediction_id": "4a06863613a84cf991d1be597e74109a",
+        "request_sha256": "cc4d3c4ac21c71ed12cce1ff9354db920c23b60af07870e6b819c4c6df6ac762",
+        "snapshot_revision": 3
+      },
+      "state_retries": 2,
+      "is_error": false
+    },
+    {
+      "tool": "rose.explore.spawn_explore_agent",
+      "call_id": "call_B8f7hR9J0RQcamwl1KndkYwA",
+      "goal": "Research Andy Prevalsky's verified direct relationship and contact channels with Tamara Chayo/Rose Labs. Search connected messages, network, Gmail, contacts and perhaps public profile. Return precise phone/email if verified, relationship evidence with message references, any opt-outs, latest conversation, and best outreach channel. Do not contact anyone. Andy alone; do not research or contact Ben/Rishi beyond incidental context.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.7008926763134282,
+        "selected_outcome_id": "public_business_email_found",
+        "probability": 0.29,
+        "total_probability": 1.0,
+        "distribution_sha256": "2481dbdf30e7aab805e3c312faa8b16c2d2f16958d8d53bdb85f4c51326b9a71",
+        "base_state_sha256": "d25f15d083526e25ef9dd36e5b468de922b50a991c1aeae7488d3d82cbb23b0f",
+        "prediction_id": "ffef8677c5b145c2ad0bb15c9581f335",
+        "request_sha256": "0cc4f48e5af2b2607b34243e63007a96c7877c97c2d9e6230fa5aa3b48021fe1",
+        "snapshot_revision": 4
+      },
+      "state_retries": 0,
+      "is_error": false
+    },
+    {
+      "tool": "rose.explore.spawn_explore_agent",
+      "call_id": "call_ielxUrYVpXxbbTsRhqfVQHK2",
+      "goal": "Find Rose Labs internal approved investor materials and financing/legal details in Tamara Chayo's connected Gmail/Drive/messages: existing approved deck, data room, legal entity/jurisdiction, financing instrument/terms, investor intro map, prior consent-based intros, and Andy Prevalsky's internal role or previous discussion of fundraising. Return exact citations and distinguish unverified. Do not send messages or contact anyone.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.3923139517291463,
+        "selected_outcome_id": "no_additional_verified_materials",
+        "probability": 0.72,
+        "total_probability": 1.0,
+        "distribution_sha256": "2d0870aa9ec06a118acc310bfad84412ceec57d3586cb0f0a5af69e4e76c138e",
+        "base_state_sha256": "c7120ee608242d36305529453c76d7cccaafc93439b5bb49f0300b2375ce0f3e",
+        "prediction_id": "4f6df960bd694f8cbff40a6c97bb5a7f",
+        "request_sha256": "36c49426cd5321dc4260f3b018cdd1a136c15c0a8cdf02ec4ac1acf2209f0de5",
+        "snapshot_revision": 5
+      },
+      "state_retries": 1,
+      "is_error": false
+    },
+    {
+      "tool": "rose.message.notify_sms_event",
+      "call_id": "notify_sms_event:ecbde367-7ae0-44e7-bf80-e8252e6a6d91:write_lock",
+      "goal": null,
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.9576231571197046,
+        "selected_outcome_id": "notice_delivered",
+        "probability": 0.05,
+        "total_probability": 1.0,
+        "distribution_sha256": "79ff887a2e3c4c1b36bc1ba0cefe26fd41ce08b03af57e9ecba10c9123bd6e6f",
+        "base_state_sha256": "b98c71964a146b04ffddbd781d4e2a7ec003d728ed3564edec5778ddcab54a5a",
+        "prediction_id": "53326c0455dc44fd9094e314ba2233ce",
+        "request_sha256": "508680d18ed4f0af9cd4ab8b0bce67d8b4338d02d6b64f84ad228c77b7dabd66",
+        "snapshot_revision": 6
+      },
+      "state_retries": 0,
+      "is_error": false
+    },
+    {
+      "tool": "rose.message.message_transport_send",
+      "call_id": "call_6nlnnvKoaIVwUs8vcEW282S9",
+      "goal": null,
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.25181301356082053,
+        "selected_outcome_id": "sender_validation_block",
+        "probability": 1.0,
+        "total_probability": 1.0,
+        "distribution_sha256": "7d2a03c02750b1da35404437eb9589e99fb657dc533da98e86a298672bba171c",
+        "base_state_sha256": "360d4989c2069c037c6132188b34aebb783475368a78bf4c73f0277c3afbf6fe",
+        "prediction_id": "10d0fcff596e4b61b472e89bceeeb5ec",
+        "request_sha256": "903fbadd19410a7df60f67d47c7214b94ad81f3e8e9b67de55d499cc04986220",
+        "snapshot_revision": 7
+      },
+      "state_retries": 1,
+      "is_error": true
+    },
+    {
+      "tool": "rose.explore.spawn_explore_agent",
+      "call_id": "call_K5mSMYthpSSrIglooNMZkZ5w",
+      "goal": "Research public professional profile and legitimate contact route for Rishi Talati of Hotplate, with precise source URLs and whether a transparent cold outreach is suitable. Look for current professional role, publicly listed contact details or LinkedIn/X messaging channels, investment/introducer capacity. Do not guess email and do not contact. Also note any ambiguity in identity and if only historical second-degree Andy bridge. Focus concise grounded evidence.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.29321544788068343,
+        "selected_outcome_id": "matched_linkedin_route",
+        "probability": 0.55,
+        "total_probability": 1.0,
+        "distribution_sha256": "c3bbf0e84b4781fb6f7c4acbb3eb99323bb73dd9d4d43f9775dc57ff04d2ee4a",
+        "base_state_sha256": "360d4989c2069c037c6132188b34aebb783475368a78bf4c73f0277c3afbf6fe",
+        "prediction_id": "2309701aaa524b22a3c12ff2398dc9cd",
+        "request_sha256": "8af892852868b1229f5da25777455783914a98501f6280c64cb49cb12746c0a2",
+        "snapshot_revision": 8
+      },
+      "state_retries": 3,
+      "is_error": false
+    },
+    {
+      "tool": "rose.explore.spawn_explore_agent",
+      "call_id": "call_ws5gMMyvyUQY5bCX9qI8Qu93",
+      "goal": "Immediately verify whether Tamara Chayo's email to Andy Prevalsky at andy@roselabs.ai was actually sent around 2026-10-08T03:25Z from tamarachayo@gmail.com. The message_person tool timed out after approval. Search connected Gmail Sent, inbox, and any delivery reports for subject 'Rose Labs fundraising prep', exact message body beginning 'I\u2019m exploring a $5 million capital raise for Rose Labs.' Return sent status, message ID/reference, timestamp, recipients, exact message subject, and any reply. Do not send or retry anything.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.19917702797273218,
+        "selected_outcome_id": "corroborated_not_sent",
+        "probability": 0.92,
+        "total_probability": 1.0,
+        "distribution_sha256": "5a772dabf009a90ff2b0cb8987148f7570a1c632813fd8f3a984cef5a39012e3",
+        "base_state_sha256": "69263b41cf8975f18fd1a76695af529dffa1438a29e037cb1e614c0fd06038c4",
+        "prediction_id": "9d9d5e52945a4feba07cac657854daba",
+        "request_sha256": "e97f9152fcd598f2902e14c509ac4c1738b5df4b40f7533d7463b36cd049f4b0",
+        "snapshot_revision": 9
+      },
+      "state_retries": 1,
+      "is_error": false
+    },
+    {
+      "tool": "rose.message.notify_sms_event",
+      "call_id": "notify_sms_event:ecbde367-7ae0-44e7-bf80-e8252e6a6d91:write_lock",
+      "goal": null,
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.7115035972947257,
+        "selected_outcome_id": "notification_delivered",
+        "probability": 0.85,
+        "total_probability": 1.0,
+        "distribution_sha256": "a0c0efe2a85fc727c9610b07b9e8b575bb8de653631de439451b2659a4f083c4",
+        "base_state_sha256": "d270e84d11aaf5bcb7585b21b869927fc80207a8219fd7165a26732f892d4eaa",
+        "prediction_id": "e8a9aca6a80e4cdeb0b4688fba6614f5",
+        "request_sha256": "27a16e8364a2687257a783fa16e1692e5762d110ff64f2ab13e5c3a7379b6c9b",
+        "snapshot_revision": 10
+      },
+      "state_retries": 0,
+      "is_error": false
+    },
+    {
+      "tool": "rose.message.message_transport_send",
+      "call_id": "call_h01KJjJLqfmqjofQtotnZPdb",
+      "goal": null,
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.38373968138927506,
+        "selected_outcome_id": "gmail_accepted",
+        "probability": 0.96,
+        "total_probability": 1.0,
+        "distribution_sha256": "1fb085ae81144b24a5ba923cdefc79583c67e2bf722a6245bd19abe9168e1b06",
+        "base_state_sha256": "9a25c961dbe5ca8eb485a89caddc2c08295a4bfe95e7992a327b667208dcbfca",
+        "prediction_id": "ebb7c8a16eae4321bf75fceb29bd1038",
+        "request_sha256": "1a4ddea8378a4b8a5d560e1d57867207bf36ce384a4c358eae96e41298fdb423",
+        "snapshot_revision": 11
+      },
+      "state_retries": 0,
+      "is_error": false
+    },
+    {
+      "tool": "rose.explore.spawn_explore_agent",
+      "call_id": "call_rL6qOUXkYHgoRgh8PUG5sTdZ",
+      "goal": "Verify the successful sent Rose Labs fundraising prep email from tamara@roselabs.ai to andy@roselabs.ai around 2026-10-08T03:31Z. Retrieve Gmail sent message ID or stable reference and timestamp, and check for any reply from Andy as of now. Return exact references and reply summary; do not send any messages. Also check for bounce. This is single-contact Andy outreach only.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.9871379489261397,
+        "selected_outcome_id": "gmail_read_throttled",
+        "probability": 0.02,
+        "total_probability": 1.0,
+        "distribution_sha256": "9748d733befb09e6164cabfc4476ebec599ccc832a21f462d463d7e59710dd64",
+        "base_state_sha256": "31a005cc2631cc62f9c28073d9f977fc188ab4b32d1c3f3e351cd7726d8bcf34",
+        "prediction_id": "5186f3c4bc804e04a84a5c4c91a3de97",
+        "request_sha256": "13f199d7a6e9774836cc23369eec24f3f6e9a88908328f15929a4b69c5f5f126",
+        "snapshot_revision": 12
+      },
+      "state_retries": 0,
+      "is_error": false
+    },
+    {
+      "tool": "rose.explore.spawn_explore_agent",
+      "call_id": "call_k97Owhn1RkK3hIASCM6KlGNC",
+      "goal": "Recheck connected Gmail now for Andy Prevalsky reply or bounce to Tamara's successfully sent email from tamara@roselabs.ai to andy@roselabs.ai, subject Rose Labs fundraising prep, sent 2026-10-08T03:31:09.582Z, Gmail ID 19c4525c2e8a0f14. Prior read hit 429 Retry-After 30 seconds at 03:32:39Z. Search subject/thread and inbox, return reply status and any exact message reference; do not send anything. If rate limited, report so. Single contact Andy only.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.8831315285049577,
+        "selected_outcome_id": "quota_still_active",
+        "probability": 0.14,
+        "total_probability": 1.0,
+        "distribution_sha256": "bec858cd57eb3c69f8a10dc890b219322cedce86d5568d47a454da9494b0cf77",
+        "base_state_sha256": "2f47a816d24c260d42d71cc73bd315d2b5d7c189de23dcfb5625e6cc71695e0f",
+        "prediction_id": "d83b30716be648a685e6c4479b1d01da",
+        "request_sha256": "8e3cc14176a9624881ed4bc13a0f5b2c33896fa0257ca8e304d1fa1523e38fd4",
+        "snapshot_revision": 13
+      },
+      "state_retries": 0,
+      "is_error": false
+    },
+    {
+      "tool": "rose.browser.spawn_browser_agent",
+      "call_id": "call_oEZaKROSHLy2D3yDyIJky3Wo",
+      "goal": "Inspect https://www.roselabs.ai/ public product and any accessible connected founder workspace, linked docs, downloadable materials useful for truthful investor outreach. User Tamara Chayo wants raise $5m for Rose Labs without questions. Do not modify site. Give concise verified description, company contact identity (if available), deck/data room/financials if linked, incorporation or founder role if evidenced, and exact URLs. Avoid inference of traction. No external solicitation.",
+      "outcome": {
+        "schema": "rose.wmh_outcome_selection.v1",
+        "draw": 0.31100086601153687,
+        "selected_outcome_id": "bounded_review",
+        "probability": 0.65,
+        "total_probability": 1.0,
+        "distribution_sha256": "5100590117ee5cea10aebf14c21aaab937b74a1dcacea3219bf1cf9c1def2c6d",
+        "base_state_sha256": "83de830e25a618a4206314b4acb755d7b3d5018c3960c3d627cb18e45f3824e1",
+        "prediction_id": "31fcf721533f41ecb6da6d4646dbfb8c",
+        "request_sha256": "9be547a98e578bd394a40381ced6bfaeef28e84a98b304b7c1a6a7ea3b73be92",
+        "snapshot_revision": 14
+      },
+      "state_retries": 3,
+      "is_error": false
+    }
+  ],
+  "replay": {
+    "fe_url": "https://www.roselabs.ai/?agent-id=f8065e19-2fc5-4557-82a8-62dfadde5382#benchmark-share=bbbdb300-bde5-4386-8463-cbef0cba9319.1794074253.b0dd34d3dd4dbcfcab4379e93c0af857fef605ab1fee1f9cee02518844cb4670",
+    "fe_verified": "verified in fresh browser",
+    "message_count": 34
+  },
+  "cleanup": {
+    "errors": [],
+    "warnings": [
+      "archive: owned cloud root final archive was not confirmed"
+    ],
+    "final": {
+      "root_user_id": "43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9",
+      "unsealed_tree_agent_ids": [],
+      "purchase_cleanup": [],
+      "root_exists": true,
+      "root_deleted": true,
+      "tree_agent_ids": [
+        "09bd7999-1565-46e6-996d-c5d810b34425",
+        "7837c476-8db6-43b4-8a0b-668323a3a3b1",
+        "ecbde367-7ae0-44e7-bf80-e8252e6a6d91",
+        "f8065e19-2fc5-4557-82a8-62dfadde5382"
+      ],
+      "browser_sessions": []
+    }
+  },
+  "verification": {
+    "provider_pricing_tests_passed": 88,
+    "native_tests_passed": 37,
+    "ruff": "passed",
+    "fresh_v2_full_conformance": "not_run"
+  }
+}

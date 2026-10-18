@@ -69,10 +69,18 @@ export async function hasActiveAttentionRequest(agentId: string): Promise<boolea
   return !!pendingRequest;
 }
 
+function attentionResponseBody(response: string, userMessage?: string): string {
+  return JSON.stringify({
+    response,
+    ...(userMessage?.trim() ? { user_message: userMessage } : {}),
+  });
+}
+
 // Check and respond to pending attention request for agent
 export async function checkAndRespondToAttentionRequest(
   agentId: string,
   response: string,
+  userMessage?: string,
 ): Promise<boolean> {
   const headers = getAuthHeaders();
 
@@ -100,7 +108,7 @@ export async function checkAndRespondToAttentionRequest(
     {
       method: 'POST',
       headers,
-      body: JSON.stringify({ response }),
+      body: attentionResponseBody(response, userMessage),
     },
   );
 
@@ -114,13 +122,14 @@ export async function checkAndRespondToAttentionRequest(
 export async function respondToAttentionRequest(
   requestId: string,
   responseText: string,
+  userMessage?: string,
 ): Promise<void> {
   const headers = getAuthHeaders();
 
   const res = await fetch(`${API_BASE_WITH_PATH}/attention-requests/${requestId}/respond`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ response: responseText }),
+    body: attentionResponseBody(responseText, userMessage),
   });
 
   if (!res.ok) {

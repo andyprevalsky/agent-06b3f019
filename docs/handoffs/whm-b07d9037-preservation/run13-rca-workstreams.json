@@ -1,0 +1,281 @@
+{
+  "schema": "rose.wmh.run13_rca_workstreams.v1",
+  "utc": "2026-10-13T07:50:45.143296+00:00",
+  "replacement_identity": {
+    "devbox_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+    "thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+    "thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+    "native_session": "01a132a3-ea1f-7b22-abfb-70608400d02e",
+    "managed_start_request": "407eed10-adb1-4d76-b4f3-36aa96b29cd0",
+    "managed_start_key": "swap-harness-whm-20261012-full-checkpoint-coordinator-generation1"
+  },
+  "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1453",
+  "branch": "codex/wmh-experiential-parallel-20261006",
+  "original_checkpoint_sha": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "run13_paid_source_sha": "badbbc2b31dc1c09ff84c20101e085cd8875b313",
+  "evaluated_base_head": "a389797bb65c46796a22ad9690bd57af65f53a0e",
+  "run_id": "f0a05573-f50e-49c2-b3c9-43b3b90dfbf9",
+  "root_agent_id": "882b536f-5210-4c83-bf10-f2b4ce034228",
+  "all_six_original_archives_retained_and_previously_authenticated": true,
+  "private_results_receipt": "docs/handoffs/whm-b07d9037-preservation/run13-rca-private-results-receipt.json",
+  "private_restore_read_location": "/home/boxes/rose-wmh-resumed/.context/whm-migration/rca-20261013",
+  "files_sha256": {
+    "agents/benchmarks/wmh_rose_provider.py": "277735f779e8634a859fa810a4923dd7ceea0088ffddc6d9ffa4d044cd3c9096",
+    "agents/benchmarks/wmh_reliability_test.py": "0deedb3099aad6acc91b93a1070dc088c836287ab591d05bca238e2914f5a550",
+    "agents/tests/blackbox/fast_cache_client.blackbox.py": "3e629f3ee55f05906970edde9899c6d5b2b6cb7e10a5b0c1a4900833de1b9a15",
+    "CLAUDE.md": "499b7975dbea1c8a5f0bcbe1617505f47717a5f0e16c95b5e6dbc1329f54633c",
+    "AGENTS.md": "57cbb4821915f3e477996ffde6ef7ee4c9d57fab64b6f57421968e3d0e9d0eca"
+  },
+  "workstreams": [
+    {
+      "owner": "/root/rca_demo_cache",
+      "case": "docs/rca/cases/2026-10-13-rose-cache-store-log-ignored-write-ack.md",
+      "case_sha256": "e6add71e6b0c910b5d3e56326d9b0af7ec86c5f3832d50dd88e2f10e813480bc",
+      "case_status": "open",
+      "finding": "Cache store log ignored a rejected/frozen write acknowledgement.",
+      "evidence_and_action": {
+        "run12": {
+          "hits": 0,
+          "lookups": 116,
+          "logged_stores": 107,
+          "frozen_write_skips": 107
+        },
+        "run13": {
+          "native_hits": 0,
+          "native_lookups": 540,
+          "logged_stores": 415,
+          "frozen_write_skips": 415,
+          "agent_hits": 0,
+          "agent_lookups": 416
+        },
+        "cross_run_native_exact_key_overlap": 0,
+        "owning_repro": {
+          "baseline_failed": 4,
+          "baseline_passed": 5,
+          "candidate_passed": 9
+        },
+        "action": "Existing acknowledgement correction cemented with six permanent native/compatibility checks; frozen global policy preserved."
+      }
+    },
+    {
+      "owner": "/root/rca_whm_json",
+      "case": "docs/rca/cases/2026-10-13-wmh-rejected-reply-discarded-before-native-capture.md",
+      "case_sha256": "2fcbf5fdd03ab0d3222e7c60860411864924d96a81181197388e1a1db4f33464",
+      "case_status": "open",
+      "finding": "Protocol rejects lacked raw replies and exact sent wire envelopes in the original capture.",
+      "evidence_and_action": {
+        "native_attempts": 540,
+        "validated_selections": 415,
+        "committed_transitions": 414,
+        "protocol_rejections": 125,
+        "syntax_rejections": 111,
+        "semantic_structural_rejections": 14,
+        "affected_operation_ids": 93,
+        "exhausted_operation_ids": 21,
+        "metered_finish_stop": 540,
+        "generating_cause_proven": false,
+        "original_capture_repro": {
+          "baseline_failed": 7,
+          "seconds": 0.64
+        },
+        "wire_capture_repro": {
+          "base_failed": 8,
+          "base_seconds": 1.05,
+          "current_passed": 8,
+          "current_seconds": 0.78
+        },
+        "action": "Applied WHM-only allowlisted private request capture; strict validation/cache/history semantics unchanged."
+      }
+    },
+    {
+      "owner": "/root/rca_step_limits",
+      "case": "docs/rca/cases/2026-10-13-execute-evidence-scope-discarded-user-specification.md",
+      "case_sha256": "2843fd4ede00863741e5c9d94213c9c74112f6dc9ddfeddfab3fe2156bc16f10",
+      "case_status": "open",
+      "finding": "Execute evidence filtering removes the original USER task before judging.",
+      "evidence_and_action": {
+        "failed_general_purpose_children": 8,
+        "saved_execute_replies_each": 25,
+        "captured_child_verifiers_without_goal": 45,
+        "whole_tree_verifiers_without_goal": 67,
+        "child_native_rejections": 92,
+        "child_syntax_rejections": 82,
+        "child_protocol_rejections": 10,
+        "child_committed_transitions": 279,
+        "all_rejections_join_saved_tool_card_ids": true,
+        "context_repro": {
+          "baseline_failed_children": 8,
+          "candidate_preserved_children": 8,
+          "baseline_seconds": 0.048,
+          "candidate_seconds": 0.041,
+          "saved_judge_score_unchanged": 0.5
+        },
+        "owning_repro": {
+          "baseline_failed": 4,
+          "baseline_passed": 5,
+          "candidate_passed": 9
+        },
+        "private_candidate_domains_passed": {
+          "llm": 228,
+          "run_agent": 58,
+          "workflow": 233,
+          "determinism": 5
+        },
+        "ordinary_real_temporal_payloads_unchanged": 21,
+        "action": "Exact simulate/shadow-only mode-propagation proposal remains unapplied pending model-visible-context approval.",
+        "benchmark_causation_proven": false
+      }
+    },
+    {
+      "owner": "/root/rca_message_grounding",
+      "case": "docs/rca/cases/2026-10-13-wmh-whole-specialized-simulation-lacks-fixture-content-reader.md",
+      "case_sha256": "fc900600b8677ca660b9db660838f327735b78cb219e4e039ef18b5769aa7a37",
+      "case_status": "open",
+      "finding": "Whole specialized simulation has no fixture-content reader; complete reseeding alone does not expose message history to the native model.",
+      "evidence_and_action": {
+        "frozen_messages": 42910,
+        "channels": {
+          "imessage": 23130,
+          "email": 10593,
+          "whatsapp": 9187
+        },
+        "contacts": 2225,
+        "seed_raw_bytes": 13909,
+        "seed_default_serialized_bytes": 10523,
+        "seed_compact_sorted_bytes": 10151,
+        "scanned_canonical_message_content_bytes": 410426415,
+        "requests_verified": 540,
+        "original_message_record_id_matches": 0,
+        "prefix_match_qualification": "One prefix shared by two source rows occurs in a later candidate goal and five histories; arbitrary paraphrases were not disproven.",
+        "offline_grep_verified_all_records": true,
+        "source_export_documents": 45135,
+        "source_export_bytes": 74000337,
+        "runtime_source_reader_wired": false,
+        "action": "Prepared exact private source export and explicit typed/provenanced query-stage design; no runtime or native artifact change.",
+        "classification": "Open source-access capability gap; deliberate whole-call simulation design, not a wrong-fixture diagnosis."
+      }
+    },
+    {
+      "owner": "/root/rca_outreach_progress",
+      "case": "docs/rca/cases/2026-10-13-fundraising-funnel-outcome-replay-gap.md",
+      "case_sha256": "c231c9131f3f74b6343740a20835781762ca987c3a84d5381d81dd7c8bae3f8a",
+      "case_status": "open",
+      "finding": "The simulated funnel reached intake without reaching replies, meetings, commitments or funding.",
+      "evidence_and_action": {
+        "world_steps": 414,
+        "failed_children_share_of_world_steps_percent": 67.3913043478,
+        "investor_for_each_wall_seconds": 3271.915,
+        "general_purpose_firm_children": 23,
+        "completed_children": 15,
+        "failed_children": 8,
+        "all_children_settled": true,
+        "simulated_intakes": 11,
+        "distinct_intake_firms": 10,
+        "emails_sent": 0,
+        "outgoing_followup_sequences": 0,
+        "source_verified_warm_routes": 0,
+        "investor_replies": 0,
+        "meetings": 0,
+        "commitments": 0,
+        "settled_proceeds_usd": 0,
+        "scheduled_possible_review_events": 10,
+        "root_completion_score": 1.0,
+        "benchmark_passed": false,
+        "action": "Prepared source/authority inventory with unknowns left null; separated independent verifier/schema contract losses from unproven fundraising causation."
+      }
+    },
+    {
+      "owner": "/root/rca_schema_descriptions",
+      "case": "docs/rca/cases/2026-10-13-response-schema-validation-omits-field-descriptions.md",
+      "case_sha256": "9311f4edd8743c0283cd69680186ae880cee6ec9d6432e59e71b0117e58feec9",
+      "case_status": "open",
+      "finding": "Shared typed schema validation strips supplied description annotations.",
+      "evidence_and_action": {
+        "captured_root_top_level_descriptions": 0,
+        "canonical_top_level_descriptions": 4,
+        "validator_repro": {
+          "baseline_passed": 3,
+          "baseline_failed": 5,
+          "baseline_ms": 97.355403,
+          "candidate_passed": 8,
+          "candidate_failed": 0,
+          "candidate_ms": 91.682186
+        },
+        "historical_raw_http_request_captured": false,
+        "model_score_causation_proven": false,
+        "full_api_persistence_suite_executed": false,
+        "action": "Two typed optional-string fields and compact permanent regression proposal prepared but unapplied; ordinary API runs are also in scope and require separate approval."
+      }
+    }
+  ],
+  "unapplied_proposals": [
+    {
+      "path": "docs/handoffs/whm-b07d9037-preservation/run13-proposed-whm-verifier-context.patch",
+      "sha256": "b081fb4c24fa55ec5b0e9f3df5c6b3c4886bf0b5a35590ccbbc16942ef3f1154",
+      "scope": "WHM-only original-USER-context preservation",
+      "approval_boundary": "model-visible context approval",
+      "applied": false
+    },
+    {
+      "path": "docs/handoffs/whm-b07d9037-preservation/run13-proposed-schema-description-production.patch",
+      "sha256": "783ba6fbd6161fb376512f2e96c87b28fdec74c2b4d19496e1da7132afaec1c7",
+      "scope": "Shared typed schema descriptions",
+      "approval_boundary": "Zod approval and ordinary-run scope approval",
+      "applied": false
+    },
+    {
+      "path": "docs/handoffs/whm-b07d9037-preservation/run13-proposed-schema-description-tests.patch",
+      "sha256": "b33eab7dbee93f02406469d2cdbd906f776641e08dc63be0de7fc782eaa0c5b9",
+      "scope": "Shared validator owning regression registration",
+      "approval_boundary": "Same schema decision",
+      "applied": false
+    }
+  ],
+  "verification": {
+    "command": "cd agents; source venv/bin/activate; python scripts/run_blackbox_tests.py world-model-harness fast-cache-client",
+    "owning_domains": {
+      "passed": 2,
+      "failed": 0,
+      "wall_seconds": 16.5
+    },
+    "native_cases_passed": 59,
+    "provider_reliability_cases_passed": 208,
+    "fast_cache_regressions_passed": 9,
+    "ruff": "0.17.0 isolated uvx; all three changed Python files passed",
+    "git_diff_check": "passed",
+    "rca_archive_cases_validated": 863,
+    "private_candidate_repros_are_component_contract_proofs_not_benchmark_outcome_proofs": true
+  },
+  "independent_review": {
+    "final_capture_schema_review": "PASS",
+    "context_proposal": "PASS with reporting corrections resolved and originals preserved",
+    "review_receipts_in_private_archive": true
+  },
+  "frontend_evidence": {
+    "canonical_url": "https://www.roselabs.ai/?agent-id=882b536f-5210-4c83-bf10-f2b4ce034228",
+    "verification": "verified in fresh browser",
+    "requires_verified_benchmark_share_grant": true,
+    "messages": 161,
+    "last_call": "1791866776671-7744d14b224d-completion_summary",
+    "publisher_manifest_mtime_utc": "2026-10-13T07:50:45.139778+00:00",
+    "review_links_location": "/home/boxes/rose-wmh-resumed/.context/whm-migration/rca-20261013/fresh-evidence-manifest.json"
+  },
+  "boundaries": {
+    "additional_paid_model_calls": 0,
+    "additional_paid_benchmark_runs": 0,
+    "merge": false,
+    "deploy": false,
+    "old_box_messages_or_lifecycle_changes": false,
+    "original_native_artifact_rebuilt_or_substituted": false,
+    "protected_instructions_changed": false,
+    "freedom_changed": false,
+    "policy_identity_replay_keys_native_parallelism_shared_state_preserved": true,
+    "schema_goal_prompt_evaluator_fixture_changes_to_manufacture_success": false
+  },
+  "open_gates": [
+    "Exact sent original wire/raw bad reply reconstruction is impossible from existing captures; generating cause remains unproven.",
+    "Explicit approvals before applying model-visible WHM context and shared Zod proposals.",
+    "A fixture-backed typed source reader is prepared but not wired into whole-call simulation.",
+    "Full API persistence and unchanged fundraising benchmark outcome proof remain unexecuted; no additional paid trial authorized."
+  ]
+}

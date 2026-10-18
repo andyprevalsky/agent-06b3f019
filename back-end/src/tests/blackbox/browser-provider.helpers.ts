@@ -272,6 +272,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
   const contextUpdate = prisma.browserContext.update;
   const create = steel.sessions.create;
   const release = steel.sessions.release;
+  const get = steel.get;
   const connect = chromium.connectOverCDP;
   const transaction = prisma.$transaction;
   const leaseUpdate = prisma.toolSideEffect.updateMany;
@@ -292,6 +293,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     context: { userId: 'offline-user' },
   };
   let ready = false;
+  let profileReads = 0;
   let releases = 0;
   let failCreate = retryReleased;
   let leaseRow: {
@@ -300,40 +302,60 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     status: string;
     externalId: string;
     updatedAt: Date;
+    request: { leaseMs: number; renewedAt?: string };
   } | null = null;
   let leaseReleases = 0;
   prisma.$transaction = (async (callback: (tx: unknown) => Promise<unknown>) =>
     callback({
       $executeRaw: async () => 0,
+      $queryRaw: async (query: TemplateStringsArray) => {
+        nodeAssert.strictEqual(query.join(''), 'SELECT clock_timestamp() AS now');
+        return [{ now: new Date() }];
+      },
       toolSideEffect: {
         findUnique: async () => leaseRow,
         upsert: async (args: { create: NonNullable<typeof leaseRow> }) => {
-          leaseRow = { ...args.create, updatedAt: new Date() };
+          leaseRow = { ...args.create };
           return leaseRow;
         },
+        updateMany: (...args: Parameters<typeof leaseUpdate>) =>
+          prisma.toolSideEffect.updateMany(...args),
       },
     })) as typeof transaction;
   prisma.toolSideEffect.updateMany = (async (args: {
     where: Record<string, unknown>;
-    data: { status?: string };
+    data: {
+      status?: string;
+      updatedAt?: Date;
+      request?: { leaseMs: number; renewedAt?: string };
+      response?: unknown;
+    };
   }) => {
     if (
       leaseRow === null ||
-      Object.entries(args.where).some(
-        ([key, value]) => leaseRow?.[key as keyof typeof leaseRow] !== value
-      )
+      Object.entries(args.where).some(([key, value]) => {
+        const actual = leaseRow?.[key as keyof typeof leaseRow];
+        if (value && typeof value === 'object' && 'gt' in value) {
+          return !(
+            value.gt instanceof Date &&
+            actual instanceof Date &&
+            actual.getTime() > value.gt.getTime()
+          );
+        }
+        return actual !== value;
+      })
     ) {
       return { count: 0 };
     }
     if (args.data.status === 'RELEASED') leaseReleases++;
     Object.assign(leaseRow, args.data);
     return { count: 1 };
-  }) as typeof leaseUpdate;
+  }) as unknown as typeof leaseUpdate;
   prisma.browserSession.findUnique = (async (args: unknown) => {
     if ('agentId' in ((args as { select?: object }).select ?? {})) return null;
     return { ...row };
   }) as typeof find;
-  prisma.integration.findUnique = (async () => null) as typeof fingerprint;
+  prisma.integration.findUnique = (async () => null) as unknown as typeof fingerprint;
   prisma.browserSession.updateMany = (async (args: unknown) => {
     const { where, data } = args as { where: { sessionId: string }; data: Partial<typeof row> };
     if (Object.entries(where).some(([key, value]) => row[key as keyof typeof row] !== value)) {
@@ -342,8 +364,8 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     Object.assign(row, data);
     return { count: 1 };
   }) as typeof update;
-  prisma.browserProviderProfile.upsert = (async () => ({})) as typeof remember;
-  prisma.browserContext.update = (async () => ({})) as typeof contextUpdate;
+  prisma.browserProviderProfile.upsert = (async () => ({})) as unknown as typeof remember;
+  prisma.browserContext.update = (async () => ({})) as unknown as typeof contextUpdate;
   steel.sessions.release = (async (id: string) => {
     nodeAssert.strictEqual(id, 'offline-source');
     nodeAssert.strictEqual(row.status, 'PAUSED', 'source release must retain recovery custody');
@@ -352,6 +374,13 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     ready = true;
     return {};
   }) as typeof release;
+  steel.get = (async (path: string) => {
+    nodeAssert.strictEqual(path, '/v1/profiles/offline-profile');
+    nodeAssert(ready, 'profile readiness must follow acknowledged source release');
+    nodeAssert.strictEqual(row.status, 'PAUSED', 'readiness must retain recovery custody');
+    profileReads++;
+    return { status: 'READY' };
+  }) as typeof get;
   steel.sessions.create = (async (input: { profileId?: string }) => {
     if (!ready) {
       throw Object.assign(
@@ -361,6 +390,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
         { status: 409 }
       );
     }
+    nodeAssert(profileReads > 0, 'replacement create requires native profile readiness');
     nodeAssert.strictEqual(row.status, 'PAUSED');
     nodeAssert.strictEqual(row.closedAt, null);
     nodeAssert.strictEqual(input.profileId, 'offline-profile');
@@ -413,6 +443,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     prisma.browserContext.update = contextUpdate;
     steel.sessions.create = create;
     steel.sessions.release = release;
+    steel.get = get;
     chromium.connectOverCDP = connect;
     prisma.$transaction = transaction;
     prisma.toolSideEffect.updateMany = leaseUpdate;

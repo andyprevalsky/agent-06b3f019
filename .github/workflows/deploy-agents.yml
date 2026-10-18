@@ -1,18 +1,30 @@
 name: Deploy Agents to Fly.io
 
 on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact main commit to deploy
+        required: true
+        type: string
   push:
     branches: [main]
     paths:
-      - 'agents/**'
-      - '!agents/tests/**'
-      - '!agents/benchmarks/**'
-      - '!agents/**/*.md'
-      - '!agents/scripts/run-coverage.sh'
-      - '!agents/scripts/run_blackbox_tests.py'
-      - '!agents/scripts/run_coverage_blackbox_parallel.py'
-      - '.github/workflows/deploy-agents.yml'
-      - 'scripts/deploy-agents-cooperative-cutover.sh'
+      - "agents/**"
+      - "!agents/tests/**"
+      - "!agents/benchmarks/**"
+      - "!agents/**/*.md"
+      - "!agents/scripts/run-coverage.sh"
+      - "!agents/scripts/run_blackbox_tests.py"
+      - "!agents/scripts/run_coverage_blackbox_parallel.py"
+      - ".github/workflows/deploy-agents.yml"
+      - "scripts/deploy-agents-cooperative-cutover.sh"
+      - "scripts/worker_pool_*.py"
+      - "scripts/retained_agent_machine.py"
+      - "back-end/scripts/worker-deployment-queue.ts"
+      - "back-end/src/providers/workerDeployment*.ts"
 
 permissions:
   contents: read
@@ -20,38 +32,42 @@ permissions:
   # (release()) to record cutover success/failure for observers.
   statuses: write
 
-concurrency:
-  group: deploy-agents-production
-  cancel-in-progress: false
+# Every run must enqueue its immutable release. GitHub concurrency keeps only
+# one pending run; production FIFO ownership is instead held in Postgres.
 
 jobs:
   deploy:
     name: Deploy to Fly.io
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
+      - name: Verify manual deployment source
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      
+
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: "22"
           cache: npm
           cache-dependency-path: back-end/package-lock.json
 
       - name: Compute workflow replay-surface generation hash
         id: surface
         run: |
-          # The generation key for zero-downtime cutover: workers poll
-          # `navi-agent-tasks@<surfaceHash>`, so a build only ever replays its own
-          # generation's histories. Same hash as the live pointer => replay-compatible
-          # rolling restart (no rollover); a changed hash => a new generation the
-          # cutover rolls over to.
+          # Replay compatibility remains content-addressed. Every durable job
+          # receives its own queue, including jobs with the same surface hash.
           SURFACE_HASH=$(python3 scripts/agent_workflow_surface_hash.py)
           echo "hash=$SURFACE_HASH" >> "$GITHUB_OUTPUT"
-          echo "queue=navi-agent-tasks@$SURFACE_HASH" >> "$GITHUB_OUTPUT"
           echo "Workflow surface generation: $SURFACE_HASH"
 
       - name: Resolve Fly app name from fly.toml
@@ -65,35 +81,13 @@ jobs:
           echo "name=$APP" >> "$GITHUB_OUTPUT"
           echo "Fly app: $APP"
 
-      - name: Classify whether shipped worker runtime changed
-        id: classify
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          # Fail closed if GitHub did not provide a usable before SHA.
-          REQUIRE_ACTIVATION=1
-          if git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            CHANGED_AGENTS=$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- agents/)
-            CHANGED_DEPLOY_WORKFLOW=$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- \
-              .github/workflows/deploy-agents.yml scripts/deploy-agents-cooperative-cutover.sh)
-            CHANGED_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
-              bash scripts/classify-agent-runtime-changes.sh)
-            if [ -z "$CHANGED_RUNTIME$CHANGED_DEPLOY_WORKFLOW" ]; then REQUIRE_ACTIVATION=0; fi
-          fi
-          echo "require_activation=$REQUIRE_ACTIVATION" >> "$GITHUB_OUTPUT"
-          echo "Temporal activation gate: $REQUIRE_ACTIVATION"
-
-      # Same-hash: rolling fly deploy with activity-boundary drain.
-      # Changed-hash: overlap old+new gen machines, flip pointer, wait up to 45m
-      # for cooperative continue_as_new handoff, then force-migrate stragglers and
-      # retire old-gen machines. migrate-open is break-glass after the SLO only.
-      # 45m drain SLO + build/overlap + old-gen retire can exceed 60m; 90m
-      # prevents false-fail after a successful pointer flip + drain.
+      # Build before queuing. The shared deployment lease and durable bank
+      # reservations serialize every controller, including non-GitHub callers.
+      # Old work keeps its bank until positive retirement; no force-clear and
+      # no per-deployment Machine allocation.
       - name: Cooperative Fly deploy + generation cutover
         id: cutover
-        # 45m drain SLO + image build/overlap + old-gen machine destroy needs
-        # headroom past 60m (run 33817062156 hit the step timeout mid-destroy;
-        # 90m also covers post-drain retire hangs bounded by timeout 120).
+        # Interruption retains the queued job, stage and Machine reservations.
         timeout-minutes: 90
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -104,12 +98,12 @@ jobs:
           TEMPORAL_ADDRESS: ${{ secrets.TEMPORAL_ADDRESS }}
           TEMPORAL_NAMESPACE: ${{ secrets.TEMPORAL_NAMESPACE }}
           TEMPORAL_API_KEY: ${{ secrets.TEMPORAL_API_KEY }}
+          BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+          BACKEND_API_URL: https://navi-j9a9.onrender.com
           SURFACE_HASH: ${{ steps.surface.outputs.hash }}
-          GENERATION_QUEUE: ${{ steps.surface.outputs.queue }}
           BUILD_ID: ${{ github.sha }}
           DEPLOYMENT_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
-          DRAIN_TIMEOUT_SECONDS: "2700"
-          REQUIRE_ACTIVATION: ${{ steps.classify.outputs.require_activation }}
+          DEPLOY_REUSE_ONLY: "1"
           APP: ${{ steps.flyapp.outputs.name }}
         run: |
           set -euo pipefail
@@ -119,9 +113,46 @@ jobs:
           }
           trap 'release error "cooperative cutover failed (check old/new gen fleets)"' ERR
           bash scripts/deploy-agents-cooperative-cutover.sh
-          if [ "$REQUIRE_ACTIVATION" = "1" ]; then
-            release success "cooperative cutover completed"
-          else
-            release success "rolling deploy completed (generation unchanged)"
-          fi
+          release success "reusable worker-bank cutover completed"
           trap - ERR
+
+  recover:
+    name: Resume interrupted worker deployment
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # This limits duplicate observers only. It never holds an unpersisted deploy.
+    concurrency:
+      group: recover-agent-pool
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: back-end/package-lock.json
+      - name: Resume the saved FIFO head without rebuilding or enqueuing
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.PROD_DIRECT_URL }}
+          TEMPORAL_ADDRESS: ${{ secrets.TEMPORAL_ADDRESS }}
+          TEMPORAL_NAMESPACE: ${{ secrets.TEMPORAL_NAMESPACE }}
+          TEMPORAL_API_KEY: ${{ secrets.TEMPORAL_API_KEY }}
+          BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+          BACKEND_API_URL: https://navi-j9a9.onrender.com
+        run: |
+          set -euo pipefail
+          APP=$(sed -nE 's/^app = "([a-z0-9-]+)"/\1/p' agents/fly.toml)
+          cd back-end
+          npm ci --workspaces=false --ignore-scripts
+          npx prisma generate
+          HEAD_JOB=$(node --import tsx scripts/worker-deployment-queue.ts head --app "$APP")
+          JOB_ID=$(printf '%s' "$HEAD_JOB" | node --input-type=module -e '
+            let body=""; for await (const chunk of process.stdin) body+=chunk;
+            const job=JSON.parse(body); if(job) process.stdout.write(job.jobId);')
+          [ -n "$JOB_ID" ] || exit 0
+          node --import tsx scripts/worker-deployment-queue.ts run \
+            --job-id "$JOB_ID" --if-idle -- python3 ../scripts/worker_pool_cutover.py

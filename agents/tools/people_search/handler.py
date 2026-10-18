@@ -16,8 +16,7 @@ from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
 from tools.people_search.config import (
     ACTIVITY_TIMEOUT_SECONDS,
-    EXA_COST_CENTS_PER_QUERY,
-    PARALLEL_COST_CENTS_PER_QUERY,
+    LANTERN_COST_CENTS_PER_QUERY,
     QUERY_DISPLAY_MAX_LENGTH,
     RETRY_BACKOFF_COEFFICIENT,
     RETRY_INITIAL_INTERVAL_SECONDS,
@@ -43,15 +42,13 @@ def _safe_time() -> float:
 
 def _cost_for_provider(provider: str) -> float:
     """Map the routed provider to its flat per-query cost in cents."""
-    if provider == "exa":
-        return EXA_COST_CENTS_PER_QUERY
-    if provider == "parallel":
-        return PARALLEL_COST_CENTS_PER_QUERY
+    if provider == "lantern":
+        return LANTERN_COST_CENTS_PER_QUERY
     return 0.0
 
 
 class PeopleSearchManager(ToolManager):
-    """Manager for people search across Exa and Parallel (enrich + discover)."""
+    """Manager for Lantern people search and source-profile retrieval."""
 
     tool_name = "people_search"
     read_only = True  # Research phase tool (explore agents only)
@@ -86,9 +83,23 @@ class PeopleSearchManager(ToolManager):
         """
         query = tool_call.get("query", "")
         mode = tool_call.get("mode", "discover")
-        provider = tool_call.get("provider", "exa")
+        provider = tool_call.get("provider", "lantern")
         limit = tool_call.get("limit")
         fields = tool_call.get("fields")
+        search_options = {
+            target: tool_call[source]
+            for source, target in (
+                ("location", "location"),
+                ("location_kind", "locationKind"),
+                ("country_code", "countryCode"),
+                ("companies", "companies"),
+                ("titles", "titles"),
+                ("cursor", "cursor"),
+                ("source_record_id", "sourceRecordId"),
+                ("generation", "generation"),
+            )
+            if tool_call.get(source) is not None
+        }
 
         start_time = _safe_time()
 
@@ -128,6 +139,10 @@ class PeopleSearchManager(ToolManager):
                 fast_mode_goal,
                 fast_mode_cache_write_enabled,
             ]
+            if search_options or user_id:
+                activity_args.append(search_options or None)
+            if user_id:
+                activity_args.append(user_id)
             result = await execute_activity(
                 people_search_activity,
                 args=activity_args,
@@ -269,7 +284,7 @@ async def people_search(
 async def people_search_activity(
     query: str,
     mode: str,
-    provider: str,
+    provider: str = "lantern",
     limit: Optional[int] = None,
     fields: Optional[List[str]] = None,
     agent_id: Optional[str] = None,
@@ -277,21 +292,22 @@ async def people_search_activity(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
+    search_options: Optional[dict[str, Any]] = None,
+    user_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Activity: Find or enrich people via Exa or Parallel (sync, sub-minute).
+    """Activity: Find people or retrieve source profiles through Lantern.
 
-    Routing is (mode x provider), both chosen explicitly by the model. On a
-    rate-limit or transport error the tool auto-retries the other provider.
-    Returns one normalized envelope regardless of provider.
+    Legacy provider names also execute through Lantern. Errors preserve plan,
+    rate-limit and disambiguation details without switching providers.
 
-    Fast Mode read: soft-complete without a live Exa/Parallel call. There is no
+    Fast Mode read: soft-complete without a live Lantern call. There is no
     durable people_search Fast Mode namespace yet (unlike web_search/web_fetch);
     falling through burned OAi-demo warm-path cents via People Search (parallel).
 
     Args:
         query: Natural-language people request.
         mode: 'enrich' (one person, field-level) or 'discover' (a list).
-        provider: 'exa' or 'parallel'.
+        provider: 'lantern'; legacy 'exa'/'parallel' activity inputs are accepted.
         limit: discover only; clamped to the public 1..25 range.
         fields: enrich only; the attributes to return for the person.
         agent_id / world_model_mode: World-model harness routing (precedes Fast
@@ -299,6 +315,9 @@ async def people_search_activity(
         fast_mode_cache_enabled / fast_mode_goal: Fast Mode read switch.
         fast_mode_cache_write_enabled: Reserved; write-through still live until
             a people_search cache key exists.
+        search_options: Structured constraints, exact cursor or source record ID.
+            Appended to preserve historical positional activity payloads.
+        user_id: Credential owner, supplied by the workflow rather than the model.
 
     Returns:
         Dict with query, mode_used, provider_used, providers_attempted, results, warnings.
@@ -319,9 +338,7 @@ async def people_search_activity(
             "provider_used": "fast-mode-soft-complete",
             "providers_attempted": [],
             "results": [],
-            "warnings": [
-                "Fast Mode cache miss for people_search. Returning without a live provider call."
-            ],
+            "warnings": ["Fast Mode cache miss for people_search. Returning without a live provider call."],
             FAST_CACHE_HIT_FIELD: True,
         }
 
@@ -332,17 +349,22 @@ async def people_search_activity(
             provider=provider,
             limit=limit,
             fields=fields,
+            search_options=search_options,
+            user_id=user_id,
         )
 
     # Preserve the pre-FM contract: omitted / "real" mode allows live fallback.
     effective_wm = None if world_model_mode in (None, "real") else world_model_mode
+    tool_args = {"query": query, "mode": mode, "provider": provider, "limit": limit, "fields": fields}
+    if search_options:
+        tool_args["search_options"] = search_options
     try:
         return await WorldModelToolExecutionAdapter.from_env(
             agent_id=agent_id,
             mode=effective_wm,
         ).execute(
             "people_search",
-            {"query": query, "mode": mode, "provider": provider, "limit": limit, "fields": fields},
+            tool_args,
             "people_search_activity",
             real_executor,
             allow_real_fallback=effective_wm is None,

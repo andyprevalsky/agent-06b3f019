@@ -22,7 +22,7 @@ require_text() {
 
 [ -f "$FORMAT" ] || fail "canonical approval format is missing"
 
-for heading in "## Evidence" "## Detail" "## Before Behavior" "## After Behavior" "## Downstream Implications"; do
+for heading in "## Evidence" "## Detail" "## Before Behavior" "## After Behavior" "## How" "## Downstream Implications"; do
   require_text "$FORMAT" "$heading" "canonical approval format must include $heading"
 done
 
@@ -35,6 +35,7 @@ headings = [
     "## Presentation",
     "## Before Behavior",
     "## After Behavior",
+    "## How",
     "## TL;DR",
     "## Evidence",
     "## Detail",
@@ -54,7 +55,7 @@ import re
 import sys
 from pathlib import Path
 
-labels = ["Before:", "After:", "TL;DR:", "Evidence:", "Detail:", "Downstream:", "Approve:"]
+labels = ["Before:", "After:", "How:", "TL;DR:", "Evidence:", "Detail:", "Downstream:", "Approve:"]
 
 
 def check(path, expected_blocks):
@@ -72,6 +73,9 @@ def check(path, expected_blocks):
         ]
         if items != labels:
             raise SystemExit(f"FAIL: {path} approval block items {items} must be {labels}")
+        mechanism = block.split("\nHow:\n", 1)[1].split("\n" + "─" * 64, 1)[0].strip()
+        if not mechanism:
+            raise SystemExit(f"FAIL: {path} How must explain the implementation mechanism")
         if re.search(r"\]\(|\*\*|^#", block, flags=re.M):
             raise SystemExit(
                 f"FAIL: {path} approval block must not contain Markdown links, bold or headings"
@@ -95,6 +99,11 @@ def check(path, expected_blocks):
 check(sys.argv[1], 1)
 check(sys.argv[2], 0)
 PY
+
+require_text "$FORMAT" "runtime harness injection" \
+  "How must identify runtime harness injection when that is the actual mechanism"
+require_text "$FORMAT" "synthetic context" \
+  "How must explain where injected synthetic context enters the agent"
 
 require_text "$FORMAT" "Do not invent a percentage" \
   "future production trajectory estimates must disclose their evidence or uncertainty"
@@ -287,7 +296,7 @@ require_text "$DEPLOY" "bash scripts/tests/approval-format.test.sh" \
   "/deploy must cement the shared approval format in its no-skip structural gate"
 require_text "$DESCEND" 'main thread using `.claude/shared/approval-format.md`' \
   "/descend approvals must route through the parent and canonical contract"
-require_text "$DESCEND" 'its six' \
+require_text "$DESCEND" 'its seven' \
   "/descend must preserve the complete shared approval sections"
 require_text "$DESCEND" 'List each member' \
   "/descend approvals must preserve member-specific evidence"

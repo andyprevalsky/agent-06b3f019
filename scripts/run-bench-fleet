@@ -17733,6 +17733,12 @@ PY
       done
       worker_provision_cancelled && finish_cancelled_worker_provision
       log_worker_stage "worker did not reach queue readiness within ${worker_ready_timeout}s"
+      # Preserve the worker-side bootstrap failure before cleanup destroys its
+      # snapshot volume. Without this, a readiness timeout only reports the
+      # symptom and the actionable /data/worker.log disappears with the clone.
+      run_worker_stage_cmd "capture worker log after readiness timeout" \
+          fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+          -C "tail -n 300 /data/worker.log" || true
       discard_replaceable_worker \
           "worker $wid did not reach queue readiness within ${worker_ready_timeout}s; see worker-$wid.stage.log"
     ) &

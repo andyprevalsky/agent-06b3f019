@@ -291,7 +291,10 @@ if [[ "$PRINT_COVERAGE_PORT" == "1" ]]; then
   exit 0
 fi
 
-rm -rf "$COV_TMP"
+if [[ -d "$COV_TMP" ]] && [[ -n "$(find "$COV_TMP" -mindepth 1 -print -quit)" ]]; then
+  echo "❌ Unrecovered raw coverage remains at $COV_TMP; archive it before starting a new collection." >&2
+  exit 1
+fi
 mkdir -p "$COV_TMP"
 
 export TEST_BASE_URL="http://localhost:$COV_PORT"
@@ -399,16 +402,33 @@ if [[ -f "$STACK_MANIFEST" ]] && ! jq -e . "$STACK_MANIFEST" >/dev/null 2>&1; th
   exit 1
 fi
 
+if [[ "${ROSE_DEPLOY_WORKTREE:-0}" == "1" && "${ROSE_USE_SYSTEM_PG:-false}" == "true" && -z "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
+  echo "❌ Isolated deploy coverage requires an explicit prepared BACKEND_COVERAGE_DATABASE_URL; refusing shared database fallback." >&2
+  exit 1
+fi
 if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
   if ! node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
     const url = new URL(process.env.BACKEND_COVERAGE_DATABASE_URL);
-    const expectedName = `victoria_${process.argv[1]}`;
+    const identity = process.argv[1];
+    const isolated = process.env.ROSE_DEPLOY_WORKTREE === "1";
+    let expectedName = `victoria_${identity}`;
+    if (isolated) {
+      const root = fs.realpathSync(process.argv[2]);
+      if (!process.env.ROSE_DEPLOY_WORKTREE_PATH ||
+          fs.realpathSync(process.env.ROSE_DEPLOY_WORKTREE_PATH) !== root) process.exit(1);
+      const safe = identity.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 48);
+      expectedName = `victoria_deploy_${safe}`;
+      const marker = fs.readFileSync(path.join(root, ".context", "deploy-system-pg.db"), "utf8");
+      if (marker !== `${expectedName}\n` || (url.port && url.port !== "5432")) process.exit(1);
+    }
     if (!["postgres:", "postgresql:"].includes(url.protocol) ||
         !["localhost", "127.0.0.1"].includes(url.hostname) ||
         decodeURIComponent(url.pathname.slice(1)) !== expectedName ||
         url.search !== "" || url.hash !== "") process.exit(1);
-  ' "$WORKSPACE_HINT"; then
-    echo "❌ BACKEND_COVERAGE_DATABASE_URL must name the local victoria_$WORKSPACE_HINT database." >&2
+  ' "$WORKSPACE_HINT" "$ROOT_DIR"; then
+    echo "❌ BACKEND_COVERAGE_DATABASE_URL must name this workspace's local database (the exact prepared marker for an isolated deploy worktree)." >&2
     exit 1
   fi
   LOCAL_PSQL_URL="$BACKEND_COVERAGE_DATABASE_URL"
@@ -417,7 +437,7 @@ if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
     exit 1
   fi
   DB_FOUND=true
-  echo "Using isolated system Postgres database victoria_$WORKSPACE_HINT"
+  echo "Using explicitly validated workspace system Postgres database"
 elif [[ -f "$STACK_MANIFEST" ]] &&
   [[ "$(jq -r '.database.container // empty' "$STACK_MANIFEST")" == "$DB_CONTAINER" ]] &&
   [[ "$(jq -r '.database.use_system_postgres // false' "$STACK_MANIFEST")" == "false" ]]; then
@@ -581,7 +601,7 @@ BLACKBOX_PID=""
 UNIT_PID=""
 
 cleanup() {
-  local child_pid
+  local cleanup_exit=$? child_pid raw_evidence_dir raw_staging_dir=""
   for child_pid in "$UNIT_PID" "$BLACKBOX_PID" "$BACKEND_PID"; do
     [[ -n "$child_pid" ]] || continue
     kill -TERM -- "-$child_pid" >/dev/null 2>&1 || true
@@ -591,8 +611,24 @@ cleanup() {
   # releasing it so a long successful run cannot act on a recycled historical
   # PGID during normal cleanup.
   printf 'disarmed\n' >"$COVERAGE_PROCESS_GROUPS_FILE"
-  # These raw blobs are inputs to the report, not durable test evidence.
-  rm -rf "$COV_TMP"
+  # Archive after shutdown so late backend V8 flushes join the completed suites.
+  # Never overwrite or nest into an earlier archive; failed copies retain inputs.
+  if [[ "$cleanup_exit" -ne 0 && -d "$COV_TMP" ]]; then
+    raw_evidence_dir="${EVIDENCE_DIR:-$ROOT_DIR/.context/test-runs/backend-coverage-failed-$(date -u +%Y%m%d-%H%M%S)-$$}"
+    if mkdir -p "$raw_evidence_dir" &&
+      [[ ! -e "$raw_evidence_dir/raw-v8" ]] &&
+      raw_staging_dir="$(mktemp -d "$raw_evidence_dir/.raw-v8-incomplete.XXXXXX")" &&
+      cp -R "$COV_TMP/." "$raw_staging_dir/" &&
+      mv "$raw_staging_dir" "$raw_evidence_dir/raw-v8"; then
+      echo "    Raw V8 coverage: $raw_evidence_dir/raw-v8"
+      rm -rf "$COV_TMP"
+    else
+      if [[ -n "$raw_staging_dir" ]]; then rm -rf "$raw_staging_dir" || true; fi
+      echo "Could not archive raw V8 coverage; retained at $COV_TMP" >&2
+    fi
+  else
+    rm -rf "$COV_TMP"
+  fi
   release_coverage_reservations
 }
 trap cleanup EXIT

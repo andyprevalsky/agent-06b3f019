@@ -1,0 +1,27 @@
+{
+  "source_head": "2f14e34e0b6e89c12744817c435c427ec7c3bbd3",
+  "build_dir": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/world-model-fundraiser-gpt61-20261008",
+  "source_build_dir": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/world-model-native",
+  "unchanged_serving_rag": {
+    "artifact_id": "trace-rag-71aa4160d086e717b2dd",
+    "sha256": "deb2b744ab5f92fae991910e8d9a90d2e4948bb17a4103bd3bfbd59a72178a0e"
+  },
+  "observations": 179150,
+  "trajectories": 12510,
+  "model": "openai/gpt-6.1-sol",
+  "effort": "xhigh",
+  "pool": "rose-wmh-gpt61",
+  "policy": {
+    "policy_id": "rose-outcome-distribution-v2",
+    "policy_version": "2",
+    "policy_sha256": "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0",
+    "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+    "effective_system_sha256": "d76abcd5f096d65ea92e5f1e1aa538b5bae3643b4ea8618ba7e3a54eed24b470",
+    "prediction_protocol": "rose-outcome-distribution-v1"
+  },
+  "exact_tested_system_match": true,
+  "task_catalog_sha256": "cd82a2cfc20c75605fe897c3d1d9ca78967534c6455ab26d44e3ab130566829f",
+  "warm_connection_environment_changed": false,
+  "timeout_seconds": 1800,
+  "production_deployment": false
+}

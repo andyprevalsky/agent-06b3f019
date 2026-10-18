@@ -181,13 +181,21 @@ test('isolated R2 refuses writable or non-root intent', async (t) => {
   await assert.rejects(putObject('index.json', '[]'), /ownership refused/);
   assert.deepEqual(fixture.keys, []);
 });
-test('default Render uses original production prefix and ignores isolation proof', async (t) => {
+test('default Render keeps the original production prefix and ignores isolation proof', async (t) => {
   const fixture = scope(t);
   process.env.BENCHMARK_HUB_STORAGE = 'r2';
   process.env.RENDER = 'true';
   delete process.env.BENCHMARK_HUB_ISOLATION_INTENT;
-  await withHubStorageOwnership(() => putObject('index.json', '[]'));
-  assert.deepEqual([...fixture.objects.keys()], ['benchmark-hub/index.json']);
+  // Without an activated storage epoch the production legacy prefix is a
+  // read-only archive: publication pauses before any object I/O.
+  await assert.rejects(
+    withHubStorageOwnership(() => putObject('index.json', '[]')),
+    /paused pending storage epoch activation/
+  );
+  assert.deepEqual(fixture.keys, []);
+  assert.equal(await withHubStorageOwnership(() => getObjectStrict('index.json')), null);
+  assert.deepEqual(fixture.keys, ['benchmark-hub/index.json']);
+  assert.equal(fixture.objects.size, 0);
 });
 test('normal local mode ignores R2 credentials and isolation intent', async (t) => {
   const fixture = scope(t);

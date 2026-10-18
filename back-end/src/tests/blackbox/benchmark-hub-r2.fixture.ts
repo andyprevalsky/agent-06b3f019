@@ -19,6 +19,17 @@ export function logicalObject(raw: string): string {
       assert.equal(typeof value.publication, 'string');
       assert.equal(typeof value.payload, 'string');
       assert.deepEqual(Object.keys(value).sort(), ['format', 'payload', 'publication']);
+      const payload = JSON.parse(value.payload as string) as unknown;
+      if (
+        payload &&
+        typeof payload === 'object' &&
+        !Array.isArray(payload) &&
+        (payload as { format?: string }).format === 'benchmark-hub-overlay-v1'
+      ) {
+        const catalog = payload as { runs: unknown[]; claims: Record<string, { state: string }> };
+        assert.ok(Array.isArray(catalog.runs));
+        return JSON.stringify(catalog.runs);
+      }
       return value.payload as string;
     }
   }

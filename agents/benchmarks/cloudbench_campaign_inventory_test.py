@@ -16,6 +16,52 @@ from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__).resolve().parents[2]))
 
 
+def assert_publication_process_retired(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    native = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True
+    )
+    if native.returncode == 0 and native.stdout.strip().startswith("Z"):
+        return
+    # An empty/failed probe is not proof of retirement. Recheck absence to
+    # distinguish a process reaped during observation from an unavailable ps.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    raise AssertionError(f"owned publication process {pid} remains: {native.stdout.strip()!r}")
+
+
+def test_campaign_inventory_publication_retirement_distinguishes_live_zombie_and_absent(monkeypatch):
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        with pytest.raises(AssertionError, match="remains"):
+            assert_publication_process_retired(live.pid)
+        deadline = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
+        while True:
+            state = subprocess.check_output(["ps", "-p", str(child.pid), "-o", "stat="], text=True).strip()
+            if state.startswith("Z"):
+                break
+            assert time.monotonic() < deadline, "fixture child did not become terminal"
+            time.sleep(0.01)
+        # Intentionally do not poll/wait: hold our exact exited child unreaped.
+        assert_publication_process_retired(child.pid)
+        child.wait()
+        assert_publication_process_retired(child.pid)
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, "", "probe failed"))
+            with pytest.raises(AssertionError):
+                assert_publication_process_retired(live.pid)
+    finally:
+        child.wait()
+        live.terminate()
+        live.wait()
+
+
 @pytest.mark.parametrize("failure", ("infra", "infra-strict", "infra-parent-owned", "task", "contradictory", "retained", "exhausted", "cutoff", "cutoff-no-retry", "retry-unverified", "retry-handle-missing", "lifecycle-failed"))
 def test_campaign_inventory_retries_only_released_infra_without_restarting_peers(tmp_path, failure):
     """Exercise the real scheduler with owned child processes and terminal artifacts."""
@@ -262,7 +308,7 @@ def producer_source(root):
     return block
 
 
-def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False, borrowed_transport_delay=False):
+def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False, borrowed_transport_delay=False, native_read_delay=0):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     (scripts / "lib").mkdir()
@@ -307,10 +353,11 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         "from pathlib import Path\n"
         "kind=sys.argv[1]\n"
         "if os.environ.get('FIXTURE_POST_CANARY') == '1' and os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID') and os.environ.get('CLOUDBENCH_CAMPAIGN_INVENTORY_DIR'): sys.exit(1)\n"
+        "time.sleep(float(os.environ['FIXTURE_NATIVE_READ_DELAY']))\n"
         "if os.environ.get('FIXTURE_EXPECT_AUTH'): assert os.environ.get('FLY_API_TOKEN') == os.environ['FIXTURE_EXPECT_AUTH'], 'wrong selected credential'\n"
         "payload=Path(os.environ['FIXTURE_'+kind.upper()]).read_bytes()\n"
         "fd=os.open(os.environ['FIXTURE_CALLS'],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)\n"
-        "os.write(fd,(json.dumps({'kind':kind,'decoded_bytes':len(payload),'role':'borrower' if os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID') else 'publisher'})+'\\n').encode());os.close(fd)\n"
+        "os.write(fd,(json.dumps({'kind':kind,'decoded_bytes':len(payload),'role':'borrower' if os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID') else 'publisher','job_id':os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID')})+'\\n').encode());os.close(fd)\n"
         "sys.stdout.buffer.write(payload);sys.stdout.buffer.flush()\n"
         "if os.environ.get('FIXTURE_BORROWED_TRANSPORT_DELAY') == '1' and os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID') and kind == 'machines': time.sleep(10)\n"
     )
@@ -322,7 +369,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         "if os.environ.get('FIXTURE_EXPECT_AUTH'): assert os.environ.get('FLY_API_TOKEN') == os.environ['FIXTURE_EXPECT_AUTH']\n"
         "payload=Path(os.environ['FIXTURE_MACHINES']).read_bytes()\n"
         "fd=os.open(os.environ['FIXTURE_CALLS'],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)\n"
-        "os.write(fd,(json.dumps({'kind':'machines','decoded_bytes':len(payload),'role':'publisher-http-transport'})+'\\n').encode());os.close(fd)\n"
+        "os.write(fd,(json.dumps({'kind':'machines','decoded_bytes':len(payload),'role':'publisher-http-transport','job_id':os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID')})+'\\n').encode());os.close(fd)\n"
         "sys.stdout.buffer.write(payload)\n"
     )
     boundary = ""
@@ -359,6 +406,12 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         + "start_machines_snapshot_loop\n"
         'if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then\n'
         ' python3 -c \'import json,os;from pathlib import Path;a=json.loads(os.environ["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"]);d=Path(os.environ["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"]);assert a["directory"]==str(d.resolve());assert a["owner"]==dict(line.split("=",1) for line in (d/"owner").read_text().splitlines());Path(os.environ["FIXTURE_ROOT"],os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"],"authority.json").write_text(json.dumps(a))\'\n'
+        'fi\n'
+        # A standalone fixture owns its publisher and cancels it on EXIT. Join
+        # the first asynchronous refresh before ending the scenario whose
+        # assertion counts that refresh; startup only joins the initial read.
+        'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
+        ' while [ "$(python3 -c \'import json,os;print(sum(row["kind"]=="machines" and row.get("job_id")==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,open(os.environ["FIXTURE_CALLS"]))))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
         'fi\n'
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
@@ -401,6 +454,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         FIXTURE_DEATH=str(int(death)),
         FIXTURE_REFRESH=str(int(refresh)),
         FIXTURE_POST_CANARY=str(int(post_canary)),
+        FIXTURE_NATIVE_READ_DELAY=str(native_read_delay),
         CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY=str(int(shared)),
         CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=str(int(mutation)),
         CLOUDBENCH_SNAPSHOT_POLL_SECONDS="1" if refresh else "60",
@@ -463,13 +517,14 @@ def test_campaign_inventory_dead_owner_cancels_paused_startup_and_joins_clean_te
     assert len([call for call in calls if call["kind"] == "machines"]) == 2, calls
 
 
-def test_campaign_inventory_post_mutation_refresh_keeps_native_generation_and_ordinary_fleet_ownership(tmp_path):
+@pytest.mark.parametrize("native_read_delay", (0, 0.1))
+def test_campaign_inventory_post_mutation_refresh_keeps_native_generation_and_ordinary_fleet_ownership(tmp_path, native_read_delay):
     result, calls, _, _ = run_consumers(tmp_path, refresh=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert len([call for call in calls if call["kind"] == "machines"]) == 3, calls
     ordinary = tmp_path / "ordinary"
     ordinary.mkdir()
-    result, calls, summary, _ = run_consumers(ordinary, shared=False)
+    result, calls, summary, _ = run_consumers(ordinary, shared=False, native_read_delay=native_read_delay)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "shared_inventory" not in summary
     assert len([call for call in calls if call["kind"] == "machines"]) == 4, calls

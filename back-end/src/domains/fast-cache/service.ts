@@ -5,5 +5,6 @@ export {
   cacheGetPosition,
   cachePurge,
   cacheSet,
+  cacheSetWithAck,
   type CacheGetResult,
 } from '../../providers/fastCacheStore';

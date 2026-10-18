@@ -19,7 +19,7 @@ export function useAgentProviderState() {
   const [inspectionContext, setInspectionContext] = useState<InspectionContext | null>(null);
   const [selectedAgentId, setSelectedAgentIdState] = useState<string | null>(initialAgentId);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [isLoadingAgent, setIsLoadingAgent] = useState(false);
+  const [isLoadingAgent, setIsLoadingAgent] = useState(initialAgentId !== null);
   const [streamingBubbles, setStreamingBubbles] = useState<Map<string, StreamingBubble>>(new Map());
   const [streamingPlan, setStreamingPlan] = useState<StreamingPlan | null>(null);
   const [streamingAttention, setStreamingAttention] = useState<StreamingAttention | null>(null);

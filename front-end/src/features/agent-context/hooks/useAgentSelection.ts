@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type React from 'react';
 import { type RealtimeChannel } from '@supabase/supabase-js';
 
@@ -36,6 +36,8 @@ interface SelectionOptions {
  */
 
 export function useAgentSelection(state: AgentProviderState, options: SelectionOptions) {
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const {
     initialLoadDoneRef,
     pendingCreationRef,
@@ -45,7 +47,6 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
     setIsLoadingAgent,
     setInspectionContext,
     setMessages,
-    setSelectedAgentIdState,
   } = state;
   const applyAgentDetail = useCallback(
     (agentId: string, data: AgentDetailResponse): boolean => {
@@ -92,23 +93,15 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
       } catch (error) {
         console.error('Failed to load agent:', error);
         if (clearSelectionOnFailure && selectedAgentIdRef.current === agentId) {
-          setIsLoadingAgent(false);
           selectedAgentIdRef.current = null;
-          setSelectedAgentIdState(null);
-          syncUrlParam(null);
+          prepareSelection(stateRef.current, null);
         }
         return false;
       } finally {
         if (selectedAgentIdRef.current === agentId) setIsLoadingAgent(false);
       }
     },
-    [
-      initialLoadDoneRef,
-      applyAgentDetail,
-      selectedAgentIdRef,
-      setIsLoadingAgent,
-      setSelectedAgentIdState,
-    ],
+    [initialLoadDoneRef, applyAgentDetail, selectedAgentIdRef, setIsLoadingAgent, stateRef],
   );
 
   useEffect(() => {
@@ -252,6 +245,7 @@ function prepareSelection(state: AgentProviderState, id: string | null) {
   syncUrlParam(id);
   killConnections(state.channelRef, state.reconnectTimeoutRef, state.isReconnectingRef);
   flushState(state);
+  state.setIsLoadingAgent(id !== null);
   state.setSelectedAgentIdState(id);
 }
 

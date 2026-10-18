@@ -66,3 +66,36 @@ async def resolve_fast_cache_goal_activity(agent_id: str) -> Optional[dict[str, 
     if not goal and not root_goal:
         return None
     return {"goal": goal, "root_goal": root_goal}
+
+
+@activity.defn
+async def resolve_fast_cache_context_activity(agent_id: str) -> dict[str, Any]:
+    """Return the backend's complete cache decision for an agent tree.
+
+    The workflow used to infer replay eligibility locally from one legacy OAI
+    prompt.  The backend is the authoritative source because it resolves the
+    persisted child and root goals against every catalog task tagged ``DEMO``.
+    """
+    from providers.fast_cache.client import resolve_agent_fast_mode
+
+    enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode = (
+        await resolve_agent_fast_mode(agent_id)
+    )
+    result = {
+        "resolved": isinstance(root_agent_id, str),
+        "enabled": bool(enabled),
+        "goal": goal,
+        "write_enabled": bool(write_enabled),
+        "root_agent_id": root_agent_id,
+        "root_goal": root_goal,
+        "provider_fast_mode": bool(provider_fast_mode),
+    }
+    logger.info(
+        "fast_cache.context_resolved",
+        agent_id=agent_id,
+        enabled=result["enabled"],
+        write_enabled=result["write_enabled"],
+        resolved=bool(goal),
+        root_resolved=bool(root_goal),
+    )
+    return result

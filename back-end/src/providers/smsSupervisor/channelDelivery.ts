@@ -14,20 +14,25 @@
 
 import { sendSms } from '../smsQueue';
 import { sendWhatsAppMessage, getWhatsAppConfig } from '../whatsappCloud';
+import type { QuotedMessage } from './messageReply';
+import { isEmojiOnlyMessage } from './emoji';
 
 export type SupervisorChannel = 'SMS' | 'WHATSAPP';
 
-type SendOptions = Parameters<typeof sendSms>[2];
+type SendOptions = NonNullable<Parameters<typeof sendSms>[2]> & {
+  replyToMessageId?: string;
+  quotedMessage?: QuotedMessage;
+};
 // The WhatsApp result is a superset (adds `recipientUnreachable`), so it types
 // both senders' returns.
-type SendResult = Awaited<ReturnType<typeof sendWhatsAppMessage>>;
+type SendResult = Awaited<ReturnType<typeof sendWhatsAppMessage>> & { deliveredBody?: string };
 
 /**
  * Deliver a message on one channel. Both senders return the identical
  * `{ success, messageSid?, error?, definitiveFailure? }` shape (WhatsApp adds an
  * optional `recipientUnreachable`), so callers never branch on channel.
  */
-export function sendOnChannel(
+export async function sendOnChannel(
   channel: SupervisorChannel,
   phoneNumber: string,
   message: string,
@@ -36,7 +41,28 @@ export function sendOnChannel(
   if (channel === 'WHATSAPP') {
     return sendWhatsAppMessage(phoneNumber, message, options);
   }
-  return sendSms(phoneNumber, message, options);
+  if (isEmojiOnlyMessage(message)) {
+    return {
+      success: false,
+      error:
+        'Native reactions are unavailable on SMS. Do not send a separate emoji acknowledgment; send a substantive reply instead.',
+      definitiveFailure: true,
+    };
+  }
+  if (options?.replyToMessageId !== undefined && options.quotedMessage === undefined) {
+    return {
+      success: false,
+      error: 'SMS reply target content is missing',
+      definitiveFailure: true,
+    };
+  }
+  // SMS has no native reply attachment: the selected quote is delivered as text.
+  const deliveredBody =
+    options?.replyToMessageId === undefined || !options.quotedMessage
+      ? message
+      : `Replying to ${options.quotedMessage.role === 'user' ? 'your' : 'my'} message:\n“${options.quotedMessage.content}”\n\n${message}`;
+  const delivery = await sendSms(phoneNumber, deliveredBody, options);
+  return { ...delivery, ...(delivery.success ? { deliveredBody } : {}) };
 }
 
 /** True when the WhatsApp Cloud API transport is configured (creds present). */

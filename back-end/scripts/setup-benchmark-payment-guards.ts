@@ -114,3 +114,46 @@ export function isStripeResourceMissing(error: unknown): boolean {
     error instanceof Stripe.errors.StripeInvalidRequestError && error.code === 'resource_missing'
   );
 }
+
+/** Exact operator-selected fixture ownership; validate before any provisioning DB write. */
+export async function requireOwnedLiveFixtureCustomer(
+  stripe: Stripe,
+  customerId: string,
+  userId: string
+): Promise<string> {
+  if (customerId.trim() === '') throw new Error('--stripe-customer-id must not be blank');
+  const customer = await stripe.customers.retrieve(customerId);
+  if (
+    customer.deleted === true ||
+    customer.id !== customerId ||
+    customer.livemode !== true ||
+    customer.metadata?.userId !== userId ||
+    customer.metadata?.fixture !== 'agent-payment-production-lifecycle'
+  ) {
+    throw new Error('Selected Stripe customer is not an owned live production lifecycle fixture');
+  }
+  return customer.id;
+}
+
+/** Select local LIVE aliases without changing deployed/global credentials or choosing an identity. */
+export function configureLiveFixtureEnvironment(
+  cardholderId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  const liveId = env.AGENTCARD_ORG_OAUTH_CLIENT_ID_LIVE?.trim() ?? '';
+  const liveSecret = env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET_LIVE?.trim() ?? '';
+  if (Boolean(liveId) !== Boolean(liveSecret)) {
+    throw new Error(
+      'A complete AgentCard LIVE credential pair is required when either alias is set'
+    );
+  }
+  const selected = cardholderId?.trim();
+  if (cardholderId !== undefined && !selected) {
+    throw new Error('--agentcard-cardholder-id requires a nonempty dedicated cardholder ID');
+  }
+  if (liveId && liveSecret) {
+    env.AGENTCARD_ORG_OAUTH_CLIENT_ID = liveId;
+    env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = liveSecret;
+  }
+  if (selected) env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = selected;
+}

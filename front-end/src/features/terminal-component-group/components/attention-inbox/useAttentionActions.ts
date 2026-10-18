@@ -8,6 +8,7 @@
  *      | failure
  *      v
  * [ERROR_TOAST] --> [IDLE]
+ * Typed draft bytes are authored input; explicit protocol overrides remain protocol-only.
  */
 
 import { useState } from 'react';
@@ -77,12 +78,30 @@ function useActionRunner(
       toast(spec.successToast);
     } catch (error) {
       console.error(`[AttentionInbox] ${spec.errorToast.title}:`, error);
-      toast({ ...spec.errorToast, variant: 'destructive' });
+      toast({
+        ...spec.errorToast,
+        description: error instanceof Error ? error.message : spec.errorToast.description,
+        variant: 'destructive',
+      });
     } finally {
       setLoading(false);
     }
   };
   return { loading, run };
+}
+
+function skipActionSpec(requests: AttentionRequest[], requestId: string): ActionSpec {
+  const remaining = countRemaining(requests, requestId);
+  return {
+    requestId,
+    mutate: () => skipAttentionRequest(requestId),
+    successToast: {
+      title: 'Request skipped',
+      description: remainingDescription(remaining, 'No more pending requests'),
+    },
+    errorToast: { title: 'Error', description: 'Failed to skip request' },
+    keepOpen: true,
+  };
 }
 
 export function useAttentionActions({
@@ -102,10 +121,14 @@ export function useAttentionActions({
     const response =
       overrideResponse ??
       (responses[requestId]?.trim() || (isAuthAssistance ? 'Authentication complete' : 'Approved'));
+    const userMessage =
+      overrideResponse === undefined && responses[requestId]?.trim()
+        ? responses[requestId]
+        : undefined;
     const remaining = countRemaining(requests, requestId);
     void run({
       requestId,
-      mutate: () => respondToAttentionRequest(requestId, response),
+      mutate: () => respondToAttentionRequest(requestId, response, userMessage),
       successToast: {
         title: isAuthAssistance ? 'Authentication complete' : 'Response sent',
         description: remainingDescription(
@@ -127,24 +150,18 @@ export function useAttentionActions({
   };
 
   const handleSkip = (requestId: string) => {
-    const remaining = countRemaining(requests, requestId);
-    void run({
-      requestId,
-      mutate: () => skipAttentionRequest(requestId),
-      successToast: {
-        title: 'Request skipped',
-        description: remainingDescription(remaining, 'No more pending requests'),
-      },
-      errorToast: { title: 'Error', description: 'Failed to skip request' },
-      keepOpen: true,
-    });
+    void run(skipActionSpec(requests, requestId));
   };
 
   const handleReject = (requestId: string) => {
     const remaining = countRemaining(requests, requestId);
     void run({
       requestId,
-      mutate: () => rejectAttentionRequest(requestId, responses[requestId]?.trim() || undefined),
+      mutate: () =>
+        rejectAttentionRequest(
+          requestId,
+          responses[requestId]?.trim() ? responses[requestId] : undefined,
+        ),
       successToast: {
         title: 'Action rejected',
         description: 'The agent will skip this action and continue',

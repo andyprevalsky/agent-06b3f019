@@ -27,12 +27,14 @@ import {
   type AgentCardOrgWallet,
 } from '../src/providers/agentcard/org-wallet-monitor';
 import {
+  configureLiveFixtureEnvironment,
   assertLiveCardholderReady,
   assertSandboxDatabaseIsLocal,
   assertUserMatchesMode,
   isStripeResourceMissing,
   requireLiveCardholderId,
   requireStripeLiveKey,
+  requireOwnedLiveFixtureCustomer,
   type FixtureMode,
 } from './setup-benchmark-payment-guards';
 
@@ -327,9 +329,13 @@ async function upsertBenchmarkUser(prisma: PrismaClient, userId: string): Promis
 async function upsertBenchmarkSubscription(
   prisma: PrismaClient,
   userId: string,
-  stripeCustomerId: string
+  stripeCustomerId: string,
+  stripeLivemode = false
 ): Promise<void> {
-  const period = { currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
+  const period = {
+    stripeLivemode,
+    currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  };
   await prisma.subscription.upsert({
     where: { userId },
     update: { subscriptionTier: 1, stripeCustomerId, ...period },
@@ -473,8 +479,16 @@ async function seedSandboxFixture(prisma: PrismaClient, userId: string): Promise
  * Existing production purchase rows are deliberately left alone — unlike the disposable sandbox
  * fixture, they are real ledger history.
  */
-async function provisionLiveFixture(prisma: PrismaClient, userId: string): Promise<void> {
+async function provisionLiveFixture(
+  prisma: PrismaClient,
+  userId: string,
+  selectedCustomerId?: string
+): Promise<void> {
   const stripe = new Stripe(requireStripeLiveKey(), { apiVersion: STRIPE_API_VERSION });
+  const selectedCustomer =
+    selectedCustomerId === undefined
+      ? undefined
+      : await requireOwnedLiveFixtureCustomer(stripe, selectedCustomerId, userId);
   const cardholderId = requireLiveCardholderId();
   // This call uses the production org credential flow. A sandbox-only or foreign id cannot
   // resolve to a terminal KYC state here, so validate it before touching any shared DB row.
@@ -489,10 +503,10 @@ async function provisionLiveFixture(prisma: PrismaClient, userId: string): Promi
   );
   await upsertBenchmarkUser(prisma, userId);
   await ensureBenchmarkCredits(prisma, userId);
-  const customerId = await ensureLiveBillingCustomer(stripe, prisma, userId);
+  const customerId = selectedCustomer ?? (await ensureLiveBillingCustomer(stripe, prisma, userId));
   // Persist the customer before asking for a card. The first cardless run intentionally throws a
   // hosted setup URL; saving first makes the next run reuse the customer that URL attached to.
-  await upsertBenchmarkSubscription(prisma, userId, customerId);
+  await upsertBenchmarkSubscription(prisma, userId, customerId, true);
   const paymentMethodId = await ensureLiveDefaultPaymentMethod(stripe, customerId);
   await seedAgentCardConnection(prisma, userId, cardholderId);
   console.log(
@@ -501,8 +515,36 @@ async function provisionLiveFixture(prisma: PrismaClient, userId: string): Promi
   );
 }
 
+export { configureLiveFixtureEnvironment } from './setup-benchmark-payment-guards';
+
 async function main(): Promise<void> {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    process.stdout.write(`Usage: setup-benchmark-payment.ts [--live] [--user-id ID]
+  [--stripe-customer-id OWNED_LIVE_CUSTOMER] [--agentcard-cardholder-id DEDICATED_ID]
+--live uses the complete AGENTCARD_ORG_OAUTH_*_LIVE pair when supplied,
+otherwise the generic production pair. Incomplete LIVE pairs are rejected.
+The cardholder must already exist, be dedicated to this fixture, and pass KYC;
+no cardholder is created or selected automatically. Ownership and live-wallet
+checks remain mandatory. Existing purchase history is preserved.
+--help performs no database or provider calls.\n`);
+    return;
+  }
   const mode: FixtureMode = process.argv.includes('--live') ? 'live' : 'sandbox';
+  const selectedCustomerId = argValue('--stripe-customer-id');
+  if (process.argv.includes('--stripe-customer-id') && selectedCustomerId === undefined) {
+    throw new Error('--stripe-customer-id requires a customer ID');
+  }
+  if (mode === 'sandbox' && selectedCustomerId !== undefined) {
+    throw new Error('--stripe-customer-id requires --live');
+  }
+  const selectedCardholderId = argValue('--agentcard-cardholder-id');
+  if (process.argv.includes('--agentcard-cardholder-id') && selectedCardholderId === undefined) {
+    throw new Error('--agentcard-cardholder-id requires a dedicated cardholder ID');
+  }
+  if (mode === 'sandbox' && selectedCardholderId !== undefined) {
+    throw new Error('--agentcard-cardholder-id requires --live');
+  }
+  if (mode === 'live') configureLiveFixtureEnvironment(selectedCardholderId);
   if (mode === 'sandbox') assertBenchmarkOrgCardholderPair();
   const defaultUserId =
     mode === 'live' ? BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID : DEFAULT_BENCHMARK_USER_ID;
@@ -517,7 +559,7 @@ async function main(): Promise<void> {
   const prisma = new PrismaClient();
   try {
     if (mode === 'live') {
-      await provisionLiveFixture(prisma, userId);
+      await provisionLiveFixture(prisma, userId, selectedCustomerId);
       return;
     }
     await seedSandboxFixture(prisma, userId);

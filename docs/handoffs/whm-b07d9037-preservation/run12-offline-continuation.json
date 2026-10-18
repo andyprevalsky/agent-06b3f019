@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 1,
+  "utc": "2026-10-13T00:38:33.664697+00:00",
+  "original_run12_root": "65889659-9f08-4488-917e-9611223be811",
+  "resumed_receipt_commit": "63eb4817c2f05cd70d147007a2dc7b9ec39c43ef",
+  "resumed_receipt_sha256": "ce4cd8fd793c9425a73d9ac10909a5ce5741c987179268f880d1d442aa999487",
+  "scope": "Further original-task offline analytical continuation; no source/policy/task changes or paid calls",
+  "correlated_error_records": {
+    "schema": "rose.wmh_run12_correlated_failure_observations.v1",
+    "utc": "2026-10-13T00:35:55.257568+00:00",
+    "native_attempts": 116,
+    "native_calls": 112,
+    "errors": [
+      {
+        "prediction_id": "b4ab9967a35e433481b1ffea81e2c448",
+        "call_id": "call_GXbbVGANFRTbfZyQlJjVImdU",
+        "type": "TextWorldModelProtocolError",
+        "http_status": null,
+        "started_utc": "2026-10-12T23:07:04.859000+00:00",
+        "finished_utc": "2026-10-12T23:08:53.842000+00:00",
+        "elapsed_seconds": 108.983,
+        "snapshot_revision": 53,
+        "state_retries": 0,
+        "protocol_repair": 0,
+        "later_same_call_successes": 1,
+        "later_same_call_protocol_repair_flags": [1],
+        "record_sha256": "709ca4758588154289e41011a216f44ebb39e2f77c1e5f361cdcbdd6ba57573a",
+        "error_message_sha256": "3cb567548994c1342b5e17512b69430a0d9f6a6ee946470c1b896026cedda0b5"
+      },
+      {
+        "prediction_id": "56b0944698864f6eaedf7dd1a7b2c982",
+        "call_id": "call_2yg7BvJabu5r7lgTxqGnKajH",
+        "type": "HTTPStatusError",
+        "http_status": 500,
+        "started_utc": "2026-10-12T23:17:36.315000+00:00",
+        "finished_utc": "2026-10-12T23:34:11.027000+00:00",
+        "elapsed_seconds": 994.712,
+        "snapshot_revision": 66,
+        "state_retries": 0,
+        "protocol_repair": 0,
+        "later_same_call_successes": 0,
+        "later_same_call_protocol_repair_flags": [],
+        "record_sha256": "71086846b0c2fbf9bdff1c2c84dde071ed4c2da50b5af5b8767d10e47061df07",
+        "error_message_sha256": "fabb9f47023f490e67610bfae40bcfa201ac9b833eb2f6f08538a44dc88cf1bc"
+      },
+      {
+        "prediction_id": "d9e628b22cb94fd596b24e14e900641b",
+        "call_id": "call_SDLOVlP7pYyG58o81acl1F9f",
+        "type": "HTTPStatusError",
+        "http_status": 500,
+        "started_utc": "2026-10-12T23:17:49.827000+00:00",
+        "finished_utc": "2026-10-12T23:34:11.017000+00:00",
+        "elapsed_seconds": 981.19,
+        "snapshot_revision": 70,
+        "state_retries": 0,
+        "protocol_repair": 0,
+        "later_same_call_successes": 0,
+        "later_same_call_protocol_repair_flags": [],
+        "record_sha256": "57efac2d7abd908632169bdbc7ec8e0755f136148a6feb5005125dd0c26c0b95",
+        "error_message_sha256": "fabb9f47023f490e67610bfae40bcfa201ac9b833eb2f6f08538a44dc88cf1bc"
+      },
+      {
+        "prediction_id": "8ace9faba0e44659af983c171cc63f50",
+        "call_id": "call_gDN6LZhKeLFCvL8QHywzOvf3",
+        "type": "HTTPStatusError",
+        "http_status": 500,
+        "started_utc": "2026-10-12T23:17:51.061000+00:00",
+        "finished_utc": "2026-10-12T23:34:10.901000+00:00",
+        "elapsed_seconds": 979.84,
+        "snapshot_revision": 70,
+        "state_retries": 0,
+        "protocol_repair": 0,
+        "later_same_call_successes": 0,
+        "later_same_call_protocol_repair_flags": [],
+        "record_sha256": "44aaa155bfe02b1152b6600ef4d7c96a9d7f846b51cba4bc143355fe049a92c5",
+        "error_message_sha256": "fabb9f47023f490e67610bfae40bcfa201ac9b833eb2f6f08538a44dc88cf1bc"
+      },
+      {
+        "prediction_id": "b289d77a870444edb383d196293e1da2",
+        "call_id": "call_ytJ7Ce2FVUKFQ62D4RxOk5sh",
+        "type": "HTTPStatusError",
+        "http_status": 500,
+        "started_utc": "2026-10-12T23:17:51.349000+00:00",
+        "finished_utc": "2026-10-12T23:34:11.027000+00:00",
+        "elapsed_seconds": 979.678,
+        "snapshot_revision": 70,
+        "state_retries": 0,
+        "protocol_repair": 0,
+        "later_same_call_successes": 0,
+        "later_same_call_protocol_repair_flags": [],
+        "record_sha256": "fc547b905dc4feb454a888d1f6afc36379474fa7ed83b6743facb94cccaa49c4",
+        "error_message_sha256": "fabb9f47023f490e67610bfae40bcfa201ac9b833eb2f6f08538a44dc88cf1bc"
+      },
+      {
+        "prediction_id": "2bc36e10b5054aee8fbe3fa307dc946e",
+        "call_id": "call_iwBn0mEGLkNpaw9pZXUJJBch",
+        "type": "CancelledError",
+        "http_status": null,
+        "started_utc": "2026-10-12T23:47:00.280000+00:00",
+        "finished_utc": "2026-10-12T23:48:12.571000+00:00",
+        "elapsed_seconds": 72.291,
+        "snapshot_revision": 103,
+        "state_retries": 0,
+        "protocol_repair": 0,
+        "later_same_call_successes": 0,
+        "later_same_call_protocol_repair_flags": [],
+        "record_sha256": "74a1ff1f11d744bd39e2a8aa735d43e047cd47b76c8230ce6901011e31d26ee1",
+        "error_message_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "prediction_id": "728b79b9658b48658b9eeebdec2c45be",
+        "call_id": "call_58EiVTbKadD9ZvCwPMMNqmso",
+        "type": "CancelledError",
+        "http_status": null,
+        "started_utc": "2026-10-12T23:47:13.997000+00:00",
+        "finished_utc": "2026-10-12T23:48:12.587000+00:00",
+        "elapsed_seconds": 58.59,
+        "snapshot_revision": 104,
+        "state_retries": 0,
+        "protocol_repair": 0,
+        "later_same_call_successes": 0,
+        "later_same_call_protocol_repair_flags": [],
+        "record_sha256": "b0108d7ccc71dcda4025d662c5b678f0f844dba6bbc5b3b9e73d26bf93f10be6",
+        "error_message_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "prediction_id": "bc6f46e852474c0cb21e01ebdb630d07",
+        "call_id": "b89906a6-6220-4857-8dfe-e9332d9a89a0",
+        "type": "CancelledError",
+        "http_status": null,
+        "started_utc": "2026-10-12T23:47:23.151000+00:00",
+        "finished_utc": "2026-10-12T23:48:12.587000+00:00",
+        "elapsed_seconds": 49.436,
+        "snapshot_revision": 104,
+        "state_retries": 0,
+        "protocol_repair": 0,
+        "later_same_call_successes": 0,
+        "later_same_call_protocol_repair_flags": [],
+        "record_sha256": "45f63bce9706110f30cbf0f5cb2b92dba335a2584bb663112e7981f829cd7b6c",
+        "error_message_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "prediction_id": "3e90e31f570e4c479a7f9eb1bf078057",
+        "call_id": "call_LMwmcNTRBxHcBFEY0G2dY0Ev",
+        "type": "CancelledError",
+        "http_status": null,
+        "started_utc": "2026-10-12T23:48:07.624000+00:00",
+        "finished_utc": "2026-10-12T23:48:12.588000+00:00",
+        "elapsed_seconds": 4.964,
+        "snapshot_revision": 105,
+        "state_retries": 0,
+        "protocol_repair": 0,
+        "later_same_call_successes": 0,
+        "later_same_call_protocol_repair_flags": [],
+        "record_sha256": "354c49eb3205ae23a93585efb25e9703d0ec386c498c7e8ad44fbf70bff8dcd4",
+        "error_message_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "later_same_call_recoveries": 1,
+    "method": "original saved native records correlated by exact call_id; no new inference or changed receipt",
+    "root_cause": "not established; local causal reproduction and unchanged benchmark proof still required"
+  },
+  "provider_log_findings": {
+    "original_log_sha256": "921c9781a68d3538329f329ed220221157a78a616a27d02b47023e7fa3350f57",
+    "terminal_provider_failures": 4,
+    "request_ids": [
+      "e58dfc9fc525",
+      "51336a1a7bbb",
+      "2c4d632a5007",
+      "d742a8662891"
+    ],
+    "route": "foundry",
+    "call_site": "wmh_world_model_timed_distribution_v1",
+    "observed_error": "RoseDeadlineError: rose.complete idle for120.0s (deadline590.0s)",
+    "productive_output_before_idle": true,
+    "buffered_tool_argument_fragments": 0,
+    "normalized_content_chunk_counts": [146, 71, 276, 216],
+    "terminal_failure_elapsed_seconds": [216.03, 217.365, 230.897, 215.444],
+    "terminal_failures_logged_utc": "2026-10-12T23:34:10Z",
+    "native_http500_finishes_utc_range": [
+      "2026-10-12T23:34:10.901Z",
+      "2026-10-12T23:34:11.027Z"
+    ],
+    "correlation_limit": "Four native HTTP500 and four provider partial-output idle failures occupy the same terminal interval. Exact provider-request-to-native-prediction mapping is not reconstructed. Native elapsed979.678\u2013994.712s is distinct from final provider-attempt elapsed215.444\u2013230.897s. Neither is a whole-benchmark or causal latency proof.",
+    "cancelled_attempts": 4,
+    "cancellation_finishes_utc_range": [
+      "2026-10-12T23:48:12.571Z",
+      "2026-10-12T23:48:12.588Z"
+    ],
+    "cancellation_usage": "No final provider usage for these cancelled attempts; no complete billing claim",
+    "protocol_repair": "One native protocol error later has same-call successful response with protocol_repair=1",
+    "open_observability_gap": "Original raw timed provider wire bytes are unavailable here; zero recorded buffered tool fragments does not prove transport silence or provider root cause. Preserve original fail-closed partial-output behavior."
+  },
+  "existing_owning_checks": {
+    "command": "named existing async Rose blackbox functions via importlib in activated agents environment",
+    "results": [
+      {
+        "name": "test_client_waterfall_partial_idle_preserves_error",
+        "passed": true,
+        "seconds": 0.086
+      },
+      {
+        "name": "test_client_buffered_tool_arguments_keep_real_progress_alive",
+        "passed": true,
+        "seconds": 0.201
+      },
+      {
+        "name": "test_client_buffered_progress_keeps_silence_and_outer_bounds",
+        "passed": true,
+        "seconds": 0.546
+      },
+      {
+        "name": "test_client_waterfall_stalled_leg_uses_existing_fallback",
+        "passed": true,
+        "seconds": 0.004
+      },
+      {
+        "name": "test_client_waterfall_global_deadline_preserves_error",
+        "passed": true,
+        "seconds": 0.044
+      }
+    ],
+    "paid_calls": 0,
+    "scope": "Existing fake-provider boundaries and controlled clocks; no production or benchmark request"
+  },
+  "other_read_only_checks": [
+    {
+      "command": "bash -n .claude/skills/instantiate-whm/scripts/run-trajectory.sh",
+      "exit_code": 0
+    },
+    {
+      "command": "node --import tsx -e \"require('./back-end/scripts/seed-dump-cache.ts')\"",
+      "exit_code": 0,
+      "result": "Existing installed backend seed-cache producer imports without invoking seed CLI/network"
+    }
+  ],
+  "rca_searches": [
+    "rose.complete idle120 deadline",
+    "WMH partial stream provider failure four predictions"
+  ],
+  "related_case_reads": [
+    "docs/rca/cases/2026-10-06-client-stream-guard-bypassed-waterfall-fallback.md",
+    "docs/rca/cases/2026-09-30-buffered-tool-progress-triggered-false-stream-idle.md"
+  ],
+  "root_cause": "Not established. Owning controls pass current code; no red/green causal reproduction or fresh unchanged benchmark outcome has been claimed.",
+  "next_trial_review": {
+    "approval_required": "Original user must explicitly approve a new paid trial and its spending cap; migration authority grants no new model calls.",
+    "recommended_next": "Continue offline transport/provider-attempt correlation and validate exact-record request preservation before a new paid run.",
+    "alternative_conformance": "Prepare a matching recovered-native/v3 conformance proposal with capped spend,100 successful calls, unchanged fidelity0.70/content0.25 floors, exact-owner stop and every session retirement receipt. Historical v2 conformance does not qualify v3 or run12.",
+    "alternative_fundraiser": "Prepare another unchanged simulate-mode fundraiser only if explicitly authorized; agree window and spend first. Keep researched examples soft, sample-once/replay keys, immutable v3 identity, native parallel/shared state and full-history fixture.",
+    "fixture_reuse": "Use recovered20261012 fixture unchanged unless original user asks for another production-data refresh; as_of_utc2026-10-12T23:00:00Z.",
+    "prepared_private_env": "/home/boxes/rose-wmh-resumed/.context/whm-migration/workspace.env",
+    "new_fixture_db": "whm_gen1_e9afcffd_fixture_20261012",
+    "workspace": "whm-gen1-e9afcffd",
+    "prepared_queue": "navi-agent-tasks-whm-gen1-e9afcffd",
+    "per_run_isolation": "Canonical launcher creates fresh run/database/queue/cache identities; its per-run queue replaces prepared workspace queue. No original runtime identity reused.",
+    "new_ports_proposal": {
+      "backend": 28700,
+      "native": 28790,
+      "status": "not allocated; canonical busy-port preflight must run at future launch"
+    },
+    "native_model": "/home/boxes/rose-wmh-resumed/.context/world-model-native-resume",
+    "initial_state": "/home/boxes/rose-wmh-resumed/.context/wmh-resume-20261009/fundraiser/context/run-state-messaging-20261012.json",
+    "native_preflight_pending": "No current swap configured. Preserve existing managed controls; provision and verify >=40GB swap, memory scope and disk reserve before serving exact recovered native artifact. Do not substitute a rebuilt model.",
+    "runner": "Existing .claude/skills/instantiate-whm/scripts/run-trajectory.sh with explicit --repo/--wmh-root/--state-file/--base-port28700/--wmh-port28790 and user-approved --timeout. Not executed.",
+    "must_report": [
+      "terminal outcome and original-user-defined trajectory metric",
+      "WMH total/cached/write input and output with incomplete-metering caveat",
+      "DEMO hits/lookups/stores separately from agent cache",
+      "committed world steps and stages reached",
+      "verified durable FE replay",
+      "exact benchmark/stack/native cleanup and joined final retirement"
+    ],
+    "merge_and_deploy": "held"
+  },
+  "archive_status": "Coordinator owns old archival; no old-box messages will be sent after an archive request",
+  "freedom_and_protected_instructions": "preserved",
+  "paid_model_calls": 0,
+  "merged": false,
+  "deployed": false,
+  "additional_recorded_prediction_validation": {
+    "recorded_response_distributions": 107,
+    "every_branch_validated_against_exact_original_base_state": true,
+    "validated_branches": 341,
+    "timed_elapsed_and_exact_call_ids_validated": true,
+    "model_calls": 0,
+    "source": "existing benchmarks.wmh_outcomes.parse_distribution",
+    "scope": "Offline response-schema/state-patch validation; not calibration or benchmark success"
+  }
+}

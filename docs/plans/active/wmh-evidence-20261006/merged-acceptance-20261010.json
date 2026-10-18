@@ -1,0 +1,100 @@
+{
+ "schema": "rose.wmh_merged_acceptance.v1",
+ "date": "2026-10-10 UTC",
+ "merged_source": {
+  "conformance_commit": "a5a54d941516e3a0f8271c093e5a923a5a58ca9a",
+  "fundraiser_commit": "f0c0a0c6035ae16b4a2d7f94d6c4932d721296d8",
+  "origin_main_integrated": "470925c93"
+ },
+ "model": {
+  "world_model_id": "grounded-world-model-785e30597233ee43e354",
+  "world_model_manifest_sha256": "cdc82bf8b55b35309c5e6925659fd7e74e51825dbccf2dc338b5777fbdffe703"
+ },
+ "conformance": {
+  "status": "passed",
+  "examples": 100,
+  "prediction_errors": 0,
+  "mean_score": 0.856942,
+  "dimensions": {
+   "artifact_refs": 0.92,
+   "content_accuracy": 0.514712,
+   "error_behavior": 0.85,
+   "schema_validity": 1.0,
+   "state_transition_correctness": 1.0
+  },
+  "floors": {
+   "mean_score": 0.7,
+   "content_accuracy": 0.25
+  },
+  "execution_identity": {
+   "base_protocol_sha256": "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122",
+   "base_protocol_version": "text-world-model-v3",
+   "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+   "base_world_model_id": "grounded-world-model-785e30597233ee43e354",
+   "base_world_model_manifest_sha256": "cdc82bf8b55b35309c5e6925659fd7e74e51825dbccf2dc338b5777fbdffe703",
+   "effective_system_sha256": "d76abcd5f096d65ea92e5f1e1aa538b5bae3643b4ea8618ba7e3a54eed24b470",
+   "execution_sha256": "a856573da298a031844946326a7ff39fbf433be8cd9dd29a3ac312e39624ff3f",
+   "policy_id": "rose-outcome-distribution-v2",
+   "policy_sha256": "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0",
+   "policy_version": "2",
+   "prediction_protocol": "rose-outcome-distribution-v1",
+   "schema": "rose.wmh_native_execution.v1"
+  },
+  "provider_calls": 101,
+  "concurrency": 8,
+  "wmh_cold_load_seconds": 741,
+  "eval_wall_seconds": 917,
+  "usage_accumulator_cost_usd": 4.690986,
+  "provider_prompt_cache": "31,911 / 1,606,927 metered input tokens (1.99%)",
+  "session_retirement": "not proven: the evaluator never ends its sessions, and stopping the server with a cgroup-wide TERM killed the native child before the owner could retire them through its bridge; fixed in f0c0a0c60 (owner retires child first), verified by the fundraiser's clean exact-owner shutdown"
+ },
+ "fundraiser": {
+  "task": "raise-5m-rose-labs-brex, unchanged prompt/evaluator, --simulate --timeout-seconds 1800",
+  "benchmark_run_id": "35efd4de-f23e-40db-b5d4-92002e79e715",
+  "root_agent_id": "6f3597a6-2fb4-4f29-9a9b-e07420259eb2",
+  "native_session_id": "71bccaba427249a2b40738ab629dfcaf",
+  "outcome": "FAIL: Timeout after 1802s (dynamic cap=1800s)",
+  "settled_proceeds_cents": 0,
+  "commitments": 0,
+  "signed_instruments": 0,
+  "pending_wires": 0,
+  "incoming_transfers": 0,
+  "joined_revision": 22,
+  "join_verified": true,
+  "agent_loop_cost_cents": 21.0,
+  "wmh_cold_load_seconds": 799,
+  "committed_wmh_actions": {
+   "explore": 15,
+   "browser": 4,
+   "sms_notify": 2,
+   "email_send": 1
+  },
+  "trajectory_note": "Root asked Andy (internal) for investor intros by email; the simulated world produced Andy's reply asking for a forwardable summary and then an introduction thread, both answered; Brex checks stayed at $0. No investor commitment or deposit within 30 minutes.",
+  "wmh_provider_prompt_cache": {
+   "provider_cached_input_tokens": 254756,
+   "provider_total_input_tokens": 1246273,
+   "provider_token_hit_pct": 20.441428,
+   "provider_metered_requests": 41,
+   "provider_requests_with_cached_input": 40,
+   "provider_output_tokens": 358002
+  },
+  "wmh_native_attempts": 44,
+  "wmh_native_errors_by_type": {
+   "CancelledError": 5
+  },
+  "wmh_demo_cache": {
+   "hits": 0,
+   "lookups": 44,
+   "stores": 41
+  },
+  "previous_30_minute_comparison": "October 8 Mac run bbbdb300: provider 0/1,813,251 (0%), DEMO 0/75",
+  "cleanup": {
+   "benchmark": "clean",
+   "local_stack": "clean",
+   "wmh": "retired after exact-owner TERM (orchestrator's systemctl --kill-whom=main was a no-op for a transient scope)"
+  },
+  "fe_url": "https://www.roselabs.ai/?agent-id=6f3597a6-2fb4-4f29-9a9b-e07420259eb2#benchmark-share=35efd4de-f23e-40db-b5d4-92002e79e715.1794192914.e968e2b1eb4de66f430a17818b045c32ac04e78221cc6ca791e2eafaed977c46",
+  "fe_verified": "rendered and verified in a fresh browser by publish_evidence_links (33 messages)"
+ },
+ "acceptance": "Corpus rebuild, matching conformance and viewer replay verified; the $5M fundraiser goal is not achieved."
+}

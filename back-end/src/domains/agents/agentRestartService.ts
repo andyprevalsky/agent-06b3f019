@@ -1,3 +1,4 @@
+import { isWorkflowStartAdmissionPending } from '../../providers/workflowQueueAdmission';
 /**
  * Generation-fenced agent workflow replacement orchestration.
  */
@@ -119,6 +120,7 @@ async function startReplacementWorkflow(
       reasoningMaxTokens: agent.reasoningMaxTokens,
       verifier: { type: verifierType },
       workflowId: claim.plannedWorkflowId,
+      rejectDuplicateWorkflowId: true,
       ...(parentWorkflowId !== null ? { parentWorkflowId } : {}),
       ...(agent.parentAgentId !== null ? { parentAgentId: agent.parentAgentId } : {}),
       ...(agent.busId !== null ? { busId: agent.busId } : {}),
@@ -297,7 +299,7 @@ export async function startPreparedAgentWorkflowReplacement(
       message: 'Workflow restarted - will continue from existing context',
     };
   } catch (error) {
-    await markWorkflowReplacementFailed(claim, error);
+    if (!isWorkflowStartAdmissionPending(error)) await markWorkflowReplacementFailed(claim, error);
     throw error;
   }
 }

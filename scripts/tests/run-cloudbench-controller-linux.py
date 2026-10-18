@@ -67,6 +67,11 @@ def retire_owned_container(
     expected = [
         ("scripts", "/repo/scripts", False),
         ("agents/benchmarks", "/repo/agents/benchmarks", False),
+        (
+            "agents/providers/rose/pools.py",
+            "/repo/agents/providers/rose/pools.py",
+            False,
+        ),
     ]
     if len(mounts) != len(expected) or not all(
         any(
@@ -277,6 +282,11 @@ def main() -> int:
             "cloudbench_dependency_sync_test",
         )
     ]
+    # The real controller resolves WMH_ROSE_POOL through this authoritative registry.
+    registry = "agents/providers/rose/pools.py"
+    if not (root / registry).is_file():
+        raise RuntimeError("authoritative Rose pool registry is missing")
+    files.append(registry)
     hashes = {}
     for name in files:
         source = root / name
@@ -301,6 +311,9 @@ def main() -> int:
     command = [
         "docker",
         "run",
+        # Match host process semantics: the fixture must be an ordinary PID,
+        # and detached descendants need a real subreaper after parent exit.
+        "--init",
         "--network",
         "none",
         "--cpus",
@@ -317,6 +330,8 @@ def main() -> int:
         f"{snapshot / 'scripts'}:/repo/scripts:ro",
         "-v",
         f"{snapshot / 'agents/benchmarks'}:/repo/agents/benchmarks:ro",
+        "-v",
+        f"{snapshot / registry}:/repo/{registry}:ro",
         "--env",
         "TMPDIR=/tmp",
         "--env",

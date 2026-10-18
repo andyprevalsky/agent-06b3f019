@@ -100,6 +100,67 @@ the final result combines its 31 passes with only the two corrected reruns.
 Independent review bound all 232 inputs and confirmed every owned launcher had
 exited. This was a private verification launch error, not a fleet runtime defect.
 
+## October 16 private Linux verification launcher recurrence
+
+At exact source `95ca49aade3bfa221049e3767e45ebe2e8e194b3`, the private
+Linux Step 4cb invocation used `agents/venv/bin/python -m pytest` without first
+activating that venv for nested shell commands. The full unchanged controller
+macro passed every preceding command, then its final documented five-file pytest
+command reported **498 passed, 7 failed, 593 deselected in 271.79 seconds**.
+Every failed traceback reached the same first-bad boundary: a shell-spawned
+`hub_upload.py` imported `benchmarks/logs.py:44`, where ambient
+`/usr/bin/python3` could not import `httpx`. The required dependency was already
+installed in the existing agents Python 3.11 venv.
+
+Archive searches were `ModuleNotFoundError No module named httpx` and
+`private launcher PATH child python shell publication dependency`; the July 6
+case and its October 1 private-launcher recurrence were the relevant lead.
+This recurrence was confirmed locally, not diagnosed from that lead alone.
+The exact existing regression command, from the repository root, was:
+
+```bash
+agents/venv/bin/python -m pytest -q 'agents/benchmarks/cloudbench_dependency_sync_test.py::test_hub_transport_starting_snapshot_preserves_terminal_publication_owner[timeout-True]'
+```
+
+With the original ambient PATH this failed in 1.206 seconds at the retained
+`ModuleNotFoundError: No module named 'httpx'`. After only
+`source agents/venv/bin/activate`, the identical argv and assertion passed in
+0.742 seconds. Interpreter/import observations and both logs are retained in
+`.context/broker95ca-python-environment/{proof.json,owning-red.log,owning-green.log}`.
+No dependency installation, global Python repair, wrapper/runtime/test edit,
+assertion relaxation, timeout change or provider call was made.
+
+The owned cause was a private invocation that selected the venv only for the
+pytest parent, leaving nested `python3` resolution ambient. Existing source
+instructions already require activation before running benchmark/controller
+helpers (`CLAUDE.md`, Linux toolchain and benchmark setup). The runtime fleet
+interpreter-selection repair was not bypassed or changed: these focused tests
+extract individual shell functions, so their private test subprocess inherits
+the caller's environment. Correcting that environment removes the import
+failure without changing the deliberately tested publication/recovery outcomes.
+This is the same configuration-error class as October 1, not a fleet code bug.
+No new runtime architecture or golden-reference harness change was appropriate.
+
+With that existing venv activated, the **entire same documented five-file final
+pytest command**, including its full unchanged `-k` expression, passed
+**505 tests, 593 deselected in 270.66 seconds**. This was not a seven-test-only
+verification. The normal stage wrapper joined exit 0; its observer also joined,
+and all observed exact PID births had retired. The command and its script hash
+are recorded in `.context/broker95ca-python-environment/command-proof.json`;
+full output is retained in the source-bound
+`lantern-broker95ca-python-environment-20261016` stage log.
+The original controller macro's 1739.2-second exit 1 and all its preceding PASS
+commands remain immutable in `A-FINAL-FAILURE-RECEIPT.json` under the original
+`lantern-broker95ca-qualification-20261016` lifecycle.
+
+The original full macro remains exit 1; the verification disposition combines
+its exact-source preceding PASS commands with the corrected complete final
+pytest command. It never relabels the original macro exit 0. Existing seven
+registered assertions remain permanent regression coverage. No new redundant
+fixture was added. All 392 declared controller inputs and qualified runtime,
+tasks, prompts and limits stay unchanged. ROOT owns source adoption, archive
+reindex, aggregate runtime finish and any subsequent live gates.
+
 ## Human feedback
 
 None recorded.

@@ -34,9 +34,13 @@ function storage<T>(name: string, bindings: Record<string, unknown>): T {
   const previous = process.env.BENCHMARK_HUB_OWNER_SOURCE_PATH;
   process.env.BENCHMARK_HUB_OWNER_SOURCE_PATH = `${process.cwd()}/src/providers/benchmarkHubStorage.ts`;
   try {
+    const versions = new Map([['benchmark-hub-v2/owner/runs/fixture.json', null]]);
     return loadDeclaration<T>(name, {
+      EPOCH: 'owner',
+      KEY_PREFIX: 'benchmark-hub-v2/owner',
+      WRITES_ENABLED: true,
       randomUUID,
-      hubStorageVersions: () => new Map([['runs/fixture.json', null]]),
+      hubStorageVersions: () => versions,
       assertHubStorageOwnership,
       ownedHubStorageRequest,
       Buffer,
@@ -162,7 +166,7 @@ test('real Smithy handler destroys the local request before later publication', 
     connectionTimeout: 0,
     requestTimeout: 0,
   });
-  const putObject = storage<(key: string, data: string) => Promise<void>>('putObject', {
+  const putObject = storage<(key: string, data: string) => Promise<void>>('putHubObjectVersion', {
     r2Configured: () => true,
     process: { env: { R2_BUCKET_TRACE_ARCHIVE: 'fixture' } },
     PutObjectCommand,

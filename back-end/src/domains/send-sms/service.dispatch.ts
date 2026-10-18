@@ -17,7 +17,8 @@ export async function dispatchByEventType(
   data: NotifyInput,
   payload: Record<string, unknown>,
   agentGoal: string,
-  channels: SupervisorChannel[]
+  channels: SupervisorChannel[],
+  startNotification?: string
 ): Promise<void> {
   switch (data.event_type) {
     case 'agent_started':
@@ -30,6 +31,10 @@ export async function dispatchByEventType(
           // literal string "Unknown goal" — a caller that omits `goal` otherwise
           // texts the user `Started: "Unknown goal"` about their own request.
           goal: (payload.goal as string | undefined) ?? agentGoal,
+          notificationMessage:
+            typeof payload.notification_message === 'string' && payload.notification_message.trim()
+              ? payload.notification_message
+              : startNotification,
         },
         channels
       );

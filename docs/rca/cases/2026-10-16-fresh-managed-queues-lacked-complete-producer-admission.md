@@ -1,0 +1,203 @@
+---
+id: 2026-10-16-fresh-managed-queues-lacked-complete-producer-admission
+date: 2026-10-16
+title: Fresh managed queues lacked immutable root starts and incoming continuation membership
+surface: back-end
+component: temporal-managed-producers
+classification: our-bug
+problem_class: concurrency-inefficiency
+first_bad_boundary: The real pointer service exposed a managed destination without source identity and ordinary root starts reused the logical agent workflow ID
+symptoms:
+  - managed pointer read without source identity succeeded
+  - ordinary managed root starts used the logical agent ID without reject duplicate policy
+tags:
+  - temporal
+  - deployment
+  - queue-admission
+  - continue-as-new
+sources:
+  - commit f3315c787a142c63cbe42c7f72aedc5542e44c0d
+  - plan:.context/lantern-producer-f3315/.context/producer-rca/final-manifest.json
+repro: cd back-end && node --import tsx src/tests/unit/managed-workflow-producers.test.ts
+status: open
+---
+
+## Problem
+
+Reusable physical banks require a complete producer boundary for each fresh
+queue generation. Existing retirement correctly refused UNKNOWN legacy coverage,
+but no production producer established safe future coverage. Root starts retained
+ALLOW_DUPLICATE semantics, while cross-queue continue-as-new bypassed start rows.
+This is a local source/owning-boundary finding, not a claimed production incident.
+
+## Diagnosis
+
+Archive searches used the literal "Legacy producer/start coverage is unqualified"
+and "queue retirement late workflow start continuation". The earlier retired-queue
+admission case is related, but its fixture's externally qualified certificate does
+not prove a complete new-generation producer transition. The registered actual
+pointer service and Temporal start wrapper failed before runtime edits: missing
+identity was accepted, and the native start used logical-agent as its workflow ID.
+
+## Solution
+
+Managed roots now durably reserve one physical ID under the agent generation
+lock and use REJECT_DUPLICATE while preserving logical agent arguments, deadlines,
+and existing explicit immutable child/replacement IDs. Clearing Agent fields alone
+does not authorize a new physical ID: prior per-agent START references need
+exact native terminal witnesses or the qualified absence proof described below;
+unresolved membership blocks. With no references,
+the original logical Workflow ID is probed, and only canonical NOT_FOUND or a
+terminal native chain permits the first new physical identity. Terminal proofs
+are persisted on the exact acknowledged member, so expired history is not needed
+forever. Fresh queue initialization
+requires the current DB-clock deployment lease and an exact owned deployment job;
+identical resume preserves incarnation, UNKNOWN and retired gates cannot upgrade.
+Only the current published managed destination admits starts.
+
+The pointer activity sends native workflow/run identity. The backend verifies the
+native chain and commits incoming continuation membership before returning a new
+managed destination. Retirement reconciles both starts and incoming continuations;
+an unfinished source or a chain still on the target blocks retirement. Legacy
+identity-free reads fail closed only after a managed target is active. Explicit
+internal observation-only reads support activity draining without granting CAN.
+
+## Verification
+
+The identical registered command failed before and passed after. Additional
+registered tests cover actual HTTP middleware, concurrent/held root starts,
+unchanged SDK arguments and explicit replacement IDs, staged zero-wire rejection,
+lease/job/source validation, exact resume, UNKNOWN preservation, and incoming-chain
+retirement. A real isolated Postgres schema exercises production transactions and
+advisory locks. The normal activity-generation-drain owner checks identity headers
+and observation behavior. These producer controls used injected native clients;
+no live Temporal or deployment operation ran. A separate baseline test was
+mistakenly launched against production PostgreSQL; its invalid result, exact
+fixture cleanup, and local rerun are recorded in
+`2026-07-13-local-test-db-resolver-fails-open-to-shared-postgres.md`.
+
+## Limitations
+
+Status remains OPEN pending independent integration and native qualification.
+Before the first managed pointer, the sole rollout owner must prove the complete
+new Render deployment and at least 375 seconds of old-instance drain. A protocol
+constant or one HTTP response does not establish that transition. Original legacy
+queues remain served and UNKNOWN. Native describe currently occurs on each
+workflow pointer fetch; no 10k-agent throughput claim is made. No workflow prompt,
+continue-as-new arguments, terminal policy, or visibility-zero waiver changed.
+
+## Human feedback
+
+None recorded.
+
+## Full-suite fixture correction
+
+The first full backend run at
+`8171b24d0f934b38a5b932f836b8726f40b07a96` correctly rejected the Postgres
+fixture's old three-argument pointer publication with
+`Managed queue publication requires its deployment job and lease owner`.
+The production guard was retained. The fixture now supplies its actual owned
+READY job, eight healthy candidate IDs, and an expected legacy pointer for the
+publication CAS. All 15 original assertions remain identical and in order.
+The same registered Postgres owner failed before and passed after the setup
+correction, using an explicitly bound isolated local database. Full integration
+and the native bootstrap qualifications above remain required.
+
+The subsequent complete agent run at
+`db99e0f616848a0a65fe5aedc3a62264158c9af2` passed all 110 blackbox domains and
+184 cache tests, then reported 132 passing and two failing unit tests. The
+pointer activity's old unit fixtures supplied HTTP and configuration doubles
+but no Temporal activity context. The SDK correctly raised
+`Not in activity context` at `activity.info()` before the expected payload
+assertions. Production still requires that native workflow/run identity.
+
+Only the two fixtures were corrected to supply the activity identity and check
+both outbound identity headers. Their original successful-payload, missing-key,
+and missing-queue assertions remain intact. The same two registered tests then
+passed, followed by all 134 agent unit tests in 48.81 seconds. The retained
+artifact is `.context/lantern-pointer-fixture-db99/.context/pointer-fixture-rca/`.
+These focused results do not turn either earlier full coverage command green;
+complete coverage on the final composed source remains required.
+
+## Reusable lesson
+
+Qualify every way work can enter a new queue before allowing that queue to retire,
+and retain the native execution identity independently of mutable agent fields.
+
+
+## Follow-up: latest native history absent after settled immutable starts
+
+PR 1527 review at `612b2d3de491ad1b70ad9bd9af245968d5b06f52` identified
+an availability boundary in physical-root reconciliation. The installed SDK
+`getHandle(workflowId, undefined, {firstExecutionRunId}).describe()` sends the
+workflow ID and undefined run ID; it queries the latest chain. It does not
+look up only the persisted first run. A canonical `WorkflowNotFoundError` can
+therefore mean the entire latest execution has aged out, not that a live
+continued chain merely lost its first-run history.
+
+The production wrapper previously converted that exact latest-ID absence to
+pending forever when no terminal witness had been saved. Queue retirement's
+real reconciliation callback likewise propagated absence, so a qualified,
+fenced queue could remain unusable after its settled executions expired.
+The original saved-terminal-proof regression only covered expiry after proof
+was already persisted; it did not exercise an accepted chain with no proof.
+
+The registered `managed-workflow-producers.test.ts` owner now invokes two
+additional cases from `managed-workflow-absence.cases.ts`. On the exact old
+runtime, both fail: physical-root reconciliation remains pending and retirement
+throws `latest absent`. Restoring the candidate runtime, with those same final
+tests unchanged, produces eleven passes. Command, from the isolated checkout's
+`back-end` directory:
+
+```bash
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/lantern_absence_offline \
+DIRECT_URL=postgresql://postgres:postgres@localhost:5432/lantern_absence_offline \
+node --import tsx src/tests/unit/managed-workflow-producers.test.ts
+```
+
+The fixture uses the real production start/admission functions, mocked native
+Temporal responses and in-process transactional storage. No database,
+Temporal server, provider, worker or production call is made. This proves the
+owning behavior, not a live retention event or whole-source qualification.
+Private exact logs and commands are retained in the isolated checkout's
+`.context/absence-proof/` directory, including `FINAL-RED.log`,
+`FINAL-GREEN.log`, and `red-green-command.json`. Earlier private invocation,
+fixture-object and compiler-setup mistakes are separate from the final causal
+pair and do not replace it.
+
+The correction records typed `ABSENT` evidence rather than inventing terminal
+status or a native queue. Only canonical latest-ID NotFound with the exact
+workflow ID and no run selector qualifies. Physical-root absence requires all
+relevant admissions to be completed, accepted, immutable and identity-matched;
+the generation lock rechecks membership before a fresh physical ID is allocated.
+Saved absence proofs retain the exact workflow and first-execution identity.
+Queue retirement retains its closed qualified gate, complete immutable ACK
+snapshot, exact incarnation, continuation identities, pointer exclusion and
+final membership recheck. It can settle absent accepted executions and absent
+incoming continuation chains without fabricating queue or run data.
+
+UNKNOWN coverage, mutable starts, unresolved wire outcomes, transport errors,
+wrong-ID or run-specific NotFound, running chains and mismatched first-run
+identities remain fail closed. Existing concurrent pending starts reuse their
+same physical ID, and child/replacement IDs remain unchanged. Permanent cases
+cover those neighboring contracts and saved-absence reuse. No prompts, task
+criteria, model selection, deadlines, retry policy or native fleet resources
+changed. Human approval and final deploy qualification remain separate gates;
+no additional human feedback is recorded here.
+
+
+## Follow-up: authenticate the independent image inspection
+
+The same PR review identified a separate deployment launch boundary. A successful
+Fly image push does not establish Docker CLI registry credentials for the later
+independent image inspection. The old test double accepted that inspection even
+with an empty Docker configuration. A clean-runner regression now refuses the
+inspection without credentials and failed the original launcher with exit 93.
+
+The launcher runs `flyctl auth docker` after the push and before digest inspection.
+The identical registered deployment-entrypoint test then passes. Its authentication
+failure control records only build and authentication, with no image inspection,
+job enqueue, or worker activation. Existing immutable-source, dirty-worktree,
+reuse-only, and build-failure controls remain. These tests use private fake Docker
+configuration and do not contact Fly or mutate real credentials. The frozen proof
+is `.context/lantern-registry-auth612b/.context/registry-auth-rca/`.

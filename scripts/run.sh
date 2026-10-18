@@ -782,21 +782,38 @@ fi
 
 cleanup_seed_bootstrap_database() {
     if $USE_SYSTEM_PG && $SYSTEM_DB_OWNED_BY_US; then
-        PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$LOCAL_DB_NAME" >/dev/null 2>&1 || true
+        PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$LOCAL_DB_NAME" >/dev/null 2>&1 || return 1
         SYSTEM_DB_OWNED_BY_US=false
         DB_OWNED_BY_US=false
     elif [ -n "$DB_OWNED_CONTAINER_ID" ]; then
-        docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
-        docker volume rm "$DB_VOLUME" >/dev/null 2>&1 || true
+        local remaining
+        if ! docker rm -f "$DB_OWNED_CONTAINER_ID" >/dev/null 2>&1; then
+            # A successful all-states query for the full immutable ID can prove
+            # it is already gone. A failed query or any result is not absence.
+            [[ "$DB_OWNED_CONTAINER_ID" =~ ^[a-f0-9]{64}$ ]] || return 1
+            remaining=$(docker container ls --all --no-trunc --filter "id=$DB_OWNED_CONTAINER_ID" --format '{{.ID}}' 2>/dev/null) || return 1
+            [ -z "$remaining" ] || return 1
+        fi
+        if ! docker volume rm "$DB_VOLUME" >/dev/null 2>&1; then
+            [[ "$DB_VOLUME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
+            remaining=$(docker volume ls --filter "name=$DB_VOLUME" --format '{{.Name}}' 2>/dev/null) || return 1
+            [ -z "$remaining" ] || return 1
+        fi
         DB_OWNED_CONTAINER_ID=""
         DB_OWNED_BY_US=false
     fi
 }
 
 fail_required_seed_dump() {
+    local cleanup_state=clean
     echo "❌ $1" >&2
     echo "   Expected cache token: $_SEED_CACHE_TOKEN" >&2
-    cleanup_seed_bootstrap_database
+    # Seed admission exits before the service cleanup trap exists. This owner
+    # must release its bootstrap resources before publishing its own receipt.
+    cleanup_seed_bootstrap_database || cleanup_state=failed
+    release_seed_lock_if_held || cleanup_state=failed
+    run_publish_stack_cleanup_status "$cleanup_state" || \
+        echo "❌ could not publish bootstrap stack cleanup status" >&2
     exit 1
 }
 
@@ -1049,6 +1066,23 @@ _SEED_LOCK_HELD=0
 release_seed_lock_if_held() {
     if [ "${_SEED_LOCK_HELD:-0}" = "1" ]; then
         release_benchmark_seed_lock "$_SEED_DUMP"
+        # Distinguish native ENOENT from an unreadable lock; shell readlink
+        # failure alone cannot prove absence or a different owner.
+        if ! python3 - "${_SEED_DUMP}.publish.lock" "${BASHPID:-$$}" <<'PYLOCK'
+import os
+import sys
+
+try:
+    owner = os.readlink(sys.argv[1])
+except FileNotFoundError:
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+sys.exit(0 if owner.isdecimal() and int(owner) > 0 and owner != sys.argv[2] else 1)
+PYLOCK
+        then
+            return 1
+        fi
         _SEED_LOCK_HELD=0
     fi
 }
@@ -1291,6 +1325,10 @@ if [ ! -f agents/venv/bin/activate ] \
     (cd agents && source venv/bin/activate && pip install -r requirements.txt)
     echo "🐍 Agents venv ready"
 fi
+
+# Python checkout fixtures and Node UI tests may require different browser revisions.
+echo "📦 Ensuring Playwright browser assets..."
+agents/venv/bin/python "$SCRIPT_DIR/ensure-playwright-browsers.py" --root "$PWD" || exit 1
 
 # Pre-flight: handle processes on our ports from this worktree.
 # Cloud instances already handled above (aggressive cleanup). This block
@@ -2253,6 +2291,19 @@ should_serve_world_model() {
     return 0
 }
 
+# Pre-export the WMH target for a benchmark stack BEFORE any service forks.
+# The agents workers start before start_world_model_harness finishes building
+# and serving (it runs after the "agents" service), and their WMH adapter
+# (agents/helpers/world_model_runtime.py:from_env) reads WMH_MODEL_NAME /
+# WMH_BASE_URL from the worker's process env at the FIRST simulated boundary.
+# Exporting only after /healthz (below) left every simulate worker without a
+# model name → "WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME".
+# The manifest still publishes the WMH only once it is confirmed healthy.
+if $BENCHMARK_MODE && should_serve_world_model; then
+    export WMH_MODEL_NAME
+    export WMH_BASE_URL="${WMH_BASE_URL:-http://localhost:$WMH_PORT}"
+fi
+
 start_world_model_harness() {
     should_serve_world_model || return 0
 
@@ -2369,22 +2420,45 @@ start_world_model_harness() {
 
 kill_tree() {
     local pid=$1
+    local child
     for child in $(pgrep -P "$pid" 2>/dev/null); do
         kill_tree "$child"
     done
     kill "$pid" 2>/dev/null || true
 }
 
-# SIGTERM the tree, wait briefly, then SIGKILL any survivors
+# All descendants of a pid (depth-first), snapshotted BEFORE any signal is
+# sent: once a parent dies its children reparent to init and `pgrep -P` can no
+# longer find them, which is exactly how a SIGTERM-surviving grandchild leaks.
+descendant_pids() {
+    local pid=$1
+    # `child` MUST be local: the recursion below reuses the loop variable, and a
+    # global one is clobbered by the inner loop before the outer echo runs.
+    local child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        descendant_pids "$child"
+        echo "$child"
+    done
+}
+
+# SIGTERM the tree, wait briefly, then SIGKILL any survivors — at EVERY depth.
+# Previously only the tracked pid and its direct children were force-killed,
+# so the agents worker (`bash -c` → run_local_worker.sh → python worker.py)
+# outlived an isolated benchmark teardown whenever worker.py hung after its
+# graceful shutdown (observed 2026-09-08: worker logged "Worker stopped" and
+# stayed alive, polling a dead per-run Temporal queue). Isolated runs skip the
+# broad kill-services.sh sweep, so this tree kill is their only reaper.
 kill_tree_hard() {
     local pid=$1
+    local survivors
+    survivors="$(descendant_pids "$pid") $pid"
     kill_tree "$pid"
     sleep 1
-    # Kill any survivors that ignored SIGTERM
-    for child in $(pgrep -P "$pid" 2>/dev/null); do
-        kill -9 "$child" 2>/dev/null || true
+    for victim in $survivors; do
+        if kill -0 "$victim" 2>/dev/null; then
+            kill -9 "$victim" 2>/dev/null || true
+        fi
     done
-    kill -9 "$pid" 2>/dev/null || true
 }
 
 # Each isolated benchmark run bundles its own ~220MB frontend keyed by run id and

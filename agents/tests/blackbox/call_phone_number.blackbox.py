@@ -584,6 +584,59 @@ def test_compute_service_usage_without_hold_is_unchanged():
     assert len(compute_service_usage(120, 0)) == 1
 
 
+async def test_simulated_phone_result_persists_terminal_event():
+    """DB-polling callers receive the exact simulated tool completion once."""
+    from domains.call_phone_number import handler
+    from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+    from helpers.messages import post_agent_message
+
+    body = "Call reached voicemail. No live response or new route. Do not redial."
+    agent_id = "00000000-0000-0000-0000-000000000001"
+    user_id = "00000000-0000-0000-0000-000000000002"
+    call_id = "call_simulated_completion_control"
+    arguments = {"to": "+12025550123", "system_prompt": "Record the actual call outcome.",
+                 "output_schema": {"call_outcome": "", "next_step": ""}}
+    for mode, is_error in [("real", False), ("shadow", False),
+                           ("simulate", False), ("simulate", True)]:
+        posted = []
+
+        class RecordedClient:
+            async def step(self, *unused):
+                return {"content": body, "is_error": is_error}
+
+        adapter = WorldModelToolExecutionAdapter(
+            mode="simulate", client=RecordedClient(), world_model_name="control",
+            session_id="control-session", agent_id=agent_id, timestamp_ms=1000,
+        )
+
+        async def execute_activity(fn, *, args, **unused):
+            if fn.__name__ == "call_phone_number_activity":
+                if mode != "simulate":
+                    return {"success": True, "message": body, "duration": 120}
+                return await handler.call_phone_number_activity(*args)
+            if fn is post_agent_message:
+                posted.append(args)
+            return None
+
+        with patch.object(handler.WorldModelToolExecutionAdapter, "from_env", return_value=adapter):
+            result = await handler.CallPhoneNumberManager().execute_tool(
+                execute_activity=execute_activity, tool_call=arguments, tool_call_id=call_id,
+                agent_id=agent_id, user_id=user_id, world_model_mode=mode,
+            )
+        terminal = [row for row in posted if row[3].get("toolStatus") in {"FINISHED", "ERROR"}]
+        if mode != "simulate":
+            assert not terminal, "Real/shadow activity already owns completion; do not duplicate it"
+            continue
+        assert len(terminal) == 1, "Persist exactly one completion for the DB-polling caller"
+        assert terminal[0][1] == body
+        assert terminal[0][3]["toolCallId"] == call_id
+        assert terminal[0][3]["toolName"] == "call_phone_number"
+        assert terminal[0][3]["toolStatus"] == ("ERROR" if is_error else "FINISHED")
+        assert result["message"] == body
+        assert result["success"] is (not is_error)
+        assert "recordingUrl" not in terminal[0][3]["phoneCall"]
+
+
 async def run_all_tests():
     print("call-phone-number blackbox tests:")
     r = BlackboxResult()
@@ -618,6 +671,7 @@ async def run_all_tests():
     r.record("manager_get_approval_question_defaults", test_manager_get_approval_question_defaults)
     r.record("poll_interval_backs_off_after_long_hold", test_poll_interval_backs_off_after_long_hold)
     await r.record_async("manager_execute_tool_success", test_manager_execute_tool_success)
+    await r.record_async("simulated_phone_result_persists_terminal_event", test_simulated_phone_result_persists_terminal_event)
     await r.record_async(
         "manager_execute_tool_uses_idempotent_retry_policy",
         test_manager_execute_tool_uses_idempotent_retry_policy,

@@ -1,3 +1,4 @@
+import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
 /**
  * Benchmark Hub run storage — uploaded benchmark run bundles + a run index.
  *
@@ -40,11 +41,15 @@ import {
   forgetHubRunFromResolutionCaches,
   __resetHubResolutionCachesForTest,
 } from './benchmarkHubLookup';
+import { getRunBundleStrict, parseRunCatalog } from './benchmarkHubRunBundles';
 import { coalesceHubRunPuts } from './benchmarkHubInFlight';
-import { getRunBundleStrict } from './benchmarkHubRunBundles';
+import {
+  assertHubStorageOwnership,
+  HUB_SQL_TIMEOUT_MS,
+  withHubStorageOwnership,
+} from './benchmarkHubStorageOwnership';
 import {
   finiteMetric,
-  normalizeAgentId,
   taskSummary,
   groupedRunCatalog,
   HUB_GROUP_FIELDS,
@@ -53,14 +58,14 @@ import {
   runGroupSchedule,
 } from './benchmarkHubRunProjection';
 import {
-  assertHubStorageOwnership,
-  HUB_SQL_TIMEOUT_MS,
-  withHubStorageOwnership,
-} from './benchmarkHubStorageOwnership';
-import {
   getObject,
   getObjectStrict,
   putObject,
+  beginHubPublications,
+  hubOverlayEnabled,
+  hubStorageDomain,
+  hubWritesEnabled,
+  bindHubLegacyBackfill,
   resetHubObjectStorageForTests,
 } from './benchmarkHubStorage';
 import type { HubRunSummary } from './benchmarkHubTypes';
@@ -246,7 +251,7 @@ export async function isHubRunVisible(runId: string): Promise<boolean | null> {
   }
 }
 
-const INDEX_LOCK_KEY = 'benchmark-hub:index';
+const INDEX_LOCK_KEY = `${hubStorageDomain()}:index`;
 const indexAdmissionWaiters: Array<() => void> = [];
 let indexAdmissionHeld = false;
 
@@ -302,6 +307,10 @@ async function storeRun(
   bundle: Record<string, unknown>,
   options: { live?: boolean; source?: string } = {}
 ): Promise<HubRunSummary> {
+  if (!hubWritesEnabled())
+    throw new BenchmarkHubUnavailableError(
+      'Hub publication is paused pending storage epoch activation'
+    );
   const runId = String(bundle.run_id ?? '');
   // Same allowlist as getRunBundle: the id becomes a filename in the local-dir
   // fallback, so anything outside it (e.g. "../../x") must never reach putObject.
@@ -448,16 +457,17 @@ async function commitPutCycle(
   if (bundles.length > 0) {
     const writes = new Map<string, Array<Record<string, unknown>>>();
     for (const [runId, body] of bundles) writes.set(runId, [...(writes.get(runId) ?? []), body]);
+    await beginHubPublications([...writes.keys()]);
     // Each run keeps its own upload order; distinct runs write concurrently.
     await inLanes([...writes], async ([runId, bodies]) => {
       for (const body of bodies) await putObject(`runs/${runId}.json`, JSON.stringify(body));
     });
     const next = [...cycle.index];
     next.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
-    await putObject('index.json', JSON.stringify(next));
     const agentIndex = cycle.agentIndex!;
     await writeAgentRunIndex(agentIndex);
     await inLanes([...writes.keys()], (runId) => putObject(`visibility/${runId}.json`, 'true'));
+    await putObject('index.json', JSON.stringify(next));
   }
   log.info('Staged Benchmark Hub upload cycle', {
     uploads: queued.length,
@@ -614,12 +624,14 @@ function applyQueuedPut(put: QueuedPut, cycle: PutCycle): HubRunSummary | null {
  */
 export async function persistHubAgentRunBackfill(
   backfilled: Map<string, string>,
-  scanStartRevision?: number
+  scanStartRevision?: number,
+  legacyStamp?: string
 ): Promise<HubAgentRunIndexSnapshot> {
   return withIndexLock(async () => {
     const runs = await listRunsStrict();
     const current = await readAgentRunIndexForMutation(runs);
     const snapshot = completedHubAgentBackfill(current, backfilled, runs, scanStartRevision);
+    if (snapshot.complete) await bindHubLegacyBackfill(legacyStamp);
     await writeAgentRunIndex(snapshot);
     return snapshot;
   });
@@ -632,6 +644,8 @@ export async function listRuns(options: { grouped?: boolean } = {}): Promise<Hub
     const runs = parseRunCatalog(raw);
     return options.grouped === true ? groupedRunCatalog(runs) : runs;
   } catch {
+    if (hubOverlayEnabled())
+      throw new BenchmarkHubUnavailableError('Hub catalog is temporarily unavailable');
     return [];
   }
 }
@@ -652,30 +666,6 @@ export async function listRunPage(page: { offset?: number; limit?: number } = {}
   };
 }
 
-function parseRunCatalog(raw: string): HubRunSummary[] {
-  const parsed = JSON.parse(raw) as unknown;
-  if (!Array.isArray(parsed)) throw new Error('Invalid Benchmark Hub run catalog');
-  return parsed.map((value) => {
-    if (
-      typeof value !== 'object' ||
-      value === null ||
-      typeof (value as Partial<HubRunSummary>).run_id !== 'string' ||
-      !/^[A-Za-z0-9._-]+$/.test((value as Partial<HubRunSummary>).run_id as string) ||
-      !Array.isArray((value as Partial<HubRunSummary>).tasks)
-    ) {
-      throw new Error('Invalid Benchmark Hub run catalog entry');
-    }
-    const run = value as HubRunSummary;
-    return {
-      ...run,
-      tasks: run.tasks.map((task) => ({
-        ...task,
-        agent_id: normalizeAgentId(task.agent_id),
-      })),
-    };
-  });
-}
-
 /** Mutations and migrations must distinguish a missing catalog from read/corruption faults. */
 export async function listRunsStrict(): Promise<HubRunSummary[]> {
   const raw = await getObjectStrict('index.json');
@@ -688,6 +678,10 @@ export async function listRunsStrict(): Promise<HubRunSummary[]> {
  * Returns false when the run id was not present.
  */
 export async function deleteRun(runId: string): Promise<boolean> {
+  if (!hubWritesEnabled())
+    throw new BenchmarkHubUnavailableError(
+      'Hub publication is paused pending storage epoch activation'
+    );
   const retired: Array<{ runId: string; bundle: Record<string, unknown> }> = [];
   const removed = await withIndexLock(async () => {
     const index = await listRunsStrict();
@@ -711,8 +705,8 @@ export async function deleteRun(runId: string): Promise<boolean> {
       await putObject(`visibility/${target.run_id}.json`, 'false');
       if (agentIndex !== null) agentIndex = hubAgentIndexAfterDelete(agentIndex, target.run_id);
     }
-    await putObject('index.json', JSON.stringify(next));
     if (agentIndex !== null) await writeAgentRunIndex(agentIndex);
+    await putObject('index.json', JSON.stringify(next));
     return true;
   });
   if (removed)

@@ -8,6 +8,7 @@
  */
 
 import type { CompletionMessage, ContentBlock, ResponseFormat } from './types';
+import { isUncachedContext, markUncachedContext } from './cache';
 
 const DATA_URI_RE = /^data:([^;]+);base64,([\s\S]+)$/;
 
@@ -121,14 +122,13 @@ export function transformMessagesForAnthropic(messages: CompletionMessage[]): An
       continue;
     }
 
-    if (Array.isArray(msg.content)) {
-      out.push({
-        role: msg.role,
-        content: msg.content.map(transformContentBlockForAnthropic),
-      });
-    } else {
-      out.push({ role: msg.role, content: msg.content });
-    }
+    const converted = {
+      role: msg.role,
+      content: Array.isArray(msg.content)
+        ? msg.content.map(transformContentBlockForAnthropic)
+        : msg.content,
+    };
+    out.push(isUncachedContext(msg) ? markUncachedContext(converted) : converted);
   }
 
   while (out.length > 0 && out[out.length - 1].role === 'assistant') {
@@ -310,7 +310,7 @@ function relaxNullableUnionsForAnthropic(schema: unknown): unknown {
   return out;
 }
 
-/** Returns the value branch of a two-branch `T | null` union, else null. */
+/** Unwrap nullable unions recursively, including combined optional/nullable wrappers. */
 function unwrapNullableUnion(schema: JsonSchema): JsonSchema | null {
   const branches = (Array.isArray(schema.anyOf) ? schema.anyOf : schema.oneOf) as
     JsonSchema[] | undefined;
@@ -319,7 +319,8 @@ function unwrapNullableUnion(schema: JsonSchema): JsonSchema | null {
   const hasNullBranch = branches.some((b) => b && typeof b === 'object' && b.type === 'null');
   if (!valueBranch || !hasNullBranch) return null;
 
-  const merged: JsonSchema = { ...valueBranch };
+  // Optional(nullable(T)) produces nested wrappers; collapse every layer.
+  const merged: JsonSchema = { ...(unwrapNullableUnion(valueBranch) ?? valueBranch) };
   // The description hangs off the union wrapper, not the value branch, so
   // collapsing without it would silently drop the model-facing field docs.
   if (typeof schema.description === 'string') merged.description = schema.description;

@@ -1,3 +1,4 @@
+import type { ClientSource } from '@/lib/clientSource';
 /**
  * STATE MACHINE: terminal message sending
  *
@@ -33,7 +34,7 @@ export interface UseMessageSendingArgs {
   isFullySignedIn: boolean;
   user?: { id?: string; phone?: string } | null;
   userId?: string | null;
-  clientSource: string;
+  clientSource: ClientSource;
   setCurrentView: (v: TerminalView) => void;
   setLoginModalOpen: (v: boolean) => void;
   setIsLoadingNetwork: (v: boolean) => void;

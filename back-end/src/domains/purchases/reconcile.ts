@@ -32,10 +32,15 @@ function hasValue(value: string | null | undefined): value is string {
 async function refundPurchaseOrRecordFailure(purchase: {
   id: string;
   stripePaymentIntentId: string | null;
+  stripeLivemode: boolean;
 }): Promise<void> {
   if (!hasValue(purchase.stripePaymentIntentId)) return;
   try {
-    await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+    await refundCapturedPurchase(
+      purchase.stripePaymentIntentId,
+      purchase.id,
+      purchase.stripeLivemode
+    );
   } catch (error) {
     await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.REFUND_FAILED);
     throw error;

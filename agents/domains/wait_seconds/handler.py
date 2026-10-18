@@ -10,12 +10,14 @@ from typing import Any, AsyncGenerator
 from temporalio import workflow
 
 from domains.wait_seconds.service import format_duration, validate_seconds
+from helpers.wait_on_world_clock import _wait_on_world_clock
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
 )
 from helpers.wait_condition_or_handoff import sleep_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from utils.simulated_clock import advance_simulated_clock, simulated_skip_metadata, simulated_time_skip_enabled
 
 
 class WaitSecondsManager(ToolManager):
@@ -56,6 +58,23 @@ class WaitSecondsManager(ToolManager):
             message="",
             status=MessageStatus.IN_PROGRESS,
         )
+
+        # 2a. World-model simulate: nothing in the WMH-served world changes with
+        # wall-clock time, so skip the sleep and advance the simulated clock.
+        if simulated_time_skip_enabled(workflow_instance):
+            world_ms = None
+            if getattr(workflow_instance, "agent_id", None):
+                world_ms = await _wait_on_world_clock(workflow_instance, tool_call_id, duration_ms=int(seconds * 1000))
+            if world_ms is None:
+                advance_simulated_clock(workflow_instance, seconds)
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"\u2713 Waited {duration} (simulated)",
+                message=f"Simulated clock advanced {duration}; wall-clock wait skipped",
+                status=MessageStatus.FINISHED,
+                metadata=simulated_skip_metadata(workflow_instance, seconds),
+            )
+            return
 
         # 2. Execute wait in 30s slices so a long sleep can still cut over.
         try:

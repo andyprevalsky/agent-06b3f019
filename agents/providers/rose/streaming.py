@@ -574,6 +574,7 @@ async def parse_responses_sse(
     completion_tokens = 0
     total_tokens = 0
     cache_write_tokens = 0
+    cache_write_reported = False
     cache_read_tokens = 0
     finish_reason = ""
     emitted_content_or_tool = False
@@ -582,13 +583,17 @@ async def parse_responses_sse(
 
     def apply_usage(usage: Optional[Dict[str, Any]]) -> None:
         nonlocal prompt_tokens, completion_tokens, total_tokens, cache_write_tokens, cache_read_tokens
+        nonlocal cache_write_reported
         if not usage:
             return
         prompt_tokens = usage.get("input_tokens", prompt_tokens) or prompt_tokens
         completion_tokens = usage.get("output_tokens", completion_tokens) or completion_tokens
         total_tokens = usage.get("total_tokens", total_tokens) or total_tokens
         details = usage.get("input_tokens_details") or {}
-        cache_write_tokens = details.get("cache_write_tokens", cache_write_tokens) or cache_write_tokens
+        if isinstance(details.get("cache_write_tokens"), int):
+            # GPT-5.6+ reports writes; zero is a real value with explicit breakpoints.
+            cache_write_tokens = details["cache_write_tokens"]
+            cache_write_reported = True
         cache_read_tokens = details.get("cached_tokens", cache_read_tokens) or cache_read_tokens
 
     try:
@@ -749,7 +754,9 @@ async def parse_responses_sse(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens or prompt_tokens + completion_tokens,
-            "cache_creation_input_tokens": cache_write_tokens or max(prompt_tokens - cache_read_tokens, 0),
+            "cache_creation_input_tokens": (
+                cache_write_tokens if cache_write_reported else max(prompt_tokens - cache_read_tokens, 0)
+            ),
             "cache_read_input_tokens": cache_read_tokens,
             "finish_reason": finish_reason or "stop",
         },

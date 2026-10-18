@@ -37,6 +37,34 @@ def _sample_tool_call():
     }
 
 
+def test_reused_approval_requires_own_available_purchase_and_no_pending_prompt():
+    from utils.payment_card import reuse_payment_approval
+
+    purchase = {"id": "approved-1", "agentId": "agent-1", "status": "HELD", "cardId": "card-1"}
+    lookup = {"found": True, "reusable": True, "purchase": purchase}
+    payload = {}
+    assert reuse_payment_approval(lookup, payload, "agent-1") == {
+        "attention_request_id": None, "reused_purchase_id": "approved-1"
+    }
+    assert payload == {"reusePurchaseId": "approved-1"}
+    rejected = [
+        {**lookup, "found": False},
+        {**lookup, "reusable": "true"},
+        {**lookup, "error": "comparison failed"},
+        {**lookup, "purchase": []},
+        *({**lookup, "purchase": {**purchase, **change}} for change in [
+            {"agentId": "another-agent"}, {"status": "CLEARED"}, {"id": ""}, {"cardId": None}
+        ]),
+    ]
+    for result in rejected:
+        payload = {}
+        assert reuse_payment_approval(result, payload, "agent-1") is None
+        assert payload == {}, "failed checks must not bind mint to any purchase"
+    payload = {}
+    assert reuse_payment_approval(lookup, payload, "agent-1", {"requestId": "pending"}) is None
+    assert payload == {}, "an existing approval wait must resume through the original flow"
+
+
 def test_normalize_payload_builds_receipt_metadata_and_fingerprint():
     from domains.request_payment_card.service import normalize_payment_payload
 
@@ -722,6 +750,30 @@ async def test_lookup_purchase_activity_boundary():
     assert call["requestHeaders"]["x-user-id"] == "user-123"
 
 
+async def test_lookup_purchase_activity_sends_full_scoped_receipt():
+    setup_mock({"/api/purchases/lookup": {"status": 200, "json": {"found": False, "reusable": False, "purchase": None}}})
+    from tools.request_payment_card import lookup_purchase_activity
+    payload = {"agentId": "agent-123", "merchant": "Shop", "lineItems": [{"name": "Monthly plan", "productUrl": "https://shop.example/pricing"}], "totalCents": 50000}
+    result = await lookup_purchase_activity("user-123", "fp-abc", None, payload)
+    assert result["reusable"] is False
+    call = assert_captured_call(url_contains="/api/purchases/lookup", method="POST")
+    body = call["requestBody"]
+    if isinstance(body, str):
+        body = json.loads(body)
+    assert body == {**payload, "userId": "user-123", "fingerprint": "fp-abc"}
+
+
+async def test_scoped_lookup_error_retains_usage_for_workflow_accounting():
+    error = {"error": "Invalid purchase approval reuse decision", "usageItems": [
+        {"type": "llm", "model": "fixture-model", "input_tokens": 37, "output_tokens": 11}
+    ]}
+    setup_mock({"/api/purchases/lookup": {"status": 502, "json": error}})
+    from tools.request_payment_card import lookup_purchase_activity
+    result = await lookup_purchase_activity("user-123", "fp-abc", None, {"agentId": "agent-123"})
+    assert result["error"] == error["error"] and result["usageItems"] == error["usageItems"]
+    assert result["statusCode"] == 502
+
+
 async def test_mint_purchase_card_activity_boundary():
     setup_mock(
         {
@@ -1077,12 +1129,15 @@ async def run_all_tests():
         "fingerprint_material_changes_distinct",
         test_fingerprint_keeps_material_receipt_changes_distinct,
     )
+    result.record("reused_approval_scope", test_reused_approval_requires_own_available_purchase_and_no_pending_prompt)
     result.record("question_no_secrets", test_question_contains_receipt_but_no_card_secrets)
     result.record(
         "question_sanitizes_merchant_content",
         test_question_normalizes_untrusted_review_text_and_escapes_markdown,
     )
     await result.record_async("lookup_boundary", test_lookup_purchase_activity_boundary)
+    await result.record_async("lookup_scoped_receipt", test_lookup_purchase_activity_sends_full_scoped_receipt)
+    await result.record_async("lookup_error_usage", test_scoped_lookup_error_retains_usage_for_workflow_accounting)
     await result.record_async("mint_boundary", test_mint_purchase_card_activity_boundary)
     await result.record_async("mint_maps_kyc_required", test_mint_purchase_card_activity_maps_kyc_required)
     await result.record_async(

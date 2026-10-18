@@ -162,7 +162,9 @@ class ResponseSchemaNestedFieldConfig(BaseModel):
     type: ResponseSchemaPrimitiveType = Field(description="Nested field type.")
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
     required: bool = Field(default=True, description="False when this property may be omitted entirely.")
-    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Declared bounds; empty when none.")
+    constraints: List[ResponseSchemaBound] = Field(
+        default_factory=list, description="Declared bounds; empty when none."
+    )
     nullable: bool = Field(default=False, description="Whether null is a valid value; the field remains required.")
 
     @model_validator(mode="before")
@@ -209,7 +211,9 @@ class ResponseSchemaFieldConfig(BaseModel):
         default_factory=list,
         description="Explicit subfields for object/list[object] outputs. Required when type is object or list[object].",
     )
-    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Declared bounds; empty when none.")
+    constraints: List[ResponseSchemaBound] = Field(
+        default_factory=list, description="Declared bounds; empty when none."
+    )
     nullable: bool = Field(default=False, description="Whether null is a valid value; the field remains required.")
 
     @model_validator(mode="before")
@@ -348,33 +352,31 @@ class WebSearchTool(BaseModel):
 
 
 class PeopleSearchTool(BaseModel):
-    """Find or enrich real people on the public web using dedicated people-search providers. Use when web_search is insufficient for a people goal: you need comprehensiveness (a broad list matching criteria) or depth (a field-level profile for a specific person). For a quick one-off people fact, web_search is fine."""
+    """Find people and retrieve source profiles through Lantern People. Use explicit title, company and location constraints; query supplies literal keywords, not semantic instructions. For compound qualification, inspect the returned profile evidence. Use grep source='network' for the user's own contacts."""
 
     tool: Literal["people_search"]
     query: str = Field(
+        min_length=2,
+        max_length=500,
         description=(
-            "Natural-language people request. For mode='enrich', a specific "
-            "person plus disambiguating context (e.g. 'Patrick Collison, "
-            "co-founder of Stripe'). For mode='discover', the criteria (e.g. "
-            "'partners at AI-infra VC firms in the SF Bay Area')."
-        )
+            "Literal profile keywords (2-500 characters), e.g. 'developer tools'. "
+            "Put role, employer and geography in titles, companies and location. "
+            "For enrich with source_record_id this is the lookup's display context."
+        ),
     )
     mode: Literal["enrich", "discover"] = Field(
         description=(
-            "'enrich': resolve ONE specific person and return a field-level "
-            "profile. 'discover': return a LIST of people matching a role, "
+            "'enrich': retrieve ONE source profile using source_record_id. "
+            "'discover': return a LIST of people matching a role, "
             "company, geography, or seniority."
         )
     )
-    provider: Literal["exa", "parallel"] = Field(
+    provider: Literal["lantern", "exa", "parallel"] = Field(
+        default="lantern",
         description=(
-            "Which backend. Exa is strongest for depth/enrichment (structured "
-            "work and education history); Parallel is strongest for broad "
-            "discovery (high recall). If the chosen provider returns "
-            "insufficient or low-quality data, re-call with the other provider. "
-            "On a provider rate-limit or error the tool auto-retries the other "
-            "provider."
-        )
+            "Use Lantern People. Legacy exa/parallel inputs are compatibility "
+            "aliases that also execute through Lantern; there is no provider fallback."
+        ),
     )
     limit: Optional[int] = Field(
         default=None,
@@ -391,10 +393,45 @@ class PeopleSearchTool(BaseModel):
             "mode='enrich' ONLY: the attributes to return for the resolved "
             "person. These DEFINE the output params, e.g. ['current_title', "
             "'current_company','location','linkedin_url','email','education']. "
-            "Maps to the provider's structured-output/enrichment schema. If "
-            "omitted, the provider returns its native default profile and no "
-            "field list is imposed."
+            "Unavailable attributes are null. Contact reveals are separate. "
+            "If omitted, returns the native source profile."
         ),
+    )
+    location: Optional[str] = Field(
+        default=None, min_length=2, max_length=200, description="Named geography, resolved by Lantern."
+    )
+    location_kind: Optional[Literal["city", "state", "metro", "country"]] = Field(
+        default=None, description="Geography kind; specify for ambiguous places."
+    )
+    country_code: Optional[str] = Field(
+        default=None, pattern="^[A-Z]{2}$", description="Two-letter country code, e.g. US."
+    )
+    companies: Optional[List[Annotated[str, Field(min_length=1, max_length=200)]]] = Field(
+        default=None,
+        min_length=1,
+        max_length=10,
+        description="Employer names or domains; Lantern resolves their identities.",
+    )
+    titles: Optional[List[Annotated[str, Field(min_length=1, max_length=200)]]] = Field(
+        default=None, min_length=1, max_length=20, description="Explicit job-title constraints."
+    )
+    cursor: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Discover only: exact next_cursor from the same request. Never invent offsets.",
+    )
+    source_record_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Required for enrich: exact source record ID from an earlier search.",
+    )
+    generation: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Source generation returned by discovery, for exact profile retrieval.",
     )
 
     @model_validator(mode="after")
@@ -403,6 +440,21 @@ class PeopleSearchTool(BaseModel):
             raise ValueError("limit is only valid for mode='discover'.")
         if self.mode == "discover" and self.fields is not None:
             raise ValueError("fields is only valid for mode='enrich'.")
+        if self.mode == "discover" and self.source_record_id is not None:
+            raise ValueError("source_record_id is only valid for mode='enrich'.")
+        if self.mode == "enrich" and self.cursor is not None:
+            raise ValueError("cursor is only valid for mode='discover'.")
+        if self.mode == "enrich" and self.source_record_id is None:
+            raise ValueError("source_record_id is required for mode='enrich'.")
+        if self.mode == "enrich" and any(
+            value is not None
+            for value in (self.location, self.location_kind, self.country_code, self.companies, self.titles)
+        ):
+            raise ValueError(
+                "Search constraints are only valid for mode='discover'; enrich retrieves the exact source profile."
+            )
+        if self.generation is not None and self.source_record_id is None:
+            raise ValueError("generation requires source_record_id.")
         return self
 
 
@@ -521,7 +573,7 @@ class GrepTool(BaseModel):
         description=(
             "The specific data source(s) to search - pass a list and pick the exact source(s) the "
             "task needs. Do NOT default to a blunt catch-all when you know the channel; name the "
-            "concrete sources (e.g. [\"email\"], or [\"email\", \"imessage\"]). Omit entirely to "
+            'concrete sources (e.g. ["email"], or ["email", "imessage"]). Omit entirely to '
             "search the local defaults (messages, network, agent_network). "
             "Channels of the user's communications: email searches the user's email/Gmail; "
             "imessage searches iMessage (including SMS stored in the Mac Messages DB); "
@@ -541,7 +593,7 @@ class GrepTool(BaseModel):
             "calendar searches the user's Google Calendar events; drive searches Google Drive "
             "file names, folders, and file text. "
             "summary returns a compact, precomputed inventory with message counts, date ranges, "
-            "channel totals, and threads ranked by volume. Use sources=[\"summary\"] first for "
+            'channel totals, and threads ranked by volume. Use sources=["summary"] first for '
             "aggregate questions such as total messages, date coverage, or most-contacted threads; "
             "then use the concrete channel source to inspect exact message text. Thread identifiers "
             "in the summary are valid contact identifiers when no human-readable name is stored. "
@@ -1046,16 +1098,12 @@ class SpawnAgentToolNoGP(BaseModel):
     )
     start_url: Optional[str] = Field(
         default=None,
-        description=(
-            "HTTPS URL the browser opens first. Required when type='browser'; "
-            "ignored otherwise."
-        ),
+        description=("HTTPS URL the browser opens first. Required when type='browser'; ignored otherwise."),
     )
     github_repo_link: Optional[str] = Field(
         default=None,
         description=(
-            "Optional when type='code'. GitHub repository URL to clone and sync to. "
-            "Ignored for every other type."
+            "Optional when type='code'. GitHub repository URL to clone and sync to. Ignored for every other type."
         ),
     )
     context_gates: Optional[Dict[str, bool]] = Field(
@@ -1172,23 +1220,23 @@ class AttemptCompletionTool(BaseModel):
 class AttemptCompletionWithResultTool(BaseModel):
     """Submit your final findings to the parent agent and end your loop.
 
-    The `result` string you submit here is the ONLY payload the parent
-    agent receives. There is no future turn after this call returns, so
-    your `result` must be complete and self-contained when you emit it.
+     The `result` string you submit here is the ONLY payload the parent
+     agent receives. There is no future turn after this call returns, so
+     your `result` must be complete and self-contained when you emit it.
 
-    Requirements:
-   - Complete: do not defer the answer. There is no future turn.
-   - Grounded: every claim must be backed by evidence from your prior
-      tool results. If a fact cannot be found, report the gap explicitly
-      ("No results for [X] after searching [keywords]") rather than
-      fabricating it.
-   - Token-efficient, punctual, and information-dense. Strip filler;
-      every sentence should carry signal.
-   - Cite sources inline with [N] tags and end `result` with a
-      `Sources:` block mapping each tag to its URL or source identifier.
+     Requirements:
+    - Complete: do not defer the answer. There is no future turn.
+    - Grounded: every claim must be backed by evidence from your prior
+       tool results. If a fact cannot be found, report the gap explicitly
+       ("No results for [X] after searching [keywords]") rather than
+       fabricating it.
+    - Token-efficient, punctual, and information-dense. Strip filler;
+       every sentence should carry signal.
+    - Cite sources inline with [N] tags and end `result` with a
+       `Sources:` block mapping each tag to its URL or source identifier.
 
-    Emit a single `attempt_completion_with_result` tool_use block, do
-    not batch it with other tool calls.
+     Emit a single `attempt_completion_with_result` tool_use block, do
+     not batch it with other tool calls.
     """
 
     tool: Literal["attempt_completion_with_result"]
@@ -1259,7 +1307,14 @@ PLAN_TOOL_MODELS: ToolRegistry = {
 # Tools available inside the explore agent (subset of read-only tools).
 # Full registry list -  callers that inject tools into an explore agent MUST use
 # `get_explore_agent_tools()` so ROSE_DISABLE_API_REQUEST can strip api_request.
-EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "api_request", "attempt_completion_with_result"]
+EXPLORE_AGENT_TOOLS = [
+    "web_search",
+    "people_search",
+    "web_fetch",
+    "grep",
+    "api_request",
+    "attempt_completion_with_result",
+]
 
 
 def get_explore_agent_tools() -> list[str]:
@@ -1412,24 +1467,24 @@ def create_agent_action_model(
     tool_registry: Optional[Dict[str, Type[BaseModel]]] = None,
 ) -> Type[BaseModel]:
     """
-    Dynamically create an AgentAction Pydantic model based on available tools.
+     Dynamically create an AgentAction Pydantic model based on available tools.
 
-    This ensures:
-   - Only available tools are in the schema (better LLM guidance)
-   - Type-safe tool calls (Pydantic validates structure)
-   - No JSON string parsing hacks needed
+     This ensures:
+    - Only available tools are in the schema (better LLM guidance)
+    - Type-safe tool calls (Pydantic validates structure)
+    - No JSON string parsing hacks needed
 
-    NOTE: reasoning is NOT part of this model anymore. Reasoning is handled via
-    OpenRouter's reasoning_details which are extracted from API responses and
-    stored in message metadata.
+     NOTE: reasoning is NOT part of this model anymore. Reasoning is handled via
+     OpenRouter's reasoning_details which are extracted from API responses and
+     stored in message metadata.
 
-    Args:
-        available_tool_names: List of tool names this agent can use
-        tool_registry: Optional custom registry (defaults to TOOL_MODELS,
-            with SpawnAgentToolNoGP when ROSE_DISABLE_GENERAL_PURPOSE_AGENT is set)
+     Args:
+         available_tool_names: List of tool names this agent can use
+         tool_registry: Optional custom registry (defaults to TOOL_MODELS,
+             with SpawnAgentToolNoGP when ROSE_DISABLE_GENERAL_PURPOSE_AGENT is set)
 
-    Returns:
-        Pydantic model class for AgentAction with proper tool union
+     Returns:
+         Pydantic model class for AgentAction with proper tool union
     """
     registry = tool_registry if tool_registry is not None else get_tool_models()
 

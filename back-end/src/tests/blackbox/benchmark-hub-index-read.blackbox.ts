@@ -1,4 +1,6 @@
 #!/usr/bin/env tsx
+import './benchmark-hub-overlay-env.fixture';
+import { hubLegacyArchiveStamp } from '../../providers/benchmarkHubStorage';
 /**
  * Cold Hub readers must observe a committed index or a durable failure, and a
  * fleet's queued live snapshots must not delay a final upload behind them.
@@ -70,11 +72,11 @@ async function publicationRead(failIndexWrite: boolean): Promise<void> {
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
     assert.equal(typeof input.Body, 'string');
-    if (input.Key === 'benchmark-hub/agent-run-index.json' && failIndexWrite) {
+    if (input.Key === 'benchmark-hub-v2/pg_owner/agent-run-index.json' && failIndexWrite) {
       throw new Error('fixture index publication failed');
     }
     const committed = commitObject(objects, input);
-    if (input.Key === 'benchmark-hub/agent-run-index-revision.json') {
+    if (input.Key === 'benchmark-hub-v2/pg_owner/agent-run-index-revision.json') {
       floorPublished.resolve();
       await releaseWriter.promise;
     }
@@ -118,9 +120,9 @@ async function publicationRead(failIndexWrite: boolean): Promise<void> {
       });
       assert.deepEqual(await reader, {
         kind: 'error',
-        error: 'Error: Benchmark Hub agent-run index trails its durable revision floor',
+        error: 'Error: Hub new-domain agent index pair is incomplete',
       });
-      await assert.rejects(loadHubAgentRunIndex(), /trails its durable revision floor/);
+      await assert.rejects(loadHubAgentRunIndex(), /new-domain agent index pair is incomplete/);
     } else {
       assert.deepEqual(await writer, { kind: 'stored' });
       assert.deepEqual(await reader, { kind: 'ready', revision: 2 });
@@ -262,11 +264,12 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
     assert.equal(stale.complete, false, 'a scan from before the repair cannot complete');
     const seed = await loadHubAgentRunIndex();
     assert.ok(seed !== null);
+    const legacyStamp = await hubLegacyArchiveStamp();
     const backfilled = await backfillHubAgentRunIndexFromCatalog(
       listRunsStrict,
       getRunBundleStrict,
       new Map(seed.agents),
-      (agents) => persistHubAgentRunBackfill(agents, seed.revision)
+      (agents) => persistHubAgentRunBackfill(agents, seed.revision, legacyStamp)
     );
     assert.equal(backfilled.complete, true, 'backfill completes over legacy task-less bundles');
     assert.equal(backfilled.revision, 11);
@@ -328,9 +331,17 @@ async function queuedUploadAdmission(
       return { Body: Buffer.from(value), ETag: objectETag(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
-    if (input.Key === 'benchmark-hub/index.json')
-      publications.push(JSON.parse(logicalObject(input.Body!)));
-    const runId = /^benchmark-hub\/runs\/(.+)\.json$/.exec(input.Key)?.[1];
+    if (input.Key === 'benchmark-hub-v2/pg_owner/index.json') {
+      const rows = JSON.parse(logicalObject(input.Body!));
+      const document = JSON.parse(JSON.parse(input.Body!).payload);
+      if (
+        !Object.values(document.claims).some(
+          (claim) => (claim as { state: string }).state === 'pending'
+        )
+      )
+        publications.push(rows);
+    }
+    const runId = /^benchmark-hub-v2\/pg_owner\/runs\/(.+)\.json$/.exec(input.Key)?.[1];
     if (runId !== undefined) {
       bundleWrites.push(runId.slice(prefix.length + 1));
       if (runId === `${prefix}-holder`) {
@@ -385,6 +396,8 @@ async function failedReadBackoff(mode: 'error' | 'legacy' | 'stale'): Promise<vo
     if (key === 'benchmark-hub/index.json') throw new Error('fixture legacy catalog unavailable');
     reads += 1;
     if (unavailable && mode === 'error') throw new Error('fixture storage unavailable');
+    if (key.startsWith('benchmark-hub-v2/'))
+      throw Object.assign(new Error('fixture fresh domain absent'), { name: 'NoSuchKey' });
     const revision = unavailable ? 7 : 13;
     const body = JSON.stringify(
       key.endsWith('-revision.json')
@@ -401,26 +414,39 @@ async function failedReadBackoff(mode: 'error' | 'legacy' | 'stale'): Promise<vo
         assert.rejects(findAgentAcrossRuns(`concurrent-${id}`), expectedError)
       )
     );
-    assert.equal(reads, 2, 'Concurrent cold reads were not coalesced');
+    const initialReads = mode === 'error' ? 2 : 5;
+    assert.equal(reads, initialReads, '100 callers must share ONE paired-domain logical refresh');
     for (let id = 0; id < 10; id += 1) {
       await assert.rejects(findAgentAcrossRuns(`sequential-${id}`), expectedError);
     }
-    assert.equal(reads, 2, 'Persistent failure retried shared storage for every agent request');
+    assert.equal(
+      reads,
+      initialReads,
+      'Persistent failure retried shared storage for every agent request'
+    );
     now += 5_001;
     await Promise.all(
       Array.from({ length: 100 }, (_, id) =>
         assert.rejects(findAgentAcrossRuns(`retry-after-backoff-${id}`), expectedError)
       )
     );
-    assert.equal(reads, 4, 'Read did not retry after the existing refresh interval');
+    assert.equal(reads, initialReads * 2, 'Read did not retry after the existing refresh interval');
     unavailable = false;
     now += 5_001;
     assert.equal(await findAgentAcrossRuns('recovered-miss'), null);
-    assert.equal(reads, 6, 'Recovery did not read the committed compact snapshot');
+    assert.equal(
+      reads,
+      initialReads * 2 + 5,
+      'Recovery did not read both domains committed compact snapshot'
+    );
     for (let id = 0; id < 100; id += 1) {
       assert.equal(await findAgentAcrossRuns(`healthy-miss-${id}`), null);
     }
-    assert.equal(reads, 6, 'Healthy cached misses performed shared storage reads');
+    assert.equal(
+      reads,
+      initialReads * 2 + 5,
+      'Healthy cached misses performed shared storage reads'
+    );
   } finally {
     await new Promise((resolve) => setImmediate(resolve));
     transport.mock.restore();
@@ -476,7 +502,7 @@ async function main(): Promise<void> {
         console.error(`FAIL: ${failures.at(-1)}`);
       }
     }
-    for (const count of [40, 129]) {
+    for (const count of [40, 129, 600]) {
       try {
         await concurrentFinalBurst(count);
         console.log(

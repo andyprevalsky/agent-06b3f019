@@ -50,6 +50,7 @@ async function main(): Promise<void> {
         );
       },
       retrieveStripeHold: async () => ({
+        livemode: false,
         id: 'pi_zero',
         status: 'succeeded',
         amount: 4396,

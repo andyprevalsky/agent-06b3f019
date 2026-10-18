@@ -13,6 +13,7 @@
  *   [IDLE] (onApprovalHandled)           [IDLE] (toast error)
  *
  *   [IDLE] --(click Reject)--> [REJECTING] --> [IDLE]
+ *   typed context --> raw authored bytes; empty input --> protocol-only action
  */
 
 import { useCallback, useState } from 'react';
@@ -90,13 +91,21 @@ function useApprovalActions(
     try {
       setActionState('accepting');
       const responseText = contextInput.trim() || 'Approved';
-      await respondToAttentionRequest(attentionRequestId, responseText);
+      await respondToAttentionRequest(
+        attentionRequestId,
+        responseText,
+        contextInput.trim() ? contextInput : undefined,
+      );
       toast({ title: 'Approved', description: 'Write action approved' });
       resetInput();
       onApprovalHandled?.();
     } catch (error) {
       console.error('Failed to accept:', error);
-      toast({ title: 'Error', description: 'Failed to approve action', variant: 'destructive' });
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to approve action',
+        variant: 'destructive',
+      });
     } finally {
       setActionState(null);
     }
@@ -105,7 +114,10 @@ function useApprovalActions(
   const handleReject = useCallback(async () => {
     try {
       setActionState('rejecting');
-      await rejectAttentionRequest(attentionRequestId);
+      await rejectAttentionRequest(
+        attentionRequestId,
+        contextInput.trim() ? contextInput : undefined,
+      );
       toast({ title: 'Rejected', description: 'Write action rejected' });
       resetInput();
       onApprovalHandled?.();
@@ -115,7 +127,7 @@ function useApprovalActions(
     } finally {
       setActionState(null);
     }
-  }, [attentionRequestId, onApprovalHandled, resetInput, toast]);
+  }, [attentionRequestId, contextInput, onApprovalHandled, resetInput, toast]);
 
   const onAccept = useCallback(() => {
     void handleAccept();

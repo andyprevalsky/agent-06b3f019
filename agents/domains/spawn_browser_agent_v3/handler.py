@@ -22,7 +22,7 @@ import time
 import traceback
 import uuid as uuid_module
 import weakref
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import structlog
@@ -33,6 +33,12 @@ from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
+from browser_tools.secret_refs import (
+    redact_current_secret_values,
+    register_logging_secret_refs,
+    secret_logging_context,
+    secret_placeholder,
+)
 from config import load_config
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED, activity_drain_reason
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
@@ -46,7 +52,7 @@ from helpers.generation_handoff import (
     park_pending_tool,
     take_tool_resume,
 )
-from helpers.messages import stream_browser_cursor
+from helpers.messages import poll_new_messages, stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from helpers.user_profile import build_user_profile_sections
@@ -65,11 +71,12 @@ from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
-from utils.error_utils import extract_error_message
+from utils.error_utils import error_chain_has_type, extract_error_message
 from utils.payment_card import (
     MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
     build_payment_question,
     normalize_payment_payload,
+    reuse_payment_approval,
 )
 from utils.prompts import build_verifier_prompt
 
@@ -158,7 +165,6 @@ from .service import (
     append_completion_evidence,
     browser_usage_items_to_tool_usage,
     build_action_titles,
-    build_auth_assistance_resume_user_message,
     build_best_effort_response,
     build_browser_dynamic_system_context,
     build_browser_llm_usage_items,
@@ -172,7 +178,6 @@ from .service import (
 )
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
-    _get_base_domain,
     apply_user_write_lock_grant,
     execute_action,
     get_domain_from_url,
@@ -331,12 +336,19 @@ async def _lookup_payment_purchase(
     """Look up the canonical key and retain a matched pre-canonicalization key for mint."""
     fingerprint = str(payment_payload.get("fingerprint") or "")
     activity_args = [user_id, fingerprint]
+    scoped_receipt = bool(payment_payload.get("agentId"))
     if world_model_mode not in {None, "real"}:
-        activity_args.append(world_model_mode)
+        activity_args.extend([
+            world_model_mode,
+            payment_payload if scoped_receipt else None,
+            payment_payload.get("agentId"),
+        ])
+    elif scoped_receipt:
+        activity_args.extend([world_model_mode, payment_payload])
     result = await workflow.execute_activity(
         "lookup_purchase_activity",
         args=activity_args,
-        start_to_close_timeout=timedelta(seconds=30),
+        start_to_close_timeout=timedelta(seconds=90 if scoped_receipt else 30),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
     purchase = result.get("purchase")
@@ -752,6 +764,14 @@ def _remap_cached_browser_action_target(
     return remapped
 
 
+def _private_browser_runtime_url(dom_service: Any, fallback: Any = "") -> str:
+    """Use the private browser URL for routing, independently of redacted views."""
+    accessor = inspect.getattr_static(dom_service, "runtime_current_url", None)
+    if callable(accessor):
+        return str(dom_service.runtime_current_url(fallback=str(fallback or "")) or fallback or "")
+    return str(fallback or "")
+
+
 async def _prepare_pending_write_lock_action(
     dom_service: Any,
     pending_action: Dict[str, Any],
@@ -760,7 +780,7 @@ async def _prepare_pending_write_lock_action(
 ) -> tuple[Dict[str, Any], Dict[str, Any], str]:
     """Rehydrate browser state before replaying the exact action a user approved."""
     browser_state = await dom_service.get_browser_state(include_screenshot=False)
-    current_url = str(browser_state.get("url") or "")
+    current_url = _private_browser_runtime_url(dom_service, browser_state.get("url"))
     if not current_url:
         raise RuntimeError("Cannot execute an approved browser action without a resumed page URL")
     action = _remap_cached_browser_action_target(
@@ -925,7 +945,7 @@ def _complete_pending_payment_card_result(
             continue
         result["status"] = "approved"
         result["card_last4"] = last4
-        result["card_secret_refs"] = list(PAYMENT_CARD_SECRET_REFS)
+        result["card_secret_refs"] = [secret_placeholder(ref) for ref in PAYMENT_CARD_SECRET_REFS]
         message["content"] = json_dumps_compact(result)
         if pending_entry is None:
             # Older paused activities saved the real tool result in the browser
@@ -942,6 +962,414 @@ def _complete_pending_payment_card_result(
     return False
 
 
+async def _load_browser_resume_user_instructions(
+    agent_id: str,
+    resume_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Read the task's durable input range, deduplicating by source row identity."""
+    cursor = resume_state.get("user_message_cursor")
+    tool_call_id = resume_state.get("tool_call_id")
+    floor_confirmed = bool(cursor) and resume_state.get("user_message_cursor_is_task_start") is True
+    epoch = datetime.fromtimestamp(0, timezone.utc)
+    cursor_time = datetime.fromisoformat(cursor.replace("Z", "+00:00")) if floor_confirmed else None
+    since = cursor_time if floor_confirmed and cursor_time is not None else epoch
+    rows = await poll_new_messages(
+        agent_id, since - timedelta(microseconds=1),
+        **({"browser_tool_call_id": tool_call_id, "browser_task_id": resume_state.get("task_id")} if tool_call_id else {}),
+    )
+    if not floor_confirmed:
+        starts = [
+            datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
+            for row in rows
+            if row.get("timestamp") and tool_call_id
+            and (row.get("metadata") or {}).get("toolCallId") == tool_call_id
+            and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"
+            and (row.get("metadata") or {}).get("action_type") == "session_starting"
+        ]
+        if not starts:
+            raise ValueError("Browser task input boundary is unavailable")
+        cursor_time = min(starts)
+    messages = list(resume_state.get("user_instruction_messages") or [])
+    seen_ids = set(resume_state.get("user_instruction_message_ids") or [])
+    for row in sorted(rows, key=lambda row: (str(row.get("timestamp") or ""), str(row.get("id") or row.get("message_id") or ""))):
+        if str(row.get("role") or "").upper() != "USER" or (row.get("metadata") or {}).get("hidden"):
+            continue
+        raw_timestamp = row.get("timestamp")
+        if not raw_timestamp:
+            continue
+        timestamp = raw_timestamp if isinstance(raw_timestamp, datetime) else datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
+        if timestamp < cursor_time:
+            continue
+        message_id = row.get("id") or row.get("message_id")
+        text = row.get("text")
+        if not message_id or message_id in seen_ids or not isinstance(text, str) or not text.strip():
+            continue
+        messages.append({"role": "user", "content": text})
+        seen_ids.add(message_id)
+    return {
+        **resume_state,
+        "user_instruction_messages": messages,
+        "user_instruction_message_ids": sorted(seen_ids),
+        "user_message_cursor": cursor_time.isoformat(),
+        "user_message_cursor_is_task_start": True,
+    }
+
+
+def _model_visible_browser_message(
+    message: Any, redact: Any, *, action_result_redact: Any = None, secret_values_used: bool = False,
+) -> Any:
+    """Project a native transcript envelope without exempting its page payloads."""
+    if not isinstance(message, dict):
+        return redact(message)
+
+    def visible_json(text: Any, action_name: str = "", *, tool_arguments: bool = False) -> Any:
+        if not isinstance(text, str):
+            return redact(text)
+        try:
+            original = json.loads(text)
+        except (ValueError, TypeError):
+            return redact(text)
+        payload = redact(original)
+        if tool_arguments:
+            target_fields = {
+                "click": ("index",), "input_text": ("index",), "scroll": ("index",),
+                "dropdown_options": ("index",), "select_dropdown": ("index",),
+                "upload_file": ("index",), "click_coordinates": ("x", "y"),
+                "drag": ("source_index", "target_index", "start_x", "start_y", "end_x", "end_y"),
+            }
+            if isinstance(original, dict) and isinstance(payload, dict):
+                for key in target_fields.get(action_name, ()):
+                    value = original.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                        payload[key] = value
+        elif action_name and callable(action_result_redact):
+            payload = action_result_redact(action_name, original)
+        return json_dumps_compact(payload)
+
+    safe = redact(message)
+    role = message.get("role")
+    if isinstance(role, str) and role in {"user", "assistant", "tool", "system", "developer", "USER", "TOOL"}:
+        safe["role"] = role
+    # These values are produced by the native transcript writer, never by a
+    # nested evaluate result or another page-controlled dictionary.
+    for key in ("tool_call_id", "name"):
+        if isinstance(message.get(key), str):
+            safe[key] = message[key]
+    content = message.get("content")
+    if isinstance(content, list):
+        blocks = []
+        for block in content:
+            visible_block = redact(block)
+            if (isinstance(block, dict) and isinstance(block.get("type"), str)
+                    and block["type"] in {"image_url", "image", "input_image"}
+                    and (secret_values_used or visible_block != block)):
+                omitted = ("[image withheld after private credential entry]" if secret_values_used
+                           else "[image omitted from Temporal resume]")
+                visible_block = {"type": "text", "text": redact(omitted)}
+            elif isinstance(block, dict) and block.get("type") == "text" and isinstance(visible_block, dict):
+                visible_block["type"] = "text"
+            blocks.append(visible_block)
+        safe["content"] = blocks
+    elif content is not None:
+        safe["content"] = visible_json(content, str(message.get("name") or "")) if role == "tool" else redact(content)
+    calls = message.get("tool_calls")
+    if isinstance(calls, list):
+        visible_calls = []
+        for call in calls:
+            if not isinstance(call, dict):
+                visible_calls.append(redact(call))
+                continue
+            visible_call = redact(call)
+            if isinstance(call.get("id"), str):
+                visible_call["id"] = call["id"]
+            if call.get("type") == "function":
+                visible_call["type"] = "function"
+            function = call.get("function")
+            if isinstance(function, dict):
+                visible_function = redact(function)
+                if isinstance(function.get("name"), str):
+                    visible_function["name"] = function["name"]
+                if "arguments" in function:
+                    visible_function["arguments"] = visible_json(
+                        function["arguments"], str(function.get("name") or ""), tool_arguments=True,
+                    )
+                visible_call["function"] = visible_function
+            visible_calls.append(visible_call)
+        safe["tool_calls"] = visible_calls
+    return safe
+
+
+def _model_visible_browser_turn_messages(
+    messages: Any, redact: Any, *, secret_values_used: bool, action_result_redact: Any = None,
+) -> Any:
+    """Preserve only screenshot-tool transport linked to its harness tool call."""
+    # Message keys are protocol; nested content still belongs to the page.
+    visible = ([_model_visible_browser_message(message, redact, action_result_redact=action_result_redact,
+                                              secret_values_used=secret_values_used)
+                for message in messages] if isinstance(messages, list) else redact(messages))
+    if secret_values_used or not isinstance(messages, list) or not isinstance(visible, list):
+        return visible
+    for index in range(2, len(messages)):
+        assistant, tool, image = messages[index - 2:index + 1]
+        if not all(isinstance(item, dict) for item in (assistant, tool, image)):
+            continue
+        if assistant.get("role") != "assistant" or tool.get("role") != "tool" or tool.get("name") != "screenshot":
+            continue
+        if not any(isinstance(call, dict) and call.get("id") == tool.get("tool_call_id")
+                   and isinstance(call.get("function"), dict) and call["function"].get("name") == "screenshot"
+                   for call in assistant.get("tool_calls") or []):
+            continue
+        try:
+            result = json.loads(tool.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        content = image.get("content")
+        screenshot_label = "Screenshot captured by the screenshot tool."
+        if (not isinstance(result, dict) or result.get("screenshot_attached") is not True
+                or image.get("role") != "user" or not isinstance(content, list) or len(content) != 2
+                or content[0] not in ({"type": "text", "text": screenshot_label},
+                                      {"type": "text", "text": redact(screenshot_label)})
+                or not isinstance(content[1], dict) or content[1].get("type") != "image_url"):
+            continue
+        payload = content[1].get("image_url")
+        url = payload.get("url") if isinstance(payload, dict) else None
+        if not isinstance(url, str) or not url.startswith("data:image/png;base64,"):
+            continue
+        try:
+            png = base64.b64decode(url.split(",", 1)[1], validate=True)
+        except ValueError:
+            continue
+        if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+            continue
+        visible_content = visible[index].get("content")
+        if isinstance(visible_content, list) and len(visible_content) == 2:
+            visible[index]["role"] = "user"
+            visible_content[0] = {"type": "text", "text": redact(content[0]["text"])}
+            visible_content[1] = {"type": "image_url", "image_url": {"url": url}}
+    return visible
+
+
+def _model_visible_browser_verifier_context(context: Any, dom_service: Any, browser_state: Dict[str, Any]) -> Any:
+    """Keep only the builder's final trusted raster intact before private entry."""
+    visible = ([_model_visible_browser_message(message, dom_service.model_visible_value,
+                                               secret_values_used=getattr(dom_service, "secret_values_used", False))
+                for message in context]
+               if isinstance(context, list) else dom_service.model_visible_value(context))
+    screenshot = browser_state.get("screenshot")
+    if (getattr(dom_service, "secret_values_used", False) or browser_state.get("screenshot_placeholder")
+            or not isinstance(screenshot, str) or not screenshot
+            or not isinstance(context, list) or not context or not isinstance(visible, list)):
+        return visible
+    original = context[-1]
+    if not isinstance(original, dict) or original.get("role") != "TOOL":
+        return visible
+    metadata = original.get("metadata")
+    if (isinstance(metadata, dict) and metadata.get("toolName") == "final_screenshot"
+            and metadata.get("screenshot_b64") == screenshot and isinstance(visible[-1], dict)):
+        visible[-1]["role"] = "TOOL"
+        visible[-1]["metadata"] = {
+            **dom_service.model_visible_value(metadata),
+            "toolName": "final_screenshot", "toolStatus": "FINISHED", "screenshot_b64": screenshot,
+        }
+    return visible
+
+
+def _model_visible_browser_output_schema(schema: Any, redact: Any) -> Any:
+    """Redact schema data while retaining declared contract mechanics."""
+    field_types = {
+        "str", "string", "int", "integer", "float", "number", "bool", "boolean",
+        "list[str]", "list[int]", "object", "list[object]", "file_pointer",
+        "list[file_pointer]", "session_file_pointer", "list[session_file_pointer]",
+    }
+    field_keys = {
+        "name", "type", "description", "required", "nullable", "properties",
+        "minLength", "maxLength", "minItems", "maxItems", "default", "enum",
+    }
+
+    def visible_field(field: Any) -> Any:
+        if not isinstance(field, dict):
+            return redact(field)
+        visible = {
+            key if key in field_keys else redact(key): redact(value)
+            for key, value in field.items()
+        }
+        if isinstance(field.get("type"), str) and field["type"] in field_types:
+            visible["type"] = field["type"]
+        for key in ("minLength", "maxLength", "minItems", "maxItems"):
+            if isinstance(field.get(key), int) and not isinstance(field[key], bool):
+                visible[key] = field[key]
+        properties = field.get("properties")
+        if isinstance(properties, list):
+            visible["properties"] = [visible_field(item) for item in properties]
+        elif isinstance(properties, dict):
+            visible["properties"] = {
+                redact(name): visible_field(spec) if isinstance(spec, dict)
+                else spec if isinstance(spec, str) and spec in field_types else redact(spec)
+                for name, spec in properties.items()
+            }
+        return visible
+
+    visible = redact(schema)
+    if isinstance(schema, dict) and isinstance(schema.get("fields"), list):
+        visible["fields"] = [visible_field(field) for field in schema["fields"]]
+    return visible
+
+
+async def _refresh_browser_output_schema(
+    *,
+    goal: str,
+    agent_id: str,
+    response_schema: Dict[str, Any],
+    resume_state: Optional[Dict[str, Any]],
+    compute_auth: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Refresh the delegated contract only when durable real input changed."""
+    state = resume_state or {}
+    if state.get("approval_type") == AUTH_ASSISTANCE_DECLINED:
+        return response_schema, {}
+    messages = state.get("user_instruction_messages") or []
+    if len(messages) <= int(state.get("schema_user_instruction_count") or 0):
+        return response_schema, {}
+    from helpers.llm import _build_verifier_response_model, _generate_response_schema_with_rose
+
+    usage: Dict[str, Any] = {}
+    try:
+        def visible(value: Any) -> Any:
+            return mask_secret_values(redact_current_secret_values(value), state.get("secret_redaction_refs"))
+
+        schema, _title, usage = await _generate_response_schema_with_rose(
+            "\n\n".join([
+                visible(goal),
+                "Current output schema (preserve fields unless later user feedback changes them):\n"
+                + json_dumps_compact(_model_visible_browser_output_schema(response_schema, visible)),
+                *[visible(message["content"]) for message in messages],
+            ]),
+            agent_id=agent_id,
+            compute_auth=compute_auth,
+        )
+        if not isinstance(schema, dict) or not schema.get("fields"):
+            raise ValueError("Browser schema refresh returned no fields")
+        if _build_verifier_response_model(schema).model_json_schema() == _build_verifier_response_model(response_schema).model_json_schema():
+            schema = response_schema
+    except WorkflowGenerationSealed:
+        raise
+    except Exception as error:
+        if any(error_chain_has_type(error, kind) for kind in (
+            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+        )):
+            raise
+        # Instruction delivery is independent of this optional model request.
+        # Keep the accepted contract and leave this input revision retryable.
+        logger.warning(
+            "Browser schema refresh failed; retaining accepted schema",
+            agent_id=agent_id,
+            error=extract_error_message(error),
+        )
+        state["_schema_refresh_error"] = {"type": type(error).__name__, "message": extract_error_message(error)}
+        return response_schema, usage
+    state.pop("_schema_refresh_error", None)
+    state["schema_user_instruction_count"] = len(messages)
+    return schema, usage
+
+
+async def _sync_browser_user_instructions(
+    *,
+    agent_id: str,
+    goal: str,
+    response_schema: Dict[str, Any],
+    instruction_state: Dict[str, Any],
+    turn_messages: List[Dict[str, Any]],
+    compute_auth: Optional[Dict[str, Any]],
+    require_current_schema: bool = False,
+    require_confirmed_read: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
+    """Use the resume transport for live input and accept only its latest contract."""
+    state = instruction_state
+    usages = []
+    schema_attempts_left: Dict[int, int] = {}
+    retry_poll = (require_current_schema or require_confirmed_read) and state.get("_user_instruction_poll_confirmed") is not False
+    while True:
+        try:
+            state = await _load_browser_resume_user_instructions(agent_id, state)
+        except WorkflowGenerationSealed:
+            raise
+        except Exception as error:
+            if any(error_chain_has_type(error, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
+            if retry_poll:
+                retry_poll = False
+                continue
+            state["_user_instruction_poll_confirmed"] = False
+            state["_user_instruction_poll_error"] = {"type": type(error).__name__, "message": extract_error_message(error)}
+            logger.warning("Browser instruction read failed", agent_id=agent_id, error=extract_error_message(error))
+            break
+        state["_user_instruction_poll_confirmed"] = True
+        state.pop("_user_instruction_poll_error", None)
+        count = len(state.get("user_instruction_messages") or [])
+        _append_browser_user_instructions(state, turn_messages)
+        state["delivered_user_instruction_count"] = count
+        if count <= int(state.get("schema_user_instruction_count") or 0):
+            break
+        previously_attempted = count <= int(state.get("schema_attempted_user_instruction_count") or 0)
+        if not require_current_schema and previously_attempted:
+            break
+        if require_current_schema:
+            remaining = schema_attempts_left.setdefault(count, 1 if previously_attempted else 2)
+            if remaining == 0:
+                break
+            schema_attempts_left[count] = remaining - 1
+        # This activity attempts a failed revision once. The accepted count alone
+        # survives suspension, so a fresh activity can retry without losing input.
+        state["schema_attempted_user_instruction_count"] = count
+        response_schema, usage = await _refresh_browser_output_schema(
+            goal=goal, agent_id=agent_id, response_schema=response_schema,
+            resume_state=state, compute_auth=compute_auth,
+        )
+        if usage:
+            usages.append(usage)
+        if require_current_schema and schema_attempts_left[count] == 0 and count > int(state.get("schema_user_instruction_count") or 0):
+            break
+        # A correction can arrive while schema generation awaits its provider.
+        # The same cursor and source-ID ledger admit it before publishing state.
+    state["browser_output_schema"] = response_schema
+    return state, response_schema, usages
+
+
+class BrowserInstructionUnavailableError(RuntimeError):
+    """A real input/schema dependency remained unavailable at an action boundary."""
+
+    def __init__(self, failure: Dict[str, str]):
+        super().__init__(failure["message"])
+        self.original_error_type = failure["type"]
+
+
+def _require_browser_instruction_state(state: Dict[str, Any], *, current_schema: bool) -> None:
+    if state.get("_user_instruction_poll_confirmed") is not True:
+        failure = state.get("_user_instruction_poll_error") or {"type": "RuntimeError", "message": "Browser instruction read is unconfirmed"}
+        raise BrowserInstructionUnavailableError(failure)
+    if current_schema and int(state.get("schema_user_instruction_count") or 0) < len(state.get("user_instruction_messages") or []):
+        failure = state.get("_schema_refresh_error") or {"type": "RuntimeError", "message": "Browser output schema revision is unaccepted"}
+        raise BrowserInstructionUnavailableError(failure)
+
+
+def _append_browser_user_instructions(
+    resume_state: Optional[Dict[str, Any]],
+    browser_turn_messages: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Deliver genuine user feedback once across repeated activity resumes."""
+    state = resume_state or {}
+    messages = [
+        {"role": "user", "content": message["content"]}
+        for message in state.get("user_instruction_messages", [])
+        if isinstance(message, dict) and isinstance(message.get("content"), str)
+    ]
+    delivered = int(state.get("delivered_user_instruction_count") or 0)
+    browser_turn_messages.extend(dict(message) for message in messages[delivered:])
+    return messages
+
+
 def _browser_resume_continuity_state(
     *,
     action_history: Any,
@@ -951,6 +1379,13 @@ def _browser_resume_continuity_state(
     reasoning_messages: Optional[List[str]] = None,
     action_summary: Optional[List[str]] = None,
     auth_runtime_state: Optional[AuthRuntimeState] = None,
+    user_instruction_messages: Optional[List[Dict[str, str]]] = None,
+    user_message_cursor: Optional[str] = None,
+    user_message_cursor_is_task_start: bool = False,
+    user_instruction_message_ids: Optional[List[str]] = None,
+    response_schema: Optional[Dict[str, Any]] = None,
+    schema_user_instruction_count: int = 0,
+    private_runtime_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Serialize exact task continuity for inline or encrypted storage."""
     state = {
@@ -961,7 +1396,41 @@ def _browser_resume_continuity_state(
         "reasoning_messages": list(reasoning_messages or []),
         "action_summary": list(action_summary or []),
         "auth_attempts": auth_runtime_state.snapshot() if auth_runtime_state is not None else None,
+        "user_instruction_messages": list(user_instruction_messages or []),
+        "delivered_user_instruction_count": len(user_instruction_messages or []),
+        "user_message_cursor": user_message_cursor,
+        "user_message_cursor_is_task_start": user_message_cursor_is_task_start,
+        "user_instruction_message_ids": list(user_instruction_message_ids or []),
+        "schema_user_instruction_count": schema_user_instruction_count,
+        "browser_output_schema": response_schema,
     }
+    if hasattr(action_history, "secret_redaction_state"):
+        privacy_state = action_history.secret_redaction_state()
+        # The state below is private input to persist_resume_context, which
+        # must archive it encrypted whenever bindings are present.
+        if privacy_state:
+            state = action_history.model_visible_value(state)
+            state["browser_turn_messages"] = _model_visible_browser_turn_messages(
+                _browser_turn_messages_for_resume(browser_turn_messages), action_history.model_visible_value,
+                secret_values_used=bool(privacy_state.get("secret_values_used")),
+            )
+            state["action_history"] = action_history.get_entries()
+            state["auth_attempts"] = auth_runtime_state.snapshot() if auth_runtime_state is not None else None
+            state["browser_output_schema"] = _model_visible_browser_output_schema(
+                response_schema, action_history.model_visible_value
+            )
+            # Cursor, deduplication IDs, and counts are trusted protocol state.
+            state.update({
+                "delivered_user_instruction_count": len(user_instruction_messages or []),
+                "user_message_cursor": user_message_cursor,
+                "user_message_cursor_is_task_start": user_message_cursor_is_task_start,
+                "user_instruction_message_ids": list(user_instruction_message_ids or []),
+                "schema_user_instruction_count": schema_user_instruction_count,
+            })
+            state.update(privacy_state)
+            if privacy_state.get("secret_redaction_refs") and private_runtime_state:
+                # Only the encrypted archive may carry exact routing/grant data.
+                state["private_browser_runtime"] = private_runtime_state
     return state
 
 
@@ -1137,6 +1606,43 @@ class BrowserCursorRealtimeStreamer:
                 return
 
 
+def _redact_browser_activity_error(error: Exception, redact: Callable[[Any], Any]) -> Exception:
+    """Keep private failure payloads out of Temporal history and parent tools."""
+    from temporalio.exceptions import ApplicationError
+
+    changed = False
+    current: Optional[BaseException] = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        try:
+            message = str(current)
+        except Exception:
+            message = extract_error_message(current)
+        details = {"details": list(current.details) if isinstance(current, ApplicationError) else []}
+        if redact(message) != message or redact(details) != details:
+            changed = True
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+    if not changed:
+        return error
+    message = redact(extract_error_message(error))
+    if isinstance(error, WorkflowGenerationSealed):
+        return WorkflowGenerationSealed(message)
+    if isinstance(error, ApplicationError):
+        details = redact({"details": list(error.details)})["details"]
+        return ApplicationError(
+            message,
+            *details,
+            type=redact(error.type) if error.type else None,
+            non_retryable=error.non_retryable,
+            next_retry_delay=error.next_retry_delay,
+            category=error.category,
+        )
+    # Temporal already represents ordinary Python failures as ApplicationError
+    # with their Python type. Keep that type and the original retry behavior.
+    return ApplicationError(message, type=type(error).__name__)
+
+
 async def _propagate_browser_credentials_with_progress(
     *,
     config: Any,
@@ -1146,9 +1652,12 @@ async def _propagate_browser_credentials_with_progress(
     status: str,
     success: bool,
     message: str,
+    redact: Optional[Callable[[Any], Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not task_id:
         return None
+    redact = redact or (lambda value: value)
+    message = redact(message)
 
     is_auth_assistance_pause = status == "awaiting_auth_assistance"
     progress_message = (
@@ -1184,7 +1693,7 @@ async def _propagate_browser_credentials_with_progress(
         # The run's own outcome stands: a backend 500 here (a Prisma transaction
         # expiring under load, 2026-10-06) must not turn a completed browser task
         # into a failure that the planner then retries from scratch.
-        error_message = extract_error_message(e)
+        error_message = redact(extract_error_message(e))
         logger.warning(
             "Credential propagation failed; keeping the browser run's outcome",
             agent_id=agent_id,
@@ -1211,10 +1720,15 @@ async def _propagate_browser_credentials_with_progress(
                 "Credential propagation diagnostic message was not saved",
                 agent_id=agent_id,
                 task_id=task_id,
-                error=extract_error_message(save_error),
+                error=redact(extract_error_message(save_error)),
             )
         return {"outcome": "unknown", "refs": 0, "applied": 0, "error": error_message}
 
+    original_result = result
+    result = redact(result)
+    for key in ("refs", "applied"):
+        if isinstance(original_result.get(key), int) and not isinstance(original_result[key], bool):
+            result[key] = original_result[key]
     outcome = result.get("outcome", "unknown")
     refs = result.get("refs", 0)
     applied = result.get("applied", 0)
@@ -1222,7 +1736,7 @@ async def _propagate_browser_credentials_with_progress(
         agent_id=agent_id,
         title="Credential state updated",
         task_id=task_id,
-        message=f"Outcome: {outcome}. Credential refs: {refs}. Updates applied: {applied}.",
+        message=redact(f"Outcome: {outcome}. Credential refs: {refs}. Updates applied: {applied}."),
         status=MessageStatus.FINISHED,
         browser_url=browser_url,
         action_type="credential_propagation",
@@ -1654,6 +2168,8 @@ async def _reconnect_browser_stack_after_rotation(
         cdp_url=connection_cdp_url,
         downloads_path=browser_downloads_path_for_provider(provider),
     )
+    if hasattr(old_dom_service, "secret_redaction_state"):
+        dom_service.restore_secret_redaction_state(old_dom_service.secret_redaction_state())
     pw_instance = None
     pw_browser = None
     driver_pid = None
@@ -2424,6 +2940,7 @@ async def _call_browser_use_with_rotation(
     skip_cache_write: bool = False,
     pool: str = BROWSER_USE_PRICING_POOL,
     dump_extra: Optional[Dict[str, Any]] = None,
+    dom_service: Any = None,
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
 
@@ -2452,6 +2969,43 @@ async def _call_browser_use_with_rotation(
         dump_extra=dump_extra,
         pool=pool,
     )
+    if dom_service is not None and hasattr(dom_service, "model_visible_value"):
+        redact = dom_service.model_visible_value
+
+        for key in ("task", "dynamic_system_context", "dump_extra"):
+            rose_kwargs[key] = redact(rose_kwargs[key])
+        rose_kwargs["turn_messages"] = _model_visible_browser_turn_messages(
+            turn_messages, redact, secret_values_used=dom_service.secret_values_used,
+            action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+        )
+        rose_kwargs["browser_state"] = redact(browser_state_for_llm)
+        rose_kwargs["action_history"] = [redact(entry) for entry in action_entries]
+        # Preserve only harness-owned action mechanics, never similarly named
+        # fields inside an evaluate result or other page-supplied payload.
+        for original, visible in zip(action_entries, rose_kwargs.get("action_history", [])):
+            for key in ("step", "action", "index", "coordinates"):
+                if key in original:
+                    visible[key] = original[key]
+            for key in ("params", "result"):
+                if key in original:
+                    visible[key] = dom_service.model_visible_value(original[key])
+            if not dom_service.secret_values_used and original.get("screenshot"):
+                visible["screenshot"] = original["screenshot"]
+        for key in ("viewport", "scroll_position", "page_stats"):
+            if key in browser_state_for_llm:
+                rose_kwargs["browser_state"][key] = browser_state_for_llm[key]
+        if "tabs" in browser_state_for_llm:
+            rose_kwargs["browser_state"]["tabs"] = [
+                {**dom_service.model_visible_value(tab), **({"id": tab["id"]} if "id" in tab else {})}
+                for tab in browser_state_for_llm["tabs"]
+            ]
+        if not dom_service.secret_values_used and browser_state_for_llm.get("screenshot"):
+            rose_kwargs["browser_state"]["screenshot"] = browser_state_for_llm["screenshot"]
+        if extra_user_messages:
+            rose_kwargs["browser_state"]["_extra_user_messages"] = _model_visible_browser_turn_messages(
+                extra_user_messages, redact, secret_values_used=dom_service.secret_values_used,
+                action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+            )
 
     use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
     use_gpt = browser_use_mode == "gpt" and bool(gpt_token)
@@ -2673,10 +3227,7 @@ def _resolve_payment_card_tool_result_for_resume(
             "success": True,
             "status": "payment_card_ready",
             "card_secret_refs": {
-                "card_number": "card_number",
-                "card_name": "card_name",
-                "card_expiry": "card_expiry",
-                "card_cvv": "card_cvv",
+                ref: secret_placeholder(ref) for ref in PAYMENT_CARD_SECRET_REFS
             },
         }
         safe_last4 = _normalize_payment_card_last4(payment_card_last4)
@@ -3819,6 +4370,7 @@ async def _generate_write_lock_notification(
     system_name: str,
     fallback_question: str,
     pool: str = BROWSER_USE_PRICING_POOL,
+    dom_service: Any = None,
 ) -> Dict[str, Any]:
     """Fork browser-use context to generate write-lock approval metadata."""
     from browser_tools.schemas import GenerateWriteLockNotificationTool
@@ -3860,6 +4412,7 @@ async def _generate_write_lock_notification(
                 + (f"_retry{attempt}" if attempt else ""),
                 skip_cache_write=True,
                 pool=pool,
+                dom_service=dom_service,
                 dump_extra={
                     "write_lock_notification_fork": True,
                     "approval_type": approval_type,
@@ -4657,7 +5210,8 @@ async def spawn_browser_agent_activity_v3(
     # The tool-call namespace remains stable across write-lock resumes, whose
     # payload also restores the exact browser session id.
     world_model = WorldModelToolExecutionAdapter.from_env(
-        agent_id=f"{agent_id}:browser:{tool_call_id}",
+        agent_id=agent_id,
+        session_scope_id=f"{agent_id}:browser:{tool_call_id}",
         inherit_explicit_session=False,
         mode=world_model_mode,
     )
@@ -5136,7 +5690,15 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "reasoning_messages",
     "action_summary",
     "auth_attempts",
+    "secret_values_used",
     "browser_resume_context_ref",
+    "user_instruction_messages",
+    "delivered_user_instruction_count",
+    "user_message_cursor",
+    "user_message_cursor_is_task_start",
+    "user_instruction_message_ids",
+    "schema_user_instruction_count",
+    "browser_output_schema",
 )
 
 
@@ -5228,7 +5790,11 @@ def _simulated_browser_resume_payload(
 ) -> Dict[str, Any]:
     compact_state = _compact_simulated_resume_value(browser_state)
     compact_actions = [_compact_simulated_resume_value(entry) for entry in action_entries[-30:]]
-    compact_turns = [_compact_browser_turn_message_for_resume(message) for message in turn_messages[-24:]]
+    retained_turns = [message for message in turn_messages[:-24] if message.get("role") == "user"] + turn_messages[-24:]
+    compact_turns = [
+        dict(message) if message.get("role") == "user" else _compact_browser_turn_message_for_resume(message)
+        for message in retained_turns
+    ]
     return {
         "simulated_browser_state": compact_state,
         "simulated_action_entries": compact_actions,
@@ -5318,6 +5884,7 @@ def _simulated_browser_verifier_context(
     action_entries: List[Dict[str, Any]],
     frame: Optional[Dict[str, Any]],
     payment_card_last4: Optional[str],
+    user_instruction_messages: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     state_text = json.dumps(
         {k: v for k, v in browser_state.items() if k not in {"screenshot", "frame", "website_frame"}},
@@ -5354,6 +5921,7 @@ def _simulated_browser_verifier_context(
             },
         },
     ]
+    context[1:1] = [{"role": "USER", "text": message["content"]} for message in user_instruction_messages or []]
     payment_evidence = _build_payment_card_verifier_evidence(payment_card_last4)
     if payment_evidence:
         context.append(payment_evidence)
@@ -5375,6 +5943,7 @@ async def _verify_simulated_browser_completion(
     gpt_account_id: Optional[str],
     gpt_token_source: Optional[str],
     gpt_token_pool_id: Optional[str],
+    user_instruction_messages: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     from helpers.llm import check_progress
 
@@ -5388,6 +5957,7 @@ async def _verify_simulated_browser_completion(
                 action_entries=action_entries,
                 frame=frame,
                 payment_card_last4=payment_card_last4,
+                user_instruction_messages=user_instruction_messages,
             ),
             build_verifier_prompt(response_schema=remote_schema),
             VERIFIER_ULTRA_MODEL,
@@ -5465,7 +6035,11 @@ async def _spawn_browser_agent_activity_v3_simulated(
     config = load_config()
     started_at = safe_time()
     resume = write_lock_resume_state or {}
+    output_schema = resume.get("browser_output_schema") or output_schema
+    instruction_state = dict(resume)
     task_id = str(task_id or resume.get("task_id") or f"wmh-browser-{tool_call_id}")
+    instruction_state["tool_call_id"] = tool_call_id
+    instruction_state["task_id"] = task_id
     browser_url = "about:blank"
     browser_state = dict(resume.get("simulated_browser_state") or {})
     action_entries = list(resume.get("simulated_action_entries") or [])
@@ -5520,9 +6094,56 @@ async def _spawn_browser_agent_activity_v3_simulated(
     )
     rose_client = BrowserStreamingRoseClient()
     recorder: Optional[SimulatedBrowserRecorder] = None
+    browser_stream: Optional[BrowserThinkingStream] = None
+    resumed_unread_user_input = len(instruction_state.get("user_instruction_messages") or []) > int(instruction_state.get("delivered_user_instruction_count") or 0)
+    _append_browser_user_instructions(instruction_state, turn_messages)
+    instruction_state["delivered_user_instruction_count"] = len(instruction_state.get("user_instruction_messages") or [])
+
+    async def sync_user_instructions(*, require_current_schema=False, require_confirmed_read=False) -> bool:
+        nonlocal instruction_state, output_schema, dynamic_system_context
+        nonlocal total_input_tokens, total_output_tokens
+        previous_schema = output_schema
+        instruction_state, output_schema, usages = await _sync_browser_user_instructions(
+            agent_id=agent_id, goal=goal, response_schema=output_schema,
+            instruction_state=instruction_state, turn_messages=turn_messages,
+            require_current_schema=require_current_schema, require_confirmed_read=require_confirmed_read,
+            compute_auth={
+                "type": "gpt" if gpt_token else "claude", "accessToken": gpt_token or token_state.access_token,
+                "accountId": gpt_account_id if gpt_token else None,
+                "source": gpt_token_source if gpt_token else token_state.source,
+                "poolTokenId": gpt_token_pool_id if gpt_token else token_state.pool_token_id,
+                "userId": user_id, "agentId": agent_id, "rootAgentId": agent_id,
+            },
+        )
+        if output_schema != previous_schema:
+            dynamic_system_context = build_browser_dynamic_system_context(
+                "# Simulated Browser Runtime\n"
+                "Operate the stateful simulated website one concrete action per turn. Continue until the requested "
+                "outcome is actually visible in state. Do not claim actions you did not take.",
+                response_schema=output_schema,
+            )
+        for usage in usages:
+            input_tokens = int(usage.get("prompt_tokens") or 0)
+            output_tokens = int(usage.get("completion_tokens") or 0)
+            total_input_tokens += input_tokens
+            total_output_tokens += output_tokens
+            accumulate_model_usage(
+                usage_by_model, usage.get("actual_model"), input_tokens, output_tokens,
+                cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                from_fast_cache=bool(usage.get("from_fast_cache")),
+                cache_sequence_id=usage.get("cache_sequence_id"),
+            )
+
+        if require_current_schema or require_confirmed_read:
+            _require_browser_instruction_state(instruction_state, current_schema=require_current_schema)
+        return instruction_state.get("_user_instruction_poll_confirmed") is True
 
     def resume_payload() -> Dict[str, Any]:
-        return _simulated_browser_resume_payload(
+        return {key: instruction_state.get(key) for key in (
+            "user_instruction_messages", "user_instruction_message_ids", "user_message_cursor", "user_message_cursor_is_task_start",
+            "delivered_user_instruction_count", "schema_user_instruction_count", "browser_output_schema",
+        )} | _simulated_browser_resume_payload(
             browser_state=browser_state,
             action_entries=action_entries,
             turn_messages=turn_messages,
@@ -5645,7 +6266,12 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 frames=frames,
             )
 
-        pending_action = resume.get("pending_action")
+        previous_instruction_count = len(instruction_state.get("user_instruction_messages") or [])
+        initial_read_confirmed = await sync_user_instructions()
+        if not initial_read_confirmed and isinstance(resume.get("pending_action"), dict):
+            await sync_user_instructions(require_confirmed_read=True)
+        new_user_input = resumed_unread_user_input or previous_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
+        pending_action = None if new_user_input else resume.get("pending_action")
         if isinstance(pending_action, dict):
             pending_call_id = str(resume.get("simulated_pending_tool_call_id") or uuid_module.uuid4())
             approved_action_name = str(pending_action.get("action") or "unknown")
@@ -5697,6 +6323,8 @@ async def _spawn_browser_agent_activity_v3_simulated(
 
         while iteration < MAX_ITERATIONS:
             iteration += 1
+            if not await sync_user_instructions():
+                await sync_user_instructions(require_confirmed_read=True)
             with contextlib.suppress(Exception):
                 browser_activity_checkpoint(f"Simulated browser step {iteration}")
             if recorder:
@@ -5815,6 +6443,8 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     "result": {"success": True, "verification_requested": True},
                 }
                 action_entries.append(completion_entry)
+                await sync_user_instructions(require_current_schema=True)
+                verification_instruction_count = len(instruction_state.get("user_instruction_messages") or [])
                 progress = await _verify_simulated_browser_completion(
                     goal=goal,
                     output_schema=output_schema,
@@ -5829,7 +6459,16 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     gpt_account_id=gpt_account_id,
                     gpt_token_source=gpt_token_source,
                     gpt_token_pool_id=gpt_token_pool_id,
+                    user_instruction_messages=instruction_state.get("user_instruction_messages"),
                 )
+                await sync_user_instructions(require_current_schema=True)
+                if (
+                    verification_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
+                    or int(instruction_state.get("schema_user_instruction_count") or 0) < len(instruction_state.get("user_instruction_messages") or [])
+                ):
+                    completion_entry["verifier_superseded_by_user_feedback"] = True
+                    await browser_stream.finish_tools(status="ERROR")
+                    continue
                 structured = progress.get("structured_response")
                 required = [
                     str(field.get("name"))
@@ -5882,6 +6521,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                                 world_model_name=world_model.world_model_name,
                             ),
                             "structured_response": structured,
+                            "browser_output_schema": output_schema,
                             "steps_taken": iteration,
                         },
                     )
@@ -5900,6 +6540,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                         "simulated_browser_steps": iteration,
                         "simulated_latest_frame": latest_frame,
                         "structured_response": structured,
+                        "browser_output_schema": output_schema,
                         "execution_time_ms": (safe_time() - started_at) * 1000,
                         "usage_items": _simulated_browser_usage_items(
                             total_input_tokens,
@@ -6012,7 +6653,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
             "simulated_browser_steps": iteration,
             "simulated_latest_frame": latest_frame,
         }
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, WorkflowGenerationSealed):
         raise
     except Exception as exc:
         logger.error(
@@ -6023,12 +6664,25 @@ async def _spawn_browser_agent_activity_v3_simulated(
             traceback=traceback.format_exc(),
         )
         with contextlib.suppress(Exception):
+            if isinstance(exc, BrowserInstructionUnavailableError) and browser_stream is not None:
+                await browser_stream.finish_tools(status="ERROR")
+        with contextlib.suppress(Exception):
             await finalize_recording()
         return {
             "status": "failed",
             "success": False,
             "error": True,
             "message": f"Simulated browser automation failed: {extract_error_message(exc)}",
+            **({
+                "usage_items": _simulated_browser_usage_items(
+                    total_input_tokens, total_output_tokens, model_pricing,
+                    usage_by_model, pricing_pool=browser_pool,
+                ),
+                "browser_error_type": exc.original_error_type,
+                "browser_error_message": extract_error_message(exc),
+                "browser_output_schema": output_schema,
+                "structured_response": None,
+            } if isinstance(exc, BrowserInstructionUnavailableError) else {}),
             "task_id": task_id,
             "session_id": world_model_session_id or None,
             "world_model_simulated": True,
@@ -6212,10 +6866,30 @@ async def _spawn_browser_agent_activity_v3_real(
             "output_files": [],
         }
 
+    private_browser_runtime: Dict[str, Any] = {}
     if write_lock_resume_state:
-        write_lock_resume_state = await hydrate_resume_context(
+        hydrated_resume = dict(await hydrate_resume_context(
             agent_id=agent_id, resume_state=write_lock_resume_state
-        )
+        ))
+        private_browser_runtime = hydrated_resume.pop("private_browser_runtime", {})
+        if "browser_output_schema" in private_browser_runtime:
+            hydrated_resume["browser_output_schema"] = private_browser_runtime["browser_output_schema"]
+        write_lock_resume_state = hydrated_resume
+        write_lock_resume_state["tool_call_id"] = tool_call_id
+        write_lock_resume_state["task_id"] = task_id or write_lock_resume_state.get("task_id")
+        if write_lock_resume_state.get("approval_type") != AUTH_ASSISTANCE_DECLINED:
+            try:
+                write_lock_resume_state = await _load_browser_resume_user_instructions(
+                    agent_id, write_lock_resume_state
+                )
+                write_lock_resume_state["_user_instruction_poll_confirmed"] = True
+            except WorkflowGenerationSealed:
+                raise
+            except Exception as error:
+                write_lock_resume_state["_user_instruction_poll_confirmed"] = False
+                write_lock_resume_state["_user_instruction_poll_error"] = {"type": type(error).__name__, "message": extract_error_message(error)}
+                logger.warning("Browser resume instruction read failed", agent_id=agent_id,
+                               error=mask_secret_values(extract_error_message(error), write_lock_resume_state.get("secret_redaction_refs")))
 
     from browser_tools.dom_service import ActionHistory, DOMService, browser_downloads_path_for_provider
     from browser_tools.humanizer import BrowserHumanizer
@@ -6235,6 +6909,123 @@ async def _spawn_browser_agent_activity_v3_real(
     interaction_layer_task: Optional[asyncio.Task] = None
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
+
+    def _redact_activity_value(value: Any) -> Any:
+        # Private hydration can precede DOM binding, and cleanup can outlive
+        # its transport. Keep those boundaries under the activity's policy.
+        return mask_secret_values(
+            redact_current_secret_values(action_history.model_visible_value(value)),
+            (write_lock_resume_state or {}).get("secret_redaction_refs"),
+        )
+
+    async def _save_browser_action_message(**kwargs: Any) -> Any:
+        # Routing IDs stay exact; only user/model-visible payloads are redacted.
+        trusted_credential_ref = (kwargs.get("extra_metadata") or {}).get("credential_ref")
+        trusted_coordinates = (kwargs.get("auxiliary") or {}).get("coordinates")
+        for key in ("title", "message", "extra_metadata", "auxiliary"):
+            if key in kwargs:
+                kwargs[key] = _redact_activity_value(kwargs[key])
+        # Only these harness-selected bookkeeping fields bypass content masking.
+        # Page result/message dictionaries never enter these metadata slots.
+        metadata = kwargs.get("extra_metadata")
+        if isinstance(metadata, dict) and isinstance(trusted_credential_ref, dict):
+            visible_ref = metadata.get("credential_ref")
+            if isinstance(visible_ref, dict):
+                for key in ("kind", "id"):
+                    if isinstance(trusted_credential_ref.get(key), str):
+                        visible_ref[key] = trusted_credential_ref[key]
+        auxiliary = kwargs.get("auxiliary")
+        if isinstance(auxiliary, dict) and isinstance(trusted_coordinates, dict):
+            coordinates = auxiliary.get("coordinates")
+            if isinstance(coordinates, dict):
+                for key in ("x", "y"):
+                    value = trusted_coordinates.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                        coordinates[key] = value
+        if "output_schema" in kwargs:
+            kwargs["output_schema"] = _model_visible_browser_output_schema(kwargs["output_schema"], _redact_activity_value)
+        return await save_browser_action_message(**kwargs)
+
+    def _pause_continuity_state(approval_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        grant_url = resolve_site_write_lock_grant_url({
+            **(approval_result or {}), "start_url": start_url,
+            "visited_urls": visited_urls, "current_url": current_url,
+        })
+        if "{{secret:" in grant_url:
+            # A model-visible product/notification URL may already be masked.
+            # The exact browser destination is still private, observed state.
+            grant_url = current_url
+        return _browser_resume_continuity_state(
+            action_history=action_history, visited_urls=visited_urls,
+            verifier_checkpoints=verifier_checkpoints, browser_turn_messages=browser_turn_messages,
+            reasoning_messages=reasoning_messages, action_summary=action_summary,
+            auth_runtime_state=auth_runtime_state,
+            response_schema=response_schema,
+            schema_user_instruction_count=schema_user_instruction_count,
+            user_instruction_messages=user_instruction_messages,
+            user_message_cursor=user_message_cursor,
+            user_message_cursor_is_task_start=bool(instruction_state.get("user_message_cursor_is_task_start")),
+            user_instruction_message_ids=user_instruction_message_ids,
+            private_runtime_state={
+                "current_url": current_url, "auth_realm": auth_realm,
+                "browser_output_schema": response_schema,
+                "write_lock_approvals": dict(write_lock_approvals), "grant_url": grant_url,
+                **({"pending_action_target": approval_result["pending_action_target"]}
+                   if approval_result and approval_result.get("pending_action_target") else {}),
+            },
+        )
+
+    def _visible_activity_result(result: Dict[str, Any]) -> Dict[str, Any]:
+        # Archive references and routing IDs remain exact protocol values.
+        auth_response = result.get("auth_assistance_request")
+        payment_response = result.get("payment_request")
+        for key in ("current_url", "question", "write_lock_notification", "payment_request",
+                    "auth_assistance_request", "write_lock_approvals", "auth_realm", "base_site",
+                    "message", "structured_response", "best_effort_response",
+                    "browser_error_message"):
+            if key in result:
+                result[key] = _redact_activity_value(result[key])
+        # Receipt image URLs are typed text, not raster attachments. Preserve
+        # only their HTTP(S) strings through the same secret-value redactor;
+        # arbitrary nested media and data-image payloads remain suppressed.
+        visible_payment = result.get("payment_request")
+        if isinstance(payment_response, dict) and isinstance(visible_payment, dict):
+            items_key = "line_items" if "line_items" in payment_response else "lineItems"
+            original_items = payment_response.get(items_key)
+            visible_items = visible_payment.get(items_key)
+            if isinstance(original_items, list) and isinstance(visible_items, list):
+                for original_item, visible_item in zip(original_items, visible_items):
+                    if not isinstance(original_item, dict) or not isinstance(visible_item, dict):
+                        continue
+                    image_url = original_item.get("image_url")
+                    if isinstance(image_url, str) and image_url.startswith(("https://", "http://")):
+                        visible_item["image_url"] = _redact_activity_value(image_url)
+        if "browser_output_schema" in result:
+            result["browser_output_schema"] = _model_visible_browser_output_schema(
+                result["browser_output_schema"], _redact_activity_value
+            )
+        target = result.get("pending_action_target")
+        if isinstance(target, dict):
+            result["pending_action_target"] = _redact_activity_value(target)
+            if isinstance(target.get("index"), int) and not isinstance(target["index"], bool):
+                result["pending_action_target"]["index"] = target["index"]
+        if isinstance(auth_response, dict):
+            request_ids = ("id", "requestId", "request_id", "attentionRequestId", "agentId", "userId",
+                           "browserSessionId", "steelSessionId", "mode")
+            visible_auth = result["auth_assistance_request"]
+            for key in request_ids:
+                if key in auth_response:
+                    visible_auth[key] = auth_response[key]
+            for key, protocol_keys in (("request", request_ids),
+                                       ("handoff", ("type", "steelSessionId", "liveViewUrl"))):
+                original = auth_response.get(key)
+                if isinstance(original, dict):
+                    visible_auth[key] = _redact_activity_value(original)
+                    for field in protocol_keys:
+                        if field in original:
+                            visible_auth[key][field] = original[field]
+        return result
+
     browser_url = None
     current_url = ""
     latest_structured_response: Optional[Dict[str, Any]] = None
@@ -6290,31 +7081,39 @@ async def _spawn_browser_agent_activity_v3_real(
     # recovery on this task, later recoveries still re-verify that URL.
     require_payment_cdn = False
     payment_cdn_verify_url = ""
-    # Payment auto-fill on cross-origin handoff (live host ≠ session origin).
-    # Do NOT pin/refuse navigation — that trapped merchant → third-party order
-    # flows (e.g. bluebottlecoffee.com → order.online) after challenge recovery.
-    handoff_payment_fill_attempts = 0
-    handoff_payment_fill_succeeded = False
-    HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS = 8
-    _start_domain = get_domain_from_url(start_url) if start_url else ""
-    navigation_origin_base_domain: Optional[str] = (
-        _get_base_domain(_start_domain) if _start_domain else None
-    )
 
     pending_write_lock_action: Optional[Dict[str, Any]] = None
     pending_write_lock_target: Optional[Dict[str, Any]] = None
     resume_step_count: int = 0
     auth_assistance_resume_mode: Optional[str] = None
-    resume_user_messages: List[Dict[str, str]] = []
     payment_card_last4: Optional[str] = None
     if write_lock_resume_state:
-        pending_write_lock_action = write_lock_resume_state.get("pending_action")
-        pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
-        write_lock_approvals = dict(write_lock_resume_state.get("write_lock_approvals") or {})
+        has_new_user_input = len(write_lock_resume_state.get("user_instruction_messages") or []) > int(
+            write_lock_resume_state.get("delivered_user_instruction_count") or 0
+        )
+        # An approved queued action predates this input. The actor must decide
+        # what to do after reading it, even when write permission remains valid.
+        if not has_new_user_input:
+            pending_write_lock_action = write_lock_resume_state.get("pending_action")
+            pending_write_lock_target = (private_browser_runtime.get("pending_action_target")
+                                         or write_lock_resume_state.get("pending_action_target"))
+        write_lock_approvals = dict(private_browser_runtime.get("write_lock_approvals")
+                                    or write_lock_resume_state.get("write_lock_approvals") or {})
         resume_step_count = write_lock_resume_state.get("step_count", 0)
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
-        auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
+        auth_realm = private_browser_runtime.get("auth_realm") or write_lock_resume_state.get("auth_realm") or auth_realm
+        current_url = str(private_browser_runtime.get("current_url") or "")
+        approved_at = write_lock_resume_state.get("write_lock_approved_at")
+        grant_url = private_browser_runtime.get("grant_url")
+        if grant_url and isinstance(approved_at, (int, float)):
+            if write_lock_resume_state.get("approval_type") == "payment":
+                write_lock_approvals = grant_site_write_lock_approvals(write_lock_approvals, grant_url, approved_at)
+            elif write_lock_resume_state.get("pending_action"):
+                write_lock_approvals = apply_user_write_lock_grant(
+                    write_lock_approvals, write_lock_resume_state.get("approval_type", "unknown"),
+                    grant_url, approved_at,
+                )
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
         # Belt-and-suspenders: older resume payloads may still carry awaiting tool
         # rows if they were parked before finalize-on-mint shipped.
@@ -6341,7 +7140,7 @@ async def _spawn_browser_agent_activity_v3_real(
         if write_lock_resume_state.get("approval_type") == "payment" and (
             write_lock_resume_state.get("payment_card_refs") or payment_card_last4
         ):
-            merchant_grant_url = resolve_site_write_lock_grant_url(
+            merchant_grant_url = private_browser_runtime.get("grant_url") or resolve_site_write_lock_grant_url(
                 {
                     "start_url": start_url,
                     "visited_urls": visited_urls,
@@ -6360,17 +7159,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     "Browser payment site write-lock unlock healed on resume",
                     agent_id=agent_id,
                     task_id=task_id,
-                    grant_url=merchant_grant_url,
-                    unlock_domain=merchant_domain,
-                    prior_domain=site_entry.get("domain"),
+                    grant_url=_redact_activity_value(merchant_grant_url),
+                    unlock_domain=_redact_activity_value(merchant_domain),
+                    prior_domain=_redact_activity_value(site_entry.get("domain")),
                 )
-        if write_lock_resume_state.get("approval_type") == "auth_assistance":
-            resume_user_messages.append(
-                build_auth_assistance_resume_user_message(
-                    auth_realm=auth_realm,
-                    handoff_mode=write_lock_resume_state.get("handoff_mode"),
-                )
-            )
         logger.info(
             "Resuming from write lock approval",
             has_pending_action=pending_write_lock_action is not None,
@@ -6378,11 +7170,13 @@ async def _spawn_browser_agent_activity_v3_real(
             step_count=resume_step_count,
         )
 
-    response_schema = output_schema
+    response_schema = (write_lock_resume_state or {}).get("browser_output_schema") or output_schema
     if not response_schema:
         raise ValueError(
             "output_schema is required for browser agent - parent agent must provide structured output schema in tool call"
         )
+    schema_user_instruction_count = int((write_lock_resume_state or {}).get("schema_user_instruction_count") or 0)
+
     logger.info(
         "Using response schema from tool call",
         fields=len(response_schema.get("fields", [])),
@@ -6506,8 +7300,42 @@ async def _spawn_browser_agent_activity_v3_real(
     browser_task_paused_for_resume = False
     otp_poll_task: Optional["asyncio.Task[int]"] = None
     state_prefetch = BrowserStatePrefetch()
+    # Bind before browser/event-bus tasks start; their inherited policy is
+    # updated in place as private bindings are hydrated or realms change.
+    _secret_log_scope = secret_logging_context((write_lock_resume_state or {}).get("secret_redaction_refs"), fresh=True)
+    _secret_log_scope.__enter__()
 
     try:
+        response_schema, schema_usage = await _refresh_browser_output_schema(
+            goal=goal,
+            agent_id=agent_id,
+            response_schema=response_schema,
+            resume_state=write_lock_resume_state,
+            compute_auth={
+                "type": "gpt" if gpt_token else "claude",
+                "accessToken": gpt_token or token_state.access_token,
+                "accountId": gpt_account_id if gpt_token else None,
+                "source": gpt_token_source if gpt_token else token_state.source,
+                "poolTokenId": gpt_token_pool_id if gpt_token else token_state.pool_token_id,
+                "userId": user_id,
+                "agentId": agent_id,
+                "rootAgentId": agent_id,
+            },
+        )
+        schema_user_instruction_count = int((write_lock_resume_state or {}).get("schema_user_instruction_count") or 0)
+        schema_input_tokens = int(schema_usage.get("prompt_tokens") or 0)
+        schema_output_tokens = int(schema_usage.get("completion_tokens") or 0)
+        total_input_tokens += schema_input_tokens
+        total_output_tokens += schema_output_tokens
+        if schema_usage:
+            accumulate_model_usage(
+                usage_by_model, schema_usage.get("actual_model"), schema_input_tokens, schema_output_tokens,
+                cache_read_input_tokens=int(schema_usage.get("cache_read_input_tokens") or 0),
+                cache_creation_input_tokens=int(schema_usage.get("cache_creation_input_tokens") or 0),
+                from_fast_cache=bool(schema_usage.get("from_fast_cache")),
+                cache_sequence_id=schema_usage.get("cache_sequence_id"),
+            )
+
         if (write_lock_resume_state or {}).get("approval_type") == AUTH_ASSISTANCE_DECLINED:
             # The user said no, so nothing is left to try. Release the browser
             # that was kept alive for them and end the task; ``finally`` posts
@@ -6527,7 +7355,7 @@ async def _spawn_browser_agent_activity_v3_real(
             if declined_session_id:
                 await close_browser_session(config, declined_session_id, pause=False)
             logger.info("User declined auth assistance; ending browser task", task_id=task_id)
-            return {
+            return _visible_activity_result({
                 "status": "completed",
                 "success": False,
                 "user_declined_auth": True,
@@ -6539,7 +7367,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "session_id": declined_session_id,
                 "structured_response": None,
                 "output_files": [],
-            }
+            })
 
         # ===== SETUP TIMING TRACKER =====
         setup_origin = time.monotonic()
@@ -6718,7 +7546,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     raise Exception(f"Browser session unavailable after {int(_elapsed)}s (provider rate limit)")
 
                 if not _waiting_msg_sent:
-                    await save_browser_action_message(
+                    await _save_browser_action_message(
                         agent_id=agent_id,
                         title="Waiting for browser availability",
                         task_id=tool_call_id,
@@ -6817,6 +7645,14 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_session_metadata.get("provider")
                 ),
             )
+            if hasattr(_dom_service, "restore_secret_redaction_state"):
+                _dom_service.restore_secret_redaction_state(write_lock_resume_state or {})
+                if (
+                    is_resume
+                    and "secret_values_used" not in (write_lock_resume_state or {})
+                    and (write_lock_resume_state or {}).get("payment_card_refs")
+                ):
+                    _dom_service.mark_secret_used()
             _playwright_instance = None
             _playwright_browser = None
 
@@ -6929,7 +7765,7 @@ async def _spawn_browser_agent_activity_v3_real(
             """Save init messages + process user data (no browser needed)."""
             if not is_resume:
                 t = time.monotonic()
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title=BROWSER_PROGRESS_TITLE,
                     task_id=task_id,
@@ -6941,7 +7777,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     is_init_message=True,
                     output_schema=response_schema,
                 )
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title="Task Started",
                     task_id=task_id,
@@ -7009,6 +7845,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 if value:
                     _secret_refs[ref] = value
             _secret_refs.update(_realm_credential_state.password_secret_refs)
+            register_logging_secret_refs(_secret_refs)
 
             logger.info(
                 "Built secret refs for type interception",
@@ -7107,7 +7944,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 output_dir=recording_output_dir,
             )
             if recorder and recorder.persists_network_log and task_id:
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title="Browser network recording started",
                     task_id=task_id,
@@ -7185,7 +8022,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 humanizer.set_cursor_observer(observe_cursor)
                 humanizer.start_idle_movement()
             if browser_recorder and task_id:
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title="Browser recording started",
                     task_id=task_id,
@@ -7214,6 +8051,26 @@ async def _spawn_browser_agent_activity_v3_real(
             model_pricing,
             initial_realm_credential_state,
         ) = data_result
+
+        if hasattr(dom_service, "register_secret_refs"):
+            dom_service.restore_secret_redaction_state(write_lock_resume_state or {})
+            dom_service.register_secret_refs(secret_refs)
+            if is_resume and "secret_values_used" not in (write_lock_resume_state or {}) and secret_refs:
+                # Legacy paused sessions predate usage tracking and may already
+                # contain entered/autofilled credentials. Fail closed on pixels.
+                dom_service.mark_secret_used()
+            action_history.bind_dom_service(dom_service)
+            # Restore happened before credentials were decrypted. Sanitize the
+            # complete histories now, before persistence, logging or a model call.
+            action_history.restore_entries(action_history.get_entries())
+            browser_turn_messages[:] = _model_visible_browser_turn_messages(
+                browser_turn_messages, dom_service.model_visible_value,
+                secret_values_used=dom_service.secret_values_used,
+                action_result_redact=getattr(dom_service, "model_visible_action_result", None),
+            )
+            verifier_checkpoints[:] = dom_service.model_visible_value(verifier_checkpoints)
+            reasoning_messages[:] = dom_service.model_visible_value(reasoning_messages)
+            action_summary[:] = dom_service.model_visible_value(action_summary)
 
         # Use the same fail-closed worker hydration path at session start and
         # on every later realm transition.
@@ -7317,7 +8174,7 @@ async def _spawn_browser_agent_activity_v3_real(
             # while the navigation is already underway.
             await asyncio.gather(
                 _navigate_to_start_url(),
-                save_browser_action_message(
+                _save_browser_action_message(
                     agent_id=agent_id,
                     title=f"Navigating \u2192 {nav_url[:50]}",
                     task_id=task_id,
@@ -7344,7 +8201,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                 await asyncio.gather(
                     _wait_for_start_url_ready(),
-                    save_browser_action_message(
+                    _save_browser_action_message(
                         agent_id=agent_id,
                         title=f"Navigated \u2192 {nav_url[:50]}",
                         task_id=task_id,
@@ -7360,7 +8217,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
                 logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
             else:
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title=f"Start URL navigate deferred \u2192 {nav_url[:40]}",
                     task_id=task_id,
@@ -7443,7 +8300,11 @@ async def _spawn_browser_agent_activity_v3_real(
         rose_client = BrowserStreamingRoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
-        browser_turn_messages.extend(resume_user_messages)
+        user_instruction_messages = _append_browser_user_instructions(
+            write_lock_resume_state, browser_turn_messages
+        )
+        user_message_cursor = (write_lock_resume_state or {}).get("user_message_cursor")
+        user_instruction_message_ids = list((write_lock_resume_state or {}).get("user_instruction_message_ids") or [])
         otp_history_count = 0
         supervisor_recovery_count = 0
         failed_steel_auth_recovery_ids: set[str] = set()
@@ -7453,6 +8314,70 @@ async def _spawn_browser_agent_activity_v3_real(
             available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
         )
+        instruction_state = {
+            **(write_lock_resume_state or {}),
+            "user_instruction_messages": user_instruction_messages,
+            "tool_call_id": tool_call_id,
+            "user_message_cursor": user_message_cursor,
+            "user_message_cursor_is_task_start": bool((write_lock_resume_state or {}).get("user_message_cursor_is_task_start")),
+            "task_id": task_id,
+            "user_instruction_message_ids": user_instruction_message_ids,
+            "delivered_user_instruction_count": len(user_instruction_messages),
+            "schema_user_instruction_count": schema_user_instruction_count,
+            "schema_attempted_user_instruction_count": len(user_instruction_messages),
+        }
+
+        async def sync_user_instructions(*, require_current_schema=False, require_confirmed_read=False) -> bool:
+            nonlocal instruction_state, response_schema, user_instruction_messages
+            nonlocal user_message_cursor, user_instruction_message_ids, dynamic_system_context
+            nonlocal latest_structured_response, total_input_tokens, total_output_tokens
+            nonlocal pending_write_lock_action, pending_write_lock_target, schema_user_instruction_count
+            previous_count = len(user_instruction_messages)
+            previous_schema = response_schema
+            instruction_state, response_schema, usages = await _sync_browser_user_instructions(
+                agent_id=agent_id, goal=goal, response_schema=response_schema,
+                instruction_state=instruction_state, turn_messages=browser_turn_messages,
+                require_current_schema=require_current_schema, require_confirmed_read=require_confirmed_read,
+                compute_auth={
+                    "type": "gpt" if gpt_token else "claude",
+                    "accessToken": gpt_token or token_state.access_token,
+                    "accountId": gpt_account_id if gpt_token else None,
+                    "source": gpt_token_source if gpt_token else token_state.source,
+                    "poolTokenId": gpt_token_pool_id if gpt_token else token_state.pool_token_id,
+                    "userId": user_id, "agentId": agent_id, "rootAgentId": agent_id,
+                },
+            )
+            user_instruction_messages = instruction_state["user_instruction_messages"]
+            user_message_cursor = instruction_state["user_message_cursor"]
+            user_instruction_message_ids = instruction_state["user_instruction_message_ids"]
+            schema_user_instruction_count = int(instruction_state.get("schema_user_instruction_count") or 0)
+            if len(user_instruction_messages) != previous_count:
+                latest_structured_response = None
+                pending_write_lock_action = None
+                pending_write_lock_target = None
+            if response_schema != previous_schema:
+                dynamic_system_context = build_browser_dynamic_system_context(
+                    base_custom_instructions,
+                    available_files=(list(available_file_paths.keys()) if available_file_paths else None),
+                    response_schema=response_schema,
+                )
+            for usage in usages:
+                input_tokens = int(usage.get("prompt_tokens") or 0)
+                output_tokens = int(usage.get("completion_tokens") or 0)
+                total_input_tokens += input_tokens
+                total_output_tokens += output_tokens
+                accumulate_model_usage(
+                    usage_by_model, usage.get("actual_model"), input_tokens, output_tokens,
+                    cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                    cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                    from_fast_cache=bool(usage.get("from_fast_cache")),
+                    cache_sequence_id=usage.get("cache_sequence_id"),
+                )
+
+            if require_current_schema or require_confirmed_read:
+                _require_browser_instruction_state(instruction_state, current_schema=require_current_schema)
+            return instruction_state.get("_user_instruction_poll_confirmed") is True
+
         if (
             (write_lock_resume_state or {}).get("approval_type") == "payment"
             and (write_lock_resume_state or {}).get("pending_action") is None
@@ -7508,6 +8433,8 @@ async def _spawn_browser_agent_activity_v3_real(
             }
             password_origins = realm_state.password_origins
             secret_refs = {**card_refs, **realm_state.password_secret_refs}
+            if hasattr(dom_service, "register_secret_refs"):
+                dom_service.register_secret_refs(secret_refs)
             if action_redaction_refs is not None:
                 action_redaction_refs.append(dict(secret_refs))
             session_passwords = list(payload.get("passwords") or [])
@@ -7666,12 +8593,31 @@ async def _spawn_browser_agent_activity_v3_real(
             redaction_refs = [dict(secret_refs)]
             action_redaction_refs = redaction_refs
             kwargs["auth_context_for_url"] = _auth_context_for_url
+            successful_secret_refs: set[str] = set()
+            kwargs["successful_secret_refs"] = successful_secret_refs
+            # A tool may navigate or refresh the active realm while executing.
+            # Persist the password for the page authorized at resolution time.
+            credential_url = kwargs.get("current_url") or current_url
             try:
                 result = await execute_action(*args, **kwargs)
+                if MINTED_NEW_PASSWORD_REF in successful_secret_refs and credential_url:
+                    try:
+                        await save_minted_account_password(config, user_id, credential_url)
+                    except Exception as save_error:
+                        logger.warning(
+                            "Failed to save minted account password",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            error=_redact_activity_value(extract_error_message(save_error)),
+                        )
                 # Ref names can collide across realms. Keep each binding's
                 # values until this result is safe to log, persist, and submit.
-                for refs in redaction_refs:
-                    result = mask_secret_values(result, refs)
+                if hasattr(dom_service, "model_visible_action_result"):
+                    action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
+                    result = dom_service.model_visible_action_result(action.get("action", ""), result)
+                else:
+                    for refs in redaction_refs:
+                        result = mask_secret_values(result, refs)
                 return result
             finally:
                 action_redaction_refs = None
@@ -7729,15 +8675,8 @@ async def _spawn_browser_agent_activity_v3_real(
                         drain_continuity = await persist_resume_context(
                             agent_id=agent_id,
                             task_id=task_id,
-                            state=_browser_resume_continuity_state(
-                                action_history=action_history,
-                                visited_urls=visited_urls,
-                                verifier_checkpoints=verifier_checkpoints,
-                                browser_turn_messages=browser_turn_messages,
-                                reasoning_messages=reasoning_messages,
-                                action_summary=action_summary,
-                                auth_runtime_state=auth_runtime_state,
-                            ),
+                            force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+                            state=_pause_continuity_state(),
                         )
                     except Exception as checkpoint_error:
                         drain_checkpoint_failed = True
@@ -7765,7 +8704,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             dom_service = None
                         browser_task_paused_for_resume = True
                         step_timer.finish()
-                        return {
+                        return _visible_activity_result({
                             "status": BROWSER_DRAIN_YIELD_STATUS,
                             "yield_reason": drain_reason,
                             "current_url": current_url,
@@ -7787,7 +8726,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                             ),
                             **drain_continuity,
-                        }
+                        })
             iteration += 1
             step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
@@ -7812,6 +8751,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 focus_cache=tab_focus_cache,
             )
             step_timer.mark("tab_rebind")
+
+            if not await sync_user_instructions():
+                await sync_user_instructions(require_confirmed_read=True)
 
             # Handle pending write lock action
             if pending_write_lock_action:
@@ -7872,7 +8814,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                 browser_activity_checkpoint(f"Step {iteration} - write lock action applied")
                 if isinstance(result, dict) and result.get("current_url"):
-                    current_url = str(result.get("current_url") or current_url)
+                    current_url = _private_browser_runtime_url(dom_service, result.get("current_url") or current_url)
                 await record_passkey_usage_once()
 
                 await action_history.record_action(
@@ -7950,7 +8892,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
                 restored_transcript_unobserved = False
                 step_timer.annotate(observe_dom=observe_needs_dom)
-                current_url = str(observe_page_state.get("url") or current_url)
+                current_url = _private_browser_runtime_url(dom_service, observe_page_state.get("url") or current_url)
                 step_timer.mark("observe_state")
             except asyncio.TimeoutError:
                 recovered = await _recover_browser_step(
@@ -8025,258 +8967,6 @@ async def _spawn_browser_agent_activity_v3_real(
                     )
 
                 browser_activity_checkpoint(f"Step {iteration} - calling Rose API")
-                if (
-                    has_payment_card_secret_refs(secret_refs)
-                    and not handoff_payment_fill_succeeded
-                    and handoff_payment_fill_attempts < HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS
-                ):
-                    from urllib.parse import urlparse as _urlparse_nudge
-
-                    _nudge_host = (_urlparse_nudge(str(current_url or "")).hostname or "").lower()
-                    _nudge_base = _get_base_domain(_nudge_host) if _nudge_host else ""
-                    # Cross-origin handoff only (merchant Place-order → hosted checkout).
-                    # No host pin / navigation refusal — agent may leave freely.
-                    _on_cross_origin_handoff = bool(
-                        navigation_origin_base_domain
-                        and _nudge_base
-                        and _nudge_base != navigation_origin_base_domain
-                    )
-                    if _on_cross_origin_handoff:
-                        # Hosted payment widgets mount fields in child frames
-                        # after the document URL settles — poll for semantic
-                        # payment inputs across frames before spending an attempt.
-                        from domains.spawn_browser_agent_v3.service_actions import (
-                            wait_for_payment_ref_fields,
-                        )
-
-                        _autofill_page = input_page
-                        if _autofill_page is None and humanizer is not None:
-                            if "input_page" in getattr(humanizer, "__dict__", {}):
-                                _autofill_page = getattr(humanizer, "input_page", None)
-                        # Keep the wait short: long polls burned the 900s budget
-                        # before titled payment iframes mounted on the handoff page.
-                        fields_ready = await wait_for_payment_ref_fields(
-                            dom_service.session,
-                            ref_names=["card_number"],
-                            input_page=_autofill_page,
-                            timeout_seconds=4.0,
-                        )
-                        if not fields_ready:
-                            await save_browser_action_message(
-                                agent_id=agent_id,
-                                title="Waiting for payment fields on handoff page",
-                                task_id=task_id,
-                                message="Semantic payment inputs not visible yet in any frame",
-                                status=MessageStatus.FINISHED,
-                                browser_url=browser_url,
-                                action_type="input_text",
-                                tool_call_id=f"handoff-autofill-wait-{task_id}-{iteration}",
-                                steps_taken=iteration,
-                                total_steps=MAX_ITERATIONS,
-                            )
-                            logger.info(
-                                "Handoff payment fields not ready; deferring auto-fill attempt",
-                                handoff_host=_nudge_host,
-                                agent_id=agent_id,
-                                task_id=task_id,
-                                iteration=iteration,
-                            )
-                            # Do not burn an attempt — retry next loop.
-                        else:
-                            handoff_payment_fill_attempts += 1
-                            auto_fill_result: Dict[str, Any] = {}
-                            auto_fill_call_id = f"handoff-autofill-{task_id}-{iteration}"
-                            await save_browser_action_message(
-                                agent_id=agent_id,
-                                title="Auto-filling payment fields on handoff page",
-                                task_id=task_id,
-                                message="",
-                                status=MessageStatus.IN_PROGRESS,
-                                browser_url=browser_url,
-                                action_type="input_text",
-                                tool_call_id=auto_fill_call_id,
-                                steps_taken=iteration,
-                                total_steps=MAX_ITERATIONS,
-                            )
-                            try:
-                                auto_fill_result = await asyncio.wait_for(
-                                    _execute_action(
-                                        dom_service,
-                                        action_history,
-                                        {
-                                            "action": "input_text",
-                                            "thinking": (
-                                                "Auto-fill approved payment card secret refs "
-                                                "on the cross-origin handoff page."
-                                            ),
-                                            "params": {"text": "card_number"},
-                                        },
-                                        available_file_paths=available_file_paths,
-                                        session_id=session_id,
-                                        config=config,
-                                        humanizer=humanizer,
-                                        secret_refs=secret_refs,
-                                        password_origins=password_origins,
-                                        credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                                        user_id=user_id,
-                                        current_url=current_url,
-                                        trusted_page_urls=visited_urls,
-                                        write_lock_enabled=write_lock_enabled,
-                                        write_lock_approvals=write_lock_approvals,
-                                        system_name=system_name,
-                                        browser_network_recorder=browser_network_recorder,
-                                        current_auth_realm=auth_realm,
-                                        prepare_credentials_for_url=_prepare_credentials_for_url,
-                                    ),
-                                    timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
-                                )
-                            except Exception as auto_fill_error:
-                                auto_fill_result = {
-                                    "success": False,
-                                    "error": str(auto_fill_error)[:300],
-                                }
-                                logger.warning(
-                                    "Handoff payment auto-fill raised",
-                                    error=str(auto_fill_error)[:300],
-                                    handoff_host=_nudge_host,
-                                    agent_id=agent_id,
-                                    task_id=task_id,
-                                    iteration=iteration,
-                                    attempt=handoff_payment_fill_attempts,
-                                )
-                            # Auto-fill is a real browser action — drop the
-                            # pre-action observe snapshot so a later
-                            # read_browser_state in this iteration re-fetches.
-                            observe_page_state = {}
-                            filled_refs = auto_fill_result.get("payment_refs_filled") or []
-                            auto_fill_url = str(auto_fill_result.get("current_url") or "")
-                            if auto_fill_url and auto_fill_url != current_url:
-                                current_url = auto_fill_url
-                                handoff_payment_fill_succeeded = bool(auto_fill_result.get("success") and filled_refs)
-                                await save_browser_action_message(
-                                    agent_id=agent_id,
-                                    title="Page changed after payment auto-fill",
-                                    task_id=task_id,
-                                    message=str(auto_fill_result.get("message") or ""),
-                                    status=MessageStatus.FINISHED,
-                                    browser_url=browser_url,
-                                    action_type="input_text",
-                                    tool_call_id=auto_fill_call_id,
-                                    steps_taken=iteration,
-                                    total_steps=MAX_ITERATIONS,
-                                )
-                                # Observe/reload the new surface before another
-                                # model turn. No model-issued tool call exists
-                                # for this automatic action, so do not invent one.
-                                continue
-                            if auto_fill_result.get("success") and filled_refs:
-                                handoff_payment_fill_succeeded = True
-                                await save_browser_action_message(
-                                    agent_id=agent_id,
-                                    title=(
-                                        "Auto-filled payment fields "
-                                        f"({', '.join(str(r) for r in filled_refs)})"
-                                    ),
-                                    task_id=task_id,
-                                    message="",
-                                    status=MessageStatus.FINISHED,
-                                    browser_url=browser_url,
-                                    action_type="input_text",
-                                    tool_call_id=auto_fill_call_id,
-                                    steps_taken=iteration,
-                                    total_steps=MAX_ITERATIONS,
-                                )
-                                browser_turn_messages.append(
-                                    {
-                                        "role": "user",
-                                        "content": (
-                                            "Cross-origin handoff page "
-                                            f"({current_url}). Approved payment card "
-                                            f"secret refs were filled automatically "
-                                            f"({', '.join(str(r) for r in filled_refs)}). "
-                                            "Submit the payment form on THIS page now."
-                                        ),
-                                    }
-                                )
-                                logger.info(
-                                    "Auto-filled payment refs on handoff page",
-                                    handoff_host=_nudge_host,
-                                    filled_refs=filled_refs,
-                                    agent_id=agent_id,
-                                    task_id=task_id,
-                                    iteration=iteration,
-                                    attempt=handoff_payment_fill_attempts,
-                                )
-                            elif (
-                                handoff_payment_fill_attempts
-                                < HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS
-                            ):
-                                await save_browser_action_message(
-                                    agent_id=agent_id,
-                                    title="Payment fields not ready yet — will retry auto-fill",
-                                    task_id=task_id,
-                                    message=str(
-                                        auto_fill_result.get("error") or "field_not_found"
-                                    )[:200],
-                                    status=MessageStatus.FINISHED,
-                                    browser_url=browser_url,
-                                    action_type="input_text",
-                                    tool_call_id=auto_fill_call_id,
-                                    steps_taken=iteration,
-                                    total_steps=MAX_ITERATIONS,
-                                )
-                                logger.info(
-                                    "Handoff payment auto-fill miss; will retry",
-                                    handoff_host=_nudge_host,
-                                    attempt=handoff_payment_fill_attempts,
-                                    agent_id=agent_id,
-                                    task_id=task_id,
-                                    iteration=iteration,
-                                )
-                            else:
-                                # Stop auto-fill retries and nudge the model to fill/submit.
-                                await save_browser_action_message(
-                                    agent_id=agent_id,
-                                    title=(
-                                        "Payment auto-fill exhausted — fill manually"
-                                    ),
-                                    task_id=task_id,
-                                    message=(
-                                        f"Handoff {current_url} still has no "
-                                        "fillable payment fields after auto-fill retries. "
-                                        "Type card refs on this page."
-                                    ),
-                                    status=MessageStatus.FINISHED,
-                                    browser_url=browser_url,
-                                    action_type="input_text",
-                                    tool_call_id=auto_fill_call_id,
-                                    steps_taken=iteration,
-                                    total_steps=MAX_ITERATIONS,
-                                )
-                                browser_turn_messages.append(
-                                    {
-                                        "role": "user",
-                                        "content": (
-                                            "Cross-origin handoff page "
-                                            f"({current_url}). Automatic payment-field "
-                                            f"fill did not succeed after "
-                                            f"{handoff_payment_fill_attempts} attempts. "
-                                            "Use input_text with "
-                                            "card_number / card_name / card_expiry / card_cvv "
-                                            "into the visible payment fields (including fields "
-                                            "inside iframes), then submit."
-                                        ),
-                                    }
-                                )
-                                logger.info(
-                                    "Handoff payment auto-fill exhausted",
-                                    handoff_host=_nudge_host,
-                                    handoff_url=current_url,
-                                    auto_fill_error=auto_fill_result.get("error"),
-                                    agent_id=agent_id,
-                                    task_id=task_id,
-                                    iteration=iteration,
-                                )
                 step_timer.mark("realm_and_payment_prep")
                 if browser_recorder:
                     with contextlib.suppress(Exception):
@@ -8333,6 +9023,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             else {"iteration": iteration_snapshot}
                         ),
                         pool=browser_pool,
+                        dom_service=dom_service_snapshot,
                     )
                     return _attach_browser_replay_target(live_result, dom_service_snapshot)
 
@@ -8637,6 +9328,8 @@ async def _spawn_browser_agent_activity_v3_real(
                         auth_realm = pending_auth_realm
                         browser_session_metadata = pending_browser_session_metadata
                         dom_service = reconnected["dom_service"]
+                        if hasattr(dom_service, "model_visible_value"):
+                            action_history.bind_dom_service(dom_service)
                         dom_page = reconnected["dom_page"]
                         input_page = reconnected["input_page"]
                         playwright_browser = reconnected["playwright_browser"]
@@ -8675,7 +9368,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             humanizer_factory=BrowserHumanizer,
                         )
                         browser_state = await dom_service.get_browser_state(include_screenshot=False)
-                        current_url = browser_state.get("url", current_url)
+                        current_url = _private_browser_runtime_url(dom_service, browser_state.get("url") or current_url)
                         recovery_result = {
                             "success": True,
                             "message": (
@@ -8698,7 +9391,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             result=recovery_result,
                             tool_call_id=tool_call_id_action,
                         )
-                        await save_browser_action_message(
+                        await _save_browser_action_message(
                             agent_id=agent_id,
                             title="Replaced signed-out saved browser session",
                             task_id=task_id,
@@ -8772,11 +9465,11 @@ async def _spawn_browser_agent_activity_v3_real(
                     config,
                     agent_id=agent_id,
                     user_id=user_id,
-                    auth_realm=auth_realm or base_site,
+                    auth_realm=_redact_activity_value(auth_realm or base_site),
                     browser_session_id=task_id,
                     steel_session_id=session_id,
                     browser_url=browser_url,
-                    current_url=auth_handoff_current_url,
+                    current_url=_redact_activity_value(auth_handoff_current_url),
                     mode="live_view",
                 )
                 request_id = (
@@ -8827,6 +9520,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     provider=browser_session_metadata.get("provider"),
                 )
                 await _propagate_browser_credentials_with_progress(
+                    redact=_redact_activity_value,
                     config=config,
                     agent_id=agent_id,
                     task_id=task_id,
@@ -8855,18 +9549,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     **(await persist_resume_context(
                         agent_id=agent_id,
                         task_id=task_id,
-                        state=_browser_resume_continuity_state(
-                            action_history=action_history,
-                            visited_urls=visited_urls,
-                            verifier_checkpoints=verifier_checkpoints,
-                            browser_turn_messages=browser_turn_messages,
-                            reasoning_messages=reasoning_messages,
-                            action_summary=action_summary,
-                            auth_runtime_state=auth_runtime_state,
-                        ),
+                        force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+                        state=_pause_continuity_state(),
                     )),
                 }
                 browser_task_paused_for_resume = True
+                resume_result = _visible_activity_result(resume_result)
                 return resume_result
 
             if action_name == "recover_from_challenge":
@@ -8915,7 +9603,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         + ". Continue the task on this page — do not start "
                         "challenge recovery unless the document itself is blocked."
                     )
-                    await save_browser_action_message(
+                    await _save_browser_action_message(
                         agent_id=agent_id,
                         title="Page already clear — skip challenge recovery",
                         task_id=task_id,
@@ -8962,7 +9650,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 }
 
                 async def emit_recovery_progress(stage: str, message: str) -> None:
-                    await save_browser_action_message(
+                    await _save_browser_action_message(
                         agent_id=agent_id,
                         title=progress_titles.get(stage, "Recovering from browser challenge"),
                         task_id=task_id,
@@ -9131,6 +9819,8 @@ async def _spawn_browser_agent_activity_v3_real(
                             playwright_driver_pid = None
                             raise
                         dom_service = reconnected["dom_service"]
+                        if hasattr(dom_service, "model_visible_value"):
+                            action_history.bind_dom_service(dom_service)
                         dom_page = reconnected["dom_page"]
                         input_page = reconnected["input_page"]
                         playwright_browser = reconnected["playwright_browser"]
@@ -9252,7 +9942,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         # gate already receives blocked_resource_url via recovery_reason.
 
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
-                    current_url = browser_state.get("url", current_url)
+                    current_url = _private_browser_runtime_url(dom_service, browser_state.get("url") or current_url)
                     if config_result is not None:
                         saved_resume = str(config_result.get("saved_url") or "").strip()
                         if saved_resume.startswith(("http://", "https://")) and not str(
@@ -9299,7 +9989,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             f"{recovery_message} Current page URL: {current_url}. "
                             "Continue the task on this page."
                         )
-                    await save_browser_action_message(
+                    await _save_browser_action_message(
                         agent_id=agent_id,
                         title="Browser challenge recovered",
                         task_id=task_id,
@@ -9328,7 +10018,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     }
                 except Exception as exc:
                     error_message = extract_error_message(exc)
-                    await save_browser_action_message(
+                    await _save_browser_action_message(
                         agent_id=agent_id,
                         title="Browser challenge recovery failed",
                         task_id=task_id,
@@ -9388,7 +10078,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 verifier_call_id = str(uuid_module.uuid4())
                 completion_tool_status = "ERROR"
                 try:
-                    await save_browser_action_message(
+                    await sync_user_instructions(require_current_schema=True)
+                    verification_instruction_count = len(user_instruction_messages)
+                    await _save_browser_action_message(
                         agent_id=agent_id,
                         title="\u2696\ufe0f Verifying completion",
                         task_id=task_id,
@@ -9413,6 +10105,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         goal=goal,
                         current_url=current_url,
                         browser_state=verifier_browser_state,
+                        user_instruction_messages=user_instruction_messages,
                         action_history=action_history,
                         config=config,
                         session_id=session_id,
@@ -9420,11 +10113,13 @@ async def _spawn_browser_agent_activity_v3_real(
                         browser_checkpoints=verifier_checkpoints,
                     )
 
-                    verifier_prompt = build_verifier_prompt(
-                        response_schema=transform_schema_for_remote_session(response_schema)
-                    )
+                    if hasattr(dom_service, "model_visible_value"):
+                        verifier_context = _model_visible_browser_verifier_context(verifier_context, dom_service, verifier_browser_state)
 
-                    remote_session_schema = transform_schema_for_remote_session(response_schema)
+                    remote_session_schema = transform_schema_for_remote_session(
+                        _model_visible_browser_output_schema(response_schema, _redact_activity_value)
+                    )
+                    verifier_prompt = build_verifier_prompt(response_schema=remote_session_schema)
 
                     # B2: `check_progress` now forces rose-1-ultra + claude_token
                     # internally. One call site, no LITE fallback — the model arg
@@ -9492,12 +10187,10 @@ async def _spawn_browser_agent_activity_v3_real(
 
                     score = progress_result.get("score", 0.0)
                     v_reasoning = progress_result.get("reasoning", "")
-                    if progress_result.get("structured_response") is not None:
-                        latest_structured_response = progress_result["structured_response"]
 
                     progress_title = f"\u2696\ufe0f Progress: {float(score or 0.0) * 100:.0f}%"
 
-                    await save_browser_action_message(
+                    await _save_browser_action_message(
                         agent_id=agent_id,
                         title=progress_title,
                         task_id=task_id,
@@ -9507,6 +10200,15 @@ async def _spawn_browser_agent_activity_v3_real(
                         action_type="system",
                         tool_call_id=verifier_call_id,
                     )
+                    await sync_user_instructions(require_current_schema=True)
+                    if (
+                        verification_instruction_count != len(user_instruction_messages)
+                        or int(instruction_state.get("schema_user_instruction_count") or 0) < len(user_instruction_messages)
+                    ):
+                        continue
+
+                    if progress_result.get("structured_response") is not None:
+                        latest_structured_response = progress_result["structured_response"]
                     if browser_recorder:
                         await browser_recorder.mark(
                             f"Verifier progress: {float(score or 0.0) * 100:.0f}%",
@@ -9593,7 +10295,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             browser_url=current_url,
                             structured_response=structured_response,
                         )
-                        await save_browser_action_message(
+                        await _save_browser_action_message(
                             agent_id=agent_id,
                             title="\u2713 Task Completed",
                             task_id=task_id,
@@ -9617,6 +10319,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             provider=browser_session_metadata.get("provider"),
                         )
                         await _propagate_browser_credentials_with_progress(
+                            redact=_redact_activity_value,
                             config=config,
                             agent_id=agent_id,
                             task_id=task_id,
@@ -9626,7 +10329,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             message=context_message,
                         )
 
-                        return {
+                        return _visible_activity_result({
                             "status": "completed",
                             "success": True,
                             "message": context_message,
@@ -9637,8 +10340,9 @@ async def _spawn_browser_agent_activity_v3_real(
                             "auth_assistance_resume_mode": auth_assistance_resume_mode,
                             "session_id": session_id,
                             "structured_response": structured_response,
+                            "browser_output_schema": response_schema,
                             "output_files": output_files,
-                        }
+                        })
 
                     verifier_feedback_thinking = f"""I just checked in with verifier for the task and it said:
 <verifier_response>
@@ -9661,7 +10365,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     # rejection where it expects to (the result of the tool it
                     # just called), not as a stray system message.
                     continuing_tool_call_id = str(uuid_module.uuid4())
-                    await save_browser_action_message(
+                    await _save_browser_action_message(
                         agent_id=agent_id,
                         title=f"⚖️ Verifier rejected ({score:.0%}) — continue task",
                         task_id=task_id,
@@ -9722,10 +10426,12 @@ Based on this feedback, I need to continue working on the task and address the i
                         thinking_preview=verifier_feedback_thinking[:200],
                     )
 
+                except (BrowserInstructionUnavailableError, WorkflowGenerationSealed):
+                    raise
                 except Exception as verifier_error:
                     completion_tool_status = "ERROR"
                     logger.error(f"Verifier failed: {verifier_error}")
-                    await save_browser_action_message(
+                    await _save_browser_action_message(
                         agent_id=agent_id,
                         title="\u26a0\ufe0f Verification failed",
                         task_id=task_id,
@@ -9764,6 +10470,9 @@ Based on this feedback, I need to continue working on the task and address the i
             title_progress, title_done, action_name = build_action_titles(
                 action_name, unified_action, element_desc, coords, secret_refs
             )
+            if hasattr(dom_service, "model_visible_value"):
+                title_progress = dom_service.model_visible_value(title_progress)
+                title_done = dom_service.model_visible_value(title_done)
 
             coords_for_cursor = coords
             if not coords_for_cursor and idx is not None:
@@ -9771,7 +10480,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 if coord_tuple:
                     coords_for_cursor = {"x": coord_tuple[0], "y": coord_tuple[1]}
 
-            await save_browser_action_message(
+            await _save_browser_action_message(
                 agent_id=agent_id,
                 title=title_progress,
                 task_id=task_id,
@@ -9969,31 +10678,19 @@ Based on this feedback, I need to continue working on the task and address the i
                 }
             step_timer.mark("execute_action")
             # Nothing a tool read back from the page may carry a secret the tool typed.
-            result = mask_secret_values(result, secret_refs)
+            result = (
+                dom_service.model_visible_action_result(action_name, result)
+                if hasattr(dom_service, "model_visible_action_result")
+                else mask_secret_values(result, secret_refs)
+            )
             state_prefetch.arm(
                 action_name,
                 success=isinstance(result, dict) and bool(result.get("success", True)),
             )
             if isinstance(result, dict) and result.get("current_url"):
-                current_url = str(result.get("current_url") or "")
+                current_url = _private_browser_runtime_url(dom_service, result.get("current_url"))
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
                     visited_urls.append(current_url)
-            if (
-                action_name == "input_text"
-                and result.get("success")
-                and str(unified_action.get("params", {}).get("text", "")) == MINTED_NEW_PASSWORD_REF
-                and current_url
-            ):
-                # The account now exists (or is being created) under this password; keep it.
-                try:
-                    await save_minted_account_password(config, user_id, current_url)
-                except Exception as save_error:
-                    logger.warning(
-                        "Failed to save minted account password",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        error=extract_error_message(save_error),
-                    )
             if (
                 not result.get("credential_ref")
                 and action_name == "input_text"
@@ -10075,6 +10772,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             system_name=system_name,
                             fallback_question=question,
                             pool=browser_pool,
+                            dom_service=dom_service,
                         ),
                         timeout=_notification_timeout_s,
                     )
@@ -10160,18 +10858,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     **(await persist_resume_context(
                         agent_id=agent_id,
                         task_id=task_id,
-                        state=_browser_resume_continuity_state(
-                            action_history=action_history,
-                            visited_urls=visited_urls,
-                            verifier_checkpoints=verifier_checkpoints,
-                            browser_turn_messages=browser_turn_messages,
-                            reasoning_messages=reasoning_messages,
-                            action_summary=action_summary,
-                            auth_runtime_state=auth_runtime_state,
-                        ),
+                        force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+                        state=_pause_continuity_state({
+                            "write_lock_notification": write_lock_notification,
+                            "pending_action_target": llm_result.get("_fast_cache_browser_target"),
+                        }),
                     )),
                 }
                 browser_task_paused_for_resume = True
+                resume_result = _visible_activity_result(resume_result)
                 return resume_result
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
@@ -10198,7 +10893,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 # tool_call_id_action) never gets a matching FINISHED row and the tool call spins
                 # forever in the UI. The request itself succeeded — the approval/mint that follows
                 # is surfaced separately by the workflow's "Payment card ready" event.
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title=title_done,
                     task_id=task_id,
@@ -10249,6 +10944,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         system_name=system_name,
                         fallback_question=f"{system_name} wants to make a purchase. Approve?",
                         pool=browser_pool,
+                        dom_service=dom_service,
                     )
                     payment_write_lock_notification = payment_notification_result.get("notification")
                     payment_write_lock_notification_usage = {
@@ -10300,18 +10996,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     **(await persist_resume_context(
                         agent_id=agent_id,
                         task_id=task_id,
-                        state=_browser_resume_continuity_state(
-                            action_history=action_history,
-                            visited_urls=visited_urls,
-                            verifier_checkpoints=verifier_checkpoints,
-                            browser_turn_messages=browser_turn_messages,
-                            reasoning_messages=reasoning_messages,
-                            action_summary=action_summary,
-                            auth_runtime_state=auth_runtime_state,
-                        ),
+                        force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+                        state=_pause_continuity_state({
+                            "payment_request": payment_request,
+                            "write_lock_notification": payment_write_lock_notification,
+                        }),
                     )),
                 }
                 browser_task_paused_for_resume = True
+                resume_result = _visible_activity_result(resume_result)
                 return resume_result
 
             if result.get("success", True):
@@ -10341,7 +11034,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 if result.get("credential_ref"):
                     auth_runtime_state.mark_credential_ref(result["credential_ref"])
                     extra_metadata = {"credential_ref": result["credential_ref"]}
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title=title_done,
                     task_id=task_id,
@@ -10379,7 +11072,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     action_type="error",
                     tool_call_id=tool_call_id_action,
                 )
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title=title_done,
                     task_id=task_id,
@@ -10453,6 +11146,7 @@ Based on this feedback, I need to continue working on the task and address the i
         # than before) and never blocks the terminal return.
         if latest_structured_response is None and response_schema and dom_service:
             try:
+                await sync_user_instructions(require_current_schema=True)
                 # Re-read the FINAL-state DOM before grading: browser_state was
                 # captured before the last action, so verifying against it evaluates
                 # stale ground truth and can misreport a last-step completion. Fall
@@ -10464,7 +11158,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         dom_service.get_browser_state(include_screenshot=True),
                         timeout=10,
                     )
-                    current_url = final_browser_state.get("url", current_url) or current_url
+                    current_url = _private_browser_runtime_url(dom_service, final_browser_state.get("url") or current_url)
                 except Exception:
                     # Last-known loop observation — prefer a stale-but-real page
                     # over skipping synthesis entirely when the refresh freezes.
@@ -10477,21 +11171,26 @@ Based on this feedback, I need to continue working on the task and address the i
                     goal=goal,
                     current_url=current_url,
                     browser_state=final_browser_state,
+                    user_instruction_messages=user_instruction_messages,
                     action_history=action_history,
                     config=config,
                     session_id=session_id,
                     browser_checkpoints=verifier_checkpoints,
                 )
-                final_verifier_prompt = build_verifier_prompt(
-                    response_schema=transform_schema_for_remote_session(response_schema)
+                if hasattr(dom_service, "model_visible_value"):
+                    final_verifier_context = _model_visible_browser_verifier_context(final_verifier_context, dom_service, final_browser_state)
+                final_remote_schema = transform_schema_for_remote_session(
+                    _model_visible_browser_output_schema(response_schema, _redact_activity_value)
                 )
+                final_verifier_prompt = build_verifier_prompt(response_schema=final_remote_schema)
+                verification_instruction_count = len(user_instruction_messages)
                 final_progress = await call_temporal_activity_from_activity(
                     check_progress,
                     args=[
                         final_verifier_context,
                         final_verifier_prompt,
                         VERIFIER_ULTRA_MODEL,
-                        transform_schema_for_remote_session(response_schema),
+                        final_remote_schema,
                         token_state.access_token,
                         "verifier_browser_max_steps",
                         agent_id,
@@ -10536,8 +11235,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     from_fast_cache=bool(fv_usage.get("from_fast_cache")),
                     cache_sequence_id=fv_usage.get("cache_sequence_id"),
                 )
-                if final_progress.get("structured_response") is not None:
+                await sync_user_instructions(require_current_schema=True)
+                if (
+                    verification_instruction_count == len(user_instruction_messages)
+                    and int(instruction_state.get("schema_user_instruction_count") or 0) >= len(user_instruction_messages)
+                    and final_progress.get("structured_response") is not None
+                ):
                     latest_structured_response = final_progress["structured_response"]
+            except (BrowserInstructionUnavailableError, WorkflowGenerationSealed):
+                raise
             except Exception as final_verifier_error:
                 logger.warning(
                     "[BrowserAgent] Final max-steps verifier pass failed; returning best-effort text only",
@@ -10558,7 +11264,7 @@ Based on this feedback, I need to continue working on the task and address the i
             goal=goal,
         )
 
-        await save_browser_action_message(
+        await _save_browser_action_message(
             agent_id=agent_id,
             title="Task Incomplete - Max Steps Reached",
             task_id=task_id,
@@ -10583,6 +11289,7 @@ Based on this feedback, I need to continue working on the task and address the i
             provider=browser_session_metadata.get("provider"),
         )
         await _propagate_browser_credentials_with_progress(
+            redact=_redact_activity_value,
             config=config,
             agent_id=agent_id,
             task_id=task_id,
@@ -10602,7 +11309,7 @@ Based on this feedback, I need to continue working on the task and address the i
             visited_urls=visited_urls,
         )
 
-        return {
+        return _visible_activity_result({
             "status": "max_iterations",
             "success": False,
             "message": context_message,
@@ -10611,7 +11318,8 @@ Based on this feedback, I need to continue working on the task and address the i
             "execution_time_ms": execution_time_ms,
             "structured_response": latest_structured_response,
             "best_effort_response": best_effort_response,
-        }
+            "browser_output_schema": response_schema,
+        })
 
     except asyncio.CancelledError as cancellation:
         logger.info("\U0001f534 Browser agent activity cancelled (paused)")
@@ -10653,7 +11361,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if task_id:
             with contextlib.suppress(Exception):
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title="Browser Session Cancelled",
                     task_id=task_id,
@@ -10718,9 +11426,11 @@ Based on this feedback, I need to continue working on the task and address the i
             goal=goal,
         )
 
+        error_message = _redact_activity_value(error_message)
+
         if task_id:
             with contextlib.suppress(Exception):
-                await save_browser_action_message(
+                await _save_browser_action_message(
                     agent_id=agent_id,
                     title="Task Failed",
                     task_id=task_id,
@@ -10732,7 +11442,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     is_completion_message=True,
                     output_schema=response_schema,
                     extra_metadata={
-                        "browser_error_type": type(e).__name__,
+                        "browser_error_type": e.original_error_type if isinstance(e, BrowserInstructionUnavailableError) else type(e).__name__,
                         "browser_error_message": extract_error_message(e),
                         "browser_error_context": error_context,
                         "browser_last_action": last_action,
@@ -10741,6 +11451,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
             try:
                 await _propagate_browser_credentials_with_progress(
+                    redact=_redact_activity_value,
                     config=config,
                     agent_id=agent_id,
                     task_id=task_id,
@@ -10755,101 +11466,128 @@ Based on this feedback, I need to continue working on the task and address the i
                     error=extract_error_message(propagation_error),
                 )
 
-        raise
+        if isinstance(e, BrowserInstructionUnavailableError):
+            execution_time_ms = (safe_time() - start_time) * 1000
+            return _visible_activity_result({
+                "status": "failed", "success": False, "error": True,
+                "message": error_message, "task_id": task_id, "session_id": session_id,
+                "browser_error_type": e.original_error_type,
+                "browser_error_message": extract_error_message(e),
+                "browser_output_schema": response_schema, "structured_response": None,
+                "usage_items": build_usage_items(
+                    total_input_tokens, total_output_tokens, model_pricing,
+                    execution_time_ms, usage_by_model, pricing_pool=browser_pool,
+                    fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                    provider=browser_session_metadata.get("provider"),
+                ),
+                "execution_time_ms": execution_time_ms,
+            })
+        safe_error = _redact_browser_activity_error(e, _redact_activity_value)
+        if safe_error is e:
+            raise
+        raise safe_error from None
+
     finally:
-        stop_browser_activity_heartbeat(_heartbeat_token)
-        await _drain_otp_poll(otp_poll_task)
-        state_prefetch.discard()
-        diagnostics_finalized = False
-        if browser_network_recorder is None and network_recorder_task is not None:
-            try:
-                browser_network_recorder = await asyncio.wait_for(
-                    asyncio.shield(network_recorder_task),
-                    timeout=10,
-                )
-            except Exception as diagnostics_resolve_error:
-                logger.warning(
-                    "Browser diagnostics recorder was unavailable before activity return",
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    error=extract_error_message(diagnostics_resolve_error),
-                )
-        if browser_network_recorder is not None:
-            try:
-                await _finalize_browser_diagnostics_for_fe(
-                    browser_network_recorder=browser_network_recorder,
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    user_id=user_id,
-                    browser_url=browser_url,
-                )
-                diagnostics_finalized = True
-            except Exception as diagnostics_error:
-                logger.warning(
-                    "Browser diagnostics finalization failed before activity return",
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    error=extract_error_message(diagnostics_error),
-                )
-        if browser_download_persister is None and download_persister_task is not None:
-            with contextlib.suppress(Exception):
-                browser_download_persister = await asyncio.wait_for(
-                    asyncio.shield(download_persister_task),
-                    timeout=10,
-                )
-        if browser_download_persister is not None:
-            with contextlib.suppress(Exception):
-                await browser_download_persister.close()
-        _schedule_browser_cleanup(
-            agent_id=agent_id,
-            preparation_cancellation=preparation_cancellation,
-            task_id=task_id,
-            user_id=user_id,
-            browser_url=browser_url,
-            browser_session_metadata=dict(browser_session_metadata),
-            input_page=input_page,
-            start_url=start_url,
-            cursor_streamer=cursor_streamer,
-            interaction_layer_task=interaction_layer_task,
-            humanizer=humanizer,
-            browser_network_recorder=None if diagnostics_finalized else browser_network_recorder,
-            network_recorder_task=None if diagnostics_finalized else network_recorder_task,
-            browser_recorder=browser_recorder,
-            dom_service=dom_service,
-            playwright_browser=playwright_browser,
-            playwright_instance=playwright_instance,
-            playwright_driver_pid=playwright_driver_pid,
-            tool_call_id=tool_call_id,
-            # Happy-path / error handlers already post task_complete before
-            # finally. CancelledError also posts one, but force-cancel and
-            # hub-archive races still need cleanup as the terminal safety net.
-            # Pause-for-resume returns must keep the FE chip open for the next
-            # activity call (write / payment / auth assistance).
-            emit_task_terminal=not browser_task_paused_for_resume,
-        )
-        playwright_browser = None
-        playwright_instance = None
-        input_page = None
-        dom_service = None
-        _clear_browser_activity_memory_buffers(
-            action_history=action_history,
-            browser_network_recorder=browser_network_recorder if diagnostics_finalized else None,
-            mutable_buffers=(
-                action_entries,
-                browser_turn_messages,
-                otp_user_messages,
-                seen_otp_codes,
-                visited_urls,
-                reasoning_messages,
-                action_summary,
-                resume_user_messages,
-                session_passwords,
-                session_passkeys,
-                available_file_paths,
-                passkey_ref_by_credential_id,
-                browser_session_metadata,
-            ),
-        )
+        try:
+            stop_browser_activity_heartbeat(_heartbeat_token)
+            await _drain_otp_poll(otp_poll_task)
+            state_prefetch.discard()
+            diagnostics_finalized = False
+            if browser_network_recorder is None and network_recorder_task is not None:
+                try:
+                    browser_network_recorder = await asyncio.wait_for(
+                        asyncio.shield(network_recorder_task),
+                        timeout=10,
+                    )
+                except Exception as diagnostics_resolve_error:
+                    logger.warning(
+                        "Browser diagnostics recorder was unavailable before activity return",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        error=extract_error_message(diagnostics_resolve_error),
+                    )
+            if browser_network_recorder is not None:
+                try:
+                    await _finalize_browser_diagnostics_for_fe(
+                        browser_network_recorder=browser_network_recorder,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        user_id=user_id,
+                        browser_url=browser_url,
+                    )
+                    diagnostics_finalized = True
+                except Exception as diagnostics_error:
+                    logger.warning(
+                        "Browser diagnostics finalization failed before activity return",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        error=extract_error_message(diagnostics_error),
+                    )
+            if browser_download_persister is None and download_persister_task is not None:
+                with contextlib.suppress(Exception):
+                    browser_download_persister = await asyncio.wait_for(
+                        asyncio.shield(download_persister_task),
+                        timeout=10,
+                    )
+            if browser_download_persister is not None:
+                with contextlib.suppress(Exception):
+                    await browser_download_persister.close()
+            _schedule_browser_cleanup(
+                agent_id=agent_id,
+                preparation_cancellation=preparation_cancellation,
+                task_id=task_id,
+                user_id=user_id,
+                browser_url=browser_url,
+                browser_session_metadata=dict(browser_session_metadata),
+                input_page=input_page,
+                start_url=start_url,
+                cursor_streamer=cursor_streamer,
+                interaction_layer_task=interaction_layer_task,
+                humanizer=humanizer,
+                browser_network_recorder=None if diagnostics_finalized else browser_network_recorder,
+                network_recorder_task=None if diagnostics_finalized else network_recorder_task,
+                browser_recorder=browser_recorder,
+                dom_service=dom_service,
+                playwright_browser=playwright_browser,
+                playwright_instance=playwright_instance,
+                playwright_driver_pid=playwright_driver_pid,
+                tool_call_id=tool_call_id,
+                # Happy-path / error handlers already post task_complete before
+                # finally. CancelledError also posts one, but force-cancel and
+                # hub-archive races still need cleanup as the terminal safety net.
+                # Pause-for-resume returns must keep the FE chip open for the next
+                # activity call (write / payment / auth assistance).
+                emit_task_terminal=not browser_task_paused_for_resume,
+            )
+            playwright_browser = None
+            playwright_instance = None
+            input_page = None
+            dom_service = None
+            _clear_browser_activity_memory_buffers(
+                action_history=action_history,
+                browser_network_recorder=browser_network_recorder if diagnostics_finalized else None,
+                mutable_buffers=(
+                    action_entries,
+                    browser_turn_messages,
+                    otp_user_messages,
+                    seen_otp_codes,
+                    visited_urls,
+                    reasoning_messages,
+                    action_summary,
+                    session_passwords,
+                    session_passkeys,
+                    available_file_paths,
+                    passkey_ref_by_credential_id,
+                    browser_session_metadata,
+                ),
+            )
+        except Exception as cleanup_error:
+            safe_error = _redact_browser_activity_error(cleanup_error, _redact_activity_value)
+            if safe_error is cleanup_error:
+                raise
+            raise safe_error from None
+        finally:
+            _secret_log_scope.__exit__(None, None, None)
 
 
 # ========================================
@@ -11246,6 +11984,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "toolApproval": True,
                                 "writePermission": True,
+                                "browserTaskId": result.get("task_id") or known_task_id,
                                 "url": result.get("current_url", ""),
                                 "writeLockNotification": result.get("write_lock_notification"),
                                 "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
@@ -11293,6 +12032,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "pending_action": result.get("pending_action"),
                             "pending_action_target": result.get("pending_action_target"),
                             "write_lock_approvals": current_approvals,
+                            "write_lock_approved_at": approved_at,
                             "approval_type": approval_type,
                             "step_count": result.get("step_count", 0),
                             "session_id": result.get("session_id"),
@@ -11405,6 +12145,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         payment_payload,
                         getattr(workflow_instance, "world_model_mode", "real"),
                     )
+                    if lookup_result.get("usageItems"):
+                        yield ToolEvent(
+                            type=EventType.USAGE,
+                            data={"usage": browser_usage_items_to_tool_usage(lookup_result["usageItems"])},
+                        )
+                    if lookup_result.get("error"):
+                        raise RuntimeError(str(lookup_result["error"]))
                     # Mint uses the same fingerprint as lookup. When a held
                     # purchase was created before canonicalization shipped,
                     # retain its legacy key so the backend returns that card.
@@ -11417,21 +12164,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         reusable=lookup_result.get("reusable"),
                     )
 
-                    # Always surface payment_approval attention — even when a held
-                    # purchase is reusable. Skipping it left fleets with
-                    # attentionRequestId=null, so Place-order write_lock became the
-                    # first observed attention ("Expected payment_approval, observed
-                    # write_lock") and H-06 site unlock was never gated on a real
-                    # approval. Reuse still applies at mint; this only restores the
-                    # approval UX / benchmark contract.
                     approval_resume, parked_approval = parked_approval, None
-                    approval_response = await _request_browser_write_approval_until_paused(
+                    approval_response = reuse_payment_approval(
+                        lookup_result, payment_payload, workflow_instance.agent_id, approval_resume
+                    ) or await _request_browser_write_approval_until_paused(
                         workflow_instance,
                         pause_sequence=payment_pause_sequence,
                         question=build_payment_question(payment_payload),
                         metadata={
                             "toolApproval": True,
                             "writePermission": True,
+                            "browserTaskId": result.get("task_id") or known_task_id,
                             "url": result.get("current_url", "")
                             or current_start_url
                             or start_url,
@@ -11875,6 +12618,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": current_approvals,
+                        "write_lock_approved_at": workflow.now().timestamp(),
                         "approval_type": "payment",
                         "step_count": result.get("step_count", 0),
                         "session_id": result.get("session_id"),
@@ -12095,6 +12839,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 final_metadata["authAssistanceDeclined"] = True
             for key in (
                 "task_id",
+                "browser_error_type",
+                "browser_error_message",
                 "world_model_simulated",
                 "world_model_session_id",
                 "world_model_name",
@@ -12103,8 +12849,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             ):
                 if result.get(key) is not None:
                     final_metadata[key] = result[key]
-            if output_schema:
-                final_metadata["output_schema"] = output_schema
+            final_output_schema = result.get("browser_output_schema") or output_schema
+            if final_output_schema:
+                final_metadata["output_schema"] = final_output_schema
             if result.get("structured_response") is not None:
                 final_metadata["structured_response"] = result["structured_response"]
             if result.get("auth_assistance_resume_mode"):

@@ -1,0 +1,119 @@
+--- a/agents/benchmarks/wmh_rose_provider.py
++++ b/agents/benchmarks/wmh_rose_provider.py
+@@ -1017,7 +1017,7 @@
+                 "result_required": True,
+                 "prefer_azure": self._prefer_azure,
+                 "retry_partial_errors": True,
+-                **({"json_mode": True} if self._json_mode else {}),
++                **({"json_mode": True, "foundry_system_messages_in_input": True} if self._json_mode else {}),
+             }
+             response = await self._client.collect(
+                 **prediction_request,
+--- a/agents/benchmarks/wmh_provider_capture.py
++++ b/agents/benchmarks/wmh_provider_capture.py
+@@ -177,7 +177,7 @@
+         "result_required",
+         "prefer_azure",
+         "retry_partial_errors",
+-        "json_mode",
++        "json_mode", "foundry_system_messages_in_input",
+         "model",
+         "tools",
+         "tool_choice",
+--- a/agents/providers/rose/foundry.py
++++ b/agents/providers/rose/foundry.py
+@@ -90,6 +90,7 @@
+     cache_namespace: Optional[str],
+     ttft_timeout_s: float,
+     idle_timeout_s: Optional[float],
++    system_messages_in_input: bool = False,
+ ) -> AsyncIterator[StreamChunk]:
+     global _auth_cooldown_until
+     endpoint = os.environ["AZURE_FOUNDRY_ENDPOINT"].strip().rstrip("/")
+@@ -123,6 +124,11 @@
+                 # Foundry Standard deployments honor caller cache markers as breakpoints.
+                 cache_breakpoints=True,
+             )
++            if system_messages_in_input and response_format and response_format.get("type") == "json_object":
++                # Preserve the converter's exact instruction aggregation, fallback,
++                # dynamic-boundary handling, and every existing input item.
++                instructions = body.pop("instructions")
++                body["input"] = [{"role": "system", "content": [{"type": "input_text", "text": instructions}]}] + body["input"]
+             if foundry_model(pool_spec) in _NO_REASONING_MODELS:
+                 body.pop("reasoning", None)
+                 body.pop("include", None)
+--- a/agents/providers/rose/client.py
++++ b/agents/providers/rose/client.py
+@@ -936,6 +936,7 @@
+         cache_namespace: Optional[str] = None,
+         prefer_azure: bool = False,
+         json_mode: bool = False,
++        foundry_system_messages_in_input: bool = False,
+         browser_use: bool = False,
+         _exclude_anthropic_family: bool = False,
+         _skip_models: FrozenSet[str] = frozenset(),
+@@ -1928,6 +1929,7 @@
+                             foundry_complete(
+                                 pool_spec=pool_spec,
+                                 messages=messages,
++                                system_messages_in_input=foundry_system_messages_in_input,
+                                 response_format=None if gpt_api_key_tools else openrouter_response_format,
+                                 tools=gpt_api_key_tools,
+                                 context_tools=context_tools,
+@@ -2292,6 +2294,7 @@
+         prefer_azure: bool = False,
+         retry_partial_errors: bool = False,
+         json_mode: bool = False,
++        foundry_system_messages_in_input: bool = False,
+         browser_use: bool = False,
+     ) -> RoseResponse:
+         """Consume the stream into a single `RoseResponse` — convenience for
+@@ -2327,6 +2330,7 @@
+             **({"prefer_azure": True} if prefer_azure else {}),
+             **({"retry_partial_errors": True} if retry_partial_errors else {}),
+             **({"json_mode": True} if json_mode else {}),
++            **({"foundry_system_messages_in_input": True} if foundry_system_messages_in_input else {}),
+         ):
+             if chunk.kind == "restart":
+                 result = RoseResponse()
+--- a/agents/tests/blackbox/rose.blackbox.py
++++ b/agents/tests/blackbox/rose.blackbox.py
+@@ -8408,6 +8408,30 @@
+ # =====================================================================
+ 
+ 
++async def test_foundry_instruction_aggregate_admission():
++ import inspect
++ import providers.rose.foundry as route
++ from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
++ messages=[{'role':'system','content':'  Return JSON. '+SYSTEM_PROMPT_DYNAMIC_BOUNDARY+' dynamic exact.  '},{'role':'developer','content':'Developer unchanged.'},{'role':'system','content':'Second exact.'},{'role':'user','content':[{'type':'text','text':'Inspect item.','cache_control':{'type':'ephemeral'}}]}]
++ seen=[];orig=httpx.AsyncClient;env={'AZURE_FOUNDRY_ENDPOINT':'https://offline.invalid','AZURE_FOUNDRY_API_KEY':'test-only','AZURE_FOUNDRY_DEPLOYMENTS':'gpt-5.6-luna'}
++ class Stop(BaseException):pass
++ def handler(request):seen.append(json.loads(request.content));raise Stop()
++ async def capture(msgs,optin=None,fmt={'type':'json_object'}):
++  kw=dict(pool_spec=get_pool('rose-1-flash'),messages=msgs,response_format=fmt,tools=None,context_tools=None,tool_choice=None,temperature=None,effort=None,provider_fast_mode=True,request_id='same-sanitized-id',route_key='same',agent_id=None,call_site='test',cache_namespace='same-cache',ttft_timeout_s=2,idle_timeout_s=2)
++  if optin is not None and 'system_messages_in_input' in inspect.signature(route.foundry_complete).parameters:kw['system_messages_in_input']=optin
++  try:
++   async for _ in route.foundry_complete(**kw):pass
++  except Stop:pass
++  return seen[-1]
++ with patch.object(route,'os',types.SimpleNamespace(environ=env,getenv=lambda k,d=None:env.get(k,d))),patch.object(route.httpx,'AsyncClient',lambda **kw:orig(transport=httpx.MockTransport(handler),trust_env=False)):
++  for msgs in [messages,[{'role':'system','content':''},{'role':'user','content':'Inspect.'}]]:
++   default=await capture(msgs);false=await capture(msgs,False);assert default==false
++   explicit=await capture(msgs,True)
++   expected=dict(default);instructions=expected.pop('instructions');expected['input']=[{'role':'system','content':[{'type':'input_text','text':instructions}]}]+default['input']
++   assert explicit==expected,'Exact original aggregated instructions must move once into input; all otherbodybytes held'
++   assert await capture(msgs,True,None)==await capture(msgs,False,None)
++   assert sum(p.get('text')==instructions for x in explicit['input'] for p in x.get('content',[]) if isinstance(p,dict))==1
++
+ async def run_all_tests():
+     print("rose blackbox tests:")
+     r = BlackboxResult()
+@@ -8982,6 +9006,7 @@
+     teardown_mock()
+     r.record("build_anthropic_body_omits_effort_for_haiku", test_build_anthropic_body_omits_effort_for_haiku)
+ 
++    await r.record_async("foundry_instruction_aggregate_admission", test_foundry_instruction_aggregate_admission)
+     return r.summary()
+ 
+ 

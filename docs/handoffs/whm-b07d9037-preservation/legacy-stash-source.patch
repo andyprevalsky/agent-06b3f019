@@ -1,0 +1,528 @@
+diff --git a/agents/domains/spawn_agent/handler.py b/agents/domains/spawn_agent/handler.py
+index c9b47d00b..4ea8ee019 100644
+--- a/agents/domains/spawn_agent/handler.py
++++ b/agents/domains/spawn_agent/handler.py
+@@ -39,6 +39,7 @@ from domains.spawn_agent.service import (
+     build_for_each_goal,
+     coerce_for_each_items,
+     compile_explore_wrap_up,
++    fetch_persisted_explore_evidence_activity,
+     resolve_start_phase,
+     spawn_explore_agent_activity,
+     validate_spawn_params,
+@@ -546,6 +547,7 @@ class SpawnAgentManager(ToolManager):
+         goal = tool_call.get("goal", "")
+         ui_goal = display_goal or goal
+         task_id = task_id or str(uuid_module.uuid4())
++        started_at = workflow.now().isoformat()
+         # One classification for depth and the activity's cache identity.
+         # Re-resolving inside the activity from the child goal or Fast Mode
+         # root disagrees (truncated explore goals, resolver failures).
+@@ -715,6 +717,7 @@ class SpawnAgentManager(ToolManager):
+                 # (cutover-class: activity-bound) without awaiting the 600s
+                 # activity timeout. Demo / Fast Mode keeps the full timeout.
+                 was_cancelled = False
++                wait_budget_exhausted = False
+                 try:
+                     await workflow.wait_condition(
+                         lambda: activity_handle.done() or workflow_instance.is_paused,
+@@ -722,6 +725,7 @@ class SpawnAgentManager(ToolManager):
+                     )
+                 except TimeoutError:
+                     if not activity_handle.done():
++                        wait_budget_exhausted = True
+                         logger.info(
+                             "Cancelling explore agent after parent wait budget",
+                             goal=goal[:100],
+@@ -764,6 +768,23 @@ class SpawnAgentManager(ToolManager):
+                         e, user_paused=bool(getattr(workflow_instance, "is_paused", False))
+                     )
+ 
++                # TRY_CANCEL may resolve the handle before Temporal exposes its
++                # heartbeat details. The child has already saved tool results
++                # under task_id; read that durable evidence instead of handing
++                # the parent a success-shaped placeholder that induces a retry.
++                if (
++                    wait_budget_exhausted
++                    and not was_cancelled
++                    and result.get("result") == "Research finished with the evidence gathered so far."
++                    and workflow.patched("explore-wait-persisted-evidence-v1")
++                ):
++                    result = await workflow.execute_activity(
++                        fetch_persisted_explore_evidence_activity,
++                        args=[workflow_instance.agent_id, task_id, started_at],
++                        start_to_close_timeout=timedelta(seconds=45),
++                        retry_policy=RetryPolicy(maximum_attempts=1),
++                    )
++
+             if was_cancelled:
+                 logger.info("Explore agent cancelled", goal=goal[:100])
+                 yield ToolEvent(
+diff --git a/agents/domains/spawn_agent/service.py b/agents/domains/spawn_agent/service.py
+index 350bf32ec..8e25748a9 100644
+--- a/agents/domains/spawn_agent/service.py
++++ b/agents/domains/spawn_agent/service.py
+@@ -32,6 +32,7 @@ from domains.spawn_agent.repo import (
+     save_explore_message,
+ )
+ from domains.spawn_agent.types import VALID_AGENT_TYPES
++from helpers.fetch_config import _fetch_agent_data_impl
+ from helpers.tracing import span, traced
+ from helpers.workflow_generation import WorkflowGenerationSealed
+ from tools.base import MessageStatus
+@@ -78,6 +79,9 @@ _TOOL_EVIDENCE_METADATA_KEYS = {
+ 
+ EXPLORE_FALLBACK_PAYLOAD_BUDGET = 12_000
+ _EXPLORE_STUB_MARKERS = ("fast mode", "cached trajectory")
++_EXPLORE_EVIDENCE_TOOLS = frozenset(
++    {"web_search", "web_fetch", "grep", "people_search", "api_request"}
++)
+ 
+ 
+ def compile_explore_wrap_up(
+@@ -115,6 +119,53 @@ def compile_explore_wrap_up(
+     return compiled
+ 
+ 
++def persisted_explore_tool_evidence(messages: List[Dict[str, Any]], task_id: str) -> List[str]:
++    """Recover only completed evidence tools from one explore task's durable messages."""
++    evidence: List[str] = []
++    for message in messages:
++        metadata = message.get("metadata") or {}
++        if not isinstance(metadata, dict) or metadata.get("taskId") != task_id:
++            continue
++        if message.get("role") != "TOOL" or metadata.get("toolStatus") != "FINISHED":
++            continue
++        tool_name = metadata.get("toolName")
++        if tool_name not in _EXPLORE_EVIDENCE_TOOLS:
++            continue
++        raw = str(message.get("text") or "").strip()
++        # Older workers did not stamp fullToolEvidence. Their tool-manager
++        # messages can still be distinguished from 500-character UI copies.
++        if metadata.get("fullToolEvidence") is not True and len(raw) <= EXPLORE_MESSAGE_TRUNCATE_LEN:
++            continue
++        if "**Result:**" not in raw:
++            continue
++        result = raw.split("**Result:**", 1)[1].strip()
++        if result and _has_usable_tool_evidence(result):
++            evidence.append(f"[{tool_name}] {result}")
++    return evidence
++
++
++@activity.defn
++async def fetch_persisted_explore_evidence_activity(
++    agent_id: str, task_id: str, since: Optional[str] = None
++) -> Dict[str, Any]:
++    """Return the task's saved research when its activity exceeds the parent wait."""
++    activity.heartbeat("Fetching persisted explore evidence")
++    data = await _fetch_agent_data_impl(agent_id, since=since)
++    evidence = persisted_explore_tool_evidence(data.get("messages") or [], task_id)
++    # This result enters the parent LLM's tool context. Keep complete tool
++    # output here; the existing UI-only wrap-up budget must not cut citations
++    # or answers from model-visible evidence.
++    result = "\n\n".join(evidence)
++    if not result:
++        return {
++            "status": "failed",
++            "error_reason": "Explore research exceeded its wait budget without saved tool evidence.",
++            "result": "",
++            "tool_call_results": [],
++        }
++    return {"status": "completed", "result": result, "tool_call_results": evidence}
++
++
+ _SOURCE_GOAL_TERMS = {
+     "email": ("email", "gmail"),
+     "gmail": ("email", "gmail"),
+@@ -522,6 +573,13 @@ async def spawn_explore_agent_activity(
+                 metadata["taskId"] = task_id
+                 metadata["agentType"] = "explore"
+                 metadata["subAgentId"] = task_id
++                if (
++                    metadata.get("toolName") in _EXPLORE_EVIDENCE_TOOLS
++                    and metadata.get("toolStatus") == MessageStatus.FINISHED.value
++                ):
++                    # Tool managers persist the full result separately from
++                    # explore_post_message's 500-character UI progress copy.
++                    metadata["fullToolEvidence"] = True
+                 tool_call_id = metadata.get("toolCallId")
+                 chain_key = str(tool_call_id) if tool_call_id else None
+             _dispatch_fe_post(
+diff --git a/agents/tests/blackbox/spawn_agent.blackbox.py b/agents/tests/blackbox/spawn_agent.blackbox.py
+index cb97fa00f..dedd9786e 100644
+--- a/agents/tests/blackbox/spawn_agent.blackbox.py
++++ b/agents/tests/blackbox/spawn_agent.blackbox.py
+@@ -460,6 +460,7 @@ class _FakeSpawnWF:
+         activity_results=None,
+         start_activity_result=None,
+         wait_condition_raises=None,
++        patch_result=True,
+     ):
+         self._activity_results = activity_results or {}
+         self.activity_calls = []
+@@ -476,11 +477,15 @@ class _FakeSpawnWF:
+         self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
+         self.wait_condition_timeouts = []
+         self._wait_condition_raises = list(wait_condition_raises or [])
++        self._patch_result = patch_result
+         import temporalio.workflow as real
+ 
+         self.unsafe = real.unsafe
+         self.ActivityCancellationType = real.ActivityCancellationType
+ 
++    def patched(self, _patch_id):
++        return self._patch_result
++
+     def now(self):
+         from datetime import datetime, timezone
+ 
+@@ -1176,7 +1181,7 @@ async def test_handler_explore_timeout_without_heartbeat_still_finishes():
+ 
+ 
+ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
+-    """Hung explore after parent wait + cancel grace FINISHES without unbounded await.
++    """Hung explore recovers its saved tools without awaiting an unbounded handle.
+ 
+     53831ac9 cancelled at the parent-wait budget then `await activity_handle`
+     blocked until the 600s activity timeout, tying the 600s smoke cap.
+@@ -1189,7 +1194,15 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
+ 
+     handle = _Activity(done=False, result={"result": "must not await this handle"})
+     fake = _FakeSpawnWF(
+-        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
++        activity_results={
++            "fetch_full_network_metadata": "",
++            "fetch_local_data_summary": "",
++            "fetch_persisted_explore_evidence_activity": {
++                "status": "completed",
++                "result": "[web_search] Census QuickFacts NYC 8,584,629",
++                "tool_call_results": ["[web_search] Census QuickFacts NYC 8,584,629"],
++            },
++        },
+         start_activity_result=handle,
+         wait_condition_raises=[True, True],
+     )
+@@ -1206,14 +1219,161 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
+         restore()
+ 
+     finished = next(event for event in events if event.status == MessageStatus.FINISHED)
+-    assert "evidence gathered" in finished.message.lower()
++    assert "8,584,629" in finished.message
+     assert not any(event.status == MessageStatus.ERROR for event in events)
+     assert handle._cancelled
+     assert not handle._awaited
+     assert fake.wait_condition_timeouts == [LIVE_EXPLORE_PARENT_WAIT, EXPLORE_CANCEL_GRACE]
++    assert any(call["name"] == "fetch_persisted_explore_evidence_activity" for call in fake.activity_calls)
+     assert 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE) <= timedelta(seconds=540)
+ 
+ 
++async def test_persisted_explore_evidence_is_task_scoped():
++    """A timed-out NYC search returns its saved result, not sibling research."""
++    from domains.spawn_agent.service import fetch_persisted_explore_evidence_activity
++
++    messages = [
++        {
++            "role": "TOOL",
++            "text": "**Result:** Tokyo 14,296,683",
++            "metadata": {"taskId": "tokyo", "toolName": "web_search", "toolStatus": "FINISHED"},
++        },
++        {
++            "role": "TOOL",
++            "text": "**Params Passed:** NYC 2025\n**Result:** U.S. Census QuickFacts: New York city, New York; July 1, 2025 population 8,584,629.",
++            "metadata": {"taskId": "nyc", "toolName": "web_search", "toolStatus": "FINISHED", "fullToolEvidence": True},
++        },
++        {
++            "role": "TOOL",
++            "text": "**Params Passed:** NYC 2025\n**Result:** U.S. Census QuickFacts: New York city...",
++            "metadata": {"taskId": "nyc", "toolName": "web_search", "toolStatus": "FINISHED"},
++        },
++        {
++            "role": "TOOL",
++            "text": "**Result:** Legacy full tool-manager result: " + "official source " * 45,
++            "metadata": {"taskId": "nyc", "toolName": "web_search", "toolStatus": "FINISHED"},
++        },
++        {
++            "role": "TOOL",
++            "text": "**Result:** Error: the source returned a 429",
++            "metadata": {"taskId": "nyc", "toolName": "web_fetch", "toolStatus": "FINISHED", "fullToolEvidence": True},
++        },
++        {
++            "role": "TOOL",
++            "text": "**Result:** incomplete fetch",
++            "metadata": {"taskId": "nyc", "toolName": "web_fetch", "toolStatus": "IN_PROGRESS"},
++        },
++    ]
++
++    async def fetch(_agent_id, since=None):
++        assert since == "2026-10-01T04:04:17+00:00"
++        return {"messages": messages}
++
++    with patch("domains.spawn_agent.service._fetch_agent_data_impl", side_effect=fetch), patch(
++        "temporalio.activity.heartbeat"
++    ):
++        result = await fetch_persisted_explore_evidence_activity(
++            "agent-1", "nyc", "2026-10-01T04:04:17+00:00"
++        )
++        missing = await fetch_persisted_explore_evidence_activity(
++            "agent-1", "missing", "2026-10-01T04:04:17+00:00"
++        )
++
++    assert result["status"] == "completed"
++    assert "8,584,629" in result["result"]
++    assert "Tokyo" not in result["result"]
++    assert "incomplete" not in result["result"]
++    assert "source returned a 429" not in result["result"]
++    assert "city..." not in result["result"]
++    assert "Legacy full tool-manager result" in result["result"]
++    assert missing["status"] == "failed"
++    assert "without saved tool evidence" in missing["error_reason"]
++
++
++async def test_persisted_explore_evidence_keeps_answer_beyond_ui_budget():
++    from domains.spawn_agent.service import fetch_persisted_explore_evidence_activity
++
++    async def fetch(_agent_id, since=None):
++        return {"messages": [{
++            "role": "TOOL",
++            "text": "**Result:** " + ("source table row " * 900) + " Tokyo 14,296,683",
++            "metadata": {
++                "taskId": "tokyo", "toolName": "web_fetch", "toolStatus": "FINISHED",
++                "fullToolEvidence": True,
++            },
++        }]}
++
++    with patch("domains.spawn_agent.service._fetch_agent_data_impl", side_effect=fetch), patch(
++        "temporalio.activity.heartbeat"
++    ):
++        result = await fetch_persisted_explore_evidence_activity("agent-2", "tokyo")
++
++    assert len(result["result"]) > 12_000
++    assert result["result"].endswith("Tokyo 14,296,683")
++
++
++async def test_handler_explore_wait_without_saved_evidence_reports_error():
++    from domains.spawn_agent.handler import SpawnAgentManager
++    from tools.base import MessageStatus
++
++    fake = _FakeSpawnWF(
++        activity_results={
++            "fetch_full_network_metadata": "",
++            "fetch_local_data_summary": "",
++            "fetch_persisted_explore_evidence_activity": {
++                "status": "failed",
++                "error_reason": "Explore research exceeded its wait budget without saved tool evidence.",
++                "result": "",
++                "tool_call_results": [],
++            },
++        },
++        start_activity_result=_Activity(done=False),
++        wait_condition_raises=[True, True],
++    )
++    restore = _patch_spawn_workflow(fake)
++    try:
++        events = await _collect(
++            SpawnAgentManager()._spawn_explore(
++                workflow_instance=_FakeWFInstance(),
++                tool_call={"type": "explore", "goal": "research NYC population"},
++                tool_call_id="tc-no-evidence",
++            )
++        )
++    finally:
++        restore()
++
++    assert events[-1].status == MessageStatus.ERROR
++    assert "without saved tool evidence" in events[-1].message
++
++
++async def test_old_explore_history_replays_without_new_activity():
++    """Temporal histories predating the patch retain their recorded placeholder."""
++    from domains.spawn_agent.handler import SpawnAgentManager
++
++    fake = _FakeSpawnWF(
++        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
++        start_activity_result=_Activity(done=False),
++        wait_condition_raises=[True, True],
++        patch_result=False,
++    )
++    restore = _patch_spawn_workflow(fake)
++    try:
++        events = await _collect(
++            SpawnAgentManager()._spawn_explore(
++                workflow_instance=_FakeWFInstance(),
++                tool_call={"type": "explore", "goal": "research NYC population"},
++                tool_call_id="tc-old-history",
++            )
++        )
++    finally:
++        restore()
++
++    assert "evidence gathered" in events[-1].message.lower()
++    assert not any(
++        call["name"] == "fetch_persisted_explore_evidence_activity" for call in fake.activity_calls
++    )
++
++
+ async def test_handler_explore_cancel_grace_awaits_when_handle_completes():
+     """If cancel finishes the activity inside the grace window, use that result."""
+     from domains.spawn_agent.handler import SpawnAgentManager
+@@ -4178,13 +4338,23 @@ async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
+ 
+     async def fake_run_agent(**kwargs):
+         execute_tool = kwargs["execute_tool"]
+-        # Force a fake manager whose execute_tool internally calls tagged_execute_activity
+-        # We can't easily reach tagged_execute_activity without reconstructing pieces.
+-        # But we still cover the wrapper flow indirectly through web_search.
++        await execute_tool("web_search", {"query": "NYC"}, "search-1")
+         return {"status": "completed", "final_response": "done"}
+ 
+     fake_ws = MagicMock()
+-    fake_ws.execute_tool = AsyncMock(return_value={"result": "ok"})
++
++    async def fake_web_search_execute(**kwargs):
++        await kwargs["execute_activity"](
++            fake_post_agent_message,
++            args=["a", "**Result:** Census NYC 8,584,629", "TOOL", {
++                "toolName": "web_search",
++                "toolStatus": "FINISHED",
++                "toolCallId": "search-1",
++            }],
++        )
++        return {"result": {"answer": "Census NYC 8,584,629"}}
++
++    fake_ws.execute_tool = AsyncMock(side_effect=fake_web_search_execute)
+ 
+     with (
+         patch("temporalio.activity.heartbeat"),
+@@ -4197,6 +4367,10 @@ async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
+     ):
+         await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m", task_id="tt")
+ 
++    metadata = next(call["args"][3] for call in captured_args if call["name"] == "post_agent_message")
++    assert metadata["taskId"] == "tt"
++    assert metadata["fullToolEvidence"] is True
++
+ 
+ async def run_all_tests():
+     print("spawn-agent blackbox tests:")
+@@ -4277,6 +4451,22 @@ async def run_all_tests():
+         "handler_explore_cancel_grace_wraps_up_without_awaiting_handle",
+         test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle,
+     )
++    await r.record_async(
++        "persisted_explore_evidence_is_task_scoped",
++        test_persisted_explore_evidence_is_task_scoped,
++    )
++    await r.record_async(
++        "persisted_explore_evidence_keeps_answer_beyond_ui_budget",
++        test_persisted_explore_evidence_keeps_answer_beyond_ui_budget,
++    )
++    await r.record_async(
++        "handler_explore_wait_without_saved_evidence_reports_error",
++        test_handler_explore_wait_without_saved_evidence_reports_error,
++    )
++    await r.record_async(
++        "old_explore_history_replays_without_new_activity",
++        test_old_explore_history_replays_without_new_activity,
++    )
+     await r.record_async(
+         "handler_explore_cancel_grace_awaits_when_handle_completes",
+         test_handler_explore_cancel_grace_awaits_when_handle_completes,
+diff --git a/agents/worker.py b/agents/worker.py
+index a3d3f0715..542882165 100644
+--- a/agents/worker.py
++++ b/agents/worker.py
+@@ -67,6 +67,7 @@ from domains.request_user_approval.repo import (
+ from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
+ from domains.spawn_agent.service import (
+     _resolve_explore_attachments_activity,
++    fetch_persisted_explore_evidence_activity,
+     fetch_full_network_metadata,
+     spawn_explore_agent_activity,
+ )
+@@ -1101,6 +1102,7 @@ async def main():
+         summarize_tool_result,
+         summarize_and_filter_links,
+         spawn_explore_agent_activity,
++        fetch_persisted_explore_evidence_activity,
+         _resolve_explore_attachments_activity,
+         fetch_full_network_metadata,
+         evaluate_condition_activity,
+diff --git a/docs/rca/INDEX.md b/docs/rca/INDEX.md
+index 26c1b7fe0..ad3379d9c 100644
+--- a/docs/rca/INDEX.md
++++ b/docs/rca/INDEX.md
+@@ -2,7 +2,7 @@
+ 
+ Generated by `python3 scripts/rca_archive.py reindex` — do not hand-edit.
+ 
+-500 cases. Search with `python3 scripts/rca_archive.py search "<symptom terms>"`.
++501 cases. Search with `python3 scripts/rca_archive.py search "<symptom terms>"`.
+ 
+ - [2026-09-30-tool-union-validation-summary-hides-selected-branch](cases/2026-09-30-tool-union-validation-summary-hides-selected-branch.md)
+   - `2026-09-30` · `our-bug` · `logical-inconsistency-in-harness-contracts`
+@@ -19,6 +19,9 @@ Generated by `python3 scripts/rca_archive.py reindex` — do not hand-edit.
+ - [2026-09-30-indexeddb-memory-blackbox-shared-fixture-identity](cases/2026-09-30-indexeddb-memory-blackbox-shared-fixture-identity.md)
+   - `2026-09-30` · `test-bug` · `fixture-environment-data-mismatch`
+   - Parallel IndexedDB memory tests shared a temp payload path and database user
++- [2026-09-30-explore-wait-cancel-drops-saved-tool-evidence](cases/2026-09-30-explore-wait-cancel-drops-saved-tool-evidence.md)
++  - `2026-09-30` · `our-bug` · `logical-inconsistency-in-harness-contracts`
++  - Explore wait cancellation discarded saved research and retriggered child searches
+ - [2026-09-30-e2b-smoke-command-targeted-stack-database](cases/2026-09-30-e2b-smoke-command-targeted-stack-database.md)
+   - `2026-09-30` · `test-bug` · `fixture-environment-data-mismatch`
+   - Deploy E2B smoke command named the stack database instead of its isolated test database
+diff --git a/scripts/publish_evidence_links.py b/scripts/publish_evidence_links.py
+index 142c680b5..7b348b176 100755
+--- a/scripts/publish_evidence_links.py
++++ b/scripts/publish_evidence_links.py
+@@ -10,7 +10,8 @@ cited in approvals must outlive that stack:
+     Verification fails closed unless every browser agent on that FE link has
+     terminated (``task_complete``) with a correctly attached recording.
+   * LLM dump → HTML under ``/opt/cursor/artifacts/rca_evidence/<agent_id>/``
+-    (Cursor uploads these for multi-day reachability in the agent UI)
++    on Cursor Cloud, or ``.context/rca_evidence/<agent_id>/`` on macOS.
++    ``RCA_EVIDENCE_DIR`` overrides either location.
+ 
+ Usage:
+ 
+@@ -40,7 +41,16 @@ from pathlib import Path
+ REPO_ROOT = Path(__file__).resolve().parents[1]
+ DEFAULT_HUB = "https://navi-j9a9.onrender.com"
+ DURABLE_ORIGIN = "https://www.roselabs.ai"
+-ARTIFACTS_ROOT = Path("/opt/cursor/artifacts/rca_evidence")
++ARTIFACTS_ROOT = Path(
++    os.environ.get(
++        "RCA_EVIDENCE_DIR",
++        str(
++            REPO_ROOT / ".context" / "rca_evidence"
++            if sys.platform == "darwin"
++            else Path("/opt/cursor/artifacts/rca_evidence")
++        ),
++    )
++)
+ _AGENT_ID_RE = re.compile(
+     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+     re.IGNORECASE,
+diff --git a/scripts/tests/publish_evidence_links_browser_validation.test.sh b/scripts/tests/publish_evidence_links_browser_validation.test.sh
+index f06e0c937..5e5aff09a 100755
+--- a/scripts/tests/publish_evidence_links_browser_validation.test.sh
++++ b/scripts/tests/publish_evidence_links_browser_validation.test.sh
+@@ -10,6 +10,7 @@ python3 - <<'PY'
+ from __future__ import annotations
+ 
+ import importlib.util
++import sys
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -19,6 +20,11 @@ mod = importlib.util.module_from_spec(spec)
+ assert spec.loader is not None
+ spec.loader.exec_module(mod)
+ 
++# The publisher must be usable from local macOS worktrees as well as Cursor
++# Cloud; /opt/cursor is not writable on the Mac deploy host.
++if sys.platform == "darwin":
++    assert mod.ARTIFACTS_ROOT == mod.REPO_ROOT / ".context" / "rca_evidence"
++
+ # Avoid network probes in unit checks: stub URL/pointer reachability.
+ mod._probe_recording_view_url = lambda url, timeout=20.0: url.startswith("https://ok/")  # type: ignore[assignment]
+ mod._probe_recording_file_pointer = (  # type: ignore[assignment]

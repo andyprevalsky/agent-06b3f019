@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private/whm-e9afcffd/run17-closeout-analysis-20261014.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "4abe531bb4b43343c569c6b2dfe990c411421418e417256e0c75133e1f54a60a",
+  "gzip_sha256": "1c0477028b8e9776981e6aaa4264ca3191865b1c8777582c97de73ad4ef91751",
+  "stored_bytes": 1110126,
+  "frames": 1,
+  "files": 40,
+  "original_bytes": 4521519,
+  "manifest_sha256": "a2c15b77b00541c1a0d336e111fe3efd6bdc2da1bca0c22e4ced2d88c9e92c6b",
+  "full_readback_verified": true
+}

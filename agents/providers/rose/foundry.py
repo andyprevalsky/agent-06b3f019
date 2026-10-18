@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -181,6 +182,7 @@ async def foundry_complete(
     cache_namespace: Optional[str],
     ttft_timeout_s: float,
     idle_timeout_s: Optional[float],
+    max_tokens: Optional[int] = None,
 ) -> AsyncIterator[StreamChunk]:
     model = foundry_model(pool_spec)
     regions = foundry_regions()
@@ -217,7 +219,11 @@ async def foundry_complete(
                 provider_fast_mode=provider_fast_mode,
                 cache_namespace=cache_namespace,
                 request_id=request_id,
+                # Foundry Standard deployments honor caller cache markers as breakpoints.
+                cache_breakpoints=True,
             )
+            if max_tokens is not None:
+                body["max_output_tokens"] = max_tokens
             if model in _NO_REASONING_MODELS:
                 body.pop("reasoning", None)
                 body.pop("include", None)
@@ -228,6 +234,9 @@ async def foundry_complete(
                 ) as response:
                     if response.status_code != 200:
                         status = response.status_code
+                        from providers.rose.whm_retry_observation import observe_http_failure
+
+                        await observe_http_failure(foundry_model(pool_spec), response, body_read_required=True)
                         # Consume the error for connection reuse; never log its body or key.
                         await response.aread()
                         last_error = _record_http_failure(status, region, deployment, response.headers)
@@ -270,7 +279,8 @@ async def foundry_complete(
                         # An in-stream request-shape rejection is the same everywhere.
                         if isinstance(exc, RoseInvalidRequest):
                             break
-            except httpx.TransportError as exc:
+            # TLS record alerts can escape httpx as raw SSLError while reading headers.
+            except (httpx.TransportError, ssl.SSLError) as exc:
                 if yielded_visible:
                     raise
                 last_error = RoseServerError(f"Foundry transport failed: {type(exc).__name__}")

@@ -1,0 +1,332 @@
+{
+  "format": "rose.whm.final-run-receipt.v1",
+  "run_number": 18,
+  "utc": "2026-10-15T01:29:26.042046+00:00",
+  "task": "raise-5m-rose-labs-brex",
+  "source_sha": "fa0314af031672bcc79f644ad865dfdea6d08fd2",
+  "run_id": "wmh-run18-e9afcffd-1792021429",
+  "hub_id": "0efc32f0-b2cf-4362-94f1-f24733188244",
+  "root_agent_id": "7db40906-6188-43a3-bd1e-2f721231d689",
+  "native_session_id": "5f70248874de481cbdd5ca5e00f3b45a",
+  "replacement_box_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+  "task_prompt": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+  "timing": {
+    "attempt_trigger_utc": "2026-10-14T23:43:49.635293Z",
+    "workflow_start_utc": "2026-10-14T23:58:50.319756Z",
+    "controller_end_utc": "2026-10-15T01:02:00.553565Z",
+    "execution_timeout_seconds": 3605,
+    "task_total_seconds": 3753.8,
+    "task_limit_seconds": 3600
+  },
+  "outcome": {
+    "passed": false,
+    "benchmark_status": "FAILED",
+    "original_agent_status": "ACTIVE",
+    "failure": "Execution-window timeout; root did not reach COMPLETED.",
+    "original_progress_counter": 0.5,
+    "counter_calibrated": false,
+    "canonical_sha256": "b5c517faf25a4b35e7a5bba836a9b78e8123cbc1d4a0c601cf8a927f3d786f68"
+  },
+  "goal_progress": {
+    "estimate": 25,
+    "band": [
+      20,
+      29
+    ],
+    "confidence": "LOW, uncalibrated stage estimate; not percentage of capital raised",
+    "stage": "Initial outreach",
+    "previous_run17_estimate": 26,
+    "comparison": "No verified stage advance beyond initial outreach; estimates not a calibrated numeric comparison.",
+    "settled_proceeds_usd": 0
+  },
+  "trajectory": {
+    "native_positive_form_submission_events": 16,
+    "unique_form_destinations": 9,
+    "repeat_form_events_same_destination": 7,
+    "form_counts_by_destination": {
+      "Soma": 2,
+      "Precursor": 2,
+      "Forum": 2,
+      "Unusual": 1,
+      "Scribble": 1,
+      "Susa": 2,
+      "Afore": 2,
+      "Human Capital": 2,
+      "Craft": 2
+    },
+    "email_send_events": 3,
+    "automated_acknowledgments": 1,
+    "personal_investor_replies": 0,
+    "new_intro_sends": 0,
+    "new_source_qualified_warm_connections": 0,
+    "meetings_scheduled": 0,
+    "meetings_held": 0,
+    "commitments": 0,
+    "signed_instruments": 0,
+    "pending_wires": 0,
+    "settled_proceeds_cents": 0,
+    "docs": 6,
+    "folders": 2,
+    "scheduled_private_review_reminders": 2,
+    "conditional_future_reply_placeholders": 1,
+    "assigned_unique_prospect_routes": 28
+  },
+  "native": {
+    "revision": 355,
+    "literal_commits_verified": 355,
+    "valid_prediction_responses": 357,
+    "error_captures": {
+      "protocol": 6,
+      "cancelled": 1
+    },
+    "retirement_join_verified": true,
+    "retirement_sha256": "15acdf67c96944f46b416dd7a969dcbb2cb5b67ab5a89b646194af15736fc2b7",
+    "observation_scope": "Simulated native observations; independent external delivery/artifact proof remains open."
+  },
+  "late_blocker": {
+    "observation": "One Soma child kept verifying receipts/replies after earlier 20-check wait exhaustion; later selected hourly max24 check wait. 28 other children done; root waiting.",
+    "cause_status": "Negative/exhausted results delivered. No scheduler, result-delivery or clock defect proved."
+  },
+  "cache": {
+    "DEMO": {
+      "enabled": true,
+      "hits": 1,
+      "lookups": 779,
+      "hit_percent": 0.12836970474967907,
+      "agent_hits": 1,
+      "native_hits": 0
+    },
+    "Agent_prompt": {
+      "read_tokens": 5401921,
+      "inclusive_prompt_tokens": 6887890,
+      "hit_percent": 78.42635407940602
+    },
+    "WHM_prompt": {
+      "read_tokens": 47976590,
+      "inclusive_prompt_tokens": 241266256,
+      "hit_percent": 19.8853295091544
+    },
+    "retained_owner_oid": 69016,
+    "retained_rows": 2430,
+    "prior_rows_unchanged": 1659,
+    "new_payloads_matched": {
+      "agent": 414,
+      "native": 357
+    },
+    "rejected_fragments_checked": 69,
+    "identical_rejected_fragments_stored": 0,
+    "independent_exact_native_key_derivation": "OPEN: offline control lacked original simulation namespace. No key remapping or cache defect inferred.",
+    "canonical_report_79_1_percent": "Preserved original; different scope/denominator including DEMO, not substituted for paid prompt ratios."
+  },
+  "llm_latency": {
+    "Agent": {
+      "raw_Rose_route_attempt_e2e_timestamp_seconds": {
+        "n": 456,
+        "avg_s": 8.854083660087719,
+        "p95_s": 28.848879,
+        "p99_s": 53.818393
+      },
+      "emitted_monotonic_subset": {
+        "n": 1,
+        "avg_s": 3.121,
+        "p95_s": 3.121,
+        "p99_s": 3.121
+      },
+      "unmatched_start_count": 0,
+      "qualification": "One terminal route event per request_id; Foundry.done is a route return. Recovery creates new requestIDs; these are not native whole-call/benchmark critical-path latencies. Second-resolution timestamp durations have quantization error. Unmatched attempts not assigned zero. Prior undercount claim remains withdrawn.",
+      "timestamp_precision": "Worker structured JSON timestamps microsecond precision"
+    },
+    "WMH": {
+      "raw_Rose_route_attempt_e2e_timestamp_seconds": {
+        "n": 425,
+        "avg_s": 28.36470588235294,
+        "p95_s": 117.0,
+        "p99_s": 177.0
+      },
+      "emitted_monotonic_subset": {
+        "n": 69,
+        "avg_s": 100.7893188405797,
+        "p95_s": 177.676,
+        "p99_s": 291.107
+      },
+      "unmatched_start_count": 2,
+      "qualification": "One terminal route event per request_id; Foundry.done is a route return. Recovery creates new requestIDs; these are not native whole-call/benchmark critical-path latencies. Second-resolution timestamp durations have quantization error. Unmatched attempts not assigned zero. Prior undercount claim remains withdrawn.",
+      "timestamp_precision": "WMH text logs second precision; quantized timestamp durations"
+    }
+  },
+  "cost": {
+    "currency": "USD",
+    "known_final_usage_estimate": 107.94201665719999,
+    "Azure_direct_estimate": 105.18099533999998,
+    "other_provider_estimate": 2.7610213172000044,
+    "agent_model_estimate": 8.613546199999998,
+    "WHM_model_estimate": 99.32847045719998,
+    "legacy_estimate_preserved": 125.05406540719999,
+    "final_metered_rows": {
+      "agent": 455,
+      "WHM": 424
+    },
+    "total_billed_cost": "UNKNOWN",
+    "qualification": "Arithmetic correction only under retained historical model-rate/SKU assumptions; no authenticated upstream SSE, invoice, rate/SKU/provider qualification inferred. Azure write and high-context pricing assumptions retained unverified. Qwen historical tuple differs repo rates; neither is invoice. OpenRouter cached writes not separately priced in this retained input/read projection.",
+    "additional_unknowns": [
+      "Effective historical SKU/region/route rates",
+      "Extra cache-write/storage charges",
+      "Unlogged or partial attempts without final usage",
+      "Infrastructure spend"
+    ],
+    "arithmetic_correction": "Inclusive input minus cached reads replaces overlapping derived total for Google/Qwen input. Same-row control 34 failures to zero; original counters and runtime unchanged."
+  },
+  "fixture": {
+    "source": "whm_gen1_e9afcffd_fixture_20261012",
+    "oid": 22067,
+    "people": 2225,
+    "messages": 42910,
+    "seed_message_limit": 100000,
+    "initial_state_sha256": "009394a4fc293c14230d15d4fc70b798876fb2d8ec4489ba3b4db560343ba5d1",
+    "prefix_verification": "First two actual native captures, both copies, exact 2225 by 33 approved values/types.",
+    "limit": "Not a claim every raw message body was admitted in every prediction."
+  },
+  "tests": {
+    "committed_runtime_passed": 488,
+    "private_schema_candidate_passed": 488,
+    "WHM_unit": 242,
+    "Rose_blackbox": 234,
+    "cache_client": 10,
+    "wire_stream": 2,
+    "scope": "Offline owning controls; no new paid RCA, native service build or full live suite."
+  },
+  "cleanup": {
+    "benchmark_and_stack_token_matched_clean": true,
+    "exact_owner_PIDs_absent": true,
+    "native_parent_and_child_absent": true,
+    "native_join_verified": true,
+    "benchmark_database": "Already removed by canonical cleanup before preservation; not reconstructed.",
+    "source_fixture_retained": true,
+    "retained_cache_dump": {
+      "bytes": 9117283,
+      "sha256": "0b106dfbe3e81bf83466aa2a250f5190617cebcacab3f1eb668e4fdea541cedf",
+      "consistent_pg_dump": true,
+      "restore_list_verified": true
+    }
+  },
+  "evidence": {
+    "frontend_canonical_url": "https://www.roselabs.ai/?agent-id=7db40906-6188-43a3-bd1e-2f721231d689",
+    "frontend_verification": "verified in fresh browser",
+    "frontend_messages": 135,
+    "last_recorded_actor_id": "88c57627-eab2-46fd-8d7c-dd4db41b8a20",
+    "last_recorded_call_site": "1792025450197-67a205e7beeb-execute_loop",
+    "last_recorded_source": ".llm-dumps/88c57627-eab2-46fd-8d7c-dd4db41b8a20/1792025450197-67a205e7beeb-execute_loop.json",
+    "last_recorded_source_sha256": "15646fca04d28cfb7c61e6518c7ad66a16c4ff1ffeda7bdddac33962c0f901d0",
+    "last_recorded_dump_HTTPS": true,
+    "capture_limit": "Latest recorded dump across all 30 owned actor directories; no fabricated capture for dump_context=False calls.",
+    "publication_correction": "Initial publisher chose root only; exact latest descendant explicitly rendered/published and FE reverified, initial evidence preserved privately.",
+    "publication_selector_repair": {
+      "status": "Applied under user infrastructure authorization",
+      "source_sha256": "3dc8f874c7f29b919a586c8e83e87f7dfccba59612e20e381c9248f9776c60d2",
+      "same_actual_run_assertion_passed": true,
+      "pinned_registered_composite_passed": true,
+      "pinned_browser_validation_passed": true,
+      "archive_and_hub_cases_passed": 46,
+      "runtime_model_context_change": false
+    }
+  },
+  "schema_cache_proposal": {
+    "id": "R18-SCHEMA-STANDARD-2",
+    "status": "UNAPPLIED; explicit user approval required",
+    "diff_sha256": "0ee10a23c9f77efa90c115463e0ab6c0046657a186eab066a920140f510b27b1",
+    "mechanism": "Ordinary stable typed wire shape removes per-candidate ID/count hints; exact local/native ID/order/count validators remain before store/replay.",
+    "risk": "May increase invalid generations/retries; physical cache benefit unproven. No old key remapping."
+  },
+  "archive": {
+    "core": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "whm-preservation/e9afcffd/run18-core-20261015-fa0314af0.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "42548a439e3ffc06723eda2171b7e21641087dbae257a98b98f7e1002176d58d",
+      "gzip_sha256": "6589a115483872a3d6f09d46dda8cf0d3480f7953ca21f5b72ce880cc98d01a8",
+      "stored_bytes": 434448116,
+      "frames": 52,
+      "files": 2142,
+      "original_bytes": 1741079697,
+      "manifest_sha256": "7cdf3df2465e2998f82fc02db641803e55c8edbd696fa451b8553fc3d440bcdb",
+      "full_readback_verified": true
+    },
+    "core_original_helper_authenticated_members": 2142,
+    "supplement": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "whm-preservation/e9afcffd/run18-final-supplement-20261015-0129.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "8b704f900708ea5b090faaf3575766792ac9b82f2f03d8e30a9a6f43d923ac65",
+      "gzip_sha256": "8d74f84080b2ad1f4a1e89467c3a378386a51667e9f6df569474ccb409034f5a",
+      "stored_bytes": 2402672,
+      "frames": 1,
+      "files": 126,
+      "original_bytes": 18383202,
+      "manifest_sha256": "bfe35e1c577a7b067dd3dff393fec478a830d7f107dba359424460c67f6b3866",
+      "full_readback_verified": true
+    },
+    "supplement_original_helper_authenticated_members": 126
+  },
+  "protected_boundaries": {
+    "all_originals_preserved": true,
+    "Freedom_and_protected_instructions_preserved": true,
+    "no_merge_or_deploy": true,
+    "no_new_harness_or_devbox": true,
+    "no_paid_RCA_or_probes": true
+  },
+  "publication_runtime_changes_after_run": {
+    "files": [
+      "scripts/publish_evidence_links.py",
+      "scripts/tests/publish_evidence_links_composite.test.sh"
+    ],
+    "RCA": "docs/rca/cases/2026-10-15-evidence-publisher-selected-only-root-dump.md",
+    "applied_tests": [
+      {
+        "name": "composite",
+        "argv": [
+          "bash",
+          "scripts/tests/publish_evidence_links_composite.test.sh"
+        ],
+        "exit": 0,
+        "wall_s": 0.06667794199893251
+      },
+      {
+        "name": "browser",
+        "argv": [
+          "bash",
+          "scripts/tests/publish_evidence_links_browser_validation.test.sh"
+        ],
+        "exit": 0,
+        "wall_s": 0.6360733610054012
+      },
+      {
+        "name": "archive-hub",
+        "argv": [
+          "agents/venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "-p",
+          "no:cacheprovider",
+          "agents/benchmarks/archived_diagnostics_test.py",
+          "agents/benchmarks/hub_upload_test.py"
+        ],
+        "exit": 0,
+        "wall_s": 8.896568611002294
+      }
+    ]
+  },
+  "resume_state": {
+    "state": "Paused at safe terminal checkpoint for benchmark coordination request",
+    "requested_by_thread": "ph71gtg4ntdz4sd4xkzp8qqn2n8g7nss",
+    "all_own_delegated_turns_terminal": true,
+    "active_WH\u041c_model_benchmark_stack_processes": 0,
+    "existing_fixture_and_retained_recording_DB_preserved": true,
+    "next_action": "Await explicit coordinator resume; then present/resolve exact unapplied R18-SCHEMA-STANDARD-2 semantic decision before further code application or paid trial.",
+    "approval_card_private_path": ".context/wmh-resume-generation1/run18-structured-request60m/finalization/approval-R18-SCHEMA-STANDARD-2.private.md"
+  }
+}

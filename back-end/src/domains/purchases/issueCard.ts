@@ -41,7 +41,17 @@ export async function resolveAndIssuePurchaseCard(
   }
 
   const subscription = await repo.findSubscriptionByUserId(input.userId);
-  const stripeCustomerId = subscription?.stripeCustomerId;
+  if (
+    purchase.stripeCustomerId === null &&
+    subscription !== null &&
+    subscription.stripeLivemode !== purchase.stripeLivemode
+  ) {
+    throw new PurchaseError(
+      'Billing account changed; this legacy purchase cannot charge the new account',
+      409
+    );
+  }
+  const stripeCustomerId = purchase.stripeCustomerId ?? subscription?.stripeCustomerId;
   if (stripeCustomerId === undefined || stripeCustomerId === null || stripeCustomerId === '') {
     await repo.updatePurchaseStatus(
       purchase.id,
@@ -59,7 +69,7 @@ export async function resolveAndIssuePurchaseCard(
     stripeCustomerId,
     cardProvider,
     walletFundingProvider,
-    subscription?.stripeSubscriptionId ?? undefined
+    purchase.stripeSubscriptionId ?? subscription?.stripeSubscriptionId ?? undefined
   );
 }
 

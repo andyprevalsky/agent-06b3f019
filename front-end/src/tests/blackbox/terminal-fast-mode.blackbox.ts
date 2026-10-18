@@ -93,7 +93,7 @@ function messageSendingArgs(overrides: Partial<Parameters<typeof useMessageSendi
     canSubmitGoals: true,
     isFullySignedIn: true,
     userId: mocks.authState.user.id,
-    clientSource: 'WEB',
+    clientSource: 'WEB' as const,
     setSelectedAgentIdContext: vi.fn(),
     setCurrentView: vi.fn(),
     setLoginModalOpen: vi.fn(),

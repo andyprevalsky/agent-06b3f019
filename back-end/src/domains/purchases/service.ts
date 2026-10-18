@@ -1,4 +1,5 @@
 import { type CardProvider } from '../../providers/card-provider';
+import { ROSE_AGENT_CARD_ID } from '../../providers/card-provider/static-card';
 import { createLogger } from '../../providers/logger';
 import { cancelAuthorizedHold } from '../../providers/stripe';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
@@ -15,21 +16,18 @@ import { PurchaseError } from './errors';
 import { kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
 import { resolveAndIssuePurchaseCard } from './issueCard';
-import {
-  ensureAllLegacyFingerprintsIndexed,
-  ensureRecentLegacyFingerprintsIndexed,
-} from './fingerprintBackfill';
+import { ensureAllLegacyFingerprintsIndexed } from './fingerprintBackfill';
 import { canonicalInputFingerprint, purchaseReceipt, tryClaimFundingResume } from './fundingResume';
 import {
   PurchaseSpendStatus,
   type MintPurchaseInput,
   type MintPurchaseResult,
-  type PurchaseLookupResult,
   type PurchaseSpend,
 } from './types';
 
 // Public surface preserved across the reconcile/errors split.
 export { PurchaseError };
+export { lookupPurchase } from './lookup';
 export {
   closePurchaseCard,
   handleAgentCardWebhook,
@@ -63,71 +61,8 @@ function isStaleChargingPurchase(purchase: PurchaseSpend, now: Date): boolean {
   );
 }
 
-export async function lookupPurchase(
-  userId: string,
-  fingerprint: string,
-  cardProvider?: CardProvider,
-  now = new Date()
-): Promise<PurchaseLookupResult> {
-  if (fingerprint.trim() === '') {
-    throw new PurchaseError('fingerprint is required');
-  }
-
-  const since = new Date(now.getTime() - PURCHASE_APPROVAL_CACHE_HOURS * 60 * 60 * 1000);
-  let purchase = await repo.findRecentPurchaseByUserAndFingerprint(userId, fingerprint, since);
-  if (!purchase) {
-    await ensureRecentLegacyFingerprintsIndexed(userId, since);
-    purchase = await repo.findRecentPurchaseByUserAndFingerprint(userId, fingerprint, since);
-  }
-  if (!purchase) {
-    return { found: false, reusable: false, purchase: null };
-  }
-
-  let reusable = isReusableStatus(purchase.status) && purchase.cardId !== null;
-  let status = purchase.status;
-
-  // Webhook-independent consume guard. `reusable` makes the workflow SKIP the user-approval
-  // prompt and re-issue the held card. Never do that for a card the network has already settled:
-  // ask the card itself (live + unspent?) instead of trusting that `transaction.cleared` was
-  // delivered. If the webhook was delayed or lost, this still forces a fresh approval rather than
-  // silently handing back a dead, already-charged card.
-  if (reusable && purchase.cardId !== null) {
-    const liveDetails = await tryGetLiveCardDetails(
-      userId,
-      purchase.agentId,
-      purchase.cardId,
-      cardProvider
-    );
-    if (!liveDetails) {
-      reusable = false;
-      const cleared = await repo.markHeldPurchaseClearedIfNoReclaim(purchase.id);
-      if (cleared.count === 1) {
-        status = PurchaseSpendStatus.CLEARED;
-      } else {
-        status = (await repo.findPurchaseById(purchase.id))?.status ?? purchase.status;
-      }
-    }
-  }
-
-  return {
-    found: true,
-    reusable,
-    purchase: {
-      id: purchase.id,
-      agentId: purchase.agentId,
-      fingerprint: purchase.fingerprint,
-      cardId: purchase.cardId,
-      merchant: purchase.merchant,
-      totalCents: purchase.totalCents,
-      status,
-      createdAt: purchase.createdAt,
-      updatedAt: purchase.updatedAt,
-    },
-  };
-}
-
 /**
- * Resolve the most-recent same-fingerprint purchase. Returns a reuse result for a still-live held
+ * Resolve the most-recent same-fingerprint purchase. Returns a reuse result for a available held
  * card (idempotent retry — no re-charge, no second user prompt). Throws 409 only for an in-flight
  * purchase. Returns `null` for a consumed/cleared/failed row so the caller opens a FRESH purchase —
  * i.e. the same cart can be legitimately bought again.
@@ -136,7 +71,8 @@ async function tryReuseExistingPurchase(
   existing: PurchaseSpend,
   cardProvider?: CardProvider,
   now = new Date(),
-  requestingAgentId?: string
+  requestingAgentId?: string,
+  reuseOnly = false
 ): Promise<MintPurchaseResult | null> {
   // Cross-agent fingerprint hits must never reuse a live card. Lifecycle/abandon keys off the
   // requesting agentId; handing back another agent's HELD purchase leaves the new agent with no
@@ -172,8 +108,8 @@ async function tryReuseExistingPurchase(
     );
   }
 
-  // Idempotent retry within the reuse window: hand back the held card while it's still live and
-  // unspent (e.g. a transient browser-agent error retried the identical cart).
+  // Idempotent retry within the reuse window: hand back the held card while the provider reports availability
+  // and the purchase remains HELD (e.g. a transient browser-agent error retried the identical cart).
   if (isReusableStatus(existing.status) && existing.cardId !== null) {
     const liveDetails = await tryGetLiveCardDetails(
       existing.userId,
@@ -181,7 +117,12 @@ async function tryReuseExistingPurchase(
       existing.cardId,
       cardProvider
     );
-    if (liveDetails) {
+    if (
+      liveDetails &&
+      (!reuseOnly ||
+        existing.cardId === ROSE_AGENT_CARD_ID ||
+        liveDetails.balanceCents >= existing.totalCents)
+    ) {
       return {
         purchaseId: existing.id,
         cardId: existing.cardId,
@@ -220,7 +161,7 @@ async function recoverStaleChargingPurchase(purchase: PurchaseSpend): Promise<vo
 
   if (purchase.stripePaymentIntentId !== null) {
     try {
-      await cancelAuthorizedHold(purchase.stripePaymentIntentId);
+      await cancelAuthorizedHold(purchase.stripePaymentIntentId, purchase.stripeLivemode);
     } catch (error) {
       log.warn('Failed to cancel Stripe hold while recovering stale CHARGING purchase', {
         purchase_id: purchase.id,
@@ -266,6 +207,32 @@ async function openPendingPurchase(input: MintPurchaseInput) {
   });
 }
 
+async function reuseApprovedPurchaseOnly(
+  input: MintPurchaseInput,
+  cardProvider: CardProvider | undefined,
+  now: Date
+): Promise<MintPurchaseResult> {
+  const approved = await repo.findPurchaseById(input.reusePurchaseId!);
+  if (
+    approved !== null &&
+    approved.userId === input.userId &&
+    approved.agentId === input.agentId &&
+    approved.fingerprint === input.fingerprint &&
+    approved.status === PurchaseSpendStatus.HELD &&
+    approved.totalCents === input.totalCents &&
+    approved.merchant.toLowerCase() === input.merchant.toLowerCase() &&
+    approved.createdAt.getTime() >= now.getTime() - PURCHASE_APPROVAL_CACHE_HOURS * 3600000
+  ) {
+    const reused = await tryReuseExistingPurchase(approved, cardProvider, now, input.agentId, true);
+    if (reused !== null) return reused;
+  }
+  throw new PurchaseError(
+    'The approved card is no longer reusable; fresh approval is required',
+    409,
+    'purchase_approval_required'
+  );
+}
+
 export async function mintPurchaseCard(
   input: MintPurchaseInput,
   cardProvider?: CardProvider,
@@ -279,6 +246,9 @@ export async function mintPurchaseCard(
   normalizeCurrency(input.currency);
 
   await repo.assertPurchaseAgentAdmitted(input);
+
+  if (input.reusePurchaseId !== undefined)
+    return reuseApprovedPurchaseOnly(input, cardProvider, now);
 
   if (input.totalCents > MAX_PURCHASE_CENTS) {
     // Distinct from subscription 402s: the browser tool surfaces this as a hard

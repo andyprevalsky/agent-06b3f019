@@ -719,7 +719,9 @@ cp -R "$ROOT_DIR/agents/benchmarks/fleet_startup_phase.py" "$SANDBOX/scripts/" 2
 # now a fail-closed production contract, so an intentionally minimal fake repo
 # still needs real (minimal) manifests rather than relying on an absent proof.
 mkdir -p "$SANDBOX/back-end/scripts" "$SANDBOX/back-end/prisma" \
-  "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
+  "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks" "$SANDBOX/agents/providers/rose"
+# The real controller resolves WMH_ROSE_POOL through this authoritative registry.
+cp "$ROOT_DIR/agents/providers/rose/pools.py" "$SANDBOX/agents/providers/rose/pools.py"
 printf '.context/\n**/.env\n' > "$SANDBOX/.gitignore"
 cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
 cp "$ROOT_DIR/agents/benchmarks/outcome_publication.py" \

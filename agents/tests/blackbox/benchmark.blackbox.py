@@ -496,6 +496,12 @@ def test_hub_requests_preserve_external_proxy_routing():
         control(monkeypatch)
 
 
+
+
+def test_archived_diagnostic_projection_requires_authenticated_bindings():
+    from benchmarks.hub_upload_test import test_archived_diagnostic_projection_requires_authenticated_bindings as control
+    control()
+
 def test_hub_upload_rejection_retains_safe_response_identity_without_retry():
     """A forbidden upload stays failed while preserving upstream correlation."""
     from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
@@ -1089,7 +1095,9 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
         )
         assert rejected.returncode == 2, rejected.stdout + rejected.stderr
         assert "zero-live-spend tasks" in rejected.stderr
-        ordinary = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS)
+        ordinary = subprocess.run(
+            command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
+        )
         assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
         assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["test-mass-agent-run-0"]
         # A DEMO-bound child can replay without a zero-spend evaluator or DEMO
@@ -1106,7 +1114,9 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             )
             assert rejected_child.returncode == 2, rejected_child.stdout + rejected_child.stderr
             assert "DEMO-replay tasks" in rejected_child.stderr
-        ordinary_child = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS)
+        ordinary_child = subprocess.run(
+            command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
+        )
         assert ordinary_child.returncode == 0, ordinary_child.stdout + ordinary_child.stderr
         assert json.loads(ordinary_child.stdout)["slices"][0]["names"] == ["single-creator-arm"]
         sampled = subprocess.run(
@@ -1162,7 +1172,11 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
         }.intersection(full.stdout.splitlines())
         pool.write_text(json.dumps(["polar-bu-070"]))
         live = subprocess.run(
-            command + ["--min-successful-llm", "3"], cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
+            command + ["--min-successful-llm", "3"],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
         )
         assert live.returncode == 0, live.stdout + live.stderr
         assert json.loads(live.stdout)["slices"][0]["names"] == ["polar-bu-070"]
@@ -1593,26 +1607,46 @@ def _live_report_producer_harness(tasks, executor, max_concurrency):
     from benchmarks.report_card import build_report_card
 
     main = ast.parse(inspect.getsource(bench.main_async)).body[0]
-    start = next(i for i, node in enumerate(main.body)
-                 if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card")
-    end = next(i for i, node in enumerate(main.body)
-               if isinstance(node, ast.Assign) and any(
-                   isinstance(target, ast.Name) and target.id == "owned_batch_cleanup"
-                   for target in node.targets))
+    start = next(
+        i
+        for i, node in enumerate(main.body)
+        if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card"
+    )
+    end = next(
+        i
+        for i, node in enumerate(main.body)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "owned_batch_cleanup" for target in node.targets)
+    )
     report_nodes = main.body[start:end]
-    ticker = next(node for node in report_nodes
-                  if isinstance(node, ast.AsyncFunctionDef) and node.name == "_report_ticker")
-    emit = next(node for node in ast.walk(ticker) if isinstance(node, ast.Expr)
-                and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
-                and node.value.func.id == "_emit_report")
-    parallel = next(node for node in ast.walk(main) if isinstance(node, ast.If)
-                    and isinstance(node.test, ast.Attribute) and node.test.attr == "parallel")
-    drive = ast.AsyncFunctionDef(name="_drive_parallel", args=ast.arguments(
-        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-        body=parallel.body, decorator_list=[])
-    tick = ast.FunctionDef(name="_tick_report_once", args=ast.arguments(
-        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-        body=[emit], decorator_list=[])
+    ticker = next(
+        node for node in report_nodes if isinstance(node, ast.AsyncFunctionDef) and node.name == "_report_ticker"
+    )
+    emit = next(
+        node
+        for node in ast.walk(ticker)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_emit_report"
+    )
+    parallel = next(
+        node
+        for node in ast.walk(main)
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Attribute) and node.test.attr == "parallel"
+    )
+    drive = ast.AsyncFunctionDef(
+        name="_drive_parallel",
+        args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=parallel.body,
+        decorator_list=[],
+    )
+    tick = ast.FunctionDef(
+        name="_tick_report_once",
+        args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[emit],
+        decorator_list=[],
+    )
     cards = []
 
     class CaptureEmitter:
@@ -1623,14 +1657,24 @@ def _live_report_producer_harness(tasks, executor, max_concurrency):
             cards.append(build_report_card(state))
 
     namespace = dict(vars(bench))
-    namespace.update(tasks=tasks, skipped_claude_tasks=[], base_url="unused",
-                     run=bench.BenchmarkRun(run_id="report-admission-control"),
-                     args=SimpleNamespace(max_concurrency=max_concurrency, prod=False,
-                                          keep_failed_agents=False),
-                     run_single_task=executor, _fetch_wmh_usage=lambda: None)
+    namespace.update(
+        tasks=tasks,
+        skipped_claude_tasks=[],
+        base_url="unused",
+        run=bench.BenchmarkRun(run_id="report-admission-control"),
+        args=SimpleNamespace(max_concurrency=max_concurrency, prod=False, keep_failed_agents=False),
+        run_single_task=executor,
+        _fetch_wmh_usage=lambda: None,
+    )
     with patch("benchmarks.report_card.ReportCardEmitter", CaptureEmitter):
-        exec(compile(ast.fix_missing_locations(ast.Module(
-            body=[*report_nodes, drive, tick], type_ignores=[])), "<live-report-producer>", "exec"), namespace)
+        exec(
+            compile(
+                ast.fix_missing_locations(ast.Module(body=[*report_nodes, drive, tick], type_ignores=[])),
+                "<live-report-producer>",
+                "exec",
+            ),
+            namespace,
+        )
     return namespace, cards
 
 
@@ -1639,8 +1683,10 @@ async def test_live_report_counts_executor_admission_and_drains_cancellation():
     from types import SimpleNamespace
     from benchmarks import run_benchmark as bench
 
-    tasks = [SimpleNamespace(name="chat-mode", requires_browser_agent=False,
-                             world_model_mode=None, tags=[]) for _ in range(3)]
+    tasks = [
+        SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+        for _ in range(3)
+    ]
     entered = asyncio.Event()
     held = asyncio.Event()
 
@@ -1672,8 +1718,10 @@ async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_li
     from types import SimpleNamespace
     from benchmarks import run_benchmark as bench
 
-    tasks = [SimpleNamespace(name="chat-mode", index=index, requires_browser_agent=False,
-                             world_model_mode=None, tags=[]) for index in range(3)]
+    tasks = [
+        SimpleNamespace(name="chat-mode", index=index, requires_browser_agent=False, world_model_mode=None, tags=[])
+        for index in range(3)
+    ]
     entered = [asyncio.Event() for _ in tasks]
     evaluate = [asyncio.Event() for _ in tasks]
     cleanup = [asyncio.Event() for _ in tasks]
@@ -1682,12 +1730,20 @@ async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_li
     async def executor(_base_url, task, *, on_agent_created, on_task_evaluated, **_kwargs):
         async def agent_child():
             on_agent_created(task.name, f"report-test-{task.index}")
+
         await asyncio.create_task(agent_child())
         entered[task.index].set()
         await evaluate[task.index].wait()
-        result = bench.TaskResult(name=task.name, passed=task.index != 2,
-            agent_id=f"report-test-{task.index}", status="COMPLETED", progress_score=1,
-            duration_seconds=1, cost_cents=0, message_count=0)
+        result = bench.TaskResult(
+            name=task.name,
+            passed=task.index != 2,
+            agent_id=f"report-test-{task.index}",
+            status="COMPLETED",
+            progress_score=1,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+        )
         await on_task_evaluated(result)
         evaluated[task.index].set()
         await cleanup[task.index].wait()
@@ -1712,7 +1768,9 @@ async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_li
             namespace["_tick_report_once"]()
             assert cards[-1]["tasks"] == {"total": 3, "running": 1, "completed": 2, "queued": 0}, cards[-1]["tasks"]
             assert cards[-1]["results"]["passed"] == 1 and cards[-1]["results"]["failed"] == 1
-            assert [row["agent_url"] for row in cards[-1]["per_task"] if row["status"] == "running"][0].endswith("=report-test-0")
+            assert [row["agent_url"] for row in cards[-1]["per_task"] if row["status"] == "running"][0].endswith(
+                "=report-test-0"
+            )
             for event in [*evaluate, *cleanup]:
                 event.set()
             await asyncio.wait_for(coordinator, timeout=10)
@@ -1732,29 +1790,36 @@ async def test_live_report_keeps_all_created_roots_for_batch_finalization():
     from unittest.mock import AsyncMock
     from benchmarks import run_benchmark as bench
 
-    root_ids = ["00000000-0000-4000-8000-000000000011",
-                "00000000-0000-4000-8000-000000000012"]
+    root_ids = ["00000000-0000-4000-8000-000000000011", "00000000-0000-4000-8000-000000000012"]
     for exit_path in ("exception", "cancellation", "composite"):
         entered = asyncio.Event()
-        task = SimpleNamespace(name="chat-mode", requires_browser_agent=False,
-                               world_model_mode=None, tags=[])
+        task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
 
         async def executor(_base_url, task, *, on_agent_created, **_kwargs):
             async def child_callbacks():
                 for root_id in root_ids:
                     on_agent_created(task.name, root_id)
+
             await asyncio.create_task(child_callbacks())
             entered.set()
             if exit_path == "cancellation":
                 await asyncio.Event().wait()
             if exit_path == "exception":
                 raise RuntimeError("test-owned failure after root callbacks")
-            return bench.TaskResult(name=task.name, passed=False,
-                agent_id=",".join(root_ids), status="COMPLETED", progress_score=0,
-                duration_seconds=1, cost_cents=0, message_count=0,
-                logs={str(index): {"tree": {root_id: {}},
-                    "worker_logs": [json.dumps({"agent_id": root_id})]}
-                    for index, root_id in enumerate(root_ids)})
+            return bench.TaskResult(
+                name=task.name,
+                passed=False,
+                agent_id=",".join(root_ids),
+                status="COMPLETED",
+                progress_score=0,
+                duration_seconds=1,
+                cost_cents=0,
+                message_count=0,
+                logs={
+                    str(index): {"tree": {root_id: {}}, "worker_logs": [json.dumps({"agent_id": root_id})]}
+                    for index, root_id in enumerate(root_ids)
+                },
+            )
 
         namespace, _cards = _live_report_producer_harness([task], executor, 1)
         with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
@@ -1779,8 +1844,7 @@ async def test_live_report_keeps_all_created_roots_for_batch_finalization():
 
         def exact_root_sessions(_base_url, root_id):
             prepared.append(root_id)
-            return {"root_user_id": "test-owned-user", "tree_agent_ids": [root_id],
-                    "browser_sessions": []}
+            return {"root_user_id": "test-owned-user", "tree_agent_ids": [root_id], "browser_sessions": []}
 
         def close_exact_root_sessions(_base_url, root_id, _before, **_kwargs):
             released.append(root_id)
@@ -1788,26 +1852,33 @@ async def test_live_report_keeps_all_created_roots_for_batch_finalization():
 
         # Force the archive boundary to fail: exact provider/payment release
         # must still run, while incomplete evidence remains a failed verdict.
-        with patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", exact_root_sessions), \
-             patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", close_exact_root_sessions), \
-             patch.object(bench, "pause_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "delete_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "_refresh_browser_archive_snapshot",
-                          AsyncMock(side_effect=RuntimeError("test-owned archive failure"))), \
-             patch.object(bench, "_finalize_owned_root_payments", AsyncMock(return_value={})), \
-             patch.object(bench, "fetch_local_worker_logs", return_value=[]):
+        with (
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", exact_root_sessions),
+            patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", close_exact_root_sessions),
+            patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+            patch.object(
+                bench,
+                "_refresh_browser_archive_snapshot",
+                AsyncMock(side_effect=RuntimeError("test-owned archive failure")),
+            ),
+            patch.object(bench, "_finalize_owned_root_payments", AsyncMock(return_value={})),
+            patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+        ):
             try:
-                await asyncio.wait_for(bench._finalize_owned_cloud_batch(
-                    "test-owned-no-network", namespace["run"].task_results,
-                    namespace["_live_task_agent_ids"]), timeout=10)
+                await asyncio.wait_for(
+                    bench._finalize_owned_cloud_batch(
+                        "test-owned-no-network", namespace["run"].task_results, namespace["_live_task_agent_ids"]
+                    ),
+                    timeout=10,
+                )
             except RuntimeError:
                 pass
             else:
                 assert exit_path == "composite", "missing evaluator identity unexpectedly accepted"
         assert set(prepared) == set(root_ids), exit_path
         assert set(released) == set(root_ids), exit_path
-        retained = {root_id for ids in namespace["_live_task_agent_ids"].values()
-                    for root_id in ids}
+        retained = {root_id for ids in namespace["_live_task_agent_ids"].values() for root_id in ids}
         assert retained == set(root_ids), exit_path
         assert all(not result.passed for result in namespace["run"].task_results)
 
@@ -3054,6 +3125,176 @@ async def test_payment_abandonment_seals_browser_before_hub_archive():
     assert cleanup_index < seal_index < archive_index
 
 
+async def _exercise_failure_evidence_exit(phase, refresh, logger_fails=False, archive_fails=False):
+    """Run the actual task owner; replace only external allocation/IO boundaries."""
+    from copy import deepcopy
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    root, task_id = "11111111-1111-4111-8111-111111111111", "owned-browser-task"
+    meta = dict(task_id=task_id, toolName="spawn_browser_agent", agentType="browser", workflowGeneration=root)
+    data = {
+        "agent": {"agent_id": root, "status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "recorded",
+                "metadata": dict(
+                    meta,
+                    action_type="recording",
+                    toolStatus="FINISHED",
+                    recording_view_url="https://fixture.invalid/recording",
+                ),
+            },
+            {
+                "role": "TOOL",
+                "text": "terminal",
+                "metadata": dict(meta, action_type="task_complete", toolStatus="FINISHED"),
+            },
+        ],
+        "_benchmark": {"payment_lifecycle": {"purchase": {"id": "owned-purchase", "status": "HELD"}}},
+    }
+    if phase == "cleanup-stall":
+        native = json.loads(
+            (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
+        )["lifecycle"]
+        data["_benchmark"]["payment_lifecycle"] = native
+    task = deepcopy(get_task_by_name("agent-payment-abandonment"))
+    task.name = "agent-payment-production-abandonment"
+    task.tags = []
+    task.production_only = True
+
+    async def poll(_base, _agent, _task, _monitor, snapshot):
+        snapshot.update(deepcopy(data))
+        if phase == "cancel":
+            raise asyncio.CancelledError()
+        if phase == "poll":
+            raise RuntimeError("actual payment reconciliation release pending")
+        return deepcopy(data), 0, 0, None
+
+    async def execute(_base, _agent, callback, **_kwargs):
+        return await callback({})
+
+    async def get(_base, aid):
+        assert aid == root
+        if refresh == "unavailable":
+            raise RuntimeError("authoritative read unavailable")
+        if refresh == "empty":
+            return {"agent": {"agent_id": root, "model": "benchmark-hub"}, "messages": []}
+        result = deepcopy(data)
+        if refresh == "foreign":
+            result["agent"]["agent_id"] = "foreign-agent"
+        if refresh == "shorter":
+            result["messages"] = result["messages"][:1]
+        return result
+
+    async def collect(_agent, snapshot, _start, *, backend_url):
+        if logger_fails:
+            raise RuntimeError("log transport unavailable")
+        return {"messages": bench.extract_message_transcript(snapshot)}
+
+    async def cleanup(*_args, **_kwargs):
+        if phase == "cleanup":
+            raise RuntimeError("actual payment reconciliation release pending")
+        if phase == "cleanup-stall":
+            raise bench._payment_reconciliation_timeout(
+                "actual payment reconciliation release pending", native, task_name=task.name
+            )
+        return None
+
+    async_names = [
+        "prepare_sandbox_payment_residual",
+        "_preflight_production_payment_identity",
+        "_apply_live_fixtures",
+        "_apply_memory_fixtures",
+        "_apply_auth_test_site",
+        "_restore_live_fixture_scenarios_async",
+        "_release_auth_test_site",
+        "subscribe_supabase_realtime_agent",
+        "post_world_model_update_events",
+        "archive_agent_start",
+    ]
+    with contextlib.ExitStack() as stack:
+        for name in async_names:
+            stack.enter_context(
+                patch.object(bench, name, AsyncMock(return_value=None if name.endswith("auth_test_site") else []))
+            )
+        for name, replacement in {
+            "create_agent": AsyncMock(return_value=root),
+            "_poll_agent": poll,
+            "_run_with_agent_execution_backstop": execute,
+            "get_agent": get,
+            "get_agent_tree": AsyncMock(return_value=[{"agent_id": root, "status": "ACTIVE"}]),
+            "_get_settled_tool_usage": AsyncMock(return_value={}),
+            "_fetch_tree_stats": AsyncMock(return_value={}),
+            "get_llm_usage_details": AsyncMock(return_value=({}, {})),
+            "_get_initial_payment_lifecycle_with_retry": AsyncMock(
+                return_value=deepcopy(data["_benchmark"]["payment_lifecycle"])
+            ),
+            "evaluate_task": lambda *_args: (
+                False,
+                "Independent wrong output" if phase == "cleanup-stall" else "payment remains pending",
+            ),
+            "collect_logs": collect,
+            "ensure_payment_lifecycle_cleanup": cleanup,
+            "finalize_archive_and_score_world_model": AsyncMock(
+                return_value=(None, None), side_effect=RuntimeError("archive unavailable") if archive_fails else None
+            ),
+            "_begin_interrupt_cleanup": lambda: False,
+            "delete_agent": AsyncMock(),
+        }.items():
+            stack.enter_context(patch.object(bench, name, replacement))
+        result = await bench._run_single_task_as_run_user(
+            "https://fixture.invalid", task, True, None, "", None, None, None
+        )
+    assert not result.passed
+    assert result.benchmark_status == ("CANCELLED" if phase == "cancel" else "ERROR")
+    assert result.logs["messages"] == bench.extract_message_transcript(data), "exception discarded the owned transcript"
+    assert result.message_count == 2
+    assert result.logs["failure_evidence"]["agent_id"] == root
+    assert result.logs["failure_evidence"]["benchmark_state"]["payment_lifecycle"]["purchase"]["id"] == (
+        native["purchase"]["id"] if phase == "cleanup-stall" else "owned-purchase"
+    )
+    assert result.logs["tree"][root]["messages"] == bench.extract_message_transcript(data)
+    if phase != "cancel":
+        assert "actual payment reconciliation release pending" in result.failure_reason
+    if refresh == "foreign":
+        assert any("another agent" in e for e in result.logs["failure_evidence"]["errors"])
+    if archive_fails:
+        assert any("archive unavailable" in e for e in result.logs["failure_evidence"]["errors"])
+    return result
+
+
+async def test_task_failure_preserves_owned_snapshot_on_all_error_exits():
+    for phase in ("poll", "cleanup", "cancel"):
+        for refresh in ("ready", "empty", "unavailable", "foreign", "shorter"):
+            await _exercise_failure_evidence_exit(phase, refresh)
+    await _exercise_failure_evidence_exit("poll", "unavailable", logger_fails=True)
+    for phase in ("poll", "cancel"):
+        await _exercise_failure_evidence_exit(phase, "unavailable", archive_fails=True)
+
+
+async def test_agentcard_release_stall_cannot_replace_an_independent_task_failure():
+    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
+        result = await _exercise_failure_evidence_exit("cleanup-stall", "ready")
+    assert "Independent wrong output" in result.failure_reason
+
+
+async def test_payment_browser_seal_rejects_empty_declared_browser_evidence():
+    from benchmarks import run_benchmark as bench
+
+    empty = {"agent": {"agent_id": "owned-root", "status": "FAILED", "model": "benchmark-hub"}, "messages": []}
+    with (
+        patch.object(bench, "get_agent", AsyncMock(return_value=empty)),
+        patch.object(bench, "pause_agent", AsyncMock()) as pause,
+    ):
+        _sealed, error = await bench._seal_payment_abandonment_browser_for_archive(
+            "https://fixture.invalid", "owned-root", empty
+        )
+    assert error, "empty Hub snapshot falsely authorized a declared browser as sealed"
+    pause.assert_not_called()
+
+
 async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof():
     """Joined pre-action init can coexist with an earlier recorded browser task."""
     import benchmarks.run_benchmark as bench
@@ -3074,20 +3315,37 @@ async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_
         "task_actions_started": False,
     }
     metadata = {
-        "toolName": "spawn_browser_agent", "action_type": "task_complete",
-        "toolStatus": "FINISHED", "task_id": task, "toolCallId": "call-preparation",
-        "excludeFromModel": True, "browser_preparation_cancellation": receipt,
+        "toolName": "spawn_browser_agent",
+        "action_type": "task_complete",
+        "toolStatus": "FINISHED",
+        "task_id": task,
+        "toolCallId": "call-preparation",
+        "excludeFromModel": True,
+        "browser_preparation_cancellation": receipt,
     }
     messages = [
-        {"metadata": {"toolName": "spawn_browser_agent", "task_id": "earlier-task",
-                      "action_type": "task_complete", "toolStatus": "FINISHED"}},
-        {"metadata": {"toolName": "spawn_browser_agent", "task_id": "earlier-task",
-                      "action_type": "recording", "toolStatus": "FINISHED",
-                      "recording_view_url": "https://recording.example/earlier"}},
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "task_id": "earlier-task",
+                "action_type": "task_complete",
+                "toolStatus": "FINISHED",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "task_id": "earlier-task",
+                "action_type": "recording",
+                "toolStatus": "FINISHED",
+                "recording_view_url": "https://recording.example/earlier",
+            }
+        },
         {"metadata": metadata},
     ]
     owner = {
-        "root_exists": True, "tree_agent_ids": [root],
+        "root_exists": True,
+        "tree_agent_ids": [root],
         "browser_sessions": [{"agent_id": root, "provider": "steel", "session_id": session}],
     }
 
@@ -3099,24 +3357,45 @@ async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_
             patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=snapshot),
         ):
             await bench._refresh_browser_archive_snapshot(
-                "http://localhost:1", root, {}, logs, expected_agent_ids={root},
-                ownership_before=owner, timeout_seconds=0.05,
+                "http://localhost:1",
+                root,
+                {},
+                logs,
+                expected_agent_ids={root},
+                ownership_before=owner,
+                timeout_seconds=0.05,
             )
         return logs
 
     logs = await refresh(messages)
     assert task in logs["browser_preparation_cancellation_receipt"]["task_ids_by_agent"][root]
-    assert [row["metadata"] for row in logs["tree"][root]["messages"]] == [
-        row["metadata"] for row in messages
-    ]
+    assert [row["metadata"] for row in logs["tree"][root]["messages"]] == [row["metadata"] for row in messages]
 
     for poisoned in [
-        messages + [{"metadata": {"toolName": "spawn_browser_agent", "task_id": task,
-                                  "action_type": "read_browser_state", "toolStatus": "FINISHED"}}],
+        messages
+        + [
+            {
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "task_id": task,
+                    "action_type": "read_browser_state",
+                    "toolStatus": "FINISHED",
+                }
+            }
+        ],
         messages + [{"metadata": {"task_id": task, "action_type": "task_started"}}],
-        messages[:-1] + [{"metadata": {**metadata, "browser_preparation_cancellation": {
-            **receipt, "init_acknowledged": False,
-        }}}],
+        messages[:-1]
+        + [
+            {
+                "metadata": {
+                    **metadata,
+                    "browser_preparation_cancellation": {
+                        **receipt,
+                        "init_acknowledged": False,
+                    },
+                }
+            }
+        ],
     ]:
         with pytest.raises(TimeoutError):
             await refresh(poisoned)
@@ -3280,6 +3559,136 @@ def test_agent_messages_ready_for_browser_hub_archive_waits_for_recording():
     paused_with_recording = [recording_started, recording_finished, session_paused]
     assert bench._agent_messages_ready_for_browser_hub_archive(paused_with_recording)
     assert bench._agent_messages_ready_for_browser_hub_archive([])
+
+
+def _resumed_recording_archive_rows():
+    # Captured a806f2a9: saved first part, resumed the SAME browser task, then
+    # paused before the resumed part was attached. No real media is fabricated.
+    identity = dict(
+        toolName="spawn_browser_agent",
+        task_id="owned-resumed-browser",
+        workflowGeneration="owned-root-generation",
+        browser_url="https://fixture.kernel.sh/browser/live/owned-session",
+        browser_session_metadata={"provider": "kernel"},
+    )
+
+    def row(action, status, **extra):
+        return {
+            "metadata": dict(identity, action_type=action, toolStatus=status, **extra)
+        }
+
+    first = row("recording", "IN_PROGRESS", toolCallId="first-start")
+    saved = row(
+        "recording",
+        "FINISHED",
+        toolCallId="first-saved",
+        recording_view_url="https://fixture.invalid/first-part",
+    )
+    resumed = row("recording", "IN_PROGRESS", toolCallId="resumed-start")
+    terminal = row("task_complete", "ERROR", toolCallId="owned-tool")
+    latest = row(
+        "recording",
+        "FINISHED",
+        toolCallId="resumed-saved",
+        recording_view_url="https://fixture.invalid/resumed-part",
+    )
+    return [first, saved, resumed, terminal], latest
+
+
+def test_browser_archive_requires_each_resumed_recording_part():
+    from copy import deepcopy
+    import benchmarks.run_benchmark as bench
+
+    rows, latest = _resumed_recording_archive_rows()
+    before = deepcopy(rows)
+    assert not bench._agent_messages_have_browser_recording_ready(rows), (
+        "earlier task recording concealed missing resumed part"
+    )
+    assert not bench._agent_messages_ready_for_browser_hub_archive(rows)
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(rows)
+    assert rows == before, "readiness mutated captured transcript"
+    complete = rows + [latest]
+    assert bench._agent_messages_ready_for_browser_hub_archive(complete)
+    assert bench._agent_messages_ready_for_durable_browser_evidence(complete)
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(
+        [rows[0], rows[2], latest, rows[3]]
+    ), "a later saved part concealed an earlier missing part"
+    for field, value in (
+        ("workflowGeneration", "foreign-generation"),
+        ("browser_url", "https://fixture.kernel.sh/browser/live/foreign-session"),
+    ):
+        foreign = deepcopy(latest)
+        foreign["metadata"][field] = value
+        assert not bench._agent_messages_ready_for_durable_browser_evidence(
+            rows + [foreign]
+        ), field
+    empty = deepcopy(latest)
+    empty["metadata"].pop("recording_view_url")
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(rows + [empty])
+
+
+async def test_browser_archive_refresh_waits_for_resumed_recording_part():
+    from copy import deepcopy
+    import benchmarks.run_benchmark as bench
+
+    rows, latest = _resumed_recording_archive_rows()
+    root = "owned-root-generation"
+    incomplete = {"agent": {"status": "PAUSED"}, "messages": rows}
+    complete = {"agent": {"status": "PAUSED"}, "messages": rows + [latest]}
+    logs = {}
+    with (
+        patch.object(
+            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
+        ) as tree,
+        patch.object(
+            bench,
+            "get_agent",
+            AsyncMock(side_effect=[deepcopy(incomplete), deepcopy(complete)]),
+        ) as get,
+        patch.object(bench.asyncio, "sleep", AsyncMock()),
+    ):
+        observed = await bench._refresh_browser_archive_snapshot(
+            "https://fixture.invalid", root, {}, logs, expected_agent_ids={root}
+        )
+    assert get.await_count == tree.await_count == 2, (
+        "archive owner returned before resumed recording was attached"
+    )
+    assert observed["messages"] == complete["messages"]
+    assert len(logs["tree"][root]["messages"]) == len(complete["messages"])
+
+
+async def test_browser_archive_missing_resumed_part_preserves_existing_deadline():
+    import benchmarks.run_benchmark as bench
+
+    rows, _ = _resumed_recording_archive_rows()
+    root = "owned-root-generation"
+    logs = {}
+    with (
+        patch.object(
+            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
+        ),
+        patch.object(
+            bench,
+            "get_agent",
+            AsyncMock(return_value={"agent": {"status": "PAUSED"}, "messages": rows}),
+        ),
+    ):
+        try:
+            await bench._refresh_browser_archive_snapshot(
+                "https://fixture.invalid",
+                root,
+                {},
+                logs,
+                expected_agent_ids={root},
+                timeout_seconds=0.02,
+            )
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError(
+                "missing resumed recording bypassed the archive deadline"
+            )
+    assert logs["browser_archive_observation"]["ready"] is False
 
 
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
@@ -3514,6 +3923,34 @@ def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
         == "payment_lifecycle.orgTransfer.releasedCents mismatch: expected 0, got 4396"
     )
 
+    # Production-only lifecycle contracts require native LIVE Stripe provenance even
+    # when the catalog lists only terminal amounts/statuses. Sandbox stays unchanged.
+    from copy import deepcopy
+    from dataclasses import replace
+
+    expected = {"stripeHold": {"status": "succeeded"}, "stripeRefund": {"status": "succeeded"}}
+    production = replace(task, production_only=True, expected_payment_lifecycle=expected)
+    live = {
+        "stripeHold": {"status": "succeeded", "livemode": True},
+        "stripeRefund": {"status": "succeeded", "paymentIntentLivemode": True},
+    }
+    assert _validate_payment_lifecycle(production, {"_benchmark": {"payment_lifecycle": live}}) is None
+    for section, field in (("stripeHold", "livemode"), ("stripeRefund", "paymentIntentLivemode")):
+        for invalid in (False, None, 1, "true"):
+            mixed = deepcopy(live)
+            mixed[section][field] = invalid
+            error = _validate_payment_lifecycle(production, {"_benchmark": {"payment_lifecycle": mixed}})
+            assert error and f"{section}.{field}" in error, (section, invalid, error)
+        missing = deepcopy(live)
+        del missing[section][field]
+        assert _validate_payment_lifecycle(production, {"_benchmark": {"payment_lifecycle": missing}})
+    sandbox = replace(production, production_only=False)
+    test_mode = deepcopy(live)
+    test_mode["stripeHold"]["livemode"] = False
+    test_mode["stripeRefund"]["paymentIntentLivemode"] = False
+    assert _validate_payment_lifecycle(sandbox, {"_benchmark": {"payment_lifecycle": test_mode}}) is None
+    assert expected == {"stripeHold": {"status": "succeeded"}, "stripeRefund": {"status": "succeeded"}}
+
 
 def test_payment_lifecycle_merchant_allows_environment_suffix():
     """Catalog merchant must match free-form labels with environment suffixes.
@@ -3683,6 +4120,9 @@ async def _exercise_owned_payment_reconciliation_caller(
     card_id = "local-owned-card"
     transfer_id = "local-owned-transfer"
     terminal = deepcopy(task.expected_payment_lifecycle)
+    # Synthetic production response: native hold and linked-refund PI modes are explicit.
+    terminal["stripeHold"]["livemode"] = True
+    terminal["stripeRefund"]["paymentIntentLivemode"] = True
     terminal["agentId"] = agent_id
     terminal["purchase"]["id"] = purchase_id
     terminal["agentCard"].update({"id": card_id, "status": "CLOSED"})
@@ -3767,19 +4207,25 @@ async def _exercise_owned_payment_reconciliation_caller(
     ):
         result = None
         error = None
+        snapshot = {}
         try:
             if caller == "cleanup":
                 result = await bench.ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             else:
-                data, _triggered, _resolved, failure = await bench._poll_agent(base_url, agent_id, task)
+                data, _triggered, _resolved, failure = await bench._poll_agent(
+                    base_url, agent_id, task, timeout_snapshot=snapshot
+                )
                 assert failure is None
                 result = data["_benchmark"]["payment_lifecycle"]
         except (RuntimeError, TimeoutError, asyncio.CancelledError) as caught:
             error = caught
 
+    if caller == "poll" and error is not None and recovery_started:
+        assert snapshot["agent"]["id"] == agent_id
+        assert snapshot["messages"] == ready["messages"]
+        assert snapshot["_benchmark"]["payment_lifecycle"]["purchase"]["id"] == purchase_id
     assert all(
-        path in {"/api/test-payment/lifecycle", "/api/test-payment/lifecycle/abandon"}
-        for _, path, _ in requests
+        path in {"/api/test-payment/lifecycle", "/api/test-payment/lifecycle/abandon"} for _, path, _ in requests
     )
     assert terminal["integrity"]["cardCount"] == 1
     assert terminal["integrity"]["purchaseCount"] == 1
@@ -3843,9 +4289,7 @@ async def test_owned_payment_recovery_rejects_a_late_terminal_callback():
 
 
 async def test_payment_card_ready_recovery_preserves_the_outer_task_deadline():
-    observed = await _exercise_owned_payment_reconciliation_caller(
-        "poll", "terminal", card_ready_at_seconds=800
-    )
+    observed = await _exercise_owned_payment_reconciliation_caller("poll", "terminal", card_ready_at_seconds=800)
     assert observed.result is None, (
         "card-ready settlement must not report success after the unchanged900s task deadline; "
         f"posts={observed.posts}, elapsed={observed.elapsed}"
@@ -3923,8 +4367,11 @@ async def test_owned_payment_sleep_deadline_preserves_the_last_observed_state():
         "walletFunding": {"status": "RECLAIMING"},
         "agentCard": {"status": "CLOSED", "balanceCents": 0},
         "orgTransfer": {
-            "id": "local-timer-transfer", "cardId": "local-timer-card",
-            "status": "consumed", "transferredCents": 4396, "releasedCents": 0,
+            "id": "local-timer-transfer",
+            "cardId": "local-timer-card",
+            "status": "consumed",
+            "transferredCents": 4396,
+            "releasedCents": 0,
         },
     }
     calls = {"reads": 0, "recoveries": 0}
@@ -3940,12 +4387,17 @@ async def test_owned_payment_sleep_deadline_preserves_the_last_observed_state():
     try:
         await asyncio.wait_for(
             _wait_for_expected_payment_lifecycle(
-                "http://benchmark.invalid", "local-timer-agent",
-                get_task_by_name("agent-payment-abandonment"), lifecycle,
-                timeout_seconds=0.025, poll_interval_seconds=0.1,
-                fetch_lifecycle=fetch_lifecycle, recover_lifecycle=recover_lifecycle,
+                "http://benchmark.invalid",
+                "local-timer-agent",
+                get_task_by_name("agent-payment-abandonment"),
+                lifecycle,
+                timeout_seconds=0.025,
+                poll_interval_seconds=0.1,
+                fetch_lifecycle=fetch_lifecycle,
+                recover_lifecycle=recover_lifecycle,
                 resume_pending_after_seconds=120,
-            ), timeout=0.5,
+            ),
+            timeout=0.5,
         )
     except RuntimeError as error:
         message = str(error)
@@ -3955,10 +4407,14 @@ async def test_owned_payment_sleep_deadline_preserves_the_last_observed_state():
     assert "remained unavailable" not in message, f"zero requests were made: {message}"
     assert "did not reach the expected terminal state before timeout" in message
     for marker in (
-        "purchase.status='HELD'", "walletFunding.status='RECLAIMING'",
+        "purchase.status='HELD'",
+        "walletFunding.status='RECLAIMING'",
         'agentCard={"status": "CLOSED", "balanceCents": 0}',
-        '"id": "local-timer-transfer"', '"cardId": "local-timer-card"',
-        '"status": "consumed"', '"transferredCents": 4396', '"releasedCents": 0',
+        '"id": "local-timer-transfer"',
+        '"cardId": "local-timer-card"',
+        '"status": "consumed"',
+        '"transferredCents": 4396',
+        '"releasedCents": 0',
     ):
         assert marker in message, message
 
@@ -3969,7 +4425,8 @@ async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
     lifecycle = {
-        "purchase": {"status": "HELD"}, "walletFunding": {"status": "RECLAIMING"},
+        "purchase": {"status": "HELD"},
+        "walletFunding": {"status": "RECLAIMING"},
         "agentCard": {"status": "CLOSED", "balanceCents": 0},
         "orgTransfer": {"status": "consumed", "transferredCents": 4396, "releasedCents": 0},
     }
@@ -3984,11 +4441,15 @@ async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
     try:
         await asyncio.wait_for(
             _wait_for_expected_payment_lifecycle(
-                "http://benchmark.invalid", "local-fetch-agent",
-                get_task_by_name("agent-payment-abandonment"), lifecycle,
-                timeout_seconds=0.025, poll_interval_seconds=0,
+                "http://benchmark.invalid",
+                "local-fetch-agent",
+                get_task_by_name("agent-payment-abandonment"),
+                lifecycle,
+                timeout_seconds=0.025,
+                poll_interval_seconds=0,
                 fetch_lifecycle=fetch_lifecycle,
-            ), timeout=0.5,
+            ),
+            timeout=0.5,
         )
     except RuntimeError as error:
         message = str(error)
@@ -3997,8 +4458,162 @@ async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
     assert reads == 1
     assert "remained unavailable" in message
     assert "after 1 consecutive reads: local provider read unavailable" in message
-    for marker in ("purchase.status='HELD'", "walletFunding.status='RECLAIMING'", '"status": "CLOSED"', '"status": "consumed"', '"releasedCents": 0'):
+    for marker in (
+        "purchase.status='HELD'",
+        "walletFunding.status='RECLAIMING'",
+        '"status": "CLOSED"',
+        '"status": "consumed"',
+        '"releasedCents": 0',
+    ):
         assert marker in message, message
+
+
+async def test_production_agentcard_release_stall_is_skippable_by_default():
+    """Replay a synthetic live allocation through both deadline owners and CI, without an opt-in."""
+    import pytest
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks import run_benchmark as bench
+
+    captured = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
+    )
+    # The historical mixed-mode allocation remains immutable and cannot earn a live waiver.
+    historical = captured["lifecycle"]
+    assert not isinstance(
+        bench._payment_reconciliation_timeout("pending", historical, task_name="agent-payment-production-abandonment"),
+        bench.AgentCardReleaseStall,
+    )
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
+    original = json.dumps(lifecycle, sort_keys=True)
+    task = get_task_by_name("agent-payment-production-abandonment")
+    for owned in (False, True):
+        with patch.dict(os.environ):
+            os.environ.pop(bench.AGENTCARD_RELEASE_SKIP_ENV, None)
+            with pytest.raises(bench.AgentCardReleaseStall) as caught:
+                await bench._wait_for_expected_payment_lifecycle(
+                    "http://benchmark.invalid",
+                    lifecycle["agentId"],
+                    task,
+                    lifecycle,
+                    timeout_seconds=0.01 if owned else 0,
+                    poll_interval_seconds=0.1,
+                    recover_lifecycle=AsyncMock() if owned else None,
+                )
+            result = bench.TaskResult(
+                name=task.name,
+                passed=False,
+                agent_id=lifecycle["agentId"],
+                status="SKIPPED",
+                benchmark_status="SKIPPED",
+                progress_score=0,
+                duration_seconds=1,
+                cost_cents=0,
+                message_count=0,
+                failure_reason=f"{bench.AGENTCARD_RELEASE_SKIP_REASON}: {caught.value}",
+            )
+            assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
+    assert json.dumps(lifecycle, sort_keys=True) == original, "a waiver must not fabricate release or refund"
+    assert lifecycle["orgTransfer"]["releasedCents"] == 0 and lifecycle["stripeRefund"] is None
+
+
+def test_agentcard_release_skip_rejects_independent_lifecycle_failures():
+    from copy import deepcopy
+    from benchmarks import run_benchmark as bench
+
+    # Start valid so each independent corruption, rather than missing provenance, owns rejection.
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
+    for section, field, value in (
+        ("stripeHold", "livemode", False),
+        ("stripeHold", "livemode", None),
+        ("stripeHold", "livemode", 1),
+        ("stripeHold", "livemode", "true"),
+        ("integrity", "cardCount", 2),
+        ("attention", "openKinds", ["payment_approval"]),
+        ("stripeHold", "amountReceivedCents", 0),
+        ("purchase", "cardId", "foreign-card"),
+        ("walletFunding", "providerTransferId", "foreign-transfer"),
+    ):
+        broken = deepcopy(lifecycle)
+        broken[section][field] = value
+        with patch.dict(os.environ, {bench.AGENTCARD_RELEASE_SKIP_ENV: "1"}):
+            error = bench._payment_reconciliation_timeout(
+                "pending", broken, task_name="agent-payment-production-abandonment"
+            )
+        assert not isinstance(error, bench.AgentCardReleaseStall), (section, field, value)
+
+
+async def test_agentcard_cleanup_preserves_the_typed_release_skip():
+    import pytest
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    lifecycle = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
+    )["lifecycle"]
+    with (
+        patch.object(bench, "_start_payment_abandonment_with_recovery", AsyncMock(return_value=lifecycle)),
+        patch.object(
+            bench,
+            "_wait_for_expected_payment_lifecycle",
+            AsyncMock(side_effect=bench.AgentCardReleaseStall("known release stall")),
+        ),
+    ):
+        with pytest.raises(bench.AgentCardReleaseStall):
+            await bench.ensure_payment_lifecycle_cleanup(
+                "http://benchmark.invalid",
+                lifecycle["agentId"],
+                get_task_by_name("agent-payment-production-abandonment"),
+            )
+
+
+async def test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup():
+    from copy import deepcopy
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    # Synthetic live response; the archived allocation has no live Stripe provenance.
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
+    task = get_task_by_name("agent-payment-production-abandonment")
+    for failure in (None, "delete", "archive", "seal"):
+        cleanup = AsyncMock(side_effect=ConnectionError("a second financial cleanup must not run"))
+        delete = AsyncMock(side_effect=ConnectionError("execution cleanup failed") if failure == "delete" else None)
+        logs = {"failure_evidence": {"errors": ["browser did not seal"] if failure == "seal" else []}}
+        stall = bench._payment_reconciliation_timeout("pending", lifecycle, task_name=task.name)
+        with contextlib.ExitStack() as stack:
+            for name in (
+                "prepare_sandbox_payment_residual",
+                "_preflight_production_payment_identity",
+                "_apply_live_fixtures",
+                "_apply_memory_fixtures",
+                "_apply_auth_test_site",
+                "_restore_live_fixture_scenarios_async",
+                "_release_auth_test_site",
+            ):
+                stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+            for name, replacement in {
+                "create_agent": AsyncMock(return_value=lifecycle["agentId"]),
+                "_run_with_agent_execution_backstop": AsyncMock(side_effect=stall),
+                "_capture_task_failure_evidence": AsyncMock(
+                    return_value=({"messages": [], "_benchmark": {"payment_lifecycle": deepcopy(lifecycle)}}, logs)
+                ),
+                "finalize_archive_and_score_world_model": AsyncMock(
+                    return_value=(None, None),
+                    side_effect=ConnectionError("archive unavailable") if failure == "archive" else None,
+                ),
+                "ensure_payment_lifecycle_cleanup": cleanup,
+                "delete_agent": delete,
+            }.items():
+                stack.enter_context(patch.object(bench, name, replacement))
+            result = await bench._run_single_task_as_run_user(
+                "https://fixture.invalid", task, False, None, "", None, None, None
+            )
+        cleanup.assert_not_awaited()
+        delete.assert_awaited_once()
+        expected = "ERROR" if failure else "SKIPPED"
+        assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False)
+        assert bench._ci_should_fail({"failed": int(bool(failure)), "skipped": int(not failure)}, [result]) is bool(
+            failure
+        )
 
 
 def test_ci_permits_only_the_opt_in_agentcard_release_skip():
@@ -4007,9 +4622,17 @@ def test_ci_permits_only_the_opt_in_agentcard_release_skip():
     from benchmarks.run_benchmark import AGENTCARD_RELEASE_SKIP_REASON, _ci_should_fail
 
     def skipped(reason: str) -> TaskResult:
-        return TaskResult(name="agent-payment-abandonment", passed=False, agent_id="agent-123",
-                          status="SKIPPED", progress_score=0, duration_seconds=1, cost_cents=0,
-                          message_count=0, failure_reason=reason)
+        return TaskResult(
+            name="agent-payment-abandonment",
+            passed=False,
+            agent_id="agent-123",
+            status="SKIPPED",
+            progress_score=0,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            failure_reason=reason,
+        )
 
     summary = {"failed": 0, "skipped": 1}
     stall = skipped(f"{AGENTCARD_RELEASE_SKIP_REASON}: owt_1 consumed")
@@ -4023,14 +4646,34 @@ def test_ci_permits_only_the_opt_in_agentcard_release_skip():
 
 
 def _agentcard_release_stall_lifecycle(**transfer) -> dict:
-    return {
-        "purchase": {"status": "HELD"},
-        "walletFunding": {"status": "RECLAIMING"},
-        "agentCard": {"id": "card_b2e87905c62c34ba8abff4d4", "status": "CLOSED", "balanceCents": 0},
-        "orgTransfer": {"id": "owt_ff135698c18b095f3a40a249", "status": "consumed",
-                        "transferredCents": 4396, "releasedCents": 0,
-                        "cardId": "card_b2e87905c62c34ba8abff4d4", "livemode": False, **transfer},
-    }
+    from copy import deepcopy
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task_name = (
+        "agent-payment-production-abandonment" if transfer.get("livemode") is True else "agent-payment-abandonment"
+    )
+    lifecycle = deepcopy(get_task_by_name(task_name).expected_payment_lifecycle)
+    card_id = "card_b2e87905c62c34ba8abff4d4"
+    transfer_id = "owt_ff135698c18b095f3a40a249"
+    lifecycle["agentId"] = "00000000-0000-4000-8000-000000000021"
+    lifecycle["purchase"].update(
+        id="571cab13-0531-4173-85ef-d0709227fcd8", status="HELD", cardId=card_id, stripePaymentIntentId="pi_test"
+    )
+    lifecycle["walletFunding"].update(status="RECLAIMING", providerTransferId=transfer_id)
+    lifecycle["agentCard"].update(id=card_id, status="CLOSED", balanceCents=0)
+    lifecycle["orgTransfer"].update(
+        id=transfer_id,
+        status="consumed",
+        transferredCents=lifecycle["purchase"]["totalCents"],
+        releasedCents=0,
+        cardId=card_id,
+    )
+    lifecycle["orgTransfer"].update(transfer)
+    if transfer.get("livemode") is True:
+        # Synthetic response, not provenance inferred from the AgentCard transfer.
+        lifecycle["stripeHold"]["livemode"] = True
+    lifecycle["stripeRefund"] = None
+    return lifecycle
 
 
 async def test_abandonment_timeout_classifies_only_the_sandbox_release_stall():
@@ -4043,8 +4686,13 @@ async def test_abandonment_timeout_classifies_only_the_sandbox_release_stall():
     async def wait(lifecycle: dict) -> None:
         with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
             await _wait_for_expected_payment_lifecycle(
-                "http://localhost:55120", "agent-123", get_task_by_name("agent-payment-abandonment"),
-                lifecycle, timeout_seconds=0, poll_interval_seconds=0)
+                "http://localhost:55120",
+                "agent-123",
+                get_task_by_name("agent-payment-abandonment"),
+                lifecycle,
+                timeout_seconds=0,
+                poll_interval_seconds=0,
+            )
 
     with pytest.raises(AgentCardReleaseStall, match="expected 'VOIDED', got 'HELD'"):
         await wait(_agentcard_release_stall_lifecycle())
@@ -4066,30 +4714,47 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
     from benchmarks import run_benchmark as bench
 
     root = "00000000-0000-4000-8000-000000000021"
-    row = {"purchase_id": "571cab13-0531-4173-85ef-d0709227fcd8", "agent_id": root, "status": "HELD",
-           "card_id": "card_b2e87905c62c34ba8abff4d4", "stripe_payment_intent_id": "pi_test",
-           "total_cents": 4396, "funding_status": "RECLAIMING",
-           "provider_transfer_id": "owt_ff135698c18b095f3a40a249", "reclaim_provider_transfer_id": None}
+    row = {
+        "purchase_id": "571cab13-0531-4173-85ef-d0709227fcd8",
+        "agent_id": root,
+        "status": "HELD",
+        "card_id": "card_b2e87905c62c34ba8abff4d4",
+        "stripe_payment_intent_id": "pi_test",
+        "total_cents": 4396,
+        "funding_status": "RECLAIMING",
+        "provider_transfer_id": "owt_ff135698c18b095f3a40a249",
+        "reclaim_provider_transfer_id": None,
+    }
 
     async def stalled_payments(_base_url, _root_id, evidence):
         evidence["payment_snapshot"] = {"tree_agent_ids": [root], "purchase_cleanup": [row]}
         raise TimeoutError()
 
     async def finalize(env: dict, lifecycle: dict) -> tuple:
-        result = bench.TaskResult(name="agent-payment-test-shop", passed=True, agent_id=root,
-                                  status="COMPLETED", progress_score=1, duration_seconds=1, cost_cents=0,
-                                  message_count=0, logs={"tree": {root: {}}})
+        result = bench.TaskResult(
+            name="agent-payment-test-shop",
+            passed=True,
+            agent_id=root,
+            status="COMPLETED",
+            progress_score=1,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            logs={"tree": {root: {}}},
+        )
         before = {"root_user_id": "test-owned-user", "tree_agent_ids": [root], "browser_sessions": []}
-        with patch.dict(os.environ, env), \
-             patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=before), \
-             patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}), \
-             patch.object(bench, "pause_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "delete_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})), \
-             patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))), \
-             patch.object(bench, "_finalize_owned_root_payments", stalled_payments), \
-             patch.object(bench, "get_test_payment_lifecycle", AsyncMock(return_value=lifecycle)), \
-             patch.object(bench, "fetch_local_worker_logs", return_value=[]):
+        with (
+            patch.dict(os.environ, env),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=before),
+            patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}),
+            patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})),
+            patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))),
+            patch.object(bench, "_finalize_owned_root_payments", stalled_payments),
+            patch.object(bench, "get_test_payment_lifecycle", AsyncMock(return_value=lifecycle)),
+            patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+        ):
             try:
                 await bench._finalize_owned_cloud_batch("test-owned-no-network", [result], {})
             except RuntimeError as error:
@@ -4117,20 +4782,30 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
         assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
 
 
-
 def test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state():
     from copy import deepcopy
     from benchmarks.run_benchmark import _agentcard_release_stalled
+
     good = _agentcard_release_stall_lifecycle()
     assert _agentcard_release_stalled(good)
     variants = []
     for field, value in (("id", "card_other"), ("balanceCents", 1), ("balanceCents", False)):
-        row = deepcopy(good); row["agentCard"][field] = value; variants.append(row)
+        row = deepcopy(good)
+        row["agentCard"][field] = value
+        variants.append(row)
     for field in ("id", "balanceCents"):
-        row = deepcopy(good); row["agentCard"].pop(field); variants.append(row)
-    row = deepcopy(good); row["orgTransfer"].pop("cardId"); variants.append(row)
-    row = deepcopy(good); row["orgTransfer"]["livemode"] = True; variants.append(row)
-    row = deepcopy(good); row["orgTransfer"]["releasedCents"] = False; variants.append(row)
+        row = deepcopy(good)
+        row["agentCard"].pop(field)
+        variants.append(row)
+    row = deepcopy(good)
+    row["orgTransfer"].pop("cardId")
+    variants.append(row)
+    row = deepcopy(good)
+    row["orgTransfer"]["livemode"] = True
+    variants.append(row)
+    row = deepcopy(good)
+    row["orgTransfer"]["releasedCents"] = False
+    variants.append(row)
     for row in variants:
         assert not _agentcard_release_stalled(row), row
 
@@ -4139,26 +4814,36 @@ async def test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_o
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
+
     task = get_task_by_name("agent-payment-abandonment")
     calls = {"reads": 0, "recoveries": 0}
+
     async def read(_base, _aid):
         calls["reads"] += 1
         raise AssertionError("owned timer expired before the read")
+
     async def recover(_base, _aid):
         calls["recoveries"] += 1
         raise AssertionError("owned timer expired before recovery")
+
     for flag in ("0", "1"):
         for owned in (False, True):
             with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": flag}):
                 with pytest.raises(RuntimeError) as caught:
-                    await asyncio.wait_for(bench._wait_for_expected_payment_lifecycle(
-                        "http://benchmark.invalid", "exact-owned-agent", task,
-                        _agentcard_release_stall_lifecycle(),
-                        timeout_seconds=0.025 if owned else 0,
-                        poll_interval_seconds=0.1 if owned else 0,
-                        fetch_lifecycle=read, recover_lifecycle=recover if owned else None,
-                        resume_pending_after_seconds=120 if owned else None,
-                    ), timeout=0.5)
+                    await asyncio.wait_for(
+                        bench._wait_for_expected_payment_lifecycle(
+                            "http://benchmark.invalid",
+                            "exact-owned-agent",
+                            task,
+                            _agentcard_release_stall_lifecycle(),
+                            timeout_seconds=0.025 if owned else 0,
+                            poll_interval_seconds=0.1 if owned else 0,
+                            fetch_lifecycle=read,
+                            recover_lifecycle=recover if owned else None,
+                            resume_pending_after_seconds=120 if owned else None,
+                        ),
+                        timeout=0.5,
+                    )
             assert isinstance(caught.value, bench.AgentCardReleaseStall) == (flag == "1")
             assert "last observed" in str(caught.value)
     assert calls == {"reads": 0, "recoveries": 0}
@@ -4168,25 +4853,40 @@ async def test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_can
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
+
     task = get_task_by_name("agent-payment-abandonment")
+
     async def failed(_base, _aid):
         await asyncio.sleep(0.035)
         raise ConnectionError("unrelated actual read failure")
+
     with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
         with pytest.raises(RuntimeError) as caught:
             await bench._wait_for_expected_payment_lifecycle(
-                "http://benchmark.invalid", "exact-owned-agent", task,
-                _agentcard_release_stall_lifecycle(), timeout_seconds=0.025,
-                poll_interval_seconds=0, fetch_lifecycle=failed)
+                "http://benchmark.invalid",
+                "exact-owned-agent",
+                task,
+                _agentcard_release_stall_lifecycle(),
+                timeout_seconds=0.025,
+                poll_interval_seconds=0,
+                fetch_lifecycle=failed,
+            )
         assert not isinstance(caught.value, bench.AgentCardReleaseStall)
         assert "remained unavailable" in str(caught.value)
+
         async def cancelled(_base, _aid):
             raise asyncio.CancelledError()
+
         with pytest.raises(asyncio.CancelledError):
             await bench._wait_for_expected_payment_lifecycle(
-                "http://benchmark.invalid", "exact-owned-agent", task,
-                _agentcard_release_stall_lifecycle(), timeout_seconds=1,
-                poll_interval_seconds=0, recover_lifecycle=cancelled)
+                "http://benchmark.invalid",
+                "exact-owned-agent",
+                task,
+                _agentcard_release_stall_lifecycle(),
+                timeout_seconds=1,
+                poll_interval_seconds=0,
+                recover_lifecycle=cancelled,
+            )
 
 
 async def test_abandonment_waits_for_cron_reconciliation():
@@ -7696,12 +8396,8 @@ def test_in_progress_phone_call_counts_as_live_stall_activity():
     hold = get_task_by_name("phone-call-hold-queue")
     chat = get_task_by_name("chat-mode")
 
-    assert has_in_progress_phone_call(
-        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "IN_PROGRESS"}}]
-    )
-    assert not has_in_progress_phone_call(
-        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "FINISHED"}}]
-    )
+    assert has_in_progress_phone_call([{"metadata": {"toolName": "call_phone_number", "toolStatus": "IN_PROGRESS"}}])
+    assert not has_in_progress_phone_call([{"metadata": {"toolName": "call_phone_number", "toolStatus": "FINISHED"}}])
     assert not has_in_progress_phone_call([{"metadata": {"toolName": "web_search", "toolStatus": "IN_PROGRESS"}}])
     assert not has_in_progress_phone_call([])
     # Keep the default fail-fast budget for hold-queue tasks that never place a
@@ -7710,6 +8406,45 @@ def test_in_progress_phone_call_counts_as_live_stall_activity():
     assert agent_stall_limit_seconds(chat) == AGENT_STALL_SECONDS
     assert get_timeout_floor(hold.name) == hold.timeout_seconds
     assert TASK_TIMEOUT_FLOORS[hold.name] == 12600
+
+
+async def test_in_flight_world_model_prediction_counts_as_live_stall_activity():
+    """A leaf waiting on a simulated tool must not trip tree-stall while the WMH predicts it.
+
+    Local repro (raise-5m-rose-labs-brex, 2026-10-10, run ee95747b): the run failed
+    at 1099s with ``tree stalled ... silent for 525s (threshold=510s)`` while the
+    native WMH session was still predicting a queued explore (19 predictions,
+    revisions advancing). The runner reads the seeded session's activity.
+    """
+    import httpx
+
+    from benchmarks.run_benchmark import tree_stall_exceeded, world_model_operations_in_flight
+
+    owned = {"base_url": "http://wmh:28690/", "model_name": "rose-archive", "session_id": "s1"}
+    replies = {"activity": (200, {"revision": 7, "operations_in_flight": 2})}
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        status, body = replies["activity"]
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await world_model_operations_in_flight(owned, client=client) == 2
+        assert seen == ["http://wmh:28690/world_models/rose-archive/sessions/s1/activity"]
+        replies["activity"] = (200, {"revision": 7, "operations_in_flight": 0})
+        assert await world_model_operations_in_flight(owned, client=client) == 0
+        for status, body in ((404, {"detail": "Unknown session"}), (200, {"operations_in_flight": True}), (200, [])):
+            replies["activity"] = (status, body)
+            assert await world_model_operations_in_flight(owned, client=client) is None
+    assert await world_model_operations_in_flight(None) is None
+
+    limit = 510
+    # The leaf and tree cost are silent, but the world model is still predicting.
+    assert not tree_stall_exceeded(tree_idle=525, cost_idle=525, world_model_idle=15, limit=limit)
+    # A genuinely dead tree still fails fast.
+    assert tree_stall_exceeded(tree_idle=525, cost_idle=525, world_model_idle=525, limit=limit)
+    assert not tree_stall_exceeded(tree_idle=525, cost_idle=30, world_model_idle=525, limit=limit)
 
 
 async def test_declared_evaluator_hydrates_claude_code_sessions():
@@ -10372,6 +11107,131 @@ def test_tamy_identity_fixture_seeds_the_run_identity_not_the_dev_user():
         "source": "prod_sync",
         "user_id": TAMY_IDENTITY_USER_ID,
     }
+
+
+def test_tamy_account_snapshot_fixture_seeds_account_rows_without_browser_auth_in_simulate():
+    """The account-snapshot fixture is DATA, not credentials: it must apply under simulate.
+
+    The identity overlay skips itself in simulate mode (browser auth is meaningless
+    when the WMH serves the browser), which left the run user with no User row at
+    all — the agent create died on the User FK before an agent existed. The
+    snapshot seeds her account rows (User, people, messages, ...) via the full
+    user-scoped seed with browser-auth sync disabled, in both modes.
+    """
+    import benchmarks.run_benchmark as bench
+    from benchmarks.live_fixtures import TAMY_IDENTITY_USER_ID
+
+    captured: dict = {}
+    compute_calls: list = []
+    original_seed = bench._run_seed_subprocess
+    original_db = bench._local_victoria_database_url
+    original_compute = bench._sync_compute_tokens
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+
+    def fake_seed(command, *, cwd, env, timeout):
+        captured.update(command=list(command), env=dict(env), timeout=timeout, cwd=str(cwd))
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
+        bench._local_victoria_database_url = lambda: "postgresql://postgres:postgres@localhost:5432/victoria_bench_x"
+        bench._sync_compute_tokens = lambda **kwargs: compute_calls.append(kwargs) or True
+        bench._run_seed_subprocess = fake_seed
+        manifest = bench._apply_live_tamy_account_snapshot_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id=bench.USER_ID,
+                auth_realm="amazon.com",
+            )
+        )
+    finally:
+        bench._run_seed_subprocess = original_seed
+        bench._local_victoria_database_url = original_db
+        bench._sync_compute_tokens = original_compute
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    # Full user-scoped seed (no --credentials-only / --compute-tokens-only scope flag).
+    assert captured["command"] == ["npx", "tsx", "scripts/seed-local.ts"]
+    assert captured["cwd"].endswith("back-end")
+    assert captured["env"]["SEED_LOCAL_USER_ID"] == TAMY_IDENTITY_USER_ID
+    assert captured["env"]["BENCHMARK_SKIP_BROWSER_AUTH_SYNC"] == "1"
+    assert captured["env"]["DATABASE_URL"].endswith("/victoria_bench_x")
+    assert captured["env"]["DIRECT_URL"].endswith("/victoria_bench_x")
+    assert "SEED_COOKIE_DOMAINS" not in captured["env"]
+    assert captured["timeout"] >= 600
+    # Simulate: compute tokens come from the restored seed DB, never a live refresh.
+    assert compute_calls == []
+    assert manifest == {
+        "fixture": "live-tamy-account-snapshot",
+        "browser_auth": False,
+        "source": "prod_sync",
+        "user_id": TAMY_IDENTITY_USER_ID,
+        "simulate": True,
+    }
+
+
+def test_tamy_account_snapshot_fixture_fails_closed_when_seed_fails():
+    """A failed snapshot seed must abort the task, not start an agent as a missing user."""
+    import pytest
+
+    import benchmarks.run_benchmark as bench
+
+    original_seed = bench._run_seed_subprocess
+    original_db = bench._local_victoria_database_url
+    original_compute = bench._sync_compute_tokens
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    compute_calls: list = []
+
+    def failing_seed(command, *, cwd, env, timeout):
+        return subprocess.CompletedProcess(command, 1, "", "Foreign key constraint violated")
+
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._local_victoria_database_url = lambda: "postgresql://postgres:postgres@localhost:5432/victoria_bench_x"
+        bench._sync_compute_tokens = lambda **kwargs: compute_calls.append(kwargs) or True
+        bench._run_seed_subprocess = failing_seed
+        with pytest.raises(RuntimeError, match="account rows"):
+            bench._apply_live_tamy_account_snapshot_fixture(
+                bench.LiveFixtureContext(
+                    base_url="http://localhost:54121",
+                    user_id=bench.USER_ID,
+                    auth_realm="amazon.com",
+                )
+            )
+    finally:
+        bench._run_seed_subprocess = original_seed
+        bench._local_victoria_database_url = original_db
+        bench._sync_compute_tokens = original_compute
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    # Real mode refreshes compute tokens first (like the other identity overlays).
+    assert len(compute_calls) == 1
+
+
+def test_tamy_account_snapshot_declaration_drives_the_run_user():
+    """Declaring the snapshot selects Tamy as the run user and keeps the task exclusive."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.live_fixtures import TAMY_IDENTITY_USER_ID
+
+    class _Task:
+        def __init__(self, fixtures):
+            self.name = "raise-5m-rose-labs-brex"
+            self.environment = {"live_fixtures": list(fixtures)}
+
+    assert bench._live_fixture_run_user_id(_Task(["live-tamy-account-snapshot"])) == TAMY_IDENTITY_USER_ID
+
+    task = get_task_by_name("raise-5m-rose-labs-brex")
+    assert task.environment["live_fixtures"] == ["live-tamy-account-snapshot"]
+    assert bench._live_fixture_run_user_id(task) == TAMY_IDENTITY_USER_ID
+    assert task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert task.world_model_mode == "simulate"
 
 
 def test_tamy_identity_fixture_declaration_drives_the_run_user():
@@ -14895,6 +15755,119 @@ async def test_tree_log_collection_fetches_supabase_once():
     ]
 
 
+def test_local_resolve_simulate_mode_honors_catalog_world_model_mode():
+    """Local stack must start the WMH when the catalog declares simulate (fleet parity).
+
+    Restored H-05 guard: `resolve_simulate_mode` was lost in a merge, so
+    `run-bench --local <sim task>` silently ran REAL boundaries for a task that
+    declares world_model_mode=simulate.
+    """
+    from benchmarks.local import resolve_simulate_mode
+
+    assert resolve_simulate_mode(False, ["raise-5m-rose-labs-brex"]) is True
+    assert resolve_simulate_mode(True, ["chat-mode"]) is True
+    assert resolve_simulate_mode(False, ["chat-mode"]) is False
+    assert resolve_simulate_mode(False, ["chat-mode", "raise-5m-rose-labs-brex"]) is True
+    # Unknown names never raise here (validate_task_names owns that error).
+    assert resolve_simulate_mode(False, ["not-a-real-task"]) is False
+
+
+def test_local_simulate_wmh_env_uses_complete_corpus_and_skips_gepa():
+    """Local simulate stacks serve the WMH from the complete corpus with GEPA off.
+
+    Normal builds must not silently cap eligible trajectories. Explicit operator
+    overrides (already-set env) still win, and GEPA remains disabled by default.
+    """
+    from benchmarks.local import apply_local_simulate_wmh_env
+
+    env: dict = {}
+    apply_local_simulate_wmh_env(env, base_port=54100, world_model_name="rose-archive")
+    assert env["BENCHMARK_WORLD_MODEL_MODE"] == "simulate"
+    assert env["WMH_BASE_URL"] == "http://localhost:54106"
+    assert env["WMH_MODEL_NAME"] == "rose-archive"
+    assert env["WMH_MAX_BUNDLES"] == "0"
+    assert env["WMH_GEPA_BUDGET"] == "0"
+
+    pinned = {"WMH_MAX_BUNDLES": "5", "WMH_GEPA_BUDGET": "3"}
+    apply_local_simulate_wmh_env(pinned, base_port=54100)
+    assert pinned["WMH_MAX_BUNDLES"] == "5"
+    assert pinned["WMH_GEPA_BUDGET"] == "3"
+    # No explicit model: the worker still needs a name at fork time (its WMH
+    # adapter reads WMH_MODEL_NAME from its process env at the first boundary).
+    assert pinned["WMH_MODEL_NAME"] == "rose-archive"
+    assert "BENCHMARK_SKIP_WMH_BUILD" not in env
+
+    # An operator-owned, already-healthy WMH replaces run.sh's served port for
+    # the worker and the benchmark runner; run.sh then neither serves nor owns it.
+    from benchmarks.local import apply_manifest_environment
+
+    saved = {key: os.environ.get(key) for key in ("WMH_EXTERNAL_BASE_URL", "WMH_BASE_URL", "WMH_MODEL_NAME")}
+    try:
+        os.environ["WMH_EXTERNAL_BASE_URL"] = "http://127.0.0.1:28690/"
+        external: dict = {}
+        apply_local_simulate_wmh_env(external, base_port=54100, world_model_name="rose-archive")
+        assert external["WMH_BASE_URL"] == "http://127.0.0.1:28690"
+        assert external["BENCHMARK_SKIP_WMH_BUILD"] == "1"
+        os.environ.pop("WMH_BASE_URL", None)
+        apply_manifest_environment({"urls": {}})
+        assert os.environ["WMH_BASE_URL"] == "http://127.0.0.1:28690"
+        # A run.sh-served WMH in the manifest stays authoritative.
+        apply_manifest_environment({"urls": {"wmh": "http://localhost:54106"}})
+        assert os.environ["WMH_BASE_URL"] == "http://localhost:54106"
+        for invalid in ("http://10.0.0.5:28690", "https://127.0.0.1:28690", "http://127.0.0.1"):
+            os.environ["WMH_EXTERNAL_BASE_URL"] = invalid
+            try:
+                apply_local_simulate_wmh_env({}, base_port=54100)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted non-loopback external WMH {invalid}")
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_local_service_start_timeout_extends_only_for_first_wmh_build():
+    """A simulate stack with no prebuilt World Model gets the first-build readiness budget.
+
+    run.sh cold-builds the WMH (R2 listing of ~80k bundles + capped corpus export)
+    before publishing services.json; killing that at the warm-start bound destroyed
+    a healthy build. Prebuilt models, real-mode stacks and explicit build skips keep
+    the normal bound; an opted-in cold seed keeps its own budget.
+    """
+    from benchmarks.local import (
+        COLD_SEED_SERVICE_START_TIMEOUT_SECONDS,
+        SERVICE_START_TIMEOUT_SECONDS,
+        WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS,
+        service_start_timeout_seconds,
+        wmh_model_prebuilt,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {"WMH_BUILD_DIR": tmp, "WMH_MODEL_NAME": "rose-archive"}
+        assert wmh_model_prebuilt(env) is False
+        assert (
+            service_start_timeout_seconds(isolated=True, env=env, simulate=True)
+            == WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS
+        )
+        assert service_start_timeout_seconds(isolated=True, env=env, simulate=False) == SERVICE_START_TIMEOUT_SECONDS
+        assert (
+            service_start_timeout_seconds(isolated=True, env={**env, "BENCHMARK_SKIP_WMH_BUILD": "1"}, simulate=True)
+            == SERVICE_START_TIMEOUT_SECONDS
+        )
+        assert (
+            service_start_timeout_seconds(isolated=True, env={**env, "BENCHMARK_REQUIRE_SEED_DUMP": "0"}, simulate=True)
+            == COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
+        )
+        (Path(tmp) / "build.manifest.json").write_text("{}", encoding="utf-8")
+        (Path(tmp) / "models" / "rose-archive").mkdir(parents=True)
+        assert wmh_model_prebuilt(env) is True
+        assert service_start_timeout_seconds(isolated=True, env=env, simulate=True) == SERVICE_START_TIMEOUT_SECONDS
+
+
 def test_local_benchmark_args_for_multi_task_preserve_explicit_order():
     """Multi-task local runs pass an exact ordered task list to the harness."""
     from benchmarks.local import build_benchmark_args
@@ -17031,7 +18004,7 @@ def test_run_sh_required_seed_failure_cleans_exact_owned_database():
                 "-c",
                 cleanup_function
                 + "\nUSE_SYSTEM_PG=false\nSYSTEM_DB_OWNED_BY_US=false\n"
-                + "DB_OWNED_CONTAINER_ID=owned-id\nDB_CONTAINER=victoria-db-owned\n"
+                + "DB_OWNED_CONTAINER_ID=owned-id\nDB_CONTAINER=foreign-replacement-name\n"
                 + "DB_VOLUME=victoria-pgdata-owned\ncleanup_seed_bootstrap_database\n",
             ],
             env=common_env,
@@ -17041,7 +18014,7 @@ def test_run_sh_required_seed_failure_cleans_exact_owned_database():
         commands = command_log.read_text().splitlines()
         assert commands == [
             "dropdb -h localhost -p 5432 -U postgres --if-exists victoria_bench_owned",
-            "docker rm -f victoria-db-owned",
+            "docker rm -f owned-id",
             "docker volume rm victoria-pgdata-owned",
         ]
 
@@ -20260,7 +21233,7 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity", "live-aman-food-plan-identity"}
+    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity", "live-tamy-account-snapshot", "live-aman-food-plan-identity"}
 
 
 def test_amazon_passkey_scenario_is_exclusive_and_restorable():
@@ -20335,7 +21308,7 @@ def test_live_fixture_is_single_and_explicit():
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
-        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity", "live-aman-food-plan-identity"}, (
+        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity", "live-tamy-account-snapshot", "live-aman-food-plan-identity"}, (
             f"{t.name}: noncanonical live fixture"
         )
         if env.get("mode") == "synthetic":
@@ -22077,6 +23050,76 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             assert not descendant_live(), "native control descendant survived exact cleanup"
 
 
+async def test_agentcard_release_skip_rejects_independent_native_retirement_failure():
+    """A typed payment waiver cannot waive an independently failed owned provider join."""
+    from copy import deepcopy
+    import httpx
+    import uuid
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    # Synthetic live response; the archived allocation has no live Stripe provenance.
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
+    for native in ('none', 'joined', 'failed'):
+        task = deepcopy(get_task_by_name('agent-payment-production-abandonment'))
+        calls = []
+        task.world_model_mode = 'simulate'
+        if native != 'none':
+            task.wmh_initial_state = {'structured': {'schema':'offline-retirement-control', 'as_of_utc':'2026-10-15T00:00:00Z'}, 'scratchpad':''}
+        else:
+            task.wmh_initial_state = None
+        actual_client = httpx.AsyncClient
+        def transport(request):
+            assert request.url.host == 'fixture.invalid'
+            payload = json.loads(request.content)
+            assert payload['world_model_mode'] == 'simulate'
+            assert request.method == 'POST' and request.url.path == '/api/agents'
+            return httpx.Response(201, json={'agent_id': lifecycle['agentId']})
+        def client(*args, **kwargs):
+            return actual_client(*args, transport=httpx.MockTransport(transport), **kwargs)
+        class NativeClient:
+            def __init__(self, base): assert base == 'http://native.test'
+            async def create_session(self, model, **kwargs):
+                assert model == 'rose-test'
+                assert kwargs['session_scope_id'] == lifecycle['agentId']
+                assert kwargs['seed_state']['structured']['root_agent_id'] == lifecycle['agentId']
+                assert kwargs['seed_state']['structured']['root_goal'] == kwargs['task']
+                return 'owned-session'
+            async def end_session(self, model, sid):
+                assert (model, sid) == ('rose-test', 'owned-session')
+                calls.append((model, sid))
+                if native == 'failed': raise RuntimeError('exact owned retirement unavailable')
+                return dict(engine='experiential', join_verified=True, ended=sid, session_id=sid, session_scope_id=lifecycle['agentId'], revision=1, state={}, history=[], usage={})
+        cleanup = AsyncMock(side_effect=AssertionError('duplicate financial cleanup'))
+        delete = AsyncMock()
+        archive = AsyncMock(return_value=(None, None))
+        logs = {'failure_evidence': {'errors': []}}
+        stall = bench._payment_reconciliation_timeout('pending', lifecycle, task_name=task.name)
+        assert isinstance(stall, bench.AgentCardReleaseStall)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {'BENCHMARK_WORLD_MODEL_MODE':'simulate','WMH_BASE_URL':'http://native.test','WMH_MODEL_NAME':'rose-test','WMH_ENGINE':'experiential'}))
+            for key in ('WMH_SESSION_ID', 'WORLD_MODEL_SESSION_ID'):
+                stack.enter_context(patch.dict(os.environ))
+                os.environ.pop(key, None)
+            stack.enter_context(patch.object(bench.uuid, 'uuid4', return_value=uuid.UUID(lifecycle['agentId'])))
+            stack.enter_context(patch.object(bench.httpx, 'AsyncClient', client))
+            for name in ('prepare_sandbox_payment_residual', '_preflight_production_payment_identity', '_apply_live_fixtures', '_apply_memory_fixtures', '_apply_auth_test_site', '_restore_live_fixture_scenarios_async', '_release_auth_test_site'):
+                stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+            for name, value in {'_api_headers':AsyncMock(return_value={}), 'WMHHttpClient':NativeClient, '_run_with_agent_execution_backstop':AsyncMock(side_effect=stall), '_capture_task_failure_evidence':AsyncMock(return_value=({'messages': [], '_benchmark': {'payment_lifecycle':deepcopy(lifecycle)}}, logs)), 'finalize_archive_and_score_world_model':archive, 'ensure_payment_lifecycle_cleanup':cleanup, 'delete_agent':delete, '_run_user_id_override_for_task':lambda *_args:None}.items():
+                stack.enter_context(patch.object(bench, name, value))
+            result = await bench.run_single_task('https://fixture.invalid', task)
+        cleanup.assert_not_awaited(); delete.assert_awaited_once()
+        assert len(calls) == (native != 'none'), calls
+        assert result.logs['agentcard_release_stall_lifecycle'] == lifecycle
+        expected = 'ERROR' if native == 'failed' else 'SKIPPED'
+        assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False), (native, result.status, result.failure_reason)
+        assert bench._is_permitted_agentcard_release_skip(result) is (native != 'failed')
+        assert archive.await_args.kwargs['benchmark_status'] == expected
+        if native == 'failed':
+            assert result.logs['wmh_retirement_error'] == dict(type='RuntimeError', message='exact owned retirement unavailable', session_id='owned-session', session_scope_id=lifecycle['agentId'], join_verified=False, cost_verified=False)
+            assert 'exact owned retirement unavailable' in result.failure_reason
+        elif native == 'joined': assert result.logs['wmh_retirement']['join_verified'] is True
+
+
 async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown():
     """A false-live lifecycle cannot turn a production or unknown task into a sandbox skip."""
     from copy import deepcopy
@@ -22084,6 +23127,7 @@ async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknow
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
+
     for name in ("agent-payment-production-abandonment", "unregistered-agentcard-task"):
         task = deepcopy(get_task_by_name("agent-payment-abandonment"))
         task.name = name
@@ -22092,22 +23136,36 @@ async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknow
             with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
                 with pytest.raises(RuntimeError) as raised:
                     await bench._wait_for_expected_payment_lifecycle(
-                        "http://localhost:55120", "agent-123", task,
-                        _agentcard_release_stall_lifecycle(), timeout_seconds=0.01 if owned else 0,
+                        "http://localhost:55120",
+                        "agent-123",
+                        task,
+                        _agentcard_release_stall_lifecycle(),
+                        timeout_seconds=0.01 if owned else 0,
                         poll_interval_seconds=0.1,
                         recover_lifecycle=AsyncMock() if owned else None,
                     )
             assert not isinstance(raised.value, bench.AgentCardReleaseStall), (name, owned)
 
 
-async def test_agentcard_release_skip_catalog_ci_rejects_production_and_unknown():
+async def test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown():
     from benchmarks import run_benchmark as bench
+
     for name in ("agent-payment-production-abandonment", "unregistered-agentcard-task"):
-        result = bench.TaskResult(name=name, passed=False, agent_id="agent-123", status="SKIPPED",
-            progress_score=0, duration_seconds=1, cost_cents=0, message_count=0,
-            failure_reason=bench.AGENTCARD_RELEASE_SKIP_REASON)
+        result = bench.TaskResult(
+            name=name,
+            passed=False,
+            agent_id="agent-123",
+            status="SKIPPED",
+            progress_score=0,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            failure_reason=bench.AGENTCARD_RELEASE_SKIP_REASON,
+        )
         with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
-            assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]), name
+            assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) == (
+                name == "unregistered-agentcard-task"
+            ), name
 
 
 async def test_agentcard_release_skip_catalog_task_catch_stays_strict():
@@ -22115,49 +23173,87 @@ async def test_agentcard_release_skip_catalog_task_catch_stays_strict():
     from unittest.mock import AsyncMock
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
-    for name in ("agent-payment-production-abandonment", "unregistered-agentcard-task", "agent-payment-test-shop", "agent-payment-abandonment"):
-        task = deepcopy(get_task_by_name("agent-payment-abandonment")); task.name = name
-        with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}), \
-             patch.object(bench, "prepare_sandbox_payment_residual", AsyncMock(side_effect=bench.AgentCardReleaseStall("injected typed stall"))), \
-             patch.object(bench, "_restore_live_fixture_scenarios_async", AsyncMock()), \
-             patch.object(bench, "_release_auth_test_site", AsyncMock()):
+
+    for name in (
+        "agent-payment-production-abandonment",
+        "unregistered-agentcard-task",
+        "agent-payment-test-shop",
+        "agent-payment-abandonment",
+    ):
+        task = deepcopy(get_task_by_name("agent-payment-abandonment"))
+        task.name = name
+        with (
+            patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}),
+            patch.object(
+                bench,
+                "prepare_sandbox_payment_residual",
+                AsyncMock(
+                    side_effect=bench.AgentCardReleaseStall(
+                        "injected typed stall",
+                        lifecycle=_agentcard_release_stall_lifecycle(
+                            livemode=name == "agent-payment-production-abandonment"
+                        ),
+                    )
+                ),
+            ),
+            patch.object(bench, "_restore_live_fixture_scenarios_async", AsyncMock()),
+            patch.object(bench, "_release_auth_test_site", AsyncMock()),
+        ):
             result = await bench._run_single_task_as_run_user(
-                "http://localhost:55120", task, True, None, "", None, None, None)
-        expected = "SKIPPED" if name in {"agent-payment-abandonment", "agent-payment-test-shop"} else "ERROR"
+                "http://localhost:55120", task, True, None, "", None, None, None
+            )
+        expected = "ERROR" if name == "unregistered-agentcard-task" else "SKIPPED"
         assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False), name
 
 
 async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
-    """With the flag, an owned root stuck only on the sandbox release warns, skips and releases the batch."""
+    """Known sandbox/live release stalls warn and skip; unknown tasks and mismatched modes fail."""
     from unittest.mock import AsyncMock
 
     from benchmarks import run_benchmark as bench
 
     root = "00000000-0000-4000-8000-000000000021"
-    row = {"purchase_id": "571cab13-0531-4173-85ef-d0709227fcd8", "agent_id": root, "status": "HELD",
-           "card_id": "card_b2e87905c62c34ba8abff4d4", "stripe_payment_intent_id": "pi_test",
-           "total_cents": 4396, "funding_status": "RECLAIMING",
-           "provider_transfer_id": "owt_ff135698c18b095f3a40a249", "reclaim_provider_transfer_id": None}
+    row = {
+        "purchase_id": "571cab13-0531-4173-85ef-d0709227fcd8",
+        "agent_id": root,
+        "status": "HELD",
+        "card_id": "card_b2e87905c62c34ba8abff4d4",
+        "stripe_payment_intent_id": "pi_test",
+        "total_cents": 4396,
+        "funding_status": "RECLAIMING",
+        "provider_transfer_id": "owt_ff135698c18b095f3a40a249",
+        "reclaim_provider_transfer_id": None,
+    }
 
     async def stalled_payments(_base_url, _root_id, evidence):
         evidence["payment_snapshot"] = {"tree_agent_ids": [root], "purchase_cleanup": [row]}
         raise TimeoutError()
 
     async def finalize(env: dict, lifecycle: dict, task_name: str = "agent-payment-test-shop") -> tuple:
-        result = bench.TaskResult(name=task_name, passed=True, agent_id=root,
-                                  status="COMPLETED", progress_score=1, duration_seconds=1, cost_cents=0,
-                                  message_count=0, logs={"tree": {root: {}}})
+        result = bench.TaskResult(
+            name=task_name,
+            passed=True,
+            agent_id=root,
+            status="COMPLETED",
+            progress_score=1,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            logs={"tree": {root: {}}},
+        )
         before = {"root_user_id": "test-owned-user", "tree_agent_ids": [root], "browser_sessions": []}
-        with patch.dict(os.environ, env), \
-             patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=before), \
-             patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}), \
-             patch.object(bench, "pause_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "delete_agent", AsyncMock(return_value=True)), \
-             patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})), \
-             patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))), \
-             patch.object(bench, "_finalize_owned_root_payments", stalled_payments), \
-             patch.object(bench, "get_test_payment_lifecycle", AsyncMock(return_value=lifecycle)), \
-             patch.object(bench, "fetch_local_worker_logs", return_value=[]):
+        with (
+            patch.dict(os.environ, env),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=before),
+            patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}),
+            patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})),
+            patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))),
+            patch.object(bench, "_finalize_owned_root_payments", stalled_payments),
+            patch.object(bench, "get_test_payment_lifecycle", AsyncMock(return_value=lifecycle)),
+            patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+        ):
             try:
                 await bench._finalize_owned_cloud_batch("test-owned-no-network", [result], {})
             except RuntimeError as error:
@@ -22174,6 +23270,20 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
     assert evidence["warnings"] == [f"payment: {bench.AGENTCARD_RELEASE_SKIP_REASON}"]
     assert evidence["agentcard_release_stall_lifecycles"][root]["orgTransfer"]["releasedCents"] == 0
 
+    with patch.dict(os.environ):
+        os.environ.pop(bench.AGENTCARD_RELEASE_SKIP_ENV, None)
+        for name, live in (("agent-payment-test-shop", False), ("agent-payment-production-abandonment", True)):
+            row["total_cents"] = 100 if live else 4396
+            result, error = await finalize({}, _agentcard_release_stall_lifecycle(livemode=live), name)
+            assert error is None, (name, error)
+            assert (result.passed, result.status, result.benchmark_status) == (False, "SKIPPED", "SKIPPED"), name
+            assert result.logs["cloud_cleanup_evidence"]["errors"] == []
+            assert result.logs["cloud_cleanup_evidence"]["warnings"] == [
+                f"payment: {bench.AGENTCARD_RELEASE_SKIP_REASON}"
+            ]
+            assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
+        row["total_cents"] = 4396
+
     for env, lifecycle in (
         ({"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "0"}, _agentcard_release_stall_lifecycle()),
         (flag, _agentcard_release_stall_lifecycle(livemode=True)),
@@ -22183,7 +23293,6 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
         assert error is not None and "owned cloud evidence finalization failed" in str(error), lifecycle
         assert (result.passed, result.benchmark_status) == (False, "ERROR")
         assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
-
 
     for name in ("agent-payment-production-abandonment", "unregistered-agentcard-task"):
         result, error = await finalize(flag, _agentcard_release_stall_lifecycle(), name)
@@ -22263,16 +23372,49 @@ async def run_all_tests():
     r.record("controller_maintenance_operation_directory", test_controller_maintenance_operation_directory)
     r.record("controller_maintenance_stop_transition", test_controller_maintenance_stop_transition)
     r.record("controller_maintenance_retained_path", test_controller_maintenance_retained_path)
+    from benchmarks import lantern_people_trace_tests
+
+    for name in (
+        "test_lantern_native_scenarios_and_final_grounding",
+        "test_lantern_discovery_constraint_and_provenance_rejections",
+        "test_lantern_enrichment_requires_native_lineage_and_fresh_values",
+        "test_lantern_pagination_requires_exact_native_cursor_and_constraints",
+        "test_lantern_config_missing_final_and_null_native_fields",
+        "test_lantern_reviewer_owner_constraint_and_native_counterexamples",
+        "test_lantern_latest_completion_and_cache_evidence_are_strict",
+    ):
+        r.record(name, getattr(lantern_people_trace_tests, name))
+    r.record("archived_diagnostic_projection_requires_authenticated_bindings", test_archived_diagnostic_projection_requires_authenticated_bindings)
+    await r.record_async("production_agentcard_release_stall_default_skip", test_production_agentcard_release_stall_is_skippable_by_default)
+    r.record("agentcard_release_skip_rejects_independent_failures", test_agentcard_release_skip_rejects_independent_lifecycle_failures)
+    await r.record_async("agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip)
+    await r.record_async("agentcard_release_skip_execution_cleanup", test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup)
+    await r.record_async("agentcard_release_skip_native_retirement_strict", test_agentcard_release_skip_rejects_independent_native_retirement_failure)
+    await r.record_async("agentcard_release_skip_preserves_task_failure", test_agentcard_release_stall_cannot_replace_an_independent_task_failure)
     await r.record_async("agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown)
-    await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_rejects_production_and_unknown)
+    await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown)
     await r.record_async("agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict)
     await r.record_async("agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict)
     r.record("ci_permits_only_opt_in_agentcard_release_skip", test_ci_permits_only_the_opt_in_agentcard_release_skip)
-    r.record("agentcard_release_policy_rejects_incomplete_foreign_state", test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state)
-    await r.record_async("abandonment_timeout_classifies_sandbox_release_stall", test_abandonment_timeout_classifies_only_the_sandbox_release_stall)
-    await r.record_async("owned_payment_release_stall_warn_skip", test_owned_payment_release_stall_warns_instead_of_failing_cleanup)
-    await r.record_async("agentcard_release_policy_owned_legacy_deadlines", test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_opted_in)
-    await r.record_async("agentcard_release_policy_fetch_cancel_strict", test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation)
+    r.record(
+        "agentcard_release_policy_rejects_incomplete_foreign_state",
+        test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state,
+    )
+    await r.record_async(
+        "abandonment_timeout_classifies_sandbox_release_stall",
+        test_abandonment_timeout_classifies_only_the_sandbox_release_stall,
+    )
+    await r.record_async(
+        "owned_payment_release_stall_warn_skip", test_owned_payment_release_stall_warns_instead_of_failing_cleanup
+    )
+    await r.record_async(
+        "agentcard_release_policy_owned_legacy_deadlines",
+        test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_opted_in,
+    )
+    await r.record_async(
+        "agentcard_release_policy_fetch_cancel_strict",
+        test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation,
+    )
 
     await r.record_async(
         "benchmark_native_checks_overlap_judges_without_losing_ownership",
@@ -22433,7 +23575,9 @@ async def run_all_tests():
     )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_call_ivr_dtmf_task", test_phone_call_ivr_dtmf_task_defines_call_tree_verification)
-    r.record("phone_call_hold_queue_task", test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credit)
+    r.record(
+        "phone_call_hold_queue_task", test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credit
+    )
     r.record(
         "phone_call_parked_on_hold_static_check",
         test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card,
@@ -22444,7 +23588,9 @@ async def run_all_tests():
         for name in sorted(dir(module)):
             if name.startswith("test_"):
                 case = getattr(module, name)
-                await r.record_async(prefix + name[5:], lambda case=case: asyncio.to_thread(_run_pytest_style_case, case))
+                await r.record_async(
+                    prefix + name[5:], lambda case=case: asyncio.to_thread(_run_pytest_style_case, case)
+                )
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record(
         "phone_callee_session_number_name_contract",
@@ -23505,6 +24651,10 @@ async def run_all_tests():
         "in_progress_phone_call_counts_as_live_stall_activity",
         test_in_progress_phone_call_counts_as_live_stall_activity,
     )
+    await r.record_async(
+        "in_flight_world_model_prediction_counts_as_live_stall_activity",
+        test_in_flight_world_model_prediction_counts_as_live_stall_activity,
+    )
     r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",
         test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate,
@@ -23682,6 +24832,18 @@ async def run_all_tests():
         test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity,
     )
     r.record(
+        "tamy_account_snapshot_seeds_account_rows_in_simulate",
+        test_tamy_account_snapshot_fixture_seeds_account_rows_without_browser_auth_in_simulate,
+    )
+    r.record(
+        "tamy_account_snapshot_fails_closed_on_seed_failure",
+        test_tamy_account_snapshot_fixture_fails_closed_when_seed_fails,
+    )
+    r.record(
+        "tamy_account_snapshot_declaration_drives_run_user",
+        test_tamy_account_snapshot_declaration_drives_the_run_user,
+    )
+    r.record(
         "live_fixture_auth_failure_is_fatal",
         test_live_fixture_fails_when_live_auth_refresh_fails,
     )
@@ -23775,6 +24937,12 @@ async def run_all_tests():
     await r.record_async(
         "post_pause_refreshes_retain_observed_harness_evidence",
         test_post_pause_refreshes_retain_observed_harness_evidence,
+    )
+    await r.record_async(
+        "task_failure_preserves_owned_snapshot", test_task_failure_preserves_owned_snapshot_on_all_error_exits
+    )
+    await r.record_async(
+        "payment_browser_seal_rejects_empty_evidence", test_payment_browser_seal_rejects_empty_declared_browser_evidence
     )
     await r.record_async(
         "payment_abandonment_seals_browser_before_hub_archive",
@@ -23909,6 +25077,17 @@ async def run_all_tests():
     r.record("prompt_user_denial_uses_rejection_sentinel", test_prompt_user_denial_uses_rejection_sentinel)
     r.record("keep_agents_env_preserves_successes_and_failures", test_keep_agents_env_preserves_successes_and_failures)
     r.record("local_services_manifest_reports_anon_capability", test_local_services_manifest_reports_anon_capability)
+    r.record(
+        "local_resolve_simulate_mode_honors_catalog", test_local_resolve_simulate_mode_honors_catalog_world_model_mode
+    )
+    r.record(
+        "local_simulate_wmh_env_uses_complete_corpus_skips_gepa",
+        test_local_simulate_wmh_env_uses_complete_corpus_and_skips_gepa,
+    )
+    r.record(
+        "local_service_start_timeout_extends_for_first_wmh_build",
+        test_local_service_start_timeout_extends_only_for_first_wmh_build,
+    )
     r.record("cache_coverage_uses_root_scoped_tool_counts", test_cache_coverage_uses_root_scoped_tool_counts)
     await r.record_async(
         "stale_workflow_count_backs_off_on_namespace_rate_limit",
@@ -23953,6 +25132,15 @@ async def run_all_tests():
     r.record(
         "payment_setup_resume_stays_exclusive_beside_event_ticket",
         test_payment_setup_resume_stays_exclusive_beside_event_ticket,
+    )
+    r.record(
+        "browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part
+    )
+    await r.record_async(
+        "browser_archive_waits_resumed_recording_part", test_browser_archive_refresh_waits_for_resumed_recording_part
+    )
+    await r.record_async(
+        "browser_archive_missing_resumed_part_deadline", test_browser_archive_missing_resumed_part_preserves_existing_deadline
     )
     r.record(
         "agent_messages_ready_for_browser_hub_archive_waits_for_recording",

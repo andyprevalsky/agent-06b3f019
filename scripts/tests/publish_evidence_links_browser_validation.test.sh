@@ -735,11 +735,63 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 )
 assert any("no correctly attached recording" in f for f in failures), failures
 
-# Exercise actual socket timeouts at the public verifier boundary. A fresh GET
-# can recover a stalled response, while persistent/auth/JSON failures stay closed.
-for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
+# Once an invalid response is observed, it must fail without another request or
+# browser launch. Isolate delivery from socket scheduling: a 100ms transport
+# timeout before the response arrives is a different, retryable boundary.
+for fault in ("forbidden", "malformed"):
+    for timeout_first in (False, True):
+        requests = []
+
+        class InvalidResponseTransport(urllib.request.BaseHandler):
+            handler_order = 400
+
+            def http_open(self, request):
+                requests.append((request.get_header("Authorization"), request.timeout))
+                if timeout_first and len(requests) == 1:
+                    raise TimeoutError("fixture response not delivered")
+                if fault == "forbidden":
+                    raise urllib.error.HTTPError(
+                        request.full_url, 403, "Forbidden", Message(), io.BytesIO(b"forbidden")
+                    )
+                response = addinfourl(
+                    io.BytesIO(b"{"), Message(), request.full_url, 200
+                )
+                response.msg = "OK"
+                return response
+
+            https_open = http_open
+
+        opener = urllib.request.build_opener(InvalidResponseTransport())
+        with (
+            patch.object(mod, "_opener", lambda: opener),
+            patch.object(mod.subprocess, "run") as browser,
+        ):
+            try:
+                mod.verify_agent_reachable(agent, "fixture.signature", timeout=0.1)
+            except SystemExit as error:
+                expected_cause = (
+                    urllib.error.HTTPError if fault == "forbidden" else json.JSONDecodeError
+                )
+                assert isinstance(error.__cause__, expected_cause), (fault, error)
+            else:
+                raise AssertionError((fault, "invalid response was accepted"))
+            assert requests == [("BenchmarkShare fixture.signature", 0.1)] * (
+                2 if timeout_first else 1
+            ), (fault, timeout_first, requests)
+            browser.assert_not_called()
+
+# Exercise actual socket timeouts separately. A fresh GET can recover stalled
+# headers/body, while a persistent stall exhausts the unchanged two attempts.
+for fault in ("headers-once", "body-once", "always", "always-late-receipt", "always-late-extra"):
     requests: list[str | None] = []
+    receipt_condition = threading.Condition()
+    observe_requests = threading.Event()
+    if fault != "always-late-receipt":
+        observe_requests.set()
     release = threading.Event()
+    extra_arrived = threading.Event()
+    extra_thread = None
+    extra_result: list[Any] = []
     body = json.dumps(
         {
             "messages": [
@@ -755,15 +807,24 @@ for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
         def do_GET(self) -> None:
             is_api = self.path.startswith("/api/benchmarks/shared-agent/")
             if is_api:
-                requests.append(self.headers.get("Authorization"))
+                if self.headers.get("Authorization") == "BenchmarkShare fixture.extra":
+                    extra_arrived.set()
+                    assert release.wait(5), "fixture extra receipt was not released"
+                # Model server scheduling after the client has already timed
+                # out. Receipt collection is asynchronous to verifier return.
+                assert observe_requests.wait(5), "fixture receipt observer was not released"
+                with receipt_condition:
+                    requests.append(self.headers.get("Authorization"))
+                    receipt_condition.notify_all()
             stalled = is_api and (
-                fault == "always" or (len(requests) == 1 and fault.endswith("-once"))
+                fault in {"always", "always-late-receipt", "always-late-extra"}
+                or (len(requests) == 1 and fault.endswith("-once"))
             )
             try:
                 if stalled and fault != "body-once":
                     release.wait(2)
-                response = b"{" if is_api and fault == "malformed" else body
-                self.send_response(403 if is_api and fault == "forbidden" else 200)
+                response = body
+                self.send_response(200)
                 self.send_header("Content-Length", str(len(response)))
                 self.end_headers()
                 if stalled and fault == "body-once":
@@ -812,18 +873,135 @@ for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
         assert observed == (("verified in fresh browser", 1) if recovered else None), (
             fault
         )
-        expected_requests = 2 if recovered or fault == "always" else 1
-        assert requests == ["BenchmarkShare fixture.signature"] * expected_requests, (
-            fault,
-            requests,
-        )
+        if fault == "always-late-extra":
+            # This test-owned third request cannot be recorded until cleanup.
+            # A pre-join snapshot would incorrectly report only two receipts.
+            def extra_request() -> None:
+                request = urllib.request.Request(
+                    f"{origin}/api/benchmarks/shared-agent/{agent}",
+                    headers={"Authorization": "BenchmarkShare fixture.extra"},
+                )
+                try:
+                    with mod._opener().open(request, timeout=5) as response:
+                        response.read()
+                        extra_result.append(response.status)
+                except Exception as exc:
+                    extra_result.append(exc)
+
+            extra_thread = threading.Thread(target=extra_request)
+            extra_thread.start()
+            assert extra_arrived.wait(5), "fixture extra request did not arrive"
+        expected_requests = 2 if recovered or fault.startswith("always") else 1
+        # Client timeout does not join the server's receipt observer. Wait for
+        # that independent fixture work, then compare a stable observation.
+        with receipt_condition:
+            observe_requests.set()
+            assert receipt_condition.wait_for(lambda: len(requests) >= expected_requests, timeout=5), (
+                fault,
+                tuple(requests),
+            )
         assert len(browser_calls) == int(recovered), fault
     finally:
+        observe_requests.set()
         release.set()
         server.shutdown()
         thread.join(timeout=2)
         server.server_close()
         assert not thread.is_alive()
+        if extra_thread is not None:
+            extra_thread.join(timeout=5)
+            assert not extra_thread.is_alive()
+            assert extra_result == [200], extra_result
 
+    # server_close joins every non-daemon request handler, including a late
+    # extra request. Inspect the final immutable receipt only after that join.
+    observed_requests = tuple(requests)
+    expected_receipts = ("BenchmarkShare fixture.signature",) * expected_requests
+    if fault == "always-late-extra":
+        expected_receipts += ("BenchmarkShare fixture.extra",)
+    assert observed_requests == expected_receipts, (
+        fault,
+        observed_requests,
+    )
+
+def check_fenced_recording_episode_provenance():
+    from copy import deepcopy
+    identity = dict(toolName="spawn_browser_agent", task_id="episode-task",
+                    workflowGeneration="owned-generation",
+                    browser_url="https://fixture.kernel.sh/browser/live/owned-session",
+                    browser_session_metadata={"provider": "kernel", "profile_id": "owned-profile"})
+    start = msg(**identity, action_type="recording", toolStatus="IN_PROGRESS",
+                toolCallId="episode-start", recording_path="/owned/index.html")
+    saved = msg(**identity, action_type="recording", toolStatus="FINISHED",
+                toolCallId="episode-saved", recording_view_url="https://ok/recorded-part")
+    terminal = msg(**identity, action_type="task_complete", toolStatus="FINISHED")
+    fenced = msg(**identity, action_type="recording", toolStatus="FINISHED",
+                 toolCallId="episode-start", recording_path="/owned/index.html",
+                 error=True, errorCode="DEPLOY_INTERRUPTED", deploymentFenced=True)
+    complete = [start, saved, terminal, fenced]
+    assert mod.validate_browser_agents_terminated_with_recording(agent, complete) == [], (
+        "a proven recorded episode's deployment diagnostic is not another saved media part")
+    for field, value in (("task_id", "foreign-task"), ("workflowGeneration", "foreign-generation"),
+                         ("browser_url", "https://fixture.kernel.sh/browser/live/foreign-session"),
+                         ("toolCallId", "unknown-start")):
+        bad = deepcopy(complete); bad[-1]["metadata"][field] = value
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad), field
+    for field in ("browser_url", "workflowGeneration"):
+        bad = deepcopy(complete)
+        for row in bad: row["metadata"].pop(field, None)
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad), field
+    for transform in ("no-start", "no-terminal", "unreachable", "placeholder-only", "unrecorded-resume"):
+        bad = deepcopy(complete)
+        if transform == "no-start": bad = bad[1:]
+        elif transform == "no-terminal": bad.pop(2)
+        elif transform == "unreachable": bad[1]["metadata"]["recording_view_url"] = "https://bad/unreachable"
+        elif transform == "placeholder-only": bad[1]["metadata"].pop("recording_view_url")
+        else:
+            extra = deepcopy(start); extra["metadata"]["toolCallId"] = "unrecorded-resume"
+            bad.insert(2, extra)
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad), transform
+    unknown = deepcopy(complete)
+    for row in unknown: row["metadata"]["browser_session_metadata"]["provider"] = "unknown-provider"
+    assert mod.validate_browser_agents_terminated_with_recording(agent, unknown)
+    explicit = deepcopy(complete)
+    for row in explicit:
+        row["metadata"].pop("browser_url")
+        row["metadata"]["browser_session_metadata"]["session_id"] = "native-session-a"
+    assert mod.validate_browser_agents_terminated_with_recording(agent, explicit) == []
+    explicit[2]["metadata"]["browser_session_metadata"] = {"provider": "kernel", "session_id": "native-session-b"}
+    assert mod.validate_browser_agents_terminated_with_recording(agent, explicit), "foreign native session closed episode"
+    other_start = deepcopy(start); other_start["metadata"]["toolCallId"] = "second-start"
+    other_saved = deepcopy(saved); other_saved["metadata"]["recording_view_url"] = "https://ok/second-part"
+    other_fenced = deepcopy(fenced); other_fenced["metadata"]["toolCallId"] = "second-start"
+    assert mod.validate_browser_agents_terminated_with_recording(
+        agent, [start, saved, other_start, other_saved, terminal, fenced, other_fenced]) == []
+    for field, value in (("workflowGeneration", "new-generation"),
+                         ("browser_url", "https://fixture.kernel.sh/browser/live/new-session")):
+        extra = deepcopy(start); extra["metadata"][field] = value
+        extra["metadata"]["toolCallId"] = "unrecorded-episode"
+        assert mod.validate_browser_agents_terminated_with_recording(agent, complete + [extra]), field
+    # A's terminal cannot close B, even if B already uploaded playable media.
+    for task_started in (False, True):
+        new_identity = dict(identity, browser_url="https://fixture.kernel.sh/browser/live/session-b")
+        b_start = msg(**new_identity, action_type="recording", toolStatus="IN_PROGRESS",
+                      toolCallId="b-start", recording_path="/b/index.html")
+        b_saved = msg(**new_identity, action_type="recording", toolStatus="FINISHED",
+                      recording_view_url="https://ok/b-recording")
+        b_fenced = msg(**new_identity, action_type="recording", toolStatus="FINISHED",
+                       toolCallId="b-start", recording_path="/b/index.html",
+                       error=True, errorCode="DEPLOY_INTERRUPTED", deploymentFenced=True)
+        prefix = [msg(**new_identity, action_type="task_started", toolStatus="IN_PROGRESS")] if task_started else []
+        assert mod.validate_browser_agents_terminated_with_recording(
+            agent, complete + prefix + [b_start, b_saved, b_fenced]), "earlier terminal closed later session B"
+        foreign_terminal = msg(**identity, action_type="task_complete", toolStatus="FINISHED")
+        assert mod.validate_browser_agents_terminated_with_recording(
+            agent, complete + prefix + [b_start, b_saved, foreign_terminal, b_fenced]), "foreign session terminal closed B"
+        b_terminal = msg(**new_identity, action_type="task_complete", toolStatus="FINISHED")
+        assert mod.validate_browser_agents_terminated_with_recording(
+            agent, complete + prefix + [b_start, b_terminal, b_saved, b_fenced]) == []
+
+
+with patch.object(mod, "_probe_recording_view_url", lambda url, timeout=20.0: url.startswith("https://ok/")):
+    check_fenced_recording_episode_provenance()
 print("publish_evidence_links browser validation checks passed")
 PY

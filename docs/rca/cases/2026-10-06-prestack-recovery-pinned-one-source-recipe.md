@@ -322,3 +322,76 @@ passed all four unchanged tasks and verified its original process, archive
 and provider cleanup. Final source/input qualification, review and merge remain
 pending. These new results do not grant a historical failed source or a
 pre-service-only canary benchmark credit.
+
+### October 15 cleanup-producer source qualification
+
+Source `f00cc265119f9df7136ec2e334872a22808a4283` changed the required-seed
+bootstrap cleanup producer and therefore derived a new executable recipe:
+`2d079ede1e02975732aa32b5edb5b7100f3e44662e65cd4c2acae1b1eae475ad`.
+R9 correctly rejected this unregistered recipe in the forensic, prestack, and
+compact live-result gates. The source comparison retains 39 of 40 bindings;
+only checkout `scripts/run.sh` changes to
+`5ea3bf05404417617d65088ff3016f57bb42a02c773e0afce540dc07a2ce9ba9`.
+
+Independent review turn `01a13e71-2268-79e1-aaf8-98364408679e` reconstructed
+both recipes, checked all committed bindings, and explicitly approved only
+`before-stack-launch` and `agent-network-index-bootstrap`. The former still
+requires the original matching ACK and absence of stack-launch evidence; the
+latter requires isolated DB/index evidence with application/task artifacts
+absent and rejects later cache, dependency, and tunnel boundaries. Nine focused
+controls passed; the positive registration prerequisite remained blocked until
+this exact entry is committed. Mutation inverses and full qualification remain
+mandatory. No frontend-preflight scope, wildcard, capture-local self-approval,
+receiver change, or historical benchmark acceptance is introduced.
+
+Private trace and audit: `.context/r9-trusted-recipe-audit/proof.json` and
+`.context/deploy-r9-independent-phase-audit.json`. The R9 agents domain also
+exposed an older fixture expecting Docker deletion by mutable name; its existing
+behavioral check now uses a foreign replacement name while requiring the captured
+immutable owned ID. The same owning function rejects the old name-based runtime
+and passes the current ID-based runtime; proof is retained in
+`.context/deploy-r9-owned-id-test-causal.json`. Original R9 failures remain failed.
+
+
+#### PR1522 absent-container cleanup recurrence: second exact reviewed recipe
+
+CodeRabbit finding `4280661029` on `849bea2ca` identified the owner cleanup
+path returning before its volume removal when its immutable container was
+already absent. The actual shell producer regression failed on the original
+source and passed on the fix, while bootstrap still exited 1. All ten focused
+tests and eleven Docker-boundary scenarios preserve native owner PID/birth,
+token and the unchanged strict receipt consumer.
+
+The frozen patch SHA-256 is
+`36c10800365ed19685e8433b205ab43a6d7dbc6289a62477cd57577acd08b69c`;
+its `run.sh` SHA-256 is
+`2d6ecf2f342447f9c16dce31a776a9972a920424e91dba458345d149ff13ca9f`.
+A distinct independent reviewer reproduced the causal proof and reconstructed
+all forty executable bindings. Thirty-nine remain unchanged. Ten composite
+controls passed, including rejection of the unregistered tuple.
+
+That role explicitly approved new composite fingerprint
+`2fc56aea8ef6c70fa77e0e2778d49fccc09f5bcafb894c04f04499dfc3ee5447`
+for only `before-stack-launch` and `agent-network-index-bootstrap`. The prior
+reviewed fingerprints remain. Frontend preflight is not enabled. Parent applied
+the frozen patch and the minimal registration after all R10 benchmark owners
+had authenticated clean receipts and the local root had retired. Dirty-candidate
+qualification was never claimed. Committed-source positives, mutation inverses
+and fresh full R11 verification are still mandatory. Private audit evidence is
+`.context/r11-absent-container-audit/`; it is not a deployment PASS.
+
+### October 17 source-policy recurrence and browser-preflight phase closure
+
+The unchanged full structural gate rejected the current composite executable fingerprint3ae210539a3582e7354d727f4d2c8e33ffe2275f6e642ed9d0c577323a7530c8: bootstrap31 had2failures3errors and forensic15 had4failures. Independent reconstruction compared the40input recipe to previously registered8550670:36unchanged, changes in run-bench-cloud/run-bench-fleet/run.sh and packed cloudbench-env.sh. The source policy correctly failed closed; no environment diagnosis or capture-local self-approval is valid.
+
+Independent review exposed a new transitive closure boundary: run.sh invokes ensure-playwright-browsers.py after index bootstrap without an intervening guaranteed rejected marker on the healthy-dependency path. That executable is outside the existing fingerprint; its current code installs/checks browser assets and allocates no task/application providers, but blindly registering this recipe would authorize future unreviewed helper changes. Root chose an unconditional marker immediately before helper execution plus rejection of that marker in the existing index-phase exclusion tuple. This retains historical recipe formats and ends the certified interval before unbound helper execution, instead of broadening executable authority.
+
+The new permanent negative uses the valid original index fixture and marker alone, marker+diagnostics, and marker+changed-helper output. All3subcases fail on immutable original recovery code and pass unchanged on candidate. No real browser/helper execution or financial/provider acceptance is claimed. All31original method ASTs remain unchanged; full candidate bootstrap32 and unchanged forensic15 pass. Existing source-change, forged-review, immutable snapshot/policy, archive, ownership and phase inverses remain intact.
+
+A separate reviewer independently reconstructed40inputs for private source commitc080f808367f3594498e67e60b31a920570c827e:39match b0f7 and only run.sh marker changes. It certified fingerprint96d5ca2564acdee8e4557f2d9f7415989e366776083e33c345c5ce18f4ac60da only for before-stack-launch and agent-network-index-bootstrap. Final private policy commit86953d801768dfacc292510b069f767a71acfff7 adds exactly that entry, preserving48priorentries; naked3ae210... is not registered. Trusted committed source and capture-local instance binding remain mandatory.
+
+The parent reviewed and applied the exact four-file repair. Full structural/deploy requalification and final review remain required. Private evidence is c12-prestack-source-review-rca-local1805/output.text, result.json, commands.json, source-phase-certification.json and hash manifest; original closed logs are retained by reference with exact SHA256. No W/index/guest/provider changes were made by this worker.
+
+Human feedback: no blind hash registration or weakened assertions. Root explicitly chose marker boundary A, preserving historical recipe format and narrowing the credited interval; no new user allowance question.
+
+Reusable lesson: End a certified recovery interval before a newly reachable unbound executable, and certify only the exact revised source composition after independent review.

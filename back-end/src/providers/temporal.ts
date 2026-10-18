@@ -1,4 +1,11 @@
 import {
+  PhysicalRootReconciliationRequired,
+  physicalWitnessKey,
+  observePhysicalRootWitness,
+  type RootTerminalWitness,
+} from './workflowPhysicalStart';
+import { createHash } from 'node:crypto';
+import {
   Connection,
   Client,
   defaultPayloadConverter,
@@ -7,6 +14,14 @@ import {
 } from '@temporalio/client';
 import { createLogger } from './logger';
 import { getCurrentAgentQueue } from './agentQueuePointer';
+import {
+  nativeWorkflowTerminal,
+  WorkflowStartAdmissionPendingError,
+  claimWorkflowStart,
+  retainPendingWorkflowStart,
+  acknowledgeWorkflowStart,
+  type StartAdmission,
+} from './workflowQueueAdmission';
 import type { WorkflowLaunchConfig, WorkflowResumeState } from './workflowReplacementState';
 import {
   createBlackboxTemporalClient,
@@ -441,9 +456,15 @@ export async function startAgentWorkflowExecutionWithClient(
   params: StartAgentWorkflowParams,
   deadlineAtMs?: number
 ): Promise<TemporalWorkflowExecutionRef> {
-  const workflowId = params.workflowId ?? params.agentId;
+  let workflowId = params.workflowId ?? params.agentId;
+  const workflowArgs = buildAgentWorkflowArgs(params);
 
   let execution: TemporalWorkflowExecutionRef;
+  let admission: StartAdmission | undefined;
+  const admissionDeadline = Math.min(
+    deadlineAtMs ?? Number.POSITIVE_INFINITY,
+    Date.now() + TEMPORAL_CONTROL_RPC_TIMEOUT_MS
+  );
   try {
     const handle = await withTemporalControlDeadline(
       client,
@@ -454,12 +475,89 @@ export async function startAgentWorkflowExecutionWithClient(
         // unset. Resolved UNDER the control deadline so a cache-miss Prisma read
         // cannot block the start past the caller's deadline.
         const taskQueue = params.taskQueue || (await getCurrentAgentQueue());
-        log.info('Starting agent workflow', { workflowId, taskQueue });
+        const fingerprint = createHash('sha256').update(JSON.stringify(workflowArgs)).digest('hex');
+        try {
+          admission = await claimWorkflowStart(
+            params.agentId,
+            workflowId,
+            taskQueue,
+            params.rejectDuplicateWorkflowId === true,
+            admissionDeadline,
+            undefined,
+            fingerprint
+          );
+        } catch (error) {
+          if (!(error instanceof PhysicalRootReconciliationRequired)) throw error;
+          const witnesses = new Map<string, RootTerminalWitness>();
+          try {
+            for (const ref of error.executions) {
+              const proof = await observePhysicalRootWitness(ref, async () => {
+                const description = await withTemporalControlDeadline(
+                  client,
+                  () => client.workflow.getHandle(ref.workflowId).describe(),
+                  admissionDeadline
+                );
+                return {
+                  firstRunId: description.raw.workflowExecutionInfo?.firstRunId,
+                  terminal: nativeWorkflowTerminal(description.status.name),
+                };
+              });
+              witnesses.set(physicalWitnessKey(ref), proof);
+            }
+          } catch (nativeError) {
+            if (nativeError instanceof WorkflowStartAdmissionPendingError) throw nativeError;
+            throw new WorkflowStartAdmissionPendingError(
+              'Prior physical root reconciliation is pending',
+              { cause: nativeError }
+            );
+          }
+          if (error.logicalProbeId) {
+            try {
+              const description = await withTemporalControlDeadline(
+                client,
+                () => client.workflow.getHandle(error.logicalProbeId!).describe(),
+                admissionDeadline
+              );
+              const firstExecutionRunId = description.raw.workflowExecutionInfo?.firstRunId;
+              if (!firstExecutionRunId || !nativeWorkflowTerminal(description.status.name))
+                throw new WorkflowStartAdmissionPendingError(
+                  'Legacy logical root is not natively terminal'
+                );
+              witnesses.set(`logical:${error.logicalProbeId}`, {
+                workflowId: error.logicalProbeId,
+                firstExecutionRunId,
+                status: 'TERMINAL',
+              });
+            } catch (probeError) {
+              if (!(probeError instanceof WorkflowNotFoundError))
+                throw new WorkflowStartAdmissionPendingError(
+                  'Legacy logical root reconciliation is pending',
+                  { cause: probeError }
+                );
+              witnesses.set(`logical:${error.logicalProbeId}`, {
+                workflowId: error.logicalProbeId,
+                status: 'ABSENT',
+              });
+            }
+          }
+          admission = await claimWorkflowStart(
+            params.agentId,
+            workflowId,
+            taskQueue,
+            params.rejectDuplicateWorkflowId === true,
+            admissionDeadline,
+            undefined,
+            fingerprint,
+            witnesses
+          );
+        }
+        workflowId = admission.workflowId;
+        log.info('Starting agent workflow', { workflowId, taskQueue: admission.queue });
         return client.workflow.start('AgentWorkflow', {
-          taskQueue,
+          taskQueue: admission!.queue,
           workflowId,
-          args: buildAgentWorkflowArgs(params),
-          ...(params.rejectDuplicateWorkflowId === true
+          args: workflowArgs,
+          ...(admission.rejectDuplicate
             ? {
                 workflowIdReusePolicy: 'REJECT_DUPLICATE' as const,
                 workflowIdConflictPolicy: 'FAIL' as const,
@@ -467,19 +565,36 @@ export async function startAgentWorkflowExecutionWithClient(
             : {}),
         });
       },
-      deadlineAtMs
+      admissionDeadline
     );
     execution = {
       workflowId: handle.workflowId,
       firstExecutionRunId: handle.firstExecutionRunId,
     };
   } catch (error) {
-    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
-    execution = await resolveTemporalWorkflowExecutionRefWithClient(
-      client,
-      workflowId,
-      deadlineAtMs
-    );
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) {
+      if (admission) retainPendingWorkflowStart(error);
+      throw error;
+    }
+    try {
+      execution = await resolveTemporalWorkflowExecutionRefWithClient(
+        client,
+        workflowId,
+        admissionDeadline
+      );
+    } catch (resolveError) {
+      if (admission) retainPendingWorkflowStart(resolveError);
+      throw resolveError;
+    }
+  }
+
+  if (admission) {
+    try {
+      await acknowledgeWorkflowStart(admission, execution, admissionDeadline);
+    } catch (error) {
+      retainPendingWorkflowStart(error);
+      throw error;
+    }
   }
 
   log.info('Workflow started', {

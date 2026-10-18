@@ -69,43 +69,58 @@ async def lookup_purchase_activity(
     user_id: str,
     fingerprint: str,
     world_model_mode: str | None = None,
+    payload: Dict[str, Any] | None = None,
+    agent_id: str | None = None,
 ) -> Dict[str, Any]:
     async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
-        return await _lookup_purchase_real(user_id, fingerprint)
+        return await _lookup_purchase_real(user_id, fingerprint, payload)
 
     return await _world_model_adapter().from_env(
-        agent_id=user_id,
+        agent_id=agent_id,
         mode=world_model_mode,
     ).execute(
         "payment_lookup",
-        {"user_id": user_id, "fingerprint": fingerprint},
+        {"user_id": user_id, "fingerprint": fingerprint, **({"payload": payload} if payload is not None else {})},
         f"payment_lookup:{fingerprint}",
         real_executor,
         allow_real_fallback=world_model_mode is None,
     )
 
 
-async def _lookup_purchase_real(user_id: str, fingerprint: str) -> Dict[str, Any]:
+async def _lookup_purchase_real(
+    user_id: str, fingerprint: str, payload: Dict[str, Any] | None = None
+) -> Dict[str, Any]:
     import httpx
 
     config = _load_config()
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"{config.backend.api_url}/api/purchases/lookup",
-            params={"fingerprint": fingerprint},
-            headers={
-                "X-API-Key": config.backend.api_key,
-                "X-User-Id": user_id,
-                "Content-Type": "application/json",
-            },
-        )
-        response.raise_for_status()
-        result = response.json()
+    async with httpx.AsyncClient(timeout=85.0 if payload is not None else 30.0) as client:
+        headers = {
+            "X-API-Key": config.backend.api_key,
+            "X-User-Id": user_id,
+            "Content-Type": "application/json",
+        }
+        if payload is None:
+            response = await client.get(
+                f"{config.backend.api_url}/api/purchases/lookup",
+                params={"fingerprint": fingerprint},
+                headers=headers,
+            )
+        else:
+            response = await client.post(
+                f"{config.backend.api_url}/api/purchases/lookup",
+                json={**payload, "userId": user_id, "fingerprint": fingerprint},
+                headers=headers,
+            )
+        if payload is not None and response.status_code >= 400:
+            result = _error_payload(response)
+        else:
+            response.raise_for_status()
+            result = response.json()
         archive_root_agent_id = _current_root_agent_id() or user_id
         _archive_json(
             root_agent_id=archive_root_agent_id,
             path=f"provider/payment/lookup/{fingerprint}.json.gz.enc",
-            payload={"request": {"user_id": user_id, "fingerprint": fingerprint}, "response": result},
+            payload={"request": {"user_id": user_id, "fingerprint": fingerprint, **({"payload": payload} if payload is not None else {})}, "response": result},
         )
         return result
 
@@ -141,6 +156,7 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
         "fingerprint": payload["fingerprint"],
         "merchant": payload["merchant"],
         "agentId": payload.get("agentId"),
+        **({"reusePurchaseId": payload["reusePurchaseId"]} if payload.get("reusePurchaseId") else {}),
         "currency": payload.get("currency", "USD"),
         "lineItems": payload.get("lineItems") or [],
         "fees": payload.get("fees") or [],

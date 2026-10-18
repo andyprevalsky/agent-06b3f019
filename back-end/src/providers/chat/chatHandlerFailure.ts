@@ -1,3 +1,4 @@
+import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
 /**
  * Last-resort recovery after handleChatMessage rejects.
  *
@@ -23,6 +24,7 @@ export async function recoverChatHandlerFailure(params: {
   error: unknown;
   persistNotice?: () => Promise<void>;
 }): Promise<void> {
+  if (isWorkflowStartAdmissionPending(params.error)) return;
   const message = params.error instanceof Error ? params.error.message : String(params.error);
   log.error('Chat handler error', {
     agent_id: params.agentId,

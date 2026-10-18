@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private/whm-e9afcffd/run16-retirement-final-qualification-20261014.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "6a854bf8095b3c110894bbffc03d60f0eb341bcbc86eb97a7492b4ea43aaa358",
+  "gzip_sha256": "5472cc1bcb60e44cf66cee5ed7a9167dca8ff8f7cea10cf46c5c9a25687c4b38",
+  "stored_bytes": 219366,
+  "frames": 1,
+  "files": 128,
+  "original_bytes": 1796672,
+  "manifest_sha256": "ae94ff65fa32eb859ff73637d1e7b4e3259667fc1d0b2047dbaaeb6b8807c18d",
+  "full_readback_verified": true
+}

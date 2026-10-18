@@ -94,6 +94,8 @@ export function loadDeclaration<T>(
     assertHubStorageOwnership,
     HUB_SQL_TIMEOUT_MS,
     withHubStorageOwnership,
+    hubStorageDomain: () => 'benchmark-hub',
+    hubWritesEnabled: () => true,
     ...bindings,
     exports: {},
   });
@@ -125,6 +127,9 @@ export function putBoundary(
     {
       Promise,
       coalesceHubRunPuts,
+      beginHubPublications: async () => {},
+      hubStorageDomain: () => 'benchmark-hub',
+      hubWritesEnabled: () => true,
       prisma: {
         $transaction: async (body: (tx: Transaction) => Promise<unknown>, options: unknown) => {
           transactions += 1;

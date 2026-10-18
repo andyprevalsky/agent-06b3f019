@@ -1,3 +1,4 @@
+import './benchmark-hub-overlay-env.fixture';
 /** Two backend processes must preserve a committed run across delayed startup retries. */
 import assert from 'node:assert/strict';
 import {
@@ -215,7 +216,8 @@ export async function delayedStartingRetryAcrossProcesses(
     const changed = { ...starting, marker: 'new pre-agent content' };
     await request(peer, { kind: 'publish', bundle: changed, live: true }).result;
     assert.equal(
-      JSON.parse(logicalObject(objects.get(`benchmark-hub/runs/${runId}.json`)!)).marker,
+      JSON.parse(logicalObject(objects.get(`benchmark-hub-v2/pg_owner/runs/${runId}.json`)!))
+        .marker,
       changed.marker
     );
     const progress = {
@@ -232,17 +234,17 @@ export async function delayedStartingRetryAcrossProcesses(
       ],
     };
     await request(peer, { kind: 'publish', bundle: progress, live: true }).result;
-    const committedBundle = objects.get(`benchmark-hub/runs/${runId}.json`)!;
-    const committedIndex = objects.get('benchmark-hub/agent-run-index.json')!;
+    const committedBundle = objects.get(`benchmark-hub-v2/pg_owner/runs/${runId}.json`)!;
+    const committedIndex = objects.get('benchmark-hub-v2/pg_owner/agent-run-index.json')!;
     original.send({ kind: 'release', id: delayed.id });
     await delayed.result;
     assert.equal(
-      objects.get(`benchmark-hub/runs/${runId}.json`),
+      objects.get(`benchmark-hub-v2/pg_owner/runs/${runId}.json`),
       committedBundle,
       'Delayed original starting registration erased the acknowledged peer progress'
     );
     assert.equal(
-      objects.get('benchmark-hub/agent-run-index.json'),
+      objects.get('benchmark-hub-v2/pg_owner/agent-run-index.json'),
       committedIndex,
       'Delayed original starting registration changed the committed agent mapping/revision'
     );
@@ -252,12 +254,14 @@ export async function delayedStartingRetryAcrossProcesses(
     // A final upload is a different protocol operation even when no task
     // obtained an agent; it must remain authoritative and publish normally.
     await request(peer, { kind: 'publish', bundle: starting, live: false }).result;
-    const index = JSON.parse(logicalObject(objects.get('benchmark-hub/index.json')!)) as Array<{
+    const index = JSON.parse(
+      logicalObject(objects.get('benchmark-hub-v2/pg_owner/index.json')!)
+    ) as Array<{
       run_id: string;
       live: boolean;
     }>;
     assert.equal(index.find((run) => run.run_id === runId)?.live, false);
-    assert.notEqual(objects.get('benchmark-hub/agent-run-index.json'), committedIndex);
+    assert.notEqual(objects.get('benchmark-hub-v2/pg_owner/agent-run-index.json'), committedIndex);
     return children.map((child) => child.pid!);
   } finally {
     for (const child of children) {

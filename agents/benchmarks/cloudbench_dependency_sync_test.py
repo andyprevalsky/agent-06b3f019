@@ -4432,6 +4432,8 @@ fi
             assert len(launch_calls) == 1
             assert "/tmp/rbw.sh" in launch_calls[0]
             assert "did not reach queue readiness" in stage_log
+            assert any("tail -n 300 /data/worker.log" in call for call in fly_calls)
+            assert "capture worker log after readiness timeout" in stage_log
         elif mode == "upload-failure":
             assert launch_calls == []
             assert "upload local patch failed rc=42" in stage_log
@@ -6365,7 +6367,6 @@ def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(
     # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     worker = WORKER_SCRIPT.read_text()
     fleet = fleet_source_text()
-    token_helper = _extract_fleet_function(fleet, "controller_github_token_b64() {")
     provision = _extract_fleet_function(fleet, "provision_worker() {")
 
     assert 'FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"' in worker
@@ -6382,6 +6383,33 @@ def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(
     assert 'CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-env.sh" /data/cloudbench-env.sh' in provision
     assert '-m 0600 "$worker_env" /tmp/rbw.env' in provision
     assert "rm -f /tmp/rbw.env" in provision
+
+
+@pytest.mark.parametrize("fresh_volumes,simulate", [(0, 0), (1, 0), (1, 1)])
+def test_autoscaled_worker_restores_primary_clone_before_applying_patch(
+    tmp_path: Path, fresh_volumes: int, simulate: int
+) -> None:
+    """A worker clone inherits the primary's already-patched tracked files.
+
+    The exact-ref helper deliberately skips a large reset when HEAD already
+    matches, so worker setup must restore tracked files before reapplying the
+    authoritative patch.  Cleaning untracked files alone leaves a partial patch
+    state and makes every tracked hunk fail.
+    """
+
+    worker = WORKER_SCRIPT.read_text()
+    fleet = fleet_source_text()
+    token_helper = _extract_fleet_function(fleet, "controller_github_token_b64() {")
+    provision = _extract_fleet_function(fleet, "provision_worker() {")
+    fetch = 'bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF"'
+    restore = 'git -C "$REPO_DIR" restore'
+    clean = 'git -C "$REPO_DIR" clean -fd'
+    apply_patch = 'log "applying local workspace patch"'
+
+    assert fetch in worker
+    assert '--source "$REF" --staged --worktree -- .' in worker
+    assert worker.index(fetch) < worker.index(restore) < worker.index(clean) < worker.index(apply_patch)
+    assert "could not restore tracked worker checkout" in worker
 
     output = tmp_path / "bench"
     output.mkdir()
@@ -19815,6 +19843,27 @@ def test_isolated_stack_forwards_anthropic_exclusion_to_wmh_provider() -> None:
     assert '"ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"' in stack_env
 
 
+def test_cloud_task_contract_checks_use_the_resolved_agent_interpreter() -> None:
+    """Cloud preflights that import agent modules must run inside agents/venv.
+
+    The system Python on a warm Fly image intentionally lacks runtime packages
+    such as httpx. Importing ``benchmarks.spawn_contract`` with ``python3``
+    therefore printed a traceback on every run even though stack startup later
+    succeeded with the virtualenv.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+    guest_check_start = driver.index('GUEST_AUTH_PYTHON="$REPO_DIR/agents/venv/bin/python"')
+    guest_check_end = driver.index('if [ -n "$FRONTEND_SUPABASE_URL" ]', guest_check_start)
+    guest_check = driver[guest_check_start:guest_check_end]
+
+    assert 'if [ ! -x "$GUEST_AUTH_PYTHON" ]; then' in guest_check
+    assert '"$GUEST_AUTH_PYTHON" -c' in guest_check
+    assert 'cd "$REPO_DIR/agents" || exit 1' in guest_check
+    assert "python3 -c" not in guest_check
+    assert "else 10" in guest_check
+    assert "FATAL: saved-browser-auth fixture resolution failed" in guest_check
+
+
 def test_cloud_isolated_stack_provides_frontend_build_identity(tmp_path: Path) -> None:
     """The on-box stack must receive the run identity required to isolate Vite output.
 
@@ -22503,14 +22552,26 @@ def test_cloud_git_sync_uses_safe_directory_everywhere() -> None:
     assert "git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO'" in cloud
 
 
-def test_refresh_wmh_bounds_the_archive_scan_by_default() -> None:
-    """Maintenance must not scan every historical R2 bundle before a run."""
+def test_refresh_wmh_uses_the_complete_archive_by_default() -> None:
+    """Maintenance must not silently omit eligible historical trajectories."""
     cloud = CLOUD_SCRIPT.read_text()
     refresh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
 
-    assert 'WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-20}"' in refresh
+    assert 'WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-0}"' in refresh
     assert "WMH_REFRESH_MAX_BUNDLES must be a non-negative integer" in refresh
     assert "WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES'" in refresh
+
+
+def test_refresh_wmh_forwards_step_caps_to_the_box() -> None:
+    """Diagnostic step controls remain available but default to unlimited."""
+    cloud = CLOUD_SCRIPT.read_text()
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert 'WMH_REFRESH_MAX_STEPS="${WMH_REFRESH_MAX_STEPS:-0}"' in refresh
+    assert 'WMH_REFRESH_MAX_STEPS_PER_BUNDLE="${WMH_REFRESH_MAX_STEPS_PER_BUNDLE:-0}"' in refresh
+    assert "must be a non-negative integer" in refresh
+    assert "WMH_MAX_STEPS='$WMH_REFRESH_MAX_STEPS'" in refresh
+    assert "WMH_MAX_STEPS_PER_BUNDLE='$WMH_REFRESH_MAX_STEPS_PER_BUNDLE'" in refresh
 
 
 def test_refresh_wmh_can_select_an_exact_attributable_corpus() -> None:
@@ -31120,8 +31181,8 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         )
     source = fleet_source_text().split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
-    # One unchanged tick of the owned aggregator; its loop runs until the controller stops it.
-    aggregate = aggregate.split("\nwhile True:\n    try:\n        aggregate_tick()", 1)[0] + "\naggregate_tick()\n"
+    # Exercise one real publication tick; the controller owns the persistent loop.
+    aggregate = aggregate.split("\nwhile True:\n", 1)[0] + "\naggregate_tick()\n"
     assert fleet_source_text().index("# ── ONE aggregated batch dashboard") < fleet_source_text().index(
         "# ── Phase 1: provision"
     ), "live publisher begins after allocation"
@@ -32348,6 +32409,7 @@ def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(tmp_path, pa
     tmp_path.chmod(0o755)
     data = tmp_path / "data"
     data.mkdir(mode=0o755)
+    data.chmod(0o755)
     cache = data / "cloudbench-cache"
     private = None
     if parent_state != "missing":

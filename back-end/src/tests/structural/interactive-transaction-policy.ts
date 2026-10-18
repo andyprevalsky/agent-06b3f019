@@ -74,9 +74,9 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
   {
     file: 'providers/benchmarkHubStore.ts',
     scope: 'withIndexLock',
-    fingerprint: 'd9893d06e46fbe43',
+    fingerprint: '34e5d3bbbfe61fd1',
     reason:
-      'transaction-scoped advisory lock with explicit maxWait/timeout for bounded index write cycles',
+      'epoch-scoped advisory lock with SQL-budget cancellation/drain for bounded Hub publication cohorts; external conditional writes are not replayed by a SQL retry',
   },
   {
     file: 'providers/computeCredentials.ts',
@@ -100,8 +100,9 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
   {
     file: 'providers/database.ts',
     scope: 'runTransactionWithRetry',
-    fingerprint: 'd9e5233d162c357a',
-    reason: 'canonical wrapper implementation',
+    fingerprint: 'abc1f6000607a968',
+    reason:
+      'canonical wrapper implementation; caller deadline bounds acquisition/body and only pre-body failures retry',
   },
   {
     file: 'providers/purchase-wallet-funding-repo.ts',

@@ -823,3 +823,41 @@ Backend capacity remains O(archive) per write cycle. Holding at 10k agents
 requires a backend change: shard or remove the global catalog read-modify-write,
 and move R2 I/O out of the Postgres transaction. That needs `/deploy` and was not
 done here. Status remains `open` for the backend cause.
+
+### 2026-10-16/17 original-600 attempt58: required publication failure
+
+Original task source `570830dbf17635e13d16a6f03b4d705f6b6443b1`, 200 unchanged tasks ×3, concurrency600 and original timeout/retry/acceptance settings were retained. Harness `b0fbd7742dde51446288c22601825a85981c1d0b` started at epoch1792192040.9586267. All601 cleanup-workspace reservations committed and were released; no reservation failure was observed. Both canonical shared-preflight tasks passed and their Machines were retired, but their required terminal Hub publication exhausted the original retries. The shared preflight recorded failure at23:31:44Z, preventing main-task execution.
+
+The operator preserved34 distinct canonical INFRA_ERROR records and sent one exact-PID/birth-verified TERM to the original supervisor at the existing30/600 threshold. The terminal campaign summary retained600 cancelled jobs and ended23:36:24.640275Z. These cancellation outcomes do not erase the threshold evidence or turn this into an accepted benchmark. No main-task execution was observed. Controller, relay and children joined; the export was verified and controller destroyed. Its workspace and the two preflight volumes were observed pending_destroy, not permanently absent or non-billable. Four protected Machines remained stopped.
+
+The verified archive SHA256 is `89b19b987e753c7fdc775000350f2cd9e4ce5b4aa1546769b67e057443cfaeb0`; manifest SHA256 is `e57898ec189d8b2b9063b6aa8a8eee133535d3a6237aa900e22a25391d1d7d46`. Archive-only audit `publication-archive-audit.safe.json` SHA256 `9c106d7a820e5775583edf2b3c2526658a6f71bcd94524eb42b8403dd683a4c4` identified600 distinct starting invocations (37 reported publication,563 pending) and600 distinct post-preflight cleanup publication invocations evidenced by retry warnings.689 warning lines are not689 unique runs. Run identity timestamps ranged23:12:10–23:13:41Z; these are not exact POST timestamps. Terminal CLI requests did not preserve request IDs or per-attempt timing, leaving an exact client/server join gap.
+
+Read-only diagnostics from the same controller returned GET /health200 in0.406s and the exact preflight run GET404 in0.872s. This excludes neither queue delay nor other per-request storage causes. The production owner's bounded logs later contained live=false StoredBundle entries for all600 known IDs (894 matching log rows across a partial23:36:03–00:39:44Z window). Store log completion is not full payload verification, native task success or retroactive acceptance.
+
+Exact reported production revision1577af0fdec6db02bb26aa05ba99596e66e99eff uses a shared foreground FIFO/PG advisory lock with one catalog cycle per distinct upload; starting registrations and finals share that queue. The separate offline owner reproduced41 catalog writes/transactions for41 tiny inputs on that source and2 on the existing batching candidate, with all41 persisted. This proves source-level amplification; exact production timeout causality remains OPEN without request-specific queue/storage timing. New-prefix compatibility/fencing tests and actual PostgreSQL qualification are separate source proofs. They must not be represented as an unchanged600-task success or a deployed production fix.
+
+### Isolated source continuation: bounded cohorts and fresh-domain claims
+
+The repair groups at most64 uploads per catalog cohort with eight body lanes,
+acknowledges only after the SQL transaction joins, and aborts/drains owned local
+SDK work at its original SQL budget. Local drain is not remote rollback: an
+accepted legacy unconditional PUT may still commit. The candidate therefore
+writes only a fresh epoch prefix. Persistent catalog claims prevent pending or
+hidden new state from falling back into an old archive success. New body ETags
+are bound to the published claim, and all first observations are physical-domain
+keys. Reader-floor and rollback requirements are recorded in
+`docs/benchmark-hub-storage-cutover.md`. No production activation was performed.
+
+Permanent owning coverage runs through the normal backend blackbox runner:
+`benchmark-hub-reader-compatibility` covers actual Store/SQL/SDK-wire behavior;
+`benchmark-hub-index-read` covers actual PostgreSQL and two-process retries,
+repair,100 concurrent reader coalescing, and40/129/600-upload bursts. Original
+frozen-B namespace and legacy-membership/floor/claim-suppression failures were
+observed before their unchanged assertions passed. Unit admission, ownership,
+ABA/CAS, and commit-rejection controls supplement these owners. A retained
+34,227,674-byte payload round-tripped through the actual S3 SDK and a local
+HTTP fixture with byte and nested-task equality; peak observed RSS was548512KiB.
+That measurement is local, not a production memory-cap guarantee.
+
+The case remains OPEN: these are causal mechanism and source-regression proofs,
+not an unchanged600-task success, a real R2 experiment, or a deployed fix.

@@ -191,7 +191,11 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
     return dispatchCompletionOnce(data, payload, channels);
   }
 
-  await dispatchByEventType(data, payload, agent.goal, channels);
+  const startNotification =
+    data.event_type === 'agent_started'
+      ? await repo.findAgentStartNotification(data.agent_id)
+      : undefined;
+  await dispatchByEventType(data, payload, agent.goal, channels, startNotification);
 
   log.info('SMS Notify processed', {
     eventType: data.event_type,

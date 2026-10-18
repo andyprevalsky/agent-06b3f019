@@ -805,6 +805,9 @@ def test_cold_image_build_skips_repository_auth_export(tmp_path, mode):
     for path in env_files:
         path.parent.mkdir()
         path.write_text("PRESERVED=fixture-value\n")
+    registry = root / "agents/providers/rose/pools.py"
+    registry.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / "agents/providers/rose/pools.py", registry)
     (root / "Dockerfile.cloudbench-warm").write_text("FROM fixture-source\n")
     (root / "fly.cloudbench-warm.toml").write_text('app = "fixture-source"\n')
     binaries = tmp_path / "bin"

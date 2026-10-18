@@ -1,0 +1,10 @@
+{
+  "utc": "2026-10-15T01:29:26.042046+00:00",
+  "core_authenticated_members": 2142,
+  "supplement_authenticated_members": 126,
+  "original_unmodified_verifier": "docs/handoffs/whm-b07d9037-preservation/private_archive.py",
+  "verification": "Full ciphertext and compressed-stream hashes, AEAD authentication, every member SHA256 against embedded manifests.",
+  "core_receipt_sha256": "f04b3c335c890f7b1acf11aa1a6a54f983909da31399955f30f3bf549467855b",
+  "supplement_receipt_sha256": "92da367d03418725e16b37ddae217c296e4fe759bf97d896cc05edfb18c37c9e",
+  "original_migration_archives": "All six prior originals remain preserved; Run18 archives are additional."
+}

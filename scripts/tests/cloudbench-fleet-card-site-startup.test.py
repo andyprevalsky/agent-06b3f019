@@ -4,13 +4,13 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
+import sys
+import tempfile
 import subprocess
 import unittest
 
 ROOT=Path(__file__).resolve().parents[2]
 SOURCE=Path(os.environ.get('CLOUDBENCH_FLEET_CARD_SOURCE',str(ROOT/'scripts/run-bench-fleet')))
-BASE_SET_UP=runpy.run_path(str(ROOT/'scripts/tests/cloudbench-site-startup.test.py'))['SiteStartup'].setUp
 
 
 def function(name):
@@ -21,7 +21,15 @@ def function(name):
 
 
 class CardStartup(unittest.TestCase):
-    def setUp(self):BASE_SET_UP(self)
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);venv=self.root/'venv';(venv/'bin').mkdir(parents=True)
+        binary=Path(sys.executable).resolve();(venv/'bin/python3').symlink_to(binary)
+        (venv/'pyvenv.cfg').write_text('home = '+str(binary.parent)+'\ninclude-system-site-packages = false\n')
+        packages=venv/f'lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages';packages.mkdir(parents=True)
+        self.marker=self.root/'site-started'
+        (packages/'owning-control.pth').write_text('import os,time; os.close(os.open('+repr(str(self.marker))+',os.O_WRONLY|os.O_CREAT,0o600)); time.sleep(0.15)\n')
+        self.env=dict(os.environ,PATH=str(venv/'bin')+':'+os.environ['PATH'])
 
     def test_actual_startup_card_preserves_exact_manifest_clock_and_errors(self):
         fleet=self.root/'fleet';phase='provisioning "fixture"\noriginal phase'

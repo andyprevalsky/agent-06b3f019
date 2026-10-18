@@ -464,7 +464,7 @@ describe('ApprovalChip', () => {
       />,
     );
     await user.click(screen.getByText('Accept'));
-    expect(respondToAttentionRequestMock).toHaveBeenCalledWith('req-1', 'Approved');
+    expect(respondToAttentionRequestMock).toHaveBeenCalledWith('req-1', 'Approved', undefined);
     expect(toastMock).toHaveBeenCalledWith(expect.objectContaining({ title: 'Approved' }));
     expect(onHandled).toHaveBeenCalled();
   });
@@ -476,7 +476,11 @@ describe('ApprovalChip', () => {
     );
     await user.type(screen.getByPlaceholderText('Add context (optional)...'), '  custom reason  ');
     await user.click(screen.getByText('Accept'));
-    expect(respondToAttentionRequestMock).toHaveBeenCalledWith('req-1', 'custom reason');
+    expect(respondToAttentionRequestMock).toHaveBeenCalledWith(
+      'req-1',
+      'custom reason',
+      '  custom reason  ',
+    );
   });
 
   it('Accept: surfaces error toast on failure', async () => {

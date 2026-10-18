@@ -46,6 +46,13 @@ import {
   resolveAccountIdForCredentialRecovery,
 } from '../../providers/integrationConnectionSync';
 import * as repo from './repo';
+import {
+  redactLanternIntegration,
+  updateLanternIntegration,
+  deleteLanternIntegration,
+  LanternCredentialError,
+} from './service.lantern';
+export { LanternCredentialError } from './service.lantern';
 
 const log = createLogger('Integrations');
 type GmailSendCredential = NonNullable<Awaited<ReturnType<typeof repo.findGmailCredentialForSend>>>;
@@ -172,7 +179,9 @@ export async function getIntegrations(userId: string) {
 
   log.info('Fetching integrations', { userId, domainsCached: hasCachedDomains });
 
-  const integrations = withDerivedConnectedEmails(await repo.findIntegrationsByUser(userId));
+  const integrations = withDerivedConnectedEmails(await repo.findIntegrationsByUser(userId)).map(
+    redactLanternIntegration
+  );
   log.info('Integrations query done', { durationMs: Date.now() - queryStart });
 
   const authenticatedDomains = await repo.getAuthenticatedDomains(userId);
@@ -195,6 +204,8 @@ export async function createIntegration(
   if (!Object.values(IntegrationType).includes(type)) {
     throw new InvalidIntegrationTypeError(type);
   }
+  if (name === 'lantern_people')
+    throw new LanternCredentialError(400, 'USE_LANTERN_CREDENTIAL_UPLOAD');
   return repo.upsertIntegration({ userId, name, type, config: config ?? {} });
 }
 
@@ -203,6 +214,7 @@ export async function updateIntegration(
   name: string,
   updates: { status?: string; isActive?: boolean; config?: Record<string, unknown> }
 ) {
+  if (name === 'lantern_people') return updateLanternIntegration(userId, updates);
   const existing = await repo.findIntegrationByUserAndName(userId, name);
   if (existing === null || existing === undefined) {
     throw new IntegrationNotFoundError(name);
@@ -220,6 +232,7 @@ export async function updateIntegration(
 }
 
 export async function deleteIntegration(userId: string, name: string) {
+  if (name === 'lantern_people') return deleteLanternIntegration(userId);
   const integration = await repo.findIntegrationByUserAndName(userId, name);
   if (integration === null || integration === undefined) {
     throw new IntegrationNotFoundError(name);

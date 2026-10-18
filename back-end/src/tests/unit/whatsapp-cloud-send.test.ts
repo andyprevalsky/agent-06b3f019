@@ -6,7 +6,11 @@
  * contract the SMS supervisor's delivery loop depends on.
  */
 import assert from 'node:assert';
-import { sendWhatsAppMessage, sendWhatsAppTemplate } from '../../providers/whatsappCloud';
+import {
+  sendWhatsAppMessage,
+  sendWhatsAppReaction,
+  sendWhatsAppTemplate,
+} from '../../providers/whatsappCloud';
 
 type FetchArgs = { url: string; init: RequestInit };
 
@@ -78,6 +82,7 @@ async function testSendSuccess(): Promise<void> {
   assert.strictEqual(body.messaging_product, 'whatsapp', 'messaging_product');
   assert.strictEqual(body.to, '15551234567', "recipient strips the leading '+'");
   assert.strictEqual(body.type, 'text', 'text message');
+  assert.equal('context' in body, false, 'ordinary sends omit quote context');
   assert.deepStrictEqual(body.text, { preview_url: false, body: 'hello from rose' }, 'text body');
   const headers = calls[0].init.headers as Record<string, string>;
   assert.strictEqual(headers.Authorization, 'Bearer tok_test', 'bearer token');
@@ -295,7 +300,65 @@ async function testTemplateRecipientUnreachable(): Promise<void> {
   );
 }
 
+async function testReactionTargetsInboundMessage(): Promise<void> {
+  const calls = await withMockedFetch(
+    () => Response.json({ messages: [{ id: 'wamid.REACTION' }] }),
+    CONFIGURED,
+    async () => {
+      const result = await sendWhatsAppReaction('+15551234567', 'wamid.INBOUND', '👩🏽‍💻');
+      assert.equal(result.success, true);
+      assert.equal(result.messageSid, 'wamid.REACTION');
+    }
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(String(calls[0].init.body)), {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: '15551234567',
+    type: 'reaction',
+    reaction: { message_id: 'wamid.INBOUND', emoji: '👩🏽‍💻' },
+  });
+}
+
+async function testQuotedReply(): Promise<void> {
+  const calls = await withMockedFetch(
+    () => Response.json({ messages: [{ id: 'wamid.REPLY' }] }),
+    CONFIGURED,
+    async () => {
+      const result = await sendWhatsAppMessage('+15551234567', 'That one.', {
+        replyToMessageId: 'wamid.EARLIER',
+      });
+      assert.equal(result.success, true);
+    }
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(String(calls[0].init.body)), {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: '15551234567',
+    type: 'text',
+    text: { preview_url: false, body: 'That one.' },
+    context: { message_id: 'wamid.EARLIER' },
+  });
+}
+
+async function testReactionRejectsMissingMessageId(): Promise<void> {
+  const calls = await withMockedFetch(
+    () => Response.json({}),
+    CONFIGURED,
+    async () => {
+      const result = await sendWhatsAppReaction('+15551234567', '', '👍');
+      assert.equal(result.success, false);
+      assert.equal(result.definitiveFailure, true);
+    }
+  );
+  assert.equal(calls.length, 0, 'never sends an untargeted reaction');
+}
+
 async function main(): Promise<void> {
+  await testQuotedReply();
+  await testReactionTargetsInboundMessage();
+  await testReactionRejectsMissingMessageId();
   await testSendSuccess();
   await testSendApiError();
   await testRecipientUnreachableCodes();

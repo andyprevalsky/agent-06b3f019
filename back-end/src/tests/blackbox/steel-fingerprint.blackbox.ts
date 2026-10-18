@@ -29,6 +29,10 @@ import {
 } from './steel-fingerprint.saved-profile.behavior';
 import { testFingerprintTimezoneFormatUsesUserLocation as runTimezoneFormatUsesUserLocation } from './steel-fingerprint.timezone.behavior';
 import { testWorkerHardwareConcurrencyMatchesPage as runWorkerHardwareConcurrencyMatchesPage } from './steel-fingerprint.worker-concurrency.behavior';
+import {
+  testSteelAlreadyReleasedWriterIsIdempotent,
+  testSteelWriterProfileHandoff,
+} from './steel-fingerprint.profile-readiness.behavior';
 import { testWritableSteelProfileHandoffRetainsRecoveryCustody } from './steel-fingerprint.profile-handoff.behavior';
 
 function makeFingerprint(): FingerprintData {
@@ -539,6 +543,26 @@ async function testSavedUrlNavigationAlwaysClosesBrowser(): Promise<void> {
 
 async function main(): Promise<void> {
   const tests = [
+    {
+      name: 'Steel writer releases and reaches native profile readiness before replacement',
+      fn: testSteelWriterProfileHandoff,
+    },
+    ...(
+      [
+        'failed-profile',
+        'failed-release',
+        'failed-create',
+        'lost-cas',
+        'lost-lease-during-profile-read',
+      ] as const
+    ).map((mode) => ({
+      name: `Steel profile handoff preserves custody on ${mode}`,
+      fn: () => testSteelWriterProfileHandoff(mode),
+    })),
+    {
+      name: 'Steel already-released writer is idempotent',
+      fn: testSteelAlreadyReleasedWriterIsIdempotent,
+    },
     {
       name: 'inner viewport dimensions are not spoofed',
       fn: testInnerViewportDimensionsAreNotSpoofed,

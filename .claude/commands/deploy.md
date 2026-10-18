@@ -45,7 +45,7 @@ agent-behavior approval, a gate override, credential/billing/environment
 escalation, a destructive action, or any other approval—must follow
 `.claude/shared/approval-format.md`. Read it completely immediately before
 composing the request. Its code-block presentation and its Before Behavior,
-After Behavior, TL;DR, Evidence, Detail, and Downstream Implications sections
+After Behavior, How, TL;DR, Evidence, Detail, and Downstream Implications sections
 are mandatory and additive to the deploy-specific telemetry, file-link, and
 snapshot rules below.
 
@@ -541,6 +541,7 @@ their assertions or test counts:
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `bash scripts/tests/descend-command.test.sh`,
+`bash scripts/tests/auto-rca-workflow.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
 `python3 scripts/tests/cloudbench-provider-capacity.test.py`,
 `bash scripts/tests/campaign-hub-grouping.test.sh`,
@@ -575,6 +576,10 @@ suites assert that their own command still appears here, which is how a gate
 cannot be silently dropped from the deploy path. `run-deploy-structural-gates.test.py`
 asserts this list and the `GATES` registry match exactly in both directions, so
 adding a gate without documenting it here fails the build.
+
+The descend and auto-RCA gates own their behavioral fixtures. The semantic
+deploy gate verifies their registration and documented commands without
+recursively executing them, so each runs once in the complete registry.
 
 The compact benchmark gates above run on every deploy, including deploys
 without cloud-runner changes. They exercise the canonical CLI dispatch (including
@@ -1145,7 +1150,7 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL non-skipped Pre-Deploy smoke benchmarks must pass, with 0 failures.** The only deploy-approved smoke skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. This provider-auth/funding state is skippable by future deploys without additional human approval. Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only in `run-predeploy-local` and must be reported as a risk when it misses. On the local path, `run-predeploy-local` must exit 0 and every non-skipped task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+**ALL non-skipped Pre-Deploy smoke benchmarks must pass, with 0 failures.** The deploy-approved credential skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. The standing AgentCard release-stall exception in Step 6a also applies when a selected payment canary encounters that exact state. These exceptions apply to future deploys without additional human approval. Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only in `run-predeploy-local` and must be reported as a risk when it misses. On the local path, `run-predeploy-local` must exit 0 and every non-skipped task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Other timeouts, stalls, wrong tool usage, backend crashes, or failures must be diagnosed and fixed.
 
 **Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
 
@@ -1226,7 +1231,7 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
-- Skipping or disabling tests, except two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
+- Skipping or disabling tests, except the standing AgentCard release-stall exception in Step 6a (sandbox AND production) and two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
 
 **Escalation is ONLY for:**
 
@@ -1314,21 +1319,29 @@ canaries from the smoke floor of every later deploy until three fresh passes.
 
 The bootstrap must report an AgentCard sandbox pool of at least $500. This is
 test-only float provisioned through the authenticated admin session; it does not
-bypass Organization MCP in the purchase path. All four tasks must pass with
+bypass Organization MCP in the purchase path. All non-skipped tasks must pass with
 their full purchase, Stripe, AgentCard card, organization transfer, attention,
-and cleanup assertions. A missing lifecycle snapshot, skipped task, unreclaimed
-abandonment transfer, or unrefunded Stripe capture blocks deploy. Record the
+and cleanup assertions. A missing lifecycle snapshot, unapproved skip, unreclaimed
+abandonment transfer, or unrefunded Stripe capture blocks deploy except for the
+standing release-stall exception below. Record the
 four task results and total cost in `TEST_REPORT`.
 
-One exception is approved for every deploy: `BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1`
-turns the open sandbox stall in
+One exception is approved permanently for every future deploy and benchmark run:
+the open AgentCard release stall in
 `docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md`
-into a loud `⚠️⚠️ SKIPPED` instead of a failure. It applies only when Rose closed
-the card and is reclaiming while AgentCard still reports that card's test-mode
-transfer `consumed` with `releasedCents=0`; any other lifecycle, cleanup or live
-(`livemode=true`) failure still fails. Report the skip as `3/4 pass, 1 ⚠️ skipped
-(AgentCard sandbox release stall)` in `TEST_REPORT` and the scorecard. Step 13c's
-production abandonment stays strict.
+is automatically a loud `⚠️⚠️ SKIPPED`, never PASS. No environment opt-in or renewed
+human approval is required. This standing user instruction covers BOTH sandbox
+and production (Step 13c), regardless of the Stripe payment's mode. It applies
+when Rose closed the card with zero balance and is reclaiming while AgentCard
+still reports that exact card's transfer `consumed` with `releasedCents=0`, in
+the task's expected AgentCard mode. Other lifecycle, read, cancellation and
+cleanup failures still fail. Report the skipped count and unreleased amount in
+`TEST_REPORT` and the scorecard. The existing reconciliation deadline stays
+unchanged; do not keep retrying the same confirmed stall every ten minutes,
+mint another card to get a passing result, or ask the user to approve this
+exception again. `BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=0` explicitly restores
+strict behavior for release diagnostics. A skip does not release funds, refund
+Stripe, or prove native cleanup; retain that liability and its evidence.
 
 ## Step 6b: Semantic tests + fix
 
@@ -1504,7 +1517,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ is required) ║
 
-# ║ 6a. AgentCard sandbox lifecycle: 4/4 pass whenever the payment ║
+# ║ 6a. AgentCard lifecycle: all pass or approved warning skips ║
 
 # ║ lifecycle surface changed ║
 
@@ -1995,6 +2008,16 @@ status. For an activation-gated Fly deploy, the finish marker belongs after the
 exact cutover releases its lock and the workflow completes in Step 13ab. These
 are telemetry calls, not extra gates.
 
+For an explicitly selected `AGENT_DEPLOY_MODE=existing-process`, use the
+[existing-Machine process route](../../docs/existing-worker-process-deployment.md).
+It requires the same exact merged source, MIN8, native candidate validation and
+activation-before-pointer proof, plus durable backend recovery and native resource
+qualification. Its old workers remain served; it never invokes Machine retirement
+or the classic force-migration fallback. A held automatic workflow is not a passed
+CI run: record the actual controller receipts and lane lifecycle below. All other
+production gates remain mandatory. This is an operational deployment mode, not a
+waiver of a failed gate.
+
 Resolve and retain the exact agent deployment attempt whenever the canonical
 cutover condition is true. The run ID plus run attempt is the
 deployment-scoped Temporal activation token; a prior rollout of the same Git
@@ -2012,7 +2035,18 @@ if [ -n "$CHANGED_AGENT_RUNTIME$CHANGED_DEPLOY_AGENTS_WORKFLOW" ]; then
   AGENT_CUTOVER_REQUIRED=1
 fi
 
+DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
 if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  if [ "${AGENT_DEPLOY_MODE:-cooperative}" = "existing-process" ]; then
+    python3 scripts/record_factory_event.py deploy production-start fly
+    # Complete the signed staging and canonical validation sequence in the route
+    # guide first. These retained exact-intent receipts survive interruptions.
+    : "${WORKER_PROCESS_PLAN:?exact saved existing-host plan required}"
+    : "${WORKER_PROCESS_VALIDATION:?canonical native candidate receipt required}"
+    cd "$DEPLOY_ROOT/back-end"
+    npx tsx scripts/deploy-existing-worker-processes.ts activate --execute \
+      --plan "$WORKER_PROCESS_PLAN" --validation-receipt "$WORKER_PROCESS_VALIDATION"
+else
   python3 scripts/record_factory_event.py deploy production-start fly
   AGENT_DEPLOY_RUN_ID=""
   for i in $(seq 1 120); do
@@ -2033,64 +2067,40 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
   AGENT_DEPLOYMENT_TOKEN="${AGENT_DEPLOY_RUN_ID}-${AGENT_DEPLOY_RUN_ATTEMPT}"
   echo "✅ Agent deployment token: $AGENT_DEPLOYMENT_TOKEN"
 
-  # Cooperative cutover: deploy-agents.yml runs deploy-agents-cooperative-cutover.sh
-  # (overlap old+new gen fleets, flip pointer, drain up to 45m via continue_as_new
-  # handoff, force-migrate stragglers only after the SLO). Capture the pre-cutover
-  # generation queue so post-merge verification can report drain progress.
-  DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
+  APP=$(sed -nE 's/^app = "([a-z0-9-]+)"/\1/p' "$DEPLOY_ROOT/agents/fly.toml")
+  # The database FIFO owns both manual controllers and GitHub runs. A later
+  # run waits for its predecessor; it never steals that predecessor's bank.
   cd "$DEPLOY_ROOT/back-end" && source .env
   AGENT_SURFACE_HASH=$(python3 "$DEPLOY_ROOT/scripts/agent_workflow_surface_hash.py")
-  AGENT_OLD_POINTER=$(npx tsx scripts/set-agent-queue-pointer.ts --read 2>/dev/null || echo "null")
-  AGENT_OLD_QUEUE=$(printf '%s' "$AGENT_OLD_POINTER" | node -e '
-let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-  for (const l of s.split("\n").reverse()) {
-    const t=l.trim(); if (!t.startsWith("{")) continue;
-    try { const o=JSON.parse(t); process.stdout.write(String(o?.taskQueue||"")); return; } catch {}
-  }
-  process.stdout.write("");
-})')
-  AGENT_OLD_HASH=$(printf '%s' "$AGENT_OLD_POINTER" | node -e '
-let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-  for (const l of s.split("\n").reverse()) {
-    const t=l.trim(); if (!t.startsWith("{")) continue;
-    try { const o=JSON.parse(t); process.stdout.write(String(o?.surfaceHash||"")); return; } catch {}
-  }
-  process.stdout.write("");
-})')
-  if [ -n "$AGENT_OLD_HASH" ] && [ "$AGENT_OLD_HASH" != "$AGENT_SURFACE_HASH" ]; then
-    echo "Pre-cutover generation: hash=$AGENT_OLD_HASH queue=$AGENT_OLD_QUEUE"
-  else
-    AGENT_OLD_QUEUE=""
-    echo "Same-generation rolling deploy expected (hash=$AGENT_SURFACE_HASH)"
-  fi
-
-  python3 scripts/record_factory_event.py deploy stage-start cooperative-cutover
+  python3 "$DEPLOY_ROOT/scripts/record_factory_event.py" deploy stage-start cooperative-cutover
   AGENT_CUTOVER_CONCLUSION=""
-  for i in $(seq 1 390); do  # up to ~65m @ 10s (45m drain SLO + build/overlap)
+  for i in $(seq 1 540); do
     AGENT_DEPLOY_STATE=$(gh run view "$AGENT_DEPLOY_RUN_ID" \
-      --json status,conclusion \
-      --jq '[.status, (.conclusion // "none")] | join("|")')
+      --json status,conclusion --jq '[.status, (.conclusion // "none")] | join("|")')
     IFS='|' read -r AGENT_DEPLOY_STATUS AGENT_CUTOVER_CONCLUSION <<<"$AGENT_DEPLOY_STATE"
     if [ $((i % 6)) -eq 1 ]; then
-      echo "--- cooperative cutover handover progress (run $AGENT_DEPLOY_RUN_ID) ---"
-      npx tsx scripts/monitor-cooperative-cutover.ts \
-        --expected-hash "$AGENT_SURFACE_HASH" \
-        ${AGENT_OLD_QUEUE:+--old-queue "$AGENT_OLD_QUEUE"} || true
+      node --import tsx scripts/worker-deployment-queue.ts head --app "$APP"
     fi
-    case "$AGENT_DEPLOY_STATUS" in
-      completed)
-        case "$AGENT_CUTOVER_CONCLUSION" in
-          success) break ;;
-          *) echo "❌ deploy-agents cooperative cutover failed: $AGENT_CUTOVER_CONCLUSION"; exit 1 ;;
-        esac
-        ;;
-    esac
+    if [ "$AGENT_DEPLOY_STATUS" = completed ]; then break; fi
     sleep 10
   done
-  [ "$AGENT_CUTOVER_CONCLUSION" = "success" ] ||
-    { echo "❌ deploy-agents cooperative cutover did not complete within 65m"; exit 1; }
-  python3 scripts/record_factory_event.py deploy stage-finish cooperative-cutover
-  echo "✅ deploy-agents cooperative cutover workflow completed"
+  [ "$AGENT_DEPLOY_STATUS" = completed ] || {
+    echo "CI is still active; retain its job, clocks and Machines and continue observing"
+    exit 1
+  }
+  AGENT_DEPLOYMENT_JOB_ID=$(gh run view "$AGENT_DEPLOY_RUN_ID" --log | \
+    sed -nE 's/.*Queued production worker deployment ([a-f0-9]{64}).*/\1/p' | sort -u)
+  [[ "$AGENT_DEPLOYMENT_JOB_ID" =~ ^[a-f0-9]{64}$ ]] || {
+    echo "Exact deployment job was not recovered from this run's log"; exit 1;
+  }
+  if [ "$AGENT_CUTOVER_CONCLUSION" != success ]; then
+    echo "Original CI result remains $AGENT_CUTOVER_CONCLUSION; resuming its saved deployment"
+    node --import tsx scripts/worker-deployment-queue.ts run \
+      --job-id "$AGENT_DEPLOYMENT_JOB_ID" -- python3 ../scripts/worker_pool_cutover.py
+  fi
+  python3 "$DEPLOY_ROOT/scripts/record_factory_event.py" deploy stage-finish cooperative-cutover
+
+fi
 fi
 ```
 
@@ -2245,178 +2255,116 @@ python3 scripts/record_factory_event.py deploy production-finish backend-probes
 
 ## Step 13ab: Verify cooperative generation cutover (handover monitor)
 
-Skip only when `$AGENT_CUTOVER_REQUIRED` is `0`. This is the canonical cutover
-condition shared with Step 13 and Step 13ac: shipped runtime changes and edits
-to `.github/workflows/deploy-agents.yml` require cutover; test-only,
-benchmark-only, documentation-only, and history-ledger changes under `agents/`
-do not.
-
-Run this immediately after Step 13's `deploy-agents.yml` watch completes
-successfully. Step 13 already polled `monitor-cooperative-cutover.ts` during
-the CI run; this step is the **hard gate** that proves the handover finished
-cleanly: live pointer on the merged generation, old-generation queue drained
-(via cooperative `continue_as_new` handoff, not premature force-migrate).
+Skip only when `$AGENT_CUTOVER_REQUIRED` is `0`. Use the same immutable merged
+source and workflow attempt selected in Step 13. CI already cut over only when
+its durable job is `SUCCEEDED`; a green image build or an empty visibility query
+is insufficient. The managed monitor --verify is authoritative for the saved
+job, its exact pointer and retained bank evidence. Continue with the native
+production checks below; this database report does not replace those checks.
 
 ```bash
+DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
 if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
-  set -e
-  DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
-  cd "$DEPLOY_ROOT/back-end" && source .env
-  AGENT_SURFACE_HASH=$(python3 "$DEPLOY_ROOT/scripts/agent_workflow_surface_hash.py")
-  AGENT_CUTOVER_RELEASE_CONTEXT="agent-cutover/${AGENT_DEPLOYMENT_TOKEN}"
-
-  # Authoritative verify: pointer matches merged generation; old queue empty when known.
-  npx tsx scripts/monitor-cooperative-cutover.ts \
-    --expected-hash "$AGENT_SURFACE_HASH" \
-    ${AGENT_OLD_QUEUE:+--old-queue "$AGENT_OLD_QUEUE"} \
-    --verify
-
-  CUTOVER_STATUS=$(gh api "repos/{owner}/{repo}/commits/$DEPLOY_MERGED_SHA/status" \
-    --jq ".statuses[] | select(.context == \"$AGENT_CUTOVER_RELEASE_CONTEXT\") | .state" | head -1)
-  if [ "$CUTOVER_STATUS" != "success" ]; then
-    echo "⚠️ agent-cutover commit status=$CUTOVER_STATUS (continuing — monitor --verify is authoritative)"
+  if [ "${AGENT_DEPLOY_MODE:-cooperative}" = "existing-process" ]; then
+    cd "$DEPLOY_ROOT/back-end"
+    npx tsx scripts/deploy-existing-worker-processes.ts verify-live --execute \
+      --plan "$WORKER_PROCESS_PLAN"
   else
-    echo "✅ agent-cutover commit status=success"
+    cd "$DEPLOY_ROOT/back-end" && source .env
+    : "${AGENT_DEPLOYMENT_JOB_ID:?exact job from this workflow run required}"
+    node --import tsx scripts/worker-deployment-queue.ts read \
+      --job-id "$AGENT_DEPLOYMENT_JOB_ID" > /tmp/worker-deployment-verification.json
+    node --input-type=module - /tmp/worker-deployment-verification.json \
+      "$DEPLOY_MERGED_SHA" "$AGENT_DEPLOYMENT_TOKEN" <<'NODE'
+import { readFileSync } from 'node:fs';
+const job = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+if (job.identity.sourceCommit !== process.argv[3] || job.identity.attempt !== process.argv[4])
+  throw new Error('Job source or workflow attempt mismatch');
+NODE
+    node --import tsx scripts/monitor-cooperative-cutover.ts \
+      --job-id "$AGENT_DEPLOYMENT_JOB_ID" --expected-hash "$AGENT_SURFACE_HASH" --verify
   fi
-
-  python3 scripts/record_factory_event.py deploy production-finish fly
+  python3 "$DEPLOY_ROOT/scripts/record_factory_event.py" deploy production-finish fly
 fi
 ```
 
-**Happy path (default):** CI's `deploy-agents-cooperative-cutover.sh` already
-overlapped fleets, flipped the pointer, waited up to 45 minutes for cooperative
-handoff, force-migrated any stragglers, and retired old-gen machines. Step 13ab
-must NOT re-run `migrate-open-agent-workflows.ts` when the monitor reports
-`cooperative_drain_complete` or `same_generation`.
+The normal path leases an existing idle bank, starts all eight candidates on a
+new deployment queue, verifies them, and publishes the pointer with a database
+lease and pointer compare-and-swap. It never allocates Machines or destroys a
+bank. Every job gets a distinct queue, including same-code deployments. A
+managed predecessor is stopped and returned to the pool only after durable
+admission and exact native chain checks certify retirement. Long-running work
+continues on its bank; expiry of the 45-minute observation window retains the
+job and bank for another bounded observation rather than force-terminating it.
 
-**Break-glass fallback** — only when Step 13's `deploy-agents.yml` run **failed**
-after the pointer flip but before drain completed. Do NOT use this on the happy
-path; it terminates workflows instead of waiting for activity-boundary handoff.
+Legacy workers whose producer coverage is unknown remain served. Their
+retention is an explicit first-deployment outcome, not a fabricated retirement
+certificate. Sixteen enrolled Machines supply the two managed banks in addition
+to the retained legacy cohort. The completed bank remains reserved as ACTIVE;
+only its positively retired predecessor can become spare capacity again.
+
+**First managed deployment:** keep automatic worker deployment disabled until
+the complete managed producer/continuation protocol is live on Render, the
+normal backend gates pass, and all old backend instances have drained. Bind this
+proof to the exact producer commit and Render deployment. The existing maximum
+shutdown window still applies:
 
 ```bash
-if [ "$AGENT_CUTOVER_REQUIRED" = "1" ] && [ "${AGENT_CUTOVER_CONCLUSION:-success}" != "success" ]; then
-  set -e
-  AGENT_CUTOVER_RELEASE_CONTEXT="agent-cutover/${AGENT_DEPLOYMENT_TOKEN}"
-  AGENT_CUTOVER_RELEASED=0
-  release_agent_cutover_lock() {
-    local state=$1 description=$2
-    gh api "repos/{owner}/{repo}/statuses/$DEPLOY_MERGED_SHA" \
-      -X POST \
-      -f state="$state" \
-      -f context="$AGENT_CUTOVER_RELEASE_CONTEXT" \
-      -f description="$description" >/dev/null
-    AGENT_CUTOVER_RELEASED=1
-  }
-  release_agent_cutover_lock_on_exit() {
-    local exit_code=$?
-    trap - EXIT
-    if [ "$AGENT_CUTOVER_RELEASED" != "1" ]; then
-      release_agent_cutover_lock error "Cooperative cutover fallback failed" || true
-    fi
-    exit "$exit_code"
-  }
-  trap release_agent_cutover_lock_on_exit EXIT
-
-  git fetch origin main
-  git cat-file -e "${DEPLOY_MERGED_SHA}^{commit}" ||
-    { echo "❌ Exact deploy merge commit is unavailable: $DEPLOY_MERGED_SHA"; exit 1; }
-  cd "$(git rev-parse --show-toplevel)/back-end" && source .env
-  AGENT_SURFACE_HASH=$(python3 "$(git rev-parse --show-toplevel)/scripts/agent_workflow_surface_hash.py")
-  AGENT_LIVE_GENERATION=$(npx tsx scripts/set-agent-queue-pointer.ts --read 2>/dev/null \
-    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.surfaceHash?o.surfaceHash:"")}catch{process.stdout.write("")}})' || true)
-  if [ "$AGENT_LIVE_GENERATION" = "$AGENT_SURFACE_HASH" ]; then
-    echo "✅ CI already cut over to generation $AGENT_SURFACE_HASH; verifying drain via monitor"
-    npx tsx scripts/monitor-cooperative-cutover.ts \
-      --expected-hash "$AGENT_SURFACE_HASH" \
-      ${AGENT_OLD_QUEUE:+--old-queue "$AGENT_OLD_QUEUE"} \
-      --verify || {
-        echo "⏰ Cooperative drain incomplete — force-migrating stragglers (break-glass only)"
-        TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-          TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
-          TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
-          WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
-          npx tsx scripts/migrate-open-agent-workflows.ts --execute
-      }
-    release_agent_cutover_lock success "Cutover verified after CI partial failure" || true
-    trap - EXIT
-    python3 scripts/record_factory_event.py deploy production-finish fly
-  else
-  # Render old-instance drain before any workflow tombstones (fallback path only).
-  RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE_DRAIN_SECONDS:-375}"
-  case "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" in
-    ''|*[!0-9]*) echo "❌ RENDER_OLD_INSTANCE_DRAIN_SECONDS must be an integer >= 375"; exit 1 ;;
-  esac
-  [ "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" -ge 375 ] ||
-    { echo "❌ Render old-instance drain cannot be weakened below 375s"; exit 1; }
-  RENDER_DEPLOY_FINISHED_AT=$(
-    curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
-      "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=20" |
-      DEPLOY_SHA="$DEPLOY_MERGED_SHA" python3 -c '
+RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE_DRAIN_SECONDS:-375}"
+case "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" in ''|*[!0-9]*) exit 1;; esac
+[ "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" -ge 375 ] || exit 1
+RENDER_DEPLOY_FINISHED_AT=$(curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
+  "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=20" | \
+  PRODUCER_SHA="$DEPLOY_MERGED_SHA" python3 -c '
 import json, os, sys
-deploy = next(
-    (
-        item["deploy"]
-        for item in json.load(sys.stdin)
-        if (item["deploy"].get("commit") or {}).get("id") == os.environ["DEPLOY_SHA"]
-        and item["deploy"].get("status") == "live"
-    ),
-    None,
-)
-if deploy is None or not deploy.get("finishedAt"):
-    raise SystemExit("exact live Render deploy timestamp was not found")
-print(deploy["finishedAt"])
-'
-  )
-  RENDER_DRAIN_REMAINING=$(
-    RENDER_DEPLOY_FINISHED_AT="$RENDER_DEPLOY_FINISHED_AT" \
-      RENDER_OLD_INSTANCE_DRAIN_SECONDS="$RENDER_OLD_INSTANCE_DRAIN_SECONDS" \
-      python3 -c '
+items = [x["deploy"] for x in json.load(sys.stdin)]
+match = next((x for x in items if (x.get("commit") or {}).get("id") == os.environ["PRODUCER_SHA"] and x.get("status") == "live"), None)
+if not match or not match.get("finishedAt"):
+    raise SystemExit("Exact live producer deployment not found")
+print(match["finishedAt"])
+')
+RENDER_DRAIN_REMAINING=$(RENDER_DEPLOY_FINISHED_AT="$RENDER_DEPLOY_FINISHED_AT" \
+  RENDER_OLD_INSTANCE_DRAIN_SECONDS="$RENDER_OLD_INSTANCE_DRAIN_SECONDS" python3 -c '
 from datetime import datetime, timezone
 import math, os
 finished = datetime.fromisoformat(os.environ["RENDER_DEPLOY_FINISHED_AT"].replace("Z", "+00:00"))
 elapsed = (datetime.now(timezone.utc) - finished).total_seconds()
-print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - elapsed)))
-'
-  )
-  while [ "$RENDER_DRAIN_REMAINING" -gt 0 ]; do
-    echo "Waiting for old Render instances/requests to drain: ${RENDER_DRAIN_REMAINING}s"
-    sleep "$([ "$RENDER_DRAIN_REMAINING" -lt 10 ] && echo "$RENDER_DRAIN_REMAINING" || echo 10)"
-    RENDER_DRAIN_REMAINING=$((RENDER_DRAIN_REMAINING - 10))
-  done
-  echo "✅ Old Render instance/request drain window elapsed"
-
-  AGENT_GENERATION_QUEUE="navi-agent-tasks@${AGENT_SURFACE_HASH}"
-  echo "Flipping agent queue pointer to generation ${AGENT_GENERATION_QUEUE}"
-  npx tsx scripts/set-agent-queue-pointer.ts \
-    --queue "$AGENT_GENERATION_QUEUE" \
-    --surface-hash "$AGENT_SURFACE_HASH" \
-    --by "deploy-${DEPLOY_MERGED_SHA}"
-  sleep 6
-
-  TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
-    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
-    WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
-    WORKFLOW_MIGRATION_CANARY_COUNT="${WORKFLOW_MIGRATION_CANARY_COUNT:-4}" \
-    WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS="${WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS:-120000}" \
-    WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS="${WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS:-300000}" \
-    WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS="${WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS:-120000}" \
-    WORKFLOW_MIGRATION_TERMINAL_CLEANUP_TIMEOUT_MS="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_TIMEOUT_MS:-900000}" \
-    WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY:-32}" \
-    npx tsx scripts/migrate-open-agent-workflows.ts --execute
-
-  release_agent_cutover_lock success "Production workflow cutover completed (fallback)" || true
-  trap - EXIT
-  python3 scripts/record_factory_event.py deploy production-finish fly
-  fi
-fi
+print(max(0, math.ceil(int(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - elapsed)))
+')
+while [ "$RENDER_DRAIN_REMAINING" -gt 0 ]; do
+  sleep "$([ "$RENDER_DRAIN_REMAINING" -lt 10 ] && echo "$RENDER_DRAIN_REMAINING" || echo 10)"
+  RENDER_DRAIN_REMAINING=$((RENDER_DRAIN_REMAINING - 10))
+done
+echo "Old Render instance/request drain window elapsed"
+# Retain the exact native deployment, protocol response and functional gate receipts.
 ```
 
-Under cooperative cutover, workers drain at activity boundaries (SIGTERM +
-35m `kill_timeout`) and workflows hand off via `continue_as_new` at safe
-`run_agent` checkpoints. Force-migrate runs only after the 45-minute SLO
-(break-glass). The monitor script is the authoritative post-merge proof that
-routing flipped and the old generation drained without leaving stragglers.
+An HTTP sample from one new process does not prove that all old producers have
+retired. Neither a queue name nor a zero workflow count can upgrade an UNKNOWN
+legacy admission certificate. Preserve the first-deployment proof before
+re-enabling automatic worker deployment.
+
+An interrupted deployment resumes **the same job** using the queue CLI `run`
+command and the original immutable image. Do not enqueue a replacement for a
+partially prepared job, release its reservations on a timer, roll the pointer
+back, or invoke forced workflow migration to make its status green. A queued job
+with no preparation may be explicitly aborted under the shared lease. A failed
+candidate that has never been published can be abandoned through the owned
+controller; it first closes and certifies the unused target queue, then returns
+only its unchanged reservations or stopped, verified candidates to the pool:
+
+```bash
+node --import tsx scripts/worker-deployment-queue.ts run \
+  --job-id "$AGENT_DEPLOYMENT_JOB_ID" --allow-abort -- \
+  python3 ../scripts/worker_pool_cutover.py --abort
+```
+
+This path refuses an ACTIVATED job or a changed/live target pointer. A failed
+retirement check retains every reservation. Abandonment records `ABORTED`, never
+changes the failed attempt to `SUCCEEDED`, and never destroys a Machine.
+Scheduled recovery runs only the existing FIFO head; it does not rebuild an
+image or enqueue another job. After a runner is interrupted, this observer
+continues the saved job under a fresh global lease.
 
 ## Step 13ac: Validate workflow replacement edge cases in production
 
@@ -2517,7 +2465,9 @@ SEMANTIC_WORKERS=1 bash front-end/scripts/run-semantic-tests.sh --prod chat-life
 
 ## Step 13c: AgentCard production lifecycle gate
 
-Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Run after both the backend
+Skip when `$CHANGED_AGENTCARD_PAYMENT` is empty. The standing release-stall
+exception in Step 6a also applies to this production gate automatically and
+without further approval. Run after both the backend
 and frontend merged commits are live. Launch it concurrently with the semantic
 gate because the two checks are isolated:
 
@@ -2538,8 +2488,19 @@ the user for them. If the run fails closed on a missing identity, provision it:
 cd back-end && set -a && . ./.env && set +a && \
   DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \
   BENCHMARK_ALLOW_LIVE_STRIPE=1 BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=1 \
-  npx tsx scripts/setup-benchmark-payment.ts --live
+  npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107 \
+  --agentcard-cardholder-id "$DEDICATED_AGENTCARD_CARDHOLDER_ID"
 ```
+
+Use `npx tsx scripts/setup-benchmark-payment.ts --help` for the effect-free CLI reference.
+Choose an **existing dedicated** benchmark cardholder; never select Andy's or another actor's
+cardholder, create an identity automatically, or bypass pending KYC. `--agentcard-cardholder-id`
+binds that exact ID after environment fallback resolution. Live setup prefers the complete local
+`AGENTCARD_ORG_OAUTH_CLIENT_ID_LIVE` / `AGENTCARD_ORG_OAUTH_CLIENT_SECRET_LIVE` pair process-locally;
+an incomplete pair fails before any provider or DB call. If both are absent, the existing generic
+production pair remains supported. No global env file or Stripe billing key is changed.
+`--stripe-customer-id` can reuse an existing owned live fixture customer; ownership, live-wallet,
+and KYC checks still apply. Existing purchase history is preserved.
 
 Use `DIRECT_URL`; the 6543 pooler fails with `Can't reach database server`. The only step an
 agent cannot perform is saving a card on the live Stripe customer (entering a card number is
@@ -2548,10 +2509,21 @@ permanently once done.
 
 This production-only task reserves exactly $1.00 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
 
-The runner performs the abandon/reclaim/refund action idempotently on success, failure, cancellation, and verifier errors before deleting the benchmark agent. Any missing cleanup snapshot or non-terminal lifecycle state fails the command. Do not declare the deploy complete until this task passes; if the process is forcibly killed, recover the printed agent ID through `/api/test-payment/lifecycle/abandon` and verify the same terminal assertions before rerunning.
+The runner performs the abandon/reclaim/refund action idempotently on success,
+failure, cancellation, and verifier errors before deleting the benchmark agent.
+A fully observed closed-card / consumed-transfer / zero-release stall is
+`⚠️⚠️ SKIPPED` under the permanent user-approved exception, and does not block
+deploy completion. Record its still-unreleased allocation and pending refund;
+never claim cleanup passed. A missing snapshot or any other failure still blocks.
+Existing failed attempts remain unchanged: record their deploy gate as explicitly
+waived when their saved native evidence proves this same stall. Do not allocate
+another live card or require a human-saved live Stripe card merely to replace
+that waived result. If the process was forcibly killed, recover the printed
+agent's execution/browser resources before assessing the financial exception.
 
 After every applicable production deployment, health, semantic, release, and
-AgentCard gate is green, close the production-verification lifecycle:
+AgentCard gate has passed or has this explicitly permitted warning skip, close
+the production-verification lifecycle:
 
 ```bash
 python3 scripts/record_factory_event.py deploy stage-finish production-verify

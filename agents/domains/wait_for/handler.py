@@ -32,8 +32,15 @@ from helpers.generation_handoff import (
 )
 from helpers.source_connect_gates import raise_source_connect_gates
 from helpers.wait_condition_or_handoff import sleep_or_generation_handoff
+from helpers.wait_on_world_clock import _wait_on_world_clock
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from utils.oai_demo import is_oai_demo_mass_agent_task
+from utils.simulated_clock import (
+    advance_simulated_clock,
+    simulated_now,
+    simulated_skip_metadata,
+    simulated_time_skip_enabled,
+)
 
 
 def skip_wait_wall_clock_for_fast_mode_replay(workflow_instance: Any) -> bool:
@@ -50,6 +57,7 @@ def skip_wait_wall_clock_for_fast_mode_replay(workflow_instance: Any) -> bool:
 # =============================================================================
 # WAIT_FOR MANAGER
 # =============================================================================
+
 
 
 class WaitForManager(ToolManager):
@@ -127,6 +135,9 @@ class WaitForManager(ToolManager):
         now = workflow.now()
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
+        # Simulate runs keep a logical clock: earlier skipped waits move "now"
+        # forward so a follow-up target is measured from the advanced clock.
+        now = simulated_now(workflow_instance, now)
 
         delta_seconds = int((target - now).total_seconds())
         if delta_seconds <= 0:
@@ -198,6 +209,43 @@ class WaitForManager(ToolManager):
                 "durationSeconds": delta_seconds,
             },
         )
+
+        # World-model simulate: the world is served by the WMH, so wall-clock
+        # waiting changes nothing — skip the sleep and advance the simulated
+        # clock instead (time skipping). Recorded in metadata for audit.
+        if simulated_time_skip_enabled(workflow_instance):
+            world_ms = await _wait_on_world_clock(
+                workflow_instance,
+                f"{workflow_instance.agent_id}:{tool_call_id}",
+                until_ms=int(target.timestamp() * 1000),
+            )
+            if world_ms is not None:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Wait complete",
+                    message=f"Reached {until_timestamp} on the shared world clock (wall-clock wait skipped)",
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "waitForMode": "timestamp",
+                        "untilTimestamp": until_timestamp,
+                        "worldClock": True,
+                        "worldTimeMs": world_ms,
+                    },
+                )
+                return
+            advance_simulated_clock(workflow_instance, delta_seconds)
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Wait complete",
+                message=f"Reached {until_timestamp} (simulated clock advanced {duration}; wall-clock wait skipped)",
+                status=MessageStatus.FINISHED,
+                metadata={
+                    "waitForMode": "timestamp",
+                    "untilTimestamp": until_timestamp,
+                    **simulated_skip_metadata(workflow_instance, delta_seconds),
+                },
+            )
+            return
 
         # OAi-demo Fast Mode: a recorded run already waited out the real time,
         # so on replay the wait is pure dead wall-clock — skip it. Live Fast
@@ -284,26 +332,37 @@ class WaitForManager(ToolManager):
             # condition evaluations already replay from cache. Live Fast Mode
             # must still sleep so external state (email/SMS) can change between
             # polls (agent 515c4894 burned max_checks in ~2m with FM skip-sleep).
-            if check_num > 1 and not skip_wait_wall_clock_for_fast_mode_replay(workflow_instance):
-                try:
-                    await sleep_or_generation_handoff(
-                        workflow_instance, check_interval_seconds, workflow_mod=workflow
+            if check_num > 1:
+                if simulated_time_skip_enabled(workflow_instance):
+                    # Simulate: wait one interval on the shared world clock (the
+                    # next check sees the world at that time) instead of sleeping.
+                    world_ms = await _wait_on_world_clock(
+                        workflow_instance,
+                        f"{workflow_instance.agent_id}:{tool_call_id}:check-{check_num}",
+                        duration_ms=check_interval_seconds * 1000,
                     )
-                except GenerationHandoffRequested:
-                    yield ToolEvent(
-                        type=EventType.POST_MESSAGE,
-                        title=f"Waiting for {description}",
-                        message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
-                        status=MessageStatus.FINISHED,
-                        metadata={
-                            "waitForMode": "condition",
-                            "description": description,
-                            "condition": condition,
-                            "checkIntervalSeconds": check_interval_seconds,
-                            "maxChecks": max_checks_param,
-                        },
-                    )
-                    raise
+                    if world_ms is None:
+                        advance_simulated_clock(workflow_instance, check_interval_seconds)
+                elif not skip_wait_wall_clock_for_fast_mode_replay(workflow_instance):
+                    try:
+                        await sleep_or_generation_handoff(
+                            workflow_instance, check_interval_seconds, workflow_mod=workflow
+                        )
+                    except GenerationHandoffRequested:
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title=f"Waiting for {description}",
+                            message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "waitForMode": "condition",
+                                "description": description,
+                                "condition": condition,
+                                "checkIntervalSeconds": check_interval_seconds,
+                                "maxChecks": max_checks_param,
+                            },
+                        )
+                        raise
 
             # Check pause / cost limit
             await workflow_instance._check_parent_state()
@@ -332,20 +391,23 @@ class WaitForManager(ToolManager):
                 f"Try to complete your task in as few tool calls as possible."
             )
 
+            check_metadata: dict[str, Any] = {
+                "waitForMode": "condition",
+                "description": description,
+                "condition": condition,
+                "checkNum": check_num,
+                "maxChecks": max_checks_param,
+                "checkIntervalSeconds": check_interval_seconds,
+                "exploreTaskId": task_id,
+            }
+            if check_num > 1 and simulated_time_skip_enabled(workflow_instance):
+                check_metadata.update(simulated_skip_metadata(workflow_instance, check_interval_seconds))
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=f"Check {check_num}/{max_checks_param}: checking...",
                 message="Verifying condition",
                 status=MessageStatus.IN_PROGRESS,
-                metadata={
-                    "waitForMode": "condition",
-                    "description": description,
-                    "condition": condition,
-                    "checkNum": check_num,
-                    "maxChecks": max_checks_param,
-                    "checkIntervalSeconds": check_interval_seconds,
-                    "exploreTaskId": task_id,
-                },
+                metadata=check_metadata,
             )
 
             # Delegate to _spawn_explore. Pass a local list for raw tool results

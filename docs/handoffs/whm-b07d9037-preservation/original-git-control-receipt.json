@@ -1,0 +1,15 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/original-git-control.tar.gz.gcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "24a06cadb320bcfbb304bc603c8deb08d90828729a7004e53dc4914bd574f81d",
+  "gzip_sha256": "39a589165a060cde567e775e069eede080cb8fba801b5ae2439cbce54d10c2c9",
+  "stored_bytes": 41023,
+  "frames": 1,
+  "files": 3,
+  "original_bytes": 43957,
+  "manifest_sha256": "79262ee3d4c81f51634faca68b172b4fd8cd303f47600083000b6c53c4093a2e",
+  "full_readback_verified": true,
+  "old_box_authenticated_member_verification": true
+}

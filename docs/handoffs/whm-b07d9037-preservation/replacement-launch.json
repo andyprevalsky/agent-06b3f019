@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "old_devbox_id": "b07d9037-81f9-4c97-80d7-6f4d42b7adc1",
+  "source_checkpoint": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "replacement_devbox_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "replacement_internal_thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+  "start_key": "swap-harness-whm-20261012-full-checkpoint-coordinator-generation1",
+  "request_id": "407eed10-adb1-4d76-b4f3-36aa96b29cd0",
+  "launch_source": "coordinator supported root-owned start, recorded .context/swap-harness/whm-root-full-checkpoint-start.json",
+  "prompt": "exact committed8475byte full checkpoint prompt plus924byte coordinator routing/reporting clarification",
+  "accepted_utc_observation": "2026-10-13T00:23:55.525049+00:00",
+  "phase": "accepted; independent source/member verification, original state read and meaningful continuation receipt pending",
+  "prior_failed_children": [
+    "ph74dvded0j3kn2ytgyj1ddwdd8g6er8",
+    "ph7dbznbkvm4j1sn121tjagca58g76qk"
+  ],
+  "old_box_disposition": "retained until complete verified replacement; no archive requested",
+  "no_additional_live_whm_replacement": true,
+  "paid_new_benchmark": false,
+  "merged": false,
+  "deployed": false,
+  "replacement_public_thread_id": "thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "replacement_thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "replacement_native_thread_id": "01a132a3-ea1f-7b22-abfb-70608400d02e"
+}
