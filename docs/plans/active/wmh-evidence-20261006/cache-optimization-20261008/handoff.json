@@ -1,0 +1,171 @@
+{
+  "schema": "rose.wmh_continuation_handoff.v1",
+  "checkpoint_date": "2026-10-08",
+  "branch": "codex/wmh-experiential-parallel-20261006",
+  "source_head_before_checkpoint": "2f14e34e0b6e89c12744817c435c427ec7c3bbd3",
+  "fetched_main": "b1e8a47e38fe1c0fdc872f8297a8efc9d4896b14",
+  "main_integration": "pending; 209 main-only / 30 WIP-only commits before this checkpoint",
+  "user_request": "Publish all WIP changes with continuation instructions to a draft PR; do not deploy or merge.",
+  "original_goal": "Complete original WMH corpus rebuild/conformance, unchanged raise-5m-rose-labs-brex benchmark and viewer-visible replay verification.",
+  "original_acceptance": "not achieved; latest full run settled $0",
+  "iterations": [
+    {
+      "iteration": 0,
+      "status": "completed",
+      "provider_token_hit_pct": 8.365461,
+      "provider_cached_input": 1367,
+      "provider_total_input": 16341,
+      "provider_output": 10978,
+      "demo_hits": 0,
+      "demo_lookups": 4,
+      "evidence": "baseline.json"
+    },
+    {
+      "iteration": 1,
+      "status": "source_applied_and_tested_benchmark_interrupted_before_task_start",
+      "source_sha256": "f4f37226b8a4bcb351e8a4a62d01a7269f8f43e76f173dfa588f12a6a44bcbe4",
+      "stack_id": "wmh-cache-20261008-i1-1791494260",
+      "benchmark_owner_state": "not_started",
+      "root_agent_allocated": false,
+      "measured_hit_rate": null,
+      "cleanup_receipt_available": false
+    },
+    {
+      "iteration": 2,
+      "status": "reviewed_unapplied_proposal",
+      "patch": "iteration-2.patch",
+      "change": "history before dynamic state; mark last two complete assistant/tool batches",
+      "measured_hit_rate": null
+    },
+    {
+      "iteration": 3,
+      "status": "reviewed_unapplied_proposal",
+      "patch": "iteration-3.patch",
+      "change": "retrieval before history; replace full-task marker with exact retrieval marker; at most four markers",
+      "measured_hit_rate": null
+    }
+  ],
+  "live_measurement_scope": "2 completed metered WMH calls; 2 cancelled calls with no final usage. No live iteration 1-3 measurements.",
+  "baseline_viewer": {
+    "agent_id": "f2936bd3-fe89-4c8f-b397-79807abbdb8e",
+    "run_id": "6b09942d-67f4-4896-8adc-cad4fdb0474b",
+    "fe_url": "https://www.roselabs.ai/?agent-id=f2936bd3-fe89-4c8f-b397-79807abbdb8e#benchmark-share=6b09942d-67f4-4896-8adc-cad4fdb0474b.1794086315.0f5dc7fde55787ccbdc26f03531d26248a4b82911c9a325b97be5f65c883c92b",
+    "fe_verified": "verified in fresh browser",
+    "message_count": 20
+  },
+  "portable_model_metadata": "model-preflight.json",
+  "original_worktree": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel",
+  "model_dir": ".context/world-model-fundraiser-gpt61-20261008",
+  "raw_75_request_dir": ".context/world-model-fundraiser-gpt61-20261008/native-predictions/3c034a09bf4848c2b40fb569fbc2ea6e",
+  "local_launch_measure_helpers": ".context/wmh-cache-optimization-20261008/{launch.py,measure.py}",
+  "model_artifacts": "gitignored, >1GB; reuse exact matching local build or rebuild native Experiential from full eligible archive; do not use older legacy recipe",
+  "immutable_controls": [
+    "model and xhigh effort",
+    "system and policy identities",
+    "task goal and initial state",
+    "corpus and retrieved data",
+    "output validation and sampling once",
+    "approval behavior",
+    "output budget and declared tools",
+    "parallel tool handling"
+  ],
+  "retained_resources": [
+    {
+      "id": "2df21db0e6bc49af65235bbb9c91a186d13af1379d052263697b9fb010eb2177",
+      "name": "victoria-db-rose-wmh-experiential-bench-wmh-cache-20261008-i1-1791494260",
+      "state": "exited",
+      "exit_code": 255,
+      "port_bindings": {
+        "5432/tcp": [
+          {
+            "HostIp": "",
+            "HostPort": "28745"
+          }
+        ]
+      },
+      "volumes": [
+        {
+          "name": "victoria-pgdata-rose-wmh-experiential-bench-wmh-cache-20261008-i1-1791494260",
+          "destination": "/var/lib/postgresql/data"
+        }
+      ],
+      "retained": true
+    },
+    {
+      "id": "3a4f793d8e26bf75760d1ff74a3ef1d4cd54006ee41d1ad9b890e3bdca213a7d",
+      "name": "rose-wmh-cache-fixture-20261008",
+      "state": "exited",
+      "exit_code": 255,
+      "port_bindings": {
+        "5432/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "28535"
+          }
+        ]
+      },
+      "volumes": [
+        {
+          "name": "rose-wmh-cache-fixture-20261008",
+          "destination": "/var/lib/postgresql/data"
+        }
+      ],
+      "retained": true
+    }
+  ],
+  "interrupted_controller_pids_absent": [
+    78085,
+    78965,
+    93465,
+    94075
+  ],
+  "recovery": "Ownership files retained under .context/benchmarks/wmh-cache-20261008-i1-1791494260; do not signal recycled PIDs or claim clean receipt. Preserve stopped volumes until exact-owner recovery.",
+  "fixture": {
+    "source": "October 6 production-derived dump, no generated success data",
+    "local_dump": "/Users/andyprevalsky/Developer/rose-wmh-continuation/.context/benchmarks/seed-cache/fc9dc50073ffa9bbd26b245774dfdbd8f7d9e121-20261006.dump",
+    "sha256": "8543fa9c2af45cb4bfe89021fa5b5fa82d59fdf83e992b8fef45a844c65909f2",
+    "seed_override": "SEED_REMOTE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:28535/victoria",
+    "restore": "scripts/restore-seed-dump.sh using image PostgreSQL 16 client",
+    "auth_identity": "User.userId",
+    "cloud_portability": "Dump is private and local. If exact snapshot unavailable, rerun baseline for new fixture rather than compare incompatible conditions."
+  },
+  "infrastructure": {
+    "temporal": "real local dev server 127.0.0.1:28533; namespace rose-labs-us-east-1.tch2n; HTTP 28534",
+    "response_cache": "fresh isolated local Postgres each run; explicit FAST_MODE_CACHE_DATABASE_URL at actual allocated DB port",
+    "warm_connections": "unchanged zero paths; deferred per user note",
+    "wmh_startup_bound_seconds": 600,
+    "task_timeout_seconds": 300
+  },
+  "verification": {
+    "registered_wmh_blackbox": {
+      "command": "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py world-model-harness",
+      "provider_passed": 89,
+      "native_passed": 37,
+      "domain": "PASS",
+      "runtime_seconds": 7.4,
+      "local_log": ".context/wmh-cache-optimization-20261008/i1-blackbox.log"
+    },
+    "pricing_tests_passed": 7,
+    "history_prefix_baseline_repro": {
+      "failed": 2,
+      "passed": 3,
+      "log": "history-prefix-baseline-repro.log",
+      "prospective_guards": "history_cache_tests.py; promote only with iteration 2"
+    },
+    "offline_invariance": "candidate-invariance.json; 75 captured inputs for each proposal, no live cache claim",
+    "offline_opportunity": "layout-opportunity-audit.json; estimated reuse, not observed reads"
+  },
+  "next_steps": [
+    "Read CLAUDE.md, WMH_HANDOFF.md and active plan in a new worktree.",
+    "Resume current iteration 1 with identical controls and a fresh DEMO cache for 300 seconds.",
+    "Apply iteration-2.patch, promote history guards to owning test file, run unchanged repro and registered blackbox, then another 300-second run.",
+    "Apply iteration-3.patch, repeat guards and blackbox, then another 300-second run.",
+    "Report each WMH provider token/read/request rate and DEMO hits/lookups/stores, explicitly excluding unknown cancelled usage. Publish and verify durable FE replay.",
+    "Carefully integrate current main, finish full corpus/matching conformance and unchanged 1800-second fundraiser/replay acceptance.",
+    "Do not deploy or merge until user resumes deployment; preserve Freedom."
+  ],
+  "role_diagnostic": "role-confusion-diagnostic.json: two paid public diagnostic calls, no runtime prompt edit, does not establish original hidden reasoning or causal role confusion",
+  "deployment": false,
+  "merge": false,
+  "patch_apply_command": "git apply --unidiff-zero docs/plans/active/wmh-evidence-20261006/cache-optimization-20261008/iteration-<2|3>.patch"
+}

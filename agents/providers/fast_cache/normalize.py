@@ -778,6 +778,18 @@ def _canonical_request_body(body: Any) -> str:
     return canonical_messages(body)
 
 
+# Immutable WMH execution-policy identities: (version, policy_sha256[:16]).
+# Kept here so the workflow replay surface never imports benchmark modules; a
+# fast-cache parity test binds every entry to benchmarks.wmh_execution_policy.
+WMH_POLICY_CACHE_IDENTITIES: dict[str, tuple[str, str]] = {
+    "rose-virtual-public-affordances-v1": ("1", "49d9d1f0430a5d8e"),
+    "rose-virtual-public-affordances-v2": ("2", "5dd9924e9a1ff4c5"),
+    "rose-outcome-distribution-v1": ("1", "650945bf68ee4ba6"),
+    "rose-outcome-distribution-v2": ("2", "23feae1291f883f0"),
+    "rose-outcome-distribution-v3": ("3", "3ace77b6b1a3a33c"),
+}
+
+
 def world_model_cache_scope() -> str:
     """Cache-key namespace segment for world-model-simulated runs.
 
@@ -791,7 +803,14 @@ def world_model_cache_scope() -> str:
     if mode != "simulate":
         return ""
     model = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME") or "rose-archive"
-    return f"sim.{re.sub(r'[^A-Za-z0-9._-]', '-', model)}:"
+    scope = f"sim.{re.sub(r'[^A-Za-z0-9._-]', '-', model)}"
+    policy_name = os.environ.get("WMH_EXECUTION_POLICY", "upstream")
+    if policy_name != "upstream":
+        if policy_name not in WMH_POLICY_CACHE_IDENTITIES:
+            raise ValueError("Unknown WMH execution policy; choose an immutable registered version")
+        version, digest = WMH_POLICY_CACHE_IDENTITIES[policy_name]
+        scope += f".policy.{policy_name}.{version}.{digest}"
+    return scope + ":"
 
 
 def build_key(kind: str, goal: str, detail: str) -> str:
@@ -1078,9 +1097,7 @@ OAI_DEMO_ROOT_GOAL_HASH = "4ae3193053ac1d8f"
 # ---------------------------------------------------------------------------
 
 _DEMO_TAG = "DEMO"
-GOOGLE_OAUTH_DEMO_PROMPT_PREFIX = (
-    "Please work through my Google account in this order."
-)
+GOOGLE_OAUTH_DEMO_PROMPT_PREFIX = "Please work through my Google account in this order."
 GOOGLE_OAUTH_DEMO_GOAL_HASH = "dd6b2b7bbe5256a1"
 
 
@@ -1160,8 +1177,14 @@ def soft_complete_allowed(
     *,
     root_goal: str | None = None,
 ) -> bool:
-    """True when soft-complete stubs may fire (same gate as DEMO cache replay)."""
-    return demo_cache_allowed(goal, root_goal=root_goal)
+    """True when legacy DEMO soft-complete stubs may fire.
+
+    WHM simulation has an isolated cache namespace, but a cold namespace is
+    expected on its first run. Synthesizing ``attempt_completion`` on that miss
+    traps the agent in PLAN and prevents both live inference and cache seeding.
+    Exact DEMO cache hits still replay; misses run live and write through.
+    """
+    return not world_model_cache_scope() and demo_cache_allowed(goal, root_goal=root_goal)
 
 
 # Pre-Jul-21 / pre-Aug-22 position fingerprint shape used by the OAi demo warm

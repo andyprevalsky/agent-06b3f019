@@ -1,0 +1,304 @@
+{
+  "schema": "rose.whm_grounded_completion_recovery.v1",
+  "utc": "2026-10-13T18:49:30.780534+00:00",
+  "status": "APPLIED_TO_TASK_SOURCE_OFFLINE_VERIFIED_UNDEPLOYED",
+  "source_commit": "df8d0285367257c58b41957bd1e17e8640aa4e03",
+  "base_checkpoint": "0a237b55277ea1de6594a2f005717398ffaec3fc",
+  "original_checkpoint": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "replacement_devbox": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "replacement_thread": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+  "replacement_thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "user_direction": "Retry WHM Rose completion failures on a schedule grounded in golden references; select timeouts using grounded examples.",
+  "activation": {
+    "flag": "WMH_VALIDATION_RECOVERY=1",
+    "default": false,
+    "managed_env_changed": false,
+    "scope": "Recovered native WHM bridge admission; other call sites/default owner unchanged"
+  },
+  "policy": {
+    "version": "rose-wmh-completion-retry-v1",
+    "max_attempts": 3,
+    "total_seconds": 590.0,
+    "attempt_seconds": 360.0,
+    "ttft_seconds": 90.0,
+    "idle_seconds": 120.0,
+    "initial_delay_seconds": 0.5,
+    "max_delay_seconds": 8.0,
+    "minimum_retry_seconds": 30.0
+  },
+  "policy_scope": "Three raw Rose _complete_once calls per completion including transient repeats/shared semantic repair; each raw call may own multiple HTTP routes. Native two protocol-repair attempts are unchanged separate completion owners.",
+  "schedule": {
+    "transient_retries_max": 2,
+    "jitter_delay_seconds": [
+      [
+        0.375,
+        0.5
+      ],
+      [
+        0.75,
+        1.0
+      ]
+    ],
+    "provider_retry_after": "Unshortened structured floor; stop if floor plus minimum remaining budget cannot fit.",
+    "semantic_validation": "Immediate existing shared Rose next-model recovery, still strict; no invented backoff.",
+    "permanent_failures": "Auth/request/payment/refusal/explicit permanent quota and mixed permanent aggregates stop. Cancellation is not retried."
+  },
+  "golden_grounding": {
+    "source_files_authenticated": 27,
+    "receipt_sha256": "e6294853e29a10bef51b3595d4cbdaccc812f9638612698cd039df2a125e9715",
+    "snapshot_manifest_sha256": "e1d15b19411d3088795fd3429f6bb2ae1391a3f5073a159a2d9fa45aa013bbd3",
+    "sdk_backoff": "Installed OpenAI2.26.0 _constants.py:9-14 and _base_client.py:720-806:2 retries,0.5s exponential delay,negative25% jitter.",
+    "retry_floor": "OpenClaw src/agents/embedded-agent-runner/run/failover-retry-controller.ts:25-56:bounded owner,max(backoff,Retry-After),refuse floor outside remaining budget.",
+    "timeout_reference": "Claude Code src/services/api/claude.ts:795-810:ordinary300s nonstream fallback ceiling; adapt to measured native maximum instead of treating it as WHM SLA.",
+    "measured_timeout_basis": {
+      "run12_validated_predictions": 107,
+      "max_seconds": 349.598,
+      "p95_seconds": 272.093,
+      "p99_seconds": 296.46,
+      "attempt_seconds": 360,
+      "selection": "Measured valid maximum plus existing10s heartbeat,rounded up.",
+      "run13_max_first_productive_seconds": 75.587,
+      "existing_rose_total_ttft_idle_seconds": [
+        590,
+        90,
+        120
+      ]
+    }
+  },
+  "checks": {
+    "schedule_actual_baseline": {
+      "failed": 12,
+      "passed": 1,
+      "seconds": 2.04,
+      "original_owner_source_sha256": "277735f779e8634a859fa810a4923dd7ceea0088ffddc6d9ffa4d044cd3c9096"
+    },
+    "private_family": {
+      "passed": 218,
+      "seconds": 22.4
+    },
+    "final_registered_gates": {
+      "command": "cd agents; WMH_NATIVE_PYTHON=<existing pinned Python3.12> WMH_TEST_NATIVE_PYTHON=<same> venv/bin/python scripts/run_blackbox_tests.py world-model-harness fast-cache-client",
+      "passed_domains": 2,
+      "failed_domains": 0,
+      "seconds": 31.6,
+      "native_cases": 59,
+      "provider_family_cases": 241,
+      "provider_family_seconds": 23.02,
+      "log_sha256": "3c96c8f72dd0b89e5bc9aabbd9294062e21291be3b00e3f4a08756c1109d523a"
+    },
+    "actual_rose_http_header_integration": "Foundry/Cerebras MockTransport;Retry-After long/short/503 and permanent quota;actual Rose terminal-waterfall header floor;no funded calls.",
+    "native_service": {
+      "receipt_sha256": "46f6c9a9a2dca097aca5da7d9bd9d9a2445c3b4f0cdf15f84c72d6d9e8047da3",
+      "source_hashes_stable": 299,
+      "same_native_prediction_store": true,
+      "lifecycle_rejoin_cancel_retirement": true,
+      "mixed_cases": [
+        {
+          "mode": "success",
+          "raw_attempts": 3,
+          "captured_ordinals": [
+            1,
+            2
+          ],
+          "world_commits": 1,
+          "known_input_tokens": 30,
+          "known_output_tokens": 9,
+          "synthetic_model_cost": 45,
+          "same_prediction_file": true,
+          "no_metering_double_count": true
+        },
+        {
+          "mode": "terminal-incomplete",
+          "raw_attempts": 3,
+          "captured_ordinals": [
+            1,
+            2,
+            3
+          ],
+          "world_commits": 0,
+          "known_input_tokens": 15,
+          "known_output_tokens": 5,
+          "synthetic_model_cost": 30,
+          "same_prediction_file": true,
+          "no_metering_double_count": true
+        }
+      ],
+      "captured_admission_matches": 5,
+      "ordinary_private_markers": []
+    },
+    "fixture_archive_reader": {
+      "original_replay_source_sha256": "d6e1c3be5c76d0ec8f585954fca73f4d62fa5bbc4d2288fbb600090334e5ee09",
+      "authoritative_archive_source_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+      "native_replay_matches_sampled_error_and_draw": true,
+      "real_service_calls": 0,
+      "pending_record_excluded_from_complete_response_reader": true,
+      "same_record_preserves_provider_attempt_and_terminal_response": true,
+      "archive_files": 17,
+      "all_archive_members_authenticated_decrypted_sha256_and_restored_equal": true,
+      "replay_of_restored_original_reader_identical": true,
+      "archive_transport": "offline memory fixture; no R2/env/key or original archive change"
+    },
+    "lint": {
+      "tool": "Ruff0.17.0 existing offline uvx",
+      "checked_files": 18,
+      "format_checked_files": 17,
+      "passed": true
+    },
+    "rca_archive": {
+      "cases": 870,
+      "passed": true
+    }
+  },
+  "source_files": [
+    {
+      "path": "agents/benchmarks/experiential_bridge.py",
+      "base_sha256": "e1c36f7ccf632f68576513c0f61322a4558aebfdd97dcd84211519f632ee0b6d",
+      "candidate_sha256": "c8a9e04fccdc955b8088136ef000c32b1fdbd6651cb54ac23da9d346cfab4ecc",
+      "bytes": 11342
+    },
+    {
+      "path": "agents/benchmarks/experiential_world_model.py",
+      "base_sha256": "cf5593c51381f641b15cfcb61fcf80b4c0c41c0143eda4cc0b1369ba42c02515",
+      "candidate_sha256": "d4d9e2d34b59ebc2913bbb54649c587292076533fc409240989ab87c7bd1451b",
+      "bytes": 40521
+    },
+    {
+      "path": "agents/benchmarks/serve_experiential_world_model.py",
+      "base_sha256": "82f0b3e4f9b2659804a87bb35cf3c62a5c3bfe43b23be3c9d13bc33c0be0d563",
+      "candidate_sha256": "6ace4d9ba6fd1aa0afa5e423a0f957858b1c2c80ac1f20fcbb59dc48f977d186",
+      "bytes": 16174
+    },
+    {
+      "path": "agents/benchmarks/wmh_execution_policy.py",
+      "base_sha256": "bdcd426242b3a1c50415d27ce5c43c1ca9f8cc6c63ec691a08657c2e279525bd",
+      "candidate_sha256": "5a18c3a417d506539c7fcc429408275899fcc5e857c02aa490a3ddd97063f8f5",
+      "bytes": 16874
+    },
+    {
+      "path": "agents/benchmarks/wmh_native_prediction_writer.py",
+      "base_sha256": null,
+      "candidate_sha256": "2052ea0ce843ef499029f5c8a1c4f7ba8ee53ccdcfb3a7c190ed486b8e792408",
+      "bytes": 4924
+    },
+    {
+      "path": "agents/benchmarks/wmh_provider_capture.py",
+      "base_sha256": null,
+      "candidate_sha256": "de42f3bbbccea8ab8fe013fc8623bc6f7967616576333be51f661e36bfa9a7cc",
+      "bytes": 7737
+    },
+    {
+      "path": "agents/benchmarks/wmh_rose_provider.py",
+      "base_sha256": "277735f779e8634a859fa810a4923dd7ceea0088ffddc6d9ffa4d044cd3c9096",
+      "candidate_sha256": "a40ac3e6db3c5d127eb3b9a0b2cbce14672fa6c794852f8d192f790c90d0f636",
+      "bytes": 58567
+    },
+    {
+      "path": "agents/benchmarks/wmh_validation_recovery_bridge_fixture.py",
+      "base_sha256": null,
+      "candidate_sha256": "498c66485876be4e01b8f94d6a5fd0dac61ac751dc9098474176011f04275e89",
+      "bytes": 4159
+    },
+    {
+      "path": "agents/benchmarks/wmh_validation_recovery_native_checks.py",
+      "base_sha256": null,
+      "candidate_sha256": "2a080dbe4a2dcbd5ea4034b99e77390b80187a09013049a1ac23b34099826922",
+      "bytes": 15765
+    },
+    {
+      "path": "agents/benchmarks/wmh_validation_recovery_private_capture_fixture.py",
+      "base_sha256": null,
+      "candidate_sha256": "8046f3ee2ff915b5e8ad50af452241e940e2522da9dee50393a97075e7a20df4",
+      "bytes": 391
+    },
+    {
+      "path": "agents/benchmarks/wmh_validation_recovery_test.py",
+      "base_sha256": null,
+      "candidate_sha256": "27ac5a0112936d09d889d61aefe7cae434f7a5248459cadc755a61ebb7004d07",
+      "bytes": 13949
+    },
+    {
+      "path": "agents/benchmarks/wmh_validation_recovery_writer_fixture.py",
+      "base_sha256": null,
+      "candidate_sha256": "8e56ed9a0cf32b906a069e6f11e6179a3f4ea9c23b73c3a8c33a010dfec8f02d",
+      "bytes": 793
+    },
+    {
+      "path": "agents/tests/blackbox/world_model_harness.blackbox.py",
+      "base_sha256": "98fb895da3d47348e42d230d56558f2b1e8d2709002ef7f37a678684cfc5f8ac",
+      "candidate_sha256": "7565af3338082490bbee5efa81fdeba7d3fcb0fd085c9378d89a49c4c6da8e5e",
+      "bytes": 261931
+    },
+    {
+      "path": "agents/benchmarks/wmh_completion_retry.py",
+      "base_sha256": null,
+      "candidate_sha256": "f980bef888c4d9ee8cfb1fa3f2eb41671fea818c2120f79612bead594bc23eb9",
+      "bytes": 10420
+    },
+    {
+      "path": "agents/benchmarks/wmh_reliability_test.py",
+      "base_sha256": "0deedb3099aad6acc91b93a1070dc088c836287ab591d05bca238e2914f5a550",
+      "candidate_sha256": "7bea28ae2a621838dc9983a3c6d9a025f047152bcb704e30857c71aaad5b800e",
+      "bytes": 44730
+    },
+    {
+      "path": "agents/providers/rose/whm_retry_observation.py",
+      "base_sha256": null,
+      "candidate_sha256": "7810f6a98750d7770f60a6484fd3d6c89a5162111f336b02ecc20fc9957ca199",
+      "bytes": 2692
+    },
+    {
+      "path": "agents/providers/rose/foundry.py",
+      "base_sha256": "111500bd70ae7d15c9de73b7862e717720beffe4fad94b772cb19598f2672325",
+      "candidate_sha256": "8e44c8a87530793d96e17d329a13fa33a4713f03f352d6e7d6d595ae771200e8",
+      "bytes": 8619
+    },
+    {
+      "path": "agents/providers/rose/cerebras.py",
+      "base_sha256": "d87e250f07c5c1fccf63ba8253ca443de091ee130939d68d8003a3d6812f5e1b",
+      "candidate_sha256": "28ddf70fbdd673213c2acac8091562652f6312f62888cbd44ce1d79506a74312",
+      "bytes": 12592
+    }
+  ],
+  "source_manifest_sha256": "d5cc7be58541ba1ec3f61dfb824553c8e975d03292505e1c465e04ae2c652b9c",
+  "independent_review": {
+    "verdict": "PASS_WITH_LIMITS",
+    "applied_review_sha256": "2b1835d8b0508d67d991535bdc03b8076179cdccceae2309f84476e1737f0ac3",
+    "final18_review_sha256": "21151f6288840ac6f8805e70801052309358802ad61206e794f83da4a10088ee",
+    "legacy_default_owner_ast_equal": true,
+    "final_import_only_changes_verified": true
+  },
+  "private_archive": {
+    "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run13-grounded-whm-recovery-private-receipt.json",
+    "files": 704,
+    "full_ciphertext_gzip_auth_decrypt_and_member_sha256_readback": true,
+    "encryption_key_id": "trace-archive-prod-2026-07-03"
+  },
+  "preservation": {
+    "original_checkpoint_is_ancestor": true,
+    "original_six_archive_receipts_and_helper_cache_ref_records_retained": true,
+    "prior_held_proposal_and_archive_retained": true,
+    "goal_filter_patch_applied": false,
+    "native_model_rebuilt_or_substituted": false,
+    "base_policy_prompts_sampling_parallel_shared_state_unchanged": true,
+    "protected_sha256": {
+      "CLAUDE.md": "2a6348f3ad1701aeb496e10e98da271fb38db5709e2abb9adbe65b7c5ad0d322",
+      "AGENTS.md": "57cbb4821915f3e477996ffde6ef7ee4c9d57fab64b6f57421968e3d0e9d0eca"
+    },
+    "main_checkout_unchanged": "7133565ba85531db4e0d25498d9a7a22d491291a",
+    "Freedom_untouched": true
+  },
+  "limits": [
+    "Original missing malformed reply generation cause and exact unchanged fundraising outcome remain OPEN; synthetic owning controls do not close those gates.",
+    "Known metered usage and synthetic price arithmetic are not complete invoices. Incomplete/cancelled attempts can have unknown usage; /rose_usage does not expose completeness.",
+    "360/590 bounds are provisional for recorded contexts; new large static prefix/provider admission and latency remain unqualified.",
+    "Positive clock-delta budget conservatively charges forward gaps; it does not execute while OS suspended or bound uninterruptible capture I/O. Writer crash/disk-full and large concurrency are not qualified.",
+    "Pending native capture is admission evidence, not a completed prediction."
+  ],
+  "boundaries": {
+    "paid_calls": 0,
+    "paid_benchmarks": 0,
+    "merge": false,
+    "deploy": false,
+    "old_box_or_other_task_operations": false
+  }
+}

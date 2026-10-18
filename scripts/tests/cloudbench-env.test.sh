@@ -32,6 +32,221 @@ require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
 # shellcheck source=../lib/cloudbench-env.sh
 source "$HELPER_SRC"
 
+# Execute the actual controller launch fragments without touching cloud resources.
+python3 - "$ROOT_DIR" <<'PY' || fail "world-model cloud launch handoff failed"
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+root = Path(sys.argv[1])
+source = (root / "scripts/run-bench-cloud").read_text()
+configuration = re.search(
+    r"^# World-model launch configuration.*?^# End world-model launch configuration\.\n",
+    source, re.M | re.S,
+)
+configuration = configuration.group(0) if configuration else ""
+
+def run(script, values=None):
+    environment = {
+        "PATH": os.environ["PATH"], "ROOT_DIR": str(root),
+        "WMH_ENGINE": "experiential", "WMH_ROSE_POOL": "rose-1-mini",
+        "WMH_CONTEXT_TOKENS": "131072",
+        "WMH_NATIVE_PYTHON": "/controller/local/python",
+        "WMH_BUILD_DIR": "/controller/local/model",
+    }
+    environment.update(values or {})
+    return subprocess.run(["bash", "-c", configuration + script], env=environment,
+                          text=True, capture_output=True)
+
+class WorldModelLaunch(unittest.TestCase):
+    def assert_handoff(self, values):
+        self.assertEqual({key: values.get(key) for key in (
+            "WMH_ENGINE", "WMH_ROSE_POOL", "WMH_CONTEXT_TOKENS",
+        )}, {"WMH_ENGINE": "experiential", "WMH_ROSE_POOL": "rose-1-mini",
+            "WMH_CONTEXT_TOKENS": "131072"})
+        self.assertNotIn("WMH_NATIVE_PYTHON", values)
+        self.assertNotIn("WMH_BUILD_DIR", values)
+
+    def test_boot_machine_arguments(self):
+        fragment = re.search(r"^    _envargs=\(\n.*?^    \)\n", source, re.M | re.S).group(0)
+        result = run(fragment + 'printf "%s\\n" "${_envargs[@]}"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_handoff(dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line))
+
+    def test_ssh_wrapper_exports(self):
+        fragment = "\n".join(line for line in source.splitlines()
+                             if re.match(r'^    echo "export WMH_', line))
+        result = run(fragment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exports = run(result.stdout + '\nprintf "%s\\n" "$WMH_ENGINE" "$WMH_ROSE_POOL" "$WMH_CONTEXT_TOKENS"',
+                      {"WMH_ENGINE": "legacy", "WMH_ROSE_POOL": "rose-1-ultra", "WMH_CONTEXT_TOKENS": ""})
+        self.assertEqual(exports.returncode, 0, exports.stderr)
+        self.assertEqual(exports.stdout.splitlines(), ["experiential", "rose-1-mini", "131072"])
+        exported_keys = {line.split("=", 1)[0].removeprefix("export ") for line in result.stdout.splitlines()}
+        self.assertFalse(exported_keys & {"WMH_NATIVE_PYTHON", "WMH_BUILD_DIR"})
+
+    def test_refresh_build_receives_guest_settings(self):
+        fragment = re.search(r'^    BUILD_CMD="set -e\n.*?^    REFRESH_LOG=', source, re.M | re.S).group(0)
+        fragment = fragment[:fragment.rfind("    REFRESH_LOG=")]
+        with tempfile.TemporaryDirectory(prefix="wmh-refresh-launch-") as temporary:
+            scratch = Path(temporary)
+            repo = scratch / "repo"
+            executable = repo / "agents/venv/bin/python"
+            executable.parent.mkdir(parents=True)
+            (repo / "back-end").mkdir()
+            receipt = scratch / "receipt.json"
+            executable.write_text("#!" + sys.executable + "\nimport json,os,sys\n"
+                                  "from pathlib import Path\nPath(os.environ['LAUNCH_RECEIPT']).write_text(json.dumps("
+                                  "{'env': {k:v for k,v in os.environ.items() if k.startswith('WMH_')}, 'args':sys.argv[1:]}))\n")
+            executable.chmod(0o755)
+            result = run(
+                "gosu() { shift; \"$@\"; }; chown() { :; };\n" + fragment
+                + '\nunset WMH_ENGINE WMH_ROSE_POOL WMH_CONTEXT_TOKENS WMH_NATIVE_PYTHON WMH_BUILD_DIR; eval "$BUILD_CMD"',
+                {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(scratch / "world-model"),
+                 "WMH_MODEL_NAME": "rose-test", "WMH_REFRESH_MAX_BUNDLES": "0",
+                 "WMH_REFRESH_MAX_STEPS": "0", "WMH_REFRESH_MAX_STEPS_PER_BUNDLE": "0",
+                 "WMH_REFRESH_ROOT_AGENT_IDS": "", "LAUNCH_RECEIPT": str(receipt)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            captured = json.loads(receipt.read_text())
+            settings = captured["env"]
+            self.assertEqual(settings.pop("WMH_BUILD_DIR"), str(scratch / "world-model"))
+            self.assert_handoff(settings)
+            self.assertEqual(captured["args"][:2], ["-u", "-c"])
+            self.assertIn("update_world_model_for_simulation", captured["args"][2])
+
+    def test_defaults_and_invalid_configuration(self):
+        result = run('printf "%s\\n" "$WMH_ENGINE" "$WMH_ROSE_POOL" "$WMH_CONTEXT_TOKENS"',
+                     {"WMH_ENGINE": "", "WMH_ROSE_POOL": "", "WMH_CONTEXT_TOKENS": ""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["legacy", "rose-1-ultra", ""])
+        for key, value in (("WMH_ENGINE", "unknown"),
+                           ("WMH_ROSE_POOL", "pool;invalid"), ("WMH_CONTEXT_TOKENS", "0"),
+                           ("WMH_CONTEXT_TOKENS", "-1"), ("WMH_CONTEXT_TOKENS", "1.5")):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(run(":", {key: value}).returncode, 2)
+
+    def test_rose_pool_is_validated_against_the_benchmark_ref(self):
+        # A pool that exists only at the requested ref must pass, and one that
+        # exists only in this checkout must not.
+        check = 'validate_wmh_rose_pool_at_ref "$BENCH_REF" "$WMH_ROSE_POOL"'
+        result = run(check, {"BENCH_REF": "HEAD", "WMH_ROSE_POOL": "rose-1-ultra"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run(check, {"BENCH_REF": "HEAD", "WMH_ROSE_POOL": "unknown-pool"}).returncode, 2)
+        with tempfile.TemporaryDirectory(prefix="wmh-pool-ref-") as temporary:
+            repo = Path(temporary)
+            registry = repo / "agents/providers/rose/pools.py"
+            registry.parent.mkdir(parents=True)
+            git = lambda *args: subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                               capture_output=True, text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            marker = repo / "executed"
+            def commit(pool, registry_text=None):
+                # Importing this registry would leave a marker; validation must not run it.
+                registry.write_text(registry_text or (
+                    f"open({str(marker)!r}, 'w').close()\n"
+                    f"POOL_REGISTRY: dict = {{{pool!r}: object()}}\n"
+                ))
+                git("add", "-A")
+                git("commit", "-qm", pool)
+                return git("rev-parse", "HEAD")
+            older = commit("ref-only-pool")
+            commit("checkout-only-pool")
+            for ref, pool, code in ((older, "ref-only-pool", 0), (older, "checkout-only-pool", 2),
+                                    ("HEAD", "checkout-only-pool", 0)):
+                with self.subTest(ref=ref, pool=pool):
+                    outcome = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": ref, "WMH_ROSE_POOL": pool})
+                    self.assertEqual(outcome.returncode, code, outcome.stderr)
+            self.assertFalse(marker.exists(), "the selected ref's registry code must not execute")
+            # A registry that is not a literal dict of names cannot be validated as data.
+            computed = commit("computed", "POOL_REGISTRY = dict(computed=1)\n")
+            self.assertEqual(run(check, {"ROOT_DIR": str(repo), "BENCH_REF": computed,
+                                         "WMH_ROSE_POOL": "computed"}).returncode, 2)
+            # Only a commit this controller has not fetched skips the check.
+            missing = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": "0" * 40,
+                                  "WMH_ROSE_POOL": "ref-only-pool"})
+            self.assertEqual(missing.returncode, 0, missing.stderr)
+            self.assertIn("is not available locally", missing.stderr)
+            for ref in ("--output=/dev/null", "HEAD:agents"):
+                with self.subTest(unsafe_ref=ref):
+                    self.assertEqual(run(check, {"ROOT_DIR": str(repo), "BENCH_REF": ref,
+                                                 "WMH_ROSE_POOL": "ref-only-pool"}).returncode, 0)
+            # A present commit without the registry fails closed.
+            registry.unlink()
+            git("add", "-A")
+            git("commit", "-qm", "drop registry")
+            self.assertEqual(run(check, {"ROOT_DIR": str(repo), "BENCH_REF": "HEAD",
+                                         "WMH_ROSE_POOL": "checkout-only-pool"}).returncode, 2)
+
+    def test_execution_policy_allowlist_admits_every_registered_policy(self):
+        # The cloud launch must accept each immutable registered policy and
+        # nothing else; a stale allowlist rejects a reviewed local policy.
+        import runpy
+        sys.path.insert(0, str(root / "agents"))
+        try:
+            policies = runpy.run_path(str(root / "agents/benchmarks/wmh_execution_policy.py"))["_POLICIES"]
+        finally:
+            sys.path.remove(str(root / "agents"))
+        self.assertIn("rose-outcome-distribution-v2", policies)
+        for name in policies:
+            with self.subTest(policy=name):
+                result = run(":", {"WMH_ENGINE": "experiential", "WMH_EXECUTION_POLICY": name})
+                self.assertEqual(result.returncode, 0, result.stderr)
+        unregistered = "rose-outcome-distribution-v999"
+        self.assertNotIn(unregistered, policies)
+        for name in (unregistered, "upstream;id"):
+            with self.subTest(policy=name):
+                self.assertEqual(run(":", {"WMH_ENGINE": "experiential", "WMH_EXECUTION_POLICY": name}).returncode, 2)
+
+    def test_setup_uses_linux_hash_and_keeps_runtime_validation(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-linux-checksum-") as temporary:
+            scratch = Path(temporary)
+            repo = scratch / "repo"
+            (repo / "scripts").mkdir(parents=True)
+            (repo / "agents").mkdir()
+            for path in ("scripts/setup-world-model.sh", "agents/requirements-world-model.txt",
+                         "agents/vendor/world-model/SOURCES.txt",
+                         "agents/vendor/world-model/experiential-0.7.158+rose.bf75987e-py3-none-any.whl"):
+                (repo / path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / path, repo / path)
+            native = repo / ".context/experiential-venv/bin"
+            native.mkdir(parents=True)
+            (native / "python").symlink_to(sys.executable)
+            binaries = scratch / "bin"
+            binaries.mkdir()
+            for command in ("dirname", "cut", "cat"):
+                (binaries / command).symlink_to(shutil.which(command))
+            digest_tool = binaries / "sha256sum"
+            digest_tool.write_text("#!" + sys.executable + "\nimport hashlib,sys\nfrom pathlib import Path\n"
+                                   "print(hashlib.sha256(Path(sys.argv[-1]).read_bytes()).hexdigest()+'  '+sys.argv[-1])\n")
+            digest_tool.chmod(0o755)
+            calls = scratch / "uv-calls"
+            uv = binaries / "uv"
+            uv.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$UV_CALLS"\n')
+            uv.chmod(0o755)
+            result = subprocess.run(["/bin/bash", str(repo / "scripts/setup-world-model.sh")],
+                                    env={"PATH": str(binaries), "UV_CALLS": str(calls)},
+                                    text=True, capture_output=True)
+            expected = hashlib.sha256((repo / "agents/requirements-world-model.txt").read_bytes()).hexdigest()
+            marker = repo / ".context/experiential-venv/requirements.sha256"
+            self.assertFalse(marker.exists(), "failed runtime validation must not mark the environment healthy")
+            self.assertEqual(len(calls.read_text().splitlines()), 2)
+            self.assertNotEqual(result.returncode, 0, "missing pinned native dependency must still fail closed")
+            self.assertTrue("Native world model requires Python" in result.stderr
+                            or "PackageNotFoundError" in result.stderr, result.stderr)
+
+unittest.main(argv=[sys.argv[0]], verbosity=1)
+PY
+
 agents_env="$TMP_ROOT/agents.env"
 backend_env="$TMP_ROOT/backend.env"
 printf 'BROWSER_PROVIDER=browserbase\nSECRET=value-one\n' > "$agents_env"
@@ -847,10 +1062,25 @@ UNAVAILABLE_POOL_IDS=()
 : > "$CLAIMED_POOL_FILE"
 # Drain stdin like the real reader: under pipefail the inventory printf otherwise
 # races this fake's exit into SIGPIPE, and the claim sees no volume.
-machine_volume_id_from_json() { cat >/dev/null; printf 'vol-mixed-shape'; }
+machine_volume_id_from_json() {
+  cat >/dev/null || return
+  printf 'vol-mixed-shape'
+}
 write_pool_claim() { printf 'owned\n' > "$1"; }
 cloudbench_env_sha256() { printf '%064d' 0; }
 fleet_audit_record_pool_machine() { return 0; }
+volume_fixture_input="$TMP_ROOT/mixed-shape-inventory.json"
+python3 - "$volume_fixture_input" "$POOL_INVENTORY_JSON" <<'PY'
+import sys
+from pathlib import Path
+
+# Provider inventories can exceed a pipe buffer. Retain valid JSON while
+# proving the fixture consumer drains the stream before returning its volume.
+Path(sys.argv[1]).write_text(" " * (1024 * 1024) + sys.argv[2])
+PY
+fixture_volume="$(cat "$volume_fixture_input" | machine_volume_id_from_json a1)" ||
+  fail "pool volume fixture did not consume its complete JSON input"
+[ "$fixture_volume" = "vol-mixed-shape" ] || fail "pool volume fixture changed its volume"
 large_claim="$(claim_pool_machine shared-cpu-4x 8192)"
 [ "$large_claim" = "b2" ] ||
   fail "large benchmark did not prefer the admitted 8GB Machine"
@@ -1664,6 +1894,8 @@ for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
             raise SystemExit(f"{name} must not mask warm_source_fetch_ref failures")
     if "GITHUB_TOKEN:-" in block and "build_controller_authenticated_git_sync_cmd" in block:
         raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
+if "WMH_CONFORMANCE_EXAMPLES=100" not in wmh or "WMH_REQUIRE_CONFORMANCE=1" not in wmh:
+    raise SystemExit("refresh-wmh must fail closed on the 100-example real-trajectory conformance suite")
 
 def extract_bash_function(source: str, name: str) -> str:
     marker = f"{name}() {{"

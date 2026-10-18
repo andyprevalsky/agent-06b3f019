@@ -28,7 +28,7 @@ def demo_recording_enabled() -> bool:
 
 
 def cache_writes_disabled() -> bool:
-    """Return whether this process is in authoritative read-only cache mode."""
+    """Return whether ordinary cache contexts are read-only in this process."""
     return os.environ.get("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "").strip().lower() in {
         "1",
         "true",

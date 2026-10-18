@@ -603,6 +603,7 @@ def test_select_param_tool_call_rejects_wrong_alias_types():
 
 async def _run_execute_dag(
     plan_data,
+    model="rose-flash",
     execute_tool_impl=None,
     reasoning_result=None,
     param_tool_calls=None,
@@ -643,9 +644,11 @@ async def _run_execute_dag(
 
         execute_tool_impl = execute_tool
 
-    async def execute_activity(fn, args=None, **_kwargs):
+    async def execute_activity(fn, args=None, **kwargs):
         if execute_activity_calls is not None:
-            execute_activity_calls.append({"fn": getattr(fn, "__name__", "") or str(fn), "args": args})
+            execute_activity_calls.append(
+                {"fn": getattr(fn, "__name__", "") or str(fn), "args": args, "kwargs": kwargs}
+            )
         fn_name = getattr(fn, "__name__", "") or str(fn)
         if "reasoning" in fn_name:
             return reasoning_result or {"content": "reasoning output", "usage": {}}
@@ -675,7 +678,7 @@ async def _run_execute_dag(
             dag=dag,
             agent_id="agent-1",
             user_id="user-1",
-            model="rose-flash",
+            model=model,
             context=list(context or []),
             execute_activity=execute_activity,
             post_message=post_message,
@@ -779,6 +782,7 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
 
     result, _events, _dag = await _run_execute_dag(
         plan_data,
+        model="rose-fast",
         execute_activity_calls=calls,
         claude_token="claude-access",
         claude_token_source="user",
@@ -804,10 +808,7 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     assert all(len(c["args"]) <= max_positional for c in llm_calls)
 
     param_args = llm_calls[0]["args"]
-    from domains.param_populator.config import PARAM_POPULATOR_MODEL
-
-    assert param_args[1] == PARAM_POPULATOR_MODEL
-    assert param_args[1] != "rose-flash"
+    assert param_args[1] == "rose-fast"
     assert param_args[2] == ["web_search", "spawn_agent", "attempt_completion"]
     assert param_args[8] == "dag_param_populator"
     assert param_args[9] == "test system prompt"

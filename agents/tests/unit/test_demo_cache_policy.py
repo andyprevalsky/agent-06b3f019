@@ -110,29 +110,75 @@ def test_is_demo_cache_task_covers_fleet_and_mass_agent():
     assert is_demo_cache_task(live) is False
 
 
-def test_is_demo_cache_task_reads_restored_fast_cache_goal():
+def test_is_demo_cache_task_reads_restored_fast_cache_goal(monkeypatch):
     """continue_as_new may restore demo fast_cache_goal while input goal is live."""
-    from types import SimpleNamespace
+    import asyncio
+    import hashlib
 
-    from domains.spawn_agent.config import is_demo_cache_task
+    import pytest
+
+    from workflows import agent_workflow
 
     tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
     tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
     alpha = next(t for t in tasks if t.get("name") == "demo-fleet-alpha")
-    resumed = SimpleNamespace(goal="Buy socks", fast_cache_goal=alpha["prompt"])
-    assert is_demo_cache_task(resumed) is True
-    # Cement workflow recompute after _restore_deployment_state (CodeRabbit).
-    workflow_src = (
-        Path(__file__).resolve().parents[2] / "workflows" / "agent_workflow.py"
-    ).read_text(encoding="utf-8")
-    restore_idx = workflow_src.index("self._restore_deployment_state(resume_state)")
-    recompute_idx = workflow_src.index(
-        "self.fast_mode_cache_enabled = is_demo_cache_task(self)",
-        restore_idx,
+    resumed = agent_workflow.AgentWorkflow()
+
+    class StartupObserved(Exception):
+        pass
+
+    def observe_startup():
+        # Observe the startup gate before any durable activity can overwrite it.
+        raise StartupObserved
+
+    monkeypatch.setattr(agent_workflow.workflow, "now", observe_startup)
+    with pytest.raises(StartupObserved):
+        asyncio.run(
+            resumed.run(
+                "resumed-agent",
+                "cache-user",
+                "Buy socks",
+                "rose-labs/rose-ultra",
+                256,
+                {"type": "FLOAT_LLM_JUDGE"},
+                fast_mode_cache_enabled=False,
+                resume_state={
+                    "version": 1,
+                    "kind": "continuation",
+                    "runtime_state": {"fast_cache_goal": alpha["prompt"]},
+                },
+            )
+        )
+    assert resumed.fast_cache_goal == alpha["prompt"]
+    assert resumed.fast_mode_cache_enabled is True
+    assert resumed.provider_fast_mode is False
+    material = json.dumps(
+        {"version": 1, "user_id": "cache-user", "goal": alpha["prompt"]},
+        sort_keys=True,
+        separators=(",", ":"),
     )
-    assert recompute_idx > restore_idx
-    resolve_idx = workflow_src.index("unpack_fast_cache_goal_resolution(")
-    guard_block = workflow_src[workflow_src.rfind("if (", 0, resolve_idx) : resolve_idx]
-    assert "self.parent_workflow_id" in guard_block, (
-        "leftover children must resolve root_goal even when Fast Mode is off"
+    assert resumed.compute_token_fast_cache_affinity_key == (
+        "fast-cache-agent-provider:" + hashlib.sha256(material.encode()).hexdigest()
     )
+
+
+def test_simulation_writes_demo_goals_only_to_its_scoped_namespace(monkeypatch):
+    """A cold WHM simulation miss seeds its scoped keys; real DEMO recordings stay frozen."""
+    from providers.fast_cache import client
+    from providers.fast_cache.normalize import build_key, goal_hash
+
+    tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
+    tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
+    demo_goal = next(t for t in tasks if t.get("name") == "test-mass-agent-run-0")["prompt"]
+    demo_hash = goal_hash(demo_goal)
+    assert demo_hash in demo_cache_goal_hashes()
+    monkeypatch.delenv("FAST_MODE_CACHE_RECORD_DEMO", raising=False)
+
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "real")
+    real_key = build_key("llm", demo_goal, "detail")
+    assert client.cache_write_allowed(demo_hash, goal=demo_goal) is False
+
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    simulated_key = build_key("llm", demo_goal, "detail")
+    assert simulated_key != real_key and ":sim." in simulated_key
+    assert client.cache_write_allowed(demo_hash, goal=demo_goal) is True

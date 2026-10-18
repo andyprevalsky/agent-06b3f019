@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "trace-archive/private/whm/e9afcffd-7ba9-4bfd-8703-d770952fe1c3/run15-final-native-runtime-llm-20261013.private.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "d0783418fd7017191e70d9c4aaf90dbf2b8ff275317a45a6e939f8a194ec2da6",
+  "gzip_sha256": "db4cdd991bd21ab05071dd805ffca198a21c89b67f34b0fecc9e75fba513981d",
+  "stored_bytes": 365431205,
+  "frames": 44,
+  "files": 1090,
+  "original_bytes": 1259715777,
+  "manifest_sha256": "5c36ccd999487411d93b7b689b5811ab0b2eb19faab4b514ae59385c556a9823",
+  "full_readback_verified": true
+}

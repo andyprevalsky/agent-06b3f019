@@ -265,6 +265,16 @@ def test_local_validate_task_names_preserves_intentional_repeats():
     assert args[args.index("--max-concurrency") + 1] == "5"
 
 
+def test_local_timeout_override_reaches_benchmark_runner():
+    options = local_runner.parse_args(
+        ["raise-5m-rose-labs-brex", "--timeout-seconds", "1800"]
+    )
+
+    assert options.timeout_seconds == 1800
+    args = local_runner.build_benchmark_args(
+        options.tasks, port=3201, timeout_seconds=options.timeout_seconds
+    )
+    assert args[args.index("--timeout-seconds") + 1] == "1800"
 def test_owner_interrupted_cloud_run_deletes_cancelled_root(monkeypatch):
     monkeypatch.delenv("BENCHMARK_KEEP_AGENTS", raising=False)
     monkeypatch.delenv("BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT", raising=False)

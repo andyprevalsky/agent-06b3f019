@@ -307,6 +307,13 @@ async function main() {
       const attempted = new Set<string>();
       let healthy = false;
       let retries = 0;
+      let retryStarted!: () => void;
+      let rejectMissingRetry!: () => void;
+      const firstRetryStarted = new Promise<void>((resolve, reject) => {
+        retryStarted = resolve;
+        rejectMissingRetry = () => reject(new Error('fixture ended before any retry started'));
+      });
+      process.once('beforeExit', rejectMissingRetry);
       globalThis.fetch = (async (_url, init) => {
         const topic = bodyMessages(init)[0].topic;
         if (topic === 'agent:healthy-after-failures') {
@@ -315,9 +322,13 @@ async function main() {
         }
         if (!attempted.has(topic)) {
           attempted.add(topic);
+          // Initial HTTP work and retry backoff are separate phases. The
+          // readiness assertion must observe a retry, not assume both fit 150 ms.
+          await sleep(80);
           return new Response('', { status: 503 });
         }
         retries += 1;
+        retryStarted();
         await gate;
         return new Response('', { status: 202 });
       }) as typeof fetch;
@@ -328,7 +339,7 @@ async function main() {
             message(`settlement-${index}`)
           );
         }
-        await sleep(150);
+        await firstRetryStarted;
         assert(retries > 0, 'the fixture must have retry settlements in flight');
         await publisher.broadcastMessageInsert(
           'healthy-after-failures',
@@ -337,6 +348,7 @@ async function main() {
         await sleep(50);
         assert(healthy, 'retry settlements must not occupy the initial request window');
       } finally {
+        process.removeListener('beforeExit', rejectMissingRetry);
         release();
       }
       await publisher.__flushBroadcastQueueForTests();

@@ -25,8 +25,10 @@ import { useMessageRouting } from './message-bubble/useMessageRouting';
 import { useToolData } from './message-bubble/useToolData';
 import { renderSpecialisedBubble } from './message-bubble/renderSpecialisedBubble';
 import { renderFallbackBubble } from './message-bubble/renderFallbackBubble';
+import { normalizeWMHCodeMessage } from './wmhCodeMessage';
 
-export default function MessageBubble(props: MessageBubbleProps) {
+export default function MessageBubble(rawProps: MessageBubbleProps) {
+  const props = { ...rawProps, message: normalizeWMHCodeMessage(rawProps.message) };
   const { message, isStreaming = false } = props;
   const routing = useMessageRouting(message);
   const toolData = useToolData({

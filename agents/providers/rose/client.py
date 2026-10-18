@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import ssl
 import time
 import uuid
 from contextlib import aclosing
@@ -106,9 +107,11 @@ _DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 120.0
 _HEARTBEAT_INTERVAL_S = 10.0
 _STALL_TOKEN_COOLDOWN_S = 10 * 60
 
-# Errors from claude_auth that mean "try the waterfall next" — as long as
+# Provider errors that mean "try the next route" — as long as
 # they fire before the first non-metadata chunk reaches the caller.
+# TLS record alerts can escape httpx as raw SSLError while reading headers.
 _FALL_THROUGH_ERRORS = (
+    ssl.SSLError,
     RoseInvalidRequest,
     RoseStallError,
     RoseServerError,
@@ -870,7 +873,7 @@ class RoseClient:
 
         if probe_read_only:
             raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
-        if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
+        if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
             raise FastCacheLookupError(
                 f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
             )
@@ -881,8 +884,8 @@ class RoseClient:
             async for chunk in live_stream:
                 _fc_accumulate(acc, chunk)
                 if chunk.kind == "done" and ctx.should_write and not structured_response_model:
-                    await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
-                    logger.info("llm.cache.stored", call_site=call_site, key=key)
+                    stored = await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
+                    logger.info("llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key)
                 yield chunk
 
     async def _complete_impl(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
@@ -892,6 +895,8 @@ class RoseClient:
         chunks; everyone else gets exactly one attempt, as before.
         """
         if not kwargs.pop("recover_truncation", False):
+            kwargs.pop("result_required", None)
+            kwargs.pop("retry_partial_errors", None)
             async with aclosing(self._complete_once(**kwargs)) as stream:
                 async for chunk in stream:
                     yield chunk
@@ -929,6 +934,8 @@ class RoseClient:
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
+        prefer_azure: bool = False,
+        json_mode: bool = False,
         browser_use: bool = False,
         _exclude_anthropic_family: bool = False,
         _skip_models: FrozenSet[str] = frozenset(),
@@ -952,7 +959,8 @@ class RoseClient:
         first_contentful_at: Optional[float] = None
 
         openrouter_response_format = (
-            build_openai_response_format(response_model) if response_model is not None else None
+            build_openai_response_format(response_model) if response_model is not None
+            else {"type": "json_object"} if json_mode else None
         )
         direct_auth_tools = tools
         effective_tool_choice = tool_choice
@@ -1683,6 +1691,7 @@ class RoseClient:
                 try:
                     async for chunk in _guarded(
                         _try_openai_api_key(
+                            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                             pool_spec=pool_spec,
                             model=pool_spec.gpt_auth_model,
                             messages=messages,
@@ -1830,154 +1839,158 @@ class RoseClient:
                     )
 
             cerebras_key = _cerebras_api_key() if pool_spec.cerebras_model else ""
-            if cerebras_key and model_key(pool_spec.cerebras_model) not in _skip_models:
-                active_route = "cerebras"
-                cerebras_yielded_any = False
-                try:
-                    async with aclosing(
-                        cerebras_complete(
-                            pool_spec=pool_spec,
-                            messages=messages,
-                            tools=waterfall_tools,
-                            tool_choice=waterfall_tool_choice,
-                            response_format=None if waterfall_tools else openrouter_response_format,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            cerebras_key=cerebras_key,
+            for route in (("foundry", "cerebras") if prefer_azure else ("cerebras", "foundry")):
+                if route == "cerebras" and cerebras_key and model_key(pool_spec.cerebras_model) not in _skip_models:
+                    active_route = "cerebras"
+                    cerebras_yielded_any = False
+                    try:
+                        async with aclosing(
+                            cerebras_complete(
+                                pool_spec=pool_spec,
+                                messages=messages,
+                                tools=waterfall_tools,
+                                tool_choice=waterfall_tool_choice,
+                                response_format=None if waterfall_tools else openrouter_response_format,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                                cerebras_key=cerebras_key,
+                                request_id=rid,
+                                agent_id=agent_id,
+                                call_site=call_site,
+                                per_step_timeout_s=ttft_timeout_s,
+                                idle_timeout_s=idle_timeout_s,
+                            )
+                        ) as cerebras_source:
+                            async for chunk in _guarded(cerebras_source):
+                                chunk = _with_timing_if_done(chunk)
+                                cerebras_yielded_any = True
+                                if chunk.kind == "metadata":
+                                    metadata = dict(chunk.data)
+                                    if claude_token_error is not None:
+                                        metadata["claude_token_error"] = claude_token_error
+                                    if gpt_token_error is not None:
+                                        metadata["gpt_token_error"] = gpt_token_error
+                                    chunk = StreamChunk(kind="metadata", data=metadata)
+                                    if chunk.data.get("actual_model"):
+                                        _seen_actual_model = chunk.data["actual_model"]
+                                elif chunk.kind == "usage":
+                                    _emit_llm_cache(chunk.data)
+                                    chunk = StreamChunk(
+                                        kind="usage",
+                                        data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                                    )
+                                chunk = _with_cache_sequence(chunk)
+                                _record_dump_chunk(chunk)
+                                yield chunk
+                        logger.info(
+                            "rose.complete.cerebras.done",
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
-                            per_step_timeout_s=ttft_timeout_s,
-                            idle_timeout_s=idle_timeout_s,
+                            elapsed_s=round(time.monotonic() - started, 3),
+                            **_observability_fields(),  # pragma: allowlist secret
                         )
-                    ) as cerebras_source:
-                        async for chunk in _guarded(cerebras_source):
-                            chunk = _with_timing_if_done(chunk)
-                            cerebras_yielded_any = True
-                            if chunk.kind == "metadata":
-                                metadata = dict(chunk.data)
-                                if claude_token_error is not None:
-                                    metadata["claude_token_error"] = claude_token_error
-                                if gpt_token_error is not None:
-                                    metadata["gpt_token_error"] = gpt_token_error
-                                chunk = StreamChunk(kind="metadata", data=metadata)
-                                if chunk.data.get("actual_model"):
-                                    _seen_actual_model = chunk.data["actual_model"]
-                            elif chunk.kind == "usage":
-                                _emit_llm_cache(chunk.data)
-                                chunk = StreamChunk(
-                                    kind="usage",
-                                    data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
-                                )
-                            chunk = _with_cache_sequence(chunk)
-                            _record_dump_chunk(chunk)
-                            yield chunk
-                    logger.info(
-                        "rose.complete.cerebras.done",
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        elapsed_s=round(time.monotonic() - started, 3),
-                        **_observability_fields(),  # pragma: allowlist secret
-                    )
-                    _finalize_dump()
-                    return
-                except (_FallThrough, RoseStallError, RoseError) as exc:
-                    if cerebras_yielded_any:
-                        raise
-                    cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
-                    logger.info(
-                        "rose.complete.cerebras.fall_through",
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        reason=type(cause).__name__ if cause else type(exc).__name__,
-                    )
+                        _finalize_dump()
+                        return
+                    except (_FallThrough, RoseStallError, RoseError) as exc:
+                        if cerebras_yielded_any:
+                            raise
+                        cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                        logger.info(
+                            "rose.complete.cerebras.fall_through",
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            reason=type(cause).__name__ if cause else type(exc).__name__,
+                        )
 
-            # Funded Azure fallback for the pool's GPT model and Responses shape
-            # (the compute-token contract). It follows direct credentials and
-            # the direct Cerebras hop, so speed pools keep Cerebras first. A
-            # pre-content failure continues to OpenRouter; an interrupted
-            # visible response remains an error.
-            # A model that was cut off at its output limit is excluded from every
-            # route that serves it, funded ones included (see truncation.py).
-            # A text-only Foundry model (rose-1-oss's DeepSeek) cannot see an
-            # image request, so screenshots go straight to the vision waterfall.
-            foundry_blind = messages_contain_images(messages) and not route_model_accepts_images(
-                foundry_model(pool_spec)
-            )
-            if foundry_blind and foundry_configured(pool_spec):
-                logger.info(
-                    "rose.complete.foundry.skipped",
-                    request_id=rid,
-                    agent_id=agent_id,
-                    call_site=call_site,
-                    model=foundry_model(pool_spec),
-                    reason="images_need_vision",
+                # Funded Azure fallback for the pool's GPT model and Responses shape
+                # (the compute-token contract). It follows direct credentials and
+                # direct Cerebras hop by default. Collected WHM calls can prefer
+                # Azure and discard a partial reply before retrying another model.
+                # Ordinary visible partial replies remain errors.
+                # A model that was cut off at its output limit is excluded from every
+                # route that serves it, funded ones included (see truncation.py).
+                if route != "foundry":
+                    continue
+                # A text-only Foundry model cannot see an image request, so
+                # screenshots retain main's direct vision-waterfall routing.
+                foundry_blind = messages_contain_images(messages) and not route_model_accepts_images(
+                    foundry_model(pool_spec)
                 )
-            if (
-                foundry_configured(pool_spec)
-                and not foundry_blind
-                and model_key(foundry_model(pool_spec)) not in _skip_models
-            ):
-                active_route = "foundry"
-                foundry_yielded_any = False
-                try:
-                    async with aclosing(
-                        foundry_complete(
-                            pool_spec=pool_spec,
-                            messages=messages,
-                            response_format=None if gpt_api_key_tools else openrouter_response_format,
-                            tools=gpt_api_key_tools,
-                            context_tools=context_tools,
-                            tool_choice=gpt_api_key_tool_choice,
-                            temperature=temperature,
-                            # A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
-                            effort=pool_spec.waterfall_reasoning_effort or effort,
-                            provider_fast_mode=provider_fast_mode,
-                            request_id=rid,
-                            route_key=foundry_route_key,
-                            agent_id=agent_id,
-                            call_site=call_site,
-                            cache_namespace=cache_namespace,
-                            ttft_timeout_s=ttft_timeout_s,
-                            idle_timeout_s=idle_timeout_s,
-                        )
-                    ) as foundry_source:
-                        async for chunk in _guarded(foundry_source):
-                            chunk = _with_timing_if_done(chunk)
-                            foundry_yielded_any = True
-                            if chunk.kind == "metadata":
-                                metadata = dict(chunk.data)
-                                if claude_token_error is not None:
-                                    metadata["claude_token_error"] = claude_token_error
-                                if gpt_token_error is not None:
-                                    metadata["gpt_token_error"] = gpt_token_error
-                                chunk = StreamChunk(kind="metadata", data=metadata)
-                                if chunk.data.get("actual_model"):
-                                    _seen_actual_model = chunk.data["actual_model"]
-                            elif chunk.kind == "usage":
-                                _emit_llm_cache(chunk.data)
-                                chunk = StreamChunk(
-                                    kind="usage", data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data)
-                                )
-                            chunk = _with_cache_sequence(chunk)
-                            _record_dump_chunk(chunk)
-                            yield chunk
-                    logger.info("rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site)
-                    _finalize_dump()
-                    return
-                except (_FallThrough, RoseStallError, RoseError) as exc:
-                    if foundry_yielded_any:
-                        raise
-                    cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                if foundry_blind and foundry_configured(pool_spec):
                     logger.info(
-                        "rose.complete.foundry.fall_through",
+                        "rose.complete.foundry.skipped",
                         request_id=rid,
                         agent_id=agent_id,
                         call_site=call_site,
-                        reason=type(cause).__name__ if cause else "unknown",
+                        model=foundry_model(pool_spec),
+                        reason="images_need_vision",
                     )
+                if (
+                    foundry_configured(pool_spec)
+                    and not foundry_blind
+                    and model_key(foundry_model(pool_spec)) not in _skip_models
+                ):
+                    active_route = "foundry"
+                    foundry_yielded_any = False
+                    try:
+                        async with aclosing(
+                            foundry_complete(
+                                **({"max_tokens": max_tokens} if max_tokens is not None else {}),
+                                pool_spec=pool_spec,
+                                messages=messages,
+                                response_format=None if gpt_api_key_tools else openrouter_response_format,
+                                tools=gpt_api_key_tools,
+                                context_tools=context_tools,
+                                tool_choice=gpt_api_key_tool_choice,
+                                temperature=temperature,
+                                # A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
+                                effort=pool_spec.waterfall_reasoning_effort or effort,
+                                provider_fast_mode=provider_fast_mode,
+                                request_id=rid,
+                                route_key=foundry_route_key,
+                                agent_id=agent_id,
+                                call_site=call_site,
+                                cache_namespace=cache_namespace,
+                                ttft_timeout_s=ttft_timeout_s,
+                                idle_timeout_s=idle_timeout_s,
+                            )
+                        ) as foundry_source:
+                            async for chunk in _guarded(foundry_source):
+                                chunk = _with_timing_if_done(chunk)
+                                foundry_yielded_any = True
+                                if chunk.kind == "metadata":
+                                    metadata = dict(chunk.data)
+                                    if claude_token_error is not None:
+                                        metadata["claude_token_error"] = claude_token_error
+                                    if gpt_token_error is not None:
+                                        metadata["gpt_token_error"] = gpt_token_error
+                                    chunk = StreamChunk(kind="metadata", data=metadata)
+                                    if chunk.data.get("actual_model"):
+                                        _seen_actual_model = chunk.data["actual_model"]
+                                elif chunk.kind == "usage":
+                                    _emit_llm_cache(chunk.data)
+                                    chunk = StreamChunk(
+                                        kind="usage", data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data)
+                                    )
+                                chunk = _with_cache_sequence(chunk)
+                                _record_dump_chunk(chunk)
+                                yield chunk
+                        logger.info("rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site)
+                        _finalize_dump()
+                        return
+                    except (_FallThrough, RoseStallError, RoseError) as exc:
+                        if foundry_yielded_any:
+                            raise
+                        cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                        logger.info(
+                            "rose.complete.foundry.fall_through",
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            reason=type(cause).__name__ if cause else "unknown",
+                        )
 
             active_route = "waterfall"
             async for chunk in waterfall_complete(
@@ -2287,10 +2300,18 @@ class RoseClient:
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
+        result_required: bool = False,
+        prefer_azure: bool = False,
+        retry_partial_errors: bool = False,
+        json_mode: bool = False,
         browser_use: bool = False,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
-        non-streaming callers who don't care about incremental chunks."""
+        non-streaming callers who don't care about incremental chunks.
+
+        `result_required` declares a plain reply that is itself the result (for
+        example a JSON document), so an output-limit cut-off gets the shared
+        recovery in `providers/rose/truncation.py` instead of a partial reply."""
         result = RoseResponse()
         structured_output = StructuredOutputAccumulator() if response_model is not None else None
         async for chunk in self.complete(
@@ -2314,6 +2335,10 @@ class RoseClient:
             cache_namespace=cache_namespace,
             browser_use=browser_use,
             recover_truncation=True,
+            result_required=result_required,
+            **({"prefer_azure": True} if prefer_azure else {}),
+            **({"retry_partial_errors": True} if retry_partial_errors else {}),
+            **({"json_mode": True} if json_mode else {}),
         ):
             if chunk.kind == "restart":
                 result = RoseResponse()
@@ -2498,12 +2523,14 @@ async def _try_openai_api_key(
     cache_namespace: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
+    max_tokens: Optional[int] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Yield from the funded OpenAI API-key route, buffering metadata for
     pre-content fall-through."""
     buffered: Optional[StreamChunk] = None
     yielded_any = False
     gen = openai_api_key_complete(
+        **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         pool_spec=pool_spec,
         model=model,
         messages=messages,

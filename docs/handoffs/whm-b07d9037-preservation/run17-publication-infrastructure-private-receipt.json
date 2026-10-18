@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private/whm-e9afcffd/run17-publication-infrastructure-20261014.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "c16de6f50d57033ecc16764e4544662f22fdb54f2e011e121324d7555c58a497",
+  "gzip_sha256": "efdc844eab0753279f660eb5f32a83807ee29d84ded512f6565a39bdc2ea5e5f",
+  "stored_bytes": 519202,
+  "frames": 1,
+  "files": 525,
+  "original_bytes": 2063830,
+  "manifest_sha256": "f7ec65da25f41b5e1899513209833ccfaa998a50c8df7ece3d88ccaaddf3a150",
+  "full_readback_verified": true
+}

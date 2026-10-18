@@ -1,0 +1,84 @@
+{
+  "utc": "2026-10-14T23:43:14.716841+00:00",
+  "source_sha": "812945e1439fecd4d3addcfe27e23f8c7c125e4e",
+  "replacement_box_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+  "thread_url": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "checkpoint_ancestor": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "fixes": [
+    "Bind structured output identities/count/order to existing candidate call IDs",
+    "Preserve existing probability 0-1 bounds in provider JSON Schema, preserving numeric types",
+    "Restore configured larger-limit stage for public Foundry/OpenAI Responses; subscription next-model behavior preserved"
+  ],
+  "verification": {
+    "passed": 488,
+    "WHM_units": 242,
+    "Rose_blackbox": 234,
+    "cache_client": 10,
+    "stream_contract": 2,
+    "live_network": "denied; owning HTTP mocks allowed",
+    "native_service_build_test": "excluded",
+    "unit_wall_seconds": 2.1663366770080756,
+    "blackbox_wall_seconds": 7.609703915994032
+  },
+  "authenticated_private_evidence": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "whm-preservation/e9afcffd/finish-current-20261014-812945e1.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "082c9266f7cc0a51daa0a7e008d6fc9c832348f1bb05b344e6ab80a3f0a578da",
+    "gzip_sha256": "26589d22e6b3be969edfc33a200913be8bef9e85898deb505b8fb70de59fb156",
+    "stored_bytes": 796220,
+    "frames": 1,
+    "files": 125,
+    "original_bytes": 3192247,
+    "manifest_sha256": "83d0fd27b65be37b549762c20d2d8b1cfebee23b2e32c266a5a91c73af21a75d",
+    "full_readback_verified": true
+  },
+  "original_helper_verify": {
+    "authenticated_original_files": 125,
+    "key": "whm-preservation/e9afcffd/finish-current-20261014-812945e1.tar.gz.aesgcm"
+  },
+  "reviewed_package_integrity": [
+    {
+      "package": "provider",
+      "members_verified": 42,
+      "manifest_sha256": "ba932f617c201683191d565f802bc8255c4facbb7fbc0a5061f725e8707e68e5"
+    },
+    {
+      "package": "provider-probability",
+      "members_verified": 24,
+      "manifest_sha256": "191ec347c77bf16417579d57b89f0b67a7cb5885fb34db666ac8b935bceefb02"
+    },
+    {
+      "package": "provenance",
+      "members_verified": 14,
+      "manifest_sha256": "09da0d7151b9b663abb2d0e2a1b2cc99cd780c242179ddb6aa867ff1f14902a0"
+    },
+    {
+      "package": "gate",
+      "members_verified": 22,
+      "manifest_sha256": "efb258a32a8db78af752f792116ac95b4fd16266da06111295d558814d911e73"
+    }
+  ],
+  "preserved_original_verdicts": {
+    "Run16": "ERROR 3670.7s",
+    "Run17": "FAILED 0/1 3780.2s",
+    "historical_infrastructure_gate": "1 ERROR / 2 terminal attempts, 50%; original grouping and clocks preserved"
+  },
+  "next_run_authority": {
+    "user": "Standing repeating 60-minute DEMO-on benchmark cycle, subsequent finish/continue instructions and infrastructure autoapproval",
+    "scope": "One next 3600-second unchanged-task trial after resource/native/fixture/cache preflight",
+    "migration_authority_used_for_paid_calls": false,
+    "historical_next_slice_hold": "Preserved; user continuation instruction takes precedence for this next trial"
+  },
+  "unapplied_context_design": "Trusted action-effect/source provenance redesign needs explicit semantic approval; no implementation claimed",
+  "open_validation": [
+    "Actual Azure non-strict open-JSON schema acceptance",
+    "Actual paid-run outcome and costs",
+    "Cerebras overflow at historical large contexts",
+    "Fundraising semantic provenance; no task PASS claimed"
+  ],
+  "no_merge_deploy": true,
+  "secrets_printed_or_committed": false
+}

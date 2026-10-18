@@ -394,6 +394,11 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "effort": complete_kwargs.get("effort"),
         "provider_fast_mode": complete_kwargs.get("provider_fast_mode"),
         "cache_namespace": complete_kwargs.get("cache_namespace"),
+        # Opt-in WHM behavior must not reuse an ordinary Flash response. Preserve
+        # the exact existing material for every caller that leaves these off.
+        **({"prefer_azure": True} if complete_kwargs.get("prefer_azure") else {}),
+        **({"retry_partial_errors": True} if complete_kwargs.get("retry_partial_errors") else {}),
+        **({"json_mode": True} if complete_kwargs.get("json_mode") else {}),
         "exclude_anthropic_family": anthropic_family_excluded(
             bool(complete_kwargs.get("_exclude_anthropic_family", False))
         ),
@@ -1161,7 +1166,7 @@ async def cached_complete(
         "BENCHMARK_ISOLATED_RUN", ""
     ).strip().lower() in {"1", "true", "yes", "on"}:
         raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
-    if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
+    if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
         raise FastCacheLookupError(
             f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
         )
@@ -1177,8 +1182,10 @@ async def cached_complete(
         _accumulate(acc, chunk)
         if chunk.kind == "done" and ctx.should_write and not structured_response_model:
             try:
-                await cache_client.cache_set(key, "llm", ctx.goal_hash, acc, goal=ctx.goal, root_goal=ctx.root_goal)
-                logger.info("llm.cache.stored", call_site=call_site, key=key)
+                stored = await cache_client.cache_set(
+                    key, "llm", ctx.goal_hash, acc, goal=ctx.goal, root_goal=ctx.root_goal
+                )
+                logger.info("llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key)
             except Exception as exc:
                 logger.warning("fast_cache.set_error", key=key, error=str(exc))
         yield chunk

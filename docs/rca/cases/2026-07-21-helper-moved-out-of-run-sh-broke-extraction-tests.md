@@ -57,6 +57,8 @@ cache-schema pooler retry).
 
 ## Human feedback
 
+October 6 relative: the worker receipt-failure fixture extracted `kill_tree_hard` but omitted its `descendant_pids` dependency after main integration. The full coverage domain failed cleanup; the standalone worker repro reproduced it (28 pass, one fail), and the exact receipt-failure function passed after adding the dependency to the extracted fixture. Production cleanup code was retained. Evidence: `.context/wmh-worker-repro.log`, `.context/wmh-worker-receipt-after.log`. Two other timeout observations passed unchanged in the standalone repro and remain unclassified until full coverage revalidation.
+
 None recorded.
 
 ## Reusable lesson

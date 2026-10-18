@@ -850,10 +850,14 @@ async def resolve_provider_fast_mode(agent_id: Optional[str]) -> bool:
 
 
 def cache_write_allowed(goal_hash: str, *, goal: Optional[str] = None, root_goal: Optional[str] = None) -> bool:
-    """False for a DEMO replay namespace unless a deliberate re-recording is enabled."""
-    demo_namespace = goal_hash in normalize.demo_cache_goal_hashes() or normalize.soft_complete_allowed(
-        goal, root_goal=root_goal
-    )
+    """False for a DEMO replay namespace unless a deliberate re-recording is enabled.
+
+    World-model simulation keys carry their own scope, so a DEMO goal's cold
+    simulation miss writes through to that isolated namespace without touching
+    the frozen real-run recording.
+    """
+    frozen_demo_hash = not normalize.world_model_cache_scope() and goal_hash in normalize.demo_cache_goal_hashes()
+    demo_namespace = frozen_demo_hash or normalize.soft_complete_allowed(goal, root_goal=root_goal)
     return not demo_namespace or demo_recording_enabled()
 
 
@@ -906,7 +910,7 @@ async def cache_set(
         if resp.status_code != 200:
             logger.warning("fast_cache.set_failed", key=key, status=resp.status_code)
             return False
-        return True
+        return resp.json().get("stored") is True
     except Exception as exc:
         logger.warning("fast_cache.set_error", key=key, error=str(exc))
         return False

@@ -359,3 +359,75 @@ def test_wait_for_trigger_ignores_phone_call_write_lock_without_completing():
     passed, reason = evaluate_task(task, data_no_lock, approvals_triggered=0)
     assert passed is False
     assert reason and "write_lock" in reason
+
+
+def test_raise_5m_brex_long_horizon_runs_simulated_on_tamy_account_snapshot():
+    """Long-horizon fundraise bench: sim ON, Tamy account snapshot, current cap, Brex $5M judge.
+
+    The prompt is the user's verbatim ask; hold the benchmark at the user-approved 10-minute block.
+    """
+    from benchmarks.live_fixtures import TAMY_IDENTITY_USER_ID
+    from benchmarks.local import resolve_simulate_mode
+    from benchmarks.run_benchmark import EXCLUSIVE_SHARED_DB_TASK_NAMES, _live_fixture_run_user_id
+
+    task = get_task_by_name("raise-5m-rose-labs-brex")
+    assert task.prompt == "Raise me 5m dollars for my company Rose Labs\nNo questions asked"
+    assert task.tags == ["DEMO", "long-horizon"]
+    assert task.timeout_seconds == 600
+    assert task.world_model_mode == "simulate"
+    assert task.fast_cache == "on"
+    assert task.world_surface == "simulated"
+    assert task.approval_handling == "auto_approve"
+    assert task.start_phase == "plan"
+    assert task.bench == "rose-bench"
+    assert task.status == "ready"
+    # Simulated browser needs no public tunnel; the local stack must not open one.
+    assert task.requires_browser_agent is False
+
+    env = task.environment
+    assert env["mode"] == "hybrid"
+    assert env["live_fixtures"] == ["live-tamy-account-snapshot"]
+    assert env["db_fixtures"] == []
+    assert "world_model_initial_state" not in env
+    # The account snapshot selects Tamy as the run user and must not overlap siblings
+    # (it retargets BENCHMARK_RUN_USER_ID process-wide).
+    assert _live_fixture_run_user_id(task) == TAMY_IDENTITY_USER_ID
+    assert task.name in EXCLUSIVE_SHARED_DB_TASK_NAMES
+
+    schema_fields = {field["name"]: field for field in task.response_schema["fields"]}
+    assert set(schema_fields) == {
+        "total_raised_usd",
+        "investor_commitments",
+        "brex_balance_usd",
+        "brex_incoming_funds",
+    }
+    assert all(field["required"] is True for field in schema_fields.values())
+    assert "at least 5000000" in schema_fields["brex_balance_usd"]["description"]
+    assert "written commitments alone do not satisfy" in schema_fields["brex_incoming_funds"]["description"]
+
+    assert task.enforce_declared_evaluators is True
+    by_id = {evaluator["id"]: evaluator for evaluator in task.evaluators}
+    assert by_id["raise-5m-root-completes"]["checks"] == [{"type": "agent_status", "value": "COMPLETED"}]
+    judge = by_id["brex-shows-5m-raised"]
+    assert judge["method"] == "single_turn_llm_judge"
+    blob = " ".join(judge["criteria"]) + " " + judge["judge_prompt"]
+    assert "Brex" in blob
+    assert "5,000,000" in blob
+
+    # The no-questions instruction does not weaken the harness approval gate.
+    from benchmarks.run_benchmark import evaluate_task
+
+    passed, reason = evaluate_task(
+        task,
+        {
+            "agent": {"status": "COMPLETED", "progress": 1.0},
+            "messages": [{"role": "USER", "message": task.prompt}],
+            "_benchmark": {},
+        },
+        approvals_triggered=0,
+    )
+    assert passed is False
+    assert reason == "Expected approval requests but none were triggered"
+
+    # The catalog declaration alone must switch the local runner into simulate.
+    assert resolve_simulate_mode(False, ["raise-5m-rose-labs-brex"]) is True

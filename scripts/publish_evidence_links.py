@@ -9,7 +9,8 @@ cited in approvals must outlive that stack:
     (``/open-agent?agent-id=…`` is an alias that redirects to the same URL).
     Verification fails closed unless every browser agent on that FE link has
     terminated (``task_complete``) with a correctly attached recording.
-  * LLM dump → HTML under ``/opt/cursor/artifacts/rca_evidence/<agent_id>/``
+  * LLM dump → HTML under ``/opt/cursor/artifacts/rca_evidence/<agent_id>/`` (or
+    ``RCA_EVIDENCE_ARTIFACTS_ROOT``; ``.context/rca_evidence`` without the Cursor mount)
     (Cursor uploads these for multi-day reachability in the agent UI)
 
 Usage:
@@ -72,10 +73,21 @@ def _load_cli_environment() -> None:
 
 DEFAULT_HUB = "https://navi-j9a9.onrender.com"
 DURABLE_ORIGIN = "https://www.roselabs.ai"
-ARTIFACTS_ROOT = Path(
-    os.getenv("RCA_EVIDENCE_ARTIFACTS_ROOT")
-    or Path(os.getenv("CURSOR_ARTIFACTS_DIR", "/opt/cursor/artifacts")) / "rca_evidence"
-)
+_CURSOR_ARTIFACTS = Path("/opt/cursor/artifacts")
+
+
+def evidence_artifacts_root(env, *, cursor_mount_exists: bool) -> Path:
+    """Explicit root, then Cursor's artifact mount, else private checkout storage."""
+    if env.get("RCA_EVIDENCE_ARTIFACTS_ROOT"):
+        return Path(env["RCA_EVIDENCE_ARTIFACTS_ROOT"])
+    if env.get("CURSOR_ARTIFACTS_DIR"):
+        return Path(env["CURSOR_ARTIFACTS_DIR"]) / "rca_evidence"
+    if cursor_mount_exists:
+        return _CURSOR_ARTIFACTS / "rca_evidence"
+    return REPO_ROOT / ".context" / "rca_evidence"
+
+
+ARTIFACTS_ROOT = evidence_artifacts_root(os.environ, cursor_mount_exists=_CURSOR_ARTIFACTS.is_dir())
 _AGENT_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -255,13 +267,15 @@ def verified_zero_session_tasks(bundle: dict, agent_id: str) -> set[str]:
     return set(task_map.get(agent_id, []))
 
 
-def upload_run_json(run_json: Path, agent_id: str) -> str:
+def upload_run_json(run_json: Path, agent_id: str, *, forensic_archive_receipt: Path | None = None) -> str:
     sys.path.insert(0, str(REPO_ROOT / "agents"))
     from benchmarks.hub_upload import upload_run_bundle
 
-    bundle = evidence_bundle_for_agent(
-        json.loads(run_json.read_text(encoding="utf-8")), agent_id
-    )
+    original = json.loads(run_json.read_text(encoding="utf-8"))
+    if forensic_archive_receipt is not None:
+        from benchmarks.archived_diagnostics import project_verified_diagnostics
+        original = project_verified_diagnostics(original, run_json, forensic_archive_receipt)
+    bundle = evidence_bundle_for_agent(original, agent_id)
     os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB)
     if not (os.getenv("BENCHMARK_HUB_API_KEY") or os.getenv("BACKEND_API_KEY")):
         raise SystemExit(
@@ -781,11 +795,32 @@ def verify_agent_reachable(
     return "verified in fresh browser", count
 
 
-def latest_dump_for_agent(agent_id: str) -> Path:
-    dump_dir = REPO_ROOT / ".llm-dumps" / agent_id
-    dumps = sorted(dump_dir.glob("*.json"))
+def latest_dump_for_agent(agent_id: str, *, bundle: dict | None = None) -> Path:
+    # Canonical logs.tree maps IDs to nodes; follow parent edges rather than
+    # scanning unrelated dump directories or assuming a children array.
+    owned = {agent_id}
+    if bundle is not None:
+        scoped = evidence_bundle_for_agent(bundle, agent_id)
+        for task in scoped.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            logs = task.get("logs") or {}
+            tree = logs.get("tree") if isinstance(logs, dict) else None
+            if not isinstance(tree, dict) or agent_id not in tree:
+                continue
+            changed = True
+            while changed:
+                changed = False
+                for child, node in tree.items():
+                    if (isinstance(child, str) and _AGENT_ID_RE.fullmatch(child)
+                            and isinstance(node, dict)
+                            and node.get("parent_agent_id") in owned and child not in owned):
+                        owned.add(child)
+                        changed = True
+    dumps = [path for owner in owned
+             for path in (REPO_ROOT / ".llm-dumps" / owner).glob("*.json")]
     if dumps:
-        return dumps[-1]
+        return max(dumps, key=lambda path: (path.name, str(path)))
 
     # Production workers archive their calls instead of writing to this host.
     # Keep each recovery attempt, including partial failures, in its own directory.
@@ -883,6 +918,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent-id", required=True)
     parser.add_argument("--run-json", type=Path, help="Upload this run bundle to the durable Hub")
+    parser.add_argument("--forensic-archive-receipt", type=Path,
+                        help="Authenticate all forensic originals before projecting duplicated native diagnostics")
     parser.add_argument("--run-id", help="Existing Hub run ID when --run-json is unavailable")
     parser.add_argument("--dump", type=Path, help="Specific LLM dump JSON (default: latest)")
     parser.add_argument("--skip-hub-upload", action="store_true")
@@ -896,7 +933,11 @@ def main() -> int:
     agent_id = _normalize_agent_id(args.agent_id)
     # Resolve the evidence before uploading, so recovery failures cannot leave
     # a successful Hub upload followed by an unexplained local-dump failure.
-    dump = (args.dump or latest_dump_for_agent(agent_id)).resolve()
+    bundle = (
+        json.loads(args.run_json.resolve().read_text(encoding="utf-8"))
+        if args.run_json else None
+    )
+    dump = (args.dump or latest_dump_for_agent(agent_id, bundle=bundle)).resolve()
     if not dump.is_file():
         raise SystemExit(f"LLM dump does not exist: {dump}")
     run_id = args.run_id or ""
@@ -904,13 +945,13 @@ def main() -> int:
     preparation_cancelled_task_ids: set[str] = set()
     if args.run_json:
         run_path = args.run_json.resolve()
-        bundle = json.loads(run_path.read_text(encoding="utf-8"))
+        assert bundle is not None
         zero_session_task_ids = verified_zero_session_tasks(bundle, agent_id)
         preparation_cancelled_task_ids = verified_preparation_cancelled_tasks(bundle, agent_id)
         if args.skip_hub_upload:
             run_id = str(evidence_bundle_for_agent(bundle, agent_id).get("run_id") or "")
         else:
-            run_id = upload_run_json(run_path, agent_id)
+            run_id = upload_run_json(run_path, agent_id, forensic_archive_receipt=args.forensic_archive_receipt)
             dual_write_claude_code_sessions(run_path, agent_id)
     if not _AGENT_ID_RE.fullmatch(run_id):
         raise SystemExit("a UUID run_id from --run-json or --run-id is required for a share link")

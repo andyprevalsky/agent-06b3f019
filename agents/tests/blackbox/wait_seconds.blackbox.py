@@ -229,6 +229,84 @@ async def test_wait_seconds_entry_point():
     assert len(events_sent) == 2
 
 
+class _SimWF:
+    """Minimal workflow-instance stand-in carrying the world-model mode + sim clock."""
+
+    def __init__(self, world_model_mode: str):
+        self.world_model_mode = world_model_mode
+        self.simulated_clock_offset_seconds = 0
+
+
+async def test_execute_tool_simulate_mode_skips_sleep_and_advances_sim_clock():
+    """World-model simulate: wait_seconds never sleeps; it advances the logical clock."""
+    from unittest.mock import patch
+
+    from tools.base import MessageStatus
+    from tools.wait_seconds import WaitSecondsManager
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    wf = _SimWF("simulate")
+    with patch("temporalio.workflow.sleep", fake_sleep):
+        events = [
+            e
+            async for e in WaitSecondsManager().execute_tool(
+                workflow_instance=wf, tool_call={"seconds": 300}, tool_call_id="tc-sim"
+            )
+        ]
+
+    assert sleeps == []
+    assert events[-1].status == MessageStatus.FINISHED
+    assert "simulated" in events[-1].title
+    assert events[-1].metadata["simulatedTimeSkip"] is True
+    assert events[-1].metadata["simulatedSkipSeconds"] == 300
+    assert events[-1].metadata["simulatedClockOffsetSeconds"] == 300
+    assert wf.simulated_clock_offset_seconds == 300
+
+    # Skips accumulate across calls.
+    with patch("temporalio.workflow.sleep", fake_sleep):
+        events_2 = [
+            e
+            async for e in WaitSecondsManager().execute_tool(
+                workflow_instance=wf, tool_call={"seconds": 60}, tool_call_id="tc-sim-2"
+            )
+        ]
+    assert sleeps == []
+    assert events_2[-1].metadata["simulatedClockOffsetSeconds"] == 360
+    assert wf.simulated_clock_offset_seconds == 360
+
+
+async def test_execute_tool_real_mode_still_sleeps_and_keeps_sim_clock_at_zero():
+    """Real mode is unchanged: the full wall-clock sleep runs and no sim clock moves."""
+    from unittest.mock import patch
+
+    from tools.base import MessageStatus
+    from tools.wait_seconds import WaitSecondsManager
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    wf = _SimWF("real")
+    with patch("temporalio.workflow.sleep", fake_sleep):
+        events = [
+            e
+            async for e in WaitSecondsManager().execute_tool(
+                workflow_instance=wf, tool_call={"seconds": 300}, tool_call_id="tc-real"
+            )
+        ]
+
+    assert sum(sleeps) == 300
+    assert all(0 < seconds <= 30 for seconds in sleeps)
+    assert events[-1].status == MessageStatus.FINISHED
+    assert "simulatedTimeSkip" not in (events[-1].metadata or {})
+    assert wf.simulated_clock_offset_seconds == 0
+
+
 async def run_all_tests():
     print("wait-seconds blackbox tests:")
     r = BlackboxResult()
@@ -249,6 +327,12 @@ async def run_all_tests():
     await r.record_async("execute_tool_sleep_raises", test_execute_tool_sleep_raises_yields_error)
     await r.record_async("execute_tool_handoff_finished", test_execute_tool_handoff_yields_finished_and_raises)
     await r.record_async("wait_seconds_entry_point", test_wait_seconds_entry_point)
+    await r.record_async(
+        "execute_tool_simulate_skips_sleep", test_execute_tool_simulate_mode_skips_sleep_and_advances_sim_clock
+    )
+    await r.record_async(
+        "execute_tool_real_mode_still_sleeps", test_execute_tool_real_mode_still_sleeps_and_keeps_sim_clock_at_zero
+    )
     teardown_mock()
     return r.all_passed
 

@@ -317,6 +317,8 @@ run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behav
 run_suite "LLM Trajectory Injection Guard Unit Tests" bash scripts/tests/check-llm-trajectory-injection-approval.test.sh
 run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.py
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
+run_suite "run.sh Process Tree Reaper" bash scripts/tests/run-sh-kill-tree.test.sh
+run_suite "Fleet Post-Child Autoscaler Settle" bash scripts/tests/fleet-post-child-settle.test.sh
 run_suite "RCA Model Intelligence Contract" bash scripts/tests/rca-model-intelligence-category.test.sh
 run_suite "RCA Prompt-Edit Abstraction Contract" bash scripts/tests/rca-prompt-edit-abstraction.test.sh
 run_suite "RCA Archive New Command" bash scripts/tests/rca-archive-new.test.sh

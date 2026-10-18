@@ -6,7 +6,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ARTIFACT_ROOT="$ROOT_DIR/.context/test-runs"
+# Resolve the root exactly as run-blackbox-tests.sh does, so a deploy env that
+# moves artifacts (BLACKBOX_TEST_ARTIFACT_ROOT) is probed and cleaned in place.
+ARTIFACT_ROOT="${BLACKBOX_TEST_ARTIFACT_ROOT:-${CONTRACT_TEST_ARTIFACT_ROOT:-$ROOT_DIR/.context/test-runs}}"
 RUN_ID="teardown-probe-$$-$RANDOM"
 ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
 TERM_RUN_ID="teardown-term-probe-$$-$RANDOM"

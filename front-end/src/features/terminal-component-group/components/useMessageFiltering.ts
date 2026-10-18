@@ -27,6 +27,7 @@ import {
 import type { ExploreStep, WaitForCheck } from '../types';
 
 import { isDirectSpawnChildProgress } from './useSubAgentTreeMerge';
+import { normalizeWMHCodeMessage } from './wmhCodeMessage';
 
 // ─── Filter messages by subAgentId ───────────────────────────────────────
 
@@ -84,7 +85,7 @@ export function useFilteredMessages(
   subAgentId: string | undefined,
 ): FilteredMessages {
   return useMemo(() => {
-    const filtered = filterMessagesForSubAgent(messages, subAgentId);
+    const filtered = filterMessagesForSubAgent(messages.map(normalizeWMHCodeMessage), subAgentId);
     const withoutSystem = filtered.filter((m) => m.role !== 'SYSTEM');
     const withoutHidden = withoutSystem
       .filter((m) => !m.metadata?.hidden)

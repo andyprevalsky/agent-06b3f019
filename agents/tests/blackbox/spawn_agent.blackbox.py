@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -505,6 +506,7 @@ class _FakeSpawnWF:
 
         self.unsafe = real.unsafe
         self.ActivityCancellationType = real.ActivityCancellationType
+        self.current_time = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
 
     def now(self):
         from datetime import datetime, timezone
@@ -561,6 +563,9 @@ class _FakeSpawnWF:
     def info(self):
         return type("I", (), {"workflow_id": "wf-test"})()
 
+    def now(self):
+        return self.current_time
+
 
 class _FakeWFInstance:
     def __init__(
@@ -576,6 +581,7 @@ class _FakeWFInstance:
     ):
         self.user_id = user_id
         self.agent_id = agent_id
+        self.root_agent_id = "root-a-1"
         self.depth = depth
         self.goal = goal
         self.is_paused = paused
@@ -1857,6 +1863,314 @@ async def test_handler_code_delegates():
     assert any(e.status == MessageStatus.FINISHED for e in events)
     assert fake_mgr.last_call["tool_call"]["github_repo_link"] == "https://github.com/foo/bar"
     assert fake_mgr.last_call["tool_call"]["attachments"] == ["file.txt"]
+
+
+async def test_simulate_mocks_specialized_agents_but_keeps_general_purpose_real():
+    """Simulator intercepts explore/browser/code, but keeps every GP path real."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    fake_workflow = _FakeSpawnWF(
+        activity_results={
+            "world_model_specialized_agent_activity": lambda args, **_: {
+                "success": True,
+                "message": f"WMH completed {args[2]}",
+                "world_model_simulated": True,
+                "world_model_session_id": "wmh-session",
+                "world_model_name": "rose-archive",
+            }
+        }
+    )
+    delegated = {"browser": 0, "code": 0}
+
+    class _UnexpectedDelegate:
+        async def execute_tool(self, *_args, **_kwargs):
+            delegated["browser"] += 1
+            if False:
+                yield None
+
+    original_browser = h.get_browser_manager
+    original_code = h.get_code_manager
+    original_sub = h.get_sub_agent_manager
+    gp_manager = _FakeDelegateManager([])
+    for_each_calls = []
+    manager = h.SpawnAgentManager()
+
+    async def fake_for_each(workflow_instance, tool_call, tool_call_id):
+        for_each_calls.append((workflow_instance, tool_call, tool_call_id))
+        if False:
+            yield None
+
+    manager._spawn_for_each = fake_for_each
+    h.get_browser_manager = lambda: _UnexpectedDelegate()
+    h.get_code_manager = lambda: _UnexpectedDelegate()
+    h.get_sub_agent_manager = lambda: gp_manager
+    restore_workflow = _patch_spawn_workflow(fake_workflow)
+    try:
+        wf = _FakeWFInstance(goal="root task")
+        wf.output_schema = {
+            "fields": [
+                {
+                    "name": "terminal_total",
+                    "type": "float",
+                    "description": "Must be at least 5000000",
+                }
+            ]
+        }
+        wf.world_model_mode = "simulate"
+        wf.simulated_clock_offset_seconds = 7_200
+        specialized_calls = [
+            ({"type": "explore", "goal": "research investors"}, "tc-explore"),
+            (
+                {
+                    "type": "browser",
+                    "goal": "inspect Brex",
+                    "start_url": "https://dashboard.brex.com",
+                    "output_schema": {"type": "object"},
+                },
+                "tc-browser",
+            ),
+            (
+                {
+                    "type": "code",
+                    "goal": "prepare data room",
+                    "output_schema": {"type": "object"},
+                },
+                "tc-code",
+            ),
+        ]
+        for tool_call, tool_call_id in specialized_calls:
+            events = await _collect(manager.execute_tool(wf, tool_call, tool_call_id))
+            assert [event.status for event in events] == [MessageStatus.IN_PROGRESS, MessageStatus.FINISHED]
+            assert events[-1].metadata["world_model_simulated"] is True
+            assert events[-1].metadata["world_model_session_id"] == "wmh-session"
+
+        gp_events = await _collect(
+            manager.execute_tool(
+                wf,
+                {
+                    "type": "general_purpose",
+                    "goal": "coordinate the fundraise",
+                    "output_schema": {"type": "object"},
+                    "start_phase": "PLAN",
+                    "_spawn_group_id": "dag:tc-gp",
+                },
+                "tc-gp",
+            )
+        )
+        for_each_events = await _collect(
+            manager.execute_tool(
+                wf,
+                {
+                    "type": "for_each",
+                    "goal": "contact each investor",
+                    "items": [{"name": "A"}, {"name": "B"}],
+                    "output_schema": {"type": "object"},
+                    "start_phase": "EXECUTE",
+                },
+                "tc-for-each",
+            )
+        )
+    finally:
+        restore_workflow()
+        h.get_browser_manager = original_browser
+        h.get_code_manager = original_code
+        h.get_sub_agent_manager = original_sub
+
+    simulated_calls = [
+        call for call in fake_workflow.activity_calls
+        if call["name"] == "world_model_specialized_agent_activity"
+    ]
+    assert [call["args"][2] for call in simulated_calls] == [
+        "spawn_explore_agent",
+        "spawn_browser_agent",
+        "spawn_claude_code_agent",
+    ]
+    expected_simulated_timestamp_ms = int(
+        (fake_workflow.current_time.timestamp() + wf.simulated_clock_offset_seconds) * 1000
+    )
+    assert [call["args"][5] for call in simulated_calls] == [expected_simulated_timestamp_ms] * 3
+    assert [call["args"][6] for call in simulated_calls] == ["root-a-1"] * 3
+    for call in simulated_calls:
+        assert "start_to_close_timeout" not in call["kwargs"]
+        assert call["kwargs"]["schedule_to_close_timeout"] > timedelta(hours=1)
+        # The shared root objective is part of every specialized WMH request:
+        # it conditions retrieval and is the exact DEMO cache namespace.
+        assert call["args"][3]["root_goal"] == "root task"
+        assert "root_output_schema" not in call["args"][3]
+        assert "simulation_contract" not in call["args"][3]
+    assert fake_workflow.start_activity_calls == []
+    assert delegated == {"browser": 0, "code": 0}
+    assert gp_manager.last_call is not None
+    assert gp_manager.last_call["tool_call"]["sub_agent"]["goal"] == "coordinate the fundraise"
+    assert gp_manager.last_call["tool_call"]["sub_agent"]["start_phase"] == "plan"
+    assert gp_manager.last_call["tool_call"]["sub_agent"]["_spawn_group_id"] == "dag:tc-gp"
+    assert gp_events == []
+    assert len(for_each_calls) == 1
+    assert for_each_calls[0][1]["items"] == [{"name": "A"}, {"name": "B"}]
+    assert for_each_events == []
+
+
+async def test_simulated_specialized_agent_reraises_cancellation():
+    """Owner cancellation must stop a simulated spawn, not become an ERROR chip."""
+    from tools.base import MessageStatus
+    import domains.spawn_agent.handler as h
+
+    def cancelled_activity(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    fake_workflow = _FakeSpawnWF(
+        activity_results={"world_model_specialized_agent_activity": cancelled_activity}
+    )
+    restore = _patch_spawn_workflow(fake_workflow)
+    events = []
+    try:
+        wf = _FakeWFInstance(goal="root task")
+        wf.world_model_mode = "simulate"
+        with pytest.raises(asyncio.CancelledError):
+            async for event in h.SpawnAgentManager().execute_tool(
+                wf,
+                {"type": "explore", "goal": "research investors"},
+                "tc-explore",
+            ):
+                events.append(event)
+    finally:
+        restore()
+
+    assert [event.status for event in events] == [MessageStatus.IN_PROGRESS]
+
+
+async def test_simulated_code_posts_code_chip_lifecycle():
+    """Whole-call simulation must publish the same chip identity and terminality."""
+    from tools.base import MessageStatus
+    import domains.spawn_agent.handler as h
+
+    cases = [
+        {"success": True, "message": "**Status**: ✅ SUCCESS\n\nDraft files created."},
+        {"success": False, "error": "Audit failed"},
+        RuntimeError("Prediction transport failed"),
+    ]
+    for result in cases:
+        def completed_activity(*_args, **_kwargs):
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        fake_workflow = _FakeSpawnWF(
+            activity_results={"world_model_specialized_agent_activity": completed_activity}
+        )
+        restore = _patch_spawn_workflow(fake_workflow)
+        try:
+            wf = _FakeWFInstance(goal="root task")
+            wf.world_model_mode = "simulate"
+            events = await _collect(
+                h.SpawnAgentManager().execute_tool(
+                    wf,
+                    {"type": "code", "goal": "prepare data room", "output_schema": {"type": "object"}},
+                    "tc-code",
+                )
+            )
+        finally:
+            restore()
+
+        progress, terminal = events
+        for event in events:
+            assert event.metadata["toolName"] == "spawn_claude_code_agent"
+            assert event.metadata["task_id"] == event.metadata["taskId"]
+            assert event.metadata["world_model_simulated"] is True
+        assert progress.metadata["task_id"] == terminal.metadata["task_id"]
+        assert terminal.metadata["action_type"] == "task_complete"
+        success = isinstance(result, dict) and result.get("success") is True
+        assert terminal.metadata["success"] is success
+        assert terminal.title == ("✓ Task Completed" if success else "Task Incomplete")
+        assert terminal.status == (MessageStatus.FINISHED if success else MessageStatus.ERROR)
+        assert fake_workflow.start_activity_calls == []
+
+
+def test_world_model_specialized_result_text_unwraps_output_envelope():
+    """WMH's generic output envelope becomes direct downstream result text."""
+    from domains.spawn_agent.handler import _world_model_specialized_result_text
+
+    result = {
+        "message": '{"output":"compact complete tranche"}',
+        "output": "compact complete tranche",
+    }
+    assert _world_model_specialized_result_text(result) == "compact complete tranche"
+
+
+def test_world_model_specialized_result_text_normalizes_file_pointer_ids():
+    """Synthetic WMH file ids cannot make a real GP handoff fail API validation."""
+    from uuid import UUID
+
+    from domains.spawn_agent.handler import _world_model_specialized_result_text
+
+    pointer = {
+        "id": "fp_rose_final_zip_a81c4f06",
+        "storage_path": "/files/Rose_Labs_Private_Fundraising_Data_Room.zip",
+        "original_filename": "Rose_Labs_Private_Fundraising_Data_Room.zip",
+        "mime_type": "application/zip",
+        "size_bytes": 1689173,
+        "created_at": "2026-09-10T06:20:14Z",
+    }
+    raw = json.dumps({"artifact_files": [pointer]})
+
+    first = json.loads(_world_model_specialized_result_text({"output": raw}))
+    second = json.loads(_world_model_specialized_result_text({"output": raw}))
+
+    normalized_id = first["artifact_files"][0]["id"]
+    assert str(UUID(normalized_id)) == normalized_id
+    assert second["artifact_files"][0]["id"] == normalized_id
+
+
+def test_world_model_specialized_result_text_normalizes_nested_json_content():
+    """FilePointers in WMH's string-valued content envelope are normalized too."""
+    from uuid import UUID
+
+    from domains.spawn_agent.handler import _world_model_specialized_result_text
+
+    valid_id = "41b4f271-f1f3-4ad5-8a7a-75b7e3d73fc6"
+    pointer = {
+        "id": "not-a-uuid",
+        "storage_path": "artifacts/code/report.pdf",
+        "original_filename": "report.pdf",
+        "mime_type": "application/pdf",
+        "size_bytes": 42,
+        "created_at": "2026-09-10T06:20:14Z",
+    }
+    valid_pointer = {**pointer, "id": valid_id, "original_filename": "valid.pdf"}
+    valid_pointer["storage_path"] = "artifacts/code/valid.pdf"
+    raw = json.dumps({"content": json.dumps({"files": [pointer, valid_pointer]})})
+
+    outer = json.loads(_world_model_specialized_result_text({"output": raw}))
+    files = json.loads(outer["content"])["files"]
+
+    assert str(UUID(files[0]["id"])) == files[0]["id"]
+    assert files[1]["id"] == valid_id
+
+
+def test_world_model_specialized_result_text_normalizes_embedded_structured_response():
+    """Prod-style Code summaries embed FilePointers after a text label."""
+    from uuid import UUID
+
+    from domains.spawn_agent.handler import _world_model_specialized_result_text
+
+    pointer = {
+        "id": "file_ptr_deck_pptx_001",
+        "storage_path": "workspace/Rose_Labs_Pitch_Deck_Final.pptx",
+        "original_filename": "Rose_Labs_Pitch_Deck_Final.pptx",
+        "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "size_bytes": 245812,
+        "created_at": "2026-09-28T12:13:00Z",
+    }
+    raw = "Code agent execution complete.\n\nStructured Response: " + json.dumps(
+        {"artifact_files": [pointer]}
+    )
+
+    normalized = _world_model_specialized_result_text({"output": raw})
+    structured = json.loads(normalized.split("Structured Response: ", 1)[1])
+    normalized_id = structured["artifact_files"][0]["id"]
+    assert str(UUID(normalized_id)) == normalized_id
+    assert structured["artifact_files"][0]["storage_path"] == pointer["storage_path"]
 
 
 async def test_handler_sub_agent_delegates_without_verifier_arg():
@@ -5215,6 +5529,31 @@ async def run_all_tests():
     await r.record_async("handler_explore_exception", test_handler_explore_exception_yields_error)
     await r.record_async("handler_browser_delegates", test_handler_browser_delegates)
     await r.record_async("handler_code_delegates", test_handler_code_delegates)
+    await r.record_async(
+        "simulate_mocks_specialized_keeps_general_purpose_real",
+        test_simulate_mocks_specialized_agents_but_keeps_general_purpose_real,
+    )
+    await r.record_async("simulated_code_chip_lifecycle", test_simulated_code_posts_code_chip_lifecycle)
+    await r.record_async(
+        "simulated_specialized_agent_reraises_cancellation",
+        test_simulated_specialized_agent_reraises_cancellation,
+    )
+    r.record(
+        "world_model_specialized_result_text_unwraps_output_envelope",
+        test_world_model_specialized_result_text_unwraps_output_envelope,
+    )
+    r.record(
+        "world_model_specialized_result_text_normalizes_file_pointer_ids",
+        test_world_model_specialized_result_text_normalizes_file_pointer_ids,
+    )
+    r.record(
+        "world_model_specialized_result_text_normalizes_nested_json_content",
+        test_world_model_specialized_result_text_normalizes_nested_json_content,
+    )
+    r.record(
+        "world_model_specialized_result_text_normalizes_embedded_structured_response",
+        test_world_model_specialized_result_text_normalizes_embedded_structured_response,
+    )
     await r.record_async("handler_sub_agent_no_verifier_arg", test_handler_sub_agent_delegates_without_verifier_arg)
     await r.record_async(
         "handler_does_not_block_general_purpose_from_explore_only_wording",

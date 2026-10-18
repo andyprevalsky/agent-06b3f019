@@ -30,8 +30,10 @@ Auto-debug mode:
 import argparse
 import asyncio
 import contextvars
+import copy
 import csv
 import fcntl
+import hashlib
 import inspect
 import ipaddress
 import json
@@ -98,6 +100,7 @@ from benchmarks.logs import (
     subscribe_supabase_realtime_agent,
     tree_child_transcript_count,
 )
+from benchmarks.long_horizon import validate_wmh_initial_state
 from benchmarks.phone_callee import (
     PhoneCalleeSession,
     callee_check_failures,
@@ -138,6 +141,7 @@ from domains.set_plan.config import (
 from helpers.completion_summary_contract import (
     is_ablated_completion_summary,
 )
+from helpers.world_model_runtime import WMHHttpClient
 from tests.e2e.test_helpers import (
     authenticate,
 )
@@ -252,6 +256,39 @@ def has_in_progress_phone_call(messages: list | None) -> bool:
     return False
 
 
+async def world_model_operations_in_flight(
+    owned: Optional[dict], *, client: Optional[httpx.AsyncClient] = None
+) -> Optional[int]:
+    """Live native WMH operations in this run's seeded world, or None when unknown.
+
+    A simulated tool is one blocking WMH step: its waiting leaf emits nothing and
+    tree LLM cost does not move while the world model predicts it, so tree-stall
+    early-fail must count an in-flight prediction as activity.
+    """
+    if not owned:
+        return None
+    url = (
+        f"{str(owned['base_url']).rstrip('/')}/world_models/{owned['model_name']}"
+        f"/sessions/{owned['session_id']}/activity"
+    )
+    try:
+        if client is None:
+            async with httpx.AsyncClient(timeout=5) as owned_client:
+                response = await owned_client.get(url)
+        else:
+            response = await client.get(url, timeout=5)
+        body = response.json() if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+    value = body.get("operations_in_flight") if isinstance(body, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
+def tree_stall_exceeded(*, tree_idle: float, cost_idle: float, world_model_idle: float, limit: float) -> bool:
+    """Every progress signal (leaf messages, tree LLM cost, WMH predictions) is quiet past the limit."""
+    return min(tree_idle, cost_idle, world_model_idle) > limit
+
+
 def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
     """Per-task early-fail silence budget for non-terminal leaves.
 
@@ -286,6 +323,8 @@ MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
+# Long-horizon fundraise bench: runs as Tamy's account snapshot under the WMH.
+RAISE_5M_BREX_TASK_NAME = "raise-5m-rose-labs-brex"
 DOORDASH_FOOD_PLAN_TASK_NAME = "browser-doordash-food-plan-grocery-order"
 _DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
 # Tasks the parallel scheduler must finish (serially) before ordinary work:
@@ -305,6 +344,7 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
     AMAZON_MX_TAMY_TASK_NAME,
+    RAISE_5M_BREX_TASK_NAME,
     DOORDASH_FOOD_PLAN_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
     "agent-payment-setup-resume",
@@ -547,6 +587,11 @@ def _resolved_fast_mode_cache(task: BenchmarkTask) -> Optional[bool]:
     if task.fast_cache == "on":
         return True
     return _benchmark_env_bool("BENCHMARK_FAST_MODE_CACHE")
+
+
+def _reported_fast_mode_cache_enabled(task: BenchmarkTask, agent: dict) -> bool:
+    """Report DEMO replay intent even when simulate forces the provider button off."""
+    return agent.get("fast_mode_cache_enabled") is True or _resolved_fast_mode_cache(task) is True
 
 
 def _apply_benchmark_env_overrides(tasks: List[BenchmarkTask]) -> None:
@@ -842,6 +887,39 @@ def _fetch_wmh_retrieval_audit() -> Optional[dict]:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+@dataclass
+class _WMHEvidenceSnapshot:
+    """Last known-good WMH usage and grounding evidence for one bench run."""
+
+    usage: Optional[dict] = None
+    retrieval_audit: Optional[dict] = None
+    _audited_calls: int = -1
+
+    def refresh(self) -> Optional[dict]:
+        current = _fetch_wmh_usage()
+        if not isinstance(current, dict):
+            return self.usage
+        self.usage = current
+        try:
+            calls = int(current.get("calls") or 0)
+        except (TypeError, ValueError):
+            calls = 0
+        if calls != self._audited_calls:
+            audit = _fetch_wmh_retrieval_audit()
+            if isinstance(audit, dict):
+                self.retrieval_audit = audit
+                self._audited_calls = calls
+        return self.usage
+
+    def finalize(self) -> Optional[dict]:
+        """Refresh if possible, preserving evidence if the sidecar is gone."""
+        self.refresh()
+        audit = _fetch_wmh_retrieval_audit()
+        if isinstance(audit, dict):
+            self.retrieval_audit = audit
+        return self.retrieval_audit
 
 
 def _fetch_wmh_grounding_usd() -> Optional[float]:
@@ -2666,6 +2744,133 @@ def _prod_user_data_prompt_override(task: BenchmarkTask) -> str | None:
     )
 
 
+def _wmh_initial_state_evidence(task: BenchmarkTask) -> dict | None:
+    if task.wmh_initial_state is None:
+        return None
+    canonical = json.dumps(task.wmh_initial_state, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return {
+        "sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+        "provenance": getattr(task, "_wmh_initial_state_source", f"tasks.json:{task.name}"),
+        "session_id": getattr(task, "_wmh_seeded_session_id", None),
+    }
+
+
+async def _retire_owned_native_world(task: BenchmarkTask, agent_id: str | None = None) -> dict | None:
+    """Join this execution's admitted predictions before freezing its outcome.
+
+    Benchmark-owned seed -> exact native session retirement -> provider join
+                         -> final state/usage receipt -> evaluation/archive
+    Explicitly supplied sessions belong to the caller and are never retired here.
+    """
+    owned = getattr(task, "_wmh_owned_session", None)
+    if not owned or owned["engine"] != "experiential":
+        return None
+    if agent_id and agent_id != owned["root_agent_id"]:
+        error = RuntimeError("Native world retirement root does not match this benchmark execution")
+        task._wmh_retirement_error = _native_world_retirement_error_details(owned, error)
+        raise error
+    receipt = getattr(task, "_wmh_retirement_receipt", None)
+    if receipt is not None:
+        return receipt
+    operation = getattr(task, "_wmh_retirement_operation", None)
+    if operation is None:
+
+        async def retire():
+            receipt = await WMHHttpClient(owned["base_url"]).end_session(owned["model_name"], owned["session_id"])
+            if (
+                receipt.get("engine") != "experiential"
+                or receipt.get("join_verified") is not True
+                or receipt.get("ended") != owned["session_id"]
+                or receipt.get("session_id") != owned["session_id"]
+                or receipt.get("session_scope_id") != owned["root_agent_id"]
+                or type(receipt.get("revision")) is not int
+                or receipt["revision"] < 0
+                or not isinstance(receipt.get("state"), dict)
+                or not isinstance(receipt.get("history"), list)
+                or not isinstance(receipt.get("usage"), dict)
+            ):
+                raise RuntimeError("Native world retirement did not prove the exact owned provider join")
+            task._wmh_retirement_receipt = receipt
+            return receipt
+
+        operation = asyncio.create_task(retire())
+        task._wmh_retirement_operation = operation
+    try:
+        return await asyncio.shield(operation)
+    except Exception as exc:
+        task._wmh_retirement_error = _native_world_retirement_error_details(owned, exc)
+        raise
+
+
+def _native_world_retirement_error_details(owned: dict, error: Exception) -> dict:
+    return {
+        "type": type(error).__name__,
+        "message": str(error),
+        "session_id": owned.get("session_id"),
+        "session_scope_id": owned.get("root_agent_id"),
+        "join_verified": False,
+        "cost_verified": False,
+    }
+
+
+def _native_world_retirement_diagnostics(task: BenchmarkTask, logs: dict | None, error=None) -> dict:
+    """Keep actual retirement evidence even when independent log collection fails."""
+    logs = logs if isinstance(logs, dict) else {}
+    if getattr(task, "_wmh_retirement_receipt", None) is not None:
+        logs["wmh_retirement"] = task._wmh_retirement_receipt
+    if getattr(task, "_wmh_retirement_error", None) is not None:
+        logs["wmh_retirement_error"] = task._wmh_retirement_error
+        logs["benchmark_cost_placeholder"] = {"cost_cents": 0, "settled": False}
+    if error is not None and getattr(task, "_wmh_owned_session", None):
+        logs["benchmark_execution_error"] = {"type": type(error).__name__, "message": str(error)}
+    if getattr(task, "_wmh_agent_admission", None) is not None:
+        logs["wmh_agent_admission"] = task._wmh_agent_admission
+    return logs
+
+
+def _native_world_retirement_failure_reason(task: BenchmarkTask) -> str:
+    error = getattr(task, "_wmh_retirement_error", None)
+    if not error:
+        return ""
+    return f" | Native WMH retirement failed: {error['type']}: {error['message']} (join and cost unverified)"
+
+
+def _recover_owned_native_admission_root(task: BenchmarkTask, agent_id: str) -> str:
+    """Recover only the UUID this execution seeded before its backend POST."""
+    owned = getattr(task, "_wmh_owned_session", None)
+    if agent_id or not owned or owned["engine"] != "experiential":
+        return agent_id
+    root = owned["root_agent_id"]
+    if getattr(task, "_wmh_agent_admission", None) is None:
+        task._wmh_agent_admission = {"root_agent_id": root, "creation_confirmed": False}
+    return root
+
+
+async def _delete_owned_native_admission_root(base_url: str, task: BenchmarkTask, agent_id: str) -> bool:
+    """A missing create response does not prove creation or verified deletion."""
+    admission = getattr(task, "_wmh_agent_admission", None)
+    if admission and admission["root_agent_id"] != agent_id:
+        raise RuntimeError("Native admission cleanup root does not match this benchmark execution")
+    try:
+        await delete_agent(base_url, agent_id)
+    except Exception as exc:
+        if not admission:
+            raise
+        admission["cleanup_observation"] = "unverified"
+        admission["cleanup_error"] = {"type": type(exc).__name__, "message": str(exc)}
+        try:
+            await get_agent(base_url, agent_id)
+        except AgentNotFoundError:
+            admission["cleanup_observation"] = "not_found"
+            return False
+        except Exception as observed:
+            admission["observation_error"] = {"type": type(observed).__name__, "message": str(observed)}
+        raise
+    if admission:
+        admission["cleanup_observation"] = "deleted"
+    return True
+
+
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
@@ -2709,6 +2914,46 @@ async def create_agent(
     if world_model_mode in {"simulate", "shadow"}:
         body["world_model_mode"] = world_model_mode
 
+    # The root's first simulated boundary is often the deferred startup SMS.
+    # Establish the benchmark world before creating the agent so that boundary
+    # cannot win the session-creation race with its generic runtime seed.
+    expected_agent_id: str | None = None
+    if task.wmh_initial_state is not None:
+        if world_model_mode != "simulate":
+            raise ValueError(f"{task.name}: wmh_initial_state requires simulate mode")
+        if os.environ.get("WMH_SESSION_ID") or os.environ.get("WORLD_MODEL_SESSION_ID"):
+            raise ValueError(f"{task.name}: explicit WMH session id would bypass wmh_initial_state")
+        base = os.environ.get("WMH_BASE_URL") or os.environ.get("WORLD_MODEL_HARNESS_URL")
+        model_name = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
+        if not base or not model_name:
+            raise ValueError(f"{task.name}: WMH_BASE_URL and WMH_MODEL_NAME are required to seed the world")
+        validate_wmh_initial_state(task.wmh_initial_state, task.name)
+        expected_agent_id = str(uuid.uuid4())
+        seed_state = {
+            "structured": {
+                **task.wmh_initial_state["structured"],
+                "root_agent_id": expected_agent_id,
+                "root_goal": goal,
+            },
+            "scratchpad": task.wmh_initial_state["scratchpad"],
+        }
+        session_id = await WMHHttpClient(base).create_session(
+            model_name,
+            task=goal,
+            seed_state=seed_state,
+            session_scope_id=expected_agent_id,
+        )
+        body["agent_id"] = expected_agent_id
+        task._wmh_seeded_session_id = session_id
+        task._wmh_owned_session = {
+            "base_url": base,
+            "model_name": model_name,
+            "session_id": session_id,
+            "root_agent_id": expected_agent_id,
+            "engine": os.environ.get("WMH_ENGINE", "legacy"),
+        }
+        print(f"    🌍 WHM initial state seeded before agent start: {session_id[:12]}...")
+
     # A task may narrow the user context its agent sees. Used when a real user's
     # connected data offers a route the scenario is not testing — the gate removes
     # that shortcut without touching the prompt or the pass criteria.
@@ -2739,6 +2984,10 @@ async def create_agent(
             raise Exception(f"Failed to create agent: {resp.status_code} - {resp.text}")
         data = resp.json()
         agent_id = data["agent_id"]
+        if expected_agent_id is not None and agent_id != expected_agent_id:
+            raise RuntimeError(f"{task.name}: backend returned agent_id {agent_id}, expected {expected_agent_id}")
+        if expected_agent_id is not None:
+            task._wmh_agent_admission = {"root_agent_id": agent_id, "creation_confirmed": True}
         if source_override == "SMS":
             if not _is_local_base_url(base_url):
                 raise RuntimeError(
@@ -4473,6 +4722,7 @@ async def _poll_agent(
     start = time.time()
     last_activity_time = start  # tracks ANY activity across the entire tree
     last_cost_change_time = start  # tree LLM cost growth (CC in-place progress)
+    last_world_model_activity_time = start  # in-flight WMH predictions (simulated tools)
     prev_tree_message_count = 0
     prev_tree_agent_count = 0
     prev_tree_cost = 0
@@ -4534,7 +4784,12 @@ async def _poll_agent(
 
         # Hot-path HTTP — fetch root agent and (if the task handles approvals)
         # attention-requests in parallel. Saves ~150ms per poll.
-        fetch_approvals_now = task.approval_handling in ("auto_approve", "ignore", "prompt_user", "count_only")
+        fetch_approvals_now = task.approval_handling in (
+            "auto_approve",
+            "ignore",
+            "prompt_user",
+            "count_only",
+        )
         try:
             if fetch_approvals_now:
                 data, _pending_attention = await asyncio.gather(
@@ -4845,6 +5100,10 @@ async def _poll_agent(
                 prev_tree_cost = tree_cost
                 last_cost_change_time = now
 
+            if await world_model_operations_in_flight(getattr(task, "_wmh_owned_session", None)):
+                activity_detected = True
+                last_world_model_activity_time = now
+
             if activity_detected:
                 last_activity_time = now
             prev_root_message_count = root_msg_count
@@ -4922,7 +5181,13 @@ async def _poll_agent(
                 max_leaf_change = max(per_agent_state.get(aid, {}).get("last_change_time", 0.0) for aid in leaves)
                 tree_idle = now - max_leaf_change
                 cost_idle = now - last_cost_change_time
-                if tree_idle > stall_limit_seconds and cost_idle > stall_limit_seconds:
+                world_model_idle = now - last_world_model_activity_time
+                if tree_stall_exceeded(
+                    tree_idle=tree_idle,
+                    cost_idle=cost_idle,
+                    world_model_idle=world_model_idle,
+                    limit=stall_limit_seconds,
+                ):
                     # All leaves silent — pick the staffer leaf (most recent
                     # activity) to surface in the error message.
                     stuck_aid = max(
@@ -4935,6 +5200,7 @@ async def _poll_agent(
                         f"tree stalled — newest-active {role} {stuck_aid[:12]} "
                         f"silent for {tree_idle:.0f}s (threshold={stall_limit_seconds}s, "
                         f"cost_idle={cost_idle:.0f}s, "
+                        f"world_model_idle={world_model_idle:.0f}s, "
                         f"status={stuck_st.get('status', '?')}, "
                         f"messages={stuck_st.get('count', '?')}, "
                         f"non_terminal_leaves={len(leaves)})"
@@ -5781,7 +6047,7 @@ def evaluate_task(
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         return True, None
 
-    # Check approval expectations
+    # Check approval expectations.
     if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
         return False, "Expected approval requests but none were triggered"
 
@@ -8644,7 +8910,7 @@ async def _restore_live_fixture_scenarios_async(manifests: list[dict]) -> None:
 def _live_fixture_run_user_id(task: "BenchmarkTask") -> Optional[str]:
     """The production identity a task's declared live fixtures make it run as."""
     fixtures = resolve_live_fixtures(task.environment)
-    if "live-tamy-identity" in fixtures:
+    if "live-tamy-identity" in fixtures or "live-tamy-account-snapshot" in fixtures:
         return TAMY_IDENTITY_USER_ID
     if "live-aman-food-plan-identity" in fixtures:
         return AMAN_FOOD_PLAN_USER_ID
@@ -8686,6 +8952,86 @@ def _apply_live_tamy_identity_fixture(ctx: LiveFixtureContext) -> dict:
     }
 
 
+def _seed_identity_account_snapshot(user_id: str, *, timeout: float = 900) -> bool:
+    """Seed one production identity's ACCOUNT rows into the isolated benchmark DB.
+
+    This is the full user-scoped prod->local sync (``seed-local.ts`` without a
+    scoped flag): User, credits, subscription, integrations (+ pooled compute
+    tokens), email credentials, contacts, message history, API keys, blueprints,
+    SMS session and feedback. Browser auth is explicitly excluded: a snapshot is
+    data the agent plans from, not a credential overlay, and simulate runs never
+    open a real browser. Fails closed (returns False) so the fixture caller can
+    refuse to start an agent against a DB that lacks the identity's rows.
+    """
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        print("    ⚠ Account snapshot skipped: local Victoria DB not found")
+        return False
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    env["SEED_LOCAL_USER_ID"] = user_id
+    env["BENCHMARK_SKIP_BROWSER_AUTH_SYNC"] = "1"
+    env.pop("SEED_COOKIE_DOMAINS", None)
+    env.pop("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL", None)
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/seed-local.ts"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(f"    ⚠ Account snapshot timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Account snapshot error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Account snapshot failed: {_seed_sync_error_detail(result)}")
+        return False
+    print(f"    📸 Seeded account snapshot for {user_id} (browser auth excluded)")
+    return True
+
+
+def _apply_live_tamy_account_snapshot_fixture(ctx: LiveFixtureContext) -> dict:
+    """Seed Tamy's production account rows as the run's base environment.
+
+    Unlike ``live-tamy-identity`` this is a DATA snapshot, not a credential
+    overlay, so it applies under world-model simulate too: the WMH serves every
+    provider boundary, but the agent still plans from her real contacts,
+    history, subscription and integrations, and the run user must exist locally
+    or ``POST /api/agents`` dies on the User FK before an agent exists. Browser
+    auth is never synced. Compute tokens: simulate runs use the restored seed
+    DB's pooled tokens (same as the run-level pre-flight); real runs refresh
+    them like the other identity overlays so no LLM call falls to the paid
+    waterfall.
+    """
+    simulate = _is_simulate_mode()
+    if not simulate:
+        if _anthropic_family_excluded():
+            synced = _sync_compute_tokens(tolerate_gpt_code_unavailable=True, required_token_types=("gpt",))
+        else:
+            synced = _sync_compute_tokens(
+                tolerate_gpt_code_unavailable=True,
+                tolerate_claude_code_unavailable=ctx.tolerate_claude_code_unavailable,
+            )
+        if not synced:
+            raise RuntimeError("Account snapshot fixture could not refresh compute tokens")
+    else:
+        print("    🌍 simulate mode — seeding the account snapshot without a credential overlay")
+    if not _seed_identity_account_snapshot(TAMY_IDENTITY_USER_ID):
+        raise RuntimeError("Account snapshot fixture could not seed Tamy's production account rows")
+    print(f"    🇲🇽 Seeded Tamy's account snapshot {TAMY_IDENTITY_USER_ID} into the isolated DB")
+    return {
+        "fixture": "live-tamy-account-snapshot",
+        "browser_auth": False,
+        "source": "prod_sync",
+        "user_id": TAMY_IDENTITY_USER_ID,
+        "simulate": simulate,
+    }
+
+
 def _apply_live_aman_food_plan_identity_fixture(ctx: LiveFixtureContext) -> dict:
     """Apply the complete live overlay for Aman's DoorDash food-plan repro identity."""
     if _is_simulate_mode():
@@ -8709,6 +9055,7 @@ def _apply_live_aman_food_plan_identity_fixture(ctx: LiveFixtureContext) -> dict
 LIVE_FIXTURE_APPLIERS = {
     "live": _apply_live_fixture,
     "live-tamy-identity": _apply_live_tamy_identity_fixture,
+    "live-tamy-account-snapshot": _apply_live_tamy_account_snapshot_fixture,
     "live-aman-food-plan-identity": _apply_live_aman_food_plan_identity_fixture,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
@@ -13676,6 +14023,15 @@ async def run_single_task(
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
+    # Repeated catalog selections share a template. Keep native lifecycle
+    # ownership on this execution while preserving caller configuration/provenance.
+    task = copy.copy(task)
+    task._wmh_seeded_session_id = None
+    task._wmh_owned_session = None
+    task._wmh_retirement_receipt = None
+    task._wmh_retirement_operation = None
+    task._wmh_retirement_error = None
+    task._wmh_agent_admission = None
     # The SMS supervisor is not a Temporal agent — it is an in-backend tool loop
     # woken by an inbound text. It gets its own driver; everything around this
     # call (selection, concurrency, history, run records) is unchanged.
@@ -13696,17 +14052,23 @@ async def run_single_task(
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     with _benchmark_run_user_scope(_run_user_id_override_for_task(task, base_url)):
-        return await _run_single_task_as_run_user(
-            base_url,
-            task,
-            keep_failed_agents,
-            checkpoint_source_index,
-            checkpoint_source_boundary,
-            checkpoint_source_out,
-            checkpoint_tree_out,
-            on_agent_created,
-            on_task_evaluated,
-        )
+        try:
+            return await _run_single_task_as_run_user(
+                base_url,
+                task,
+                keep_failed_agents,
+                checkpoint_source_index,
+                checkpoint_source_boundary,
+                checkpoint_source_out,
+                checkpoint_tree_out,
+                on_agent_created,
+                on_task_evaluated,
+            )
+        finally:
+            # An already reported failed join must not replace its original
+            # execution error or abandon the independently owned cleanup path.
+            if getattr(task, "_wmh_retirement_error", None) is None:
+                await _retire_owned_native_world(task)
 
 
 def _run_user_id_override_for_task(task: BenchmarkTask, base_url: str) -> Optional[str]:
@@ -14090,12 +14452,15 @@ async def _run_single_task_as_run_user(
             try:
                 if await pause_agent(base_url, agent_id):
                     print(f"    ⏸ Paused agent {agent_id[:12]} after early-fail before cleanup")
+                    await _retire_owned_native_world(task, agent_id)
                     data = await _refresh_agent_after_pause_for_browser_terminal(base_url, agent_id, data)
                     # Wait for Session Cancelled (task_complete+task_id) before
                     # freezing the transcript into the durable hub archive.
                     data = await _await_claude_code_chip_terminality(base_url, agent_id, data)
             except Exception as pause_error:
                 print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
+
+        await _retire_owned_native_world(task, agent_id)
 
         # Get final agent data
         agent = data.get("agent", {})
@@ -14429,6 +14794,7 @@ async def _run_single_task_as_run_user(
         # Collect prod logs for diagnostics
         print("    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
+        logs = _native_world_retirement_diagnostics(task, logs)
         if declared_evaluator_results:
             logs["declared_evaluators"] = declared_evaluator_results
         # Keep hydrated Claude Code transcripts in the run JSON so durable FE
@@ -14529,13 +14895,14 @@ async def _run_single_task_as_run_user(
                 "cost_cents": round(cost_cents, 2),
                 "cache_hit_pct": cache_hit_pct,
             },
-            fast_mode_cache_enabled=agent.get("fast_mode_cache_enabled") is True,
+            fast_mode_cache_enabled=_reported_fast_mode_cache_enabled(task, agent),
             context_violations=context_violation_dicts,
             logs=logs,
             archive_manifest_ref=archive_manifest_ref,
             payment_lifecycle=(data.get("_benchmark") or {}).get("payment_lifecycle"),
             world_model_fidelity=world_model_fidelity,
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
+            wmh_initial_state=_wmh_initial_state_evidence(task),
         )
 
         # Evaluation is complete. Publish its outcome before releasing agent
@@ -14582,12 +14949,17 @@ async def _run_single_task_as_run_user(
 
         return result
 
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as e:
         duration = time.time() - start
         interrupt_cleanup_started = _begin_interrupt_cleanup() if cloud_batch_cleanup.contract() is None else False
         cancelled_agent_deleted = False
         cancellation_cleanup_ok = True
+        agent_id = _recover_owned_native_admission_root(task, agent_id)
         print(f"\n    ⚠ {task.name}: CANCELLED — collecting logs before shutdown")
+        try:
+            await _retire_owned_native_world(task, agent_id)
+        except Exception:
+            pass  # Unproven join is retained below; independent cleanup still owns its resources.
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
@@ -14623,35 +14995,40 @@ async def _run_single_task_as_run_user(
             if interrupt_cleanup_started:
                 if not _should_delete_cancelled_agent(keep_failed_agents):
                     raise RuntimeError("owner-requested benchmark teardown cannot retain the cancelled agent")
-                await delete_agent(base_url, agent_id)
-                cancelled_agent_deleted = True
-                print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
+                cancelled_agent_deleted = await _delete_owned_native_admission_root(base_url, task, agent_id)
+                print(
+                    f"    🗑  {'Deleted cancelled agent' if cancelled_agent_deleted else 'Observed absent root'} {agent_id[:12]}"
+                )
             else:
                 try:
                     if _should_delete_cancelled_agent(keep_failed_agents):
-                        await delete_agent(base_url, agent_id)
-                        cancelled_agent_deleted = True
-                        print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
+                        cancelled_agent_deleted = await _delete_owned_native_admission_root(base_url, task, agent_id)
+                        print(
+                            f"    🗑  {'Deleted cancelled agent' if cancelled_agent_deleted else 'Observed absent root'} {agent_id[:12]}"
+                        )
                     else:
                         print(f"    🧪 Keeping cancelled agent {agent_id[:12]} for diagnostics")
                 except Exception:
                     print(f"    ⚠ Failed to delete cancelled agent {agent_id[:12]}")
         interrupt_cleanup_ready = interrupt_cleanup_started and cancellation_cleanup_ok and cancelled_agent_deleted
         print(
-            f"    Interrupt cleanup evidence: agent_present={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
+            f"    Interrupt cleanup evidence: root_target_known={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
         )
+        logs = _native_world_retirement_diagnostics(task, logs, e)
+        retirement_failed = getattr(task, "_wmh_retirement_error", None) is not None
         return TaskResult(
             name=task.name,
             passed=False,
             agent_id=agent_id,
-            status=status,
-            benchmark_status="CANCELLED",
+            status="ERROR" if retirement_failed else status,
+            benchmark_status="ERROR" if retirement_failed else "CANCELLED",
             progress_score=progress_score,
             duration_seconds=round(duration, 1),
             cost_cents=0,
             message_count=len(messages),
             failure_reason=(
                 "Benchmark interrupted; prod logs were collected before shutdown"
+                + _native_world_retirement_failure_reason(task)
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
             ),
             logs=logs,
@@ -14669,6 +15046,14 @@ async def _run_single_task_as_run_user(
         )
         release_skip = release_stall and evaluated_failure_reason is None
         error_status = "SKIPPED" if release_skip else "ERROR"
+        agent_id = _recover_owned_native_admission_root(task, agent_id)
+        try:
+            await _retire_owned_native_world(task, agent_id)
+        except Exception:
+            pass  # Evidence/archive/agent cleanup must continue after an unproven native join.
+        if getattr(task, "_wmh_retirement_error", None) is not None:
+            release_skip = False
+            error_status = "ERROR"
         if release_skip:
             _warn_agentcard_release_skip(task.name, str(e))
         else:
@@ -14698,6 +15083,7 @@ async def _run_single_task_as_run_user(
                     f"archive: {type(archive_error).__name__}: {archive_error}")
         if release_skip and logs and logs.get("failure_evidence", {}).get("errors"):
             error_status = "ERROR"
+        logs = _native_world_retirement_diagnostics(task, logs, e)
         result = TaskResult(
             name=task.name,
             passed=False,
@@ -14711,6 +15097,7 @@ async def _run_single_task_as_run_user(
             failure_reason=(
                 (f"{AGENTCARD_RELEASE_SKIP_REASON}: " if release_skip else "")
                 + f"{e}"
+                + _native_world_retirement_failure_reason(task)
                 + (f" | Prior task failure: {evaluated_failure_reason}" if evaluated_failure_reason else "")
                 + (f" | Independent evidence/cleanup errors: {logs['failure_evidence']['errors']}" if release_skip and error_status == "ERROR" else "")
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
@@ -14738,8 +15125,8 @@ async def _run_single_task_as_run_user(
                 logs["failure_evidence"]["errors"].append(f"cleanup: {type(cleanup_error).__name__}: {cleanup_error}")
             try:
                 if not keep_failed_agents and cloud_batch_cleanup.contract() is None:
-                    await delete_agent(base_url, agent_id)
-                    print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
+                    deleted = await _delete_owned_native_admission_root(base_url, task, agent_id)
+                    print(f"    🗑  {'Deleted orphaned agent' if deleted else 'Observed absent root'} {agent_id[:12]}")
                 else:
                     print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
             except Exception as deletion_error:
@@ -15794,6 +16181,16 @@ async def main_async(args):
     if not tasks:
         print("No tasks matched. Use --list to see available tasks.")
         sys.exit(1)
+    if args.wmh_initial_state_file:
+        if len(tasks) != 1 or len(task_names_from_args(args)) != 1:
+            raise ValueError("--wmh-initial-state-file requires exactly one explicit --task")
+        task = tasks[0]
+        if task.world_model_mode != "simulate":
+            raise ValueError("--wmh-initial-state-file requires a simulate-mode task")
+        source_path = Path(args.wmh_initial_state_file).resolve()
+        state = json.loads(source_path.read_text(encoding="utf-8"))
+        task.wmh_initial_state = validate_wmh_initial_state(state, task.name)
+        task._wmh_initial_state_source = str(source_path)
     if _force_show_passwords_mode():
         tasks = [task for task in tasks if task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME]
         if not tasks:
@@ -15980,6 +16377,9 @@ async def main_async(args):
 
     _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
     _report_start = time.monotonic()
+    _wmh_evidence = _WMHEvidenceSnapshot()
+    # name -> FIFO of live agent ids so k-repeats of the same task name each keep
+    # their own deep link instead of overwriting one shared slot.
     # Entry to _run_reported_task is after every admission guard. Pending
     # futures can still be waiting for a semaphore or cross-process slot.
     # Task ownership also isolates repeated names and child agent callbacks.
@@ -16037,7 +16437,7 @@ async def main_async(args):
                 )
             )
         elapsed = time.monotonic() - _report_start
-        wmh_usage = _fetch_wmh_usage()
+        wmh_usage = _wmh_evidence.refresh()
         return RunState(
             run_id=run.run_id,
             elapsed_s=elapsed,
@@ -16310,7 +16710,7 @@ async def main_async(args):
 
         # Always save results — even partial results from interrupted runs are valuable
         if run.task_results:
-            run.world_model_retrieval_audit = _fetch_wmh_retrieval_audit()
+            run.world_model_retrieval_audit = _wmh_evidence.finalize()
             path = run.save()
             print(f"\n  Results saved: {path}")
             try:
@@ -16461,13 +16861,14 @@ def main():
         default=None,
         help="Set BENCHMARK_WORLD_MODEL_MODE for tool execution adapters. "
         "real runs live provider boundaries, shadow compares live provider boundaries with WMH predictions, "
-        "simulate routes eligible provider/environment boundaries to WMH while agent loops and orchestration still run.",
+        "simulate routes provider boundaries and specialized explore/browser/code subagents to WMH; "
+        "root and general-purpose loops still run.",
     )
     parser.add_argument(
         "--simulate",
         action="store_true",
-        help="Alias for --world-model-mode simulate. Agent loops and orchestration still run; "
-        "only eligible provider/environment boundaries are simulated by WMH.",
+        help="Alias for --world-model-mode simulate. Root and general-purpose loops stay real; "
+        "provider boundaries and specialized explore/browser/code subagents use WMH.",
     )
     parser.add_argument(
         "--wmh-eval",
@@ -16492,6 +16893,10 @@ def main():
         type=str,
         default=None,
         help="Existing WMH session id for simulate/shadow tool execution.",
+    )
+    parser.add_argument(
+        "--wmh-initial-state-file",
+        help="Override one simulate-mode task's catalog WHM initial state with an EnvState JSON file.",
     )
     parser.add_argument(
         "--anon",

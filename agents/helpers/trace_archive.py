@@ -37,6 +37,8 @@ _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 _MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".m4a", ".mp3", ".wav", ".m3u8"}
 _R2_CLIENT: Any = None
+# PID that built _R2_CLIENT (None for clients injected directly, e.g. test fakes).
+_R2_CLIENT_PID: Optional[int] = None
 _BACKEND_CLIENTS = threading.local()
 _ARTIFACT_LOCK_STRIPES = 256
 _ARTIFACT_WRITE_LOCKS = tuple(threading.Lock() for _ in range(_ARTIFACT_LOCK_STRIPES))
@@ -351,9 +353,14 @@ def _object_key(root_agent_id: str, path: str = "") -> str:
 
 
 def _r2_client() -> Any:
-    global _R2_CLIENT
+    global _R2_CLIENT, _R2_CLIENT_PID
     if _R2_CLIENT is not None:
-        return _R2_CLIENT
+        # A boto3 client inherited across fork() shares its parent's pooled TLS
+        # sockets; the corpus exporter forks worker processes, so each process
+        # builds its own client. Injected clients (PID None) are kept as-is.
+        if _R2_CLIENT_PID is None or _R2_CLIENT_PID == os.getpid():
+            return _R2_CLIENT
+        _R2_CLIENT = None
     try:
         import boto3
         from botocore.config import Config as BotoConfig
@@ -372,7 +379,12 @@ def _r2_client() -> Any:
         connect_timeout=int(os.environ.get("R2_CONNECT_TIMEOUT", "15")),
         read_timeout=int(os.environ.get("R2_READ_TIMEOUT", "60")),
         retries={"max_attempts": int(os.environ.get("R2_MAX_ATTEMPTS", "5")), "mode": "adaptive"},
+        # Parallel corpus readers (benchmarks/world_model_harness.py) fan out
+        # dozens of small GETs at once; the urllib3 default of 10 pooled
+        # connections serialises them again and logs pool-full warnings.
+        max_pool_connections=int(os.environ.get("R2_MAX_POOL_CONNECTIONS", "64")),
     )
+    _R2_CLIENT_PID = os.getpid()
     _R2_CLIENT = boto3.client(
         "s3",
         endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
@@ -458,6 +470,60 @@ def read_archive_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[by
     return read_local_artifact(root_agent_id=root_agent_id, path=path)
 
 
+def _read_local_artifact_metadata_unlocked(target: Path) -> Optional[dict[str, Any]]:
+    _recover_artifact_transaction_unlocked(target)
+    if not target.exists():
+        return None
+    meta_path = target.with_suffix(target.suffix + ".meta.json")
+    if not meta_path.exists():
+        raise ValueError(f"Archive metadata missing for {target.name}")
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def read_local_artifact_metadata(*, root_agent_id: str, path: str) -> Optional[dict[str, Any]]:
+    """Read only the sidecar metadata of a locally archived artifact."""
+    safe_root = _safe_segment(root_agent_id)
+    safe_path = _safe_path(path)
+    target = _local_root() / safe_root / safe_path
+    with _artifact_lock(target):
+        return _read_local_artifact_metadata_unlocked(target)
+
+
+def read_r2_artifact_metadata(*, root_agent_id: str, path: str) -> Optional[dict[str, Any]]:
+    """Read only the ``.meta.json`` sidecar of an R2 artifact (never the ciphertext body).
+
+    Same contract as ``read_r2_artifact``: ``None`` when the artifact does not
+    exist, ``ValueError`` when ciphertext is present without metadata. The
+    existence probe uses HEAD before accepting a sidecar, without opening a ciphertext body.
+    """
+    key = _object_key(root_agent_id, path)
+    try:
+        _r2_client().head_object(Bucket=_r2_bucket(), Key=key)
+    except Exception as exc:
+        if _is_missing_r2_object_error(exc):
+            return None
+        raise
+    try:
+        return json.loads(_read_r2_object(f"{key}.meta.json").decode("utf-8"))
+    except Exception as exc:
+        if _is_missing_r2_object_error(exc):
+            raise ValueError(f"Archive metadata missing for {path}") from exc
+        raise
+
+
+
+def read_archive_artifact_metadata(*, root_agent_id: str, path: str) -> Optional[dict[str, Any]]:
+    """Read an artifact's integrity/content metadata without downloading its ciphertext.
+
+    Corpus signatures and artifact refs only need ``plaintext_sha256`` /
+    ``plaintext_bytes`` / ``content_type``; fetching whole ciphertexts for that
+    turned a 20-bundle World Model build into hundreds of full-object reads.
+    """
+    if _use_r2_archive():
+        return read_r2_artifact_metadata(root_agent_id=root_agent_id, path=path)
+    return read_local_artifact_metadata(root_agent_id=root_agent_id, path=path)
+
+
 def list_local_bundle_ids() -> list[str]:
     local_root = _local_root()
     if not local_root.exists():
@@ -526,6 +592,45 @@ def list_r2_artifact_paths(root_agent_id: str) -> list[str]:
             break
         token = response.get("NextContinuationToken")
     return sorted(paths)
+
+
+def list_r2_artifact_entries(root_agent_id: str) -> list[dict[str, Any]]:
+    """Every object under a bundle with the size and ETag the listing already carries.
+
+    Includes ``.meta.json`` sidecars so callers can verify metadata presence
+    without a GET per artifact; one paginated request per ~1000 objects.
+    """
+    client = _r2_client()
+    bucket = _r2_bucket()
+    prefix = _object_key(root_agent_id)
+    entries: list[dict[str, Any]] = []
+    token: Optional[str] = None
+    while True:
+        kwargs: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix}
+        if token:
+            kwargs["ContinuationToken"] = token
+        response = client.list_objects_v2(**kwargs)
+        for item in response.get("Contents", []):
+            key = str(item.get("Key") or "")
+            if not key or key == prefix:
+                continue
+            entries.append(
+                {
+                    "path": key[len(prefix) :],
+                    "size": int(item.get("Size") or 0),
+                    "etag": str(item.get("ETag") or "").strip('"'),
+                }
+            )
+        if not response.get("IsTruncated"):
+            break
+        token = response.get("NextContinuationToken")
+    entries.sort(key=lambda entry: entry["path"])
+    return entries
+
+
+def archive_backend_is_r2() -> bool:
+    """Whether the configured archive backend is R2 (vs. the local directory)."""
+    return _use_r2_archive()
 
 
 def list_archive_bundle_ids() -> list[str]:

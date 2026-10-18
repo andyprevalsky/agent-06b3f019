@@ -259,7 +259,7 @@ with tempfile.TemporaryDirectory() as tmp:
             raise AssertionError(f"archive {flag} must fail closed")
     corrupt = escape = False
     failure = "archive ciphertext failed integrity validation"
-    publisher.parse_args = lambda: SimpleNamespace(agent_id=agent, dump=None)
+    publisher.parse_args = lambda: SimpleNamespace(agent_id=agent, dump=None, run_json=None)
     error = io.StringIO()
     with redirect_stderr(error):
         try:

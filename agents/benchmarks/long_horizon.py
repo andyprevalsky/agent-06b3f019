@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -285,6 +286,32 @@ def _validate_evaluators(evaluators: list[Any], item_id: str) -> list[dict[str, 
     return parsed
 
 
+def validate_wmh_initial_state(value: Any, item_id: str) -> dict[str, Any]:
+    """Validate the benchmark-facing portion of upstream WHM's EnvState."""
+    if not isinstance(value, dict) or set(value) != {"structured", "scratchpad"}:
+        raise ValueError(f"{item_id}: wmh_initial_state must contain structured and scratchpad")
+    structured = value["structured"]
+    if not isinstance(structured, dict) or not isinstance(structured.get("schema"), str):
+        raise ValueError(f"{item_id}: wmh_initial_state.structured requires a schema string")
+    if not structured["schema"].strip() or "root_agent_id" in structured or "root_goal" in structured:
+        raise ValueError(f"{item_id}: wmh_initial_state must have a schema and omit runtime root fields")
+    if not isinstance(value["scratchpad"], str):
+        raise ValueError(f"{item_id}: wmh_initial_state.scratchpad must be a string")
+    # The world clock starts here, so every seeded world pins an ISO UTC date.
+    as_of = structured.get("as_of_utc")
+    try:
+        pinned = datetime.fromisoformat(as_of.replace("Z", "+00:00")) if isinstance(as_of, str) else None
+    except ValueError:
+        pinned = None
+    if pinned is None or pinned.utcoffset() is None:
+        raise ValueError(f"{item_id}: wmh_initial_state.structured.as_of_utc must pin an ISO UTC start date")
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{item_id}: wmh_initial_state must contain finite JSON values") from exc
+    return value
+
+
 def _validate_auth_test_site_contract(raw: dict[str, Any], item_id: str) -> None:
     """A hosted-site task must send the agent to its site and judge the site's own record."""
     scenario = declared_auth_test_site_scenario(raw.get("environment"))
@@ -383,6 +410,11 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     world_model_mode = raw.get("world_model_mode")
     if world_model_mode is not None and world_model_mode not in WORLD_MODEL_MODES:
         raise ValueError(f"{item_id}: world_model_mode must be one of {sorted(WORLD_MODEL_MODES)}")
+    wmh_initial_state = raw.get("wmh_initial_state")
+    if wmh_initial_state is not None:
+        validate_wmh_initial_state(wmh_initial_state, item_id)
+        if world_model_mode != "simulate":
+            raise ValueError(f"{item_id}: wmh_initial_state requires world_model_mode=simulate")
     description = raw.get("description")
     if description is not None and (not isinstance(description, str) or not description.strip()):
         raise ValueError(f"{item_id}: description must be a non-empty string when present")

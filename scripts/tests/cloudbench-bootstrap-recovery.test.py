@@ -451,6 +451,22 @@ class BootstrapRecoveryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.verify()
 
+    def test_browser_asset_preflight_is_past_the_index_source_boundary(self):
+        # No browser-helper execution/output can borrow the earlier index interval.
+        original = self.original["repo/.context/cloudbench/stack.log"]
+        for helper_output in (
+            b"",
+            b"command interrupted; cleanup diagnostics\n",
+            b"changed browser preflight executable output\n",
+        ):
+            with self.subTest(helper_output=helper_output):
+                self.original["repo/.context/cloudbench/stack.log"] = (
+                    original + "📦 Ensuring Playwright browser assets...\n".encode() + helper_output
+                )
+                self.make_capture()
+                with self.assertRaisesRegex(ValueError, "final source boundary"):
+                    self.verify()
+
     def test_public_tunnel_start_is_past_the_index_source_boundary(self):
         # Restore path with healthy dependencies and no local Fast Mode cache:
         # the next stack.log lines after the index step are the DDL hook and
