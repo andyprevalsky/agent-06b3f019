@@ -22,7 +22,7 @@ sources:
   - benchmark run 1108b4ad-f5f1-434f-bf2d-9d9df4af1d88
   - task browser-auth-member-discount-purchase actor dump7867fddc4326 span a4613e8f529a request c2d1455c419f
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py test_private_browser_pause_urls_use_protected_continuity
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -237,3 +237,122 @@ the coordinated protected-820 scope; it does not rewrite the old stop clock
 or authorize this RCA worker to operate the VM. Root retains operational
 custody. No additional allowance question is introduced. Case status remains
 OPEN until the unchanged task and deployment requirements actually qualify.
+
+
+## October 18 qualification: unchanged task outcome recovered
+
+On source `12c3f4b55e60a291ce6902b47e88fb2f1acc9307`, the unchanged
+`browser-auth-member-discount-purchase` passed in 257.8 seconds (reported as
+258 seconds), 98 messages, root `322fb545-94a9-4278-a67b-418cf1b92e21`,
+run `310997cf-3812-4560-97e0-b5f607d7794a`. Root and benchmark statuses are
+COMPLETED/PASSED with no failure reason. The complete regular run is 13 passed,
+zero failed; the separate mass run is one passed. This actual funded outcome
+supplements the prior owning callbacks and recorded-parameter controls; it
+does not replace them or erase the original C10 interruption or C13 recurrence.
+
+The exact complete regular body is 64,920,341 bytes, SHA-256
+`8077283486ffa9ee2c4940d50d72caad7304ef717454b4d5ff9a7dd85478ed10`,
+retained in the C14 observer originals at `635178fb0c398506/bytes`.
+At `/tasks/8/logs/messages/61`, `/62` and `/63`, the metadata path
+`requestUserApproval/requestPaymentCard/lineItems/0/imageUrl` contains the
+original public Canvas Tote URL `https://placehold.co/320x220/png?text=Canvas+Tote`.
+Both declared runtime and outcome evaluators scored 1.0 and passed. The saved
+shop report contains placed order `ORD-26978392`, total 1,960 cents, joined to
+purchase `c717a3d8-9561-4f32-8946-56d41e874735`. Native saved lifecycle joins
+that purchase, TEST Stripe PI `pi_3URhuvJyWRw3Eb951EnFfuJD`, closed zero-balance
+card `card_68bc3246b54f0b1513060ab5` and consumed transfer
+`owt_98b66ceb093bc4bafa12770e`; this is completed purchase fulfillment, not a
+refund obligation or LIVE billing claim.
+
+The same-source full Group3 result has all 14 stage exits zero. Its actual
+agents coverage log, SHA-256
+`7226918c32f38d8fad089494050bee48973f2af11bb325057c479ba8625d83bf`,
+reports 110 blackbox domains passed, zero failed, including world-model-harness
+in 86.52 seconds. ROOT also retains the current native40/pytest224 and complete
+controller/cold-seed receipts; the historical native-runtime installation
+receipt is not substituted for current native execution evidence.
+
+Saved cleanup for this root records a sealed/deleted final tree, no unsealed
+agents, no cleanup errors and its exact owned Kernel session
+`o93kmykch3ynjjthr7nuucem` returning native404. Browser recording metadata is
+present at messages12/66 (`recording_path`) and60/90 (`recording_view_url`,
+`recording_started_at`). Signed provider replay URLs are locators, not durable
+FE verification. The root carries encrypted trace-archive manifest pointers,
+but neither the regular nor mass canonical body embeds an authenticated Hub
+publication receipt, a durable `www.roselabs.ai/?agent-id=` verification receipt,
+or a published last-LLM-dump receipt. Absence in these bodies is not proof that
+publication failed; separate actual ROOT evidence may satisfy those duties.
+No offline inference upgrades a pointer to fetched/authenticated content.
+
+At that body-only review, this case remained OPEN for durable evidence and final
+deployment qualification. The actual publication follow-up below resolves the
+durable evidence gap for this root. The funded receipt outcome is now proven on the repaired source;
+publication, complete archive authentication, final source review and production
+are separate obligations. The explicit current user instruction to skip
+AgentCard tests applies to the separate isolated startup failure, not this
+successful smoke result or financial liabilities. Original failures, clocks,
+standing sandbox cleanupFalse and the separate retrospective production warning
+remain unchanged.
+
+
+## October 18 durable publication follow-up
+
+The canonical publisher ran against the exact current regular and mass bodies.
+Both initial actual invocations failed fresh-browser launch because sudo selected
+an empty root Playwright cache; original Hub uploads, renderer artifacts and
+exit1 outputs remain preserved. The only retry environment change selected the
+already installed matching1248 browser cache with PLAYWRIGHT_BROWSERS_PATH.
+There was no browser install, source change, skip flag or assertion change.
+
+Both canonical publishers then exited0 and were joined. Receipt root
+`322fb545-94a9-4278-a67b-418cf1b92e21` rendered98messages in a fresh browser;
+mass root `235d16af-ac3d-44a7-a408-618d1e101329` rendered263. The normal
+publisher uploaded their original Hub bundles, recovered authenticated archived
+LLM calls, rendered/uploaded last-call HTML to R2 HTTPS, validated browser
+termination/recording metadata and checked the shared transcript in a fresh
+browser including reload. No skip-fe-verify or local-only artifact supplied
+acceptance credit. Exact FE share links and seven-day HTTPSdump URLs are retained
+in each root's publisher manifest, rather than committing expiring bearer tokens.
+
+Actual publication packet:
+`/run/rose-whm-deploy-evidence-20261018/c14-durable-evidence-publication-v1`.
+Result SHA-256:
+`ae8112c32e2f8a18e3f902d141c1b47063b6a4c03de4a1f4cb5863b43d8abc22`.
+Complete packet-manifest SHA-256:
+`979bdfea7ecf9e0898d3abed45bec87486189736c00bbe212dc101a5c8078684`.
+Exact source12c3, publisher-script bytes and original regular/mass run SHA-256
+values were rechecked unchanged after publication. Original failed attempts and
+recovered archive originals remain in that packet. This qualifies representative
+durable evidence for these two roots, not every root's FE publication.
+
+The unchanged funded receipt outcome, owning causal controls, full source
+coverage and this root's durable evidence now qualify. Case remains OPEN pending
+ROOT's already-required final preservation, owned cleanup and final source
+acceptance. No C3, merge, production, LIVE billing or financial-cleanup completion
+is claimed. The separate user-skipped AgentCard startup1 and sandbox8792cleanupFalse
+remain unchanged; the private port fix is not part of this deployment.
+
+
+## ROOT acceptance of the repaired receipt boundary
+
+The exact unchanged funded member task, owning causal controls, full current-source
+coverage, durable publication and captured tree/browser cleanup qualified on
+`12c3f4b55e60a291ce6902b47e88fb2f1acc9307`. ROOT preserved 5,059 closed original
+files (3,520,519,866 bytes) under encrypted archive key
+`whm-preservation/e9afcffd/deploy-20261015-C14-20261018T014841Z-final-g1-03491aecd838`.
+Upload/self read-back, the independent original HOST verifier and guest stock
+comparison each completed with exit0. The authenticated manifest SHA-256 is
+`7d9597ee7bc9a7bc7171e6a5e3a93a8d617821ec11744add1bd382cdffd8d010`.
+Expired pytest paths were bound to their exact saved originals with explicit
+custody records; their old paths and the failed selection remain preserved.
+
+Canonical service cleanup completed before preservation. Native Machine
+`820224f7e069e8` was confirmed stopped at 2026-10-18T02:07:33.009796Z,
+before its unchanged deadline; its volume was retained and the exact watchdog
+exited naturally without signals. ROOT accepts this receipt defect as fixed.
+The final administrative batch preserves all historical row multiplicities and
+contains only these documentation updates and actual generated histories;
+behavioral source and exercised contracts remain unchanged. This RCA acceptance
+does not claim a completed C3, merge or production deployment. Original failures,
+the user-overridden AgentCard startup exit1, the separate open private port
+follow-up and historical financial liabilities remain unchanged.
