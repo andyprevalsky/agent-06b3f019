@@ -2372,3 +2372,104 @@ def test_retirement_joins_actual_writer_beyond_original_ten_second_window(tmp_pa
         assert observed == (True, 1, True, True), (observed, repr(error))
         assert session.revision == 0 and not session.receipts
     asyncio.run(run())
+
+
+def _measured_source_fixture(tmp_path):
+    """Two real calls: one with measured clocks (2m 14s), one exported without clocks."""
+    source = _source_fixture(tmp_path)
+    otel = next((source / "otel").iterdir())
+    spans = [json.loads(line) for line in otel.read_text().splitlines()]
+    for span in spans:
+        if span["spanId"] == "obs-1":
+            span["attributes"] += [
+                {"key": "rose.tool.started_at_ms", "value": {"intValue": "1787537754364"}},
+                {"key": "rose.tool.completed_at_ms", "value": {"intValue": str(1787537754364 + 134_000)}},
+            ]
+    otel.write_text("\n".join(json.dumps(s) for s in spans) + "\n")
+    return source
+
+
+def test_demo_renders_the_real_measured_tool_duration_not_the_ingest_ordinals(tmp_path):
+    from exp.common.core.artifacts import canonical_json_bytes
+    from exp.simulation.engines.text.prompt import build_world_model_request
+    from exp.simulation.retrieval import RAGMatch, RAGTransition
+
+    from benchmarks.build_experiential_world_model import build
+    from benchmarks.serve_experiential_world_model import load_native
+
+    digest = "a" * 64
+    build(_measured_source_fixture(tmp_path), tmp_path / "native", "rose-test", "rose-1-ultra", digest)
+    _, retriever = load_native(tmp_path / "native", "rose-test", "rose-1-ultra", digest)
+    by_span = {t.action_span_id: t for t in retriever.loaded.transitions}
+    # Ingest rewrites span clocks to microsecond ordinals; the measured duration survives.
+    assert by_span["action-1"].elapsed_ms == 134_000
+    assert by_span["action-2"].elapsed_ms is None
+    # An unmeasured record keeps the pre-duration wire shape, so older corpora load unchanged.
+    unmeasured = canonical_json_bytes(by_span["action-2"])
+    assert b"elapsed" not in unmeasured
+    assert RAGTransition.model_validate_json(unmeasured) == by_span["action-2"]
+
+    task = _task_for_request()
+    request = build_world_model_request(
+        task,
+        visible_messages=(),
+        candidate_response=action_from_canonical(action(3)),
+        grounded_examples=tuple(RAGMatch(transition=t, score=1.0) for t in (by_span["action-1"], by_span["action-2"])),
+        maximum_output_tokens=1024,
+    )
+    examples = {e["transition_id"]: e for e in json.loads(request.messages[1].content)["grounded_examples"]}
+    measured = examples[by_span["action-1"].transition_id]
+    assert measured["elapsed"] == "2m 14s" and measured["elapsed_ms"] == 134_000
+    assert set(measured) >= {"action", "observation", "elapsed"}
+    assert not {"elapsed", "elapsed_ms"} & set(examples[by_span["action-2"].transition_id])
+
+
+def _task_for_request():
+    from exp.common.tasks import TaskCase
+
+    from benchmarks.experiential_world_model import canonical_tool_schema
+
+    return TaskCase(
+        task_id="task-duration",
+        lineage_group_id="lineage-current",
+        partition="held_out",
+        instruction="Research",
+        initial_context={},
+        tools=(canonical_tool_schema(action(3)["name"]),),
+        workload_weight=1,
+        source_trace_ids=("current",),
+    )
+
+
+def test_served_world_model_request_shows_each_demo_real_duration():
+    """The actual serving path, not only the builder, places the duration beside each demo."""
+    from exp.simulation.retrieval import RAGMatch, RAGTransition
+
+    def demo(n, elapsed_ms):
+        return RAGMatch(transition=RAGTransition(
+            transition_id=f"example-{n}", trace_id="trace", lineage_id=f"lineage-{n}",
+            action_span_id=f"action-{n}", observation_span_id=f"obs-{n}", task="Research",
+            initial_context={},
+            action={"kind": "tool_call", "tool_name": "rose.browser.spawn_browser_agent", "tool_arguments": {}},
+            observation={"kind": "tool_result", "content": "done"},
+            key_text="Research", key_sha256="a" * 64, elapsed_ms=elapsed_ms), score=1.0)
+
+    class Examples:
+        def retrieve(self, query):
+            return (demo(1, 134_000), demo(2, 850), demo(3, 3_605_000), demo(4, None))
+
+    async def run():
+        requests = []
+
+        async def complete(request):
+            requests.append(request)
+            return reply(request, {})
+
+        model = ParallelWorldModel(complete, Examples())
+        session = model.new_session("Research", {}, "root")
+        await model.step(session.id, action(1), "inv")
+        evidence = json.loads(requests[0].messages[1].content)
+        rendered = {e["transition_id"]: e.get("elapsed") for e in evidence["grounded_examples"]}
+        assert rendered == {"example-1": "2m 14s", "example-2": "850ms", "example-3": "1h 0m 5s", "example-4": None}
+
+    asyncio.run(run())

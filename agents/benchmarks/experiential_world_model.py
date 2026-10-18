@@ -10,13 +10,13 @@ used. Session locks cover only immutable snapshots, receipts and atomic commits.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
 import json
 import secrets
 import time
 import uuid
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -728,6 +728,7 @@ class ParallelWorldModel:
                         "initial_context_sha256": sha256_json(m.transition.initial_context),
                         "action": preview(m.transition.action.model_dump(mode="json")),
                         "observation": {"content": preview(m.transition.observation.content)},
+                        **({} if m.transition.elapsed_ms is None else {"elapsed_ms": m.transition.elapsed_ms}),
                     }
                     for m in demos
                 ],

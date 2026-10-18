@@ -2873,6 +2873,78 @@ def test_native_wmh_ingestion_preserves_completed_pairs_with_equal_or_regressing
             assert step.state_before.scratchpad == transition.scratchpad
 
 
+def test_grounded_export_preserves_each_real_tool_call_measured_duration():
+    """Demos carry the real measured time-to-complete, independent of the ordinal span clocks."""
+    from benchmarks.world_model_harness import export_archive_to_otel_jsonl, load_grounded_transitions
+    from helpers.trace_archive import archive_json
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            root = "root-measured-durations"
+            start_fixture = {
+                "root_agent_id": root,
+                "user_id": "user",
+                "agent_ids": [root],
+                "rows": {"Agent": [{"id": root, "goal": "Research a vendor"}]},
+            }
+
+            def assistant(call_id, tool, created):
+                return {"id": f"assistant-{call_id}", "agentId": root, "role": "ASSISTANT", "createdAt": created,
+                        "metadata": {"tool_calls": [{"tool": tool, "tool_call_id": call_id, "arguments": {"q": call_id}}]}}
+
+            def tool_row(call_id, tool, status, created, text=""):
+                return {"id": f"tool-{call_id}-{status}", "agentId": root, "role": "TOOL", "text": text,
+                        "createdAt": created,
+                        "metadata": {"toolName": tool, "toolCallId": call_id, "toolStatus": status, "title": tool}}
+
+            messages = [
+                # IN_PROGRESS marks the tool's own start: 00:00:01 -> 00:02:15 is 2m 14s.
+                assistant("call-explore", "spawn_explore_agent", "2026-07-20T00:00:00.000Z"),
+                tool_row("call-explore", "spawn_explore_agent", "IN_PROGRESS", "2026-07-20T00:00:01.000Z"),
+                tool_row("call-explore", "spawn_explore_agent", "FINISHED", "2026-07-20T00:02:15.000Z", "found it"),
+                # Without IN_PROGRESS, the issuing ASSISTANT row is the measured start: 850 ms.
+                assistant("call-grep", "grep", "2026-07-20T00:03:00.000Z"),
+                tool_row("call-grep", "grep", "FINISHED", "2026-07-20T00:03:00.850Z", "3 matches"),
+            ]
+            archive_json(root_agent_id=root, path="db/start.fixture.json.gz.enc", payload=start_fixture)
+            archive_json(
+                root_agent_id=root,
+                path="db/end.fixture.json.gz.enc",
+                payload={**start_fixture, "rows": {**start_fixture["rows"], "Message": messages}},
+            )
+            archive_json(
+                root_agent_id=root,
+                path="manifest.json.gz.enc",
+                payload={"root_agent_id": root, "world_model_mode": "real",
+                         "run": {"root_goal": "Research a vendor", "agent_ids": [root]}},
+            )
+            grounded = {step.action.name: step for step in load_grounded_transitions(root)}
+            assert grounded["spawn_explore_agent"].observation.elapsed_ms == 134_000
+            assert grounded["grep"].observation.elapsed_ms == 850
+            # The duration is grounding evidence, not observation text the model should echo.
+            for step in grounded.values():
+                assert "elapsed" not in step.observation.to_output_text()
+                assert "started_at_ms" not in step.observation.to_output_text()
+
+            trace_path = Path(out) / "traces.otel.jsonl"
+            export_archive_to_otel_jsonl(root, trace_path)
+            spans = [json.loads(line) for line in trace_path.read_text().splitlines() if line.strip()]
+            measured = {}
+            for span in spans:
+                if not span["name"].startswith("execute_tool "):
+                    continue
+                attrs = {a["key"]: next(iter(a["value"].values())) for a in span["attributes"]}
+                # Span clocks are ordinal pairing slots (a few ns wide), not the call's duration.
+                assert int(span["endTimeUnixNano"]) - int(span["startTimeUnixNano"]) == 1
+                measured[attrs["gen_ai.tool.name"]] = int(attrs["rose.tool.completed_at_ms"]) - int(
+                    attrs["rose.tool.started_at_ms"]
+                )
+            assert measured == {"rose.explore.spawn_explore_agent": 134_000, "rose.grep.grep": 850}, measured
+        finally:
+            restore()
+
+
 def test_compare_real_vs_world_model_benchmark_outcomes():
     from benchmarks.world_model_harness import compare_real_vs_world_model_benchmark
 
@@ -6222,6 +6294,10 @@ async def run_all_tests():
     r.record(
         "grounded_export_and_conformance_suite_cover_100_real_terminal_tool_results",
         test_grounded_export_and_conformance_suite_cover_100_real_terminal_tool_results,
+    )
+    r.record(
+        "grounded_export_preserves_each_real_tool_call_measured_duration",
+        test_grounded_export_preserves_each_real_tool_call_measured_duration,
     )
     r.record(
         "public_export_redacts_root_goal_and_scratchpad_secrets",

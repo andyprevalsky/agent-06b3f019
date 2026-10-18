@@ -29,14 +29,18 @@ from exp.common.models import BillingSource, ModelCapabilities, ModelSnapshot
 from exp.common.project import ArtifactStore, ProjectPaths, artifact_input
 from exp.common.traces import Trace, TraceDataset, TraceSource, TraceSpan, load_trace_dataset
 from exp.simulation.retrieval import RAGIndex, RAGLineageBinding, RAGSourceRef, load_rag_index, persist_trace_rag
-from exp.simulation.retrieval.transitions import extract_real_transitions
+from exp.simulation.retrieval.transitions import MEASURED_ELAPSED_MS_ATTRIBUTE, extract_real_transitions
 from exp.simulation.world_model.artifact import grounded_world_model_prompt_sha256, persist_grounded_world_model
 from exp.simulation.world_model.runtime import load_grounded_world_model_artifact
 
 from benchmarks.experiential_world_model import canonical_tool_schema, lineage_id
 from benchmarks.wmh_archive_io import (
     _credential_field as _credential_field,
+)
+from benchmarks.wmh_archive_io import (
     atomic_json as atomic_json,
+)
+from benchmarks.wmh_archive_io import (
     redact_archive as redact_archive,
 )
 
@@ -345,6 +349,26 @@ def _attributes(span):
     return result
 
 
+def _clock_ms(value):
+    """OTel JSON carries intValue as decimal text; accept only exact nonnegative integers."""
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def measured_elapsed_ms(attrs, root):
+    """Real time-to-complete from the export's measured tool clocks, never the pairing ordinals."""
+    started, completed = attrs.get("rose.tool.started_at_ms"), attrs.get("rose.tool.completed_at_ms")
+    if started is None and completed is None:
+        return None
+    started, completed = _clock_ms(started), _clock_ms(completed)
+    if started is None or completed is None or completed < started:
+        raise ValueError(f"{root}: malformed measured tool clocks")
+    return completed - started
+
+
 def load_rose_trace(otel: Path, session_file: Path) -> tuple[Trace, int, int]:
     """Preserve exact task/start context, action/output bytes, source spans and order."""
     session = json.loads(session_file.read_text())
@@ -358,7 +382,7 @@ def load_rose_trace(otel: Path, session_file: Path) -> tuple[Trace, int, int]:
     payload = otel.read_bytes()
     source = TraceSource(
         identity=SourceIdentity(kind="file", source_id=root, sha256=hashlib.sha256(payload).hexdigest()),
-        semantic_convention_version="rose-canonical-export-v11",
+        semantic_convention_version="rose-canonical-export-v12",
     )
     spans = []
     tools = set()
@@ -390,6 +414,9 @@ def load_rose_trace(otel: Path, session_file: Path) -> tuple[Trace, int, int]:
             raise ValueError(f"{root}: generated or unavailable corpus observation")
         if not isinstance(observation.get("content"), str):
             raise ValueError(f"{root}: non-text corpus observation")
+        elapsed = measured_elapsed_ms(attrs, root)
+        if elapsed is not None:
+            attrs[MEASURED_ELAPSED_MS_ATTRIBUTE] = elapsed
         tool = action_attrs["gen_ai.tool.name"]
         tools.add(tool)
         action_attrs["gen_ai.tool.call.id"] = parent
@@ -474,7 +501,7 @@ def build(source_root: Path, output: Path, name: str, pool: str, pool_sha256: st
         code_revision=code_revision,
         source=SourceIdentity(kind="file", source_id="rose-real-archive-export", sha256=digest),
         dataset_id=dataset_id,
-        semantic_convention_version="rose-canonical-export-v11",
+        semantic_convention_version="rose-canonical-export-v12",
         traces_path="traces.jsonl",
         traces_sha256=digest,
         trace_ids=tuple(t.trace_id for t in traces),

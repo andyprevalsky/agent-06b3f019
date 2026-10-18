@@ -215,7 +215,7 @@ class WorldModelLaunch(unittest.TestCase):
             (repo / "agents").mkdir()
             for path in ("scripts/setup-world-model.sh", "agents/requirements-world-model.txt",
                          "agents/vendor/world-model/SOURCES.txt",
-                         "agents/vendor/world-model/experiential-0.7.158+rose.bf75987e-py3-none-any.whl"):
+                         "agents/vendor/world-model/experiential-0.7.158+rose.bf75987e.elapsed1-py3-none-any.whl"):
                 (repo / path).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(root / path, repo / path)
             native = repo / ".context/experiential-venv/bin"
