@@ -12348,9 +12348,19 @@ PY
 # the CURRENT branch code — the baked image only supplies deps. Stopped pool
 # machines cost $0 compute (volumes only) between runs.
 machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seconds-deadline>
-    local target_name="$1" deadline="$2" match prior_snapshot
+    local target_name="$1" deadline="$2" match prior_snapshot borrowed=0 cycle health_status
     prior_snapshot=""
     declare -F machines_snapshot_identity >/dev/null && prior_snapshot="$(machines_snapshot_identity)"
+    # A borrowed campaign child never refreshes the parent feed itself. Give the
+    # parent one complete publication cycle to publish a post-clone generation:
+    # the caller's lookup seconds were sized for the unsharded 15-second poll.
+    if [ "${INVENTORY_PUBLISHER_BORROWED:-0}" = 1 ] \
+        && declare -F inventory_borrowed_generation_wait_seconds >/dev/null; then
+        borrowed=1
+        cycle="$(inventory_borrowed_generation_wait_seconds)"
+        case "$cycle" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$deadline" -ge "$((SECONDS + cycle))" ] || deadline=$((SECONDS + cycle))
+    fi
     while :; do
         # This is the post-mutation fallback for clone output that omitted an
         # authoritative target id.  Coalesce one fresh API read into the shared
@@ -12361,6 +12371,17 @@ machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seco
                     echo "❌ unresolved clone name '$target_name' after inventory refresh failure" >&2
                     return 1
                 fi
+                if [ "$borrowed" = 1 ]; then
+                    # Only live, owned availability is pending. A dead or foreign
+                    # parent cannot publish within the longer borrowed cycle.
+                    health_status=0
+                    inventory_index_healthy || health_status=$?
+                    case "$health_status" in
+                        0|75) ;;
+                        *) echo "❌ unresolved clone name '$target_name': borrowed parent inventory is not owned and healthy" >&2
+                           return 1 ;;
+                    esac
+                fi
                 prior_snapshot="$(machines_snapshot_identity)"
                 sleep 1
                 continue
@@ -12370,6 +12391,13 @@ machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seco
         if [ -n "$match" ]; then
             printf '%s' "$match"
             return 0
+        fi
+        if [ "$borrowed" = 1 ]; then
+            # A new healthy post-clone generation lacks this name. Do not wait out
+            # more parent cycles: the caller's exact registry resolver re-reads
+            # native state and still owns the found/absent/unsafe decision.
+            echo "🧭 clone name '$target_name' absent from the first new parent inventory generation; deferring to the exact registry resolver" >&2
+            return 1
         fi
         if [ "$SECONDS" -ge "$deadline" ]; then
             echo "❌ unresolved clone name '$target_name'; inspect with: flyctl machines list -a $APP --json" >&2

@@ -3428,6 +3428,89 @@ def test_campaign_inventory_clone_name_wait_passes_original_absolute_deadline(tm
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize('case', ['materialized', 'absent', 'publisher-stalled', 'publisher-dead', 'capacity-guard-default'])
+def test_campaign_inventory_borrowed_lookup_waits_one_sharded_publication_cycle(tmp_path, case):
+    # run600c shard-16 r001-j0157/r003-j0557: the healthy borrowed parent published
+    # every 61-70 s (sharded CLOUDBENCH_SNAPSHOT_POLL_SECONDS=60), but the clone-name
+    # lookup allowed it only CLOUDBENCH_CLONE_LOOKUP_SECONDS=20 s, so the wait reported
+    # "timed out waiting for a new healthy parent inventory generation". The real
+    # lookup and borrowed wait run here; only the wait tick and sleep advance SECONDS.
+    source = (ROOT / 'scripts/run-bench-fleet').read_text()
+    start = source.index('machine_id_for_clone_name() {')
+    function = source[start:source.index('\n}\n', start) + 3]
+    publish_tick = 100 if case == 'capacity-guard-default' else 45
+    script = tmp_path / 'lookup.sh'
+    script.write_text(
+        'set -euo pipefail\nFLEET_DIR="$1"; case_name="$2"; APP=fixture; FLEET_OWNER_HOST="$(hostname)"\n'
+        'export CLOUDBENCH_SNAPSHOT_POLL_SECONDS=60 CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS=30\n'
+        'unset CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS CLOUDBENCH_CLONE_LOOKUP_SECONDS\n'
+        f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}\n'
+        f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh"))}\n'
+        + function +
+        'mkdir -p "$INVENTORY_INDEX/current/names"\n'
+        'SNAPSHOT_LOOP_PID=$$; SNAPSHOT_LOOP_PID_START="$(inventory_pid_start_time $$)"\n'
+        'SNAPSHOT_LOOP_TOKEN=fixture; INVENTORY_PUBLISHER_BORROWED=1\n'
+        'INVENTORY_CAMPAIGN_PARENT_PID=$$; INVENTORY_CAMPAIGN_PARENT_START="$SNAPSHOT_LOOP_PID_START"\n'
+        'FLY() { touch "$FLEET_DIR/native-called"; return 91; }\n'
+        'health() { printf "publisher_token=fixture\\nvalid_until=%s\\ngeneration=%s\\n" "$((INVENTORY_CLOCK_EPOCH+600))" "$1" > "$INVENTORY_INDEX/current/health.tmp"; mv "$INVENTORY_INDEX/current/health.tmp" "$INVENTORY_INDEX/current/health"; }\n'
+        'health before-clone; ticks=0\n'
+        'advance() {\n'
+        '  ticks=$((ticks+1)); SECONDS=$((SECONDS+1))\n'
+        f'  if [ "$case_name" != publisher-stalled ] && [ "$ticks" = {publish_tick} ]; then\n'
+        '    [ "$case_name" = absent ] || printf "0123456789abcd\\n" > "$INVENTORY_INDEX/current/names/cloudbench-target"\n'
+        '    health after-clone\n'
+        '  fi\n'
+        '}\n'
+        'inventory_refresh_wait_tick() { advance; }\n'
+        'sleep() { advance; }\n'
+        'if [ "$case_name" = publisher-dead ]; then (exit 0) & SNAPSHOT_LOOP_PID=$!; wait "$SNAPSHOT_LOOP_PID"; fi\n'
+        'status=0; started=$SECONDS\n'
+        'if [ "$case_name" = capacity-guard-default ]; then\n'
+        '  refresh_machines_snapshot_after "$(machines_snapshot_identity)" 2> "$FLEET_DIR/err" || status=$?\n'
+        'else\n'
+        # The clone loop passes its original 20-second lookup deadline.
+        '  deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}))\n'
+        '  machine_id_for_clone_name cloudbench-target "$deadline" > "$FLEET_DIR/id" 2> "$FLEET_DIR/err" || status=$?\n'
+        'fi\n'
+        'printf "%s %s %s\\n" "$status" "$ticks" "$((SECONDS - started))"\n'
+        'test ! -e "$FLEET_DIR/native-called"; test ! -e "$INVENTORY_REFRESH_LOCK"\n'
+    )
+    result = subprocess.run(['bash', str(script), str(tmp_path), case], capture_output=True, text=True,
+                            timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    status, ticks, elapsed = map(int, result.stdout.split())
+    stderr = (tmp_path / 'err').read_text()
+    if case == 'publisher-stalled':
+        # A genuinely stalled feed still fails closed, after one bounded cycle:
+        # poll 60 + jitter 2 + the existing 3 x 30 + 5 refresh budget.
+        # SECONDS also carries the fixture's real host time; ticks alone may be fewer.
+        assert status == 1 and ticks <= 157 and 157 <= elapsed <= 159, (status, ticks, elapsed, stderr)
+        assert 'timed out waiting for a new healthy parent inventory generation' in stderr
+        assert (tmp_path / 'id').read_text() == ''
+        return
+    if case == 'publisher-dead':
+        # Ownership loss stays immediately fatal; the longer cycle covers only a
+        # live, owned publisher between generations.
+        assert status == 1 and ticks <= 1, (ticks, stderr)
+        assert 'borrowed parent inventory is not owned and healthy' in stderr
+        assert (tmp_path / 'id').read_text() == ''
+        return
+    assert ticks == publish_tick, stderr
+    assert 'timed out waiting' not in stderr and 'after inventory refresh failure' not in stderr, stderr
+    if case == 'materialized':
+        assert status == 0 and (tmp_path / 'id').read_text() == '0123456789abcd', stderr
+        assert stderr == ''
+    elif case == 'absent':
+        # One post-clone generation without the name hands off to the existing exact
+        # registry resolver immediately; it neither waits out the cycle nor reports
+        # an inventory failure.
+        assert status == 1 and (tmp_path / 'id').read_text() == '', stderr
+        assert 'absent from the first new parent inventory generation' in stderr
+        assert '❌' not in stderr
+    else:
+        assert status == 0, stderr
+
+
 def _scheduled_stop_guard():
     import runpy
     return runpy.run_path(str(ROOT / 'scripts/cloudbench-campaign-stop.py'))

@@ -540,6 +540,14 @@ fleet_admission_machines_json() {
 }
 fleet_volumes_json()  { _fresh_snapshot_or "$VOLUMES_SNAPSHOT" FLY volumes list -a "$APP" --json; }
 
+inventory_borrowed_generation_wait_seconds() {
+    # A borrower cannot refresh the parent feed. One healthy publication cycle is
+    # the publisher's deliberate sleep (poll plus at most two seconds of jitter)
+    # followed by the existing bounded refresh budget. Sharded campaigns lengthen
+    # the poll (60 s at 20 controllers); a budget sized for 15 s cannot cover it.
+    printf '%s' "${CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS:-$((SNAPSHOT_POLL + 2 + SNAPSHOT_REFRESH_TIMEOUT * 3 + 5))}"
+}
+
 machines_snapshot_identity() {
     local key value generation="missing"
     [ -s "$INVENTORY_INDEX/current/health" ] || { printf '%s' "$generation"; return; }
@@ -555,7 +563,7 @@ refresh_machines_snapshot_after() {  # <prior-identity> [original-caller-deadlin
         # They never become a second producer or take its refresh mutex: a slow
         # child native CLI would otherwise prevent the healthy parent publishing.
         local borrowed_prior="$1" before after health_status wait_seconds deadline caller_deadline="${2:-}"
-        wait_seconds="${CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS:-$((SNAPSHOT_REFRESH_TIMEOUT * 3 + 5))}"
+        wait_seconds="$(inventory_borrowed_generation_wait_seconds)"
         case "$wait_seconds" in ''|*[!0-9]*) return 1 ;; esac
         deadline=$((SECONDS + wait_seconds))
         if [ -n "$caller_deadline" ]; then
