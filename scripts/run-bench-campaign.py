@@ -691,30 +691,20 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
 
 
 def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
+    """Send one cancellation TERM to each live controller's process group.
+
+    Each fleet controller releases its own guests and provider resources in its
+    EXIT cleanup, whose phases carry their own bounds (guest acknowledgement,
+    native stop, evidence, destroy). Callers keep joining every controller and
+    record its real exit. Never SIGKILL a controller: KILL cannot run that
+    cleanup, so started guests would stay allocated without an owner acting.
+    """
     for process_id, job in active.items():
         process = job["_process"]
         assert isinstance(process, subprocess.Popen)
         if process.poll() is None:
             try:
                 os.killpg(process_id, signal.SIGTERM)
-                job["_terminated_by_campaign"] = True
-            except ProcessLookupError:
-                pass
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if all(
-            isinstance(job["_process"], subprocess.Popen)
-            and job["_process"].poll() is not None
-            for job in active.values()
-        ):
-            return
-        time.sleep(0.1)
-    for process_id, job in active.items():
-        process = job["_process"]
-        assert isinstance(process, subprocess.Popen)
-        if process.poll() is None:
-            try:
-                os.killpg(process_id, signal.SIGKILL)
                 job["_terminated_by_campaign"] = True
             except ProcessLookupError:
                 pass
@@ -1412,7 +1402,7 @@ def main() -> int:
         # Waiting fleets observe the marker and exit through their existing
         # owned teardown. Booting fleets do the same on reaching the gate. Do
         # not turn an ordinary cohort startup failure into the user's explicit
-        # signal-cancellation path, which can escalate to SIGKILL after 30s.
+        # signal-cancellation path, which signals every controller group.
         for job in cohort["_jobs"]:
             if "_process" in job:
                 job["_aborted_by_campaign"] = True

@@ -4692,7 +4692,7 @@ group_term_delivered_slow_drain_contract() {
     # The runner already retired the delivered guest's proxy: nothing can
     # acknowledge it any more, so controller cleanup must hand it to retention
     # promptly (main took about 6 s) instead of polling a dead port until the
-    # 30 s confirmation deadline, which a campaign's 30 s SIGKILL would cut.
+    # 30 s confirmation deadline.
     cleanup_seconds="$(python3 -c 'import sys, time; print(f"{time.time() - float(sys.argv[1]):.1f}")' "$runner_exited_at")"
     python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) < 20 else 1)' "$cleanup_seconds" ||
         fail "$bench: controller cleanup took ${cleanup_seconds}s after the runner exited (limit 20s)"
