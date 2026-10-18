@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import ssl
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -186,7 +187,8 @@ async def foundry_complete(
                         logger.warning(
                             "rose.foundry.stream_failed", deployment=deployment, error_type=type(exc).__name__
                         )
-            except httpx.TransportError as exc:
+            # TLS record alerts can escape httpx as raw SSLError while reading headers.
+            except (httpx.TransportError, ssl.SSLError) as exc:
                 if yielded_visible:
                     raise
                 last_error = RoseServerError(f"Foundry transport failed: {type(exc).__name__}")

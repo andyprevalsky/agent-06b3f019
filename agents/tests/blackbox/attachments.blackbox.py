@@ -723,7 +723,10 @@ async def test_parent_attachment_success_preserves_metadata_and_logs():
         assert records[0].getMessage() == "Extracted parent attachments"
         assert records[0].parent_agent_id == "parent-1"
         assert records[0].attachment_count == len(pointers)
-        assert records[0].filenames == [p["original_filename"] for p in pointers]
+        # Attachment names can contain personal data; only the count is logged.
+        assert not hasattr(records[0], "filenames")
+        for pointer in pointers:
+            assert pointer["original_filename"] not in str(vars(records[0]))
 
 
 async def run_all_tests():

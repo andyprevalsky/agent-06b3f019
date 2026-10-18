@@ -5251,6 +5251,85 @@ async def test_client_raw_tls_failure_before_headers_uses_funded_fallback():
     assert metadata[0]["gpt_token_error"] == "server_error"
 
 
+async def test_cerebras_and_foundry_raw_tls_failures_become_route_errors():
+    """A raw TLS alert before output must be a Rose route error so later routes still run."""
+    import types
+
+    import providers.rose.cerebras as cb
+    import providers.rose.foundry as foundry
+    from providers.rose.pools import foundry_model
+
+    failure = ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+    messages = [{"role": "user", "content": "unchanged request"}]
+    provider_requests = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"rateLimitedUntil": None})
+        provider_requests.append(request.url.host)
+        raise failure
+
+    set_mock_handler(handler)
+    try:
+        await _drain(
+            cb.cerebras_complete(
+                pool_spec=get_pool("rose-1-flash"),
+                messages=messages,
+                cerebras_key="offline-provider-key",
+                request_id="raw-tls-cerebras",
+            )
+        )
+        raise AssertionError("a raw TLS alert must not complete the Cerebras route")
+    except RoseError as error:
+        assert error.__cause__ is failure
+    assert len(provider_requests) == 1
+
+    deployment = foundry_model(get_pool("rose-1-ultra"))
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid",
+        "AZURE_FOUNDRY_API_KEY": "offline",
+        "AZURE_FOUNDRY_DEPLOYMENTS": deployment,
+    }
+    real = httpx.AsyncClient
+    module_httpx = types.SimpleNamespace(
+        AsyncClient=lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False),
+        Timeout=httpx.Timeout,
+        Headers=httpx.Headers,
+        TransportError=httpx.TransportError,
+    )
+    with (
+        patch.object(foundry, "httpx", module_httpx),
+        patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
+        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_cooldown_until", {}),
+    ):
+        try:
+            await _drain(
+                foundry.foundry_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=messages,
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort=None,
+                    provider_fast_mode=True,
+                    request_id="raw-tls-foundry",
+                    route_key="raw-tls",
+                    agent_id=None,
+                    call_site="test",
+                    cache_namespace="raw-tls-cache",
+                    ttft_timeout_s=90,
+                    idle_timeout_s=120,
+                )
+            )
+            raise AssertionError("a raw TLS alert must not complete the Foundry route")
+        except RoseServerError as error:
+            assert "SSLError" in str(error)
+    assert provider_requests[1:] == ["offline.invalid"]
+
+
 async def test_client_raw_tls_failure_after_output_preserves_error_without_replay():
     """A TLS alert after productive output must keep the same error and stop."""
     from helpers import httpx_capture
@@ -9636,6 +9715,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "raw_tls_before_headers_uses_funded_fallback", test_client_raw_tls_failure_before_headers_uses_funded_fallback
+    )
+    await r.record_async(
+        "cerebras_foundry_raw_tls_become_route_errors",
+        test_cerebras_and_foundry_raw_tls_failures_become_route_errors,
     )
     await r.record_async(
         "raw_tls_after_output_does_not_replay", test_client_raw_tls_failure_after_output_preserves_error_without_replay

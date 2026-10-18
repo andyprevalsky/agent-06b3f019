@@ -1291,7 +1291,7 @@ class SpawnAgentManager(ToolManager):
                 metadata=terminal_metadata,
             )
         except BaseException as exc:
-            if isinstance(exc, GeneratorExit):
+            if isinstance(exc, (GeneratorExit, asyncio.CancelledError)):
                 raise
             terminal_metadata = dict(base_metadata)
             if agent_type == "code":

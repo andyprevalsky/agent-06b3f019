@@ -53,13 +53,19 @@ def _world_model_content_payload(content: Any) -> Any:
     return payload
 
 
+def _observation_metadata(observation: JsonObject) -> JsonObject:
+    # The observation is an open WMH record; a non-object metadata field is ignored.
+    metadata = observation.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
 def normalize_world_model_observation(observation: JsonObject, *, canonical: bool = False) -> JsonObject:
     """Decode WMH's output envelope; optionally expose canonical fidelity fields."""
     payload = _world_model_content_payload(observation.get("content"))
     if isinstance(payload, dict) and set(payload).issubset({"output", "is_error", "state_note"}):
         output = payload.get("output")
         if isinstance(output, (str, dict, list)):
-            metadata = dict(observation.get("metadata") or {})
+            metadata = _observation_metadata(observation)
             if isinstance(payload.get("state_note"), str) and payload["state_note"].strip():
                 metadata["state_note"] = payload["state_note"]
             observation = {
@@ -82,7 +88,7 @@ def normalize_world_model_observation(observation: JsonObject, *, canonical: boo
         and payload.get("schema") == "rose.canonical_observation.v1"
         and isinstance(payload.get("content"), str)
     ):
-        metadata = dict(observation.get("metadata") or {})
+        metadata = _observation_metadata(observation)
         if isinstance(payload.get("metadata"), dict):
             metadata.update(payload["metadata"])
         return {

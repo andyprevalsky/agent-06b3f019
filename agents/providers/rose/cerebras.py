@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import ssl
 import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -327,7 +328,8 @@ async def cerebras_complete(
             ):
                 yield chunk
             stream_completed = True
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+    # TLS record alerts can escape httpx as raw SSLError while reading headers.
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, ssl.SSLError) as exc:
         raise RoseError(f"Cerebras {model} connect/read error: {exc}") from exc
     finally:
         if cooldown_mark is not None:

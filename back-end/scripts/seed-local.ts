@@ -1418,7 +1418,8 @@ async function sync() {
     for (let skip = 0; skip < MESSAGE_LIMIT; skip += MESSAGE_PAGE_SIZE) {
       const page = await remote.messageRecord.findMany({
         where: { personId: { in: personIds } },
-        orderBy: { timestamp: 'desc' },
+        // id breaks timestamp ties so offset pages never repeat or skip a row.
+        orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
         skip,
         take: Math.min(MESSAGE_PAGE_SIZE, MESSAGE_LIMIT - skip),
         // Production may still be on the previous schema during a deploy.

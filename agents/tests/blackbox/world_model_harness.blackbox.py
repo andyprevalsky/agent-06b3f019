@@ -3109,6 +3109,15 @@ async def test_runtime_world_clock_long_polls_waits_and_skips_without_a_world():
             assert await runtime.world_clock_activity("wait", "child-1", None, {"wait_id": "w2", "duration_ms": day}) == {
                 "skipped": "no_world_session"
             }
+            # A transient root lookup failure retries instead of using the child's own scope.
+            resolve.return_value = (False, None, False, None, None, False)
+            request_count = len(requests)
+            try:
+                await runtime.world_clock_activity("register", "child-1", "root-1")
+                raise AssertionError("an unresolved root must fail the activity so it retries")
+            except RuntimeError as exc:
+                assert "durable root agent" in str(exc)
+            assert len(requests) == request_count
         with patch.dict(os.environ, {"WMH_BASE_URL": "", "WORLD_MODEL_HARNESS_URL": ""}):
             assert await runtime.world_clock_activity("finish", "child-1") == {"skipped": "no_world_model"}
     finally:
@@ -3175,6 +3184,9 @@ async def test_runtime_world_time_nonobject_clock_is_unavailable():
             payload = {"agents": [], "shared_time_ms": -1_000}
             assert await runtime.world_time_ms("child-1") == -1_000
             payload = {"start_ms": 0}
+            assert await runtime.world_time_ms("child-1") == 0
+            # A world pinned at epoch 0 reports shared time 0, not its start.
+            payload = {"agents": [], "shared_time_ms": 0, "start_ms": 1_000}
             assert await runtime.world_time_ms("child-1") == 0
             assert all(p == "/world_models/rose-archive/scopes/root-1/clock" for p in requests)
             assert resolve.await_count == len(requests)
@@ -3479,6 +3491,28 @@ async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
     assert sent_prompts[0] != sent_prompts[1], "The provider must see the unmodified WMH prompt"
     assert keys[0] == keys[1], "Equivalent DEMO actions must reuse the same WHM cache entry"
     assert keys[1] != keys[2], "A meaningful action change must still produce a new key"
+
+
+def test_world_model_observation_ignores_non_object_metadata():
+    from utils.world_model_observation import normalize_world_model_observation
+
+    for metadata in (["unexpected"], "unexpected", 3):
+        envelope = {
+            "content": json.dumps({"output": "done", "state_note": "cart saved"}),
+            "metadata": metadata,
+        }
+        decoded = normalize_world_model_observation(envelope)
+        assert decoded["content"] == "done"
+        assert decoded["metadata"] == {"state_note": "cart saved"}
+        canonical = {
+            "content": json.dumps(
+                {"schema": "rose.canonical_observation.v1", "content": "ok", "metadata": {"step": 1}}
+            ),
+            "metadata": metadata,
+        }
+        decoded = normalize_world_model_observation(canonical, canonical=True)
+        assert decoded["content"] == "ok"
+        assert decoded["metadata"] == {"step": 1}
 
 
 def test_world_model_observation_latency_normalization_matches_runtime_helper():
@@ -4878,6 +4912,49 @@ async def test_runtime_world_model_session_uses_first_tool_goal_as_task():
         teardown_mock()
 
 
+async def test_runtime_world_model_session_locks_per_scope():
+    """A slow create for one tree must not block another tree; one key creates once."""
+    import asyncio
+
+    from helpers import world_model_runtime as runtime
+
+    release_slow = asyncio.Event()
+    creates: list[str | None] = []
+
+    class _Client:
+        async def create_session(self, _name, *, task=None, seed_state=None, session_scope_id=None):
+            creates.append(session_scope_id)
+            if session_scope_id == "root-slow":
+                await release_slow.wait()
+            return f"session-{session_scope_id}"
+
+    keys = [("root-slow", "rose-golden"), ("root-fast", "rose-golden")]
+    for key in keys:
+        runtime._WMH_SESSION_CACHE.pop(key, None)
+        runtime._WMH_SESSION_LOCKS.pop(key, None)
+    client = _Client()
+    try:
+        slow = [
+            asyncio.create_task(runtime.ensure_world_model_session(client, "rose-golden", "root-slow"))
+            for _ in range(3)
+        ]
+        await asyncio.sleep(0)
+        fast = await asyncio.wait_for(
+            runtime.ensure_world_model_session(client, "rose-golden", "root-fast"), timeout=5
+        )
+        assert fast == "session-root-fast"
+        assert not any(task.done() for task in slow)
+        release_slow.set()
+        assert await asyncio.gather(*slow) == ["session-root-slow"] * 3
+        assert sorted(creates) == ["root-fast", "root-slow"]
+        assert not any(key in runtime._WMH_SESSION_LOCKS for key in keys)
+    finally:
+        release_slow.set()
+        for key in keys:
+            runtime._WMH_SESSION_CACHE.pop(key, None)
+            runtime._WMH_SESSION_LOCKS.pop(key, None)
+
+
 async def test_runtime_world_model_session_prioritizes_root_and_delegated_goals():
     from helpers import world_model_runtime as runtime
 
@@ -6126,6 +6203,10 @@ async def run_all_tests():
         test_world_model_observation_latency_normalization_matches_runtime_helper,
     )
     r.record(
+        "world_model_observation_ignores_non_object_metadata",
+        test_world_model_observation_ignores_non_object_metadata,
+    )
+    r.record(
         "world_model_observation_passes_through_activity_tool_result",
         test_world_model_observation_passes_through_activity_tool_result,
     )
@@ -6207,6 +6288,10 @@ async def run_all_tests():
     await r.record_async(
         "runtime_world_model_session_prioritizes_root_and_delegated_goals",
         test_runtime_world_model_session_prioritizes_root_and_delegated_goals,
+    )
+    await r.record_async(
+        "runtime_world_model_session_locks_per_scope",
+        test_runtime_world_model_session_locks_per_scope,
     )
     await r.record_async(
         "startup_sms_seeds_wmh_with_demo_root_goal",

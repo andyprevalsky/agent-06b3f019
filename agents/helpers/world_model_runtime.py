@@ -357,7 +357,9 @@ def _redact(value: Any) -> Any:
 # Direct benchmark activity calls may omit the scope and fall back to the action agent
 # (or the worker's single-run "default" session) for backward compatibility.
 _WMH_SESSION_CACHE: dict[tuple[str, str], str] = {}
-_WMH_SESSION_LOCK = asyncio.Lock()
+# One lock per key: a slow create for one agent tree must not block another tree's
+# first boundary. A key's lock is dropped once its session is cached.
+_WMH_SESSION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 
 
 async def ensure_world_model_session(
@@ -373,7 +375,8 @@ async def ensure_world_model_session(
     cached = _WMH_SESSION_CACHE.get(key)
     if cached:
         return cached
-    async with _WMH_SESSION_LOCK:
+    lock = _WMH_SESSION_LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
         cached = _WMH_SESSION_CACHE.get(key)
         if cached:
             return cached
@@ -384,6 +387,7 @@ async def ensure_world_model_session(
             session_scope_id=session_scope_id,
         )
         _WMH_SESSION_CACHE[key] = session_id
+        _WMH_SESSION_LOCKS.pop(key, None)
         return session_id
 
 
@@ -693,7 +697,9 @@ async def world_time_ms(agent_id: str | None) -> int | None:
     for agent in snapshot.get("agents") or []:
         if isinstance(agent, dict) and agent.get("agent_id") == agent_id and type(agent.get("time_ms")) is int:
             return agent["time_ms"]
-    fallback = snapshot.get("shared_time_ms") or snapshot.get("start_ms")
+    fallback = snapshot.get("shared_time_ms")
+    if fallback is None:
+        fallback = snapshot.get("start_ms")
     return fallback if type(fallback) is int else None
 
 
@@ -720,7 +726,11 @@ async def world_clock_activity(
     if not scope:
         from providers.fast_cache.client import resolve_agent_fast_mode
 
-        scope = (await resolve_agent_fast_mode(agent_id))[3] or agent_id
+        scope = (await resolve_agent_fast_mode(agent_id))[3]
+        if not scope:
+            # A failed lookup must retry: a child's own scope has no world, so
+            # it would keep a private clock and move ahead of its siblings.
+            raise RuntimeError("World clock could not resolve its durable root agent")
     path = f"/world_models/{model}/scopes/{scope}/clock/agents/{agent_id}/{operation}"
     try:
         if operation == "register":

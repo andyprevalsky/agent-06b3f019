@@ -2011,6 +2011,35 @@ async def test_simulate_mocks_specialized_agents_but_keeps_general_purpose_real(
     assert for_each_events == []
 
 
+async def test_simulated_specialized_agent_reraises_cancellation():
+    """Owner cancellation must stop a simulated spawn, not become an ERROR chip."""
+    from tools.base import MessageStatus
+    import domains.spawn_agent.handler as h
+
+    def cancelled_activity(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    fake_workflow = _FakeSpawnWF(
+        activity_results={"world_model_specialized_agent_activity": cancelled_activity}
+    )
+    restore = _patch_spawn_workflow(fake_workflow)
+    events = []
+    try:
+        wf = _FakeWFInstance(goal="root task")
+        wf.world_model_mode = "simulate"
+        with pytest.raises(asyncio.CancelledError):
+            async for event in h.SpawnAgentManager().execute_tool(
+                wf,
+                {"type": "explore", "goal": "research investors"},
+                "tc-explore",
+            ):
+                events.append(event)
+    finally:
+        restore()
+
+    assert [event.status for event in events] == [MessageStatus.IN_PROGRESS]
+
+
 async def test_simulated_code_posts_code_chip_lifecycle():
     """Whole-call simulation must publish the same chip identity and terminality."""
     from tools.base import MessageStatus
@@ -5505,6 +5534,10 @@ async def run_all_tests():
         test_simulate_mocks_specialized_agents_but_keeps_general_purpose_real,
     )
     await r.record_async("simulated_code_chip_lifecycle", test_simulated_code_posts_code_chip_lifecycle)
+    await r.record_async(
+        "simulated_specialized_agent_reraises_cancellation",
+        test_simulated_specialized_agent_reraises_cancellation,
+    )
     r.record(
         "world_model_specialized_result_text_unwraps_output_envelope",
         test_world_model_specialized_result_text_unwraps_output_envelope,
