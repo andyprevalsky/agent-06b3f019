@@ -79,6 +79,7 @@ model Agent {
   temporalWorkflowCleanups         TemporalWorkflowCleanup[]
   traceArchiveFinalization         TraceArchiveFinalization?
   purchaseSpends                   PurchaseSpend[]
+  iphoneLeases                     IPhoneLease[]
   verifier                         Verifier?
 
   @@index([userId, deletedAt])
@@ -390,6 +391,8 @@ model User {
   dataProviderSyncStates      UserDataProviderSyncState[]
   userSnapshot                UserSnapshot?
   userSnapshotRevisions       UserSnapshotRevision[]
+  iphoneDevice                IPhoneDevice?
+  iphoneLeases                IPhoneLease[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -1704,4 +1707,48 @@ model PlannerMemoryEmbedding {
   updatedAt       DateTime                    @updatedAt
 
   @@index([model])
+}
+
+// Account-owned persistent device; binding never transfers between accounts.
+model IPhoneDevice {
+  id               String        @id @default(uuid())
+  userId           String        @unique
+  providerDeviceId String        @unique
+  enabled          Boolean       @default(false)
+  setupState       String        @default("not_started")
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  user             User          @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  leases           IPhoneLease[]
+}
+
+// device row lock -> reconcile -> mutate -> admit smallest ticket, all in one transaction.
+model IPhoneLease {
+  id                 String       @id @default(uuid())
+  deviceId           String
+  userId             String
+  agentId            String
+  requestKey         String
+  browserTaskId      String?
+  status             String       @default("WAITING")
+  ticket             BigInt       @unique @default(autoincrement())
+  // A nullable unique slot also enforces one ACTIVE holder during db-push tests.
+  activeDeviceId     String?      @unique
+  queueDeadlineAt    DateTime
+  leaseExpiresAt     DateTime?
+  controlOwner       String       @default("agent")
+  attentionRequestId String?
+  revision           Int          @default(1)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  device             IPhoneDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  user               User         @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  agent              Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, agentId, requestKey])
+  @@index([deviceId, status, ticket])
+  @@index([deviceId, status, queueDeadlineAt])
+  @@index([deviceId, status, leaseExpiresAt])
+  @@index([userId])
+  @@index([agentId])
 }
