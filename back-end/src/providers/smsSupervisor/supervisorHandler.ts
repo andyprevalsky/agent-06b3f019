@@ -606,7 +606,6 @@ export async function handleSmsSupervisorMessage(config: {
     }
 
     const failedToolResults = toolResults.filter((result) => !result.success);
-    const blockingFailures = failedToolResults;
 
     // attempt_completion sends nothing. It is a valid stop signal only after
     // this run has successfully delivered at least one user message.
@@ -625,7 +624,7 @@ export async function handleSmsSupervisorMessage(config: {
         );
         break;
       }
-      if (sentMessages.length === 0 || blockingFailures.length > 0) {
+      if (sentMessages.length === 0 || failedToolResults.length > 0) {
         const completionFailure: ToolResult = {
           tool: 'attempt_completion',
           success: false,
