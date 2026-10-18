@@ -47,3 +47,8 @@ Private archive (NOT in Git): `swap-1ed69a70-private.tar.part-00..02` (+ `PARTS.
 
 ## Replacement / receipt
 Stable start key `swap-harness-replacement-1ed69a70-e33f-402d-b101-217cc36e4cb2-20261018T0228Z`. Replacement ids, URL and resumed receipt are appended below once known.
+
+## Replacement verified (appended 2026-10-18T03:45Z by the old-box worker)
+- Replacement: devbox `75ad1c7a-4e51-424b-b271-4d06695fe5c7`, thread `ph74556smw66kq04ce6jr873gs8ghasd` / https://boxes.dev/thread/thr_8ecc60522a644b6fb3bba00c85eefe81 (Claude, unmuted).
+- Receipt: `docs/handoffs/swap-harness-1ed69a70-e33f-402d-b101-217cc36e4cb2-resumed.json` at commit `e29200bca2c970acbfb755a1f7675e2cad72e213`. The first receipt commit `b942132d6` was invalid (content copied from an unrelated 2026-10-12 migration); it was corrected by a normal follow-up commit and is not evidence. Verified fields: old/new box, thread, harness=claude, checkpoint `0bcf17f80`, private archive 3/3 parts and 108/108 members verified, extracted outside Git.
+- Old-box disposition: **KEPT, archival NOT requested.** ~16 GB of other ignored `.context` evidence (run dumps, traces, recordings, earlier campaign artifacts) is not in the transferred archive; one idle helper-owned deploy stack also remains there. Destroy only after the user/coordinator supplies a bulk transfer route or explicitly accepts the loss.
