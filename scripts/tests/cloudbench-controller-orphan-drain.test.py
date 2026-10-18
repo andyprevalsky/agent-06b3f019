@@ -891,5 +891,33 @@ class CleanupExecution(unittest.TestCase):
                 clock(execution)
 
 
+class SavedEnvelope(unittest.TestCase):
+    def test_sorted_intent_roundtrip_preserves_exact_semantics(self):
+        original = dict(z=1, machine="a" * 14, action="plan", a=2)
+        saved = json.loads(json.dumps(original, sort_keys=True))
+        actual, expected = M["command"](original), M["command"](saved)
+        self.assertNotEqual(actual, expected)
+        validate = M["saved_command_matches"]
+        self.assertTrue(validate(actual, expected, M["GUEST"], saved))
+        for changed in [
+            dict(actual, timeout=19),
+            dict(actual, machine=False),
+            dict(actual, extra=True),
+            M["command"](dict(saved, action="signal")),
+        ]:
+            with self.assertRaises(Exception):
+                validate(changed, expected, M["GUEST"], saved)
+        argv = shlex.split(actual["cmd"])
+        for pos, value in [
+            (0, "python"),
+            (3, "foreign loader"),
+            (-1, base64.b64encode(gzip.compress(json.dumps(["foreign", saved]).encode())).decode()),
+        ]:
+            altered = list(argv)
+            altered[pos] = value
+            with self.assertRaises(Exception):
+                validate(dict(actual, cmd=shlex.join(altered)), expected, M["GUEST"], saved)
+
+
 if __name__ == "__main__":
     unittest.main()

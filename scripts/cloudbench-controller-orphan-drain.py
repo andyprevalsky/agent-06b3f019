@@ -5,6 +5,7 @@ import argparse
 import ast
 import base64
 import gzip
+import zlib
 import json
 import os
 import runpy
@@ -409,6 +410,29 @@ def command(payload):
     return body
 
 
+def saved_command_matches(actual, expected, source, payload):
+    need(isinstance(actual, dict) and set(actual) == set(expected), "saved command fields differ")
+    need(
+        actual["timeout"] == expected["timeout"] and actual["machine"] is expected["machine"],
+        "saved command bounds differ",
+    )
+    need(isinstance(actual["cmd"], str) and len(json.dumps(actual).encode()) <= 16384, "saved command exceeds bound")
+    argv, wanted = shlex.split(actual["cmd"]), shlex.split(expected["cmd"])
+    need(len(argv) == len(wanted) and argv[:-1] == wanted[:-1], "saved command loader differs")
+    packed = base64.b64decode(argv[-1], validate=True)
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    raw = decoder.decompress(packed, 256 * 1024 + 1)
+    need(
+        len(raw) <= 256 * 1024 and decoder.eof and not decoder.unused_data and not decoder.unconsumed_tail,
+        "saved command compression differs",
+    )
+    need(
+        json.dumps(json.loads(raw), sort_keys=True) == json.dumps([source, payload], sort_keys=True),
+        "saved command source or payload differs",
+    )
+    return True
+
+
 def successful_agent_response(response, payload, action):
     need(
         response.get("exit_code") == 0 and response.get("exit_signal", 0) == 0,
@@ -536,12 +560,12 @@ def saved_positive_plan(args, export):
     second, response = recorded(2)
     need(
         first == {"method": "GET", "path": "/machines/" + payload["machine"], "body": None}
-        and second
-        == {
-            "method": "POST",
-            "path": "/machines/" + payload["machine"] + "/exec",
-            "body": old["command"](dict(payload, action="plan")),
-        },
+        and set(second) == {"method", "path", "body"}
+        and second["method"] == "POST"
+        and second["path"] == "/machines/" + payload["machine"] + "/exec"
+        and saved_command_matches(
+            second["body"], old["command"](dict(payload, action="plan")), old["GUEST"], dict(payload, action="plan")
+        ),
         "saved plan request differs",
     )
     plan = successful_agent_response(response, payload, "plan")

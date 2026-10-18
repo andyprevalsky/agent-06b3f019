@@ -36,6 +36,8 @@ The exact originating Fly invocation is not proven. A missing parent canary rela
 
 The first real retirement invocation then exposed a separate response-contract defect. Its guest plan completed with exit code zero, one target and no held targets, and returned a durable plan hash. Loading the canonical export checker also emitted exactly one `EXPORT_PHASE REMOTE_ENTERED` diagnostic on stderr. The host rejected all nonempty stderr, so it stopped after planning and before sending any signal. The recorded native responses and original plan remain the source of truth; rerunning the plan would not be an appropriate recovery.
 
+The subsequent provider-free check exposed a reconstruction error: the durable intent saver sorts JSON object keys, while the original command encoded the payload's insertion order. Recompressing the reread intent therefore produced a different command string. Independent decoding of the retained request proved the same old guest source, payload, loader, timeout and Machine flag. The comparison must validate that exact command envelope and decoded source/payload rather than treating one compression serialization as the identity of the request. The original raw request remains unchanged.
+
 ## Prior archive search
 
 The search `Fly agent controller export relay parent preflight` found related normal-export ownership and retained-retirement evidence cases. Existing relay retirement explicitly excludes its isolated Fly agent and cannot stand in for ownership of this default agent.
@@ -56,11 +58,15 @@ The scoped continuation adds three controls, bringing the owning file to twelve 
 
 The separately authorized cleanup window adds one retirement and one export control: thirteen retirement and sixteen export controls pass. They cover an expired original task clock with the valid distinct cleanup window, unchanged original identity and deadline, and refusal of a foreign epoch, hold or cutoff. Root repeats the affected owning files successfully. Actual old-plan transport frames remain below the existing 16,384-byte limit, including the cleanup execution context. Actual retirement, export and release still require the executor's receipts.
 
+The ordering repair brings the retirement file to fourteen passing controls. The new case reproduces a sorted intent roundtrip while retaining the original command order, then rejects a changed loader, guest source, payload or transport envelope. The exact retained production request also passes the frozen bounded decoder without any provider call or replay. The compressed command remains limited to the original transport size and one complete gzip member; only the representation's object-key order is disregarded.
+
 ## Human feedback
 
 Continue the authorized deployment and benchmark task without bypassing writer checks or discarding evidence. Current-run cleanup and future source repairs remain separately attributable.
 
 The user subsequently required discussion before starting each new fix. After the successful-plan refusal was explained, the user explicitly approved accepting the known diagnostic line and continuing from the saved retirement plan without replaying prior actions. This approval does not cover unrelated response errors, new cleanup authority, or changing the original run deadline.
+
+After the command-ordering check failure was explained separately, the user explicitly instructed “fix it and do it.” That approval covers only the strict command-envelope comparison repair and continuation of the same saved plan. It does not authorize recreating the plan, replaying a signal, accepting a different guest program or payload, or extending the separately recorded cleanup cutoff.
 
 ## Reusable lesson
 
