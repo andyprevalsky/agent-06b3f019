@@ -1518,6 +1518,17 @@ def _context_dir_env_value(context_dir: Path) -> str:
         return str(context_dir)
 
 
+def print_scorecard_instruction(run_dir: Path) -> None:
+    """Print the mandatory CLI scorecard command for this run's report card directory."""
+    renderer = REPO_ROOT / "scripts" / "cloudbench-scorecard.py"
+    if not renderer.is_file():
+        return
+    try:
+        runpy.run_path(str(renderer))["print_instruction"](run_dir)
+    except Exception:  # a reporting aid never blocks the benchmark
+        return
+
+
 def _dashboard_context_dir(stack: ServiceStack) -> Path:
     """Absolute dir where run_benchmark.py's report_card.py writes report-card.json.
 
@@ -3126,6 +3137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # a browser. run_benchmark.py resolves the same dir via BENCHMARK_CONTEXT_DIR.
         if dashboard_enabled(ci=args.no_dashboard):
             dashboard = maybe_launch_dashboard(_dashboard_context_dir(stack), enabled=True)
+        print_scorecard_instruction(_dashboard_context_dir(stack))
         if needs_payment_fixture(cohort_tasks):
             seed_payment_fixture(manifest)
         if needs_frontend_tunnel(selected_tasks):
@@ -3191,6 +3203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if diag_dir:
                     print(f"Diagnostics saved: {diag_dir}")
         all_failures = [failure for path in result_paths for failure in failed_tasks_from_run(path)]
+        print_scorecard_instruction(_dashboard_context_dir(stack))
         if all_failures:
             print("\nFailed tasks:")
             for failure in all_failures:

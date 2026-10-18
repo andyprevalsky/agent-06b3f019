@@ -328,6 +328,7 @@ run_suite "Auto RCA Lifecycle Blackbox" bash scripts/tests/auto-rca-lifecycle.bl
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Benchmark Live Results" python3 scripts/tests/benchmark-live-results.test.py
+run_suite "Benchmark Scorecard" python3 scripts/tests/cloudbench-scorecard.test.py
 run_suite "Benchmark Campaign Grouping" bash scripts/tests/campaign-hub-grouping.test.sh
 run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
 run_suite "Original600 Portable Operator" python3 scripts/tests/original600-portable-operator.test.py

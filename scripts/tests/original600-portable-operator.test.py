@@ -3,6 +3,7 @@
 import argparse
 import ast
 import base64
+import contextlib
 from contextlib import contextmanager
 import errno
 import gzip
@@ -74,10 +75,15 @@ def wide_provider_limits():
     return value
 
 
-def warm_fixture(now=None, listed=True, status='created', created_age=86400, retention=5, metadata_snapshot=None):
+# The producer-proven snapshot a fixture's .fp names; runs never pin one in source.
+FIXTURE_SNAPSHOT = 'vs_fixtureproducerproof'
+
+
+def warm_fixture(now=None, listed=True, status='created', created_age=86400, retention=5, metadata_snapshot=None,
+                 pin=FIXTURE_SNAPSHOT):
     """Producer-shaped donor Machine, snapshot listing and the two operator inputs."""
     now = time.time() if now is None else now
-    pin, machine_id, app = RUNNER['WARM_SNAPSHOT_ID'], RUNNER['WARM_MACHINE_ID'], RUNNER['APP']
+    machine_id, app = RUNNER['WARM_MACHINE_ID'], RUNNER['APP']
     epoch = int(now - created_age - 120)
     proof = ['a'*64, 'b'*64, str(epoch), pin]
     created = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - created_age))
@@ -1764,7 +1770,7 @@ class Portable(unittest.TestCase):
             self.assertEqual(check['status'], 'CHECKED_NOT_LAUNCHED')
             self.assertEqual(check['infra_early_stop'], 'enabled')
             self.assertEqual(check['provider_calls'], 2)
-            self.assertEqual(check['warm_snapshot']['snapshot_id'], RUNNER['WARM_SNAPSHOT_ID'])
+            self.assertEqual(check['warm_snapshot']['snapshot_id'], FIXTURE_SNAPSHOT)
             self.assertGreater(check['warm_snapshot']['retention_after_deadline_s'], CLI.SNAPSHOT_RETENTION_MARGIN_S)
             base = '/v1/apps/' + RUNNER['APP']
             self.assertEqual(requests, [('GET', base+'/machines/'+RUNNER['WARM_MACHINE_ID'], 'FlyV1 fixture'),
@@ -1774,7 +1780,7 @@ class Portable(unittest.TestCase):
             fixture.update(warm_fixture(now, listed=False))
             expired = subprocess.run(args, cwd='/', env=env, capture_output=True, text=True, timeout=10)
             self.assertNotEqual(expired.returncode, 0)
-            self.assertIn('pinned warm snapshot ' + RUNNER['WARM_SNAPSHOT_ID'] + ' no longer exists', expired.stderr)
+            self.assertIn('proven warm snapshot ' + FIXTURE_SNAPSHOT + ' no longer exists', expired.stderr)
             self.assertIn('--refresh-deps', expired.stderr)
             self.assertNotIn('CHECKED_NOT_LAUNCHED', expired.stdout)
             self.assertEqual([r[0] for r in requests], ['GET', 'GET'])
@@ -1917,7 +1923,7 @@ class Portable(unittest.TestCase):
         fly, call = run(warm_fixture(now))
         receipt = call()
         self.assertEqual((receipt['snapshot_id'], receipt['volume_id'], receipt['provider_calls']),
-                         (RUNNER['WARM_SNAPSHOT_ID'], 'vol_fixture', 2))
+                         (FIXTURE_SNAPSHOT, 'vol_fixture', 2))
         self.assertLess(abs(receipt['expires_epoch'] - (now + 4 * 86400)), 2)
         self.assertEqual(receipt['retention_after_deadline_s'], int(receipt['expires_epoch'] - (now + 5400)))
         self.assertEqual(fly.requests, [('GET', '/machines/'+RUNNER['WARM_MACHINE_ID']), ('GET', '/volumes/vol_fixture/snapshots')])
@@ -1932,10 +1938,14 @@ class Portable(unittest.TestCase):
             (warm_fixture(now, retention=None), 'no measured retention'),
             (warm_fixture(now, metadata_snapshot='vs_newerrefresh'), 'donor dependency proof names vs_newerrefresh'),
         ]
+        refreshable = {'no longer exists on donor volume vol_fixture', 'expires .* before the run deadline', 'plus 600s',
+                       'is not complete', 'donor dependency proof names vs_newerrefresh'}
         for fixture, message in online:
             fly, call = run(fixture)
-            with self.assertRaisesRegex(ValueError, message):
+            with self.assertRaisesRegex(ValueError, message) as raised:
                 call()
+            # Gone/expiring/incomplete/unpublished snapshots are what a producer refresh fixes.
+            self.assertEqual(isinstance(raised.exception, CLI.WarmSnapshotStale), message in refreshable, message)
             self.assertTrue(all(method == 'GET' for method, _ in fly.requests))
         fixture = warm_fixture(now)
         fixture['machine']['config']['mounts'] = [dict(volume='vol_foreign', path='/data')]
@@ -1943,7 +1953,8 @@ class Portable(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'donor dependency proof names none'):
             call()
         offline = [
-            (dict(warm_deps='a'*64 + ' ' + 'b'*64 + ' 1791903927 vs_otherpin\n'), '--warm-deps proves snapshot vs_otherpin'),
+            # The proof's own snapshot is the run's: the inventory must carry exactly that one.
+            (dict(warm_deps='a'*64 + ' ' + 'b'*64 + ' 1791903927 vs_otherpin\n'), 'one complete row for the proven vs_otherpin'),
             (dict(warm_deps='fixture'), 'not one producer dependency proof line'),
             (dict(inventory=[]), '--snapshot-inventory does not contain one complete row'),
             (dict(inventory=[dict(warm_fixture(now)['inventory'][0], status='pending')]), 'one complete row'),
@@ -2114,6 +2125,21 @@ class Portable(unittest.TestCase):
 
 
 class Sharded(unittest.TestCase):
+    def setUp(self):
+        # Launches append to the experiments ledger and run a read-only native audit;
+        # tests keep both away from the shared git-common ledger and the provider.
+        ledger = tempfile.NamedTemporaryFile(prefix='experiments-', suffix='.jsonl', delete=False)
+        ledger.close()
+        self.ledger = Path(ledger.name)
+        self.addCleanup(self.ledger.unlink, missing_ok=True)
+        self.audits = []
+        for patcher in (patch.dict(os.environ, CLOUDBENCH_EXPERIMENTS_LEDGER=str(self.ledger)),
+                        patch.object(CLI, 'native_release_audit', lambda root, directory, token, owned: (
+                            self.audits.append((directory, owned)) or dict(released=True, present=[],
+                                                                           checked=dict(guest_names=sorted(owned[0])))))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     """Fresh runs split across controllers sized to what one controller handles easily."""
 
     def args(self, directory, **overrides):
@@ -2354,11 +2380,18 @@ class Sharded(unittest.TestCase):
                                 for r in range(1, shard['runs']+1) for i in shard['task_indexes']]
                         export = self.out/'export'; export.mkdir(mode=0o700)
                         (export/'disposable-export.verified.json').write_text('{}')
+                        jobs[0].update(run_id='20261018-000000-4242', controller_pid=4242, wall_clock_seconds=61.5)
+                        card = dict(run_id='20261018-000000-4242', cost=dict(agents_llm_usd=0.25, wmh_grounding_usd=None),
+                                    per_task=[dict(name=None, status='passed', duration_s=42.0, cost_usd=0.25,
+                                                   failure_reason=None, lifecycle_stage='released')])
                         raw = json.dumps(dict(jobs=jobs)).encode()
                         import tarfile
                         with tarfile.open(export/'originals.tar.gz', 'w:gz') as tar:
-                            info = tarfile.TarInfo('context/benchmarks/campaigns/campaign-x/summary.json')  # actual export layout
-                            info.size = len(raw); tar.addfile(info, io.BytesIO(raw))
+                            for member, data in (('context/benchmarks/campaigns/campaign-x/summary.json', raw),  # actual export layout
+                                                 ('context/fleet/runs/20261018-000000-4242/_batch/report-card.json', json.dumps(card).encode()),
+                                                 ('context/fleet/runs/20261018-000000-4242/teardown-ownership/owned-clones.names', b'cloudbench-owned\n')):
+                                info = tarfile.TarInfo(member)
+                                info.size = len(data); tar.addfile(info, io.BytesIO(data))
                         self.code = 0
                     elif self.polls == 1:
                         self.status('ready')
@@ -2386,8 +2419,17 @@ class Sharded(unittest.TestCase):
                  patch.object(CLI, 'publish_shard_group', publish), \
                  patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
                  patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
-                 patch.object(CLI.subprocess, 'Popen', Runner):
+                 patch.object(CLI.subprocess, 'Popen', Runner), \
+                 contextlib.redirect_stdout(io.StringIO()) as printed:
                 code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
+            output = printed.getvalue()
+            self.assertEqual(output.count('scripts/run-bench scorecard '), 4, 'start and end both print the scorecard command')
+            self.assertIn('hand-written cards are non-compliant', output)
+            ledger = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+            self.assertEqual([(e['event'], e['goal']) for e in ledger], [('launch', 'original600'), ('end', 'original600')])
+            self.assertEqual((ledger[0]['scheduled_total'], ledger[0]['controllers'], ledger[0]['slice']), (36, 3, 'tasks'))
+            self.assertEqual(len(self.audits), 1)
+            self.assertIn('cloudbench-owned', self.audits[0][1][0], 'the native audit checks owned guest names from the exports')
             self.assertEqual([p['outcomes'] is None for p in published], [True, False])
             self.assertEqual({p['group_id'] for p in published}, {launched[0].config['shard']['group_run_id']})
             self.assertEqual(published[0]['members'], 36)
@@ -2401,6 +2443,9 @@ class Sharded(unittest.TestCase):
             admission = next((directory/'state').iterdir())
             result = json.loads((admission/'result.json').read_bytes())
             self.assertEqual((result['observed_jobs'], result['missing_jobs'], result['infra_failures']), (36, 0, 0))
+            self.assertEqual(len(result['jobs']), 36, 'result.json carries one bounded row per scheduled job')
+            costed = [row for row in result['jobs'] if row['cost_usd'] is not None]
+            self.assertEqual([(row['cost_usd'], row['exec_s'], row['wall_s']) for row in costed], [(0.25, 42.0, 61.5)] * 3)  # one carded job per shard
             self.assertEqual(json.loads((admission/'capacity-proof.private.json').read_bytes())['new_machine_demand'], 45)
 
     def test_sharded_run_refuses_a_hub_interpreter_without_agents_dependencies(self):
@@ -2523,9 +2568,385 @@ class Sharded(unittest.TestCase):
                     CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
 
 
+DONOR_IMAGE = 'registry.fly.io/navi-whisper-lux-bench:cloudbench-warm-fixture@sha256:' + 'd'*64
+RUN_REF = 'c'*40
+
+
+class DiscoveryFly:
+    """Serves only the read-only discovery GETs: the bench Machine list, the donor and its snapshots."""
+    def __init__(self, fixture, machines):
+        self.fixture, self.machines, self.requests = fixture, machines, []
+
+    def __call__(self, app, token):
+        if app != RUNNER['APP']:
+            raise AssertionError('discovery reads only the bench app')
+        return self
+
+    def machine(self, machine_id):
+        self.requests.append(('GET', '/machines/' + machine_id))
+        return json.loads(json.dumps(self.fixture['machine']))
+
+    def api(self, method, path, body=None, timeout=60, **unused):
+        self.requests.append((method, path))
+        if (method, path) == ('GET', '/machines'):
+            return json.loads(json.dumps(self.machines))
+        if (method, path) == ('GET', '/volumes/vol_fixture/snapshots'):
+            return json.loads(json.dumps(self.fixture['snapshots']))
+        raise AssertionError('discovery must stay read-only: ' + method + ' ' + path)
+
+
+def bench_inventory(fixture):
+    """Donor, the other persistent cohort, and disposable task/controller resources."""
+    donor = json.loads(json.dumps(fixture['machine']))
+    donor['config']['image'] = DONOR_IMAGE
+    fixture['machine'] = donor
+    def row(mid, name, volume, metadata=None, state='stopped'):
+        return dict(id=mid, name=name, state=state, config=dict(image=DONOR_IMAGE, metadata=metadata or {},
+                                                                 mounts=[dict(volume=volume, path='/data')]))
+    return [donor, row('683e47df5094d8', 'cloudbench-warm', 'vol_legacydonor'),
+            row('820224f7e069e8', 'whm-deploy-g4-fixture', 'vol_whm', dict(whm_deploy_owner='fixture')),
+            row('89639da66e9468', 'polar-controller-300-fixture', 'vol_polar'),
+            row('86010ece9546e8', 'cloudbench-0b779b3381094bdb94043a60', 'vol_task', state='started'),
+            row('837ee3c7de1d68', 'cloudbench-gate-126b8262-20261018-191418-s02', 'vol_gate', state='started'),
+            row('81245db9215698', 'cloudbench-1111111111111111aaaaaaaa', 'vol_retained', dict(cloudbench_protected='1'))]
+
+
+class InputDiscovery(unittest.TestCase):
+    """The routed CLI's facts/warm-proof/inventory discovery and its reuse-vs-refresh decision."""
+    FINGERPRINTS = dict(node='a'*64, python='b'*64)
+
+    @contextmanager
+    def common(self, fp=None, receipt=None):
+        with tempfile.TemporaryDirectory() as name:
+            common = Path(name)/'git-common'
+            common.mkdir(mode=0o700)
+            proof = common/('cloudbench-warm-deps.' + RUNNER['WARM_MACHINE_NAME'] + '.fp')
+            if fp is not None:
+                private(proof, fp)
+            if receipt is not None:
+                private(proof.with_name(proof.name + '.ref'), receipt)
+            state = Path(name)/'state'
+            state.mkdir(mode=0o700)
+            with patch.object(CLI, 'git_common_dir', lambda root: common), \
+                 patch.object(CLI, 'committed_dependency_fingerprints', lambda root, ref: dict(self.FINGERPRINTS)):
+                yield types.SimpleNamespace(common=common, proof=proof, state=state,
+                                            args=argparse.Namespace(task_ref=RUN_REF, source_ref=RUN_REF, state_dir=state))
+
+    def test_warm_decision_reuses_only_an_exact_ref_proof_with_matching_fingerprints(self):
+        proof = warm_fixture()['warm_deps']
+        exact = RUN_REF + ' ' + FIXTURE_SNAPSHOT + '\n'
+        cases = [
+            (None, None, 'no producer dependency proof'),
+            ('fixture\n', exact, 'not one producer proof line'),
+            (proof.replace('a'*64, 'e'*64), exact, 'fingerprints differ from the checkout'),
+            (proof, None, 'records no source ref'),
+            (proof, 'd'*40 + ' ' + FIXTURE_SNAPSHOT + '\n', 'produced for ' + 'd'*40 + ', not the run ref'),
+            (proof, RUN_REF + ' vs_oldersnapshot\n', 'names snapshot vs_oldersnapshot'),
+            (proof, 'short\n', 'malformed'),
+        ]
+        for fp, receipt, reason in cases:
+            with self.subTest(reason=reason), self.common(fp, receipt):
+                decision = CLI.warm_decision(ROOT, RUNNER, RUN_REF)
+                self.assertEqual(decision['action'], 'refresh')
+                self.assertTrue(any(reason in r for r in decision['reasons']), decision['reasons'])
+                self.assertIn('bash scripts/run-bench-cloud --refresh-deps --ref ' + RUN_REF, decision['refresh_command'])
+                for env in ('CLOUDBENCH_WARM_MACHINE_NAME=' + RUNNER['WARM_MACHINE_NAME'],
+                            'CLOUDBENCH_WARM_VOLUME_NAME=' + RUNNER['WARM_VOLUME_NAME'], 'CLOUDBENCH_REGION=ord',
+                            'CLOUDBENCH_SKIP_LOCAL_PATCH=1'):
+                    self.assertIn(env, decision['refresh_command'])
+        with self.common(proof, exact):
+            decision = CLI.warm_decision(ROOT, RUNNER, RUN_REF)
+            self.assertEqual((decision['action'], decision['reasons'], decision['snapshot_id']), ('reuse', [], FIXTURE_SNAPSHOT))
+
+    def test_derived_facts_protect_every_non_disposable_machine_and_its_volumes(self):
+        fixture = warm_fixture()
+        machines = bench_inventory(fixture)
+        facts = CLI.derived_facts(machines, fixture['machine'], RUNNER)
+        self.assertEqual(facts['image_ref'], DONOR_IMAGE)
+        self.assertEqual(facts['protected_machines'], sorted([RUNNER['WARM_MACHINE_ID'], '683e47df5094d8', '820224f7e069e8',
+                                                              '89639da66e9468', '81245db9215698']))
+        self.assertEqual(facts['protected_volumes'], sorted(['vol_fixture', 'vol_legacydonor', 'vol_whm', 'vol_polar', 'vol_retained']))
+        CLI.facts_from(json.dumps(facts).encode())  # the authority's own fact contract
+        unpinned = json.loads(json.dumps(fixture['machine']))
+        unpinned['config']['image'] = 'registry.fly.io/navi-whisper-lux-bench:latest'
+        with self.assertRaisesRegex(ValueError, 'digest-pinned'):
+            CLI.derived_facts(machines, unpinned, RUNNER)
+        with self.assertRaisesRegex(ValueError, 'donor is absent'):
+            CLI.derived_facts(machines[1:], fixture['machine'], RUNNER)
+
+    def test_discovery_check_reports_refresh_or_reuse_with_only_read_only_provider_calls(self):
+        now = time.time()
+        exact = RUN_REF + ' ' + FIXTURE_SNAPSHOT + '\n'
+        for receipt, fixture, action, reason in [
+                ('d'*40 + ' ' + FIXTURE_SNAPSHOT + '\n', warm_fixture(now), 'refresh', 'not the run ref'),
+                (exact, warm_fixture(now, listed=False), 'refresh', 'no longer exists'),
+                (exact, warm_fixture(now, created_age=5*86400 - 3600), 'refresh', 'before the run deadline'),
+                (exact, warm_fixture(now), 'reuse', None)]:
+            with self.subTest(action=action, reason=reason), self.common(fixture['warm_deps'], receipt) as fx:
+                fly = DiscoveryFly(fixture, bench_inventory(fixture))
+                refresh = []
+                with patch.object(CLI, 'run_warm_refresh', lambda *a, **k: refresh.append(a)):
+                    report, paths = CLI.discover_inputs(fx.args, ROOT, RUNNER, 'FlyV1 fixture', False, fly=fly)
+                self.assertEqual((report['action'], paths, refresh), (action, None, []))
+                self.assertTrue(all(method == 'GET' for method, _ in fly.requests))
+                self.assertEqual(report['provider_calls'], len(fly.requests))
+                self.assertEqual(report['facts']['protected_machines'], 5)
+                self.assertEqual(list(fx.state.iterdir()), [])  # --check writes nothing
+                if reason:
+                    self.assertTrue(any(reason in r for r in report['reasons']), report['reasons'])
+                else:
+                    self.assertEqual(report['warm_snapshot']['snapshot_id'], FIXTURE_SNAPSHOT)
+
+    def test_discovery_run_refreshes_through_the_producer_then_binds_its_new_snapshot(self):
+        now = time.time()
+        stale = warm_fixture(now, created_age=5*86400 - 3600)  # expires inside this run
+        fresh = warm_fixture(now, pin='vs_freshrefresh', created_age=600)
+        with self.common(stale['warm_deps'], RUN_REF + ' ' + FIXTURE_SNAPSHOT + '\n') as fx:
+            fly = DiscoveryFly(stale, bench_inventory(stale))
+            calls = []
+            def producer(root, runner, ref, log):
+                calls.append((ref, log.parent.parent))
+                # The normal producer rewrites its proof and exact-ref receipt; the donor now records it.
+                fx.proof.write_text(fresh['warm_deps'])
+                fx.proof.with_name(fx.proof.name + '.ref').write_text(ref + ' vs_freshrefresh\n')
+                fly.fixture = fresh
+                fly.machines = bench_inventory(fresh)
+            with patch.object(CLI, 'run_warm_refresh', producer):
+                report, paths = CLI.discover_inputs(fx.args, ROOT, RUNNER, 'FlyV1 fixture', True, fly=fly)
+            self.assertEqual(calls, [(RUN_REF, fx.state)])
+            self.assertEqual((report['action'], report['refreshed'], report['refreshed_snapshot']), ('refresh', True, 'vs_freshrefresh'))
+            self.assertTrue(all(method == 'GET' for method, _ in fly.requests))
+            for name in ('facts', 'snapshot_inventory', 'warm_deps'):
+                CLI.runpy.run_path(str(ROOT/'scripts/cloudbench-operator-preflight.py'))['private_input'](paths[name])
+            self.assertEqual(paths['warm_deps'].read_text(), fresh['warm_deps'])
+            self.assertEqual(json.loads(paths['snapshot_inventory'].read_text()), fresh['snapshots'])
+            facts = json.loads(paths['facts'].read_text())
+            self.assertEqual((facts['image_ref'], len(facts['protected_machines'])), (DONOR_IMAGE, 5))
+            # The staged proof, not a source constant, pins the guest snapshot.
+            env = {}
+            self.assertEqual(RUNNER['pin_warm_snapshot'](env, {RUNNER['WARM_DEPS_RELATIVE']: paths['warm_deps'].read_bytes()}),
+                             'vs_freshrefresh')
+            self.assertEqual(env, dict(CLOUDBENCH_SNAPSHOT_ID='vs_freshrefresh'))
+            # The bound preflight accepts the discovered pair as explicit inputs.
+            CLI.warm_snapshot_preflight(DiscoveryFly(fresh, []), 'FlyV1 fixture', RUNNER, paths['warm_deps'].read_bytes(),
+                                        paths['snapshot_inventory'].read_bytes(), facts['protected_machines'], now + 5400)
+
+    def test_discovery_run_refuses_when_the_producer_does_not_prove_this_ref(self):
+        now = time.time()
+        fixture = warm_fixture(now)
+        with self.common(fixture['warm_deps'], 'd'*40 + ' ' + FIXTURE_SNAPSHOT + '\n') as fx:
+            fly = DiscoveryFly(fixture, bench_inventory(fixture))
+            # A peer's same-fingerprint snapshot for another ref is not this run's snapshot.
+            with patch.object(CLI, 'run_warm_refresh', lambda *a: None):
+                with self.assertRaisesRegex(ValueError, 'did not prove a snapshot for ' + RUN_REF):
+                    CLI.discover_inputs(fx.args, ROOT, RUNNER, 'FlyV1 fixture', True, fly=fly)
+
+    def test_runner_refuses_a_missing_or_conflicting_staged_snapshot_proof(self):
+        proof = warm_fixture()['warm_deps'].encode()
+        with self.assertRaisesRegex(ValueError, 'staged warm dependency proof required'):
+            RUNNER['pin_warm_snapshot']({}, {})
+        with self.assertRaisesRegex(ValueError, 'CLOUDBENCH_SNAPSHOT_ID'):
+            RUNNER['pin_warm_snapshot'](dict(CLOUDBENCH_SNAPSHOT_ID='vs_other'), {RUNNER['WARM_DEPS_RELATIVE']: proof})
+        with self.assertRaisesRegex(ValueError, 'one producer proof line'):
+            RUNNER['pin_warm_snapshot']({}, {RUNNER['WARM_DEPS_RELATIVE']: b'fixture'})
+        self.assertNotIn('WARM_SNAPSHOT_ID', RUNNER)  # no snapshot is pinned in source
+
+    def test_the_producer_records_its_exact_unpatched_ref_beside_the_proof(self):
+        text = (ROOT/'scripts/run-bench-cloud').read_text()
+        block = text[text.index('if [ "$MODE" = "refresh-deps" ]; then'):text.index('MODE: --refresh-wmh')]
+        proof = block.index('> "$WARM_DEPS_STATE_FILE"')
+        receipt = block.index('printf \'%s %s\\n\' "$EXPECTED_REF" "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE.ref.$$"')
+        stale = block.index('rm -f "$WARM_DEPS_STATE_FILE.ref"')
+        guard = block.index('if [ -z "$REFRESH_PATCH_FILE" ]; then')
+        # Written after the four-field proof, after removing any stale receipt, and only for an unpatched ref.
+        self.assertLess(proof, stale)
+        self.assertLess(stale, guard)
+        self.assertLess(guard, receipt)
+        self.assertIn('mv -f "$WARM_DEPS_STATE_FILE.ref.$$" "$WARM_DEPS_STATE_FILE.ref"', block)
+        # The remote checkout is verified equal to EXPECTED_REF before the snapshot is cut.
+        self.assertLess(block.index('[ "$REMOTE_REF" != "$EXPECTED_REF" ]'), block.index('create_volume_snapshot_exact'))
+
+    def test_committed_fingerprints_equal_the_producer_on_this_checkout(self):
+        head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        manifests = ['package.json', 'back-end/package.json', 'back-end/package-lock.json', 'front-end/package.json',
+                     'agents/requirements.txt']
+        changed = subprocess.check_output(['git', '-C', str(ROOT), 'status', '--porcelain', '--', *manifests], text=True)
+        self.assertEqual(changed, '', 'dependency manifests must be committed for this parity check')
+        live = subprocess.run(['bash', '-c', 'source scripts/lib/cloudbench-env.sh; cloudbench_node_dependency_fingerprint "$1" && '
+                               'cloudbench_manifest_fingerprint "$1" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}"', 'fp', str(ROOT)],
+                              cwd=ROOT, capture_output=True, text=True, timeout=60, check=True).stdout.split()
+        self.assertEqual(CLI.committed_dependency_fingerprints(ROOT, head), dict(node=live[0], python=live[1]))
+
+
+class TaskRefBinding(unittest.TestCase):
+    """The guest task ref is the run's requested pushed ref, bound in its shards; the pin stays historical."""
+    def args(self, directory, **overrides):
+        names = polar_names(40)
+        values = dict(source_ref=RUN_REF, task_ref=RUN_REF, tasks=private(directory/'tasks', names), task_count=None,
+                      repetitions=1, controllers='auto', tasks_per_controller=None, task_timeout=480, e2e_timeout=5400)
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def test_bound_task_ref_reaches_every_shard_argv_and_the_supervisor(self):
+        supervisor = runpy.run_path(str(ROOT/'scripts/cloudbench-original600-supervisor.py'))
+        with tempfile.TemporaryDirectory() as name:
+            args = self.args(Path(name))
+            plan = CLI.shard_selection(args, RUNNER)
+            self.assertEqual((plan['controllers'], plan['copies']), (2, 40))
+            manifest = json.loads(args.tasks.read_text())
+            for item in plan['shards']:
+                shard = CLI.bound_shard(item, args, RUNNER, 'g1', plan['copies'], time.time())
+                self.assertEqual(shard['task_ref'], RUN_REF)
+                argv = RUNNER['campaign_argv'](manifest, shard['group_started_at'], shard)
+                self.assertEqual(argv[argv.index('--ref') + 1], RUN_REF)
+                self.assertEqual(supervisor['shard_task_ref'](shard), RUN_REF)
+                supervisor['validate_shard'](shard, manifest)
+                for bad in (RUNNER['TASK_REF'], 'HEAD', 'C'*40):
+                    with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'task ref'):
+                        RUNNER['shard_task_ref'](dict(shard, task_ref=bad))
+                    with self.assertRaisesRegex(ValueError, 'task ref'):
+                        supervisor['shard_task_ref'](dict(shard, task_ref=bad))
+            # Without --task-ref the historical pin keeps its exact encoding (absence).
+            legacy = CLI.bound_shard(plan['shards'][0], self.args(Path(name), task_ref=None), RUNNER, 'g1', 40, 1.0)
+            self.assertNotIn('task_ref', legacy)
+            argv = RUNNER['campaign_argv'](manifest, 1.0, legacy)
+            self.assertEqual(argv[argv.index('--ref') + 1], RUNNER['TASK_REF'])
+            self.assertEqual(supervisor['shard_task_ref'](legacy), RUNNER['TASK_REF'])
+            self.assertEqual(supervisor['shard_task_ref'](None), RUNNER['TASK_REF'])
+
+
+class RunBenchShardedRouting(unittest.TestCase):
+    """scripts/run-bench routes wide cloud runs to the sharded operator with the pushed HEAD."""
+    @contextmanager
+    def checkout(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)/'repo'
+            (root/'agents/benchmarks').mkdir(parents=True)
+            (root/'.claude/shared').mkdir(parents=True)
+            subprocess.run(['cp', '-a', str(ROOT/'scripts'), str(root/'scripts')], check=True)
+            for member in ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
+                           '.claude/shared/benchmark-report-format.txt'):
+                (root/member).write_bytes((ROOT/member).read_bytes())
+            git = ['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false']
+            (root/'back-end').mkdir()
+            for env_file in ('agents/.env', 'back-end/.env'):  # untracked, as in a real checkout
+                private(root/env_file, 'FIXTURE=1\n')
+            (root/'.gitignore').write_text('.env\n.context/\n')
+            subprocess.run(git[:3] + ['init', '-q'], check=True)
+            subprocess.run(git + ['add', '-A'], check=True)
+            subprocess.run(git + ['commit', '-qm', 'fixture'], check=True)
+            head = subprocess.check_output(git + ['rev-parse', 'HEAD'], text=True).strip()
+            # Pushed: reachable from origin/main, the CLI's offline fetchable fast path.
+            subprocess.run(git + ['update-ref', 'refs/remotes/origin/main', head], check=True)
+            calls, fleet = Path(name)/'operator-calls.jsonl', Path(name)/'fleet-calls.jsonl'
+            operator = Path(name)/'fake-operator'
+            operator.write_text('#!/usr/bin/env python3\nimport json,os,sys\n'
+                                'open(os.environ["OPERATOR_CALLS"],"a").write(json.dumps(sys.argv[1:])+"\\n")\n'
+                                'tasks=sys.argv[sys.argv.index("--tasks")+1]\n'
+                                'open(os.environ["OPERATOR_CALLS"]+".manifest","w").write(open(tasks).read())\n'
+                                'print(json.dumps(dict(status="CHECKED_NOT_LAUNCHED")))\n'
+                                'raise SystemExit(int(os.environ.get("OPERATOR_EXIT","0")))\n')
+            operator.chmod(0o700)
+            fake_fleet = Path(name)/'fake-fleet'
+            fake_fleet.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$FLEET_CALLS"\n')
+            env = dict(os.environ, RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST=str(operator), OPERATOR_CALLS=str(calls),
+                       RUN_BENCH_FLEET_BIN_UNDER_TEST=str(fake_fleet), FLEET_CALLS=str(fleet),
+                       GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+            for key in ('RUN_BENCH_SHARDED_ROUTE', 'RUN_BENCH_SHARDED_STATE_DIR', 'RUN_BENCH_GOAL', 'RUN_BENCH_CATALOG_UNDER_TEST'):
+                env.pop(key, None)
+            def run(*argv):
+                result = subprocess.run(['bash', str(root/'scripts/run-bench'), *argv], cwd=root, env=env,
+                                        capture_output=True, text=True, timeout=120)
+                ops = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+                fleets = fleet.read_text().splitlines() if fleet.exists() else []
+                for path in (calls, fleet):
+                    path.unlink(missing_ok=True)
+                return result, ops, fleets
+            yield types.SimpleNamespace(root=root, head=head, run=run, git=git, env=env,
+                                        manifest=Path(str(calls) + '.manifest'))
+
+    def option(self, argv, flag):
+        return argv[argv.index(flag) + 1] if flag in argv else None
+
+    def test_wide_runs_route_check_then_run_with_manifest_repetitions_timeout_and_pushed_head(self):
+        names = polar_names(40)
+        with self.checkout() as fx:
+            result, ops, fleets = fx.run(*names)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(fleets, [])
+            self.assertEqual(len(ops), 2)
+            check, launch = ops
+            self.assertNotIn('--run', check)
+            self.assertEqual(launch, check + ['--run'])
+            self.assertEqual(check[0], str(fx.root.resolve()/'scripts/run-original600-controller.py'))
+            self.assertEqual((self.option(check, '--source-ref'), self.option(check, '--task-ref')), (fx.head, fx.head))
+            self.assertEqual(self.option(check, '--repetitions'), '1')
+            self.assertIsNone(self.option(check, '--task-timeout'))  # the operator's unchanged 1200 default
+            for flag in ('--facts', '--snapshot-inventory', '--warm-deps'):
+                self.assertNotIn(flag, check)  # discovered from their normal producers
+            self.assertEqual(json.loads(fx.manifest.read_text()), names)
+            state = Path(self.option(check, '--state-dir'))
+            self.assertEqual((state, state.stat().st_mode & 0o777), (fx.root.resolve()/'.context/sharded-runs', 0o700))
+            self.assertEqual(Path(self.option(check, '--tasks')).stat().st_mode & 0o777, 0o600)
+            self.assertIn('sharded controller operator: 40 simultaneous copies exceed', result.stdout)
+
+            result, ops, fleets = fx.run(*names[:2], '-k', '20', '--concurrency', '40', '--timeout', '480', '--check')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(ops), 1)
+            self.assertEqual((self.option(ops[0], '--repetitions'), self.option(ops[0], '--task-timeout')), ('20', '480'))
+            self.assertNotIn('--run', ops[0])
+            self.assertIn('dry run only (--check)', result.stdout)
+
+            result, ops, fleets = fx.run(*names[:2], '-k', '20', '--retry-infra', '1', '--e2e-timeout', '4000', '--check')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.option(ops[0], '--e2e-timeout'), '4000')
+
+            fx.env['OPERATOR_EXIT'] = '1'
+            result, ops, fleets = fx.run(*names, '--timeout', '480')
+            self.assertEqual((result.returncode, len(ops)), (2, 1))  # a refused check never launches
+            self.assertIn('nothing was launched', result.stderr)
+            fx.env.pop('OPERATOR_EXIT')
+
+    def test_narrow_runs_keep_the_fleet_path_and_refuse_a_sharded_dry_run(self):
+        names = polar_names(10)
+        with self.checkout() as fx:
+            result, ops, fleets = fx.run(*names, '--timeout', '480')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((ops, len(fleets)), ([], 1))
+            self.assertIn('--timeout 480', fleets[0])
+            result, ops, fleets = fx.run(*names, '--check')
+            self.assertEqual((result.returncode, ops, fleets), (2, [], []))
+            self.assertIn('fit one controller', result.stderr)
+
+    def test_routed_runs_refuse_unpushed_dirty_foreign_ref_and_unsupported_options(self):
+        names = polar_names(40)
+        with self.checkout() as fx:
+            refusals = [
+                (('--ref', 'HEAD~0^{tree}'), 'execute the pushed checkout HEAD'),
+                (('--sim-on', names[0]), 'not a sharded operator option'),
+                (('--retry-infra', '2'), 'exactly once'),
+                (('--concurrency', '39', '--retry-infra', '1'), 'admits all 40 copies'),
+                (('--e2e-started-at', '1'), 'owns its admission clock'),
+            ]
+            for extra, message in refusals:
+                with self.subTest(message=message):
+                    result, ops, fleets = fx.run(*names, *extra)
+                    self.assertEqual((result.returncode, ops, fleets), (2, [], []), result.stderr)
+                    self.assertIn(message, result.stderr)
+            (fx.root/'agents/benchmarks/tasks.json').write_bytes((fx.root/'agents/benchmarks/tasks.json').read_bytes() + b' ')
+            result, ops, fleets = fx.run(*names)
+            self.assertEqual((result.returncode, ops), (2, []))
+            self.assertIn('tracked changes refused', result.stderr)
+            subprocess.run(fx.git + ['commit', '-qam', 'unpushed'], check=True)
+            result, ops, fleets = fx.run(*names)
+            self.assertEqual((result.returncode, ops), (2, []))
+            self.assertIn('is not pushed to origin', result.stderr)
+
+
 class TaskRefPins(unittest.TestCase):
     def test_every_guest_task_ref_pin_matches_the_runner(self):
-        """Moving the frozen guest task source must move every validator with it."""
+        """The historical default guest task source: every legacy validator pins the same ref.
+        New runs bind their own pushed ref per shard (task_ref; see TaskRefBinding)."""
         ref = runpy.run_path(str(ROOT/'scripts/cloudbench-original600-runner.py'))['TASK_REF']
         self.assertRegex(ref, '^[0-9a-f]{40}$')
         for name in ('cloudbench-archived-machine-reuse.py', 'cloudbench-reuse-index.py'):

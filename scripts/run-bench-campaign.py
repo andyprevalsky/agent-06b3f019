@@ -1087,6 +1087,24 @@ def provider_capacity_refusal(benches: int) -> int:
         raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
 
 
+def scorecard_hooks() -> dict | None:
+    """The CLI scorecard and experiments ledger, when this script snapshot carries them."""
+    here = Path(__file__).resolve().parent
+    if not (here / "cloudbench-scorecard.py").is_file() or not (here / "cloudbench_experiments.py").is_file():
+        return None
+    try:
+        return runpy.run_path(str(here / "cloudbench-scorecard.py"))
+    except Exception:  # reporting aids never block a launch
+        return None
+
+
+def record_experiment(hooks, event: str, campaign_dir: Path, root: Path, **fields) -> None:
+    """Top-level campaigns record actual launches/ends; sharded children belong to their operator."""
+    if hooks is None or os.environ.get("RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER"):
+        return
+    hooks["ledger_mod"].record(event, campaign_dir.name, root=root, **fields)
+
+
 def main() -> int:
     args = parse_args()
     if args.runs < 1 or args.concurrency < 1 or not args.task:
@@ -1289,6 +1307,14 @@ def main() -> int:
         f"jobs={len(jobs)} concurrency={args.concurrency}"
     )
     print(f"   summary: {summary_path}")
+    scorecard = scorecard_hooks()
+    experiment_goal = os.environ.get("RUN_BENCH_GOAL") or "campaign:" + ",".join(sorted(set(args.task)))[:120]
+    record_experiment(scorecard, "launch", campaign_dir, root, goal=experiment_goal, kind="campaign",
+                      slice=os.environ.get("RUN_BENCH_EXPERIMENT_LABEL") or (args.task[0] if len(args.task) == 1 else f"{len(set(args.task))} tasks"),
+                      run_dir=str(campaign_dir), triggered_at=e2e_started_at, tasks=len(set(args.task)),
+                      runs=args.runs, scheduled_total=len(jobs), surface="cloud")
+    if scorecard is not None:
+        scorecard["print_instruction"](campaign_dir)
     if strict_start:
         print(
             f"   strict startup: {len(cohorts)} cohort(s), "
@@ -2181,6 +2207,10 @@ def main() -> int:
         f"{'✅' if result == 0 else '❌'} campaign {state['status']} "
         f"wall={state['wall_clock_seconds']}s summary={summary_path}"
     )
+    record_experiment(scorecard, "end", campaign_dir, root, goal=experiment_goal, ended_at=time.time(),
+                      state={"passed": "COMPLETE", "failed": "FAILED", "cancelled": "ABORTED"}.get(state["status"], "ENDED"))
+    if scorecard is not None:
+        scorecard["print_instruction"](campaign_dir)
     return result
 
 

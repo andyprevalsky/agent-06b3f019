@@ -447,62 +447,317 @@ SNAPSHOT_COMPLETE = frozenset({'created', 'complete', 'completed', 'ready'})
 SNAPSHOT_RETENTION_MARGIN_S = 600
 
 
-def warm_snapshot_preflight(fly, token, runner, warm_deps_raw, inventory_raw, protected_machines, deadline_epoch):
-    """Read-only: the pinned donor snapshot must exist, be complete, remain the
-    donor's recorded dependency proof and outlive the run deadline. Two GETs."""
+class WarmSnapshotStale(ValueError):
+    """The producer-proven snapshot is gone, incomplete, unpublished or expiring: a refresh fixes it."""
+
+
+def warm_refresh_command(runner, ref):
+    """The exact normal producer invocation for this run's donor and ref."""
+    return ('CLOUDBENCH_WARM_MACHINE_NAME=%s CLOUDBENCH_WARM_VOLUME_NAME=%s CLOUDBENCH_REGION=%s '
+            'CLOUDBENCH_SKIP_LOCAL_PATCH=1 bash scripts/run-bench-cloud --refresh-deps --ref %s'
+            % (runner['WARM_MACHINE_NAME'], runner['WARM_VOLUME_NAME'], runner['WARM_REGION'], ref))
+
+
+def warm_snapshot_preflight(fly, token, runner, warm_deps_raw, inventory_raw, protected_machines, deadline_epoch,
+                            refresh=None):
+    """Read-only: the snapshot the producer proof names must exist, be complete, remain the
+    donor's recorded dependency proof and outlive the run deadline. Two GETs. With
+    inventory_raw None the donor listing itself becomes the run's snapshot inventory."""
     import datetime
-    pin, machine_id, app = runner['WARM_SNAPSHOT_ID'], runner['WARM_MACHINE_ID'], runner['APP']
-    refresh = ('refresh the donor through `scripts/run-bench-cloud --refresh-deps` and rebind '
-               'WARM_SNAPSHOT_ID with new --warm-deps/--snapshot-inventory inputs')
-    fields = warm_deps_raw.decode('ascii', 'replace').split()
-    if (len(fields) != 4 or not all(re.fullmatch('[0-9a-f]{64}', value) for value in fields[:2])
-            or not re.fullmatch('[1-9][0-9]*', fields[2])):
-        raise ValueError('--warm-deps is not one producer dependency proof line')
-    if fields[3] != pin:
-        raise ValueError(f'--warm-deps proves snapshot {fields[3]}, not the pinned {pin}')
-    rows = json.loads(inventory_raw)
-    rows = [r for r in rows if isinstance(r, dict) and r.get('id') == pin] if isinstance(rows, list) else []
-    if len(rows) != 1 or str(rows[0].get('status') or '').lower() not in SNAPSHOT_COMPLETE or int(rows[0].get('size') or 0) <= 0:
-        raise ValueError(f'--snapshot-inventory does not contain one complete row for the pinned {pin}')
+    machine_id, app = runner['WARM_MACHINE_ID'], runner['APP']
+    refresh = refresh or ('refresh the donor through `scripts/run-bench-cloud --refresh-deps` and rebind '
+                          'new --warm-deps/--snapshot-inventory inputs')
+    try:
+        proof = runner['warm_deps_proof'](warm_deps_raw)
+    except ValueError:
+        raise ValueError('--warm-deps is not one producer dependency proof line') from None
+    fields = [proof['node'], proof['python'], str(proof['epoch']), proof['snapshot']]
+    pin = proof['snapshot']
+    if inventory_raw is not None:
+        rows = json.loads(inventory_raw)
+        rows = [r for r in rows if isinstance(r, dict) and r.get('id') == pin] if isinstance(rows, list) else []
+        if len(rows) != 1 or str(rows[0].get('status') or '').lower() not in SNAPSHOT_COMPLETE or int(rows[0].get('size') or 0) <= 0:
+            raise ValueError(f'--snapshot-inventory does not contain one complete row for the proven {pin}')
     if machine_id not in protected_machines:
-        raise ValueError('the pinned warm donor must remain a protected Machine')
+        raise ValueError('the warm donor must remain a protected Machine')
     api = fly(app, token)
     machine = api.machine(machine_id)
     mounts = (machine.get('config') or {}).get('mounts') or []
     if machine.get('name') != runner['WARM_MACHINE_NAME'] or len(mounts) != 1 or not mounts[0].get('volume'):
-        raise ValueError('pinned warm donor identity or volume changed')
+        raise ValueError('warm donor identity or volume changed')
     volume_id = mounts[0]['volume']
     if not re.fullmatch('vol_[A-Za-z0-9]+', volume_id):
-        raise ValueError('pinned warm donor volume identity is invalid')
+        raise ValueError('warm donor volume identity is invalid')
     metadata = (machine.get('config') or {}).get('metadata') or {}
     recorded = [value.split() for value in metadata.values() if isinstance(value, str)]
     recorded = [value for value in recorded if len(value) == 7 and value[:2] == fields[:2] and value[4:] == [volume_id, machine_id, app]]
     if [fields[2], pin] not in [value[2:4] for value in recorded]:
         named = sorted({value[3] for value in recorded}) or ['none']
-        raise ValueError(f'donor dependency proof names {", ".join(named)}, not the pinned {pin}; {refresh}')
+        raise WarmSnapshotStale(f'donor dependency proof names {", ".join(named)}, not the proven {pin}; {refresh}')
     snapshots = api.api('GET', f'/volumes/{volume_id}/snapshots', timeout=20)
     match = [s for s in snapshots if isinstance(s, dict) and s.get('id') == pin] if isinstance(snapshots, list) else None
     if match is None:
         raise ValueError('donor volume snapshot listing is not a list')
     if len(match) != 1:
-        raise ValueError(f'pinned warm snapshot {pin} no longer exists on donor volume {volume_id} '
-                         f'(retention expired or deleted); {refresh}')
+        raise WarmSnapshotStale(f'proven warm snapshot {pin} no longer exists on donor volume {volume_id} '
+                                f'(retention expired or deleted); {refresh}')
     snapshot = match[0]
     if str(snapshot.get('status') or '').lower() not in SNAPSHOT_COMPLETE or int(snapshot.get('size') or 0) <= 0:
-        raise ValueError(f'pinned warm snapshot {pin} is not complete (status {snapshot.get("status")!r})')
+        raise WarmSnapshotStale(f'proven warm snapshot {pin} is not complete (status {snapshot.get("status")!r}); {refresh}')
     created = datetime.datetime.fromisoformat(str(snapshot.get('created_at') or '').replace('Z', '+00:00')).timestamp()
     if created < int(fields[2]) - 60:
-        raise ValueError(f'pinned warm snapshot {pin} predates its dependency proof')
+        raise ValueError(f'proven warm snapshot {pin} predates its dependency proof')
     retention = snapshot.get('retention_days')
     if type(retention) is not int or retention <= 0:
-        raise ValueError(f'pinned warm snapshot {pin} has no measured retention')
+        raise ValueError(f'proven warm snapshot {pin} has no measured retention')
     expires = created + retention * 86400
     if expires < deadline_epoch + SNAPSHOT_RETENTION_MARGIN_S:
         stamp = lambda value: datetime.datetime.fromtimestamp(value, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-        raise ValueError(f'pinned warm snapshot {pin} expires {stamp(expires)}, before the run deadline '
-                         f'{stamp(deadline_epoch)} plus {SNAPSHOT_RETENTION_MARGIN_S}s; {refresh}')
-    return dict(snapshot_id=pin, volume_id=volume_id, created_at=snapshot['created_at'], retention_days=retention,
-                expires_epoch=expires, retention_after_deadline_s=int(expires - deadline_epoch), provider_calls=2)
+        raise WarmSnapshotStale(f'proven warm snapshot {pin} expires {stamp(expires)}, before the run deadline '
+                                f'{stamp(deadline_epoch)} plus {SNAPSHOT_RETENTION_MARGIN_S}s; {refresh}')
+    result = dict(snapshot_id=pin, volume_id=volume_id, created_at=snapshot['created_at'], retention_days=retention,
+                  expires_epoch=expires, retention_after_deadline_s=int(expires - deadline_epoch), provider_calls=2)
+    if inventory_raw is None:
+        # The read-only donor listing just read is the run's authentic snapshot inventory.
+        result['inventory'] = snapshots
+        result['donor_machine'] = machine
+    return result
+
+
+# ── Input discovery: launch facts, warm proof and snapshot inventory ─────────
+# The routed CLI (scripts/run-bench) supplies no private inputs: facts come
+# from read-only native inventory at admission, the warm proof from the
+# producer's git-common file, and the snapshot inventory from the donor listing.
+# Disposable benchmark resources: task/worker clones and controller gates are
+# owned by exact run tokens. Every other bench-app Machine (warm donors,
+# retained controllers, WHM deploys) and its Volumes form the protected cohort.
+DISPOSABLE_MACHINE_NAME = re.compile(r'cloudbench-(?:[0-9a-f]{16,40}|gate-[A-Za-z0-9_.-]+)')
+PROTECTED_METADATA_PREFIXES = ('whm_deploy', 'rose_controller', 'cloudbench_protected', 'polar')
+
+
+def git_common_dir(root):
+    return Path(subprocess.check_output(['git', '-C', str(root), 'rev-parse', '--path-format=absolute',
+                                         '--git-common-dir'], text=True, timeout=10).strip())
+
+
+def committed_dependency_fingerprints(root, ref):
+    """The producer's node/python fingerprints of the committed manifests at ref (sparse-checkout safe)."""
+    import tempfile
+    env_lib = root / 'scripts/lib/cloudbench-env.sh'
+    listing = subprocess.run(['bash', '-c', 'source "$1"; printf "%s\\n" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}"', 'manifests',
+                              str(env_lib)], capture_output=True, text=True, timeout=30, check=True).stdout.split()
+    members = ['package.json', 'back-end/package.json', 'back-end/package-lock.json', 'front-end/package.json', *listing]
+    with tempfile.TemporaryDirectory(prefix='warm-fingerprint-') as scratch:
+        for member in members:
+            target = Path(scratch, member)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                                        ref + ':' + member], timeout=30))
+        result = subprocess.run(['bash', '-c', 'source "$1"; cloudbench_node_dependency_fingerprint "$2" && '
+                                 'cloudbench_manifest_fingerprint "$2" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}"',
+                                 'fingerprints', str(env_lib), scratch], capture_output=True, text=True, timeout=60)
+    values = result.stdout.split()
+    if result.returncode or len(values) != 2 or not all(re.fullmatch('[0-9a-f]{64}', v) for v in values):
+        raise ValueError('could not compute the producer dependency fingerprints at ' + ref + ': '
+                         + result.stderr.strip()[-300:])
+    return dict(node=values[0], python=values[1])
+
+
+def warm_proof_paths(root, runner):
+    common = git_common_dir(root)
+    proof = common / ('cloudbench-warm-deps.' + runner['WARM_MACHINE_NAME'] + '.fp')
+    return proof, proof.with_name(proof.name + '.ref')
+
+
+def read_small(path, limit=4096):
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_size > limit:
+            raise ValueError('producer proof must be a small regular file owned by this operator: ' + str(path))
+        return stream.read(limit + 1)
+
+
+def warm_decision(root, runner, ref, fingerprints=None):
+    """Local, no provider call: reuse the producer proof only when it was produced for this
+    exact ref with this checkout's dependency fingerprints; otherwise refresh."""
+    proof_path, ref_path = warm_proof_paths(root, runner)
+    current = fingerprints or committed_dependency_fingerprints(root, ref)
+    reasons, proof, raw = [], None, None
+    try:
+        raw = read_small(proof_path)
+        proof = runner['warm_deps_proof'](raw)
+    except FileNotFoundError:
+        reasons.append('no producer dependency proof at ' + str(proof_path))
+    except ValueError as error:
+        reasons.append(str(error))
+    if proof is not None:
+        if (proof['node'], proof['python']) != (current['node'], current['python']):
+            reasons.append('producer proof dependency fingerprints differ from the checkout at ' + ref)
+        try:
+            produced = read_small(ref_path).decode('ascii', 'replace').split()
+        except FileNotFoundError:
+            produced = None
+        if produced is None:
+            reasons.append('producer proof records no source ref (' + str(ref_path) + ' absent)')
+        elif len(produced) != 2 or not re.fullmatch('[0-9a-f]{40}', produced[0]):
+            reasons.append('producer ref receipt is malformed')
+        elif produced[1] != proof['snapshot']:
+            reasons.append('producer ref receipt names snapshot ' + produced[1] + ', not the proven ' + proof['snapshot'])
+        elif produced[0] != ref:
+            reasons.append('producer proof was produced for ' + produced[0] + ', not the run ref ' + ref)
+    return dict(action='refresh' if reasons else 'reuse', reasons=reasons, proof_path=str(proof_path),
+                proof_raw=raw, snapshot_id=proof and proof['snapshot'], fingerprints=current,
+                refresh_command=warm_refresh_command(runner, ref))
+
+
+def pushed_task_ref(root, ref, github):
+    """The guest fetches only pushed commits: origin/main ancestry or a live origin branch/tag tip."""
+    result = subprocess.run(['bash', '-c', 'source "$1"; cloudbench_fetchable_ref "$2" "$3" 0', 'pushed-ref',
+                             str(root / 'scripts/lib/cloudbench-env.sh'), str(root), ref],
+                            capture_output=True, text=True, timeout=60, env=dict(os.environ, GITHUB_TOKEN=github))
+    if result.returncode or result.stdout.strip() != ref:
+        raise ValueError('task ref ' + ref + ' is not a pushed commit on origin; push it first')
+    return ref
+
+
+def run_warm_refresh(root, runner, ref, log_path, timeout=2400):
+    """Run the normal producer once (it takes the app environment lock and parks the donor)."""
+    env = dict(os.environ, CLOUDBENCH_WARM_MACHINE_NAME=runner['WARM_MACHINE_NAME'],
+               CLOUDBENCH_WARM_VOLUME_NAME=runner['WARM_VOLUME_NAME'], CLOUDBENCH_REGION=runner['WARM_REGION'],
+               CLOUDBENCH_SKIP_LOCAL_PATCH='1')
+    with open(log_path, 'xb') as log:
+        child = subprocess.Popen(['bash', str(root / 'scripts/run-bench-cloud'), '--refresh-deps', '--ref', ref],
+                                 cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            code = child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            child.terminate()  # its own traps park the donor and release the lock
+            code = child.wait(timeout=300)
+            raise ValueError('warm dependency refresh exceeded %ds (see %s)' % (timeout, log_path))
+    if code:
+        raise ValueError('warm dependency refresh failed with exit %d (see %s)' % (code, log_path))
+
+
+DONOR_IMAGE = re.compile(r'registry\.fly\.io/navi-whisper-lux-bench[^@\s]*@sha256:[0-9a-f]{64}')
+
+
+def derived_facts(machines, donor, runner):
+    """Launch facts from one native inventory: the donor's active immutable image and the protected cohort."""
+    if not isinstance(machines, list) or any(not isinstance(m, dict) or not isinstance(m.get('id'), str) for m in machines):
+        raise ValueError('complete native Machine inventory required for launch facts')
+    if len({m['id'] for m in machines}) != len(machines):
+        raise ValueError('duplicate native Machine identity')
+    image = ((donor.get('config') or {}).get('image')) if isinstance(donor, dict) else None
+    if not isinstance(image, str) or not DONOR_IMAGE.fullmatch(image):
+        raise ValueError('warm donor has no digest-pinned benchmark image; run scripts/run-bench image-activate')
+    protected, volumes = [], []
+    for machine in machines:
+        metadata = (machine.get('config') or {}).get('metadata') or {}
+        marked = any(str(key).startswith(PROTECTED_METADATA_PREFIXES) for key in metadata)
+        if DISPOSABLE_MACHINE_NAME.fullmatch(str(machine.get('name') or '')) and not marked:
+            continue
+        protected.append(machine['id'])
+        for mount in (machine.get('config') or {}).get('mounts') or []:
+            if isinstance(mount, dict) and isinstance(mount.get('volume'), str):
+                volumes.append(mount['volume'])
+    if runner['WARM_MACHINE_ID'] not in protected:
+        raise ValueError('warm donor is absent from the native inventory')
+    return dict(app=runner['APP'], image_ref=image, protected_machines=sorted(protected),
+                protected_volumes=sorted(set(volumes)),
+                discovered=dict(schema='original600-discovered-launch-facts-v1', observed_epoch=time.time(),
+                                rule='bench-app Machines other than disposable cloudbench-<hex>/cloudbench-gate-* '
+                                     'resources, plus any carrying protected metadata, and their mounted Volumes',
+                                donor_machine=runner['WARM_MACHINE_ID'], native_machines=len(machines)))
+
+
+def counted_fly(fly):
+    """Count every native read issued through a Fly client factory, including failed preflights."""
+    class Counted:
+        calls = 0
+
+        def __call__(self, app, token):
+            api, outer = fly(app, token), self
+
+            class Reads:
+                def machine(self, machine_id):
+                    outer.calls += 1
+                    return api.machine(machine_id)
+
+                def api(self, *args, **kwargs):
+                    outer.calls += 1
+                    return api.api(*args, **kwargs)
+            return Reads()
+    return Counted()
+
+
+def discover_inputs(args, root, runner, token, run, fly=None):
+    """Resolve facts, warm proof and snapshot inventory without private hand-made files.
+
+    --check (run False) only reads and reports the reuse/refresh decision; --run refreshes
+    through the normal producer when needed, then writes the discovered inputs privately."""
+    fly = counted_fly(fly or runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))['Fly'])
+    ref = bound_task_ref(args, runner)
+    decision = warm_decision(root, runner, ref)
+    report = dict(action=decision['action'], reasons=list(decision['reasons']), proof=decision['proof_path'],
+                  refresh_command=decision['refresh_command'], fingerprints=decision['fingerprints'])
+    def native():
+        with runner['bounded'](110):
+            machines = fly(runner['APP'], token).api('GET', '/machines', timeout=60)
+        donor = next((m for m in machines if isinstance(m, dict) and m.get('id') == runner['WARM_MACHINE_ID']), None) \
+            if isinstance(machines, list) else None
+        return derived_facts(machines, donor, runner)
+
+    def preflight(facts):
+        warm = warm_snapshot_preflight(fly, token, runner, decision['proof_raw'], None,
+                                       facts['protected_machines'], time.time() + 5400,
+                                       refresh=decision['refresh_command'])
+        warm.pop('provider_calls')
+        return warm
+
+    facts = native()
+    warm = None
+    if decision['action'] == 'reuse':
+        try:
+            warm = preflight(facts)
+        except WarmSnapshotStale as error:
+            decision['action'] = report['action'] = 'refresh'
+            report['reasons'].append(str(error))
+    if decision['action'] == 'refresh' and not run:
+        return dict(report, provider_calls=fly.calls, facts=dict(image_ref=facts['image_ref'],
+                    protected_machines=len(facts['protected_machines']),
+                    protected_volumes=len(facts['protected_volumes']))), None
+    parent = args.state_dir.absolute()
+    directory = parent / ('inputs-' + str(time.time_ns()))
+    if run:
+        if parent.resolve(strict=True) != parent or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
+            raise ValueError('private physical current-owner state directory required')
+        directory.mkdir(mode=0o700)
+    if decision['action'] == 'refresh':
+        print(json.dumps(dict(status='WARM_SNAPSHOT_REFRESH', ref=ref, reasons=report['reasons'],
+                              log=str(directory / 'warm-refresh.private.log'))), flush=True)
+        run_warm_refresh(root, runner, ref, directory / 'warm-refresh.private.log')
+        decision = warm_decision(root, runner, ref, decision['fingerprints'])
+        if decision['action'] != 'reuse':
+            raise ValueError('the producer did not prove a snapshot for ' + ref + ': ' + '; '.join(decision['reasons']))
+        facts = native()
+        warm = preflight(facts)  # a fresh snapshot that still fails is a hard error, not another refresh
+        report.update(refreshed=True, refreshed_snapshot=warm['snapshot_id'])
+    inventory, donor = warm.pop('inventory'), warm.pop('donor_machine')
+    if (donor.get('config') or {}).get('image') != facts['image_ref']:
+        raise ValueError('warm donor image changed between native reads')
+    report.update(provider_calls=fly.calls, warm_snapshot=warm, facts=dict(image_ref=facts['image_ref'],
+                  protected_machines=len(facts['protected_machines']), protected_volumes=len(facts['protected_volumes'])))
+    if not run:
+        return report, None
+    paths = {}
+    for name, value in (('facts', facts), ('snapshot_inventory', inventory)):
+        paths[name] = directory / (name.replace('_', '-') + '.private.json')
+        runner['save'](paths[name], value)
+    paths['warm_deps'] = directory / 'warm-deps.private.fp'
+    with os.fdopen(os.open(paths['warm_deps'], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as stream:
+        stream.write(decision['proof_raw']); stream.flush(); os.fsync(stream.fileno())
+    runner['save'](directory / 'discovery.json', dict(report, inputs={k: str(v) for k, v in paths.items()}))
+    return report, paths
 
 
 def admission_remaining(deadline):
@@ -762,8 +1017,8 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
                            if guest_env['temporal_namespace'] else {})
     save(directory/'authority-template.private.json', auth)
     files = []
-    for path, relative in [(args.snapshot_inventory, '.git/cloudbench-warm-snapshot-inventory.cloudbench-warm-t10-ord-85a7e2c.json'),
-                           (args.warm_deps, '.git/cloudbench-warm-deps.cloudbench-warm-t10-ord-85a7e2c.fp')]:
+    for path, relative in [(args.snapshot_inventory, runner['WARM_INVENTORY_RELATIVE']),
+                           (args.warm_deps, runner['WARM_DEPS_RELATIVE'])]:
         files.append(dict(source_path=str(path), relative_path=relative, sha256=digest(read(path))))
     reuse_env = {}
     if cap.get('qualified_reuse_count'):
@@ -804,7 +1059,7 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
     start_guest = dict(guest_temporal_namespace=guest_env['temporal_namespace']) if guest_env['override'] else {}
     save(directory/'attempt-start.safe.json', dict(scope='original200x3REAL' if shard is None else 'original600-shard',
          scheduled_total=scheduled_total if shard is None else len(shard['tasks']) * shard['runs'],
-         source_ref=args.source_ref, task_ref=runner['TASK_REF'], started_at_epoch=stamp,
+         source_ref=args.source_ref, task_ref=shard_task_ref(runner, shard), started_at_epoch=stamp,
          original_deadline_epoch=stamp+5400, config_sha256=digest(read(directory/'config.private.json')),
          status='BOUND_NOT_LAUNCHED', **start_guest))
     return directory/'config.private.json'
@@ -834,11 +1089,22 @@ def original_manifest(manifest, runner):
             and runner['manifest_sha'](manifest) == runner['TASK_NAMES_SHA'])
 
 
+def shard_task_ref(runner, shard):
+    return runner['TASK_REF'] if shard is None else runner['shard_task_ref'](shard)
+
+
+def bound_task_ref(args, runner):
+    """The guest task source: the requested pushed --task-ref, or the historical pin when omitted."""
+    return getattr(args, 'task_ref', None) or runner['TASK_REF']
+
+
 def shard_bindings(args, runner):
     """Bound shard fields beyond the original600 defaults; empty for the original manifest and timeouts."""
     manifest = json.loads(runner['read'](args.tasks))
     task_timeout, e2e_timeout = bound_timeouts(args, runner)
     extra = {} if original_manifest(manifest, runner) else dict(manifest_sha256=runner['manifest_sha'](manifest))
+    if bound_task_ref(args, runner) != runner['TASK_REF']:
+        extra['task_ref'] = bound_task_ref(args, runner)
     if task_timeout != runner['DEFAULT_TASK_TIMEOUT']:
         extra['task_timeout'] = task_timeout
     if e2e_timeout != runner['RUN_DEADLINE']:
@@ -852,8 +1118,8 @@ def bound_shard(item, args, runner, group_id, group_total, started_at):
                 group_total=group_total, group_started_at=started_at, **shard_bindings(args, runner))
 
 
-def catalog_ineligible_reason(root, runner, tasks, backend_env):
-    """None when every name is ready, Linux/cloud-root and LIVE eligible in the unified catalog at TASK_REF."""
+def catalog_ineligible_reason(root, runner, tasks, backend_env, task_ref=None):
+    """None when every name is ready, Linux/cloud-root and LIVE eligible in the unified catalog at the task ref."""
     import tempfile
     members = ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
                'agents/providers/fast_cache/normalize.py', 'agents/utils/__init__.py',
@@ -863,7 +1129,7 @@ def catalog_ineligible_reason(root, runner, tasks, backend_env):
             target = Path(scratch, member)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
-                                                        runner['TASK_REF'] + ':' + member]))
+                                                        (task_ref or runner['TASK_REF']) + ':' + member]))
         # Phone-callee assignments come from the selected backend env, as the benchmark reads them.
         Path(scratch, 'back-end').mkdir()
         Path(scratch, 'back-end/.env').symlink_to(Path(backend_env).absolute())
@@ -892,9 +1158,9 @@ def task_manifest(args, root, runner):
     if (not isinstance(manifest, list) or not manifest or any(not isinstance(t, str) or not t for t in manifest)
             or len(set(manifest)) != len(manifest)):
         raise ValueError('--tasks must be an ordered JSON list of distinct task names')
-    reason = catalog_ineligible_reason(root, runner, manifest, args.backend_env)
+    reason = catalog_ineligible_reason(root, runner, manifest, args.backend_env, bound_task_ref(args, runner))
     if reason:
-        raise ValueError('--tasks refused at task ref ' + runner['TASK_REF'] + ': ' + reason)
+        raise ValueError('--tasks refused at task ref ' + bound_task_ref(args, runner) + ': ' + reason)
     return dict(sha256=runner['manifest_sha'](manifest), tasks=len(manifest), original=False,
                 task_timeout=task_timeout, e2e_timeout=e2e_timeout, catalog_eligible=len(manifest))
 
@@ -918,10 +1184,10 @@ def shard_selection(args, runner):
 PROMPT_SECRET_PLACEHOLDERS = {'{GITHUB_DISPATCH_TOKEN}': 'GITHUB_DISPATCH_TOKEN'}
 
 
-def missing_prompt_secrets(root, runner, tasks, env_paths):
+def missing_prompt_secrets(root, runner, tasks, env_paths, task_ref=None):
     """Tasks whose prompt needs a secret absent from every authoritative env file."""
     catalog = json.loads(subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
-                                                  runner['TASK_REF'] + ':agents/benchmarks/tasks.json']))
+                                                  (task_ref or runner['TASK_REF']) + ':agents/benchmarks/tasks.json']))
     prompts = {row.get('name'): json.dumps(row) for row in catalog if isinstance(row, dict)}
     present = set()
     for path in env_paths:
@@ -933,7 +1199,7 @@ def missing_prompt_secrets(root, runner, tasks, env_paths):
                   if placeholder in prompts.get(task, '') and key not in present)
 
 
-def shared_cpu_plan(root, runner, tasks, runs, bench_rows):
+def shared_cpu_plan(root, runner, tasks, runs, bench_rows, task_ref=None):
     """Planned and baseline shared CPU units, from the task revision's catalog and the native baseline."""
     import tempfile
     campaign = runpy.run_path(str(root / 'scripts/run-bench-campaign.py'))
@@ -941,7 +1207,7 @@ def shared_cpu_plan(root, runner, tasks, runs, bench_rows):
     with tempfile.TemporaryDirectory(prefix='shard-catalog-') as scratch:
         for name in ('tasks.json', 'polar_tasks.json'):
             raw = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
-                                           runner['TASK_REF'] + ':agents/benchmarks/' + name])
+                                           (task_ref or runner['TASK_REF']) + ':agents/benchmarks/' + name])
             Path(scratch, name).write_bytes(raw)
         rows = catalog['get_task_metadata'](Path(scratch, 'tasks.json'), tasks)
     plan = campaign['stress_default_requirements'](root, rows, peak=len(tasks) * runs, baseline=bench_rows,
@@ -963,6 +1229,27 @@ def summary_from_export(export):
             if member.isfile() and re.search(r'(^|/)\.?context/benchmarks/campaigns/[^/]+/summary\.json$', member.name):
                 return json.loads(stream.extractfile(member).read())
     return None
+
+
+def scorecard_module(root):
+    return runpy.run_path(str(root / 'scripts/cloudbench-scorecard.py'))
+
+
+def experiment_fields(args, plan):
+    """Ledger identity for one actual sharded launch: goal, operator slice label and shape."""
+    label = getattr(args, 'label', None) or os.environ.get('RUN_BENCH_EXPERIMENT_LABEL') \
+        or re.sub(r'(-tasks)?(\.private)?$', '', Path(args.tasks).stem)
+    return dict(goal=getattr(args, 'goal', None) or os.environ.get('RUN_BENCH_GOAL') or 'original600',
+                slice=label, kind='sharded', surface='cloud', source_ref=args.source_ref,
+                tasks=len({task for shard in plan['shards'] for task in shard['tasks']}),
+                runs=plan['shards'][0]['runs'], scheduled_total=plan['copies'], controllers=plan['controllers'])
+
+
+def native_release_audit(root, directory, token, identities):
+    """Final read-only native audit of every owned guest/controller identity (never mutates)."""
+    capture = runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))
+    audit = runpy.run_path(str(root / 'scripts/cloudbench-native-release-audit.py'))
+    return audit['run'](directory, capture['Fly']('navi-whisper-lux-bench', token), identities=identities)
 
 
 def publish_shard_group(root, directory, args, runner, group_id, started_at, shards, outcomes=None, finished=None):
@@ -998,7 +1285,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     coordinator = runpy.run_path(str(root / 'scripts/cloudbench-shard-coordinator.py'))
     os.environ['RUN_BENCH_HUB_PYTHON'] = hub_interpreter(args)
     selected = [task for shard in plan['shards'] for task in shard['tasks']]
-    missing = missing_prompt_secrets(root, runner, selected, (args.agents_env, args.backend_env))
+    missing = missing_prompt_secrets(root, runner, selected, (args.agents_env, args.backend_env), bound_task_ref(args, runner))
     if missing:
         raise ValueError('selected task prompts need secrets absent from the env files: '
                          + ', '.join(f'{task} needs {key}' for task, key in missing))
@@ -1018,6 +1305,11 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     print(json.dumps(dict(directory=str(directory), status='SHARDED_ADMISSION_STARTED', controllers=controllers,
                           copies=copies, copies_per_controller_bound=plan['copies_per_controller_bound'],
                           native_slots_required=demand)), flush=True)
+    scorecard = scorecard_module(root)
+    ledger = runpy.run_path(str(root / 'scripts/cloudbench_experiments.py'))
+    fields = experiment_fields(args, plan)
+    ledger['record']('launch', directory.name, root=root, run_dir=str(directory), triggered_at=started_at, **fields)
+    scorecard['print_instruction'](directory)
     with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
         cap = capacity_snapshot(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
     cap.update(qualified_reuse_count=0, new_machine_demand=demand, qualified_ids=[], new_controller_slots=controllers,
@@ -1030,7 +1322,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     cap['proof_path'] = str(directory / 'capacity-proof.private.json')  # every shard binds the one admission proof
     bench_rows = json.loads(read_inventory(directory / 'navi-whisper-lux-bench.private.json'))
     tasks = [task for shard in plan['shards'] for task in shard['tasks']]
-    planned, baseline = shared_cpu_plan(root, runner, tasks, plan['shards'][0]['runs'], bench_rows)
+    planned, baseline = shared_cpu_plan(root, runner, tasks, plan['shards'][0]['runs'], bench_rows, bound_task_ref(args, runner))
     env = coordinator['shard_runtime_env'](
         machine_limit=cap['machine_limit'], other_app_objects=cap['total_active_inventory_objects'] - len(bench_rows),
         extra_destroying=cap['conservative_extra_destroying_bench_objects'], planned_shared_cpus=planned,
@@ -1097,8 +1389,12 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=copies,
                                        infra_early_stop=args.infra_early_stop, respawn=respawn,
                                        stagger_seconds=coordinator['DEFAULT_SPAWN_STAGGER_SECONDS'])
-    summaries = [summary_from_export(Path(s['out']) / 'export') for s in shards]
+    exports = [scorecard['export_records'](Path(s['out']) / 'export') for s in shards]
+    summaries = [record['summary'] for record in exports]
     merged = coordinator['merge']([v for v in summaries if v is not None], copies)
+    # Bounded per-job rows (verdict, reason, cost, timing, release) let the scorecard render without archives.
+    merged['jobs'] = [row for record in exports if record['summary']
+                      for row in scorecard['compact_rows'](record['summary'], record['cards'])]
     merged.update(shards_without_summary=[s['index'] for s, v in zip(shards, summaries) if v is None],
                   coordination=record, hub_group=group_id)
     outcomes = {job['job_id']: dict(status=job.get('status'), controller_exit_code=job.get('controller_exit_code'))
@@ -1116,6 +1412,19 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     print(json.dumps(dict(directory=str(directory), status='SHARDS_JOINED', result=str(directory / 'result.json'),
                           observed_jobs=merged['observed_jobs'], missing_jobs=merged['missing_jobs'],
                           infra_failures=merged['infra_failures'])), flush=True)
+    owned = (set().union(*(r['owned_names'] for r in exports)), set().union(*(r['owned_ids'] for r in exports)),
+             sum(r['summary'] is not None for r in exports))
+    try:
+        audit = native_release_audit(root, directory, token, owned)
+        print(json.dumps(dict(status='NATIVE_RELEASE_AUDIT', released=audit['released'], present=audit['present'],
+                              checked_guests=len(audit['checked']['guest_names']))), flush=True)
+    except Exception as error:  # read-only evidence; its absence renders as an unverified release, never a pass
+        print(json.dumps(dict(status='NATIVE_RELEASE_AUDIT_UNAVAILABLE', error=type(error).__name__)), flush=True)
+    ledger['record']('end', directory.name, root=root, goal=fields['goal'], ended_at=record.get('finished_at'),
+                     state='ABORTED' if record.get('abort_reason') or record.get('terminate_reason') else 'ENDED',
+                     outcome={k: merged.get(k) for k in ('task_status', 'infra_failures', 'observed_jobs', 'missing_jobs',
+                                                         'resources_released', 'lifecycle_verified')})
+    scorecard['print_instruction'](directory)
     return 0 if all(code == 0 for code in record['exit_codes'].values()) and not merged['missing_jobs'] else 1
 
 
@@ -1953,8 +2262,14 @@ def main():
     parser.add_argument('--run', action='store_true', help='perform fresh capacity reads, then allocate and own one original600 controller')
     parser.add_argument('--source-ref', required=True)
     parser.add_argument('--infra-early-stop', choices=('enabled', 'disabled'), default='enabled', help='Automatic infrastructure threshold stop policy; failure accounting and all time limits remain unchanged')
-    for name in ['state-dir', 'facts', 'agents-env', 'backend-env', 'tasks', 'snapshot-inventory', 'warm-deps']:
+    for name in ['state-dir', 'agents-env', 'backend-env', 'tasks']:
         parser.add_argument('--'+name, required=True, type=Path)
+    # Omit all three to discover them: facts from read-only native inventory, the warm
+    # proof from the producer's git-common file (refreshed for this ref when stale) and
+    # the snapshot inventory from the donor listing. Historical runs pass them explicitly.
+    for name in ['facts', 'snapshot-inventory', 'warm-deps']:
+        parser.add_argument('--'+name, type=Path)
+    parser.add_argument('--task-ref', help='pushed guest task source commit (default: the historical original600 pin)')
     parser.add_argument('--archive-run', action='append', type=Path, help='Verified predecessor run directory; preserve IDs/volume using a clean task generation before fresh creation')
     parser.add_argument('--unused-reservation-run', action='append', default=[], type=Path, help='Closed admission whose fully archived, never-assigned reservations may pass to this new cohort')
     parser.add_argument('--parked-reservation-run', action='append', default=[], type=Path, help='Closed admission: validate untouched and positively proven parked claims for a new cohort')
@@ -1978,6 +2293,8 @@ def main():
                         help='whole-campaign budget from the admission clock, seconds (default 5400, the operator deadline)')
     parser.add_argument('--worker-headroom', type=int, default=0, help='extra native Machine slots to require for autoscaled workers')
     parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
+    parser.add_argument('--goal', help='experiments-ledger goal for numbering and experiments/day (default original600)')
+    parser.add_argument('--label', help='operator slice label for the scorecard (default: tasks file name)')
     args = parser.parse_args()
     if args.controllers != 'auto' and not re.fullmatch('[1-9][0-9]{0,2}', args.controllers):
         raise ValueError("--controllers must be 'auto' or a positive integer")
@@ -1987,7 +2304,18 @@ def main():
     runner = runpy.run_path(str(root/'scripts/cloudbench-original600-runner.py'))
     runner['validate_source_members'](root, args.source_ref, pins)
     preflight = runpy.run_path(str(root/'scripts/cloudbench-operator-preflight.py'))
-    for name in ['facts', 'agents_env', 'backend_env', 'tasks', 'snapshot_inventory', 'warm_deps']:
+    explicit = [name for name in ('facts', 'snapshot_inventory', 'warm_deps') if getattr(args, name) is not None]
+    if explicit and len(explicit) != 3:
+        raise ValueError('pass all of --facts/--snapshot-inventory/--warm-deps, or none to discover them')
+    discover = not explicit
+    if args.task_ref is not None:
+        if not re.fullmatch('[0-9a-f]{40}', args.task_ref):
+            raise ValueError('--task-ref must be a full 40-hex commit')
+        if args.task_ref == runner['TASK_REF']:
+            args.task_ref = None  # the historical pin is encoded by absence
+    if discover and bound_task_ref(args, runner) != args.source_ref:
+        raise ValueError('discovered inputs bind the warm snapshot to this checkout: --task-ref must equal --source-ref')
+    for name in ['agents_env', 'backend_env', 'tasks'] + ([] if discover else ['facts', 'snapshot_inventory', 'warm_deps']):
         path = getattr(args, name).absolute()
         preflight['private_input'](path)
         setattr(args, name, path)
@@ -2021,9 +2349,12 @@ def main():
         print(json.dumps(dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=args.source_ref, copies=copies,
                               max_concurrent_benches=capacity['load_registry']()['cap'], provider_calls=0)))
         return refused
-    facts_from(runner['read'](args.facts))
+    if not discover:
+        facts_from(runner['read'](args.facts))
     token_from_agents(runner['read'](args.agents_env))
     github = github_token(root, args.backend_env, args.agents_env)
+    if args.task_ref is not None:
+        pushed_task_ref(root, args.task_ref, github)
     guest_env = guest_temporal_env(root, args.agents_env, args.backend_env)  # unusable override refuses before provider reads
     if args.extra_destroying_count < 1:
         raise ValueError('conservative unlisted/destroying allowance must be at least one')
@@ -2044,15 +2375,29 @@ def main():
     if args.prepare_admission_request:
         preparation_plan(args, runner)
     bound = bound_launch_plan(args, runner) if args.resume_bound_launch else None
+    if discover and (args.archive_run or recovery or bound or args.resume_admission or args.resume_incomplete_admission
+                     or args.prepare_admission_request):
+        raise ValueError('archived reuse and continuations bind their original explicit inputs')
     # Last local refusal precedes this; it is the first provider read for every mode.
-    warm = warm_snapshot_preflight(runpy.run_path(str(root/'scripts/cloudbench-original-volume-capture.py'))['Fly'],
-                                   token_from_agents(runner['read'](args.agents_env)), runner,
-                                   runner['read'](args.warm_deps), runner['read'](args.snapshot_inventory),
-                                   facts_from(runner['read'](args.facts))['protected_machines'], time.time() + 5400)
+    if discover:
+        discovery, paths = discover_inputs(args, root, runner, token_from_agents(runner['read'](args.agents_env)), args.run)
+        warm = dict(discovery.get('warm_snapshot') or {}, provider_calls=discovery['provider_calls'])
+        for name, path in (paths or {}).items():
+            setattr(args, name, path)
+    else:
+        discovery = None
+        warm = warm_snapshot_preflight(runpy.run_path(str(root/'scripts/cloudbench-original-volume-capture.py'))['Fly'],
+                                       token_from_agents(runner['read'](args.agents_env)), runner,
+                                       runner['read'](args.warm_deps), runner['read'](args.snapshot_inventory),
+                                       facts_from(runner['read'](args.facts))['protected_machines'], time.time() + 5400)
     if not args.run:
-        check = dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=warm.pop('provider_calls'),
+        check = dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, task_ref=bound_task_ref(args, runner),
+                     uid=os.geteuid(), provider_calls=warm.pop('provider_calls'),
                      warm_snapshot=warm, infra_early_stop=args.infra_early_stop,
                      guest_temporal_namespace=guest_env['temporal_namespace'], guest_env_delivery=guest_env['delivery'])
+        if discovery is not None:
+            # --check never refreshes: it reports the path --run takes (reuse or refresh) and why.
+            check['input_discovery'] = {k: v for k, v in discovery.items() if k not in ('warm_snapshot', 'provider_calls')}
         check.update(manifest=manifest)
         plan = None if (args.archive_run or args.resume_admission) else shard_selection(args, runner)
         if plan is not None:

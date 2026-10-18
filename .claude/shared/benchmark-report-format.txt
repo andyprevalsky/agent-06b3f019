@@ -1,42 +1,45 @@
-BENCHMARK PARENT AGENT INSTRUCTIONS · FORMAT v7
+BENCHMARK PARENT AGENT INSTRUCTIONS · FORMAT v8
 
 Communication contract (mandatory)
+- The scorecard is generated, never hand-written. Every launch prints its exact
+  command; render the card only with
+  `scripts/run-bench scorecard <run-dir> --html <run-dir>/scorecard.html`
+  and publish that file unchanged through `boxes-inline-visualizations`
+  (`dvb-onbox visuals publish --file <run-dir>/scorecard.html --title "<label> scorecard"`),
+  returning its standalone link. No prose before or after it. A hand-written,
+  edited or re-typed card is non-compliant; `scripts/run-bench scorecard
+  --validate <card.html>` rejects it. Off boxes.dev, or when HTML is
+  unavailable, post `scripts/run-bench scorecard <run-dir> --text` in one diff
+  fence and state that limitation.
+- Pass active sub-agent rows with `--agents <rows.json>` and owner-assigned
+  issues with `--issues <issues.json>`; every other value comes from recorded
+  run artifacts and the git-common experiments ledger. If a value is wrong or
+  missing, fix its producer or artifact; never patch the rendered card.
 - Apply `.claude/shared/report-display-format.md` to this card and every other
   skill display: 12-hour America/Los_Angeles timestamps (PDT/PST by date), one
-  status emoji, current-assignment tokens and rolling 15-minute tokens/min, with LIFE at the far right
-  and no UPD. Stored/raw evidence timestamps remain unchanged.
-- Every benchmark progress/final message MUST contain the full scorecard using
-  the template's content below. On boxes.dev publish a self-contained HTML
-  visual with actual CSS text colors through `boxes-inline-visualizations`,
-  returning its standalone link. No prose before or after it. Use a single diff
-  fence only when rendered HTML is unavailable, and state that limitation. Keep
-  every section, label and separator; use the conditional sub-agent placement
-  below and retain the remaining order. Replace placeholders with recorded
-  values. Do not replace the card with Markdown tables or a narrative summary.
+  status emoji, current-assignment tokens and rolling 15-minute tokens/min, with
+  LIFE at the far right and no UPD. Stored/raw evidence timestamps remain unchanged.
 - This is the standard display for every future CLI benchmark route: cloud,
-  local, eval, campaign and production-only. Lead with QUEUED, IN_PROGRESS,
-  COMPLETED, then PASS, HARNESS FAILURE and INFRA FAILURE. Keep the infra stop
-  threshold in a minor note, not a headline metric. Put machine admission and
-  qualification details in supporting sections.
+  local, eval, campaign, sharded and production-only. The card leads with the
+  Experiment # and state, then KPI tiles (pass %, infra % with the stop
+  threshold, QUEUED/IN_PROGRESS/COMPLETED progress, elapsed and execution
+  window), the outcome bar with PASS, HARNESS FAILURE and INFRA FAILURE always
+  shown, failure causes, timing/cost/cache/LLM coverage, the lifecycle
+  checklist, LAST 3 EXPERIMENTS, active sub-agents and ISSUES / NEXT ACTION.
 - Publish the card on agent start/completion, every fixed 15-minute checkpoint,
   and benchmark-state changes. Events never reset the checkpoint or run clock.
-- Use the /deploy Step 15 scorecard's 64-column frame. Align labels and numbers,
-  wrap explanations to fit, and use the same units on every observation. Preserve
-  full evidence URLs and exact code/prompt diffs without reflowing their contents.
 - User-requested approval messages use .claude/shared/approval-format.md instead:
   the same styled text frame, all seven required sections with How: immediately
   before TL;DR:, exact inline diffs and the clickable Links list immediately below.
   This changes presentation, not when approval is required. Continue independent
   authorized work meanwhile.
-- Color-code the text itself: CSS green verified successes/healthy checks,
-  red failures/blockers, blue active/section headings and amber warnings or
-  unmeasured coverage. Emoji/diff prefixes alone are not colored text. Keep
-  section order and signed rate semantics; no ANSI escape sequences. HTML
-  publication never pauses workers or cancels the ongoing experiment.
-- Do not display null, —, N/A, blank fields or empty sentinels. Obtain actual
-  evidence where safely available; otherwise use a concrete state such as
-  warming <age>, UNMETERED, UNMEASURED or NOT SCORED. Omit unmeasured numeric
-  rows and retain a concise coverage note. Never invent zeros or measurements.
+- The renderer colors the text itself: green verified successes/healthy checks,
+  red failures/blockers, blue active work and headings, amber warnings or
+  unmeasured coverage. HTML publication never pauses workers or cancels the
+  ongoing experiment.
+- The card never displays null, —, N/A, blank fields or empty sentinels; missing
+  evidence renders as RUNNING, UNMEASURED, UNMETERED, UNRECORDED or NOT SCORED.
+  Never invent zeros or measurements.
 
 Maintain the run (mandatory; this card is not a stopping point)
 - Continuously make progress toward the authorized benchmark goal: observe,
@@ -90,13 +93,15 @@ Measurement contract
 - Preserve the logical slice's original triggered_at timestamp (with timezone),
   requested names/count, run/group IDs, full source checkpoint, original timeouts
   and every attempt. Retries, later uploads and recovery never reset those clocks.
-- The first card row names the current Experiment # and state. Record distinct
-  actual original launches per goal and show experiments/day = verified launches /
-  elapsed goal days. Exclude local diagnostics, tests and prepared drafts. If
-  history coverage is incomplete, show a numeric lower bound and verified count;
-  never equate the experiment sequence number with the launch count.
-- Show only the latest three actual qualification experiments, newest first, as one
-  compact table with aligned subrows. For each, retain trigger, producer end,
+- The first card row names the current Experiment # and state. Launch paths
+  (fleet, campaign, sharded operator) append one immutable line per actual launch
+  and end to `<git-common>/cloudbench-experiments.jsonl`; the CLI computes the
+  Experiment #, Experiments/day = verified launches / elapsed goal days and LAST
+  3 EXPERIMENTS from it. Exclude local diagnostics, tests and prepared drafts.
+  Backfilled history is labelled a lower bound; never equate the experiment
+  sequence number with the launch count or type these values by hand.
+- Show only the latest three actual qualification experiments, newest first, as
+  compact rows with a mini outcome bar. For each, retain trigger, producer end,
   total elapsed, QUEUED/IN_PROGRESS/COMPLETED counts, task verdicts, infrastructure
   reliability, costs, cache rates, LLM latencies and lifecycle coverage. These
   replace the old standalone active-run/progress/cost blocks. A live experiment
@@ -152,51 +157,35 @@ Measurement contract
 - Evidence must identify this concrete slice/group and its durable viewer, retaining
   individual run/agent references. Do not cite ephemeral localhost/tunnel viewers.
 
-Parent message template (fill from actual records; repeat the compact experiment
-row and its subrows for up to three launched experiments, newest first):
+Text fallback (the exact shape `scripts/run-bench scorecard <run-dir> --text`
+prints; never type it by hand):
 
 ```diff
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-@@ 🧪 EXPERIMENT #<number>                              <STATE>
- <slice> · <tasks> × <runs> · <cloud/local> · <checkpoint>
- <Month D, h:mm:ss AM/PM PDT/PST> · goal elapsed <duration>
- Experiments/day <rate> · <verified launches>/<elapsed days>d
- QUEUED <n>       IN_PROGRESS <n>       COMPLETED <n>
- PASS <n>    HARNESS FAILURE <n/UNCLASSIFIED>    INFRA FAILURE <n>
- <genuine AGENT FAILURE/cancelled/skipped/unknown coverage, if present>
- Note: stop at <threshold>/<original scheduled> unique infra-failed jobs
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-@@ LAST 3 EXPERIMENTS
- RUN  STATE      TRIGGERED          ENDED             ELAPSED
-@@ <id> 🔵 RUNNING <local instant> RUNNING             <duration>
-   QUEUED <n> · IN_PROGRESS <n> · COMPLETED <n>/<requested>
-   PASS <n>/<scored> · HARNESS FAILURE <n/UNCLASSIFIED>
-   INFRA FAILURE <n>/<all terminal attempts> · unknown <n>
-   <genuine AGENT FAILURE/cancelled/skipped/unscored coverage, if present>
-   Cost <metered/estimate/UNMETERED> · coverage <actual scope>
-   Cache <DEMO/agent/WMH rates and denominators, or UNMEASURED>
-   LLM <agent/WMH avg/p95/p99 and coverage, or UNMEASURED>
-+  ✅ <verified precheck/publication/cleanup evidence only>
--  🔴 <failed/disqualified run or infrastructure result only>
-   Lifecycle <publication/controller/owned release/evidence>
-   🟠 <warning or unmeasured coverage>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-@@ ACTIVE SUB-AGENTS / PARENT
- AGENT / WORK                    TOKENS    15m tok/min     LIFE
- <status> <name>/<work>          <tokens>  <tok/min/warming> <life>
-   <For every red row: cause; corrective owner/action>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-@@ ISSUES / NEXT ACTION
- <concrete issue, owner and action; next run condition>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- <RUNNING | NEXT RUN HELD | COMPLETE | USER STOPPED> · <reason>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧪 EXPERIMENT #<number> · <state emoji> <STATE>
+<slice> · <scheduled> scheduled · <cloud/local> · src <checkpoint>
+Triggered <Month D, h:mm:ss AM/PM PDT/PST>
+<rate> experiments/day · <verified launches> launches / <elapsed days> d
+Since last benchmark ended: <age (label) | RUNNING | END UNRECORDED>
+QUEUED <n> · IN_PROGRESS <n> · COMPLETED <n>/<scheduled>
+PASS <n>/<scored> <pct> · HARNESS <n/UNCLASSIFIED> · INFRA <pct> (<n>/<terminal attempts>)
+<AGENT FAIL / UNKNOWN / CANCELLED / SKIPPED counts, if present>
+Stop at <threshold>/<original scheduled> unique infra-failed jobs (5%)
+  <count> <category>: <top failure cause>
+Cost <metered or UNMETERED> · <unmetered providers> UNMETERED
+Cache <rate and denominator or UNMEASURED> · LLM latency <UNMEASURED or measured>
+Lifecycle
+  <✅/🔴/🟠/🔵> <release, controllers, exports, results, publication evidence>
+LAST 3 EXPERIMENTS
+  #<n> <state> <label> · <TRIGGERED> → <ENDED/RUNNING> · PASS <n>/<scored> · INFRA <n>/<attempts>
+ACTIVE SUB-AGENTS / PARENT
+  <status> <name>/<work> · <tokens> · <15m tok/min | warming <age> | UNMETERED> · <LIFE>
+ISSUES / NEXT ACTION
+  • <concrete issue> Owner <owner> → <action>
+<state emoji> <STATE> · <reason>
 ```
 
-Compact measured metric subrows may wrap to the frame width. Use NO SCORED
-TASKS or NO TERMINAL ATTEMPTS instead of 0/0 rates; preserve actual zero counts.
-If the same coverage gap applies to multiple runs, one concise indented coverage
-row may name those runs. Do not restore standalone cost/cache/LLM, active-run or
-benchmark-progress sections. Preserve the original bounds (including a recorded
-10800-second no-new-run delay) in telemetry; put the concrete owner/action in
-ISSUES / NEXT ACTION when a delay needs action, not a separate last-slice block.
+Use NO SCORED TASKS or NO TERMINAL ATTEMPTS instead of 0/0 rates; preserve
+actual zero counts. ELAPSED for a live experiment runs from its original
+trigger. Preserve the original bounds (including a recorded 10800-second
+no-new-run delay) in telemetry; put the concrete owner/action in ISSUES / NEXT
+ACTION when a delay needs action, not a separate last-slice block.

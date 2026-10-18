@@ -1,6 +1,6 @@
 ---
 description: "Run benchmark tasks through the isolated cloud fleet by default; use --local explicitly for local benchmarks and evals."
-argument-hint: "list | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | <slice-or-task...> [-k K --concurrency N] | --local <task...|--full|--rerun-failed latest>"
+argument-hint: "list | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | <slice-or-task...> [-k K --concurrency N] [--timeout S] [--check] | --local <task...|--full|--rerun-failed latest>"
 ---
 
 # Benchmark Runner
@@ -15,8 +15,10 @@ Every launch prints the mandatory parent-agent format and maintenance contract.
 Read it before communicating or scheduling the next slice; retrieve it again
 without a launch with `scripts/run-bench report-format`. Its single source is
 `.claude/shared/benchmark-report-format.txt`, governed by
-`.claude/shared/report-display-format.md`. Use its inline CSS-colored scorecard
-on boxes.dev (the framed fallback only when HTML is unavailable): headline
+`.claude/shared/report-display-format.md`. Render the card only with the
+printed `scripts/run-bench scorecard <run-dir> --html <file>` command and publish
+that file; never hand-write it. Use its inline CSS-colored scorecard
+on boxes.dev (the `--text` fallback only when HTML is unavailable): headline
 QUEUED / IN_PROGRESS / COMPLETED, then PASS / HARNESS FAILURE / INFRA FAILURE.
 Preserve genuine agent failures, cancellations and unknown classifications
 separately; keep the infra threshold in a minor note. Include the latest three
@@ -54,6 +56,7 @@ Behavior:
 - `scripts/run-bench --local <task-name...>` explicitly selects `agents/benchmarks/local.py` and its isolated local stack.
 - `scripts/run-bench eval ...` runs `agents/benchmarks/run_eval_suite.py` through the isolated local stack.
 - `scripts/run-bench <task> -k K --concurrency N` runs K independent copies with at most N active. These flags select a bounded campaign; omit them for one fully parallel slice.
+- Wide cloud runs route automatically to the sharded controller operator when more simultaneous copies run than one controller's copy bound (32): `scripts/run-bench <slice-or-tasks...> [-k K] [--timeout S] [--e2e-timeout S]`. It is the same path used for original600/polar70: an ordered manifest, K repetitions, auto-sized disposable controllers behind one global strict barrier, and the provider-cap and native-capacity checks. Guests run the clean, pushed HEAD. Launch facts, the warm dependency proof and snapshot inventory are discovered from their normal producers. A warm snapshot not produced for this exact HEAD with its dependency fingerprints, or one that expires before the run deadline, is first refreshed with `run-bench-cloud --refresh-deps`. Every routed launch runs `--check` before `--run`. Use `--check` alone for a dry run with no allocation; it reports the reuse/refresh decision. Report progress only with the CLI-rendered FORMAT v8 scorecard printed for the admission directory: `scripts/run-bench scorecard <admission-dir> --html <admission-dir>/scorecard.html`.
 - `scripts/run-bench stability-proof -k K --concurrency N --seed S` runs K sequential random slices of N distinct tasks. This proof wrapper has a 32-task width cap; it is separate from the predeploy selection cap of 20. For a wider explicitly requested slice, resolve the concrete task names and pass them together to the ordinary fleet entrypoint.
 - `scripts/run-bench <production-only-task>` uses the existing controller-local production runner without allocating Fly guests.
 

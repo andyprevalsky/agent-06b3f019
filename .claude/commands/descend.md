@@ -1040,7 +1040,9 @@ do not turn them into ad hoc prioritization questions.
 ## Response contract
 
 Read `.claude/shared/benchmark-report-format.txt`, or retrieve it with
-`scripts/run-bench report-format`. It is the sole scorecard template; preserve
+`scripts/run-bench report-format`. It is the sole scorecard contract; render
+each card with `scripts/run-bench scorecard <run-dir> --html <file>` and publish
+that output instead of hand-writing it; preserve
 the Experiment Number in the first row, experiments/day for this goal, and
 the last three experiments with concise timing, queue/verdict, cost/cache/latency
 and lifecycle subrows. Preserve the frame, denominators and active-worker lines;

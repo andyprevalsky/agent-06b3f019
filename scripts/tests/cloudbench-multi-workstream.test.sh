@@ -421,7 +421,8 @@ clone_source_read_rate_limit_contract() (
 
     DISPOSABLE_LIFECYCLE=1; POOL_REUSE_ONLY=0; PROVISION_POOL=""
     for function_name in machine_creation_admission fleet_clone_with_queue_admission clone_failure_definitively_unallocated \
-        clone_failure_owned_volume_id machine_id_for_clone_name clone_machine_target; do
+        clone_failure_owned_volume_id machine_id_for_clone_name clone_volume_receipt_field clone_attach_failure_prelaunch \
+        clone_retire_owned_volume clone_create_owned_volume clone_machine_target; do
         function_source="$(fleet_production_function "$function_name")"
         [ -n "$function_source" ] \
             || { echo "FAIL: could not load production $function_name" >&2; return 1; }
@@ -452,6 +453,13 @@ clone_source_read_rate_limit_contract() (
     worker_ledger_lock_acquire() { return 0; }
     worker_ledger_lock_release() { return 0; }
     machine_volume_id() { printf 'vol_captured'; }
+    # Fake Machines API: the clone's exact Volume is created and owned first.
+    fleet_clone_volume_request() {
+        printf '%s\n' "$*" >> "$TMP_ROOT/clone-source-rate-limit.volume-requests"
+        printf '{"outcome":"created","id":"vol_captured"}\n'
+    }
+    fleet_registry_record_volume() { return 0; }
+    reap_volume() { return 0; }
     machine_storage_ready() {
         if [ ! -e "$TMP_ROOT/storage-restoring-observed" ]; then
             : > "$TMP_ROOT/storage-restoring-observed"
@@ -493,6 +501,9 @@ clone_source_read_rate_limit_contract() (
     call_count="$(wc -l < "$clone_calls" | tr -d ' ')"
     [ "$call_count" -eq 2 ] \
         || { echo "FAIL: captured source-read rejection used $call_count clone attempts, expected 2" >&2; return 1; }
+    # A source read rejected before Launch keeps the same owned Volume.
+    [ "$(wc -l < "$TMP_ROOT/clone-source-rate-limit.volume-requests" | tr -d ' ')" -eq 1 ] \
+        || { echo "FAIL: allocation-free source-read retry created a duplicate Volume" >&2; return 1; }
     refresh_count="$(wc -l < "$refresh_calls" | tr -d ' ')"
     if [ "$refresh_count" -ne 0 ]; then
         echo "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution ($refresh_count forced inventory refreshes)" >&2
@@ -1600,6 +1611,21 @@ def serve_machines_api(port_file):
             parts = urlsplit(self.path)
             query = parse_qs(parts.query)
             segments = parts.path.strip("/").split("/")
+            if (segments[:2] == ["v1", "apps"] and len(segments) == 4 and segments[3] == "volumes"
+                    and segments[2] == BENCH_APP and self.command in ("GET", "POST")):
+                # The clone's exact owned Volume is created before its Machine.
+                with locked_state() as state:
+                    if self.command == "GET":
+                        return self.reply(200, json.loads(json.dumps(state["volumes"])))
+                    request = json.loads(raw)
+                    volume = {"id": "vol_" + uuid.uuid4().hex[:8], "name": request["name"],
+                              "region": request["region"], "state": "created",
+                              "size_gb": request["size_gb"], "auto_backup_enabled": True,
+                              "snapshot_retention": 5, "attached_machine_id": None}
+                    state["volumes"].append(volume)
+                with open(os.path.join(FAKE_DIR, "volume-creates.log"), "a") as fh:
+                    fh.write(json.dumps(request, sort_keys=True) + "\n")
+                return self.reply(200, volume)
             if segments[:2] != ["v1", "apps"] or len(segments) < 4 or segments[3] != "machines":
                 return self.reply(501, {"error": "route not modeled by fixture"})
             app, rest = segments[2], segments[4:]
@@ -1805,8 +1831,14 @@ elif args[:2] == ["machine", "clone"]:
     vm_cpus = int(cpu_match.group(1)) if cpu_match else 1
     cpu_kind = "performance" if vm_size.startswith("performance-") else "shared"
     override_cmd = flag_value("--override-cmd")
+    attach_volume = flag_value("--attach-volume")
     with locked_state() as state:
-        volume_id = "vol_" + uuid.uuid4().hex[:8]
+        volume_id = attach_volume or "vol_" + uuid.uuid4().hex[:8]
+        if attach_volume is not None:
+            attached = [v for v in state["volumes"] if v["id"] == attach_volume]
+            if len(attached) != 1 or attached[0].get("attached_machine_id"):
+                print(f"Error: could not get existing volume: {attach_volume}", file=sys.stderr)
+                sys.exit(1)
         clone_config = {"mounts": [{"volume": volume_id, "size_gb": 40}],
                         "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
                                   "memory_mb": vm_memory}}
@@ -1824,8 +1856,11 @@ elif args[:2] == ["machine", "clone"]:
             )),
             "config": clone_config,
         })
-        state["volumes"].append(
-            {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40, "auto_backup_enabled": True, "snapshot_retention": 5, "attached_machine_id": machine_id})
+        if attach_volume is not None:
+            attached[0]["attached_machine_id"] = machine_id
+        else:
+            state["volumes"].append(
+                {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40, "auto_backup_enabled": True, "snapshot_retention": 5, "attached_machine_id": machine_id})
         provider_machine = state["machines"][-1]
     # Retain the actual indexed row for assertions after normal teardown removes it.
     with open(os.path.join(machine_dir(machine_id), "provider-machine.json"), "w") as fh:

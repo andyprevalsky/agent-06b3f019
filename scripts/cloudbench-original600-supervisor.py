@@ -19,7 +19,9 @@ ORIGINAL_TASK_NAMES_SHA256 = '660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bc
 SHARD_FIELDS = {'index', 'count', 'tasks', 'tasks_sha256', 'task_indexes', 'runs',
                 'group_run_id', 'group_total', 'group_started_at'}
 # Optional bound shard fields; absent means the original600 value (runner SHARD_OPTIONAL).
-SHARD_OPTIONAL = {'infra_threshold', 'manifest_sha256', 'task_timeout', 'e2e_timeout'}
+SHARD_OPTIONAL = {'infra_threshold', 'manifest_sha256', 'task_timeout', 'e2e_timeout', 'task_ref'}
+# Historical guest task source; a shard binds its own pushed ref in task_ref.
+ORIGINAL_TASK_REF = '1387ae608e7cfb8e3f0a876daae92093f503b465'
 DEFAULT_TASK_TIMEOUT = 1200
 RUN_DEADLINE = 5400
 STARTUP_ALLOWANCE = 2100
@@ -37,6 +39,16 @@ def shard_timeouts(shard):
     if type(e2e) is not int or not task+STARTUP_ALLOWANCE <= e2e <= RUN_DEADLINE:
         raise ValueError('invalid bound e2e timeout')
     return task, e2e
+
+def shard_task_ref(shard):
+    """The guest task source: a shard's bound task_ref, or the pinned original when absent."""
+    if shard is None or 'task_ref' not in shard:
+        return ORIGINAL_TASK_REF
+    ref = shard['task_ref']
+    # One canonical encoding: the original value is encoded by absence.
+    if not isinstance(ref, str) or not re.fullmatch('[0-9a-f]{40}', ref) or ref == ORIGINAL_TASK_REF:
+        raise ValueError('invalid bound task ref')
+    return ref
 
 def bound_manifest(tasks, shard):
     """The ordered launch manifest: the pinned original 200, or a shard's explicitly bound one."""
@@ -89,6 +101,65 @@ def fold(summary, threshold=INFRA_THRESHOLD):
             'cancelled_unique': len(cancelled), 'infra_job_ids': sorted(infra),
             'trigger': len(infra) >= threshold, 'records': records}
 
+PROGRESS_COMBOS = 40
+PROGRESS_REASONS = 5
+CARD_BYTES = 512 * 1024
+
+
+def card_reason(job, cache):
+    """A terminal non-pass job's recorded failure reason from its own fleet report card.
+
+    Read once per terminal fleet directory (the card is final by then); missing,
+    oversized or malformed cards contribute no reason."""
+    if job.get('status') not in TERMINAL or job.get('task_status') == 'PASSED':
+        return None
+    fleet = job.get('fleet_dir')
+    if not isinstance(fleet, str) or not fleet:
+        return None
+    if fleet not in cache:
+        cache[fleet] = None
+        try:
+            path = Path(fleet)/'_batch/report-card.json'
+            if path.stat().st_size <= CARD_BYTES:
+                card = json.loads(path.read_bytes())
+                rows = [r for r in card.get('per_task') or [] if isinstance(r, dict)]
+                row = next((r for r in rows if r.get('name') == job.get('task')), rows[0] if len(rows) == 1 else {})
+                reason = row.get('failure_reason')
+                if isinstance(reason, str) and reason.strip():
+                    cache[fleet] = re.sub(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<id>',
+                                          reason.strip().split(' | ')[0])[:120]
+        except (OSError, ValueError, AttributeError):
+            pass
+    return cache[fleet]
+
+
+def progress_counters(summary, cache):
+    """Small bounded job counters for the external runner PROBE (live scorecard)."""
+    combos, reasons = {}, {}
+    terminal_attempts = infra_attempts = 0
+    for job in summary.get('jobs') or []:
+        if not isinstance(job, dict):
+            continue
+        verdict = job.get('task_status')
+        infra = job.get('infra_failure')
+        key = (str(job.get('status'))[:16], verdict[:16] if isinstance(verdict, str) else None,
+               infra if isinstance(infra, bool) else None)
+        combos[key] = combos.get(key, 0) + 1
+        for attempt in job.get('attempts') or []:
+            if isinstance(attempt, dict) and attempt.get('status') in TERMINAL and attempt.get('finished_at'):
+                terminal_attempts += 1
+                infra_attempts += attempt.get('infra_failure') is True
+        reason = card_reason(job, cache)
+        if reason:
+            category = 'INFRA' if infra is True else 'AGENT FAIL' if verdict == 'FAILED' else 'UNKNOWN'
+            reasons[(category, reason)] = reasons.get((category, reason), 0) + 1
+    ordered = sorted(combos.items(), key=lambda item: (-item[1], str(item[0])))[:PROGRESS_COMBOS]
+    top = sorted(reasons.items(), key=lambda item: (-item[1], item[0]))[:PROGRESS_REASONS]
+    return {'combos': [[s, t, i, n] for (s, t, i), n in ordered], 'jobs': len(summary.get('jobs') or []),
+            'terminal_attempts': terminal_attempts, 'infra_attempts': infra_attempts,
+            'reasons': [[category, reason, n] for (category, reason), n in top]}
+
+
 def should_stop(result, trigger_saved, policy='enabled'):
     if policy not in ('enabled', 'disabled'):
         raise ValueError('invalid infrastructure early-stop policy')
@@ -107,6 +178,7 @@ def validate_shard(shard, manifest):
     if not isinstance(shard, dict) or not SHARD_FIELDS <= set(shard) <= SHARD_FIELDS | SHARD_OPTIONAL:
         raise ValueError('exact shard fields required')
     bound_manifest(manifest, shard)
+    shard_task_ref(shard)
     index, count, runs, names = shard['index'], shard['count'], shard['runs'], shard['tasks']
     if any(type(x) is not int for x in (index, count, runs)) or not 0 <= index < count or runs < 1:
         raise ValueError('invalid shard index/count/runs')
@@ -303,7 +375,7 @@ def main():
     ref = os.environ['REVIEWED_OPERATOR_SOURCE_REF']
     if len(ref) != 40 or any(c not in '0123456789abcdef' for c in ref):
         raise ValueError('final source is not bound')
-    task_ref = '1387ae608e7cfb8e3f0a876daae92093f503b465'
+    task_ref = ORIGINAL_TASK_REF
     task_raw = Path(os.environ['REVIEWED_OPERATOR_TASKS']).read_bytes()
     if hashlib.sha256(task_raw).hexdigest() != os.environ['REVIEWED_OPERATOR_TASKS_SHA256']:
         raise ValueError('original tasks bytes changed')
@@ -319,6 +391,7 @@ def main():
         validate_shard(shard, tasks)
     else:
         bound_manifest(tasks, None)
+    task_ref = shard_task_ref(shard)
     expected_jobs = 600 if shard is None else len(shard['tasks'])*shard['runs']
     expected_runs = 3 if shard is None else shard['runs']
     task_timeout, e2e_timeout = (DEFAULT_TASK_TIMEOUT, RUN_DEADLINE) if shard is None else shard_timeouts(shard)
@@ -365,6 +438,7 @@ def main():
         first_reported = False
         stopped = False
         last_refusal = None
+        card_cache = {}
         while True:
             try:
                 raw = (campaign/'summary.json').read_bytes()
@@ -384,7 +458,8 @@ def main():
                 if infra_path is not None:
                     try:
                         publish_status(infra_path, {'schema':'original600-shard-infra-v1','infra_true':result['infra_true'],
-                                                    'unique_jobs':len(summary['jobs']),'observed_at':time.time()})
+                                                    'unique_jobs':len(summary['jobs']),'observed_at':time.time(),
+                                                    'progress':progress_counters(summary, card_cache)})
                     except OSError as error:  # status only; never a reason to stop the campaign parent
                         message = 'INFRA_STATUS_WRITE_FAILED '+type(error).__name__
                         if message != last_refusal:

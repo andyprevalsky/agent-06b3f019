@@ -104,6 +104,7 @@ GATES = (
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
     Gate("auto-rca-workflow", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
+    Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
     Gate(
         "benchmark-provider-capacity",
         ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
