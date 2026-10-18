@@ -1831,7 +1831,8 @@ class Sharded(unittest.TestCase):
                       snapshot_inventory=private(directory/'snapshot', {}), warm_deps=private(directory/'warm', 'fixture'),
                       task_count=None, repetitions=3, controllers='auto', tasks_per_controller=None,
                       worker_headroom=0, infra_early_stop='enabled', org='personal', extra_destroying_count=1,
-                      archive_run=[], reuse_exclude_machine=[], state_dir=directory/'state')
+                      archive_run=[], reuse_exclude_machine=[], state_dir=directory/'state',
+                      hub_python=Path(sys.executable))
         values.update(overrides)
         return argparse.Namespace(**values)
 
@@ -1946,6 +1947,7 @@ class Sharded(unittest.TestCase):
             with patch.object(CLI, 'capacity_snapshot', snapshot), \
                  patch.object(CLI, 'shared_cpu_plan', lambda *a: (36, 0)), \
                  patch.object(CLI, 'publish_shard_group', publish), \
+                 patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
                  patch.object(CLI.subprocess, 'Popen', Runner):
                 code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
             self.assertEqual([p['outcomes'] is None for p in published], [True, False])
@@ -1963,6 +1965,19 @@ class Sharded(unittest.TestCase):
             self.assertEqual((result['observed_jobs'], result['missing_jobs'], result['infra_failures']), (36, 0, 0))
             self.assertEqual(json.loads((admission/'capacity-proof.private.json').read_bytes())['new_machine_demand'], 45)
 
+    def test_sharded_run_refuses_a_hub_interpreter_without_agents_dependencies(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            bare = directory/'bare-python'
+            bare.write_text('#!/bin/sh\nexit 1\n'); bare.chmod(0o700)
+            args = self.args(directory, task_count=12, repetitions=3, tasks_per_controller=4, hub_python=bare)
+            plan = CLI.shard_selection(args, RUNNER)
+            with patch.object(CLI, 'capacity_snapshot', side_effect=AssertionError('no provider read before the check')):
+                with self.assertRaisesRegex(ValueError, 'lacks httpx'):
+                    CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+            self.assertEqual(list((directory/'state').iterdir()), [])
+
     def test_sharded_run_refuses_before_any_runner_when_capacity_is_short(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -1974,6 +1989,7 @@ class Sharded(unittest.TestCase):
                 private(target/'navi-whisper-lux-bench.private.json', [])
                 return dict(cap)
             with patch.object(CLI, 'capacity_snapshot', snapshot), \
+                 patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
                  patch.object(CLI.subprocess, 'Popen', side_effect=AssertionError('no runner may start')):
                 with self.assertRaisesRegex(ValueError, '44 free Machine slots < 45 required'):
                     CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)

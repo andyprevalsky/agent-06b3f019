@@ -761,9 +761,18 @@ def publish_shard_group(root, directory, args, runner, group_id, started_at, sha
     return campaign['publish_campaign_group'](root, group_dir, state, live=outcomes is None, stop_requested=lambda: False)
 
 
+def hub_interpreter(args):
+    """Interpreter for operator-side Hub publication; checked before any provider read."""
+    hub_python = str(args.hub_python.absolute()) if getattr(args, 'hub_python', None) else sys.executable
+    if subprocess.run([hub_python, '-c', 'import httpx'], capture_output=True, timeout=30).returncode:
+        raise ValueError('Hub publication interpreter lacks httpx; pass --hub-python <agents venv python>')
+    return hub_python
+
+
 def sharded_run(args, root, pins, runner, github, plan):
     """One fresh admission, K shard configs, then the global-barrier coordinator over K runners."""
     coordinator = runpy.run_path(str(root / 'scripts/cloudbench-shard-coordinator.py'))
+    os.environ['RUN_BENCH_HUB_PYTHON'] = hub_interpreter(args)
     parent = args.state_dir.absolute()
     if parent.resolve(strict=True) != parent or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
         raise ValueError('private physical current-owner state directory required')
@@ -1708,6 +1717,7 @@ def main():
     parser.add_argument('--task-count', type=int, help='run only the first N manifest tasks (diagnostic ladder)')
     parser.add_argument('--repetitions', type=int, default=3, help='copies per task (default 3)')
     parser.add_argument('--worker-headroom', type=int, default=0, help='extra native Machine slots to require for autoscaled workers')
+    parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
     args = parser.parse_args()
     if args.controllers != 'auto' and not re.fullmatch('[1-9][0-9]{0,2}', args.controllers):
         raise ValueError("--controllers must be 'auto' or a positive integer")

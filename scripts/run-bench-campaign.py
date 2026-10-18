@@ -379,7 +379,9 @@ def publish_campaign_group(
         os.chmod(log, 0o600)
         result = subprocess.Popen(
             [
-                sys.executable,
+                # hub_upload's tree helpers need the agents venv (httpx); an
+                # operator on system Python names that interpreter explicitly.
+                os.environ.get("RUN_BENCH_HUB_PYTHON") or sys.executable,
                 str(root / "agents/benchmarks/hub_upload.py"),
                 "--register-starting" if live else "--upload-final",
                 str(target),
