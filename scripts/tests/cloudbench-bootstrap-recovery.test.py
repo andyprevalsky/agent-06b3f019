@@ -1576,11 +1576,25 @@ class ControllerExportContinuationTests(unittest.TestCase):
                 calls.append(1)
                 if len(calls)==2:os.utime(fifo,ns=(1,1))
                 return []
-            archive=self.base/'drift.tar.gz'
-            with patch.object(self.module,'writers',side_effect=writers):
-                with self.assertRaisesRegex(ValueError,'originals changed'):
-                    self.module.export(self.types.SimpleNamespace(record=self.oldrecord,archive=archive,manifest=self.base/'drift-manifest.json',pending=self.base/'drift-pending.json',capture_tool_ref=toolref))
-            self.assertFalse(archive.exists());self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode))
+            archive=self.base/'drift.tar.gz';manifest=self.base/'drift-manifest.json';pending=self.base/'drift-pending.json'
+            args=self.types.SimpleNamespace(record=self.oldrecord,archive=archive,manifest=manifest,pending=pending,capture_tool_ref=toolref)
+            # Persistent drift: no attempt is ever sealed, and the evidence names the FIFO.
+            def drifting(roots,permitted):
+                calls.append(1)
+                if len(calls)%2==0:os.utime(fifo,ns=(len(calls),len(calls)))
+                return []
+            with patch.object(self.module,'writers',side_effect=drifting),patch.object(self.module,'EXPORT_SETTLE_SECONDS',0):
+                self.assertEqual(self.module.export(args),75)
+            self.assertFalse(archive.exists());self.assertFalse(manifest.exists());self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode))
+            self.assertIn(str(fifo),[row['path'] for attempt in json.loads(pending.read_text())['snapshot_attempts'] for row in attempt['changed']])
+            pending.unlink();calls.clear()
+            # One drift during capture: the drifted snapshot is discarded and a fresh
+            # strict snapshot seals only the settled FIFO metadata.
+            with patch.object(self.module,'writers',side_effect=writers),patch.object(self.module,'EXPORT_SETTLE_SECONDS',0):
+                self.assertEqual(self.module.export(args),0)
+            self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode));self.assertFalse(pending.exists())
+            row=json.loads(manifest.read_text())['files']['context/native-retirement.pipe']
+            self.assertEqual((row['kind'],row['stat']['mtime_ns']),('fifo',1))
 
     def test_changed_source_continuation_preserves_original_seal_and_ownership(self):
         self.prepare();self.module.launch(self.launch)
