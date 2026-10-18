@@ -581,7 +581,7 @@ RESOLVE_SLICE
       ├─ infra-failed jobs >=5% of original scheduled total (30/600)
       │    → STOP_EXACT_OWNED_RUN → CLUSTER_FAILURES / PARALLEL_RCA
       │    → VERIFY_CRITICAL_REPAIRS → next authorized original RUN_SLICE
-      └─ terminal slice below5% → next authorized RUN_SLICE / FULL_SLICE_ACCEPTANCE
+      └─ terminal slice below 5% → next authorized RUN_SLICE / FULL_SLICE_ACCEPTANCE
 
 MAIN:   monitor current tasks, dispatch/review repairs, deliver approvals,
         and run the next authorized slice without awaiting unrelated lanes
@@ -1078,7 +1078,7 @@ with its actual start/block timestamp and age. Pending runtime/deploy approval
 is not marked as blocking the next slice unless that exact action is a genuine
 resource/authorization dependency. Show the infra hold's original start/age.
 
-For each terminal run record both task success and infra reliability. A below5%
+For each terminal run record both task success and infra reliability. A below 5%
 infra result allows the next slice; it does not mean all tasks passed, all fixes
 are proven or all resources released. Recovery/proof attempts and errors stay
 visible even when their failure is accepted for a separate infrastructure goal.

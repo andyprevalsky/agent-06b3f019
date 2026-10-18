@@ -55,9 +55,9 @@ Maintain the run (mandatory; this card is not a stopping point)
 - During an active run, immediately stop that exact owned run through its
   normal controller when scheduled_total > 0 and
   20 * infra_failed_jobs >= scheduled_total (>=5% of original scheduled total).
-  For 600 scheduled benchmarks, stop at30confirmed infra-failed jobs; 1/600 and
+  For 600 scheduled benchmarks, stop at 30 confirmed infra-failed jobs; 1/600 and
   29/600 continue. Never use completed attempts as the denominator or double-count
-  a scheduled job because it retried. Exactly5% disqualifies.
+  a scheduled job because it retried. Exactly 5% disqualifies.
   Preserve the first breach, original clocks and every physical attempt/retry.
   With no terminal attempts, report NO TERMINAL ATTEMPTS; do not invent 0%.
   Unknown classifications remain unknown and require evidence gathering.
@@ -77,7 +77,7 @@ Maintain the run (mandatory; this card is not a stopping point)
   approvals are delivered in the main thread; workers return concrete packets
   to the parent and wait only on their own gated action. Under /descend, do not
   wait for an infra-zero run, all cluster RCAs or all decisions before continuing
-  a below5% authorized next slice. Ready independent approval packets may be
+  a below 5% authorized next slice. Ready independent approval packets may be
   delivered separately without waiting for a different cluster's answer.
 - Delegate /deploy to a separate sub-agent with an immutable full commit SHA
   captured at dispatch and an isolated checkout/worktree based on that checkpoint.
