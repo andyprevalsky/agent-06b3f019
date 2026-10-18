@@ -34,6 +34,7 @@ import {
   runTest,
   type TestResult,
   codexCreateUnavailableSkipReason,
+  codexOauthRevocationSignal,
   codexSmokeCreditSkipReason,
   detectCodexCreditExhaustion,
   testCreateUnavailableSkip_cooldownOnly,
@@ -289,7 +290,7 @@ async function testSmoke_codexCompletesE2bTask() {
     }
     assert(
       output.includes('CODEX_E2B_DONE'),
-      `Codex output did not include CODEX_E2B_DONE. exit=${exitCode ?? 'unknown'} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
+      `Codex output did not include CODEX_E2B_DONE. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
     );
     assert(
       events.some((event) => {
