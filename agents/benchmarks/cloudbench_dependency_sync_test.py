@@ -1622,6 +1622,36 @@ done
     assert "DETACH_ENV_UNSET=(-u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS)" in fleet
 
 
+def test_explicit_timeout_is_the_guest_backstop_that_stops_agents() -> None:
+    """--timeout 1200 alone left the guest backstop at 7200 s (or a longer catalog
+    timeout), so agents ran past the requested execution window."""
+    fleet = FLEET_SCRIPT.read_text()
+    apply_fn = _extract_fleet_function(fleet, "apply_operator_timeout_backstop() {")
+    budget_fn = _extract_fleet_function(fleet, "bench_execution_budget() {")
+    script = f"""set -euo pipefail
+{apply_fn}
+{budget_fn}
+case_run() {{
+    RUN_TIMEOUT="$1"; RUN_TIMEOUT_OPERATOR_SET="$2"
+    BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="$3"; BACKSTOP_OPERATOR_SET="$4"
+    apply_operator_timeout_backstop
+    printf '%s %s %s\\n' "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" "$BACKSTOP_OPERATOR_SET" \\
+        "$(bench_execution_budget 12600 "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" "$BACKSTOP_OPERATOR_SET")"
+}}
+case_run 1200 1 7200 0
+case_run 7200 0 7200 0
+case_run 1200 1 900 1
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "1200 1 1200",  # explicit window: agents stop at 1200 s, a 12600 s catalog timeout cannot extend it
+        "7200 0 12600",  # no explicit window: the default still yields to a longer catalog timeout
+        "900 1 900",    # an explicit backstop stays the operator's choice
+    ]
+    assert fleet.index("apply_operator_timeout_backstop\nCHILD_RUN_TIMEOUT=") > fleet.index('RUN_TIMEOUT="${2:-}"; RUN_TIMEOUT_OPERATOR_SET="1"')
+
+
 def test_fleet_catalog_preflight_rejects_timeouts_shell_arithmetic_cannot_hold(
     tmp_path: Path,
 ) -> None:

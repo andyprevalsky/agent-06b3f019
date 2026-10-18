@@ -52,9 +52,10 @@
 #                      exact recovery, handing proven stopped primaries to this pool
 #   --recover-stale-owner <32-hex-token>
 #                      internal exact-owner recovery after forced cancellation
-#   --timeout <s>      controller ceiling passed to run-bench-cloud (default 7200;
-#                      a longer catalog timeout_seconds extends only the default,
-#                      as it does an unset BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS)
+#   --timeout <s>      task execution window (default 7200): the controller ceiling
+#                      passed to run-bench-cloud and, unless BENCHMARK_WALL_CLOCK_
+#                      BACKSTOP_SECONDS is set, the guest backstop that stops agents;
+#                      a longer catalog timeout_seconds extends only the default
 #   --autoscale-max N  per-bench ceiling including the primary; must be >=2
 #                      (default 15 = prod MAX_MACHINES)
 #   --qualify-worker   separate one-task REAL run with one required reusable worker
@@ -1490,6 +1491,17 @@ PY
 # A catalog timeout longer than a default budget extends that task's budget;
 # an operator-set --timeout or BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS stays a
 # hard cap, matching run_benchmark.agent_execution_backstop_seconds.
+# An explicit --timeout is the task execution window: unless the operator chose
+# a separate backstop, the guest's wall-clock backstop stops the agents at the
+# same bound and a longer catalog timeout cannot extend it.
+apply_operator_timeout_backstop() {
+    if [ "$RUN_TIMEOUT_OPERATOR_SET" = "1" ] && [ "$BACKSTOP_OPERATOR_SET" != "1" ]; then
+        BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="$RUN_TIMEOUT"
+        BACKSTOP_OPERATOR_SET="1"
+        export BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS
+    fi
+}
+
 bench_execution_budget() {  # <catalog-timeout-seconds> <budget-seconds> <operator-set 0|1>
     local catalog_timeout="$1" budget="$2" operator_set="$3"
     if [ "$operator_set" != "1" ] && [ "$catalog_timeout" -gt "$budget" ]; then
@@ -1709,6 +1721,7 @@ fi
 case "$CONTROLLER_RETRY_SECONDS" in
     ''|*[!0-9]*|0) echo "❌ CLOUDBENCH_CONTROLLER_RETRY_SECONDS must be a positive integer" >&2; exit 2 ;;
 esac
+apply_operator_timeout_backstop
 CHILD_RUN_TIMEOUT="$RUN_TIMEOUT"
 if [ "$SYNCHRONIZED_START" = "1" ]; then
     CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))
