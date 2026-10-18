@@ -699,6 +699,21 @@ def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -
                        "source": {"ref": source_ref, "sha256": hashes}}, sort_keys=True)
 
 
+def bind_shared_relay(environment, relay):
+    """Use only the relay already owned by this campaign for every consumer."""
+    for key in (
+        "CLOUDBENCH_SHARED_RELAY_AUTHORITY",
+        "CLOUDBENCH_SHARED_RELAY_DIRECTORY",
+        "CLOUDBENCH_SHARED_RELAY_PID",
+        "CLOUDBENCH_SHARED_RELAY_BIRTH",
+        "CLOUDBENCH_SHARED_RELAY_AGENT_PID",
+        "CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH",
+    ):
+        environment.pop(key, None)
+    if relay is not None:
+        environment.update(relay["environment"])
+
+
 def bind_mutation_inventory(environment, inventory_directory, mutation_authority):
     """Pass the same parent-minted feed authority to every owned consumer."""
     for key, value in (
@@ -1335,6 +1350,7 @@ def main() -> int:
                                 text=True,
                             ).strip()
                             bind_mutation_inventory(policy, inventory_directory, mutation_authority)
+                            bind_shared_relay(policy, shared_relay)
                             policy.update(
                                 RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(current_cohort["_directory"]),
                                 RUN_BENCH_CAMPAIGN_COHORT=str(current_cohort["cohort_id"]),
@@ -1460,8 +1476,7 @@ def main() -> int:
                 else:
                     environment.pop("RUN_BENCH_CAMPAIGN_ATTEMPT", None)
                 bind_mutation_inventory(environment, inventory_directory, mutation_authority)
-                if shared_relay is not None:
-                    environment.update(shared_relay['environment'])
+                bind_shared_relay(environment, shared_relay)
                 environment.pop("CLOUDBENCH_CAMPAIGN_SEED_PROOF", None)
                 if strict_start and not job.get("_independent_retry"):
                     if current_cohort.get("_seed_proof"):

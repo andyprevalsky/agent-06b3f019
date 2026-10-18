@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class CampaignTickets(unittest.TestCase):
-    def campaign_fixture(self, mode="pass", old=False, old_mutation=False):
+    def campaign_fixture(self, mode="pass", old=False, old_mutation=False, old_relay=False):
         with tempfile.TemporaryDirectory(
             prefix="cleanup-ticket-campaign-"
         ) as temporary:
@@ -29,7 +29,7 @@ class CampaignTickets(unittest.TestCase):
                 "cloudbench-infra-canary-preflight.py",
             ):
                 shutil.copyfile(ROOT / "scripts" / name, scripts / name)
-            if mode.startswith("mutation"):
+            if mode.startswith(("mutation", "relay")):
                 for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "cloudbench-port-lease.py", "cloudbench-cohort-reconcile.py", "cloudbench-machine-readiness.py", "cloudbench-campaign-machines.py"):
                     shutil.copyfile(ROOT / "scripts" / name, scripts / name)
                 (scripts / "lib").mkdir()
@@ -50,6 +50,23 @@ index=p/'inventory';index.mkdir();generation=index/'.generation-fixture';generat
 (p/'owner').write_text(''.join(k+'='+str(v)+'\\n' for k,v in dict(app='navi-whisper-lux-bench',pid=os.getpid(),pid_start=birth(os.getpid()),token='fixture',parent_pid=parent,parent_start=birth(parent)).items()))
 while not(p/'stop').exists():time.sleep(.01)
 """)
+                if mode.startswith("relay"):
+                    for name in ("cloudbench-shared-relay.py", "run-bench-cloud", "run-bench-fleet"):
+                        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                    if old_relay:
+                        (scripts / "run-bench-campaign.py").write_bytes(subprocess.check_output(
+                            ["git", "show", "ffe622243b8d704692fd3b69ab1d08eb1bb54040:scripts/run-bench-campaign.py"], cwd=ROOT))
+                    publisher = (root / "publisher.py").read_text().replace("(generation/'admission-machines.json')", "(generation/'machines').mkdir()\n(generation/'machines'/'aaaaaaaaaaaaaa').write_text('private_ip=fd00::1\\ninstance_id=nested-new-instance\\n')\n(generation/'admission-machines.json')")
+                    (root / "publisher.py").write_text(publisher)
+                    fake = root / "bin"
+                    fake.mkdir()
+                    agent_fixture = ROOT / "scripts/tests/cloudbench-shared-transport-integration.test.py"
+                    (fake / "flyctl").write_text("#!/usr/bin/env python3\n" + "import json,os,runpy,signal,sys,time\nfrom pathlib import Path\n" +
+                        "if sys.argv[1]=='status': print(json.dumps({'Name':'navi-whisper-lux-bench','Organization':{'Slug':'fixture'},'Network':''}));raise SystemExit(0)\n" +
+                        "if 'FLY_AGENT_ISOLATED' not in os.environ:\n with (Path(os.environ['FIXTURE_ROOT'])/'events').open('a') as f:f.write('DEFAULT_AGENT_ROUTE\\n')\n raise SystemExit(31)\n" +
+                        "agent=runpy.run_path(" + repr(str(agent_fixture)) + ")['FakeUnixAgent'](Path(os.environ['FLY_AGENT_SOCKET_PATH']).parent,os.environ['FLY_AGENT_SOCKET_PATH'])\n" +
+                        "signal.signal(signal.SIGTERM,lambda *a:sys.exit(0))\nprint('Proxying localhost:',flush=True)\ntry:\n while True:time.sleep(.02)\nfinally:agent.close()\n")
+                    (fake / "flyctl").chmod(0o700)
                 (scripts / "cloudbench-campaign-seed.py").write_text("import pathlib,sys\np=pathlib.Path(sys.argv[sys.argv.index('--barrier')+1]);(p/'seed-proof.private.json').write_text('{}')\n")
             if old:
                 (scripts / "run-bench-campaign.py").write_bytes(
@@ -87,9 +104,27 @@ mkdir -p "$(dirname "$CLEANUP_DISK_RESERVE_FILE")"
                 + functions
                 + """
 trap release_cleanup_disk_reserve EXIT
-if [[ "$FIXTURE_CANARY_MODE" != mutation* ]]; then
+if [[ "$FIXTURE_CANARY_MODE" != mutation* && "$FIXTURE_CANARY_MODE" != relay* ]]; then
  [ -z "${CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY:-}" ] || exit 94
  [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || exit 95
+ [ -z "${CLOUDBENCH_SHARED_RELAY_AUTHORITY:-}${CLOUDBENCH_SHARED_RELAY_DIRECTORY:-}${CLOUDBENCH_SHARED_RELAY_PID:-}${CLOUDBENCH_SHARED_RELAY_BIRTH:-}${CLOUDBENCH_SHARED_RELAY_AGENT_PID:-}${CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH:-}" ] || exit 96
+fi
+if [[ "$FIXTURE_CANARY_MODE" == relay* ]]; then
+ source "$FIXTURE_ROOT/scripts/lib/cloudbench-env.sh"
+ APP=navi-whisper-lux-bench
+ RUN_ID=fixture-nested
+ RUN_LOG_TOKEN=fixture-nested
+ mid=aaaaaaaaaaaaaa
+ CLOUDBENCH_SCRIPT_SNAPSHOT="$FIXTURE_ROOT/scripts"
+ if [ "$FIXTURE_CANARY_MODE" = relay-foreign ]; then CLOUDBENCH_SHARED_RELAY_AUTHORITY="$FIXTURE_ROOT/foreign-authority"; fi
+ if [ "$FIXTURE_CANARY_MODE" = relay-source ]; then
+  cp "$FIXTURE_ROOT/scripts/cloudbench-shared-relay.py" "$FIXTURE_ROOT/relay-original.py"
+  trap 'cp "$FIXTURE_ROOT/relay-original.py" "$FIXTURE_ROOT/scripts/cloudbench-shared-relay.py"; release_cleanup_disk_reserve' EXIT
+  printf "\\n# foreign relay source\\n" >> "$FIXTURE_ROOT/scripts/cloudbench-shared-relay.py"
+ fi
+ cloudbench_start_data_plane_proxy 0 3003 fd00::1 "$FIXTURE_ROOT/proxy-$$.log" proxy metrics 2
+ printf 'SHARED_ROUTE:%s\\n' "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" >> "$FIXTURE_ROOT/events"
+ cloudbench_proxy_stop proxy
 fi
 if [[ "$FIXTURE_CANARY_MODE" == mutation* ]]; then
  source "$FIXTURE_ROOT/scripts/lib/cloudbench-env.sh"
@@ -129,7 +164,7 @@ if [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" = 1 ]; then
  trap 'printf "CANARY_JOINED\n" >> "$FIXTURE_ROOT/events"; exit 143' TERM INT
  case "$FIXTURE_CANARY_MODE" in
   fail) exit 17 ;;
-  cancel) while :; do sleep .05; done ;;
+  cancel|relay-cancel) while :; do sleep .05; done ;;
  esac
  printf 'CANARY_DONE\n' >> "$FIXTURE_ROOT/events"
  exit 0
@@ -150,7 +185,7 @@ while not(cohort/'release.json').exists():
 READY
 """
             )
-            if mode.startswith("mutation"):
+            if mode.startswith(("mutation", "relay")):
                 start = source.index("FLY() {")
                 end = source.index("\nis_sim_on()", start)
                 (root / "production-fly.sh").write_text(source[start:end])
@@ -226,6 +261,12 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="0",
                 CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY="foreign-shell-authority",
                 CLOUDBENCH_CAMPAIGN_INVENTORY_DIR="/foreign-shell-inventory",
+                CLOUDBENCH_SHARED_RELAY_AUTHORITY="/foreign-shell-relay",
+                CLOUDBENCH_SHARED_RELAY_DIRECTORY="/foreign-shell-relay",
+                CLOUDBENCH_SHARED_RELAY_PID="9999999",
+                CLOUDBENCH_SHARED_RELAY_BIRTH="foreign",
+                CLOUDBENCH_SHARED_RELAY_AGENT_PID="9999998",
+                CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH="foreign",
                 CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="1",
                 CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB="1",
                 CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB="0",
@@ -235,10 +276,16 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                     "RUN_BENCH_CLEANUP_"
                 ):
                     env.pop(name)
-            if mode.startswith("mutation"):
+            if old or old_relay:
+                for key in list(env):
+                    if key.startswith("CLOUDBENCH_SHARED_RELAY_"):
+                        env.pop(key)
+            if mode.startswith(("mutation", "relay")):
                 env.pop("CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY", None)
                 env.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
                 env.update(CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="1", CLOUDBENCH_CAMPAIGN_SHARED_RELAY="0", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="1")
+                if mode.startswith("relay"):
+                    env.update(CLOUDBENCH_CAMPAIGN_SHARED_RELAY="1", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="0", FLY_API_TOKEN="offline-fixture", PATH=str(root / "bin") + os.pathsep + env["PATH"])
             if mode == "fresh":
                 stamp = root / ".context/fleet-infra-canary.last-pass"
                 stamp.parent.mkdir(parents=True, exist_ok=True)
@@ -269,7 +316,7 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                         "--forward-arg=--cold-primary-bootstrap",
                     ]
                 )
-            if mode == "cancel":
+            if mode in ("cancel", "relay-cancel"):
                 child = subprocess.Popen(
                     argv,
                     env=env,
@@ -308,6 +355,23 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 if (root / "events").exists()
                 else []
             )
+            if mode.startswith("relay"):
+                if old_relay or mode in ("relay-foreign", "relay-source", "relay-cancel"):
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr + details)
+                    self.assertNotIn("TASK_START", events)
+                    if old_relay:
+                        self.assertIn("DEFAULT_AGENT_ROUTE", events)
+                    else:
+                        self.assertNotIn("DEFAULT_AGENT_ROUTE", events)
+                    if mode == "relay-cancel":
+                        self.assertIn("CANARY_JOINED", events)
+                    return
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr + details)
+                self.assertNotIn("DEFAULT_AGENT_ROUTE", events)
+                self.assertEqual(events.count("SHARED_ROUTE:1"), 1)
+                self.assertEqual(events.count("SHARED_ROUTE:0"), 6)
+                self.assertLess(events.index("SHARED_ROUTE:1"), events.index("TASK_START"))
+                return
             if mode.startswith("mutation"):
                 if old_mutation or mode != "mutation":
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr + details)
@@ -339,7 +403,7 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                     self.assertIn("receipt checksum differs", details)
                 else:
                     self.assertNotIn("TASK_START", events)
-                    if mode == "cancel":
+                    if mode in ("cancel", "relay-cancel"):
                         self.assertIn("CANARY_JOINED", events)
                 return
             self.assertEqual(
@@ -384,6 +448,15 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                         / (budget["global_budget_id"] + ".json")
                     ).exists()
                 )
+
+    def test_parent_n2_and_workers_use_owned_shared_relay_without_default_agent(self):
+        self.campaign_fixture(mode="relay")
+        self.campaign_fixture(mode="relay", old_relay=True)
+
+    def test_parent_n2_foreign_relay_never_falls_back_to_default_agent(self):
+        for mode in ("relay-foreign", "relay-source", "relay-cancel"):
+            with self.subTest(mode=mode):
+                self.campaign_fixture(mode=mode)
 
     def test_parent_n2_and_workers_use_same_checked_mutation_authority(self):
         self.campaign_fixture(mode="mutation")
