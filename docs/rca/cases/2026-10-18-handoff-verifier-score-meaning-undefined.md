@@ -60,7 +60,7 @@ matched its reasoning in all 32 replays. The earlier Auth Options phone label
 (`6f53a9a42`) was reverted: baseline runs without it also passed, and the
 divergence is at the verifier, not the actor's identity choice.
 
-## Fix
+## Solution
 
 `AUTH_HANDOFF_VERIFICATION_GOAL` now ends with "The score is this handoff
 decision: 1.0 only when the transfer is justified now; otherwise 0.0." The
@@ -69,3 +69,14 @@ per-call directive and both provider request bodies (fails on the old source).
 
 At 10k agents: one sentence (~20 tokens) per handoff verification call; no new
 calls, channels, or state.
+
+## Human feedback
+
+The user deferred prompt approval to the deploy step: fix failures, rerun every
+unchanged auth benchmark, then request approval with the exact diff.
+
+## Reusable lesson
+
+When a gate consumes a judge's numeric score as a decision, the per-call goal
+must state what each score value decides. A generic completeness rubric lets a
+well-grounded "no" score 1.0.
