@@ -12225,6 +12225,25 @@ async def test_execute_action_request_payment_card_accepts_image_urls_rendered_o
     dom.get_page_image_urls.assert_awaited_once()
 
 
+    # Actual member-discount receipt shape must also survive the real private DOM
+    # action projection; MagicMock above intentionally has no production policy.
+    from browser_tools.dom_service import DOMService
+    private_dom = DOMService("ws://offline-private-receipt-control")
+    private_dom.register_secret_refs({"password": "fixture-password"})
+    private_dom.mark_secret_used()
+    private_dom._session = SimpleNamespace()
+    private_dom.get_page_image_urls = AsyncMock(return_value=list(_TEST_SHOP_PAGE_IMAGES))
+    private_receipt = _test_shop_receipt([_TEST_SHOP_PAGE_IMAGES[i] for i in (0, 2, 3)])
+    private_out = await execute_action(
+        private_dom, ah, {"action": "request_payment_card", "params": private_receipt},
+        current_url=f"{_TEST_SHOP_ORIGIN}/test_payment",
+        trusted_page_urls=[f"{_TEST_SHOP_ORIGIN}/test_payment"],
+    )
+    assert "payment_request" in private_out, private_out
+    assert private_out["payment_request"] == private_receipt, "private action projection dropped typed receipt"
+    assert private_out["payment_request"]["line_items"][2]["image_url"].endswith("Canvas+Tote")
+
+
 async def test_execute_action_request_payment_card_without_image_urls_skips_page_read():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -21854,6 +21873,7 @@ class _FakeDomService:
     secret_redaction_state = _PrivacyPolicyDOMService.secret_redaction_state
     restore_secret_redaction_state = _PrivacyPolicyDOMService.restore_secret_redaction_state
     model_visible_value = _PrivacyPolicyDOMService.model_visible_value
+    model_visible_action_result = _PrivacyPolicyDOMService.model_visible_action_result
 
     def __init__(self, cdp_url, downloads_path="/tmp/downloads"):
         self.cdp_url = cdp_url
@@ -23631,10 +23651,10 @@ async def test_private_browser_pause_urls_use_protected_continuity():
     assert ordinary_call["turn_messages"][0]["content"][1] == ordinary_image, "no-secret attachment lost vision"
     assert ordinary_call["browser_state"]["_extra_user_messages"][0]["content"][1] == ordinary_image
     failures = []
-    for scenario in ("actor_before", "actor_after", "drain", "write", "payment", "auth", "completed",
+    for scenario in ("actor_before", "actor_after", "drain", "write", "payment", "payment_alias", "auth", "completed",
                      "max_steps", "declined", "raster_completed", "raster_max_steps"):
         actor_resume = scenario.startswith("actor_")
-        pause = "drain" if actor_resume else scenario.removeprefix("raster_")
+        pause = "payment" if scenario == "payment_alias" else ("drain" if actor_resume else scenario.removeprefix("raster_"))
         private_entry = scenario != "actor_before" and not scenario.startswith("raster_")
         prior_messages = []
         if actor_resume:
@@ -23696,9 +23716,26 @@ async def test_private_browser_pause_urls_use_protected_continuity():
                         "message": secret}
             if pause == "write":
                 return {"status": "needs_write_approval", "approval_type": "purchase", "question": raw_url}
-            return {"status": "needs_payment_card_approval", "payment_request": {"url": raw_url}}
+            return {"status": "needs_payment_card_approval", "payment_request": {
+                "url": raw_url, "merchant": "Fixture Merchant", "currency": "USD",
+                "subtotal_cents": 1350, "total_cents": 1960,
+                "fees": [{"label": "Tax", "amount_cents": 111}, {"label": "Shipping", "amount_cents": 499}],
+                ("lineItems" if scenario == "payment_alias" else "line_items"): [
+                    {"name": "Canvas Tote", "image_url": "https://public.fixture/tote.png",
+                     "product_url": raw_url, "rating": "4.7 stars", "review_count": "212 reviews",
+                     "unit_price_cents": 450, "quantity": 1, "line_total_cents": 450, "note": secret,
+                     "screenshot": "data:image/png;base64," + screenshot},
+                    {"name": "Secret URL", "image_url": raw_url, "product_url": raw_url,
+                     "rating": "4.7 stars", "review_count": "212 reviews",
+                     "unit_price_cents": 450, "quantity": 1, "line_total_cents": 450},
+                    {"name": "Raster", "image_url": "data:image/png;base64," + screenshot,
+                     "product_url": raw_url, "rating": "4.7 stars", "review_count": "212 reviews",
+                     "unit_price_cents": 450, "quantity": 1, "line_total_cents": 450},
+                ],
+            }}
 
         action = ("request_user_assistance_for_authentication" if pause == "auth" else
+                  "request_payment_card" if pause == "payment" else
                   "attempt_completion" if pause == "completed" else "scroll")
         session_info = {"session_id": "session-1", "ws_url": "ws://fixture", "debug_url": "https://kernel.fixture/view",
                         "same_session_available": True, "auth_options": {"realm": realm},
@@ -23872,6 +23909,13 @@ async def test_private_browser_pause_urls_use_protected_continuity():
                     "payment": "awaiting_payment_card_approval", "auth": "awaiting_auth_assistance",
                     "completed": "completed", "max_steps": "max_iterations", "declined": "completed"}[pause]
         assert result["status"] == expected
+        if pause == "payment":
+            items_key = "lineItems" if scenario == "payment_alias" else "line_items"
+            items = result["payment_request"][items_key]
+            assert items[0].get("image_url") == "https://public.fixture/tote.png", "typed receipt URL lost at owning activity return"
+            assert items[1].get("image_url") == visible_url, "receipt URL leaked private credential"
+            assert items[0]["product_url"] == visible_url and items[0]["note"] == "{{secret:pwd:url}}"
+            assert "screenshot" not in items[0] and "image_url" not in items[2], "private raster escaped suppression"
         if scenario == "raster_completed":
             screenshot_upload.assert_awaited_once_with(
                 user_id="u1", file_content=base64.b64decode(screenshot, validate=True),
@@ -26190,6 +26234,16 @@ async def test_payment_lookup_reuses_backend_matched_legacy_fingerprint():
     assert calls == [
         ("lookup_purchase_activity", ["user-1", "canonical-fingerprint"]),
     ]
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.workflow.execute_activity",
+        side_effect=fake_execute_activity,
+    ):
+        await _lookup_payment_purchase(
+            "user-1", {"fingerprint": "canonical-fingerprint", "agentId": "browser-child"}, "simulate"
+        )
+    assert calls[-1] == (
+        "lookup_purchase_activity", ["user-1", "canonical-fingerprint", "simulate", {"fingerprint": "canonical-fingerprint", "agentId": "browser-child"}, "browser-child"]
+    )
 
 class _FakePaymentGateHandle:
     """Awaitable activity handle returning a fixed result (matches manager fake)."""

@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Unit tests for the Fast Mode cache normalization + key builder (TS side).
  *
@@ -10,6 +9,7 @@
  */
 
 import assert from 'node:assert';
+import { testRegisteredWmhExecutionPolicy } from './fast-cache-normalize-policy-controls';
 import {
   normalizeUrl,
   canonicalMessages,
@@ -25,10 +25,10 @@ function test(name: string, fn: () => void): void {
   try {
     fn();
     passed += 1;
-    console.log(`  ✅ ${name}`);
+    process.stdout.write(`  ✅ ${name}\n`);
   } catch (err) {
     failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
-    console.log(`  ❌ ${name}`);
+    process.stdout.write(`  ❌ ${name}\n`);
   }
 }
 
@@ -608,8 +608,14 @@ test('isOaiDemoGoal matches only identity-bound mass-agent demo goals', () => {
   );
 });
 
+test(
+  'registered WMH policy isolates backend cache and mirrors exact Python metadata',
+  testRegisteredWmhExecutionPolicy
+);
 if (failures.length > 0) {
-  console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
+  process.stderr.write(
+    `\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}\n`
+  );
   process.exit(1);
 }
-console.log(`\n✅ fast-cache normalize: ${passed}/${passed} passed`);
+process.stdout.write(`\n✅ fast-cache normalize: ${passed}/${passed} passed\n`);

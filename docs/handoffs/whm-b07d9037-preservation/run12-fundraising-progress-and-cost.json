@@ -1,0 +1,375 @@
+{
+  "schemaVersion": 1,
+  "generatedUtc": "2026-10-13T02:05:06.090384+00:00",
+  "kind": "Derived original-run fundraising progress and estimated provider-spend report; not a new run or reconstructed original receipt",
+  "originalRun": "wmh-raise-5m-rose-labs-brex-1791845194",
+  "rootAgent": "65889659-9f08-4488-917e-9611223be811",
+  "sourceSha": "39a0433b8850f38996c7fb1433c043998b6f9eeb",
+  "executionWindowSeconds": 3600,
+  "reportedDurationSeconds": 3665.3,
+  "canonicalLauncherStartedToFinishedSeconds": 3769,
+  "canonicalLauncherClockScope": "Recorded run.env started_epoch to finished_epoch includes launch and evidence/cleanup; native cold load precedes it. Do not sum durations as proof of every whole-run boundary.",
+  "nativeColdStartupSecondsReported": 854,
+  "simulatedWorldElapsedSeconds": 2886.9,
+  "outcome": "Execution-window FAILURE; zero of one benchmark passed",
+  "previousIteration": {
+    "name": "run11-world20m",
+    "executionWindowSeconds": 1200,
+    "worldSteps": 25,
+    "outreachToolsCommitted": 0,
+    "scheduledFollowupEvents": 0,
+    "settledProceedsCents": 0,
+    "progress": "Research; no investor outreach committed",
+    "estimatedTrajectoryProgressPct": 10
+  },
+  "currentIteration": {
+    "name": "run12-messaging60m",
+    "worldSteps": 105,
+    "researchAttempts": 79,
+    "sourceVerifiedWarmIntroducerRows": 0,
+    "sourceVerifiedWarmRelationshipRows": 0,
+    "simulatedEmailSends": 0,
+    "emailDeliveryActivityAttempts": 2,
+    "emailDeliveryActivityTimeouts": 2,
+    "nativeWorldAcceptedEmailRecords": 2,
+    "emailCountingCorrection": "Both agent-facing send_email_activity attempts timed out. Two later native-world accepted-send records are present, but neither was returned as a completed agent delivery. Mark this as an ambiguous late-commit boundary, not two confirmed completed agent sends.",
+    "distinctEmailInvestorOrganizations": 1,
+    "submissionRecords": 6,
+    "confirmedSubmissionRecords": 4,
+    "confirmedFounderIntakeRecords": 1,
+    "confirmedSubmissionDestinations": 5,
+    "investorOrganizationsTouched": 6,
+    "submissionCountingLimit": "Five distinct confirmed form/intake destinations include one unresolved eligibility case. One retry succeeded after an earlier unverified record. Two emails went to one investor organization; do not count them as two investor contacts.",
+    "blockedIntakes": 1,
+    "blockedIntakeReason": "required company country unknown",
+    "currentDeckVersionAuthorizationVerifiedAcrossSubmissions": false,
+    "privateCalendarReviewEntries": 2,
+    "investorEmailFollowupSequencesRecorded": 0,
+    "investorMeetings": 0,
+    "humanInvestorReplies": 0,
+    "commitments": 0,
+    "signedInstruments": 0,
+    "pendingWires": 0,
+    "settledProceedsCents": 0,
+    "financialGoalCompletionPct": 0,
+    "overallTrajectoryCompletionPct": 20,
+    "percentageExplanation": "Approximate qualitative reporting estimate of progress through the fundraising trajectory, not cash raised or probability of success. Run11 reached research/preparation (~10%); Run12 reached initial outreach (~20%). Small outreach volume, no recorded email follow-up sequence, no attributable warm paths, and unresolved pitch-material authorization keep Run12 in the early-outreach band. Financial completion remains separately 0%.",
+    "observedBottleneck": "Research did not produce attributable warm-introduction paths; outreach is still small, current pitch-material authorization unresolved, and no sustained multi-day investor follow-up/meeting/diligence/closing cycle was demonstrated. These observations are not a proven causal root."
+  },
+  "trajectoryProgressReportingRubric": {
+    "kind": "Qualitative milestone estimate requested by the user; reporting only, not a changed benchmark, prompt, policy or evaluator",
+    "calibrated": false,
+    "successProbability": false,
+    "firstScorecardNumber": "Approximate trajectory progress, followed by change from the previous iteration; cash raised is separate",
+    "bandsPct": [
+      {
+        "range": [
+          0,
+          10
+        ],
+        "stage": "Preparation and source-grounded investor research"
+      },
+      {
+        "range": [
+          10,
+          25
+        ],
+        "stage": "Initial authorized outreach; score within band reflects unique reach, verified fit, usable materials and warm-path evidence"
+      },
+      {
+        "range": [
+          25,
+          45
+        ],
+        "stage": "Sufficient qualified investor pipeline and sustained scheduled follow-up cadence"
+      },
+      {
+        "range": [
+          45,
+          60
+        ],
+        "stage": "Investor responses and held meetings with viable next steps"
+      },
+      {
+        "range": [
+          60,
+          75
+        ],
+        "stage": "Active diligence and negotiation with credible investors"
+      },
+      {
+        "range": [
+          75,
+          90
+        ],
+        "stage": "Credible commitments progressing toward the full target"
+      },
+      {
+        "range": [
+          90,
+          100
+        ],
+        "stage": "Signed instruments, wires and full target settled; 100% requires the goal actually achieved"
+      }
+    ],
+    "limitation": "Band placement is judgment based on original records, not an empirically calibrated fraction of work. Stage presence alone is insufficient for later bands; outreach volume, conversion, authorization and outstanding blockers must be reported. Scores may regress when evidence invalidates a milestone."
+  },
+  "stallAndFixtureVerification": {
+    "scope": "Additional read-only inspection of original prediction records/final joined history and the replacement isolated restored fixture; no new trial",
+    "longFailedNativePredictions": 4,
+    "nativeElapsedSecondsRange": [
+      979.678,
+      994.712
+    ],
+    "providerFailureObservation": "Four Foundry partial-output attempts ended with RoseDeadlineError: idle for120s; native HTTP500 records finish in the same terminal interval. Exact provider-to-native mapping and causal root remain unproven.",
+    "longFailedPredictionIntervalUtc": [
+      "2026-10-12T23:17:36.315Z",
+      "2026-10-12T23:34:11.027Z"
+    ],
+    "successfulPredictionsFinishedInThatIntervalAndPresentInFinalHistory": 7,
+    "successfulPredictionsFinishedAfterThoseFailuresAndPresentInFinalHistory": 32,
+    "wholeRunPermanentDeadlockObserved": false,
+    "progressLimitations": [
+      "37 of79 research attempts were partial, incomplete or unresolved",
+      "No attributable warm-introduction paths returned; this does not prove the fixture contains none",
+      "One intake blocked by required unknown company country",
+      "Current pitch-material authorization unresolved; no email follow-up cadence demonstrated"
+    ],
+    "run12SeedSourceDatabase": "wmh_fixture_source_20261012",
+    "run12SeedMessageLimit": 100000,
+    "originalRunSeedLogConfirms42910Messages": true,
+    "replacementRestoredDatabase": "whm_gen1_e9afcffd_fixture_20261012",
+    "replacementReadOnlyDatabaseCountsRechecked": {
+      "IMESSAGE": 23130,
+      "EMAIL": 10593,
+      "WHATSAPP": 9187,
+      "contacts": 2225,
+      "connectedIntegrations": 9
+    },
+    "fixtureState": "Correct frozen Tamy October12 full-history fixture was used by original Run12 and restored here; no new production refresh or duplicate paid run was performed"
+  },
+  "llmEndToEndLatencyScorecard": {
+    "units": "seconds",
+    "definition": "RoseClient request start through terminal stream completion or logged failure, including provider fallback within that client request; not time to first token or whole tool/world-operation latency",
+    "percentileMethod": "Nearest rank, using existing agents/benchmarks/span_history.py:_percentile",
+    "agent": {
+      "scope": "All task-agent LLM calls in the original owned Run12 worker, including root and children",
+      "completedTimedCalls": 125,
+      "avgSeconds": 7.508571696,
+      "p95Seconds": 25.90513,
+      "p99Seconds": 32.183899,
+      "minSeconds": 2.383048,
+      "maxSeconds": 35.277204,
+      "loggedFailuresIncluded": 0,
+      "startedCallsWithoutTerminalTiming": 5,
+      "timingSource": "Exact request_id plus span_id matching between rose.complete.start and rose.complete.foundry.done timestamps",
+      "meteredPopulationCheck": "All125 final usage rows match125 timing rows by span_id and call_site; the wait_for usage row has agent_id string None while the completion log has null"
+    },
+    "WHM": {
+      "scope": "Native WMH RoseClient LLM requests;108 successes plus4 logged terminal failures",
+      "terminalTimedCalls": 112,
+      "successfulCalls": 108,
+      "loggedFailuresIncluded": 4,
+      "avgSeconds": 131.67125,
+      "p95Seconds": 216.03,
+      "p99Seconds": 265,
+      "minSeconds": 47,
+      "maxSeconds": 349,
+      "startedCallsWithoutTerminalTiming": 4,
+      "timingSource": "Exact request_id matching in original WMH final serve log; elapsed_s where available, otherwise start/done timestamps recorded to whole-second precision",
+      "precision": "Approximate:102 Foundry success durations use second-resolution timestamps;6 OpenRouter success and4 failure logs supply elapsed_s",
+      "successOnly": {
+        "count": 108,
+        "avgSeconds": 128.40225925925927,
+        "p95Seconds": 203,
+        "p99Seconds": 265
+      }
+    },
+    "coverageLimit": "Calls without terminal timing are excluded, rather than assigning a fabricated finish time. These are observed-terminal-call latency distributions, not a complete distribution for all started calls.",
+    "latencyBreakdown": {
+      "agentAll125CompletedCallsUsedAzure": true,
+      "agentActualModel": "gpt-6-sol-foundry",
+      "WMHAzureSuccessfulCalls": 102,
+      "WMHOpenRouterSuccessfulCalls": 6,
+      "WMHActualModels": [
+        "gpt-6.1-sol-foundry",
+        "openai/gpt-6.1-sol"
+      ],
+      "WMHAzureOnlySuccessfulMeanSeconds": 124.7843137254902,
+      "WMHFallbackSuccessfulMeanSeconds": 189.90733333333333,
+      "WMHMeanFirstProductiveChunkSeconds112TerminalCalls": 20.910116071428572,
+      "WMHMeanRemainingTimeAfterFirstProductiveChunkSeconds112TerminalCalls": 110.76113392857143,
+      "WMHFirstProductiveKinds": {
+        "codex_reasoning_item": 93,
+        "reasoning": 17,
+        "content": 2
+      },
+      "firstProductiveChunkLimit": "Mostly reasoning signals, not first visible answer token; remaining time includes subsequent reasoning/generation, delivery and failed-call idle time, not a measured pure decode duration",
+      "agentMeanInputTokens125FinalMeteredCalls": 16629.088,
+      "agentMeanOutputTokens125FinalMeteredCalls": 775.024,
+      "WMHMeanInputTokens108FinalMeteredCalls": 170772.13888888888,
+      "WMHMeanOutputTokens108FinalMeteredCalls": 6482.805555555556,
+      "WMHPoolFromAll116StartLogs": "rose-wmh-gpt61",
+      "WMHConfiguredFoundryAndFallbackReasoningEffort": "xhigh",
+      "WMHActualResponseOutcomeBranchRange": [
+        2,
+        6
+      ],
+      "causalInterpretation": "Both sets used Azure. WHM's much larger input/output workload, different model and high-effort distribution generation are plausible latency drivers. The four logged failures add about3.27s to the observed mean versus successful calls; fallback calls are slower but only6 of108 successes. These observations do not isolate model, effort, context length, generation length, deployment load or transport as a proven causal root; no controlled same-input comparison was run."
+    },
+    "widerNativePredictionOperationDiagnostic": {
+      "scope": "Separate116 original prediction-attempt intervals, including all9 errors/cancellations and work outside the RoseClient LLM request",
+      "count": 116,
+      "avgSeconds": 163.2173275862069,
+      "p95Seconds": 296.46,
+      "p99Seconds": 981.19,
+      "maxSeconds": 994.712,
+      "distinction": "Do not substitute these whole prediction-attempt durations for LLM-call latency; this is the scope of the previously reported16-minute stalls"
+    },
+    "originalEvidenceSha256": {
+      "ownedFinalWorkerLog": "b3a449ec0c4b2a0d8c4c77d78ecf1ed86f0873dde390fcb2b0cca18b21f89f77",
+      "WMHFinalServeLog": "921c9781a68d3538329f329ed220221157a78a616a27d02b47023e7fa3350f57",
+      "privateDerivedLatencyRows": "02807681195a5f30491cbd09165aedc11376a84eaca76ebfbd4bef54d4eda130"
+    }
+  },
+  "providerSpendEstimate": {
+    "azure_wmh": {
+      "calls": 102,
+      "input": 17298164,
+      "read": 16730599,
+      "write": 567259,
+      "plain": 306,
+      "output": 655276,
+      "long_context_calls": 11,
+      "cost_usd": 10.3812189,
+      "input_cost_usd": 3.481718900000001,
+      "output_cost_usd": 6.899499999999996
+    },
+    "openrouter_wmh": {
+      "calls": 6,
+      "input": 1145227,
+      "read": 943035,
+      "write": 202174,
+      "plain": 18,
+      "output": 44867,
+      "long_context_calls": 0,
+      "cost_usd": 1.0484445,
+      "input_cost_usd": 0.5997745000000001,
+      "output_cost_usd": 0.44867
+    },
+    "azure_task_agents": {
+      "calls": 125,
+      "input": 2078636,
+      "read": 1606268,
+      "write": 458503,
+      "plain": 13865,
+      "output": 96878,
+      "cost_usd": 2.4640211,
+      "input_cost_usd": 1.4952411,
+      "output_cost_usd": 0.96878,
+      "long_context_calls": 0
+    },
+    "azure_total_usd": 12.84524,
+    "all_metered_llm_usd": 13.8936845,
+    "pricing_basis": "Global Standard USD list-rate estimate; GPT6.1 input/read/write/output2/.1/2.5/10, GPT6 Sol2/.2/2.5/10 per1M; >272K input doubles input/cache rates and multiplies output by1.5. Region/deployment/contract and incomplete-usage/infrastructure invoice not reconciled."
+  },
+  "costCoverage": {
+    "AzureIncludesWMHAndTaskAgents": true,
+    "taskAgentMeteredCallsInFinalWorkerLog": 125,
+    "taskAgentCallsInBenchmarkSnapshot": 122,
+    "deduplicatedFinalWorkerCacheLines": 125,
+    "WMHMeteredCalls": 108,
+    "WMHLookups": 116,
+    "WMHAttemptsWithoutFinalUsage": 8,
+    "storedBenchmarkZeroCostIsNotAzureSpend": true,
+    "estimateNotProviderInvoice": true,
+    "AzureDeploymentRegionContractCreditsDiscountsUnreconciled": true,
+    "AzureGlobalStandardRateAssumed": true,
+    "infrastructureStorageEgressCostNotCaptured": true,
+    "partialFailedCancelledUsageMayAddCost": true,
+    "longContextPremiumAppliedPerCall": true,
+    "longContextWMHCalls": 11,
+    "maxWMHInputTokens": 295596,
+    "costFormula": "Per completed call: (plain_input*input_rate + cache_reads*cached_rate + cache_writes*write_rate + output*output_rate)/1e6; use long-context rates for input totals above272000 tokens. Sum each actual route separately.",
+    "pricingSources": [
+      "https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-gpt-6-1-sol-in-microsoft-foundry-advanced-intelligence-optimized-for/4560811",
+      "https://azure.microsoft.com/en-us/blog/gpt-6-astra-sol-and-luna-for-production-agents-in-microsoft-foundry/",
+      "https://openrouter.ai/openai/gpt-6.1-sol/providers",
+      "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+    ]
+  },
+  "wmhCache": {
+    "input": 18443391,
+    "cachedInput": 17673634,
+    "cachedInputPct": 95.82638,
+    "cacheWrites": 769433,
+    "output": 700143,
+    "DEMOHits": 0,
+    "DEMOLookups": 116,
+    "DEMOStores": 107
+  },
+  "originalEvidence": {
+    "retirementSha256": "e7fe63858245cc665c368098779805995a70824cf646bc2ca5eea1b5364ff0a9",
+    "finalWorkerLogSha256": "b3a449ec0c4b2a0d8c4c77d78ecf1ed86f0873dde390fcb2b0cca18b21f89f77"
+  },
+  "futureIterationReportRequiredByUser": [
+    "First scorecard number: approximate progress of the fundraising trajectory on the fixed reporting rubric, with previous-iteration delta; report financial completion separately",
+    "One agent LLM e2e latency row and one WHM LLM e2e latency row, each showing average, p95, p99 in seconds; state scope, sample count, percentile method, failed-call inclusion and missing terminal timings",
+    "Execution duration, reported duration and simulated time progressed",
+    "What changed since previous iteration, with its exact source/state identity",
+    "Progress through actual fundraising funnel: verified warm paths, unique targeted investors, sent/scheduled emails, replies, held meetings, diligence, commitments, signed instruments and settled cash",
+    "Outreach plan/volume still needed, with calibrated assumptions kept soft rather than forced outcomes",
+    "Observed limiting stage and concrete next test; separate observations from causal proof",
+    "WMH total/cached/write input, output, DEMO hits/lookups/stores; separate task-agent cache",
+    "Total metered inference estimate, Azure WMH expense, Azure task-agent expense, other providers, rate/tier assumptions and missing-cost coverage",
+    "Verified FE replay and exact final joined resource cleanup",
+    "Scorecard must separately show DEMO response replay hit rate, task-agent prompt-cache hit rate and WHM provider prompt-cache hit rate, with numerators/denominators and scope."
+  ],
+  "benchmarkPromptPolicyEvaluatorChanged": false,
+  "newPaidCalls": 0,
+  "merged": false,
+  "deployed": false,
+  "cacheScorecard": {
+    "DEMOResponseReplay": {
+      "hitPct": 0,
+      "hits": 0,
+      "lookups": 116,
+      "stores": 107,
+      "denominator": "response-cache lookups",
+      "loggedStoreQualification": {
+        "loggedStores": 107,
+        "explicitFrozenNamespaceSkips": 107,
+        "durableWritesFromThoseEvents": 0,
+        "originalWMHLookups": 116,
+        "originalAgentLookups": 129,
+        "combinedOriginalLookups": 245,
+        "explanation": "Keep original logged107 stores as historical evidence; every such event corresponds to an explicit skipped write. They are not durable replay entries."
+      }
+    },
+    "agentPromptCacheFinalAllInput": {
+      "hitPct": 77.27509770830487,
+      "cacheReadInputTokens": 1606268,
+      "totalInclusiveInputTokens": 2078636,
+      "meteredCalls": 125,
+      "denominator": "all input tokens of125 final owned worker llm.cache entries; same normalization as WHM provider token hit rate",
+      "source": "original final owned worker log"
+    },
+    "agentPromptCacheRecordedBenchmarkSnapshot": {
+      "reportedHitPct": 79.2,
+      "cacheReadInputTokens": 1570471,
+      "cacheWriteInputTokens": 412508,
+      "totalInclusiveInputTokens": 1996296,
+      "meteredCalls": 122,
+      "denominator": "read/(read+write) in saved benchmark snapshot; snapshot captures fewer final calls",
+      "allInputComparableHitPct": 78.66924544255961
+    },
+    "WMHPromptCache": {
+      "hitPct": 95.82638,
+      "cacheReadInputTokens": 17673634,
+      "totalInclusiveInputTokens": 18443391,
+      "meteredCalls": 108,
+      "denominator": "all input tokens of108 final metered WMH rows"
+    },
+    "distinction": "DEMO measures replayed complete responses; agent and WHM cache rates measure provider prompt-token reuse. They are separate populations. Use final all-input denominators for comparisons, while retaining the original79.2% benchmark-reported metric."
+  }
+}

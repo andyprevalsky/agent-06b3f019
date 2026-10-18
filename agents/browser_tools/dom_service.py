@@ -892,6 +892,22 @@ class DOMService:
             return safe
         if "credential_ref" in result:
             safe["credential_ref"] = result["credential_ref"]
+        if action_name == "request_payment_card":
+            # Typed operational receipt text must survive every action projection,
+            # before the activity's final return. Raster/media policy stays generic.
+            payment = result.get("payment_request")
+            visible_payment = safe.get("payment_request")
+            if isinstance(payment, dict) and isinstance(visible_payment, dict):
+                items_key = "line_items" if "line_items" in payment else "lineItems"
+                original_items = payment.get(items_key)
+                visible_items = visible_payment.get(items_key)
+                if isinstance(original_items, list) and isinstance(visible_items, list):
+                    for original, visible in zip(original_items, visible_items):
+                        if not isinstance(original, dict) or not isinstance(visible, dict):
+                            continue
+                        url = original.get("image_url")
+                        if isinstance(url, str) and url.startswith(("https://", "http://")):
+                            visible["image_url"] = self.model_visible_value(url)
         if action_name in {"screenshot", "read_browser_state"} and not self.secret_values_used:
             # Only these action outputs contain trusted raster transport.
             # A coincidental CVV in PNG base64 is not a page-text readback.

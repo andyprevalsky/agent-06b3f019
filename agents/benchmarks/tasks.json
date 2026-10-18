@@ -9493,6 +9493,206 @@
     "group": "rose-bench"
   },
   {
+    "name": "raise-5m-rose-labs-brex",
+    "title": "Raise $5M for Rose Labs (Brex balance, simulated)",
+    "description": "Long-horizon fundraise: from Tamy's account snapshot, raise US$5M for Rose Labs with no questions asked; passes when the Brex account shows $5,000,000 received.",
+    "prompt": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "DEMO",
+      "long-horizon"
+    ],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "model": "rose-ultra",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "rose-bench",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.fundraise_initial_state.v3",
+        "as_of_utc": "2026-09-28T00:00:00Z",
+        "acting_user": {
+          "name": "Tamara Chayo",
+          "role": "CEO",
+          "authority": "company_ceo"
+        },
+        "company": {
+          "name": "Rose Labs",
+          "ceo": "Tamara Chayo",
+          "cto": "Andy Prevalsky"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "brex": {
+          "account_ref": "rose_labs_primary_usd",
+          "currency": "USD",
+          "opening_balance_cents": 0,
+          "browser_session": "authenticated_via_browser_cookie",
+          "reauthentication_route": null,
+          "incoming_transfers": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "tamara@roselabs.ai"
+          },
+          "gmail": {
+            "connected": true,
+            "account": "tamara@roselabs.ai"
+          },
+          "sms": {
+            "connected": true,
+            "phone_number_e164": "+12028803603"
+          }
+        },
+        "fundraising": {
+          "existing_commitments": [],
+          "signed_instruments": [],
+          "pending_wires": [],
+          "settled_proceeds_cents": 0,
+          "existing_deal_documents": []
+        }
+      },
+      "scratchpad": "Every data source, integration, app, website, and browser workspace is connected and authenticated by default in this simulated world, including services not listed in structured state. This includes Gmail, SMS, Slack, iMessage, WhatsApp, Google Drive and Docs, Brex, and investor application portals. Do not infer a disconnected source, missing login, or unavailable workspace from an absent per-service entry; only an explicit state change can disconnect one. Use the stated account identities for actions that require a sender: Gmail is tamara@roselabs.ai and SMS is +12028803603. Connectivity does not itself establish prior correspondence, an application, investor interest, a commitment, or deposited funds."
+    },
+    "human_time": "3mo",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; the Brex account for Rose Labs shows at least $5,000,000 received, traceable to grounded investor commitments.",
+    "label_notes": "Long-horizon capability bench. The initial timeout is 10 minutes; only raise it in explicit 10-minute increments approved by the user. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live-tamy-account-snapshot"
+      ],
+      "services": [
+        "brex.com",
+        "world-model-harness"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://dashboard.brex.com"
+      ],
+      "context_notes": "Runs as Tamy's production identity on top of an account snapshot (User, credits, subscription, integrations, contacts, message history) seeded from prod as the base environment; browser auth is never synced. World model simulate is ON (world_model_mode=simulate): specialized explore/browser/code subagent calls plus search, messaging, phone and payment boundaries are served by the WMH, so no real investor is contacted and no real money moves. Root, general-purpose, and general-purpose for-each loops remain real. The DEMO tag enables shared record/replay for both real agent-loop LLM calls and WMH prediction calls. wait_for / wait_seconds skip wall-clock sleeps and advance the simulated clock (utils/simulated_clock.py) so months of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "total_raised_usd",
+          "type": "float",
+          "required": true,
+          "description": "Total funding received by Rose Labs; must be at least 5000000 and grounded in tool-observed investor or lender commitments"
+        },
+        {
+          "name": "investor_commitments",
+          "type": "list[object]",
+          "required": true,
+          "properties": [
+            {
+              "name": "investor_name",
+              "type": "str",
+              "description": "Named investor or lender"
+            },
+            {
+              "name": "commitment_amount_usd",
+              "type": "float",
+              "description": "Grounded committed amount in USD"
+            },
+            {
+              "name": "confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed commitment evidence and instrument terms"
+            }
+          ],
+          "description": "Concrete commitments whose deduplicated amounts total at least 5000000 USD"
+        },
+        {
+          "name": "brex_balance_usd",
+          "type": "float",
+          "required": true,
+          "description": "Grounded balance shown in Rose Labs' Brex account after the incoming funds settle; must be at least 5000000"
+        },
+        {
+          "name": "brex_incoming_funds",
+          "type": "list[object]",
+          "required": true,
+          "properties": [
+            {
+              "name": "source",
+              "type": "str",
+              "description": "Named investor, lender, or originating institution"
+            },
+            {
+              "name": "amount_usd",
+              "type": "float",
+              "description": "Incoming Brex deposit or wire amount in USD"
+            },
+            {
+              "name": "status",
+              "type": "str",
+              "description": "Brex-observed settlement status"
+            },
+            {
+              "name": "confirmation_reference",
+              "type": "str",
+              "description": "Grounded Brex balance, deposit, or incoming-wire evidence"
+            }
+          ],
+          "description": "Brex-observed incoming deposits or wires totaling at least 5000000 USD; written commitments alone do not satisfy this field"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "raise-5m-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "brex-shows-5m-raised",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The final deliverable reports Rose Labs raised at least US$5,000,000 in total",
+          "The transcript grounds the money in Rose Labs' Brex account: a Brex balance, deposit, or incoming-wire evidence totaling at least $5,000,000",
+          "The raised funds trace to concrete investor or lender commitments in the transcript, not unsupported assertions",
+          "The agent never stopped to ask the user clarifying questions or for permission before acting"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON fundraising run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. The user, the founder of Rose Labs, asked the agent to raise US$5,000,000 for the company with no questions asked. PASS only if ALL hold, grounded in tool evidence (browser/Brex observations, investor replies, wire/deposit confirmations) rather than assistant narration alone:\n1. The final deliverable reports that Rose Labs raised a total of at least US$5,000,000 (five million dollars).\n2. The funds are shown in Rose Labs' Brex account: a Brex balance, deposit, or incoming-wire evidence in the transcript totals at least $5,000,000.\n3. The money traces to concrete investor/lender commitments in the transcript (named parties, amounts, terms or instruments), not an unsupported assertion.\n4. The agent never stopped to ask the user clarifying questions or for permission before acting; harness auto-approvals of write locks are fine.\nFAIL if the total is below $5,000,000, if the Brex balance is asserted without grounded evidence, if the agent ended by asking the user what to do, or if it fabricated commitments that no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-09-08-raise-5m-rose-labs-brex",
+      "long_horizon_ideas:raise-money"
+    ]
+  }
+,
+  {
     "name": "planner-memory-blue-bottle-off",
     "title": "Blue Bottle planner A/B \u2014 memory OFF",
     "description": "Planner-phase A/B for planner memory on the Blue Bottle pickup goal: the accepted plan is the deliverable (plan-only terminal).",

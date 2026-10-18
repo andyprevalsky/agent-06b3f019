@@ -13,6 +13,7 @@ interface Args {
   deleteRejected: boolean;
   json: boolean;
   rootAgentIds: string[];
+  concurrency?: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -27,6 +28,13 @@ function parseArgs(argv: string[]): Args {
       args.deleteRejected = false;
     } else if (arg === '--json') {
       args.json = true;
+    } else if (arg === '--concurrency') {
+      const value = Number(argv[index + 1]);
+      if (!Number.isFinite(value) || value < 1) {
+        throw new Error('--concurrency requires a positive integer');
+      }
+      args.concurrency = Math.floor(value);
+      index += 1;
     } else if (arg === '--root-agent-id') {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith('--')) {
@@ -68,6 +76,7 @@ async function main(): Promise<void> {
   const results = await curateTraceArchives({
     rootAgentIds,
     deleteRejected: args.deleteRejected,
+    concurrency: args.concurrency,
   });
   const summary = {
     mode: args.deleteRejected ? 'delete' : 'dry-run',

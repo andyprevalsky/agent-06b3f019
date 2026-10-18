@@ -54,6 +54,10 @@ export interface CurateTraceArchiveOptions {
   rootAgentIds: string[];
   deleteRejected?: boolean;
   policy?: Partial<GoldArchivePolicy>;
+  /** Parallel classifications (default DEFAULT_CURATION_CONCURRENCY). */
+  concurrency?: number;
+  /** Progress hook, called as each bundle finishes (out of input order). */
+  onResult?: (result: CurateTraceArchiveResult, index: number) => void;
 }
 
 export interface CurateTraceArchiveResult {
@@ -106,7 +110,9 @@ function replayableArtifactCount(objects: ArchivedObjectSummary[]): number {
 function legacyMarker(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (value.legacy_migrated === true) return true;
-  if (value.source_kind === 'llm-only' || value.source_kind === 'benchmark-task') return true;
+  // Benchmark provenance is valid when the run was real and the catalog task
+  // is not DEMO. Migrated synthetic bundles carry explicit legacy markers.
+  if (value.source_kind === 'llm-only') return true;
   const restore = value.restore;
   if (isRecord(restore) && restore.legacy_migrated === true) return true;
   const sensitive = value.sensitive;
@@ -223,21 +229,54 @@ export async function classifyTraceArchiveGold(
   };
 }
 
+/**
+ * Classification downloads and decrypts every object of a bundle, so it is
+ * latency-bound (~100ms per R2 round trip). A strictly sequential pass over
+ * the ~80k-bundle archive took many hours; bundles are independent, so run a
+ * bounded pool of workers while preserving input order in the results.
+ */
+export const DEFAULT_CURATION_CONCURRENCY = 8;
+
 export async function curateTraceArchives(
   options: CurateTraceArchiveOptions
 ): Promise<CurateTraceArchiveResult[]> {
-  const results: CurateTraceArchiveResult[] = [];
-  for (const rootAgentId of options.rootAgentIds) {
-    const classification = await classifyTraceArchiveGold(rootAgentId, options.policy);
-    let deletedObjectCount = 0;
-    if (options.deleteRejected === true && !classification.gold) {
-      deletedObjectCount = (await deleteArchivedBundle(rootAgentId)).deletedObjectCount;
-    }
-    results.push({
-      deleted: deletedObjectCount > 0,
-      classification,
-      deletedObjectCount,
-    });
+  const requestedConcurrency = options.concurrency ?? DEFAULT_CURATION_CONCURRENCY;
+  if (!Number.isFinite(requestedConcurrency) || requestedConcurrency < 1) {
+    throw new Error('concurrency must be a finite number greater than or equal to 1');
   }
+  const concurrency = Math.floor(requestedConcurrency);
+  const results: CurateTraceArchiveResult[] = new Array(options.rootAgentIds.length);
+  let next = 0;
+  let failed = false;
+  let failure: unknown;
+  const worker = async (): Promise<void> => {
+    try {
+      while (!failed && next < options.rootAgentIds.length) {
+        const index = next;
+        next += 1;
+        const rootAgentId = options.rootAgentIds[index];
+        const classification = await classifyTraceArchiveGold(rootAgentId, options.policy);
+        let deletedObjectCount = 0;
+        if (options.deleteRejected === true && !classification.gold) {
+          deletedObjectCount = (await deleteArchivedBundle(rootAgentId)).deletedObjectCount;
+        }
+        results[index] = {
+          deleted: deletedObjectCount > 0,
+          classification,
+          deletedObjectCount,
+        };
+        options.onResult?.(results[index], index);
+      }
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, options.rootAgentIds.length) }, () => worker())
+  );
+  if (failed) throw failure;
   return results;
 }

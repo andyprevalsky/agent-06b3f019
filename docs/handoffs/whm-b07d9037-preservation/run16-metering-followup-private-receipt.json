@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private/whm-e9afcffd/run16-metering-followup-20261013.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "28d12b5b01ae457ef9cd11bc91dffb062c739b262fda38ea858d4ebe722dc5a1",
+  "gzip_sha256": "3cc1c7796abe7065c57657e2f543c9fd55a28383648591f57eaed881e2dd3805",
+  "stored_bytes": 543505,
+  "frames": 1,
+  "files": 38,
+  "original_bytes": 3308966,
+  "manifest_sha256": "9c9be8406b9e6cdc6fbd91131d033f806b18cf66febaddd2303531e3faff99ec",
+  "full_readback_verified": true
+}

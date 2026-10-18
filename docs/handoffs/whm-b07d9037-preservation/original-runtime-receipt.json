@@ -1,0 +1,15 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/original-runtime.tar.gz.gcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "aa1c527d066ff52856001fcd5f8e13ce72dc60d14d124d9eece7defdeddec71d",
+  "gzip_sha256": "d3e60e5aac0d82edc0efb3c4c5a3037b4fb1faf81365ea6e0173d690f1972ea8",
+  "stored_bytes": 2320147995,
+  "frames": 277,
+  "files": 44439,
+  "original_bytes": 11789967360,
+  "manifest_sha256": "b2ecd73efb8833e1669d8a1e23fee8ae6d87b2fece58aa23bf2414d71fd3c7fe",
+  "full_readback_verified": true,
+  "old_box_authenticated_member_verification": true
+}

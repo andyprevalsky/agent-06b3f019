@@ -112,6 +112,7 @@ from helpers import (
     mark_finished,
     poll_new_messages,
     post_agent_message,
+    resolve_fast_cache_context_activity,
     resolve_fast_cache_goal_activity,
     summarize_tool_result,
     update_agent_status,
@@ -147,7 +148,11 @@ from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_event_loop import run_worker_event_loop
 from helpers.worker_generation import resolve_production_task_queue
 from helpers.workflow_sandbox import production_workflow_runner
-from helpers.world_model_runtime import world_model_step_activity
+from helpers.world_model_runtime import (
+    world_clock_activity,
+    world_model_specialized_agent_activity,
+    world_model_step_activity,
+)
 from temporal_connection import temporal_connect_options
 from tools.people_search import people_search_activity  # not yet refactored into domains/
 from tools.web_search import web_search_activity  # not yet refactored into domains/
@@ -1320,6 +1325,7 @@ async def main():
         update_agent_tree_cost_activity,
         update_agent_tree_state,
         resolve_fast_cache_goal_activity,
+        resolve_fast_cache_context_activity,
         get_agent_source,
         send_direct_sms_activity,
         notify_sms_event_activity,
@@ -1327,6 +1333,8 @@ async def main():
         execute_reasoning_activity,
         query_parent_state_activity,
         world_model_step_activity,
+        world_model_specialized_agent_activity,
+        world_clock_activity,
         report_failure_activity,
     ]
 

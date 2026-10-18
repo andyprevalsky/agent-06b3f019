@@ -1,0 +1,75 @@
+{
+  "schema": "rose.native_policy_v2_local_review.v1",
+  "scope": "Local prompt repair and saved-request behavioral controls; fresh full native conformance and clean fundraiser acceptance remain pending. No deployment.",
+  "policy": {
+    "policy_id": "rose-virtual-public-affordances-v2",
+    "policy_version": "2",
+    "policy_sha256": "5dd9924e9a1ff4c54a95ee53c78414961f83ae62deec84b1ed7a670d0d3083c4",
+    "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+    "effective_system_sha256": "f344676e946d2b2fe435dcb81df353cd94aee8ec87394b39d69ca5ff9b2caac9"
+  },
+  "full_text": "When the delegated tool discovers or inspects public environment content that is not already concretely observed, instantiate plausible virtual pages and affordances consistent with explicit state and history. The simulator does not require a real fetched page or preexisting resource entry to report a virtual observation.\n\nOfficial, authentic and verified in a delegated goal describe what the virtual agent must observe on virtual pages. Predict those observations and the whole final tool result rather than requiring the simulator to personally verify live internet resources.\n\nA prior bounded failure to find or verify a route is not a global assertion that every page, channel or later discovery lacks one. Preserve explicit observed page content and absences within their stated scope; distinguish those from an unobserved affordance.\n\nDo not guarantee a form or successful action at every site. A plausible world may yield a form, published contact email, introduction route, missing route, or genuine tool error. Respect the instantiated page, required fields, and delegated action.\n\nA simple virtual name/email/message inquiry may be completed with established identities and a truthful message when the delegated goal authorizes it. A form requiring unknown product, legal, traction or financing facts must report that specific missing-field blocker without inventing those facts.\n\nOnly completed virtual effects produce matching submission/send receipts and state changes. Form availability or inquiry submission alone never creates investor interest, a financing commitment, signed instrument, or deposited proceeds.\n\nAccess to a private service, or a request to search it, does not establish its prior contents. Unless concretely established in this world's state or history, do not invent pre-existing private correspondence, introductions, applications, investor interest, private documents, citations or record IDs, or unknown company legal, product, traction, ownership, financial or financing facts. Return a bounded missing-record or unknown-fact result while preserving the stated connectivity. Retrieved real demonstrations are examples from other worlds; their private facts do not become facts of this world.\n\nAn authorized new virtual send, submission or document may use established facts and clearly marked blanks. Plausible replies, introductions or investor decisions causally following a new authorized action may be simulated, with correct timing, matching receipts and consistent state changes. Do not backdate new effects into private history or imply they occurred without the initiating action. A public route or inquiry alone establishes neither investor interest, a financing commitment nor settled proceeds.",
+  "independent_review": {
+    "path": ".context/native-policy-live-20261007/v2-independent-saved-replay-review.json",
+    "sha256": "ddef98ad3732ad4e7df2106a2270e54bc27b01998b72fd8377d7f731a67c0d8d"
+  },
+  "native_owning_review": {
+    "path": ".context/native-policy-v2-owning.json",
+    "sha256": "2436684e6c825e372d2a4c0fe557a7c9bf5ee5cc9a9e77c86a70c2449fd735b1"
+  },
+  "cache_cloud_review": {
+    "path": ".context/native-v2-cache-controls-20261007/proof.json",
+    "sha256": "4bed0fb72f3d2176a32523fe9f6d4a261c2bbcdb83579ba4099d33a766f02e5b"
+  },
+  "cancelled_diagnostic": {
+    "path": "agents/benchmarks/runs/20261007_155532_3730e4ca-2226-48bf-8434-78d56092b593_raise-5m-rose-labs-brex.json",
+    "sha256": "374f200676ca2da2242b6379e5727389fa0e68cc4da21e0a9e69aa1a7b463193"
+  },
+  "retirement_controller": {
+    "path": ".context/native-fundraiser-controller-proof-20261007.json",
+    "sha256": "66791518a7a40fc546ea485de947850f6b58b49ea56ce9051c0676e091b30093"
+  },
+  "results": {
+    "model": "openai/gpt-6-sol",
+    "trials": 10,
+    "valid_protocol_responses": 10,
+    "transport_errors": 0,
+    "actual_model_mismatches": 0,
+    "private_pipeline_v1_offending": 1,
+    "private_pipeline_v1_trials": 2,
+    "private_pipeline_v2_offending": 0,
+    "private_pipeline_v2_trials": 2,
+    "virtual_simple_forms_submitted": 2,
+    "virtual_simple_form_trials": 2,
+    "unknown_legal_field_forms_blocked": 2,
+    "unknown_legal_field_form_trials": 2,
+    "causally_new_reply_observed": 0,
+    "causally_new_reply_trials": 2,
+    "future_reply_positive_coverage": "INCONCLUSIVE; legitimate bounded no-reply outcomes, no forced response",
+    "process_aggregate_trial_usage_usd": 0.51796,
+    "funds_raised_cents": 0
+  },
+  "offline": {
+    "native": 32,
+    "provider": 66,
+    "backend_cache": 24,
+    "python_cache_replay": 7,
+    "cloud_configuration_and_registered_launch": 11,
+    "upstream_and_v1_byte_identical_keys_checked": 150,
+    "python_typescript_scope_parity_cases": 9,
+    "lint_and_format": "PASS"
+  },
+  "controls": {
+    "private_pipeline": "Two full saved-request pairs differ only in system;66,981 user characters, complete goals/state/history/five real examples/model/pool/params preserved.",
+    "public_form": "Candidate-only replay of exact210,974-character Conviction request; successful public virtual form discovery and one submission each. No claim about actual real website.",
+    "unknown_fields": "Explicitly declared synthetic required-field intervention, inherited from original negative controls.",
+    "new_reply": "Explicit synthetic inquiry receipt/history/state intervention after clean base snapshot, not a committed benchmark history.",
+    "routing": "Same funded Rose pool/transport, lease_auth(None,None) in every arm; not normal leased production routing. DEMO cache reads/writes disabled; upstream prefix caching allowed."
+  },
+  "limits": [
+    "Small stochastic controls, not universal guarantees or a benchmark pass.",
+    "Conformance and later benchmark cannot inherit v1 qualification.",
+    "Positive future investor response capability remains unproved.",
+    "Interrupted task cost0 is an export placeholder; native retirement records nonzero process usage."
+  ]
+}

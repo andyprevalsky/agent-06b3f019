@@ -1,0 +1,413 @@
+{
+  "schema": "rose.review-disposition.v1",
+  "review_id": 5539467570,
+  "reviewed_original_source": "fb24dd0304de82ece7fe011292c12da38e19732a",
+  "observed_current_head": "fac7bb4f1c1440ff9194bfd14aef37d31e9a169c",
+  "observed_current_uncommitted_diff_sha256": "039aac598b02c24966d147acd97fa7a33ac084855d4ed4b76bd03096a1bf302b",
+  "created_at": "2026-10-15T21:42:00.641053+00:00",
+  "publication_state": "ROOT_REVIEWED_PRESERVING_HELD_PROPOSALS",
+  "review_kind": "independent existing-worker manual static source/diff and sealed-evidence review; no new runtime tests",
+  "counts": {
+    "APPLIED_SCOPED_REPAIR": 11,
+    "USER_SEMANTIC_APPROVAL_HOLD_UNAPPLIED": 2,
+    "INTENTIONAL_USER_APPROVED_POLICY_PRESERVED": 1,
+    "APPLIED_SCOPED_REPAIR_WITH_LIMITS": 1
+  },
+  "findings": [
+    {
+      "key": "4287952601",
+      "comment_id": 4287952601,
+      "review_id": 5539467570,
+      "title": "Phone activity timeout parity",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Phone now uses existing WMH policy for simulate/shadow; real start-to-close AND heartbeat remain, retry policy/options/arguments unchanged. Bot suggestion omitting real heartbeat was not copied.",
+      "source": [
+        {
+          "path": "agents/domains/call_phone_number/handler.py",
+          "sha256": "2f3f54237843c3bef8551231df35c18438bd89a39a0ec94e4da47aedaced7adf"
+        },
+        {
+          "path": "agents/helpers/wmh_activity_policy.py",
+          "sha256": "9a40e8ed258ed77a45d6c6149131bd3ae2662a81607535c534a22b50762e1447"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "main-integration-applied/clock-wire-applied.log",
+          "sha256": "229eed03a1a8726c64029a9dd56beb8f248e84bacf702b6a0f725bd3155b2b62",
+          "observed_evidence": "40 passed in1.71s; existing applied targeted run, not rerun by this reviewer"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    },
+    {
+      "key": "4287952610",
+      "comment_id": 4287952610,
+      "review_id": 5539467570,
+      "title": "Shared world clock for wait_seconds",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Simulation calls existing wait_for shared-clock helper with unchanged tool-call identity/duration; local advance remains fallback on unavailable world/agent. Ordinary waits unchanged.",
+      "source": [
+        {
+          "path": "agents/domains/wait_seconds/handler.py",
+          "sha256": "e5426d1870d116783997dd05ea577ba52d7d742c9f5c9f0cc684774ccbe49707"
+        },
+        {
+          "path": "agents/domains/wait_for/handler.py",
+          "sha256": "f5ae5384038216b82114c39446a5cd713ec74b5700554ef0cd8479a6e369418f"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "main-integration-applied/clock-wire-applied.log",
+          "sha256": "229eed03a1a8726c64029a9dd56beb8f248e84bacf702b6a0f725bd3155b2b62",
+          "observed_evidence": "40 passed in1.71s; existing applied targeted run, not rerun by this reviewer"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    },
+    {
+      "key": "4287952621",
+      "comment_id": 4287952621,
+      "review_id": 5539467570,
+      "title": "Invalid planner date conversion",
+      "disposition": "USER_SEMANTIC_APPROVAL_HOLD_UNAPPLIED",
+      "reason": "Unrepresentable timestamp overflow is proved. Valid negative epochs are legitimate and do not generally fail. Choosing real UTC for invalid pinned-world time changes planner clock authority/model-visible context;18fcc is pending explicit user approval. Current direct conversion remains.",
+      "source": [
+        {
+          "path": "agents/helpers/llm.py",
+          "sha256": "58e7e85541a4840f0cb30b8558a7967429ddd3638b67c8adb3c3d229b790b8e0"
+        },
+        {
+          "path": "agents/helpers/world_model_runtime.py",
+          "sha256": "be3e133d175b68a4c5a4fc762d7b9c61dc8cab425b0d480a534863e819bb180a"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "rca-review-clock-authority/result.json",
+          "sha256": "8fd25f70ea708ddd880fb06f425cfccd6d3471f8cd676d01e28d48145dce595b",
+          "observed_evidence": "Owning huge timestamp FAIL baseline/PASS private authority candidate; negative epoch and unavailable-clock controls PASS. Candidate18fcc remains unapplied/user-held"
+        }
+      ],
+      "limits": "Not fixed. No historical live invalid-clock capture or fundraiser causality established. No approval inferred from silence."
+    },
+    {
+      "key": "4287952708",
+      "comment_id": 4287952708,
+      "review_id": 5539467570,
+      "title": "Archive existence response lifetime",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Orphan ciphertext existence now uses HEAD; metadata-sidecar read, missing-object/orphan/error contracts remain. No unread ciphertext StreamingBody opened.",
+      "source": [
+        {
+          "path": "agents/helpers/trace_archive.py",
+          "sha256": "5942760156aa3f269fae1caaf07573c7db70ec98621002b54c549370aba09882"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "main-integration-applied/transport-applied.log",
+          "sha256": "f0fa9fdf2e4fffc627141ad83a480a700f8a2727e9b1c99447fbd9d924a26cff",
+          "observed_evidence": "21 passed in1.51s; existing applied targeted run"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    },
+    {
+      "key": "4287952716",
+      "comment_id": 4287952716,
+      "review_id": 5539467570,
+      "title": "WMH attempt timers",
+      "disposition": "INTENTIONAL_USER_APPROVED_POLICY_PRESERVED",
+      "reason": "365-day scheduling bound with owner cancellation and no short attempt/heartbeat/read timeout is intentional standing user policy. Do not restore bot-proposed timers. Grounded provider raw/attempt/shared budgets unchanged.",
+      "source": [
+        {
+          "path": "agents/helpers/wmh_activity_policy.py",
+          "sha256": "9a40e8ed258ed77a45d6c6149131bd3ae2662a81607535c534a22b50762e1447"
+        },
+        {
+          "path": "agents/domains/spawn_agent/handler.py",
+          "sha256": "1d9d023da07515a6496c3896375c4c7281c11857e3b0dbce9b0f604604d76685"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "rca-review-clock/result.private.json",
+          "sha256": "4e4247bf9041174b1d72511a8cce228ec319b7844b8e2c4ed8bf0c9ffe32f320",
+          "observed_evidence": "Policy adjudication: no fabricated worker-loss/stall repro; timer restoration not adopted"
+        }
+      ],
+      "limits": "Worker-loss/stall risk not experimentally eliminated; no new timeout/heartbeat policy approved by this review."
+    },
+    {
+      "key": "4287952723",
+      "comment_id": 4287952723,
+      "review_id": 5539467570,
+      "title": "Passive HTTP observer body failure",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Optional evidence-read failures cannot replace status failure. Foundry explicitly passes body_read_required=True to preserve its original mandatory read/error behavior; broad unconditional swallowing was rejected.",
+      "source": [
+        {
+          "path": "agents/providers/rose/whm_retry_observation.py",
+          "sha256": "fad2b9108417b5de256ff9d92c5954f8d8ea7509e0cf87db884804835d5953a3"
+        },
+        {
+          "path": "agents/providers/rose/foundry.py",
+          "sha256": "ca12a263119f9e8ed61465bf64b63663cb7db499c7063793633e577f4f91dd32"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "main-integration-applied/transport-applied.log",
+          "sha256": "f0fa9fdf2e4fffc627141ad83a480a700f8a2727e9b1c99447fbd9d924a26cff",
+          "observed_evidence": "21 passed in1.51s; existing applied targeted run"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    },
+    {
+      "key": "4287952751",
+      "comment_id": 4287952751,
+      "review_id": 5539467570,
+      "title": "Historical signed simulated offset",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Signed offsets preserved only when simulation time skipping enabled. Real-mode clamp remains, and forward advances stay nonnegative.",
+      "source": [
+        {
+          "path": "agents/utils/simulated_clock.py",
+          "sha256": "43b6b142ad83907ebe7b810c233fb4aeed82e2ff228650bdd431d77bc31b3209"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "main-integration-applied/clock-wire-applied.log",
+          "sha256": "229eed03a1a8726c64029a9dd56beb8f248e84bacf702b6a0f725bd3155b2b62",
+          "observed_evidence": "40 passed in1.71s; existing applied targeted run, not rerun by this reviewer"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    },
+    {
+      "key": "4287952778",
+      "comment_id": 4287952778,
+      "review_id": 5539467570,
+      "title": "Failed cache lookup overrides replay decision",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Activity emits explicit success-only resolved identity; workflow applies backend decision only after successful resolution under Temporal patch. Failed lookup preserves restored/input state; successful empty goal still valid. Truthy-goal bot shortcut not used.",
+      "source": [
+        {
+          "path": "agents/helpers/fast_cache_goal.py",
+          "sha256": "82b7460bec55e38216fd2a83452cc3f697323d7030bce631bb654f6342489e7e"
+        },
+        {
+          "path": "agents/workflows/agent_workflow.py",
+          "sha256": "a5ca0918124aacae710799033a5ec682c470fa13258a0f097e87239be283d6e9"
+        },
+        {
+          "path": "agents/providers/fast_cache/client.py",
+          "sha256": "e5cd533300edaf1e104d92fb4808e78ca523383f866bda63228ddfc1d1927fca"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "main-integration-applied/transport-applied.log",
+          "sha256": "f0fa9fdf2e4fffc627141ad83a480a700f8a2727e9b1c99447fbd9d924a26cff",
+          "observed_evidence": "21 passed in1.51s; existing applied targeted run"
+        }
+      ],
+      "limits": "Focused patched/unpatched controls pass; full Temporal service/history replay remains OPEN. No cache key remapping or live cache write here."
+    },
+    {
+      "key": "4287952796",
+      "comment_id": 4287952796,
+      "review_id": 5539467570,
+      "title": "Clock operation acknowledged prematurely",
+      "disposition": "APPLIED_SCOPED_REPAIR_WITH_LIMITS",
+      "reason": "Done set updated only on strict integer time_ms acknowledgement. In-flight Event coalesces concurrent duplicates; exceptions/skipped/malformed responses leave operation eligible for subsequent invocation. Existing3attempt/30s policy preserved.",
+      "source": [
+        {
+          "path": "agents/workflows/agent_workflow.py",
+          "sha256": "a5ca0918124aacae710799033a5ec682c470fa13258a0f097e87239be283d6e9"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "main-integration-applied/clock-wire-applied.log",
+          "sha256": "229eed03a1a8726c64029a9dd56beb8f248e84bacf702b6a0f725bd3155b2b62",
+          "observed_evidence": "40 passed in1.71s; existing applied targeted run, not rerun by this reviewer"
+        }
+      ],
+      "limits": "No new automatic retry budget, continue-as-new or deployment-resume design. Durable recovery/history replay is not fully proved by focused mocks; not claimed fixed."
+    },
+    {
+      "key": "4287952805",
+      "comment_id": 4287952805,
+      "review_id": 5539467570,
+      "title": "Gold and DEMO membership",
+      "disposition": "USER_SEMANTIC_APPROVAL_HOLD_UNAPPLIED",
+      "reason": "Backend classification can label a DEMO-named real-mode mock gold; corpus reader already rejects identified catalog DEMO bundles. Gold membership/deletion/corpus authority extension is held. No demonstrated actual corpus contamination.",
+      "source": [
+        {
+          "path": "back-end/src/providers/traceArchiveCuration.ts",
+          "sha256": "2211172f9ee2aafdc7fcbd0b91c99a5f0d3756f4f6fc83ad6ba8d14ff3c93c19"
+        },
+        {
+          "path": "agents/benchmarks/world_model_harness.py",
+          "sha256": "cab106f9a0d283ab2c1b1c3fb995ab9ef401650d25c7e39094956bbc519d603b"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "rca-review-curation/result.private.json",
+          "sha256": "635d828d94d08426af5fea7fffe49edeeee14cd216ca0cd96356ee30468f3323",
+          "observed_evidence": "Same owning baseline rejection assertions FAIL, private candidate PASS; positive bounded/order controls retained. Integrated full backend gate OPEN"
+        }
+      ],
+      "limits": "No archive/corpus/model build or production data inspected/mutated. Unreadable/unknown manifests retain documented existing reader behavior. Held policy not applied."
+    },
+    {
+      "key": "4287952811",
+      "comment_id": 4287952811,
+      "review_id": 5539467570,
+      "title": "Curation concurrency API admission",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Exported API rejects nonfinite and <1 values before processing. Default8, floor(validfraction>=1), bounded worker allocation, result order, callbacks and deletion policy unchanged.",
+      "source": [
+        {
+          "path": "back-end/src/providers/traceArchiveCuration.ts",
+          "sha256": "2211172f9ee2aafdc7fcbd0b91c99a5f0d3756f4f6fc83ad6ba8d14ff3c93c19"
+        },
+        {
+          "path": "back-end/src/tests/unit/trace-archive-curation.test.ts",
+          "sha256": "e8a69afd52de9a9b2cc9517561bc3a9bb8640050eefd6a2bdb7b9ad47467f7ff"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "rca-review-curation/result.private.json",
+          "sha256": "635d828d94d08426af5fea7fffe49edeeee14cd216ca0cd96356ee30468f3323",
+          "observed_evidence": "Same owning baseline rejection assertions FAIL, private candidate PASS; positive bounded/order controls retained. Integrated full backend gate OPEN"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    },
+    {
+      "key": "4287952820",
+      "comment_id": 4287952820,
+      "review_id": 5539467570,
+      "title": "Sticky simulated terminal output",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Output selected from latest related simulated terminal independently of later ordinary cancellation; no re-enabled nonexistent-session fetch solely from missing later simulation flag.",
+      "source": [
+        {
+          "path": "front-end/src/features/terminal-component-group/components/claudeCodeChip.hooks.ts",
+          "sha256": "7356ccc6102473282f57b8b013f32247cc5e6883bbde7989608ac0639cd76e7f"
+        },
+        {
+          "path": "front-end/src/tests/blackbox/wmh-code-chip.blackbox.tsx",
+          "sha256": "5dac6219673cc5c5602f92aa933ea2d58fa6e6e0b412757a44a5712cf420cc31"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "rca-review-code-chip/candidate.log",
+          "sha256": "b3ec67105640d631cc34d658fdd5436ad576dd95f8296b644ad162a36dc21c31",
+          "observed_evidence": "6 passed; sealed candidate log. Root separately reports six applied-source tests PASS; no independent new runtime run here"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    },
+    {
+      "key": "4287952828",
+      "comment_id": 4287952828,
+      "review_id": 5539467570,
+      "title": "Override interpreter serving dependencies",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Every interpreter path validates exact existing Experiential pin and imports FastAPI/Uvicorn; override is never installed/upgraded. Requirements signature committed only after validation succeeds.",
+      "source": [
+        {
+          "path": "scripts/setup-world-model.sh",
+          "sha256": "1ec2d76ecf549858c663ded742f5e8d4bc3bfd85244fd613af949ce4e074ce5e"
+        },
+        {
+          "path": "agents/benchmarks/world_model_vendor_test.py",
+          "sha256": "bb3cfbe664304e30e1c9ca7b7bff608497c2bce14c2ab4a41993b37d7e671aaf"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "main-integration-applied/native-setup-applied.log",
+          "sha256": "47980be0ee6b3d9ecaf2df3dc62bb008e6a048a89d42d62ffcc77d54a18616d1",
+          "observed_evidence": "5 passed in2.43s; existing applied targeted run"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    },
+    {
+      "key": "4287952837",
+      "comment_id": 4287952837,
+      "review_id": 5539467570,
+      "title": "Vendor wheel integrity before install",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Single well-formed wheel digest record authenticated before native-env mutation using SHA256. Corrupt/missing/duplicate/malformed records reject; Linux and Mac hash-tool contracts retained.",
+      "source": [
+        {
+          "path": "scripts/setup-world-model.sh",
+          "sha256": "1ec2d76ecf549858c663ded742f5e8d4bc3bfd85244fd613af949ce4e074ce5e"
+        },
+        {
+          "path": "agents/vendor/world-model/SOURCES.txt",
+          "sha256": "e6612f3709714c87b988ae9049103d6d499608d8c0b3fa98a72539f7a109e810"
+        },
+        {
+          "path": "agents/benchmarks/world_model_vendor_test.py",
+          "sha256": "bb3cfbe664304e30e1c9ca7b7bff608497c2bce14c2ab4a41993b37d7e671aaf"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "main-integration-applied/native-setup-applied.log",
+          "sha256": "47980be0ee6b3d9ecaf2df3dc62bb008e6a048a89d42d62ffcc77d54a18616d1",
+          "observed_evidence": "5 passed in2.43s; existing applied targeted run"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    },
+    {
+      "key": "5539467570:outside:1",
+      "comment_id": null,
+      "review_id": 5539467570,
+      "title": "Normalize cancellation siblings",
+      "disposition": "APPLIED_SCOPED_REPAIR",
+      "reason": "Shared normalizedMessages now feeds both task filter and toolCallId cancellation sibling path, preserving provider/legacy task identity. Formal review supplies no standalone inline comment ID for this outside-diff finding; stable key is reviewID+outside ordinal.",
+      "source": [
+        {
+          "path": "front-end/src/features/terminal-component-group/components/claudeCodeChip.hooks.ts",
+          "sha256": "7356ccc6102473282f57b8b013f32247cc5e6883bbde7989608ac0639cd76e7f"
+        },
+        {
+          "path": "front-end/src/tests/blackbox/wmh-code-chip.blackbox.tsx",
+          "sha256": "5dac6219673cc5c5602f92aa933ea2d58fa6e6e0b412757a44a5712cf420cc31"
+        }
+      ],
+      "test_evidence": [
+        {
+          "artifact": "rca-review-code-chip/candidate.log",
+          "sha256": "b3ec67105640d631cc34d658fdd5436ad576dd95f8296b644ad162a36dc21c31",
+          "observed_evidence": "6 passed; sealed candidate log. Root separately reports six applied-source tests PASS; no independent new runtime run here"
+        }
+      ],
+      "limits": "New integrated full Group3 on final committed source remains OPEN."
+    }
+  ],
+  "global_limits": [
+    "Current source is dirty root integration; source file hashes bind this observation, not a final committed deploy snapshot.",
+    "Applied repair means observed source hunk + bounded existing focused evidence, not full finalHEAD Group3/Group4 PASS.",
+    "C1 review ledger and canonical outcomes remain unchanged; this packet does not close C1.",
+    "R18 typed-outcome/schema proposal remains held/unapplied; rejected global context caps remain withdrawn; no replacement cap proposed.",
+    "Independent native-retirement classification repair retains payment release_stall while forcing ERROR for native retirement error; existing six owning merged callbacks PASS, no new execution.",
+    "Prompt/context/date/corpus semantics need their own explicit approval; no approval flags fabricated."
+  ],
+  "root_reviewed_at": "2026-10-15T21:43:35.322010+00:00"
+}

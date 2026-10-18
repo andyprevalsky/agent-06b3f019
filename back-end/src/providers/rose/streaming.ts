@@ -407,6 +407,7 @@ export async function* parseResponsesSSE(
   let completionTokens = 0;
   let totalTokens = 0;
   let cacheWriteTokens = 0;
+  let cacheWriteReported = false;
   let cacheReadTokens = 0;
   let finishReason = '';
   let emittedContentOrTool = false;
@@ -419,7 +420,12 @@ export async function* parseResponsesSSE(
     completionTokens = numberValue(usage.output_tokens) ?? completionTokens;
     totalTokens = numberValue(usage.total_tokens) ?? totalTokens;
     const details = usage.input_tokens_details as Record<string, unknown> | undefined;
-    cacheWriteTokens = numberValue(details?.cache_write_tokens) ?? cacheWriteTokens;
+    const reportedWrites = numberValue(details?.cache_write_tokens);
+    if (reportedWrites !== undefined) {
+      // GPT-5.6+ reports writes; zero is a real value once breakpoints apply.
+      cacheWriteTokens = reportedWrites;
+      cacheWriteReported = true;
+    }
     cacheReadTokens = numberValue(details?.cached_tokens) ?? cacheReadTokens;
   };
 
@@ -574,7 +580,9 @@ export async function* parseResponsesSSE(
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
       total_tokens: totalTokens || promptTokens + completionTokens,
-      cache_creation_input_tokens: cacheWriteTokens || Math.max(promptTokens - cacheReadTokens, 0),
+      cache_creation_input_tokens: cacheWriteReported
+        ? cacheWriteTokens
+        : Math.max(promptTokens - cacheReadTokens, 0),
       cache_read_input_tokens: cacheReadTokens,
       finish_reason: finishReason || 'stop',
     },

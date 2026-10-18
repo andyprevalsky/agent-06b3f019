@@ -45,9 +45,15 @@ test('every large table is paged, not materialised', () => {
   // message body in one array before the first write.
   assert.doesNotMatch(SEED_SOURCE, /take:\s*MESSAGE_LIMIT/);
   assert.ok(SEED_SOURCE.includes("positivePageSize('SEED_MESSAGE_PAGE_SIZE', 50)"));
+  // A larger SEED_MESSAGE_LIMIT only adds pages; the default stays the latest 10k.
+  assert.ok(SEED_SOURCE.includes("positivePageSize('SEED_MESSAGE_LIMIT', 10_000)"));
   // Paged loops must advance by their page size and stop on a short page.
   assert.match(SEED_SOURCE, /skip \+= MESSAGE_PAGE_SIZE/);
   assert.match(SEED_SOURCE, /page\.length < MESSAGE_PAGE_SIZE/);
+  // Offset pages need a total order: equal timestamps must not cross a page
+  // boundary in a different order and repeat or skip a message.
+  assert.ok(SEED_SOURCE.includes("orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],"));
+  assert.doesNotMatch(SEED_SOURCE, /orderBy: \{ timestamp: 'desc' \},\s*skip,/);
 });
 
 test('large JSONB never materializes in the Node process', () => {

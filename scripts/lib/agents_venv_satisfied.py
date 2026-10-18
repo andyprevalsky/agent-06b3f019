@@ -16,12 +16,24 @@ except ImportError:
     from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
 
 
+# Options that only say where packages come from; they name no distribution, and
+# every requirement after them is still checked. Others (-e, -r, -c) stay unchecked.
+_LOCATION_OPTIONS = ("--find-links", "-f", "--index-url", "-i", "--extra-index-url", "--no-index", "--trusted-host")
+
+
+def _location_option(line: str) -> bool:
+    option = line.split("=", 1)[0].split(None, 1)[0]
+    return option in _LOCATION_OPTIONS
+
+
 def unsatisfied(requirements_path: str) -> list[str]:
     problems: list[str] = []
     with open(requirements_path, encoding="utf-8") as handle:
         for raw in handle:
             line = raw.split(" #", 1)[0].strip()
             if not line or line.startswith("#"):
+                continue
+            if line.startswith("-") and _location_option(line):
                 continue
             if line.startswith("-"):
                 problems.append(f"{line}: pip option lines are not checked")

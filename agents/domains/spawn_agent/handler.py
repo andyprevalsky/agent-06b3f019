@@ -6,7 +6,10 @@ workflow sandbox where lazy imports trigger threading.Lock errors.
 
 from __future__ import annotations
 
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 import asyncio
+import json
+import uuid as uuid_module
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -50,6 +53,7 @@ from helpers.generation_handoff import (
 )
 from helpers.source_connect_gates import raise_source_connect_gates
 from helpers.tracing import span
+from helpers.world_model_runtime import world_model_specialized_agent_activity
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.grep import fetch_local_data_summary
@@ -58,6 +62,7 @@ from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
 from utils.explore_evidence import render_native_grep
+from utils.simulated_clock import simulated_timestamp_ms
 from utils.oai_demo_july import apply_oai_demo_july_for_each
 from utils.tool_call_ids import spawn_group_id
 
@@ -69,6 +74,143 @@ _FAST_MODE_USER_COPY = (
     "from_fast_cache",
 )
 _EXPLORE_NO_EVIDENCE = "Explore stopped before completion with no tool evidence."
+
+_WORLD_MODEL_SPECIALIZED_AGENT_TOOLS = {
+    "explore": "spawn_explore_agent",
+    "browser": "spawn_browser_agent",
+    "code": "spawn_claude_code_agent",
+}
+
+# Retained as the ordinary activity budget; simulate uses owner cancellation
+# instead of a per-attempt deadline at this WMH boundary.
+_WORLD_MODEL_SPECIALIZED_ACTIVITY_TIMEOUT = timedelta(minutes=12)
+
+
+_FILE_POINTER_SHAPE_KEYS = {
+    "storage_path",
+    "original_filename",
+    "mime_type",
+    "size_bytes",
+    "created_at",
+}
+
+
+def _normalize_simulated_file_pointer_ids(value: Any) -> tuple[Any, bool]:
+    """Give WMH-produced FilePointers stable API-valid UUID identifiers.
+
+    A simulated Code/Browser result can legitimately describe a generated file,
+    but model-authored identifiers such as ``fp_report_123`` are not valid for
+    the message API's FilePointer schema.  Normalize only complete FilePointer-
+    shaped objects at the simulation boundary; real subagent results remain
+    untouched.  JSON strings are walked as well because WMH may place the
+    terminal observation inside a string-valued ``content`` field.
+    """
+
+    if isinstance(value, dict):
+        normalized: Dict[str, Any] = {}
+        changed = False
+        for key, item in value.items():
+            normalized_item, item_changed = _normalize_simulated_file_pointer_ids(item)
+            normalized[key] = normalized_item
+            changed = changed or item_changed
+
+        if _FILE_POINTER_SHAPE_KEYS.issubset(normalized):
+            raw_id = str(normalized.get("id") or "").strip()
+            try:
+                uuid_module.UUID(raw_id)
+            except (TypeError, ValueError, AttributeError):
+                identity = json.dumps(
+                    {key: normalized.get(key) for key in sorted(_FILE_POINTER_SHAPE_KEYS)},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+                normalized["id"] = str(
+                    uuid_module.uuid5(
+                        uuid_module.NAMESPACE_URL,
+                        f"rose-wmh-file-pointer:{identity}",
+                    )
+                )
+                changed = True
+        return normalized, changed
+
+    if isinstance(value, list):
+        normalized_items = []
+        changed = False
+        for item in value:
+            normalized_item, item_changed = _normalize_simulated_file_pointer_ids(item)
+            normalized_items.append(normalized_item)
+            changed = changed or item_changed
+        return normalized_items, changed
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")) and stripped.endswith(("}", "]")):
+            try:
+                decoded = json.loads(stripped)
+            except (TypeError, ValueError):
+                return value, False
+            normalized, changed = _normalize_simulated_file_pointer_ids(decoded)
+            if changed:
+                return json.dumps(
+                    normalized,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ), True
+        return value, False
+
+    return value, False
+
+
+def _normalize_world_model_result_text(text: str) -> str:
+    normalized, changed = _normalize_simulated_file_pointer_ids(text)
+    if changed and isinstance(normalized, str):
+        return normalized
+    # Real Code-agent summaries can embed a JSON Structured Response after
+    # human-readable prose. Normalize that object before a parent agent copies
+    # its FilePointers into the message API (which requires UUID ids).
+    marker = "Structured Response:"
+    marker_at = text.find(marker)
+    if marker_at < 0:
+        return text
+    json_start = text.find("{", marker_at + len(marker))
+    if json_start < 0:
+        return text
+    try:
+        embedded, consumed = json.JSONDecoder().raw_decode(text[json_start:])
+    except json.JSONDecodeError:
+        return text
+    normalized_embedded, embedded_changed = _normalize_simulated_file_pointer_ids(embedded)
+    if not embedded_changed:
+        return text
+    encoded = json.dumps(normalized_embedded, ensure_ascii=False, separators=(",", ":"))
+    return text[:json_start] + encoded + text[json_start + consumed :]
+
+
+def _world_model_specialized_result_text(result: Dict[str, Any]) -> str:
+    """Return the terminal simulated subagent result shown to the parent/UI."""
+
+    # WMH's generic response shape carries both the decoded ``output`` field
+    # and its raw JSON envelope in ``message``. Prefer the decoded value so the
+    # parent agent receives the actual terminal observation, not wrapper JSON.
+    for key in ("output", "message", "content", "summary", "final_response"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return _normalize_world_model_result_text(value.strip())
+    nested = result.get("result")
+    if isinstance(nested, str) and nested.strip():
+        return _normalize_world_model_result_text(nested.strip())
+    if nested is not None:
+        return _normalize_world_model_result_text(
+            json.dumps(nested, ensure_ascii=False, sort_keys=True, default=str)
+        )
+    observation = result.get("world_model_observation")
+    if observation is not None:
+        return _normalize_world_model_result_text(
+            json.dumps(observation, ensure_ascii=False, sort_keys=True, default=str)
+        )
+    return "The simulated subagent completed without a textual result."
 
 
 def user_facing_explore_result(text: Any) -> str:
@@ -611,6 +753,18 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(workflow.uuid4())
+        if getattr(workflow_instance, "world_model_mode", "real") == "simulate":
+            async for event in self._spawn_world_model_specialized(
+                workflow_instance,
+                tool_call,
+                tool_call_id,
+                agent_type="explore",
+                task_id=task_id,
+                display_goal=ui_goal,
+                capture_tool_results=capture_tool_results,
+            ):
+                yield event
+            return
         # One classification for depth and the activity's cache identity.
         # Re-resolving inside the activity from the child goal or Fast Mode
         # root disagrees (truncated explore goals, resolver failures).
@@ -972,6 +1126,15 @@ class SpawnAgentManager(ToolManager):
         tool_call_id: str,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Delegate to existing SpawnBrowserAgentManagerV3."""
+        if getattr(workflow_instance, "world_model_mode", "real") == "simulate":
+            async for event in self._spawn_world_model_specialized(
+                workflow_instance,
+                tool_call,
+                tool_call_id,
+                agent_type="browser",
+            ):
+                yield event
+            return
         browser_tool_call = {
             "tool": "spawn_browser_agent",
             "start_url": tool_call.get("start_url"),
@@ -992,6 +1155,15 @@ class SpawnAgentManager(ToolManager):
         tool_call_id: str,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Delegate to existing SpawnClaudeCodeAgentManager."""
+        if getattr(workflow_instance, "world_model_mode", "real") == "simulate":
+            async for event in self._spawn_world_model_specialized(
+                workflow_instance,
+                tool_call,
+                tool_call_id,
+                agent_type="code",
+            ):
+                yield event
+            return
         code_tool_call = {
             "tool": "spawn_claude_code_agent",
             "goal": tool_call.get("goal"),
@@ -1006,6 +1178,138 @@ class SpawnAgentManager(ToolManager):
         async for event in manager.execute_tool(workflow_instance, code_tool_call, tool_call_id):
             yield event
 
+    async def _spawn_world_model_specialized(
+        self,
+        workflow_instance,
+        tool_call: Dict[str, Any],
+        tool_call_id: str,
+        *,
+        agent_type: str,
+        task_id: Optional[str] = None,
+        display_goal: Optional[str] = None,
+        capture_tool_results: Optional[List[str]] = None,
+    ) -> AsyncGenerator[ToolEvent, None]:
+        """Mock an explore, browser, or code subagent with one terminal WMH transition.
+
+        This runs in the unified spawn boundary before a real specialized-agent
+        activity is created. General-purpose agent loops remain real in
+        simulator mode.
+        """
+
+        boundary_tool = _WORLD_MODEL_SPECIALIZED_AGENT_TOOLS[agent_type]
+        goal = str(tool_call.get("goal") or "")
+        ui_goal = str(display_goal or goal)
+        task_id = task_id or str(workflow.uuid4())
+        progress_title = {
+            "explore": "Exploring",
+            "browser": "Browser agent",
+            "code": "Code agent",
+        }[agent_type]
+        terminal_title = {
+            "explore": ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
+            "browser": "Browser automation complete",
+            "code": "Code agent complete",
+        }[agent_type]
+        base_metadata: Dict[str, Any] = {
+            "agentType": agent_type,
+            "taskId": task_id,
+            "fullGoal": ui_goal,
+            "world_model_simulated": True,
+            "world_model_boundary": boundary_tool,
+        }
+        if agent_type == "code":
+            base_metadata.update(
+                toolName=boundary_tool,
+                task_id=task_id,
+                code_provider="claude",
+            )
+
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=progress_title,
+            message=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
+            status=MessageStatus.IN_PROGRESS,
+            metadata=base_metadata,
+        )
+
+        simulated_args = {
+            key: value
+            for key, value in tool_call.items()
+            if key not in {"tool", "_phase", "_spawn_group_id"}
+        }
+        simulated_args.setdefault(
+            "root_goal",
+            str(
+                getattr(workflow_instance, "fast_cache_root_goal", None)
+                or getattr(workflow_instance, "goal", "")
+                or ""
+            ),
+        )
+
+        try:
+            result = await workflow.execute_activity(
+                world_model_specialized_agent_activity,
+                args=[
+                    "simulate",
+                    str(getattr(workflow_instance, "agent_id", "") or ""),
+                    boundary_tool,
+                    simulated_args,
+                    tool_call_id,
+                    simulated_timestamp_ms(workflow_instance, workflow.now()),
+                    str(
+                        getattr(workflow_instance, "root_agent_id", None)
+                        or getattr(workflow_instance, "agent_id", "")
+                        or ""
+                    ),
+                ],
+                **wmh_activity_timeout_options("simulate", _WORLD_MODEL_SPECIALIZED_ACTIVITY_TIMEOUT),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            result_text = _world_model_specialized_result_text(result)
+            if capture_tool_results is not None:
+                capture_tool_results.append(f"[{boundary_tool}] {result_text}")
+            failed = bool(result.get("error") or result.get("success") is False)
+            status_text = str(result.get("status") or "").strip().lower()
+            failed = failed or status_text in {"error", "failed", "cancelled"}
+            terminal_metadata = dict(base_metadata)
+            if agent_type == "code":
+                terminal_metadata.update(action_type="task_complete", success=not failed)
+                terminal_title = "Task Incomplete" if failed else "✓ Task Completed"
+            for key in (
+                "world_model_session_id",
+                "world_model_name",
+                "predicted_latency_ms",
+                "simulated_elapsed_ms",
+                "world_model_timestamp_ms",
+            ):
+                if result.get(key) is not None:
+                    terminal_metadata[key] = result[key]
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=terminal_title,
+                message=result_text,
+                status=MessageStatus.ERROR if failed else MessageStatus.FINISHED,
+                data={
+                    "result": result_text,
+                    "world_model_simulated": True,
+                },
+                metadata=terminal_metadata,
+            )
+        except BaseException as exc:
+            if isinstance(exc, (GeneratorExit, asyncio.CancelledError)):
+                raise
+            terminal_metadata = dict(base_metadata)
+            if agent_type == "code":
+                terminal_metadata.update(action_type="task_complete", success=False)
+                terminal_title = "Task Incomplete"
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=terminal_title,
+                message=str(exc) or type(exc).__name__,
+                status=MessageStatus.ERROR,
+                metadata=terminal_metadata,
+            )
+
     async def _spawn_sub_agent(
         self,
         workflow_instance,
@@ -1015,10 +1319,11 @@ class SpawnAgentManager(ToolManager):
         parent_attachments: Dict[str, Any] | None = None,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Delegate to existing SpawnSubAgentManager."""
+        start_phase = resolve_start_phase(tool_call)
         sub_agent_config = {
             "goal": tool_call.get("goal"),
             "output_schema": tool_call.get("output_schema"),
-            "start_phase": resolve_start_phase(tool_call),
+            "start_phase": start_phase,
             "attachments": tool_call.get("attachments"),
         }
         group_id = spawn_group_id(tool_call_id, tool_call.get("_spawn_group_id"))

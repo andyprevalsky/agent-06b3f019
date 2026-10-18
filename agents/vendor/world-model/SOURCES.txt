@@ -1,0 +1,10 @@
+Vendored distributions for the isolated Python 3.12 world model, installed through
+agents/requirements-world-model.txt (`--find-links ./vendor/world-model`).
+
+experiential-0.7.158+rose.bf75987e-py3-none-any.whl
+  sha256: f15392b6c09676f1d9905be0afe5e2c3aa8222a1674cffefc94a00c2ddb2cf36
+  source: github.com/experientiallabs/experiential @ bf75987eac5e8c984d8f3868249f84e4095d1733
+          (organization removed upstream by 2026-10-12; built from an exact local copy of the pin)
+  build:  version set to 0.7.158+rose.bf75987e, then `uv build --wheel` with
+          SOURCE_DATE_EPOCH=1791303018 (the pin's commit time); reproducible byte for byte.
+          All 823 package files are identical to the original 0.7.158 build.

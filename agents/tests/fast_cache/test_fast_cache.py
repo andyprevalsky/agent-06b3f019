@@ -16,17 +16,18 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List
 
+from pathlib import Path
+
 import pytest
 from pydantic import BaseModel
 
-from providers.fast_cache import normalize
+from providers.fast_cache import normalize, rose_cache
 from providers.fast_cache.context import (
     FastCacheContext,
     is_enabled,
     reset_context,
     set_context,
 )
-from providers.fast_cache import rose_cache
 from providers.rose.pools import POOL_REGISTRY
 
 
@@ -252,9 +253,11 @@ def test_cache_dump_marks_consumer_abandonment(mem, monkeypatch, tmp_path, entry
         key = ctx.llm_key("execute_loop", rose_cache.request_key_material({**kwargs, "provider_fast_mode": True}))
         mem.data[key] = {"content": "not consumed"}
         client = RoseClient(openrouter_key="must-not-call-live")
-        stream = (client.complete(call_site="execute_loop", **kwargs)
-                  if entrypoint == "central" else
-                  rose_cache.cached_complete(client, call_site="execute_loop", **kwargs))
+        stream = (
+            client.complete(call_site="execute_loop", **kwargs)
+            if entrypoint == "central"
+            else rose_cache.cached_complete(client, call_site="execute_loop", **kwargs)
+        )
         assert (await anext(stream)).kind == "metadata"
         await stream.aclose()
         # Check before event-loop shutdown/GC can finalize a leaked inner iterator.
@@ -375,7 +378,7 @@ def test_world_model_scope_partitions_simulated_runs(monkeypatch):
 
     assert sim_key != real_key and sim_global != real_global and sim_codex != real_codex
     for key in (sim_key, sim_global, sim_codex):
-        assert f":sim.rose-archive-v2:" in key
+        assert ":sim.rose-archive-v2:" in key
 
     # Different world models get different namespaces.
     monkeypatch.setenv("WMH_MODEL_NAME", "rose-archive-v3")
@@ -454,9 +457,7 @@ def test_canonical_messages_preserve_transcript_shaped_nested_payloads():
             }
         ]
 
-    assert normalize.canonical_messages(request("nested alpha")) != normalize.canonical_messages(
-        request("nested beta")
-    )
+    assert normalize.canonical_messages(request("nested alpha")) != normalize.canonical_messages(request("nested beta"))
 
 
 def test_canonical_messages_ignore_separate_dynamic_user_context_system_message_churn():
@@ -2547,9 +2548,7 @@ def test_dag_param_positional_candidate_is_not_rekeyed(mem, monkeypatch):
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g", base_step=1, write_enabled=True))
         rose = FakeRose(_full_stream())
-        chunks = await _drain(
-            rose_cache.cached_complete(rose, call_site="dag_param_populator", pool="rose-1-ultra")
-        )
+        chunks = await _drain(rose_cache.cached_complete(rose, call_site="dag_param_populator", pool="rose-1-ultra"))
         assert rose.calls == 0
         assert next(chunk for chunk in chunks if chunk.kind == "tool_call").data["name"] == "spawn_agent"
         assert mem.set_calls == 0
@@ -2692,6 +2691,38 @@ def test_resolve_fast_cache_goal_activity_none_on_unresolved(monkeypatch):
     asyncio.run(body())
 
 
+def test_resolve_fast_cache_context_activity_returns_general_demo_gate(monkeypatch):
+    """Any catalog DEMO tree, not only the legacy OAI demo, enables replay."""
+    import providers.fast_cache.client as cache_client_module
+    from helpers.fast_cache_goal import resolve_fast_cache_context_activity
+
+    async def fake_resolve(agent_id: str):
+        assert agent_id == "fundraise-root"
+        return (
+            True,
+            "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+            True,
+            "fundraise-root",
+            "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+            False,
+        )
+
+    monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
+
+    async def body():
+        assert await resolve_fast_cache_context_activity("fundraise-root") == {
+            "resolved": True,
+            "enabled": True,
+            "goal": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+            "write_enabled": True,
+            "root_agent_id": "fundraise-root",
+            "root_goal": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+            "provider_fast_mode": False,
+        }
+
+    asyncio.run(body())
+
+
 def test_goal_hash_collapses_run_local_message_refs():
     # Spawn paths append "Reference: @ref:message:<uuid>" to sub-agent goals with
     # a fresh message id per run. The namespace must survive reruns.
@@ -2718,8 +2749,8 @@ def test_write_through_disabled_by_isolated_shared_cache_flag(monkeypatch):
     assert FastCacheContext(enabled=True, goal="benchmark", write_enabled=True).should_write is False
 
 
-def test_shared_cache_disable_flag_blocks_all_cache_writes(mem, monkeypatch):
-    """Benchmark read-only mode wins over contexts that request writes."""
+def test_shared_cache_disable_flag_blocks_ordinary_cache_writes(mem, monkeypatch):
+    """Benchmark read-only mode wins over ordinary contexts that request writes."""
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
 
     async def body():
@@ -2728,6 +2759,43 @@ def test_shared_cache_disable_flag_blocks_all_cache_writes(mem, monkeypatch):
         await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
         assert rose.calls == 1
         assert mem.set_calls == 0
+
+    asyncio.run(body())
+
+
+def test_demo_wmh_cache_stores_and_replays_with_benchmark_read_only_flag(mem, monkeypatch):
+    """DEMO WHM predictions persist even when ordinary benchmark writes are disabled."""
+    from benchmarks.wmh_rose_provider import _WMHFastCacheContext
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def body():
+        goal = "DEMO fundraiser cache integration"
+        ctx = _WMHFastCacheContext(enabled=True, goal=goal, write_enabled=True, root_goal=goal)
+        set_context(ctx)
+        rose = RoseClient(openrouter_key="test-key")
+        live_calls = 0
+
+        async def fake_impl(**_kwargs):
+            nonlocal live_calls
+            live_calls += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(rose, "_complete_impl", fake_impl)
+        kwargs = {
+            "pool": "rose-1-ultra",
+            "messages": [{"role": "user", "content": "Predict this DEMO step"}],
+            "call_site": "wmh_world_model",
+        }
+        first = await _drain(rose.complete(**kwargs))
+        assert live_calls == 1
+        assert mem.set_calls == 1
+        second = await _drain(rose.complete(**kwargs))
+        assert live_calls == 1
+        assert mem.get_calls >= 2
+        assert [chunk.kind for chunk in second] == [chunk.kind for chunk in first]
 
     asyncio.run(body())
 
@@ -3245,9 +3313,7 @@ def test_content_lookup_keys_dual_read_flash_and_lite_pools():
     }
     keys = normalize.content_lookup_keys_with_pool_aliases("mass agent", "response_schema", material)
     flash_key = normalize.content_key("mass agent", "response_schema", material)
-    lite_key = normalize.content_key(
-        "mass agent", "response_schema", {**material, "pool": "rose-1-lite"}
-    )
+    lite_key = normalize.content_key("mass agent", "response_schema", {**material, "pool": "rose-1-lite"})
     assert keys[0] == flash_key
     assert lite_key in keys
     assert flash_key != lite_key
@@ -3342,6 +3408,54 @@ def test_soft_complete_allowed_only_for_fast_cache_on_bench_goals():
     assert ctx.soft_complete_allowed is True
     ctx_other = FastCacheContext(enabled=True, goal="Order coffee")
     assert ctx_other.soft_complete_allowed is False
+
+
+def test_wmh_demo_cache_miss_runs_live_and_writes_instead_of_soft_completing(mem, monkeypatch):
+    """Simulated DEMO runs replay exact hits but must seed cold trajectory slots."""
+    from providers.rose.client import RoseClient
+
+    bench = _soft_complete_bench_goal()
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    monkeypatch.setenv("WMH_MODEL_NAME", "rose-archive")
+    assert normalize.demo_cache_allowed(bench) is True
+    assert normalize.soft_complete_allowed(bench) is False
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal=bench, root_goal=bench, base_step=0))
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**kwargs):
+            del kwargs
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        first = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="plan_loop",
+                dump_context=False,
+            )
+        )
+        assert first[0].kind == "metadata"
+        assert live_calls["n"] == 1
+        assert mem.set_calls == 1
+        second = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="plan_loop",
+                dump_context=False,
+            )
+        )
+        assert second[0].kind == "metadata"
+        assert live_calls["n"] == 1
+        assert mem.set_calls == 1
+
+    asyncio.run(body())
 
 
 def test_soft_complete_on_miss_for_explore_sites_only():
@@ -3638,10 +3752,13 @@ def test_july_gp_execute_classifier_requires_bound_per_creator_goal():
     for goal in synthesis_goals:
         assert rose_cache.is_july_gp_execute_site(SimpleNamespace(goal=goal), "execute_loop") is False
 
-    assert rose_cache.is_july_gp_execute_site(
-        SimpleNamespace(goal=_july_gp_child_goal()),
-        "execute_loop",
-    ) is True
+    assert (
+        rose_cache.is_july_gp_execute_site(
+            SimpleNamespace(goal=_july_gp_child_goal()),
+            "execute_loop",
+        )
+        is True
+    )
 
 
 def _july_web_search_payload() -> Dict[str, Any]:
@@ -4202,7 +4319,8 @@ def test_demo_cache_probe_refuses_unresolved_or_uncached_live_provider(mem, monk
     async def body():
         token = set_context(
             FastCacheContext(enabled=True, goal="ordinary goal", base_step=1)
-            if boundary == "non-demo-cache-miss" else None
+            if boundary == "non-demo-cache-miss"
+            else None
         )
         client = RoseClient(openrouter_key="test-key")
         live_calls = {"n": 0}
@@ -4215,12 +4333,14 @@ def test_demo_cache_probe_refuses_unresolved_or_uncached_live_provider(mem, monk
         monkeypatch.setattr(client, "_complete_impl", live_boundary)
         try:
             with pytest.raises(FastCacheLookupError, match="DEMO replay probe.*live"):
-                await _drain(client.complete(
-                    pool="rose-1-browser-use" if boundary == "browser-bypass" else "rose-1-ultra",
-                    messages=[{"role": "user", "content": "go"}],
-                    call_site="response_schema",
-                    agent_id="agent-fixture",
-                ))
+                await _drain(
+                    client.complete(
+                        pool="rose-1-browser-use" if boundary == "browser-bypass" else "rose-1-ultra",
+                        messages=[{"role": "user", "content": "go"}],
+                        call_site="response_schema",
+                        agent_id="agent-fixture",
+                    )
+                )
             assert live_calls["n"] == 0
             assert mem.set_calls == 0
         finally:
@@ -4263,12 +4383,14 @@ def test_demo_cache_probe_flag_off_or_nonisolated_preserves_live_fallback(mem, m
 
         monkeypatch.setattr(client, "_complete_impl", live_boundary)
         try:
-            chunks = await _drain(client.complete(
-                pool="rose-1-ultra",
-                messages=[{"role": "user", "content": "go"}],
-                call_site="response_schema",
-                agent_id="agent-fixture",
-            ))
+            chunks = await _drain(
+                client.complete(
+                    pool="rose-1-ultra",
+                    messages=[{"role": "user", "content": "go"}],
+                    call_site="response_schema",
+                    agent_id="agent-fixture",
+                )
+            )
             assert chunks
             assert live_calls["n"] == 1
             assert mem.set_calls == 0
@@ -4341,6 +4463,144 @@ def test_demo_cache_probe_preserves_existing_recorded_replay_hits(mem, monkeypat
     assert mem.set_calls == 0
 
 
+def test_simulated_root_and_gp_cache_isolates_immutable_execution_policy(monkeypatch):
+    monkeypatch.setenv("WMH_MODEL_NAME", "rose-archive")
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    monkeypatch.delenv("WMH_EXECUTION_POLICY", raising=False)
+    baseline_scope = normalize.world_model_cache_scope()
+    baseline = normalize.content_key(
+        "DEMO FIXTURE ONLY root goal", "root_gp_call", [{"role": "user", "content": "same goal"}]
+    )
+    baseline_global = normalize.build_global_key("lookup", "same-request")
+    assert baseline_scope == "sim.rose-archive:"
+    old_cache = {baseline: "baseline no-route result", baseline_global: "baseline route lookup"}
+    for policy, version, digest in (
+        ("rose-virtual-public-affordances-v1", "1", "49d9d1f0430a5d8e"),
+        ("rose-virtual-public-affordances-v2", "2", "5dd9924e9a1ff4c5"),
+        ("rose-outcome-distribution-v1", "1", "650945bf68ee4ba6"),
+        ("rose-outcome-distribution-v2", "2", "23feae1291f883f0"),
+    ):
+        monkeypatch.setenv("WMH_EXECUTION_POLICY", policy)
+        scope = normalize.world_model_cache_scope()
+        candidate = normalize.content_key(
+            "DEMO FIXTURE ONLY root goal", "root_gp_call", [{"role": "user", "content": "same goal"}]
+        )
+        candidate_global = normalize.build_global_key("lookup", "same-request")
+        assert scope == f"sim.rose-archive.policy.{policy}.{version}.{digest}:"
+        assert candidate not in old_cache and candidate_global not in old_cache
+        assert candidate == normalize.content_key(
+            "DEMO FIXTURE ONLY root goal", "root_gp_call", [{"content": "same goal", "role": "user"}]
+        )
+        assert candidate_global == normalize.build_global_key("lookup", "same-request")
+        old_cache.update({candidate: policy, candidate_global: policy})
+    monkeypatch.setenv("WMH_EXECUTION_POLICY", "unapproved")
+    with pytest.raises(ValueError, match="Unknown WMH execution policy"):
+        normalize.world_model_cache_scope()
+    # Real/shadow keys remain byte-identical regardless of configured policy.
+    monkeypatch.delenv("BENCHMARK_WORLD_MODEL_MODE")
+    assert normalize.world_model_cache_scope() == ""
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "shadow")
+    assert normalize.world_model_cache_scope() == ""
+
+
+def test_world_model_policy_cache_identities_match_the_immutable_registry():
+    """The runtime cache scope must not import benchmark modules, yet it must
+    reproduce each registered policy's exact (version, sha256 prefix)."""
+    from benchmarks import wmh_execution_policy as policies
+
+    registered = {}
+    for name in policies._POLICIES:
+        if name == policies.DEFAULT_EXECUTION_POLICY:
+            continue
+        policy = policies.execution_policy(name)
+        registered[name] = (policy.version, policy.metadata()["policy_sha256"][:16])
+    assert normalize.WMH_POLICY_CACHE_IDENTITIES == registered
+
+
+def test_backend_policy_cache_identities_mirror_the_immutable_registry():
+    """The backend's simulate-mode cache scope throws for an unlisted policy, so
+    its TypeScript mirror must carry every registered policy exactly."""
+    import re
+
+    from benchmarks import wmh_execution_policy as policies
+
+    source = (Path(__file__).resolve().parents[3] / "back-end/src/providers/fastCacheNormalizeConstants.ts").read_text()
+    constants = dict(re.findall(r"const (WMH_[A-Z0-9_]+) =\s*'([^']+)'", source))
+    table = source[source.index("const WMH_EXECUTION_POLICIES") : source.index("]);", source.index("const WMH_EXECUTION_POLICIES"))]
+    mirrored = {}
+    for name, version, sha in re.findall(
+        r"\[\s*('[^']+'|WMH_[A-Z0-9_]+),\s*\{\s*version:\s*('[^']+'|WMH_[A-Z0-9_]+),\s*sha256:\s*('[^']+'|WMH_[A-Z0-9_]+)",
+        table,
+    ):
+        value = lambda token: token.strip("'") if token.startswith("'") else constants[token]  # noqa: E731
+        mirrored[value(name)] = (value(version), value(sha))
+    registered = {
+        name: (policies.execution_policy(name).version, policies.execution_policy(name).metadata()["policy_sha256"])
+        for name in policies.registered_execution_policies()
+        if name != policies.DEFAULT_EXECUTION_POLICY
+    }
+    assert mirrored == registered
+
+
+@pytest.mark.parametrize("base_step", [None, 7], ids=["content", "position"])
+@pytest.mark.parametrize(
+    "tool_choice",
+    [None, "auto", {"type": "function", "function": {"name": "set_plan"}}],
+    ids=["default", "auto", "forced-function"],
+)
+def test_simulated_v2_cache_misses_v1_and_replays_its_own_tool_choice(mem, monkeypatch, base_step, tool_choice):
+    """Actual cache read/write/replay must preserve policy and tool-choice custody."""
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    monkeypatch.setenv("WMH_MODEL_NAME", "rose-archive")
+    monkeypatch.delenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", raising=False)
+    kwargs = {
+        "pool": "rose-1-ultra",
+        "messages": [{"role": "user", "content": "same goal"}],
+        "tool_choice": tool_choice,
+        "provider_fast_mode": True,
+    }
+
+    async def body():
+        monkeypatch.setenv("WMH_EXECUTION_POLICY", "rose-virtual-public-affordances-v1")
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=base_step))
+        old_chunks = _full_stream()
+        old_chunks[1].data["text"] = "v1 stale "
+        old_rose = FakeRose(old_chunks)
+        await _drain(rose_cache.cached_complete(old_rose, call_site="response_schema", **kwargs))
+        assert old_rose.calls == 1 and mem.set_calls == 1
+        old_keys = set(mem.data)
+
+        monkeypatch.setenv("WMH_EXECUTION_POLICY", "rose-virtual-public-affordances-v2")
+        context = FastCacheContext(enabled=True, goal="g", base_step=base_step)
+        set_context(context)
+        material = rose_cache.request_key_material(kwargs)
+        assert material["tool_choice"] == tool_choice
+        key = context.llm_key("response_schema", material)
+        assert key not in old_keys
+        assert not old_keys.intersection(context.llm_lookup_keys("response_schema", material))
+        choices = [None, "auto", {"type": "function", "function": {"name": "set_plan"}}]
+        choice_keys = {
+            context.llm_key("response_schema", rose_cache.request_key_material({**kwargs, "tool_choice": choice}))
+            for choice in choices
+        }
+        assert len(choice_keys) == len(choices)
+
+        new_chunks = _full_stream()
+        new_chunks[1].data["text"] = "v2 fresh "
+        new_rose = FakeRose(new_chunks)
+        await _drain(rose_cache.cached_complete(new_rose, call_site="response_schema", **kwargs))
+        assert new_rose.calls == 1 and mem.set_calls == 2
+        assert mem.data[key]["content"] == "v2 fresh world"
+
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=base_step))
+        replay_rose = FakeRose(_full_stream())
+        replay = await _drain(rose_cache.cached_complete(replay_rose, call_site="response_schema", **kwargs))
+        assert replay_rose.calls == 0 and mem.set_calls == 2
+        assert "".join(c.data.get("text", "") for c in replay if c.kind == "content") == "v2 fresh world"
+        assert next(c for c in replay if c.kind == "metadata").data["from_fast_cache"] is True
+
+    asyncio.run(body())
+
 def test_demo_replay_namespace_rejects_live_write_through(monkeypatch):
     """A live miss must not add entries to a frozen DEMO recording.
 
@@ -4357,6 +4617,10 @@ def test_demo_replay_namespace_rejects_live_write_through(monkeypatch):
 
     class _Response:
         status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True, "stored": True}
 
     class _Recorder:
         async def post(self, url, **kwargs):

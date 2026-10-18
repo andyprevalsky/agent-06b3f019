@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private/whm-e9afcffd/run17-http-integration-and-midrun-db-20261014.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "b20e3aa2a5c5daaf1ff1b9695349186ba29fbdbf8e7f2c96c8b64c9588051018",
+  "gzip_sha256": "ae07f4f91cdc832ee83ce8fb3e0cfcb98f70beedb98b5d000c188e31054617ad",
+  "stored_bytes": 44427656,
+  "frames": 6,
+  "files": 63,
+  "original_bytes": 45622500,
+  "manifest_sha256": "cab20b4819c3f13779910e1dd982fdfb6a6c59cc6ef9801ced3084d2457d2410",
+  "full_readback_verified": true
+}

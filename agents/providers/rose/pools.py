@@ -73,6 +73,7 @@ PoolName = Literal[
     "rose-1-ultra",
     "rose-1-browser-use",
     "rose-1-oss",
+    "rose-wmh-gpt61",
 ]
 
 # DAG / approval param-populator always uses ultra, even when the parent agent is flash.
@@ -108,6 +109,7 @@ class PoolSpec:
     pool keeps its guarantee on an open-weights Azure model). Defaults to
     ``gpt_auth_model``."""
 
+
     waterfall_reasoning_effort: str | None = None
     """When set, the OpenRouter waterfall and the Foundry fallback stamp this
     effort instead of the caller / xhigh default. Speed pools pin ``low``: measured xhigh TTFT on
@@ -130,6 +132,17 @@ class PoolSpec:
 
 
 POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
+    # Explicit WMH diagnostic runner; other agent pools retain their defaults.
+    "rose-wmh-gpt61": PoolSpec(
+        name="rose-wmh-gpt61",
+        claude_auth_model="claude-opus-5-5",
+        gpt_auth_model="gpt-6.1-sol",
+        # Azure credit first; the same model on OpenRouter is the fallback.
+        foundry_enabled=True,
+        waterfall=("openai/gpt-6.1-sol",),
+        waterfall_reasoning_effort="xhigh",
+        direct_auth_enabled=False,
+    ),
     # Cheapest/fastest tier — used by background condensation passes
     # (web_fetch Haiku filter, tool-result summarization). claudeAuth routes
     # directly to Anthropic's Haiku 4.5; waterfall falls back to OpenRouter's

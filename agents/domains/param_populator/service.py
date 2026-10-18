@@ -12,7 +12,6 @@ import structlog
 from domains.param_populator.config import (
     CALL_SITE,
     MAX_TOKENS,
-    PARAM_POPULATOR_MODEL,
     REASONING_MAX_TOKENS,
     TEMPERATURE,
 )
@@ -91,6 +90,7 @@ async def populate_tool_params(
     tool_name: str,
     goal: str,
     agent_id: str,
+    model: str,
     alias_hint: str = "",
     claude_token: str | None = None,
     *,
@@ -102,6 +102,7 @@ async def populate_tool_params(
         tool_name: Name of the tool to populate params for.
         goal: The task goal from the plan.
         agent_id: Agent ID to fetch context from DB.
+        model: Model selected for the agent.
         alias_hint: Original alias name for type-specific prompt instructions.
         claude_token: Optional Claude OAuth token for direct Anthropic calls.
         heartbeat: Optional callable for Temporal heartbeat signals.
@@ -137,7 +138,7 @@ async def populate_tool_params(
 
     pydantic_result, usage, _detected_tools = await call_llm_structured_streaming(
         messages=messages,
-        model=PARAM_POPULATOR_MODEL,
+        model=model,
         temperature=TEMPERATURE,
         max_tokens=MAX_TOKENS,
         response_model=agent_action,

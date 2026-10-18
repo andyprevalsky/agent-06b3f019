@@ -268,6 +268,12 @@ def test_hub_requests_preserve_external_proxy_routing():
         control(monkeypatch)
 
 
+
+
+def test_archived_diagnostic_projection_requires_authenticated_bindings():
+    from benchmarks.hub_upload_test import test_archived_diagnostic_projection_requires_authenticated_bindings as control
+    control()
+
 def test_hub_upload_rejection_retains_safe_response_identity_without_retry():
     """A forbidden upload stays failed while preserving upstream correlation."""
     from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
@@ -3874,6 +3880,9 @@ async def _exercise_owned_payment_reconciliation_caller(
     card_id = "local-owned-card"
     transfer_id = "local-owned-transfer"
     terminal = deepcopy(task.expected_payment_lifecycle)
+    # Synthetic production response: native hold and linked-refund PI modes are explicit.
+    terminal["stripeHold"]["livemode"] = True
+    terminal["stripeRefund"]["paymentIntentLivemode"] = True
     terminal["agentId"] = agent_id
     terminal["purchase"]["id"] = purchase_id
     terminal["agentCard"].update({"id": card_id, "status": "CLOSED"})
@@ -4221,7 +4230,7 @@ async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
 
 
 async def test_production_agentcard_release_stall_is_skippable_by_default():
-    """Exercise both deadline owners with complete synthetic live-shaped Stripe metadata."""
+    """Replay a synthetic live allocation through both deadline owners and CI, without an opt-in."""
     import pytest
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
@@ -4229,7 +4238,13 @@ async def test_production_agentcard_release_stall_is_skippable_by_default():
     captured = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
     )
-    lifecycle = _synthetic_production_stripe_provenance(captured["lifecycle"])
+    # The historical mixed-mode allocation remains immutable and cannot earn a live waiver.
+    historical = captured["lifecycle"]
+    assert not isinstance(
+        bench._payment_reconciliation_timeout("pending", historical, task_name="agent-payment-production-abandonment"),
+        bench.AgentCardReleaseStall,
+    )
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
     original = json.dumps(lifecycle, sort_keys=True)
     task = get_task_by_name("agent-payment-production-abandonment")
     for owned in (False, True):
@@ -4266,11 +4281,13 @@ def test_agentcard_release_skip_rejects_independent_lifecycle_failures():
     from copy import deepcopy
     from benchmarks import run_benchmark as bench
 
-    lifecycle = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
-    )["lifecycle"]
-    lifecycle = _synthetic_production_stripe_provenance(lifecycle)
+    # Start valid so each independent corruption, rather than missing provenance, owns rejection.
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
     for section, field, value in (
+        ("stripeHold", "livemode", False),
+        ("stripeHold", "livemode", None),
+        ("stripeHold", "livemode", 1),
+        ("stripeHold", "livemode", "true"),
         ("integrity", "cardCount", 2),
         ("attention", "openKinds", ["payment_approval"]),
         ("stripeHold", "amountReceivedCents", 0),
@@ -4316,10 +4333,8 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
     from benchmarks import run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    lifecycle = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
-    )["lifecycle"]
-    lifecycle = _synthetic_production_stripe_provenance(lifecycle)
+    # Synthetic live response; the archived allocation has no live Stripe provenance.
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
     task = get_task_by_name("agent-payment-production-abandonment")
     for failure in (None, "delete", "archive", "seal"):
         cleanup = AsyncMock(side_effect=ConnectionError("a second financial cleanup must not run"))
@@ -4417,7 +4432,8 @@ def _agentcard_release_stall_lifecycle(**transfer) -> dict:
     )
     lifecycle["orgTransfer"].update(transfer)
     if transfer.get("livemode") is True:
-        lifecycle = _synthetic_production_stripe_provenance(lifecycle)
+        # Synthetic response, not provenance inferred from the AgentCard transfer.
+        lifecycle["stripeHold"]["livemode"] = True
     lifecycle["stripeRefund"] = None
     return lifecycle
 
@@ -8154,6 +8170,45 @@ def test_in_progress_phone_call_counts_as_live_stall_activity():
     assert TASK_TIMEOUT_FLOORS[hold.name] == 12600
 
 
+async def test_in_flight_world_model_prediction_counts_as_live_stall_activity():
+    """A leaf waiting on a simulated tool must not trip tree-stall while the WMH predicts it.
+
+    Local repro (raise-5m-rose-labs-brex, 2026-10-10, run ee95747b): the run failed
+    at 1099s with ``tree stalled ... silent for 525s (threshold=510s)`` while the
+    native WMH session was still predicting a queued explore (19 predictions,
+    revisions advancing). The runner reads the seeded session's activity.
+    """
+    import httpx
+
+    from benchmarks.run_benchmark import tree_stall_exceeded, world_model_operations_in_flight
+
+    owned = {"base_url": "http://wmh:28690/", "model_name": "rose-archive", "session_id": "s1"}
+    replies = {"activity": (200, {"revision": 7, "operations_in_flight": 2})}
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        status, body = replies["activity"]
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await world_model_operations_in_flight(owned, client=client) == 2
+        assert seen == ["http://wmh:28690/world_models/rose-archive/sessions/s1/activity"]
+        replies["activity"] = (200, {"revision": 7, "operations_in_flight": 0})
+        assert await world_model_operations_in_flight(owned, client=client) == 0
+        for status, body in ((404, {"detail": "Unknown session"}), (200, {"operations_in_flight": True}), (200, [])):
+            replies["activity"] = (status, body)
+            assert await world_model_operations_in_flight(owned, client=client) is None
+    assert await world_model_operations_in_flight(None) is None
+
+    limit = 510
+    # The leaf and tree cost are silent, but the world model is still predicting.
+    assert not tree_stall_exceeded(tree_idle=525, cost_idle=525, world_model_idle=15, limit=limit)
+    # A genuinely dead tree still fails fast.
+    assert tree_stall_exceeded(tree_idle=525, cost_idle=525, world_model_idle=525, limit=limit)
+    assert not tree_stall_exceeded(tree_idle=525, cost_idle=30, world_model_idle=525, limit=limit)
+
+
 async def test_declared_evaluator_hydrates_claude_code_sessions():
     """Transcript static checks hydrate Claude Code sessions before grading."""
     from dataclasses import replace
@@ -10814,6 +10869,131 @@ def test_tamy_identity_fixture_seeds_the_run_identity_not_the_dev_user():
         "source": "prod_sync",
         "user_id": TAMY_IDENTITY_USER_ID,
     }
+
+
+def test_tamy_account_snapshot_fixture_seeds_account_rows_without_browser_auth_in_simulate():
+    """The account-snapshot fixture is DATA, not credentials: it must apply under simulate.
+
+    The identity overlay skips itself in simulate mode (browser auth is meaningless
+    when the WMH serves the browser), which left the run user with no User row at
+    all — the agent create died on the User FK before an agent existed. The
+    snapshot seeds her account rows (User, people, messages, ...) via the full
+    user-scoped seed with browser-auth sync disabled, in both modes.
+    """
+    import benchmarks.run_benchmark as bench
+    from benchmarks.live_fixtures import TAMY_IDENTITY_USER_ID
+
+    captured: dict = {}
+    compute_calls: list = []
+    original_seed = bench._run_seed_subprocess
+    original_db = bench._local_victoria_database_url
+    original_compute = bench._sync_compute_tokens
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+
+    def fake_seed(command, *, cwd, env, timeout):
+        captured.update(command=list(command), env=dict(env), timeout=timeout, cwd=str(cwd))
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
+        bench._local_victoria_database_url = lambda: "postgresql://postgres:postgres@localhost:5432/victoria_bench_x"
+        bench._sync_compute_tokens = lambda **kwargs: compute_calls.append(kwargs) or True
+        bench._run_seed_subprocess = fake_seed
+        manifest = bench._apply_live_tamy_account_snapshot_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id=bench.USER_ID,
+                auth_realm="amazon.com",
+            )
+        )
+    finally:
+        bench._run_seed_subprocess = original_seed
+        bench._local_victoria_database_url = original_db
+        bench._sync_compute_tokens = original_compute
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    # Full user-scoped seed (no --credentials-only / --compute-tokens-only scope flag).
+    assert captured["command"] == ["npx", "tsx", "scripts/seed-local.ts"]
+    assert captured["cwd"].endswith("back-end")
+    assert captured["env"]["SEED_LOCAL_USER_ID"] == TAMY_IDENTITY_USER_ID
+    assert captured["env"]["BENCHMARK_SKIP_BROWSER_AUTH_SYNC"] == "1"
+    assert captured["env"]["DATABASE_URL"].endswith("/victoria_bench_x")
+    assert captured["env"]["DIRECT_URL"].endswith("/victoria_bench_x")
+    assert "SEED_COOKIE_DOMAINS" not in captured["env"]
+    assert captured["timeout"] >= 600
+    # Simulate: compute tokens come from the restored seed DB, never a live refresh.
+    assert compute_calls == []
+    assert manifest == {
+        "fixture": "live-tamy-account-snapshot",
+        "browser_auth": False,
+        "source": "prod_sync",
+        "user_id": TAMY_IDENTITY_USER_ID,
+        "simulate": True,
+    }
+
+
+def test_tamy_account_snapshot_fixture_fails_closed_when_seed_fails():
+    """A failed snapshot seed must abort the task, not start an agent as a missing user."""
+    import pytest
+
+    import benchmarks.run_benchmark as bench
+
+    original_seed = bench._run_seed_subprocess
+    original_db = bench._local_victoria_database_url
+    original_compute = bench._sync_compute_tokens
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    compute_calls: list = []
+
+    def failing_seed(command, *, cwd, env, timeout):
+        return subprocess.CompletedProcess(command, 1, "", "Foreign key constraint violated")
+
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._local_victoria_database_url = lambda: "postgresql://postgres:postgres@localhost:5432/victoria_bench_x"
+        bench._sync_compute_tokens = lambda **kwargs: compute_calls.append(kwargs) or True
+        bench._run_seed_subprocess = failing_seed
+        with pytest.raises(RuntimeError, match="account rows"):
+            bench._apply_live_tamy_account_snapshot_fixture(
+                bench.LiveFixtureContext(
+                    base_url="http://localhost:54121",
+                    user_id=bench.USER_ID,
+                    auth_realm="amazon.com",
+                )
+            )
+    finally:
+        bench._run_seed_subprocess = original_seed
+        bench._local_victoria_database_url = original_db
+        bench._sync_compute_tokens = original_compute
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    # Real mode refreshes compute tokens first (like the other identity overlays).
+    assert len(compute_calls) == 1
+
+
+def test_tamy_account_snapshot_declaration_drives_the_run_user():
+    """Declaring the snapshot selects Tamy as the run user and keeps the task exclusive."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.live_fixtures import TAMY_IDENTITY_USER_ID
+
+    class _Task:
+        def __init__(self, fixtures):
+            self.name = "raise-5m-rose-labs-brex"
+            self.environment = {"live_fixtures": list(fixtures)}
+
+    assert bench._live_fixture_run_user_id(_Task(["live-tamy-account-snapshot"])) == TAMY_IDENTITY_USER_ID
+
+    task = get_task_by_name("raise-5m-rose-labs-brex")
+    assert task.environment["live_fixtures"] == ["live-tamy-account-snapshot"]
+    assert bench._live_fixture_run_user_id(task) == TAMY_IDENTITY_USER_ID
+    assert task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert task.world_model_mode == "simulate"
 
 
 def test_tamy_identity_fixture_declaration_drives_the_run_user():
@@ -15392,6 +15572,119 @@ async def test_tree_log_collection_fetches_supabase_once():
     assert result["child-agent-id"]["logs"]["research_logs"] == [
         "[supabase] Gateway logs are tree-scoped; see root agent root-agent-i research logs"
     ]
+
+
+def test_local_resolve_simulate_mode_honors_catalog_world_model_mode():
+    """Local stack must start the WMH when the catalog declares simulate (fleet parity).
+
+    Restored H-05 guard: `resolve_simulate_mode` was lost in a merge, so
+    `run-bench --local <sim task>` silently ran REAL boundaries for a task that
+    declares world_model_mode=simulate.
+    """
+    from benchmarks.local import resolve_simulate_mode
+
+    assert resolve_simulate_mode(False, ["raise-5m-rose-labs-brex"]) is True
+    assert resolve_simulate_mode(True, ["chat-mode"]) is True
+    assert resolve_simulate_mode(False, ["chat-mode"]) is False
+    assert resolve_simulate_mode(False, ["chat-mode", "raise-5m-rose-labs-brex"]) is True
+    # Unknown names never raise here (validate_task_names owns that error).
+    assert resolve_simulate_mode(False, ["not-a-real-task"]) is False
+
+
+def test_local_simulate_wmh_env_uses_complete_corpus_and_skips_gepa():
+    """Local simulate stacks serve the WMH from the complete corpus with GEPA off.
+
+    Normal builds must not silently cap eligible trajectories. Explicit operator
+    overrides (already-set env) still win, and GEPA remains disabled by default.
+    """
+    from benchmarks.local import apply_local_simulate_wmh_env
+
+    env: dict = {}
+    apply_local_simulate_wmh_env(env, base_port=54100, world_model_name="rose-archive")
+    assert env["BENCHMARK_WORLD_MODEL_MODE"] == "simulate"
+    assert env["WMH_BASE_URL"] == "http://localhost:54106"
+    assert env["WMH_MODEL_NAME"] == "rose-archive"
+    assert env["WMH_MAX_BUNDLES"] == "0"
+    assert env["WMH_GEPA_BUDGET"] == "0"
+
+    pinned = {"WMH_MAX_BUNDLES": "5", "WMH_GEPA_BUDGET": "3"}
+    apply_local_simulate_wmh_env(pinned, base_port=54100)
+    assert pinned["WMH_MAX_BUNDLES"] == "5"
+    assert pinned["WMH_GEPA_BUDGET"] == "3"
+    # No explicit model: the worker still needs a name at fork time (its WMH
+    # adapter reads WMH_MODEL_NAME from its process env at the first boundary).
+    assert pinned["WMH_MODEL_NAME"] == "rose-archive"
+    assert "BENCHMARK_SKIP_WMH_BUILD" not in env
+
+    # An operator-owned, already-healthy WMH replaces run.sh's served port for
+    # the worker and the benchmark runner; run.sh then neither serves nor owns it.
+    from benchmarks.local import apply_manifest_environment
+
+    saved = {key: os.environ.get(key) for key in ("WMH_EXTERNAL_BASE_URL", "WMH_BASE_URL", "WMH_MODEL_NAME")}
+    try:
+        os.environ["WMH_EXTERNAL_BASE_URL"] = "http://127.0.0.1:28690/"
+        external: dict = {}
+        apply_local_simulate_wmh_env(external, base_port=54100, world_model_name="rose-archive")
+        assert external["WMH_BASE_URL"] == "http://127.0.0.1:28690"
+        assert external["BENCHMARK_SKIP_WMH_BUILD"] == "1"
+        os.environ.pop("WMH_BASE_URL", None)
+        apply_manifest_environment({"urls": {}})
+        assert os.environ["WMH_BASE_URL"] == "http://127.0.0.1:28690"
+        # A run.sh-served WMH in the manifest stays authoritative.
+        apply_manifest_environment({"urls": {"wmh": "http://localhost:54106"}})
+        assert os.environ["WMH_BASE_URL"] == "http://localhost:54106"
+        for invalid in ("http://10.0.0.5:28690", "https://127.0.0.1:28690", "http://127.0.0.1"):
+            os.environ["WMH_EXTERNAL_BASE_URL"] = invalid
+            try:
+                apply_local_simulate_wmh_env({}, base_port=54100)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted non-loopback external WMH {invalid}")
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_local_service_start_timeout_extends_only_for_first_wmh_build():
+    """A simulate stack with no prebuilt World Model gets the first-build readiness budget.
+
+    run.sh cold-builds the WMH (R2 listing of ~80k bundles + capped corpus export)
+    before publishing services.json; killing that at the warm-start bound destroyed
+    a healthy build. Prebuilt models, real-mode stacks and explicit build skips keep
+    the normal bound; an opted-in cold seed keeps its own budget.
+    """
+    from benchmarks.local import (
+        COLD_SEED_SERVICE_START_TIMEOUT_SECONDS,
+        SERVICE_START_TIMEOUT_SECONDS,
+        WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS,
+        service_start_timeout_seconds,
+        wmh_model_prebuilt,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {"WMH_BUILD_DIR": tmp, "WMH_MODEL_NAME": "rose-archive"}
+        assert wmh_model_prebuilt(env) is False
+        assert (
+            service_start_timeout_seconds(isolated=True, env=env, simulate=True)
+            == WMH_FIRST_BUILD_SERVICE_START_TIMEOUT_SECONDS
+        )
+        assert service_start_timeout_seconds(isolated=True, env=env, simulate=False) == SERVICE_START_TIMEOUT_SECONDS
+        assert (
+            service_start_timeout_seconds(isolated=True, env={**env, "BENCHMARK_SKIP_WMH_BUILD": "1"}, simulate=True)
+            == SERVICE_START_TIMEOUT_SECONDS
+        )
+        assert (
+            service_start_timeout_seconds(isolated=True, env={**env, "BENCHMARK_REQUIRE_SEED_DUMP": "0"}, simulate=True)
+            == COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
+        )
+        (Path(tmp) / "build.manifest.json").write_text("{}", encoding="utf-8")
+        (Path(tmp) / "models" / "rose-archive").mkdir(parents=True)
+        assert wmh_model_prebuilt(env) is True
+        assert service_start_timeout_seconds(isolated=True, env=env, simulate=True) == SERVICE_START_TIMEOUT_SECONDS
 
 
 def test_local_benchmark_args_for_multi_task_preserve_explicit_order():
@@ -20759,7 +21052,7 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity", "live-aman-food-plan-identity"}
+    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity", "live-tamy-account-snapshot", "live-aman-food-plan-identity"}
 
 
 def test_amazon_passkey_scenario_is_exclusive_and_restorable():
@@ -20834,7 +21127,7 @@ def test_live_fixture_is_single_and_explicit():
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
-        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity", "live-aman-food-plan-identity"}, (
+        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity", "live-tamy-account-snapshot", "live-aman-food-plan-identity"}, (
             f"{t.name}: noncanonical live fixture"
         )
         if env.get("mode") == "synthetic":
@@ -22445,6 +22738,76 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             assert not descendant_live(), "native control descendant survived exact cleanup"
 
 
+async def test_agentcard_release_skip_rejects_independent_native_retirement_failure():
+    """A typed payment waiver cannot waive an independently failed owned provider join."""
+    from copy import deepcopy
+    import httpx
+    import uuid
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    # Synthetic live response; the archived allocation has no live Stripe provenance.
+    lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
+    for native in ('none', 'joined', 'failed'):
+        task = deepcopy(get_task_by_name('agent-payment-production-abandonment'))
+        calls = []
+        task.world_model_mode = 'simulate'
+        if native != 'none':
+            task.wmh_initial_state = {'structured': {'schema':'offline-retirement-control', 'as_of_utc':'2026-10-15T00:00:00Z'}, 'scratchpad':''}
+        else:
+            task.wmh_initial_state = None
+        actual_client = httpx.AsyncClient
+        def transport(request):
+            assert request.url.host == 'fixture.invalid'
+            payload = json.loads(request.content)
+            assert payload['world_model_mode'] == 'simulate'
+            assert request.method == 'POST' and request.url.path == '/api/agents'
+            return httpx.Response(201, json={'agent_id': lifecycle['agentId']})
+        def client(*args, **kwargs):
+            return actual_client(*args, transport=httpx.MockTransport(transport), **kwargs)
+        class NativeClient:
+            def __init__(self, base): assert base == 'http://native.test'
+            async def create_session(self, model, **kwargs):
+                assert model == 'rose-test'
+                assert kwargs['session_scope_id'] == lifecycle['agentId']
+                assert kwargs['seed_state']['structured']['root_agent_id'] == lifecycle['agentId']
+                assert kwargs['seed_state']['structured']['root_goal'] == kwargs['task']
+                return 'owned-session'
+            async def end_session(self, model, sid):
+                assert (model, sid) == ('rose-test', 'owned-session')
+                calls.append((model, sid))
+                if native == 'failed': raise RuntimeError('exact owned retirement unavailable')
+                return dict(engine='experiential', join_verified=True, ended=sid, session_id=sid, session_scope_id=lifecycle['agentId'], revision=1, state={}, history=[], usage={})
+        cleanup = AsyncMock(side_effect=AssertionError('duplicate financial cleanup'))
+        delete = AsyncMock()
+        archive = AsyncMock(return_value=(None, None))
+        logs = {'failure_evidence': {'errors': []}}
+        stall = bench._payment_reconciliation_timeout('pending', lifecycle, task_name=task.name)
+        assert isinstance(stall, bench.AgentCardReleaseStall)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {'BENCHMARK_WORLD_MODEL_MODE':'simulate','WMH_BASE_URL':'http://native.test','WMH_MODEL_NAME':'rose-test','WMH_ENGINE':'experiential'}))
+            for key in ('WMH_SESSION_ID', 'WORLD_MODEL_SESSION_ID'):
+                stack.enter_context(patch.dict(os.environ))
+                os.environ.pop(key, None)
+            stack.enter_context(patch.object(bench.uuid, 'uuid4', return_value=uuid.UUID(lifecycle['agentId'])))
+            stack.enter_context(patch.object(bench.httpx, 'AsyncClient', client))
+            for name in ('prepare_sandbox_payment_residual', '_preflight_production_payment_identity', '_apply_live_fixtures', '_apply_memory_fixtures', '_apply_auth_test_site', '_restore_live_fixture_scenarios_async', '_release_auth_test_site'):
+                stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+            for name, value in {'_api_headers':AsyncMock(return_value={}), 'WMHHttpClient':NativeClient, '_run_with_agent_execution_backstop':AsyncMock(side_effect=stall), '_capture_task_failure_evidence':AsyncMock(return_value=({'messages': [], '_benchmark': {'payment_lifecycle':deepcopy(lifecycle)}}, logs)), 'finalize_archive_and_score_world_model':archive, 'ensure_payment_lifecycle_cleanup':cleanup, 'delete_agent':delete, '_run_user_id_override_for_task':lambda *_args:None}.items():
+                stack.enter_context(patch.object(bench, name, value))
+            result = await bench.run_single_task('https://fixture.invalid', task)
+        cleanup.assert_not_awaited(); delete.assert_awaited_once()
+        assert len(calls) == (native != 'none'), calls
+        assert result.logs['agentcard_release_stall_lifecycle'] == lifecycle
+        expected = 'ERROR' if native == 'failed' else 'SKIPPED'
+        assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False), (native, result.status, result.failure_reason)
+        assert bench._is_permitted_agentcard_release_skip(result) is (native != 'failed')
+        assert archive.await_args.kwargs['benchmark_status'] == expected
+        if native == 'failed':
+            assert result.logs['wmh_retirement_error'] == dict(type='RuntimeError', message='exact owned retirement unavailable', session_id='owned-session', session_scope_id=lifecycle['agentId'], join_verified=False, cost_verified=False)
+            assert 'exact owned retirement unavailable' in result.failure_reason
+        elif native == 'joined': assert result.logs['wmh_retirement']['join_verified'] is True
+
+
 async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown():
     """A false-live lifecycle cannot turn a production or unknown task into a sandbox skip."""
     from copy import deepcopy
@@ -22750,38 +23113,17 @@ async def run_all_tests():
         "test_lantern_latest_completion_and_cache_evidence_are_strict",
     ):
         r.record(name, getattr(lantern_people_trace_tests, name))
-    await r.record_async(
-        "production_agentcard_release_stall_default_skip",
-        test_production_agentcard_release_stall_is_skippable_by_default,
-    )
-    r.record(
-        "agentcard_release_skip_rejects_independent_failures",
-        test_agentcard_release_skip_rejects_independent_lifecycle_failures,
-    )
-    await r.record_async(
-        "agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip
-    )
-    await r.record_async(
-        "agentcard_release_skip_execution_cleanup",
-        test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup,
-    )
-    await r.record_async(
-        "agentcard_release_skip_preserves_task_failure",
-        test_agentcard_release_stall_cannot_replace_an_independent_task_failure,
-    )
-    await r.record_async(
-        "agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown
-    )
-    await r.record_async(
-        "agentcard_release_skip_catalog_ci",
-        test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown,
-    )
-    await r.record_async(
-        "agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict
-    )
-    await r.record_async(
-        "agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict
-    )
+    r.record("archived_diagnostic_projection_requires_authenticated_bindings", test_archived_diagnostic_projection_requires_authenticated_bindings)
+    await r.record_async("production_agentcard_release_stall_default_skip", test_production_agentcard_release_stall_is_skippable_by_default)
+    r.record("agentcard_release_skip_rejects_independent_failures", test_agentcard_release_skip_rejects_independent_lifecycle_failures)
+    await r.record_async("agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip)
+    await r.record_async("agentcard_release_skip_execution_cleanup", test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup)
+    await r.record_async("agentcard_release_skip_native_retirement_strict", test_agentcard_release_skip_rejects_independent_native_retirement_failure)
+    await r.record_async("agentcard_release_skip_preserves_task_failure", test_agentcard_release_stall_cannot_replace_an_independent_task_failure)
+    await r.record_async("agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown)
+    await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown)
+    await r.record_async("agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict)
+    await r.record_async("agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict)
     r.record("ci_permits_only_opt_in_agentcard_release_skip", test_ci_permits_only_the_opt_in_agentcard_release_skip)
     r.record(
         "agentcard_release_policy_rejects_incomplete_foreign_state",
@@ -24033,6 +24375,10 @@ async def run_all_tests():
         "in_progress_phone_call_counts_as_live_stall_activity",
         test_in_progress_phone_call_counts_as_live_stall_activity,
     )
+    await r.record_async(
+        "in_flight_world_model_prediction_counts_as_live_stall_activity",
+        test_in_flight_world_model_prediction_counts_as_live_stall_activity,
+    )
     r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",
         test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate,
@@ -24208,6 +24554,18 @@ async def run_all_tests():
     await r.record_async(
         "sibling_cleanup_cannot_revert_run_identity",
         test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity,
+    )
+    r.record(
+        "tamy_account_snapshot_seeds_account_rows_in_simulate",
+        test_tamy_account_snapshot_fixture_seeds_account_rows_without_browser_auth_in_simulate,
+    )
+    r.record(
+        "tamy_account_snapshot_fails_closed_on_seed_failure",
+        test_tamy_account_snapshot_fixture_fails_closed_when_seed_fails,
+    )
+    r.record(
+        "tamy_account_snapshot_declaration_drives_run_user",
+        test_tamy_account_snapshot_declaration_drives_the_run_user,
     )
     r.record(
         "live_fixture_auth_failure_is_fatal",
@@ -24443,6 +24801,17 @@ async def run_all_tests():
     r.record("prompt_user_denial_uses_rejection_sentinel", test_prompt_user_denial_uses_rejection_sentinel)
     r.record("keep_agents_env_preserves_successes_and_failures", test_keep_agents_env_preserves_successes_and_failures)
     r.record("local_services_manifest_reports_anon_capability", test_local_services_manifest_reports_anon_capability)
+    r.record(
+        "local_resolve_simulate_mode_honors_catalog", test_local_resolve_simulate_mode_honors_catalog_world_model_mode
+    )
+    r.record(
+        "local_simulate_wmh_env_uses_complete_corpus_skips_gepa",
+        test_local_simulate_wmh_env_uses_complete_corpus_and_skips_gepa,
+    )
+    r.record(
+        "local_service_start_timeout_extends_for_first_wmh_build",
+        test_local_service_start_timeout_extends_only_for_first_wmh_build,
+    )
     r.record("cache_coverage_uses_root_scoped_tool_counts", test_cache_coverage_uses_root_scoped_tool_counts)
     await r.record_async(
         "user_data_prod_grep_final_answer_semantic_judge",

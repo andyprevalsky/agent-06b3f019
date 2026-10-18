@@ -99,6 +99,8 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
       effort: opts.effort,
       providerFastMode: opts.providerFastMode,
       requestId: opts.requestId,
+      // Foundry Standard deployments honor caller cache markers as breakpoints.
+      cacheBreakpoints: true,
     });
     let response;
     try {

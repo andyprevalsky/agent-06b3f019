@@ -296,16 +296,16 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
   return result;
 }
 
-export async function cacheSet(args: {
+export async function cacheSetWithAck(args: {
   key: string;
   kind: CacheKind;
   goalHash: string;
   value: unknown;
   blobPath?: string | null;
-}): Promise<void> {
+}): Promise<boolean> {
   if (fastCacheWritesDisabled()) {
     log.info('fast_cache.write_skipped_read_only', { key: args.key, kind: args.kind });
-    return;
+    return false;
   }
   const value = stripSecrets(args.value);
   const blobPath = args.blobPath ?? null;
@@ -343,13 +343,13 @@ export async function cacheSet(args: {
         },
       });
       writeMemoryCache(args.key, args.goalHash, { hit: true, value, blobPath });
-      return;
+      return true;
     }
     throw error;
   }
   writeMemoryCache(args.key, args.goalHash, { hit: true, value, blobPath });
+  return true;
 }
-
 export async function cachePurge(goalHash: string): Promise<number> {
   const res = await fastCachePrisma.fastModeCacheEntry.deleteMany({ where: { goalHash } });
   purgeMemoryCacheByGoalHash(goalHash);
@@ -503,4 +503,8 @@ export async function agentFastMode(agentId: string): Promise<{
     rootGoal,
     providerFastMode,
   };
+}
+
+export async function cacheSet(args: Parameters<typeof cacheSetWithAck>[0]): Promise<void> {
+  await cacheSetWithAck(args);
 }

@@ -23,7 +23,10 @@ const bundle = (id: string) => ({
     {
       name: 'fixture-task',
       status: 'completed',
-      logs: { messages: ['full transcript sentinel'], extra: { retained: true } },
+      logs: {
+        messages: ['full transcript sentinel'],
+        extra: { retained: true },
+      },
     },
   ],
 });
@@ -50,7 +53,9 @@ function baseline(name: string, file = 'benchmarkHubStore.ts') {
     Map,
     Set,
     ...(name === 'parseRunCatalog'
-      ? { normalizeAgentId: baseline('normalizeAgentId', 'benchmarkHubRunProjection.ts') }
+      ? {
+          normalizeAgentId: baseline('normalizeAgentId', 'benchmarkHubRunProjection.ts'),
+        }
       : {}),
   });
   vm.runInContext(
@@ -120,10 +125,15 @@ async function fixture(t: TestContext) {
       const key = input.Key!;
       assert.equal(input.Bucket, 'fixture');
       if (!(command instanceof PutObjectCommand)) {
-        commands.push({ method: command instanceof HeadObjectCommand ? 'HEAD' : 'GET', key });
+        commands.push({
+          method: command instanceof HeadObjectCommand ? 'HEAD' : 'GET',
+          key,
+        });
         const raw = objects.get(key);
         if (raw === undefined)
-          throw Object.assign(new Error('fixture missing'), { name: 'NoSuchKey' });
+          throw Object.assign(new Error('fixture missing'), {
+            name: 'NoSuchKey',
+          });
         if (command.input.IfNoneMatch === etag(raw)) {
           throw Object.assign(new Error('fixture not modified'), {
             $metadata: { httpStatusCode: 304 },
@@ -244,26 +254,29 @@ test('new writes use only the fresh domain; unclaimed legacy bytes stay raw and 
     }
   );
   const old = new Map(f.objects);
+  await assert.rejects(
+    f.ownership.withHubStorageOwnership(() =>
+      f.storage.putObject('runs/wire.json', JSON.stringify(bundle('wire')))
+    ),
+    /no private publication/,
+    'direct body writes cannot bypass private publication staging'
+  );
   await f.ownership.withHubStorageOwnership(async () => {
     assert.deepEqual(
       JSON.parse((await f.storage.getObjectStrict('runs/wire.json'))!),
       bundle('wire')
     );
-    await assert.rejects(
-      f.storage.putObject('runs/wire.json', JSON.stringify(bundle('wire'))),
-      /no private publication/
-    );
+    await f.storage.beginHubPublications(['wire']);
+    await f.storage.putObject('runs/wire.json', JSON.stringify(bundle('wire')));
   });
-  assert.equal(f.commands.filter((c) => c.method === 'PUT').length, 0);
-  await f.publish('new-wire');
   const writes = f.commands.filter((c) => c.method === 'PUT');
-  assert.ok(writes.every((c) => c.key.startsWith(fresh)));
-  const body = f.document().claims['new-wire'];
-  const bodyWrite = writes.find((c) => c.key === fresh + body.body_key);
-  assert.ok(bodyWrite);
-  assert.equal(bodyWrite.key.startsWith(fresh + 'publications/'), true);
-  assert.equal(bodyWrite.ifNoneMatch, '*');
-  assert.equal(bodyWrite.ifMatch, undefined);
+  assert.equal(writes.length, 1);
+  assert.match(
+    writes[0].key,
+    new RegExp('^' + fresh + 'publications/[A-Za-z0-9-]+/body-[A-Za-z0-9-]+\\.json$')
+  );
+  assert.equal(writes[0].ifNoneMatch, '*');
+  assert.equal(writes[0].ifMatch, undefined);
   for (const [key, value] of old) assert.equal(f.objects.get(key), value);
   assert.equal(JSON.parse((await f.storage.getObjectStrict('index.json'))!)[0].run_id, 'wire');
 });
@@ -278,7 +291,9 @@ test('legacy raw catalog, bundle and visibility keep exact baseline reader seman
     'the relocated production parser remains on the actual Store reader path'
   );
   // The actual baseline catalog maps its actual baseline task normalization.
-  const parsed = baseline('parseRunCatalog')(rawCatalog) as Array<{ run_id: string }>;
+  const parsed = baseline('parseRunCatalog')(rawCatalog) as Array<{
+    run_id: string;
+  }>;
   assert.equal(parsed[0].run_id, 'old');
   const rawBundle = await f.storage.getObjectStrict('runs/old.json');
   assert.deepEqual(baseline('parseHubRunBundle')(rawBundle), bundle('old'));
@@ -302,26 +317,26 @@ test('invalid payload cannot persist PENDING or suppress a readable legacy run',
   assert.deepEqual(await f.store.getRunBundleStrict('old'), bundle('old'));
 });
 
-test('failed private body preserves prior ACK and legacy readers; retry commits atomically', async (t) => {
+test('body failure preserves the prior legacy view without ACK; retry publishes the same immutable domain', async (t) => {
   const f = await fixture(t);
   f.seed(['old', 'untouched']);
-  const priorCatalog = await f.store.listRunsStrict();
-  f.failPut((key) => key.startsWith(fresh + 'publications/') && /\/body-[^/]+\.json$/.test(key));
+  f.failPut(
+    (key) => key.startsWith(fresh + 'publications/') && /\/body-[A-Za-z0-9-]+\.json$/.test(key)
+  );
   await assert.rejects(f.publish('old'), /fixture publication failure/);
   assert.equal(
     f.objects.has(fresh + 'index.json'),
     false,
-    'failed private stage cannot publish a catalog'
+    'failed private staging must not publish a catalog claim'
   );
-  assert.deepEqual(
-    await f.store.listRunsStrict(),
-    priorCatalog,
-    'failed private staging must preserve the exact prior logical catalog'
-  );
+  assert.deepEqual((await f.store.listRunsStrict()).map((r) => r.run_id).sort(), [
+    'old',
+    'untouched',
+  ]);
   assert.deepEqual(JSON.parse((await f.storage.getObjectStrict('runs/old.json'))!), bundle('old'));
-  assert.ok(
-    f.commands.some((c) => c.key === legacy + 'runs/old.json'),
-    'unclaimed legacy remains authoritative before CAS'
+  assert.equal(
+    f.commands.some((c) => c.method === 'PUT' && c.key === fresh + 'index.json'),
+    false
   );
   f.failPut();
   await f.publish('old');
@@ -375,7 +390,10 @@ test('published claim binds body version and visibility; corruption never falls 
 test('hidden claims permanently mask legacy reinsertion without per-run visibility scans', async (t) => {
   const f = await fixture(t);
   f.seed(['old', 'untouched']);
-  await f.store.deleteRun('old');
+  await f.ownership.withHubStorageOwnership(async () => {
+    await f.storage.putObject('visibility/old.json', 'false');
+    await f.storage.putObject('index.json', '[]');
+  });
   assert.equal(f.document().claims.old.state, 'hidden');
   f.objects.set(legacy + 'index.json', JSON.stringify([row('old'), row('untouched')]));
   const at = f.commands.length;
@@ -400,34 +418,29 @@ test('domain-complete agent index retains unclaimed legacy mapping and drops cla
       agents: { removed: 'old', archived: 'untouched' },
     })
   );
-  const legacySnapshot = new Map(f.objects);
-  await f.ownership.withHubStorageOwnership(() => f.storage.beginHubPublications(['old']));
-  assert.equal(
-    JSON.parse((await f.storage.getObjectStrict('agent-run-index.json'))!).agents.removed,
-    'old',
-    'uncommitted private begin must preserve acknowledged mapping'
+  // Persist an existing-format PENDING claim to retain backward-reader fail-closed coverage.
+  // Current writers stage privately and never expose this intermediate state.
+  f.objects.set(
+    fresh + 'index.json',
+    JSON.stringify({
+      format: 'benchmark-hub-overlay-v1',
+      epoch,
+      revision: 1,
+      runs: [],
+      claims: {
+        old: { state: 'pending', publication: 'reader-compatibility-pending' },
+      },
+    })
   );
+  const pendingAt = f.commands.length;
+  await assert.rejects(f.storage.getObjectStrict('runs/old.json'), /pending/);
+  assert.ok(!f.commands.slice(pendingAt).some((c) => c.key === legacy + 'runs/old.json'));
   for (const state of ['pending', 'hidden']) {
-    f.objects.clear();
-    for (const [key, value] of legacySnapshot) f.objects.set(key, value);
-    f.storage.resetHubObjectStorageForTests();
-    f.store._resetForTests();
-    if (state === 'hidden') await f.store.deleteRun('old');
-    else
-      f.objects.set(
-        fresh + 'index.json',
-        JSON.stringify({
-          format: 'rose-benchmark-hub-publication-v1',
-          publication: 'historical-pending',
-          payload: JSON.stringify({
-            format: 'benchmark-hub-overlay-v1',
-            epoch,
-            revision: 1,
-            runs: [],
-            claims: { old: { state: 'pending', publication: 'historical-pending' } },
-          }),
-        })
-      );
+    if (state === 'hidden')
+      await f.ownership.withHubStorageOwnership(async () => {
+        await f.storage.putObject('visibility/old.json', 'false');
+        await f.storage.putObject('index.json', '[]');
+      });
     assert.equal(f.objects.has(fresh + 'agent-run-index.json'), false);
     assert.equal(f.objects.has(fresh + 'agent-run-index-revision.json'), false);
     const outcome = await f.storage.getObjectStrict('agent-run-index.json').then(
@@ -526,8 +539,9 @@ test('domain-complete agent index retains unclaimed legacy mapping and drops cla
       agents: { removed: 'old', archived: 'untouched' },
     })
   );
-  f.objects.delete(fresh + 'agent-run-index.json');
-  f.objects.delete(fresh + 'agent-run-index-revision.json');
+  const committedIndex = f.document().agent_index;
+  f.objects.delete(fresh + committedIndex.index.key);
+  f.objects.delete(fresh + committedIndex.revision.key);
   const missingPublished = await f.storage.getObjectStrict('agent-run-index.json').then(
     (raw) => ({ raw }),
     (error) => ({ error })

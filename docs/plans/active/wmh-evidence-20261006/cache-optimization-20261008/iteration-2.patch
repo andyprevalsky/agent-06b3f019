@@ -1,0 +1,102 @@
+--- a/agents/benchmarks/wmh_rose_provider.py
++++ b/agents/benchmarks/wmh_rose_provider.py
+@@ -869,22 +869 @@
+-                    # Mark the reusable task context explicitly. A short system
+-                    # breakpoint and a changing whole-user breakpoint cannot
+-                    # reliably reuse this partial JSON prefix on newer models.
+-                    stable_keys = ("initial_context", "instruction", "task_id")
+-                    def encode(value: object) -> str:
+-                        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+-
+-                    stable = {key: task[key] for key in stable_keys}
+-                    remainder = {key: value for key, value in task.items() if key not in stable}
+-                    tail = {key: native[key] for key in order if key in native and key != "task"}
+-                    tail.update({
+-                        key: value for key, value in native.items()
+-                        if key not in tail and key not in {"task", "candidate_response"}
+-                    })
+-                    tail["candidate_response"] = native["candidate_response"]
+-                    prefix = '{"task":' + encode(stable)[:-1]
+-                    task_end = "," + encode(remainder)[1:] if remainder else "}"
+-                    content = [
+-                        {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
+-                        {"type": "text", "text": task_end, "cache_control": {"type": "ephemeral"}},
+-                        {"type": "text", "text": "," + encode(tail)[1:]},
+-                    ]
++                    content = _native_prompt_blocks(native)
+@@ -900,0 +880,75 @@
++
++
++def _native_prompt_blocks(native: dict) -> List[dict]:
++    """Mark exact shared context and completed history without dropping values."""
++    def encode(value: object) -> str:
++        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
++
++    task = native["task"]
++    stable_keys = ("initial_context", "instruction", "task_id")
++    stable = {key: task[key] for key in stable_keys}
++    remainder = {key: value for key, value in task.items() if key not in stable}
++    text = '{"task":' + encode(stable)[:-1]
++    cuts = [len(text)]
++    text += "," + encode(remainder)[1:] if remainder else "}"
++    cuts.append(len(text))
++    emitted = {"task"}
++
++    def field(key: str) -> None:
++        nonlocal text
++        if key in native:
++            text += "," + encode(key) + ":" + encode(native[key])
++            emitted.add(key)
++
++    field("grounding_schema_version")
++    # Retrieval follows history for this measured layout.
++    history = native.get("visible_conversation")
++    if isinstance(history, list) and all(isinstance(entry, dict) for entry in history):
++        # A boundary after each of the last two complete result batches retains
++        # the previous exact prefix when a new assistant/tool batch is appended.
++        boundaries = []
++        pending = None
++        for index, entry in enumerate(history):
++            if entry.get("role") == "assistant":
++                action = entry.get("assistant_action")
++                calls = action.get("tool_calls") if isinstance(action, dict) else None
++                ids = [call.get("call_id") for call in calls] if isinstance(calls, list) and all(isinstance(call, dict) for call in calls) else []
++                valid = ids and all(isinstance(value, str) and value for value in ids)
++                pending = set(ids) if valid and len(set(ids)) == len(ids) else None
++            elif entry.get("role") == "tool" and pending is not None:
++                result_id = entry.get("tool_call_id")
++                if not isinstance(result_id, str) or result_id not in pending:
++                    pending = None
++                else:
++                    pending.remove(result_id)
++                    if not pending and (index + 1 == len(history) or history[index + 1].get("role") != "tool"):
++                        boundaries.append(index)
++                        pending = None
++            else:
++                pending = None
++        selected = set(boundaries[-2:])
++        text += ',"visible_conversation":['
++        emitted.add("visible_conversation")
++        for index, entry in enumerate(history):
++            text += ("," if index else "") + encode(entry)
++            if index in selected:
++                cuts.append(len(text))
++        # Keep the closing array bracket out of the cached history prefix.
++        text += "]"
++    else:
++        field("visible_conversation")
++    field("environment_state")
++    field("grounding_contexts")
++    field("grounded_examples")
++    for key in native:
++        if key not in emitted and key != "candidate_response":
++            field(key)
++    field("candidate_response")
++    text += "}"
++    blocks = []
++    start = 0
++    for end in cuts:
++        blocks.append({"type": "text", "text": text[start:end], "cache_control": {"type": "ephemeral"}})
++        start = end
++    blocks.append({"type": "text", "text": text[start:]})
++    return blocks

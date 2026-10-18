@@ -20,7 +20,7 @@ import {
   cacheGet,
   cacheGetMany,
   cacheGetPosition,
-  cacheSet,
+  cacheSetWithAck,
   cachePurge,
   agentFastMode,
 } from './service';
@@ -90,14 +90,14 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const body = setSchema.parse(req.body);
-    await cacheSet({
+    const stored = await cacheSetWithAck({
       key: body.key,
       kind: body.kind,
       goalHash: body.goalHash,
       value: body.value,
       blobPath: body.blobPath ?? null,
     });
-    res.json({ ok: true });
+    res.json({ ok: true, stored });
   })
 );
 

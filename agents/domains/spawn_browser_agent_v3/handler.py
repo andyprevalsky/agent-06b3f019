@@ -341,10 +341,14 @@ async def _lookup_payment_purchase(
     fingerprint = str(payment_payload.get("fingerprint") or "")
     activity_args = [user_id, fingerprint]
     scoped_receipt = bool(payment_payload.get("agentId"))
-    if scoped_receipt:
+    if world_model_mode not in {None, "real"}:
+        activity_args.extend([
+            world_model_mode,
+            payment_payload if scoped_receipt else None,
+            payment_payload.get("agentId"),
+        ])
+    elif scoped_receipt:
         activity_args.extend([world_model_mode, payment_payload])
-    elif world_model_mode not in {None, "real"}:
-        activity_args.append(world_model_mode)
     result = await workflow.execute_activity(
         "lookup_purchase_activity",
         args=activity_args,
@@ -5380,7 +5384,8 @@ async def spawn_browser_agent_activity_v3(
     # The tool-call namespace remains stable across write-lock resumes, whose
     # payload also restores the exact browser session id.
     world_model = WorldModelToolExecutionAdapter.from_env(
-        agent_id=f"{agent_id}:browser:{tool_call_id}",
+        agent_id=agent_id,
+        session_scope_id=f"{agent_id}:browser:{tool_call_id}",
         inherit_explicit_session=False,
         mode=world_model_mode,
     )
@@ -7149,6 +7154,7 @@ async def _spawn_browser_agent_activity_v3_real(
     ) -> Dict[str, Any]:
         # Archive references and routing IDs remain exact protocol values.
         auth_response = result.get("auth_assistance_request")
+        payment_response = result.get("payment_request")
         for key in ("current_url", "question", "write_lock_notification", "payment_request",
                     "auth_assistance_request", "write_lock_approvals", "auth_realm", "base_site",
                     "message", "structured_response", "best_effort_response",
@@ -7167,6 +7173,21 @@ async def _spawn_browser_agent_activity_v3_real(
                 **observation, "origin": _redact_activity_value(observation.get("origin")),
                 "path": _redact_activity_value(observation.get("path")),
             }
+        # Receipt image URLs are typed text, not raster attachments. Preserve
+        # only their HTTP(S) strings through the same secret-value redactor;
+        # arbitrary nested media and data-image payloads remain suppressed.
+        visible_payment = result.get("payment_request")
+        if isinstance(payment_response, dict) and isinstance(visible_payment, dict):
+            items_key = "line_items" if "line_items" in payment_response else "lineItems"
+            original_items = payment_response.get(items_key)
+            visible_items = visible_payment.get(items_key)
+            if isinstance(original_items, list) and isinstance(visible_items, list):
+                for original_item, visible_item in zip(original_items, visible_items):
+                    if not isinstance(original_item, dict) or not isinstance(visible_item, dict):
+                        continue
+                    image_url = original_item.get("image_url")
+                    if isinstance(image_url, str) and image_url.startswith(("https://", "http://")):
+                        visible_item["image_url"] = _redact_activity_value(image_url)
         if "browser_output_schema" in result:
             result["browser_output_schema"] = _model_visible_browser_output_schema(
                 result["browser_output_schema"], _redact_activity_value

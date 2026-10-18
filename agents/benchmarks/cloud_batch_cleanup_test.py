@@ -38,9 +38,20 @@ async def test_evaluated_outcome_is_visible_before_agent_and_phone_teardown():
             await _assert_evaluated_before_teardown(monkeypatch, passed)
 
 
-async def _assert_evaluated_before_teardown(monkeypatch, passed):
+async def _assert_evaluated_before_teardown(
+    monkeypatch,
+    passed,
+    *,
+    native=False,
+    terminal=None,
+    retirement_failure=False,
+    log_failure=False,
+    admission_failure=False,
+    missing_agent=False,
+):
     """Exercise the real task runner through evaluation and both cleanup boundaries."""
     events = []
+    evaluations = []
     task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
     task.tags = []
     task.min_steps = {}
@@ -68,10 +79,17 @@ async def _assert_evaluated_before_teardown(monkeypatch, passed):
         return []
 
     async def poll(*_args):
+        if terminal == "cancel":
+            raise asyncio.CancelledError("execution cancelled")
+        if terminal == "error":
+            raise RuntimeError("execution failed")
         return {"agent": {"status": "COMPLETED"}, "messages": []}, 0, 0, None
 
-    async def delete(*_args):
+    async def delete(_base, aid):
+        assert aid == ROOT
         events.append("agent-cleanup")
+        if missing_agent:
+            raise RuntimeError("Failed to delete agent: HTTP 404")
 
     for name in (
         "_apply_live_fixtures",
@@ -102,16 +120,91 @@ async def _assert_evaluated_before_teardown(monkeypatch, passed):
             )
         ),
     )
-    monkeypatch.setattr(bench, "evaluate_task", lambda *_args: (passed, None if passed else "task failed"))
+
+    def evaluate(*_args):
+        evaluations.append(True)
+        return passed, None if passed else "task failed"
+
+    monkeypatch.setattr(bench, "evaluate_task", evaluate)
     monkeypatch.setattr(bench, "_evaluate_phone_call_task", AsyncMock(return_value=(True, None)))
     monkeypatch.setattr(bench, "ensure_payment_lifecycle_cleanup", AsyncMock(return_value=None))
     monkeypatch.setattr(bench, "collect_logs", AsyncMock(return_value={"messages": []}))
     monkeypatch.setattr(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("fixture", None)))
     monkeypatch.setattr(bench, "_should_delete_agent_after_run", lambda *_args: True)
     monkeypatch.setattr(bench, "delete_agent", delete)
+    if admission_failure and not native:
+        monkeypatch.setattr(bench, "create_agent", AsyncMock(side_effect=RuntimeError("execution failed")))
+    if terminal or retirement_failure:
+
+        async def get(_base, aid):
+            assert aid == ROOT
+            if missing_agent:
+                raise bench.AgentNotFoundError("Exact seeded root is absent")
+            return {"agent": {"status": "CANCELLED"}, "messages": []}
+
+        monkeypatch.setattr(bench, "get_agent", get)
+        monkeypatch.setattr(bench, "_begin_interrupt_cleanup", lambda: False)
+        monkeypatch.setattr(bench, "_should_delete_cancelled_agent", lambda *_args: True)
+
+        async def archive(*_args, **_kwargs):
+            events.append("archive")
+            return "fixture", None
+
+        monkeypatch.setattr(bench, "finalize_archive_and_score_world_model", archive)
+    if log_failure:
+        monkeypatch.setattr(bench, "collect_logs", AsyncMock(side_effect=RuntimeError("logs unavailable")))
+
+    if native:
+        receipt = {
+            "ended": "native-owned",
+            "engine": "experiential",
+            "session_id": "native-owned",
+            "session_scope_id": ROOT,
+            "revision": 3,
+            "state": {"sent": False},
+            "history": [],
+            "usage": {"calls": 3, "total_cost_usd": 0.2},
+            "join_verified": True,
+        }
+
+        async def create_native(_base, execution_task):
+            execution_task._wmh_owned_session = {
+                "base_url": "http://native.test",
+                "model_name": "rose-test",
+                "session_id": "native-owned",
+                "root_agent_id": ROOT,
+                "engine": "experiential",
+            }
+            if admission_failure:
+                if terminal == "cancel":
+                    raise asyncio.CancelledError("execution cancelled")
+                raise RuntimeError("execution failed")
+            return ROOT
+
+        class NativeClient:
+            def __init__(self, base):
+                assert base == "http://native.test"
+
+            async def end_session(self, name, session_id):
+                assert (name, session_id) == ("rose-test", "native-owned")
+                await asyncio.sleep(0)
+                if retirement_failure:
+                    events.append("native-unjoined")
+                    raise RuntimeError("retirement unavailable")
+                events.append("native-joined")
+                return receipt
+
+        async def settled_usage(*_args):
+            assert events == ["native-joined"], "native provider work must join before cost is frozen"
+            return {}
+
+        monkeypatch.setattr(bench, "create_agent", create_native)
+        monkeypatch.setattr(bench, "WMHHttpClient", NativeClient)
+        monkeypatch.setattr(bench, "_get_settled_tool_usage", settled_usage)
 
     async def evaluated(result):
-        assert result.agent_id == ROOT and result.passed is passed
+        expected_root = ROOT if native or not admission_failure else ""
+        assert result.agent_id == expected_root and result.passed is passed
         await asyncio.sleep(0)
         events.append("evaluated")
 
@@ -122,7 +215,335 @@ async def _assert_evaluated_before_teardown(monkeypatch, passed):
     )
     result = await bench.run_single_task("http://localhost:39999", task, **kwargs)
     assert result.passed is passed
-    assert events == ["evaluated", "agent-cleanup", "phone-cleanup"]
+    expected = ["evaluated", "agent-cleanup", "phone-cleanup"]
+    if terminal or retirement_failure:
+        expected = ["archive", *([] if terminal == "cancel" else ["evaluated"]), "agent-cleanup", "phone-cleanup"]
+        if admission_failure and not native:
+            expected = ["evaluated", "phone-cleanup"]
+    if native:
+        expected.insert(0, "native-unjoined" if retirement_failure else "native-joined")
+    assert events == expected
+    if native:
+        if retirement_failure:
+            assert result.benchmark_status in {"ERROR", "CANCELLED"} and not result.passed
+            error = result.logs["wmh_retirement_error"]
+            assert error["type"] == "RuntimeError" and error["message"] == "retirement unavailable"
+            assert error["session_id"] == "native-owned" and error["session_scope_id"] == ROOT
+            assert error["join_verified"] is False and error["cost_verified"] is False
+            assert result.logs["benchmark_cost_placeholder"] == {"cost_cents": 0, "settled": False}
+            assert not evaluations, "an unjoined world cannot reach task evaluation or settled cost"
+            assert "retirement unavailable" in result.failure_reason
+            if terminal == "error":
+                assert "execution failed" in result.failure_reason
+                assert result.logs["benchmark_execution_error"] == {
+                    "type": "RuntimeError",
+                    "message": "execution failed",
+                }
+        else:
+            assert result.logs["wmh_retirement"] == receipt
+        if admission_failure:
+            assert result.agent_id == ROOT and not evaluations
+            admission = result.logs["wmh_agent_admission"]
+            assert admission["root_agent_id"] == ROOT and admission["creation_confirmed"] is False
+            if missing_agent:
+                assert admission["cleanup_observation"] == "not_found"
+            else:
+                assert admission["cleanup_observation"] == "deleted"
+    elif admission_failure:
+        assert result.agent_id == "" and "wmh_agent_admission" not in result.logs
+
+
+@async_case
+async def test_native_world_joins_before_cost_evaluation_and_diagnostics():
+    for passed in (True, False):
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            await _assert_evaluated_before_teardown(monkeypatch, passed, native=True)
+
+
+@pytest.mark.parametrize("terminal", ["cancel", "error"])
+@pytest.mark.parametrize("log_failure", [False, True])
+def test_native_world_retirement_preserves_cancel_error_receipts_when_logs_fail(terminal, log_failure):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(
+            _assert_evaluated_before_teardown(
+                monkeypatch,
+                False,
+                native=True,
+                terminal=terminal,
+                log_failure=log_failure,
+            )
+        )
+
+
+@pytest.mark.parametrize("terminal", [None, "cancel", "error"])
+@pytest.mark.parametrize("log_failure", [False, True])
+def test_native_world_retirement_failure_keeps_evidence_cleanup_and_original_error(terminal, log_failure):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(
+            _assert_evaluated_before_teardown(
+                monkeypatch,
+                False,
+                native=True,
+                terminal=terminal,
+                retirement_failure=True,
+                log_failure=log_failure,
+            )
+        )
+
+
+@pytest.mark.parametrize("terminal", ["cancel", "error"])
+@pytest.mark.parametrize("missing_agent", [False, True])
+def test_native_world_retirement_owned_seed_recovers_exact_root_after_admission_failure(terminal, missing_agent):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(
+            _assert_evaluated_before_teardown(
+                monkeypatch,
+                False,
+                native=True,
+                terminal=terminal,
+                admission_failure=True,
+                missing_agent=missing_agent,
+            )
+        )
+
+
+@async_case
+async def test_native_world_retirement_caller_owned_admission_does_not_invent_a_root():
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        await _assert_evaluated_before_teardown(
+            monkeypatch,
+            False,
+            terminal="error",
+            admission_failure=True,
+        )
+
+
+def test_native_world_retirement_admission_cleanup_rejects_foreign_and_unverified_roots(monkeypatch):
+    async def run():
+        task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+        task._wmh_agent_admission = {"root_agent_id": CHILD, "creation_confirmed": False}
+        deletion = AsyncMock(side_effect=RuntimeError("delete unavailable"))
+        observed = AsyncMock(return_value={"agent": {"agent_id": ROOT}})
+        monkeypatch.setattr(bench, "delete_agent", deletion)
+        monkeypatch.setattr(bench, "get_agent", observed)
+        with pytest.raises(RuntimeError, match="root does not match"):
+            await bench._delete_owned_native_admission_root("http://native.test", task, ROOT)
+        assert not deletion.called and not observed.called
+        task._wmh_agent_admission["root_agent_id"] = ROOT
+        with pytest.raises(RuntimeError, match="delete unavailable"):
+            await bench._delete_owned_native_admission_root("http://native.test", task, ROOT)
+        assert task._wmh_agent_admission["cleanup_observation"] == "unverified"
+        assert task._wmh_agent_admission["creation_confirmed"] is False
+        assert task._wmh_agent_admission["cleanup_error"] == {
+            "type": "RuntimeError",
+            "message": "delete unavailable",
+        }
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("join_verified", False),
+        ("session_scope_id", CHILD),
+        ("session_id", "foreign-session"),
+        ("revision", True),
+        ("state", None),
+        ("usage", None),
+    ],
+)
+def test_native_world_retirement_rejects_unjoined_or_foreign_receipts(monkeypatch, field, value):
+    task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+    task._wmh_owned_session = {
+        "base_url": "http://native.test",
+        "model_name": "rose-test",
+        "session_id": "owned",
+        "root_agent_id": ROOT,
+        "engine": "experiential",
+    }
+    receipt = {
+        "ended": "owned",
+        "engine": "experiential",
+        "session_id": "owned",
+        "session_scope_id": ROOT,
+        "revision": 0,
+        "state": {},
+        "history": [],
+        "usage": {},
+        "join_verified": True,
+    }
+    receipt[field] = value
+
+    class Client:
+        def __init__(self, base):
+            assert base == "http://native.test"
+
+        async def end_session(self, model, session_id):
+            assert (model, session_id) == ("rose-test", "owned")
+            return receipt
+
+    monkeypatch.setattr(bench, "WMHHttpClient", Client)
+    with pytest.raises(RuntimeError, match="exact owned provider join"):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert getattr(task, "_wmh_retirement_receipt", None) is None
+
+
+def test_native_world_retirement_never_closes_a_different_root_or_unowned_session(monkeypatch):
+    task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+
+    class Client:
+        def __init__(self, *_args):
+            pytest.fail("unowned/foreign worlds must never reach the retirement endpoint")
+
+    monkeypatch.setattr(bench, "WMHHttpClient", Client)
+    assert asyncio.run(bench._retire_owned_native_world(task, ROOT)) is None
+    task._wmh_owned_session = {"engine": "legacy"}
+    assert asyncio.run(bench._retire_owned_native_world(task, ROOT)) is None
+    task._wmh_owned_session = {"engine": "experiential", "root_agent_id": CHILD}
+    with pytest.raises(RuntimeError, match="root does not match"):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert task._wmh_retirement_error["join_verified"] is False
+    assert task._wmh_retirement_error["cost_verified"] is False
+
+
+def test_native_world_retirement_lost_waiter_keeps_one_owner_and_full_receipt(monkeypatch):
+    async def run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+        task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+        task._wmh_owned_session = {
+            "base_url": "http://native.test",
+            "model_name": "rose-test",
+            "session_id": "owned",
+            "root_agent_id": ROOT,
+            "engine": "experiential",
+        }
+        receipt = {
+            "ended": "owned",
+            "engine": "experiential",
+            "session_id": "owned",
+            "session_scope_id": ROOT,
+            "revision": 1,
+            "state": {"submitted": True},
+            "history": [],
+            "usage": {"calls": 1},
+            "join_verified": True,
+        }
+
+        class Client:
+            def __init__(self, base):
+                assert base == "http://native.test"
+
+            async def end_session(self, model, session_id):
+                calls.append((model, session_id))
+                entered.set()
+                await release.wait()
+                return receipt
+
+        monkeypatch.setattr(bench, "WMHHttpClient", Client)
+        first = asyncio.create_task(bench._retire_owned_native_world(task, ROOT))
+        second = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+            second = asyncio.create_task(bench._retire_owned_native_world(task, ROOT))
+            await asyncio.sleep(0)
+            assert calls == [("rose-test", "owned")] and not second.done()
+            release.set()
+            assert await asyncio.wait_for(second, 2) == receipt
+            assert task._wmh_retirement_receipt == receipt
+            assert await bench._retire_owned_native_world(task, ROOT) == receipt
+            assert calls == [("rose-test", "owned")]
+        finally:
+            release.set()
+            await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_native_world_retirement_parallel_cached_task_copies_keep_exact_roots(monkeypatch):
+    async def run():
+        task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+        task._wmh_initial_state_source = "caller-reviewed-seed.json"
+        task._wmh_seeded_session_id = "previous-execution"
+        admitted = asyncio.Event()
+        roots = iter((ROOT, CHILD))
+        executions = []
+        retired = []
+        inherited_sessions = []
+
+        class Client:
+            def __init__(self, base):
+                assert base == "http://native.test"
+
+            async def end_session(self, model, session):
+                assert model == "rose-test"
+                retired.append(session)
+                return {
+                    "ended": session,
+                    "engine": "experiential",
+                    "session_id": session,
+                    "session_scope_id": session,
+                    "revision": 0,
+                    "state": {},
+                    "history": [],
+                    "usage": {},
+                    "join_verified": True,
+                }
+
+        async def execute(_base, execution_task, *_args):
+            root = next(roots)
+            assert execution_task._wmh_initial_state_source == "caller-reviewed-seed.json"
+            inherited_sessions.append(execution_task._wmh_seeded_session_id)
+            execution_task._wmh_owned_session = {
+                "base_url": "http://native.test",
+                "model_name": "rose-test",
+                "session_id": root,
+                "root_agent_id": root,
+                "engine": "experiential",
+            }
+            executions.append(execution_task)
+            if len(executions) == 2:
+                admitted.set()
+            await admitted.wait()
+            receipt = await bench._retire_owned_native_world(execution_task, root)
+            return bench.TaskResult(
+                name=execution_task.name,
+                passed=False,
+                agent_id=root,
+                status="ERROR",
+                benchmark_status="ERROR",
+                progress_score=0,
+                duration_seconds=0,
+                cost_cents=0,
+                message_count=0,
+                failure_reason="fixture",
+                logs={"wmh_retirement": receipt},
+            )
+
+        monkeypatch.setattr(bench, "WMHHttpClient", Client)
+        monkeypatch.setattr(bench, "_run_single_task_as_run_user", execute)
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                bench.run_single_task("http://localhost:39999", task),
+                bench.run_single_task("http://localhost:39999", task),
+                return_exceptions=True,
+            ),
+            2,
+        )
+        assert all(isinstance(result, bench.TaskResult) for result in results), results
+        assert executions[0] is not executions[1] and all(item is not task for item in executions)
+        assert inherited_sessions == [None, None]
+        assert sorted(retired) == sorted((ROOT, CHILD))
+        for result in results:
+            assert result.logs["wmh_retirement"]["session_scope_id"] == result.agent_id
+        assert task._wmh_seeded_session_id == "previous-execution"
+        assert task._wmh_initial_state_source == "caller-reviewed-seed.json"
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -243,7 +664,7 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "_finalize_owned_cloud_batch": finalizer,
         "_complete_interrupt_cleanup": lambda: events.append("batch-closed"),
         "_live_task_agent_ids": live_ids,
-        "_fetch_wmh_retrieval_audit": lambda: None,
+        "_wmh_evidence": SimpleNamespace(finalize=lambda: None),
         "Path": Path,
         "os": os,
     }

@@ -247,7 +247,7 @@ export function goalAnchorFailure(
   return undefined;
 }
 
-function assertServedOnFirstAttempt(sample: LiveSample, goalAnchor: GoalAnchor): void {
+export function assertServedOnFirstAttempt(sample: LiveSample, goalAnchor: GoalAnchor): void {
   assert.equal(
     sample.outcome.kind,
     'escalated',

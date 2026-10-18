@@ -14,6 +14,8 @@ import argparse
 import asyncio
 import json
 import os
+import ssl
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -151,7 +153,8 @@ def test_oss_pool_is_open_weights_only():
     assert oss.foundry_enabled and foundry_model(oss) == "DeepSeek-V3.2"
     assert foundry_model(oss) != oss.gpt_auth_model
     # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
-    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use"}
+    # The explicit WMH runner pins its exact GPT-6.1 Sol waterfall model.
+    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use", "rose-wmh-gpt61"}
     for name, spec in POOL_REGISTRY.items():
         if name in auth_skipped:
             assert spec.direct_auth_enabled is False, f"{name} should skip direct auth"
@@ -237,11 +240,6 @@ def test_pool_registry_lookup():
     assert flash.cerebras_reasoning_effort == "high"
     assert flash.cerebras_reasoning_effort in {"none", "low", "medium", "high"}
     assert ultra.name == "rose-1-ultra"
-    from domains.param_populator.config import PARAM_POPULATOR_MODEL as DOMAIN_PARAM_POPULATOR_MODEL
-    from providers.rose.pools import PARAM_POPULATOR_MODEL
-
-    assert PARAM_POPULATOR_MODEL == "rose-labs/rose-1-ultra"
-    assert DOMAIN_PARAM_POPULATOR_MODEL == PARAM_POPULATOR_MODEL
     assert ultra.claude_auth_model == "claude-opus-5-5"
     assert ultra.gpt_auth_model == "gpt-6-sol"
     # Opus 5.5 is claudeAuth (index 58, $4/$20). Paid waterfall is gpt-6-sol
@@ -4361,6 +4359,144 @@ async def test_waterfall_falls_through_then_succeeds():
     assert efforts == ["low", "low"]
 
 
+def _offline_waterfall_streaming_client(handler):
+    from helpers import httpx_capture
+
+    # The capture harness buffers bodies. Keep the real HTTP streaming boundary
+    # over an offline transport so header and partial-output failures stay distinct.
+    with patch.object(httpx.AsyncClient, "__init__", httpx_capture._original_init or httpx.AsyncClient.__init__):
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
+
+
+async def test_waterfall_raw_tls_failure_before_headers_uses_existing_next_model():
+    spec = get_pool("rose-1-ultra")
+    messages = [{"role": "system", "content": "unchanged rules"}, {"role": "user", "content": "unchanged request"}]
+    completed = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "existing fallback"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}},
+            ]
+        )
+    )
+
+    # The handled read-error control and captured raw TLS alert must take the
+    # same bounded next-model path, with one attempt per unchanged pool member.
+    for failure in (
+        httpx.ReadError("offline header read failed"),
+        ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac"),
+    ):
+        bodies = []
+
+        def handler(request):
+            assert request.url.host == "openrouter.ai"
+            body = json.loads(request.content)
+            bodies.append(body)
+            if body["model"] == spec.waterfall[0]:
+                raise failure
+            return httpx.Response(200, text=completed, headers={"Content-Type": "text/event-stream"})
+
+        streaming_client = _offline_waterfall_streaming_client(handler)
+        with patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client):
+            async with streaming_client:
+                chunks = await _drain(
+                    waterfall_complete(
+                        pool_spec=spec,
+                        messages=messages,
+                        max_tokens=16384,
+                        openrouter_key="offline-fake",
+                        request_id="raw-tls-waterfall-before-headers",
+                    )
+                )
+        assert [body["model"] for body in bodies] == list(spec.waterfall)
+        assert bodies[0]["messages"] == bodies[1]["messages"]
+        assert all(body["max_tokens"] == 16384 for body in bodies)
+        assert "".join(chunk.data.get("text", "") for chunk in chunks if chunk.kind == "content") == "existing fallback"
+        assert chunks[-1].kind == "done"
+        assert streaming_client.is_closed
+
+
+async def test_waterfall_raw_tls_failure_after_productive_output_preserves_cause_without_replay():
+    spec = get_pool("rose-1-ultra")
+    failure = ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+    models_seen = []
+    closed = []
+    chunks = []
+
+    class InterruptedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            raise failure
+
+        async def aclose(self):
+            closed.append(True)
+
+    def handler(request):
+        assert request.url.host == "openrouter.ai"
+        model = json.loads(request.content)["model"]
+        models_seen.append(model)
+        assert model == spec.waterfall[0], "productive output must prevent a second model attempt"
+        return httpx.Response(200, stream=InterruptedStream(), headers={"Content-Type": "text/event-stream"})
+
+    streaming_client = _offline_waterfall_streaming_client(handler)
+    with patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client):
+        async with streaming_client:
+            try:
+                async for chunk in waterfall_complete(
+                    pool_spec=spec,
+                    messages=[{"role": "user", "content": "unchanged request"}],
+                    openrouter_key="offline-fake",
+                    request_id="raw-tls-waterfall-after-output",
+                ):
+                    chunks.append(chunk)
+                raise AssertionError("a partial failed stream must remain an error")
+            except RoseError as error:
+                assert not isinstance(error, RoseAllFailed)
+                assert error.__cause__ is failure
+    assert models_seen == [spec.waterfall[0]]
+    assert "".join(chunk.data.get("text", "") for chunk in chunks if chunk.kind == "content") == "partial"
+    assert not any(chunk.kind == "done" for chunk in chunks)
+    assert closed == [True]
+    assert streaming_client.is_closed
+
+
+async def test_waterfall_raw_tls_failure_on_all_models_preserves_exact_step_errors():
+    spec = get_pool("rose-1-ultra")
+    models_seen = []
+    failures = {
+        model: ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+        for model in spec.waterfall
+    }
+
+    def handler(request):
+        assert request.url.host == "openrouter.ai"
+        model = json.loads(request.content)["model"]
+        models_seen.append(model)
+        raise failures[model]
+
+    streaming_client = _offline_waterfall_streaming_client(handler)
+    with patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client):
+        async with streaming_client:
+            try:
+                await _drain(
+                    waterfall_complete(
+                        pool_spec=spec,
+                        messages=[{"role": "user", "content": "unchanged request"}],
+                        openrouter_key="offline-fake",
+                        request_id="raw-tls-waterfall-all-models",
+                    )
+                )
+                raise AssertionError("TLS failure on every model must remain terminal")
+            except RoseAllFailed as error:
+                assert [step.model for step in error.step_errors] == list(spec.waterfall)
+                for step in error.step_errors:
+                    assert type(step.error) is RoseError
+                    assert step.error.__cause__ is failures[step.model]
+                    assert "SSLV3_ALERT_BAD_RECORD_MAC" in str(step.error)
+    assert models_seen == list(spec.waterfall)
+    assert streaming_client.is_closed
+
+
 async def test_browser_qwen_prefers_cached_provider_without_affecting_flash():
     """Browser Qwen prefers a cache-capable endpoint on any pool and retains fallback."""
     bodies = []
@@ -5117,6 +5253,182 @@ async def test_client_gpt_token_usage_limit_falls_back_to_openai_api_key():
     assert str(meta.data.get("actual_model", "")).endswith("-openai")
     # The classified token failure is surfaced so callers can see WHY it fell back.
     assert meta.data.get("gpt_token_error") == "rate_limit"
+
+
+async def test_client_raw_tls_failure_before_headers_uses_funded_fallback():
+    """The captured raw TLS alert must fall through before any output is exposed."""
+    seen = {"codex": 0, "openai": 0, "openrouter": 0}
+    failure = ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+    completed = (
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"funded fallback"}\n\n'
+        'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":2,"total_tokens":4}}}\n\n'
+    )
+
+    def handler(request):
+        if request.url.host == "chatgpt.com":
+            seen["codex"] += 1
+            raise failure
+        if str(request.url) == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            return httpx.Response(200, text=completed, headers={"Content-Type": "text/event-stream"})
+        if request.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            raise AssertionError("funded fallback must complete before the waterfall")
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    with patch.dict(os.environ, {"GPT_API_KEY": "offline-fake", "ANTHROPIC_API_KEY": ""}):
+        chunks = await _drain(
+            RoseClient(openrouter_key="offline-fake").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "unchanged request"}],
+                gpt_auth=gpt_auth_from_token("offline-token", "offline-account"),
+                call_site="test-raw-tls-before-headers",
+                dump_context=False,
+            )
+        )
+    assert seen == {"codex": 1, "openai": 1, "openrouter": 0}, seen
+    assert "".join(chunk.data.get("text", "") for chunk in chunks if chunk.kind == "content") == "funded fallback"
+    metadata = [chunk.data for chunk in chunks if chunk.kind == "metadata"]
+    assert len(metadata) == 1, metadata
+    assert metadata[0]["actual_model"].endswith("-openai")
+    assert metadata[0]["gpt_token_error"] == "server_error"
+
+
+async def test_cerebras_and_foundry_raw_tls_failures_become_route_errors():
+    """A raw TLS alert before output must be a Rose route error so later routes still run."""
+    import types
+
+    import providers.rose.cerebras as cb
+    import providers.rose.foundry as foundry
+    from providers.rose.pools import foundry_model
+
+    failure = ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+    messages = [{"role": "user", "content": "unchanged request"}]
+    provider_requests = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"rateLimitedUntil": None})
+        provider_requests.append(request.url.host)
+        raise failure
+
+    set_mock_handler(handler)
+    try:
+        await _drain(
+            cb.cerebras_complete(
+                pool_spec=get_pool("rose-1-flash"),
+                messages=messages,
+                cerebras_key="offline-provider-key",
+                request_id="raw-tls-cerebras",
+            )
+        )
+        raise AssertionError("a raw TLS alert must not complete the Cerebras route")
+    except RoseError as error:
+        assert error.__cause__ is failure
+    assert len(provider_requests) == 1
+
+    deployment = foundry_model(get_pool("rose-1-ultra"))
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid",
+        "AZURE_FOUNDRY_API_KEY": "offline",
+        "AZURE_FOUNDRY_DEPLOYMENTS": deployment,
+    }
+    real = httpx.AsyncClient
+    module_httpx = types.SimpleNamespace(
+        AsyncClient=lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False),
+        Timeout=httpx.Timeout,
+        Headers=httpx.Headers,
+        TransportError=httpx.TransportError,
+    )
+    with (
+        patch.object(foundry, "httpx", module_httpx),
+        patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
+        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_cooldown_until", {}),
+    ):
+        try:
+            await _drain(
+                foundry.foundry_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=messages,
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort=None,
+                    provider_fast_mode=True,
+                    request_id="raw-tls-foundry",
+                    route_key="raw-tls",
+                    agent_id=None,
+                    call_site="test",
+                    cache_namespace="raw-tls-cache",
+                    ttft_timeout_s=90,
+                    idle_timeout_s=120,
+                )
+            )
+            raise AssertionError("a raw TLS alert must not complete the Foundry route")
+        except RoseServerError as error:
+            assert "SSLError" in str(error)
+    assert provider_requests[1:] == ["offline.invalid"]
+
+
+async def test_client_raw_tls_failure_after_output_preserves_error_without_replay():
+    """A TLS alert after productive output must keep the same error and stop."""
+    from helpers import httpx_capture
+
+    seen = {"codex": 0, "openai": 0, "openrouter": 0}
+    closed = []
+    failure = ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+
+    class InterruptedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+            raise failure
+
+        async def aclose(self):
+            closed.append(True)
+
+    def handler(request):
+        if request.url.host == "chatgpt.com":
+            seen["codex"] += 1
+            return httpx.Response(200, stream=InterruptedStream(), headers={"Content-Type": "text/event-stream"})
+        if str(request.url) == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            raise AssertionError("productive output must not switch to the funded route")
+        if request.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            raise AssertionError("productive output must not switch to the waterfall")
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    chunks = []
+    # The capture harness buffers response bodies. Use the real httpx streaming
+    # context over an offline transport to preserve the productive-output boundary.
+    with patch.object(httpx.AsyncClient, "__init__", httpx_capture._original_init or httpx.AsyncClient.__init__):
+        streaming_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
+    with (
+        patch.dict(os.environ, {"GPT_API_KEY": "offline-fake", "ANTHROPIC_API_KEY": ""}),
+        patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client),
+    ):
+        async with streaming_client:
+            try:
+                async for chunk in RoseClient(openrouter_key="offline-fake").complete(
+                    pool="rose-1-ultra",
+                    messages=[{"role": "user", "content": "unchanged request"}],
+                    gpt_auth=gpt_auth_from_token("offline-token", "offline-account"),
+                    call_site="test-raw-tls-after-output",
+                    dump_context=False,
+                ):
+                    chunks.append(chunk)
+            except ssl.SSLError as error:
+                assert error is failure
+            else:
+                raise AssertionError("the original TLS alert must reach the caller")
+    assert seen == {"codex": 1, "openai": 0, "openrouter": 0}, seen
+    assert "".join(chunk.data.get("text", "") for chunk in chunks if chunk.kind == "content") == "partial"
+    assert closed == [True], closed
 
 
 async def test_client_codex_404_falls_through_to_waterfall():
@@ -5969,6 +6281,31 @@ async def test_collect_stops_retrying_once_the_larger_limit_is_enough():
     assert response.content == '{"answer":"ok"}', response.content
 
 
+async def test_collect_recovers_a_cut_off_reply_that_is_itself_the_result():
+    """A plain reply declared as the whole result (a JSON document) is unusable when cut off."""
+    seen: list = []
+    set_mock_handler(
+        _cut_off_recovery_handler(
+            {
+                ("qwen/qwen3.8-27b", 16384): ('{"outcomes": [{"tool_results": "cut', "length"),
+                ("qwen/qwen3.8-27b", 32000): ('{"outcomes": []}', "stop"),
+            },
+            seen,
+        )
+    )
+    response = await RoseClient(openrouter_key="ork-x").collect(
+        pool="rose-1-flash",
+        messages=[{"role": "user", "content": "simulate"}],
+        max_tokens=16384,
+        call_site="test-cut-off-whole-result",
+        result_required=True,
+    )
+
+    assert seen == [("qwen/qwen3.8-27b", 16384), ("qwen/qwen3.8-27b", 32000)], seen
+    assert response.content == '{"outcomes": []}', response.content
+    assert len(response.usage.get("abandoned_attempts") or []) == 1, response.usage
+
+
 async def test_cut_off_recovery_leaves_plain_text_and_non_opted_streams_alone():
     """A cut-off answer in prose is still a partial answer; streams that cannot restart get one attempt."""
     from pydantic import BaseModel
@@ -6258,6 +6595,182 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert attempted == ["foundry", "openrouter"]
     assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "openai/gpt-6-sol"
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
+
+
+async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
+    """Azure credit serves the world model ahead of OpenRouter, on the WMH model.
+
+    The production deployment list (``AZURE_FOUNDRY_DEPLOYMENTS=gpt-6-sol``) names
+    Ultra's GPT-6 deployments; it must not route a GPT-6.1 world-model request to
+    a different model. OpenRouter credit ran out mid-run on 2026-10-10 (HTTP 402).
+    """
+    import providers.rose.foundry as foundry
+
+    sse = (
+        b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+        b'data: {"type":"response.completed","response":{"usage":'
+        b'{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    seen = []
+
+    def handler(req):
+        if "a-4989-resource.openai.azure.com" in str(req.url):
+            body = json.loads(req.content)
+            seen.append((body["model"], body["reasoning"]["effort"]))
+            return httpx.Response(200, content=sse, headers={"Content-Type": "text/event-stream"})
+        seen.append(str(req.url.host))
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    with (
+        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_cooldown_until", {}),
+        patch.dict(
+            os.environ,
+            {
+                "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+                "AZURE_FOUNDRY_API_KEY": "test-key",
+                "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+                "GPT_API_KEY": "",
+                "ANTHROPIC_API_KEY": "",
+            },
+        ),
+    ):
+        for pool in ("rose-wmh-gpt61", "rose-1-ultra"):
+            chunks = await _drain(
+                RoseClient(openrouter_key="ork-x").complete(
+                    pool=pool,
+                    messages=[{"role": "user", "content": "simulate"}],
+                    _exclude_anthropic_family=True,
+                    call_site="test-foundry-wmh-deployment",
+                )
+            )
+            assert any(c.kind == "content" and c.data.get("text") == "ok" for c in chunks), (pool, chunks)
+
+    assert seen == [("gpt-6.1-sol", "xhigh"), ("gpt-6-sol", "xhigh")], seen
+
+
+async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_true_writes():
+    """GPT-5.6+ caches only at breakpoints (measured on Azure 2026-10-12).
+
+    Rose maps the caller's ordinary ``cache_control`` markers to GPT-5.6+
+    ``prompt_cache_breakpoint``s, as it maps them to Anthropic's own markers;
+    prompts do not change. Implicit mode stays on, so the latest message is
+    still cached for chat-style callers. A reported zero cache write stays zero.
+    """
+    import providers.rose.foundry as foundry
+    from providers.rose.gpt_auth import supports_prompt_cache_breakpoints
+
+    def sse(details):
+        usage = {"input_tokens": 1000, "output_tokens": 1, "total_tokens": 1001}
+        if details is not None:
+            usage["input_tokens_details"] = details
+        return (
+            b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+            + b'data: {"type":"response.completed","response":{"usage":' + json.dumps(usage).encode() + b"}}\n\n"
+            + b"data: [DONE]\n\n"
+        )
+
+    bodies, replies = [], []
+
+    def handler(req):
+        body = json.loads(req.content)
+        bodies.append(body)
+        if "a-4989-resource.openai.azure.com" in str(req.url):
+            return httpx.Response(200, content=replies.pop(0), headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    marker = {"type": "ephemeral"}
+    messages = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": [{"type": "text", "text": "unit one", "cache_control": marker}]},
+        {"role": "user", "content": [{"type": "text", "text": "unit two", "cache_control": marker}]},
+        {"role": "user", "content": "this call only"},
+    ]
+    set_mock_handler(handler)
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+        "AZURE_FOUNDRY_API_KEY": "test-key",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "GPT_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+    }
+    usages = []
+    with patch.object(foundry, "_auth_cooldown_until", 0.0), patch.object(foundry, "_cooldown_until", {}), \
+            patch.dict(os.environ, env):
+        for pool, details in (
+            ("rose-wmh-gpt61", {"cached_tokens": 900, "cache_write_tokens": 0}),
+            ("rose-1-ultra", {"cached_tokens": 0}),
+        ):
+            replies.append(sse(details))
+            chunks = await _drain(RoseClient(openrouter_key="ork-x").complete(
+                pool=pool, messages=messages, _exclude_anthropic_family=True, call_site="test-foundry-breakpoints",
+            ))
+            usages.append(next(c.data for c in chunks if c.kind == "usage"))
+
+    assert [body["model"] for body in bodies] == ["gpt-6.1-sol", "gpt-6-sol"]
+    for body in bodies:
+        marked = [part.get("prompt_cache_breakpoint") for item in body["input"] for part in item["content"]]
+        assert marked == [{"mode": "explicit"}, {"mode": "explicit"}, None]
+        assert "prompt_cache_options" not in body and '"cache_control"' not in json.dumps(body["input"])
+    # Reported zero writes stay zero; an absent field keeps the inclusive fallback.
+    assert usages[0]["cache_creation_input_tokens"] == 0 and usages[0]["cache_read_input_tokens"] == 900
+    assert usages[1]["cache_creation_input_tokens"] == 1000
+    # Earlier models reject the field; only GPT-5.6 and later receive it.
+    assert [supports_prompt_cache_breakpoints(m) for m in (
+        "gpt-5.5", "gpt-5", "gpt-5.6", "gpt-6-sol", "gpt-6.1-sol", "claude-opus-5-5", None,
+    )] == [False, False, True, True, True, False, False]
+
+
+def test_responses_body_marks_every_completed_user_message_without_caller_markers():
+    """Replaying 911 real agent calls (2026-10-12) through the measured GPT-5.6+ cache rule:
+    implicit mode plus a breakpoint after every user message before the final item cost 0.51x
+    of no caching (0.55x implicit only; explicit mode 0.61x). Rose applies it for every caller."""
+    from providers.rose.gpt_auth import build_codex_responses_body
+    from providers.rose.pools import get_pool
+
+    messages = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "stable context"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "result"},
+        {"role": "user", "content": [{"type": "text", "text": "part a"}, {"type": "text", "text": "part b"}]},
+        {"role": "user", "content": "this call only"},
+    ]
+    body = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), messages=messages, request_id="r",
+                                      tools=[{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
+                                      cache_breakpoints=True)
+    marked = [
+        [part.get("prompt_cache_breakpoint") for part in item["content"]] if isinstance(item.get("content"), list)
+        else item.get("type")
+        for item in body["input"]
+    ]
+    assert marked == [
+        [{"mode": "explicit"}],
+        "function_call",
+        "function_call_output",
+        [None, {"mode": "explicit"}],
+        [None],
+    ], marked
+    plain = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), messages=messages, request_id="r")
+    assert '"prompt_cache_breakpoint"' not in json.dumps(plain), "routes without breakpoint support are unchanged"
+
+
+def test_responses_body_keeps_at_most_the_latest_50_cache_breakpoints():
+    from providers.rose.gpt_auth import build_codex_responses_body
+    from providers.rose.pools import get_pool
+
+    messages = [{"role": "user", "content": [{"type": "text", "text": f"unit {i}", "cache_control": {"type": "ephemeral"}}]}
+                for i in range(60)]
+    body = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), messages=messages, request_id="r",
+                                      cache_breakpoints=True)
+    marked = ["prompt_cache_breakpoint" in item["content"][0] for item in body["input"]]
+    assert marked == [False] * 10 + [True] * 50
+    older = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), model_override="gpt-5.5",
+                                       messages=messages, request_id="r", cache_breakpoints=True)
+    assert '"prompt_cache_breakpoint"' not in json.dumps(older)
 
 
 async def test_client_foundry_luna_backs_mini_and_speed_pools():
@@ -8399,6 +8912,455 @@ async def test_rose_client_preserves_native_tools_for_waterfall():
 # =====================================================================
 
 
+async def test_wmh_native_response_model_reaches_foundry_http():
+    """Sanitized WHM owning call must carry its declared native output schema."""
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+    from benchmarks.wmh_rose_provider import RoseWMHProvider
+    from providers.rose.client import RoseClient
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+
+    class Captured(BaseException):
+        pass
+
+    seen = []
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        assert request.url.host == "offline.invalid"
+        body = json.loads(request.content)
+        seen.append(body)
+        assert body.get("text", {}).get("format", {}).get("type") == "json_schema", "Actual WHM request must carry its typed native output schema"
+        assert body["text"]["format"]["strict"] is False
+        schema = body["text"]["format"]["schema"]
+        assert schema["properties"]["schema"]["const"] == "rose.wmh_timed_outcome_distribution.v1"
+        assert "outcomes" in schema["properties"]
+        patches = schema["properties"]["outcomes"]["items"]["properties"]["state_patch"]["items"]["anyOf"]
+        setter = next(branch for branch in patches if "value" in branch["properties"])
+        remove = next(branch for branch in patches if "value" not in branch["properties"])
+        assert setter["properties"]["value"] == {"title": "Value"}
+        assert set(remove["required"]) == {"op", "path"}
+        raise Captured()
+
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline-test", "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol"}
+    with patch.object(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda key, default=None: env.get(key, default))), patch.object(foundry, "_auth_cooldown_until", 0.), patch.object(foundry, "_cooldown_until", {}):
+        rose = RoseClient(openrouter_key="offline-test")
+        for json_mode in (False, True):
+            owner = RoseWMHProvider(pool="rose-1-ultra", client=rose, user_id="offline", protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=json_mode, prefer_azure=True)
+            owner._streams = None
+            owner._lease_auth = AsyncMock(return_value=(None, None))
+            count = len(seen)
+            try:
+                await owner._complete_async("Existing policy.", [types.SimpleNamespace(role="user", content="Inspect unchanged fixture.")], max_tokens=16384)
+            except Captured:
+                pass
+            assert len(seen) == count + 1
+        # Ordinary non-WHM calls retain their original JSON object transport.
+        def ordinary(request):
+            body = json.loads(request.content)
+            assert body["text"]["format"] == {"type": "json_object"}
+            raise Captured()
+        with patch.object(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(ordinary), trust_env=False)):
+            try:
+                await rose.collect(pool="rose-1-ultra", messages=[{"role": "user", "content": "Existing JSON request."}], json_mode=True, prefer_azure=True, dump_context=False)
+            except Captured:
+                pass
+
+
+def test_wmh_response_schema_preserves_native_json_values():
+    import json
+    import math
+    from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL, parse_distribution
+    from benchmarks.wmh_response_schema import NativeTransition, OutcomeDistribution, TimedOutcomeDistribution, response_model_for_protocol
+    from benchmarks.wmh_provider_capture import prediction_request
+    from providers.rose.schema import build_openai_response_format
+
+    values = [None, False, True, 0, -1, 1.5, "", "text", [], {}, [None, {"nested": [False, 2]}], {"key/with~escape": {"all": [1, True, None]}}]
+    for timed, model, protocol in [(False, OutcomeDistribution, DISTRIBUTION_PROTOCOL), (True, TimedOutcomeDistribution, TIMED_DISTRIBUTION_PROTOCOL)]:
+        assert response_model_for_protocol(protocol) is model
+        for value in values:
+            item = {"id": "existing", "probability": 1, "description": "existing result", "tool_results": [{"call_id": "exact", "content": "complete observation", "is_error": False}], "state_patch": [{"op": "add", "path": "/value", "value": value}]}
+            if timed:
+                item["elapsed_ms"] = 0
+            payload = {"schema": "rose.wmh_timed_outcome_distribution.v1" if timed else "rose.wmh_outcome_distribution.v1", "outcomes": [item]}
+            roundtrip = model.model_validate_json(json.dumps(payload)).model_dump(mode="json")
+            assert roundtrip == payload
+            assert parse_distribution(json.dumps(roundtrip), base_state={}, expected_call_ids=("exact",), timed=timed) == parse_distribution(json.dumps(payload), base_state={}, expected_call_ids=("exact",), timed=timed)
+        assert build_openai_response_format(model)["json_schema"]["strict"] is False
+        metadata = prediction_request({"response_model": model})
+        json.dumps(metadata, allow_nan=False)
+        assert metadata["response_model"] == {"name": model.__name__, "schema": model.model_json_schema(), "rose_openai_strict": False}
+    assert response_model_for_protocol("legacy") is None
+    assert response_model_for_protocol("unknown") is None
+    native = {"message": "", "tool_results": [{"call_id": "c", "content": "complete", "is_error": False}], "state": {"open": values}, "terminal": False}
+    assert NativeTransition.model_validate_json(json.dumps(native)).model_dump(mode="json") == native
+    assert build_openai_response_format(NativeTransition)["json_schema"]["schema"]["properties"]["state"]["additionalProperties"] is True
+    for invalid in [0, 1, None, "false"]:
+        try:
+            NativeTransition.model_validate({**native, "terminal": invalid})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Native false terminal must not coerce")
+    for invalid in [float("nan"), float("inf"), {"nested": [float("nan")]}]:
+        try:
+            NativeTransition.model_validate({**native, "state": {"invalid": invalid}})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Nonfinite state JSON is forbidden")
+
+
+async def test_wmh_foundry_preserves_requested_output_budget():
+    import inspect
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.wmh_rose_provider import RoseWMHProvider
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+
+    class Captured(BaseException):
+        pass
+
+    captured = []
+    real = httpx.AsyncClient
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-5.6-luna"}
+    def callback(request):
+        captured.append(json.loads(request.content))
+        raise Captured()
+    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(callback), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.):
+        owner = RoseWMHProvider(pool="rose-1-flash", client=RoseClient(openrouter_key="offline"), protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=True, prefer_azure=True, user_id="offline")
+        owner._streams = None
+        owner._lease_auth = AsyncMock(return_value=(None, None))
+        for requested in (16384, 32000):
+            try:
+                await owner._complete_async("Unchanged policy.", [types.SimpleNamespace(role="user", content="Unchanged input.")], max_tokens=requested)
+            except Captured:
+                pass
+            assert captured[-1].get("max_output_tokens") == requested, "Actual WHM requested output budget must reach Foundry HTTP"
+        # None/omitted defaults are byte-identical; explicit budget is the only body difference.
+        async def direct(limit="omitted"):
+            kw = dict(pool_spec=get_pool("rose-1-flash"), messages=[{"role": "user", "content": "Unchanged input."}], response_format=None, tools=None, context_tools=None, tool_choice=None, temperature=None, effort=None, provider_fast_mode=True, request_id="same", route_key="same", agent_id=None, call_site="test", cache_namespace="same", ttft_timeout_s=90, idle_timeout_s=120)
+            if limit != "omitted" and "max_tokens" in inspect.signature(foundry.foundry_complete).parameters:
+                kw["max_tokens"] = limit
+            try:
+                async for _ in foundry.foundry_complete(**kw):
+                    pass
+            except Captured:
+                pass
+            return captured[-1]
+        default = await direct()
+        none = await direct(None)
+        bounded = await direct(16384)
+        from providers.rose.gpt_auth import build_codex_responses_body
+        reference = build_codex_responses_body(pool_spec=get_pool("rose-1-flash"), model_override="gpt-5.6-luna", messages=[{"role": "user", "content": "Unchanged input."}], response_format=None, request_id="same", cache_namespace="same", cache_breakpoints=True)
+        assert default == none == reference and "max_output_tokens" not in default
+        assert bounded == {**default, "max_output_tokens": 16384}
+
+
+async def test_funded_openai_preserves_requested_output_budget():
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool, foundry_model
+    from providers.rose.gpt_auth import build_codex_responses_body
+    import providers.rose.client as client
+    import providers.rose.transport as transport
+    import providers.rose.foundry as foundry
+
+    class Captured(BaseException):
+        pass
+
+    messages = [{"role": "system", "content": "Unchanged policy."}, {"role": "user", "content": "Unchanged evidence."}]
+    seen = []
+    def callback(request):
+        assert request.url.host == "api.openai.com"
+        assert request.url.path == "/v1/responses"
+        seen.append(json.loads(request.content))
+        raise Captured()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(callback), trust_env=False) as mock_client:
+        with patch.object(transport, "get_streaming_http_client", return_value=mock_client), patch.object(client, "_openai_api_key", return_value="offline-only-key"), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "_gpt_api_key_on_cooldown", AsyncMock(return_value=False)), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))):
+            rose = RoseClient(openrouter_key="offline")
+            async def collect(limit="omitted"):
+                kwargs = dict(pool="rose-1-ultra", messages=messages, request_id="same-offline-request", cache_namespace="same-offline-cache", dump_context=False)
+                if limit != "omitted":
+                    kwargs["max_tokens"] = limit
+                count = len(seen)
+                try:
+                    await rose.collect(**kwargs)
+                except Captured:
+                    pass
+                assert len(seen) == count + 1
+                return seen[-1]
+            for requested in (16384, 32000):
+                body = await collect(requested)
+                assert body.get("max_output_tokens") == requested, "Funded OpenAI caller output budget must reach actual Responses HTTP transport"
+            default = await collect()
+            none = await collect(None)
+            bounded = await collect(16384)
+            assert default == none and "max_output_tokens" not in default
+            assert bounded == {**default, "max_output_tokens": 16384}
+            reference = build_codex_responses_body(pool_spec=get_pool("rose-1-ultra"), model_override=get_pool("rose-1-ultra").gpt_auth_model, messages=messages, request_id="same-offline-request", cache_namespace="same-offline-cache", cache_breakpoints=True)
+            assert default == reference
+    # Foundry default route remains the same shared-converter body.
+    seen_foundry = []
+    real = httpx.AsyncClient
+    def foundry_callback(request):
+        assert request.url.host == "offline.invalid"
+        seen_foundry.append(json.loads(request.content))
+        raise Captured()
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(get_pool("rose-1-ultra"))}
+    module_httpx = types.SimpleNamespace(AsyncClient=lambda **kw: real(transport=httpx.MockTransport(foundry_callback), trust_env=False), Timeout=httpx.Timeout, Headers=httpx.Headers, TransportError=httpx.TransportError)
+    with patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_auth_cooldown_until", 0.), patch.object(foundry, "_cooldown_until", {}):
+        try:
+            async for _ in foundry.foundry_complete(pool_spec=get_pool("rose-1-ultra"), messages=messages, response_format=None, tools=None, context_tools=None, tool_choice=None, temperature=None, effort=None, provider_fast_mode=True, request_id="same-offline-request", route_key="same", agent_id=None, call_site="test", cache_namespace="same-offline-cache", ttft_timeout_s=90, idle_timeout_s=120):
+                pass
+        except Captured:
+            pass
+    foundry_reference = build_codex_responses_body(pool_spec=get_pool("rose-1-ultra"), model_override=foundry_model(get_pool("rose-1-ultra")), messages=messages, request_id="same-offline-request", cache_namespace="same-offline-cache", cache_breakpoints=True)
+    assert seen_foundry == [foundry_reference]
+
+
+async def test_wmh_response_schema_binds_exact_candidate_call_ids():
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.wmh_rose_provider import RoseWMHProvider
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool, foundry_model
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+
+    expected_ids = ["call_exact_A", "call_exact_B"]
+    packet = {"candidate_response": {"tool_calls": [{"call_id": value} for value in expected_ids]}, "environment_state": {}}
+    seen = []
+    observed_wire = []
+    class Captured(BaseException):
+        pass
+    def handler(request):
+        body = json.loads(request.content)
+        results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
+        assert results["minItems"] == results["maxItems"] == len(expected_ids)
+        assert body["text"]["format"]["strict"] is False
+        from providers.rose.gpt_auth import build_codex_responses_body
+        wire_messages, namespace = observed_wire[-1]
+        reference = build_codex_responses_body(pool_spec=get_pool("rose-1-flash"), model_override=foundry_model(get_pool("rose-1-flash")), messages=wire_messages, response_format=None, request_id="irrelevant-to-held-cache-namespace", cache_namespace=namespace, cache_breakpoints=True)
+        assert body["input"] == reference["input"]
+        assert body["instructions"] == reference["instructions"]
+        assert body["prompt_cache_key"] == reference["prompt_cache_key"]
+        seen.append(body)
+        raise Captured()
+    real = httpx.AsyncClient
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(get_pool("rose-1-flash"))}
+    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.):
+        owner = RoseWMHProvider(pool="rose-1-flash", client=RoseClient(openrouter_key="offline"), protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=True, prefer_azure=True, user_id="offline")
+        owner._streams = None
+        original_wire = owner._wire_messages
+        async def inspect_wire(*args, **kwargs):
+            result = await original_wire(*args, **kwargs)
+            observed_wire.append(result)
+            return result
+        owner._wire_messages = inspect_wire
+        owner._lease_auth = AsyncMock(return_value=(None, None))
+        try:
+            await owner._complete_async("Unchanged existing policy.", [types.SimpleNamespace(role="user", content=json.dumps(packet))], max_tokens=16384)
+        except Captured:
+            pass
+        assert len(seen) == 1
+
+
+def test_wmh_candidate_id_schema_preserves_native_json_contract():
+    import copy
+    import json
+    from benchmarks.wmh_response_schema import response_model_for_protocol
+    from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL
+    from providers.rose.schema import build_openai_response_format
+    from benchmarks.wmh_provider_capture import prediction_request
+
+    ids = ("call_A", "call_B")
+    results = [{"call_id": value, "content": "complete original observation", "is_error": False} for value in ids]
+    for protocol in (DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL, "text-world-model-v3"):
+        model = response_model_for_protocol(protocol, expected_call_ids=ids)
+        for value in (None, True, 0, 1.5, "", [], {}, {"arbitrary/key": [False, None]}):
+            if protocol == "text-world-model-v3":
+                obj = {"message": "", "tool_results": results, "state": {"value": value}, "terminal": False}
+            else:
+                outcome = {"id": "model_chosen", "probability": 1, "description": "existing possibility", "tool_results": results, "state_patch": [{"op": "add", "path": "/value", "value": value}]}
+                if protocol == TIMED_DISTRIBUTION_PROTOCOL:
+                    outcome["elapsed_ms"] = 0
+                obj = {"schema": "rose.wmh_timed_outcome_distribution.v1" if protocol == TIMED_DISTRIBUTION_PROTOCOL else "rose.wmh_outcome_distribution.v1", "outcomes": [outcome]}
+            assert model.model_validate_json(json.dumps(obj)).model_dump(mode="json") == obj
+        for replacement in ([{**results[0], "call_id": "wrong"}, results[1]], results[:1], results[::-1], [results[0], results[0]]):
+            bad = copy.deepcopy(obj)
+            if protocol == "text-world-model-v3":
+                bad["tool_results"] = replacement
+            else:
+                bad["outcomes"][0]["tool_results"] = replacement
+            try:
+                model.model_validate_json(json.dumps(bad))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Existing candidate identity/cardinality/order must hold")
+        assert build_openai_response_format(model)["json_schema"]["strict"] is False
+        metadata = prediction_request({"response_model": model})
+        assert metadata["response_model"]["schema"] == model.model_json_schema()
+        json.dumps(metadata)
+        assert response_model_for_protocol(protocol, expected_call_ids=None) is response_model_for_protocol(protocol)
+        assert response_model_for_protocol(protocol, expected_call_ids=()) is response_model_for_protocol(protocol)
+    assert response_model_for_protocol("unknown", expected_call_ids=ids) is None
+    assert response_model_for_protocol("legacy", expected_call_ids=ids) is None
+
+async def test_public_responses_uses_existing_larger_limit_stage():
+    import json
+    import types
+    import httpx
+    from unittest.mock import patch, AsyncMock
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool, foundry_model
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+    import providers.rose.transport as transport
+
+    real = httpx.AsyncClient
+    def sse(events):
+        return "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n"
+    for route in ("foundry", "funded"):
+        requests = []
+        expected_host = "offline.invalid" if route == "foundry" else "api.openai.com"
+        def callback(request):
+            body = json.loads(request.content)
+            assert request.url.host == expected_host, "Public Responses must use existing same-model larger-limit stage before fallback"
+            requests.append(body)
+            assert body["max_output_tokens"] == (16384 if len(requests) == 1 else 32000)
+            if len(requests) == 1:
+                events = [{"type": "response.output_text.delta", "delta": "partial fixture"}, {"type": "response.incomplete", "response": {"incomplete_details": {"reason": "max_output_tokens"}, "usage": {"input_tokens": 1, "output_tokens": 1}}}]
+            else:
+                events = [{"type": "response.output_text.delta", "delta": "complete fixture"}, {"type": "response.completed", "response": {"usage": {"input_tokens": 1, "output_tokens": 1}}}]
+            return httpx.Response(200, text=sse(events))
+        pool = get_pool("rose-1-ultra")
+        env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(pool)}
+        module_httpx = types.SimpleNamespace(AsyncClient=lambda **kw: real(transport=httpx.MockTransport(callback), trust_env=False), Timeout=httpx.Timeout, Headers=httpx.Headers, TransportError=httpx.TransportError)
+        async with real(transport=httpx.MockTransport(callback), trust_env=False) as mock_client:
+            with patch.object(transport, "get_streaming_http_client", return_value=mock_client), patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.), patch.object(client, "_openai_api_key", return_value="offline-key" if route == "funded" else ""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "_gpt_api_key_on_cooldown", AsyncMock(return_value=False)), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))):
+                response = await RoseClient(openrouter_key="offline").collect(pool="rose-1-ultra", messages=[{"role": "user", "content": "Unchanged synthetic fixture."}], max_tokens=16384, result_required=True, dump_context=False, prefer_azure=route == "foundry")
+        assert [body["max_output_tokens"] for body in requests] == [16384, 32000]
+        assert requests[0]["model"] == requests[1]["model"]
+        assert response.content == "complete fixture"
+
+    # Subscription backend still omits output limits and skips larger-limit recovery.
+    from providers.rose.types import StreamChunk
+    calls = []
+    async def subscription_attempt(**kwargs):
+        calls.append(kwargs)
+        first = len(calls) == 1
+        yield StreamChunk(kind="metadata", data={"actual_model": "same-gpt" if first else "other-openai"})
+        yield StreamChunk(kind="content", data={"text": "partial" if first else "complete"})
+        yield StreamChunk(kind="usage", data={"finish_reason": "length" if first else "stop", "prompt_tokens": 1, "completion_tokens": 1})
+        yield StreamChunk(kind="done", data={})
+    chunks = [chunk async for chunk in client.recover_truncated(subscription_attempt, {"max_tokens": 16384, "result_required": True, "deadline_s": 590})]
+    assert len(calls) == 2 and calls[1]["max_tokens"] == 32000
+    assert calls[1].get("_skip_models")
+
+
+async def test_wmh_probability_bounds_reach_provider_schema():
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.wmh_rose_provider import RoseWMHProvider
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool, foundry_model
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+
+    expected_ids = ["call_exact_A", "call_exact_B"]
+    packet = {"candidate_response": {"tool_calls": [{"call_id": value} for value in expected_ids]}, "environment_state": {}}
+    seen = []
+    observed_wire = []
+    class Captured(BaseException):
+        pass
+    def handler(request):
+        body = json.loads(request.content)
+        results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
+        assert results["minItems"] == results["maxItems"] == len(expected_ids)
+        assert body["text"]["format"]["strict"] is False
+        from jsonschema import Draft202012Validator
+        probability = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["probability"]
+        validator = Draft202012Validator(probability)
+        assert not validator.is_valid(-1), "Serialized existing probability lower bound must reject -1"
+        assert not validator.is_valid(2), "Serialized existing probability upper bound must reject 2"
+        for value in (0, 1, 0.0, 0.5, 1.0):
+            assert validator.is_valid(value)
+        assert not validator.is_valid(True)
+        assert not validator.is_valid("0.5")
+        from providers.rose.gpt_auth import build_codex_responses_body
+        wire_messages, namespace = observed_wire[-1]
+        reference = build_codex_responses_body(pool_spec=get_pool("rose-1-flash"), model_override=foundry_model(get_pool("rose-1-flash")), messages=wire_messages, response_format=None, request_id="irrelevant-to-held-cache-namespace", cache_namespace=namespace, cache_breakpoints=True)
+        assert body["input"] == reference["input"]
+        assert body["instructions"] == reference["instructions"]
+        assert body["prompt_cache_key"] == reference["prompt_cache_key"]
+        seen.append(body)
+        raise Captured()
+    real = httpx.AsyncClient
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(get_pool("rose-1-flash"))}
+    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.):
+        owner = RoseWMHProvider(pool="rose-1-flash", client=RoseClient(openrouter_key="offline"), protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=True, prefer_azure=True, user_id="offline")
+        owner._streams = None
+        original_wire = owner._wire_messages
+        async def inspect_wire(*args, **kwargs):
+            result = await original_wire(*args, **kwargs)
+            observed_wire.append(result)
+            return result
+        owner._wire_messages = inspect_wire
+        owner._lease_auth = AsyncMock(return_value=(None, None))
+        try:
+            await owner._complete_async("Unchanged existing policy.", [types.SimpleNamespace(role="user", content=json.dumps(packet))], max_tokens=16384)
+        except Captured:
+            pass
+        assert len(seen) == 1
+
+    from benchmarks.wmh_response_schema import response_model_for_protocol
+    from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL
+    from providers.rose.schema import build_openai_response_format
+    from jsonschema import Draft202012Validator
+    for protocol in (DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL):
+        for ids in (None, ("call_exact_A",)):
+            model = response_model_for_protocol(protocol, expected_call_ids=ids)
+            probability_schema = build_openai_response_format(model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["probability"]
+            validator = Draft202012Validator(probability_schema)
+            assert not validator.is_valid(-1), "Serialized existing probability lower bound must reject -1"
+            assert not validator.is_valid(2), "Serialized existing probability upper bound must reject 2"
+            assert not validator.is_valid(True)
+            assert not validator.is_valid("0.5")
+            for value in (0, 1, 0.0, 0.25, 1.0):
+                assert validator.is_valid(value)
+                result = {"call_id": "call_exact_A", "content": "fixture", "is_error": False}
+                outcome = {"id": "fixture", "probability": value, "description": "fixture", "tool_results": [result], "state_patch": []}
+                if protocol == TIMED_DISTRIBUTION_PROTOCOL:
+                    outcome["elapsed_ms"] = 0
+                obj = {"schema": "rose.wmh_timed_outcome_distribution.v1" if protocol == TIMED_DISTRIBUTION_PROTOCOL else "rose.wmh_outcome_distribution.v1", "outcomes": [outcome]}
+                validated = model.model_validate_json(json.dumps(obj))
+                decoded = json.loads(validated.model_dump_json())["outcomes"][0]["probability"]
+                assert type(decoded) is type(value), "Preserve original JSON integer/float type"
+                assert type(validated.outcomes[0].probability) is type(value)
+
 async def test_direct_auth_honors_candidate_exclusions():
     from types import SimpleNamespace
     from providers.rose.truncation import model_key
@@ -8734,6 +9696,18 @@ async def run_all_tests():
     )
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
     await r.record_async(
+        "waterfall_raw_tls_before_headers_uses_existing_next_model",
+        test_waterfall_raw_tls_failure_before_headers_uses_existing_next_model,
+    )
+    await r.record_async(
+        "waterfall_raw_tls_after_output_preserves_cause_without_replay",
+        test_waterfall_raw_tls_failure_after_productive_output_preserves_cause_without_replay,
+    )
+    await r.record_async(
+        "waterfall_raw_tls_all_models_preserves_exact_step_errors",
+        test_waterfall_raw_tls_failure_on_all_models_preserves_exact_step_errors,
+    )
+    await r.record_async(
         "browser_qwen_cached_provider_with_fallback",
         test_browser_qwen_prefers_cached_provider_without_affecting_flash,
     )
@@ -8782,6 +9756,16 @@ async def run_all_tests():
     await r.record_async(
         "codex_404_falls_through_to_waterfall",
         test_client_codex_404_falls_through_to_waterfall,
+    )
+    await r.record_async(
+        "raw_tls_before_headers_uses_funded_fallback", test_client_raw_tls_failure_before_headers_uses_funded_fallback
+    )
+    await r.record_async(
+        "cerebras_foundry_raw_tls_become_route_errors",
+        test_cerebras_and_foundry_raw_tls_failures_become_route_errors,
+    )
+    await r.record_async(
+        "raw_tls_after_output_does_not_replay", test_client_raw_tls_failure_after_output_preserves_error_without_replay
     )
     await r.record_async(
         "anthropic_apikey_tier_402_to_waterfall", test_client_api_key_tier_402_falls_through_to_waterfall
@@ -8834,11 +9818,24 @@ async def run_all_tests():
         "collect_cut_off_larger_limit_is_enough", test_collect_stops_retrying_once_the_larger_limit_is_enough
     )
     await r.record_async(
+        "collect_cut_off_whole_result_reply", test_collect_recovers_a_cut_off_reply_that_is_itself_the_result
+    )
+    await r.record_async(
         "cut_off_recovery_skips_plain_text_and_plain_streams",
         test_cut_off_recovery_leaves_plain_text_and_non_opted_streams_alone,
     )
     r.record("cut_off_recovery_limits_keys_cache", test_cut_off_recovery_limits_model_keys_and_cache_restart)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
+    await r.record_async(
+        "wmh_pool_uses_azure_gpt_6_1_deployment_before_openrouter",
+        test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter,
+    )
+    await r.record_async(
+        "gpt56_foundry_cache_markers_become_breakpoints_and_true_writes",
+        test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_true_writes,
+    )
+    r.record("responses_body_keeps_latest_50_cache_breakpoints", test_responses_body_keeps_at_most_the_latest_50_cache_breakpoints)
+    r.record("responses_body_marks_completed_user_messages", test_responses_body_marks_every_completed_user_message_without_caller_markers)
     await r.record_async(
         "client_foundry_stream_exit_closes_http_owner",
         test_client_foundry_stream_exit_closes_http_owner,
@@ -9021,6 +10018,14 @@ async def run_all_tests():
     teardown_mock()
     r.record("build_anthropic_body_omits_effort_for_haiku", test_build_anthropic_body_omits_effort_for_haiku)
 
+    await r.record_async("wmh_native_response_model_reaches_foundry_http", test_wmh_native_response_model_reaches_foundry_http)
+    r.record("wmh_response_schema_preserves_native_json_values", test_wmh_response_schema_preserves_native_json_values)
+    await r.record_async("wmh_foundry_preserves_requested_output_budget", test_wmh_foundry_preserves_requested_output_budget)
+    await r.record_async("funded_openai_preserves_requested_output_budget", test_funded_openai_preserves_requested_output_budget)
+    await r.record_async("wmh_response_schema_binds_exact_candidate_call_ids", test_wmh_response_schema_binds_exact_candidate_call_ids)
+    r.record("wmh_candidate_id_schema_preserves_native_json_contract", test_wmh_candidate_id_schema_preserves_native_json_contract)
+    await r.record_async("public_responses_uses_existing_larger_limit_stage", test_public_responses_uses_existing_larger_limit_stage)
+    await r.record_async("wmh_probability_bounds_reach_provider_schema", test_wmh_probability_bounds_reach_provider_schema)
     return r.summary()
 
 

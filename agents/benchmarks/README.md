@@ -40,10 +40,12 @@ Declare it only on tasks that exercise current credentials:
 ```
 
 - **`live`** — syncs fresh compute tokens plus the browser-auth graph from production (`seed-local.ts --compute-tokens-only` and `--credentials-only`). Tasks with `environment.live_cookie_domains` scope every domain-bearing browser-auth table to those domains; tasks without it retain the complete account-wide graph. In simulator mode the overlay is skipped as a unit because environment-boundary tools are simulated.
+- **`live-tamy-identity`** / **`live-aman-food-plan-identity`** — complete credential overlays for a specific production identity (User row + scoped browser auth + compute tokens) that also select that person as the run user. Skipped as a unit in simulator mode.
+- **`live-tamy-account-snapshot`** — a prod-synced snapshot of Tamy's *account rows* (User, credits, subscription, integrations, contacts, message history, API keys, blueprints, SMS session, feedback) used as the run's base environment. It is data, not credentials, so it also applies in simulator mode; browser auth is never synced. Used by the long-horizon `raise-5m-rose-labs-brex` bench.
 - Omitted `live_fixtures` resolve to `[]`; using a live website does not implicitly import production credentials.
 - Site-specific setup is task scenario logic, not another live fixture. For example, the Amazon passkey probe applies `live`, then temporarily removes competing cookie/password paths and restores them in cleanup.
 
-Validated by `long_horizon.py:_validate_environment`: the only accepted fixture name is `live`, and synthetic tasks cannot declare it.
+Validated by `long_horizon.py:_validate_environment`: only names registered in `live_fixtures.py` (`LIVE_FIXTURE_NAMES`) are accepted, and synthetic tasks cannot declare any of them.
 
 Task-specific DB deltas remain separate from the base image. The dedicated gate-user deltas are safe to pre-seed physically, but their declarations remain useful for reset/isolation. Plaid and user-data deltas use the regular benchmark user and must not be bundled into the shared base image because they would contaminate unrelated tasks.
 
@@ -342,6 +344,47 @@ visible-card sequence. Use `--checkpoint-no-start` to leave a paused workflow
 open in the local FE; the runner keeps that isolated stack alive and prints the
 resume command. To reuse a pre-existing export instead of generating one, pass
 `--checkpoint-source-json`; optional tree cloning uses `--checkpoint-tree-json`.
+
+### World-model refresh conformance
+
+`bash scripts/run-bench-cloud --refresh-wmh` incrementally exports every real
+completed tool result from eligible archived trajectories, including results
+already present in an active or interrupted run whose final DB fixture has not
+been written yet. Launch-only shells with no end fixture or incremental result
+artifact are skipped because they contain zero completed steps. Normal
+refreshes scan the complete eligible archive; an
+explicit positive `WMH_REFRESH_MAX_BUNDLES` is diagnostic-only. The command
+refreshes the WMH retriever and writes
+`/data/world-model/conformance.json`. Corpus coverage is intentionally broader
+than simulation: general-purpose orchestration is learned but remains real at
+runtime; only `is_world_model_environment_boundary()` calls are intercepted.
+Completed DB fixtures use the same projection as the live agent boundary:
+model-hidden and child/UI lifecycle rows are removed, each assistant/DAG action
+is paired with the latest real terminal result for its agent-scoped tool-call
+ID, and legacy browser action rows remain separate per-action transitions.
+
+The cloud refresh fails closed unless the generated OTel contains 100 valid,
+redacted, category-stratified examples spanning at least 10 real trajectories,
+five categories, and ten concrete tool names. The report lists that coverage
+and rejects unavailable or simulated observations. For deliberately scoped
+diagnostics, opt into the existing `WMH_REFRESH_MAX_BUNDLES`/step-limit
+variables; normal maintenance leaves them at zero and embeds the complete
+eligible corpus. The 100-example conformance gate itself is fixed for the
+maintenance entrypoint.
+
+After serving the built artifact, run the same examples through inference:
+
+```bash
+python -m benchmarks.run_world_model_conformance \
+  --suite /data/world-model/conformance.json \
+  --url http://127.0.0.1:<wmh-port> \
+  --model rose-r2-archive-anthropic \
+  --output /data/world-model/prediction-conformance.json
+```
+
+The prediction gate requires all 100 calls to succeed, mean aggregate fidelity
+of at least `0.70`, and mean content accuracy of at least `0.25`; the JSON also
+breaks fidelity down by tool category.
 
 ## Suites (tags)
 

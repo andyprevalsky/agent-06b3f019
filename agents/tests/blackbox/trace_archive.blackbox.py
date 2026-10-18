@@ -740,7 +740,7 @@ async def test_fast_cache_archive_uses_resolved_root_agent_id():
                         "rootAgentId": "root-agent-for-cache",
                     },
                 )
-            return _Response(200, {"ok": True})
+            return _Response(200, {"ok": True, "stored": True})
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)
@@ -1636,12 +1636,184 @@ def test_oversized_artifact_is_dropped_with_warning():
             restore()
 
 
+def test_read_archive_artifact_metadata_never_reads_ciphertext():
+    """Metadata-only reads share the artifact contract but skip the body.
+
+    Local: metadata from the sidecar; None when the artifact is absent;
+    ValueError when ciphertext exists without its sidecar. R2: only the
+    ``.meta.json`` object is fetched on the hit path, and the miss path probes
+    existence without reading a body.
+    """
+    from helpers.trace_archive import (
+        archive_json,
+        read_archive_artifact,
+        read_archive_artifact_metadata,
+    )
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        try:
+            root_agent_id = "root-meta-only"
+            archive_json(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc", payload={"steps": [1, 2, 3]})
+            full = read_archive_artifact(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc")
+            assert full is not None
+            _, full_metadata = full
+            metadata = read_archive_artifact_metadata(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc")
+            assert metadata == full_metadata
+            assert read_archive_artifact_metadata(root_agent_id=root_agent_id, path="missing.json.gz.enc") is None
+            target = Path(tmp) / root_agent_id / "trace" / "transitions.json.gz.enc"
+            (target.with_suffix(target.suffix + ".meta.json")).unlink()
+            try:
+                read_archive_artifact_metadata(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc")
+            except ValueError as exc:
+                assert "Archive metadata missing" in str(exc)
+            else:
+                raise AssertionError("ciphertext without metadata must fail closed")
+
+            objects: dict[str, bytes] = {}
+            for item in Path(tmp).rglob("*"):
+                if item.is_file():
+                    objects["trace-archive/" + item.relative_to(tmp).as_posix()] = item.read_bytes()
+        finally:
+            restore()
+
+    meta_key = f"trace-archive/{root_agent_id}/trace/transitions.json.gz.enc.meta.json"
+    objects[meta_key] = json.dumps(full_metadata).encode("utf-8")
+    fetched: list[str] = []
+
+    class _Body:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def read(self) -> bytes:
+            return self._data
+
+    class _Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict:
+            fetched.append(Key)
+            if Key not in objects:
+                error = Exception(f"NoSuchKey: {Key}")
+                error.response = {"Error": {"Code": "NoSuchKey"}}
+                raise error
+            return {"Body": _Body(objects[Key])}
+
+        def head_object(self, *, Bucket: str, Key: str) -> dict:
+            fetched.append(Key)
+            if Key not in objects:
+                error = Exception(f"NoSuchKey: {Key}")
+                error.response = {"Error": {"Code": "NoSuchKey"}}
+                raise error
+            return {}
+
+    old_client = trace_archive._R2_CLIENT
+    old_env = {key: os.environ.get(key) for key in ["TRACE_ARCHIVE_BACKEND", "R2_BUCKET_TRACE_ARCHIVE"]}
+    trace_archive._R2_CLIENT = _Client()
+    os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
+    os.environ["R2_BUCKET_TRACE_ARCHIVE"] = "unit-bucket"
+    try:
+        assert read_archive_artifact_metadata(root_agent_id=root_agent_id, path="trace/transitions.json.gz.enc") == full_metadata
+        assert fetched == [meta_key[:-len(".meta.json")], meta_key]
+        fetched.clear()
+        assert read_archive_artifact_metadata(root_agent_id=root_agent_id, path="nope.json.gz.enc") is None
+        assert fetched == [f"trace-archive/{root_agent_id}/nope.json.gz.enc"]
+        objects[f"trace-archive/{root_agent_id}/orphan.enc"] = b"ciphertext without sidecar"
+        try:
+            read_archive_artifact_metadata(root_agent_id=root_agent_id, path="orphan.enc")
+        except ValueError as exc:
+            assert "Archive metadata missing for orphan.enc" in str(exc)
+        else:
+            raise AssertionError("R2 ciphertext without metadata must fail closed")
+    finally:
+        trace_archive._R2_CLIENT = old_client
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_r2_metadata_requires_ciphertext_and_preserves_head_errors():
+    """A sidecar is not an artifact; existence never opens a ciphertext body."""
+    import helpers.trace_archive as archive
+    from unittest.mock import patch
+
+    metadata = {"plaintext_sha256": "test-digest", "plaintext_bytes": 7}
+    key = archive._object_key("root-sidecar-contract", "trace/example.enc")
+    sidecar = key + ".meta.json"
+
+    class R2Error(Exception):
+        def __init__(self, code):
+            super().__init__(code)
+            self.response = {"Error": {"Code": code}}
+
+    class Body:
+        def read(self):
+            return json.dumps(metadata).encode()
+
+    class Client:
+        def __init__(self, ciphertext, meta, head_error=None):
+            self.ciphertext = ciphertext
+            self.meta = meta
+            self.head_error = head_error
+            self.gets = []
+            self.heads = []
+
+        def get_object(self, *, Bucket, Key):
+            self.gets.append(Key)
+            assert Key == sidecar, "metadata reader opened a ciphertext body"
+            if not self.meta:
+                raise R2Error("NoSuchKey")
+            return {"Body": Body()}
+
+        def head_object(self, *, Bucket, Key):
+            self.heads.append(Key)
+            assert Key == key
+            if self.head_error:
+                raise self.head_error
+            if not self.ciphertext:
+                raise R2Error("NoSuchKey")
+            return {"ContentLength": 7}
+
+    cases = [(False, True, None), (True, True, metadata), (False, False, None)]
+    for ciphertext, meta, expected in cases:
+        client = Client(ciphertext, meta)
+        with patch.object(archive, "_r2_client", return_value=client), patch.object(archive, "_r2_bucket", return_value="test-bucket"):
+            assert archive.read_r2_artifact_metadata(root_agent_id="root-sidecar-contract", path="trace/example.enc") == expected
+        assert client.heads == [key], "every metadata result must establish ciphertext existence"
+        assert key not in client.gets
+
+    client = Client(True, False)
+    with patch.object(archive, "_r2_client", return_value=client), patch.object(archive, "_r2_bucket", return_value="test-bucket"):
+        try:
+            archive.read_r2_artifact_metadata(root_agent_id="root-sidecar-contract", path="trace/example.enc")
+        except ValueError as exc:
+            assert "Archive metadata missing for trace/example.enc" in str(exc)
+        else:
+            raise AssertionError("ciphertext without metadata was accepted")
+    assert client.heads == [key] and key not in client.gets
+
+    for code in ["AccessDenied", "InternalError"]:
+        failure = R2Error(code)
+        client = Client(True, True, failure)
+        with patch.object(archive, "_r2_client", return_value=client), patch.object(archive, "_r2_bucket", return_value="test-bucket"):
+            try:
+                archive.read_r2_artifact_metadata(root_agent_id="root-sidecar-contract", path="trace/example.enc")
+            except R2Error as exc:
+                assert exc is failure
+            else:
+                raise AssertionError("nonmissing HEAD error was swallowed")
+        assert client.heads == [key] and key not in client.gets
+
+
 async def run_all_tests():
     print("trace archive blackbox tests:")
     r = BlackboxResult()
     r.record("encrypt_json_gzip_roundtrip", test_encrypt_json_gzip_roundtrip)
     r.record("encrypt_media_skips_gzip", test_encrypt_media_skips_gzip)
     r.record("local_store_writes_ciphertext_and_metadata", test_local_store_writes_ciphertext_and_metadata)
+    r.record("read_archive_artifact_metadata_never_reads_ciphertext", test_read_archive_artifact_metadata_never_reads_ciphertext)
+    r.record("r2_metadata_requires_ciphertext_and_preserves_head_errors", test_r2_metadata_requires_ciphertext_and_preserves_head_errors)
     r.record("local_store_publishes_metadata_atomically", test_local_store_publishes_metadata_atomically)
     r.record(
         "artifact_transaction_recovers_crash_between_pair_replacements",

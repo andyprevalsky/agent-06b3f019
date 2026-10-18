@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import ssl
 import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -264,6 +265,9 @@ async def cerebras_complete(
         raise RoseError(f"pool {pool_spec.name} has no cerebras_model")
     scope, backend_key = _cooldown_scope(cerebras_key, model)
     if await _cerebras_on_cooldown(scope, backend_key):
+        from providers.rose.whm_retry_observation import observe_cooldown
+
+        observe_cooldown(model, max(0.0, _cooldowns.get(scope, (0.0, 0.0))[0] - time.monotonic()))
         logger.info("rose.cerebras.cooldown_skip", request_id=request_id, model=model)
         raise RoseRateLimitError("Cerebras route is on its reported quota cooldown", status=429)
     body = build_cerebras_body(
@@ -308,6 +312,9 @@ async def cerebras_complete(
                     until = (datetime.now(timezone.utc) + timedelta(seconds=cooldown_s)).isoformat()
                     cooldown_mark = asyncio.create_task(_publish_cerebras_cooldown(scope, backend_key, until))
             if status >= 400:
+                from providers.rose.whm_retry_observation import observe_http_failure
+
+                await observe_http_failure(model, response, cooldown_seconds=cooldown_s)
                 raise RoseError(
                     f"Cerebras {model} returned {status}",
                     status=status,
@@ -321,7 +328,8 @@ async def cerebras_complete(
             ):
                 yield chunk
             stream_completed = True
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+    # TLS record alerts can escape httpx as raw SSLError while reading headers.
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, ssl.SSLError) as exc:
         raise RoseError(f"Cerebras {model} connect/read error: {exc}") from exc
     finally:
         if cooldown_mark is not None:
