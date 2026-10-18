@@ -371,7 +371,9 @@ export async function handleSmsSupervisorMessage(config: {
   // the first poll picks up anything that landed after the context was composed.
   let threadWatermark = new Date().toISOString();
 
-  for (let round = 0; round < environment.MAX_TOOL_ROUNDS; round++) {
+  // The work budget is followed by one closing turn; queued writes retain their commit gates.
+  for (let round = 0; round <= environment.MAX_TOOL_ROUNDS; round++) {
+    const finalResponseRound = round === environment.MAX_TOOL_ROUNDS;
     // Catch the model's view of the thread up to the user's phone. Anything
     // that landed since the last round — an agent announcing itself, a sibling
     // finishing — is replayed verbatim, in order, with the role it was stored
@@ -402,6 +404,13 @@ export async function handleSmsSupervisorMessage(config: {
         round,
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+
+    if (finalResponseRound) {
+      const lastToolResult = [...messages].reverse().find((message) => message.role === 'tool');
+      if (!lastToolResult || typeof lastToolResult.content !== 'string') break;
+      lastToolResult.content +=
+        '\n\nYou have reached the maximum number of tool-calling rounds. Use the results already available to send one final response with send_user_message, then call attempt_completion. Do not call any other tools.';
     }
 
     log.info('[SmsSupervisor] LLM call round', {
@@ -458,6 +467,27 @@ export async function handleSmsSupervisorMessage(config: {
     const realToolCalls = llmResponse.tool_calls.filter((tc) => tc.tool !== 'attempt_completion');
     const sendCalls = realToolCalls.filter((tc) => tc.tool === 'send_user_message');
     const dispatchCalls = realToolCalls.filter((tc) => tc.tool !== 'send_user_message');
+
+    if (
+      finalResponseRound &&
+      (llmResponse.tool_calls.some(
+        (tc) => tc.tool !== 'send_user_message' && tc.tool !== 'attempt_completion'
+      ) ||
+        sendCalls.length > 1)
+    ) {
+      const error =
+        'Rejected: the final response may only send one user message and attempt completion';
+      for (const toolCall of llmResponse.tool_calls) {
+        recordToolTrace(
+          round,
+          toolCall,
+          { tool: toolCall.tool, success: false, result: '', error },
+          'dispatch'
+        );
+      }
+      log.warn('[SmsSupervisor] Final response attempted extra work or multiple replies');
+      break;
+    }
 
     // Resolve reads/writes before user delivery. A same-round tool failure must
     // not allow an ungrounded success message to escape first.
