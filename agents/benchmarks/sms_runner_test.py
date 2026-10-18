@@ -1846,7 +1846,12 @@ def test_sms_dispatch_relays_only_committed_root_custody_to_existing_callback(mo
     task=SimpleNamespace(name='owning-sms',runner='sms')
     monkeypatch.setattr(bench,'_validate_task_target',lambda *args:None)
     async def drive(url,actual,deps):
-        assert actual is task and deps.task_name==task.name
+        assert actual is not task
+        assert actual.name==task.name and actual.runner==task.runner and deps.task_name==task.name
+        assert all(getattr(actual,field) is None for field in (
+            '_wmh_seeded_session_id','_wmh_owned_session','_wmh_retirement_receipt',
+            '_wmh_retirement_operation','_wmh_retirement_error','_wmh_agent_admission',
+        ))
         sms._remember_sms_committed_roots(deps,{ROOT})
         sms._remember_sms_committed_roots(deps,{ROOT})
         return 'owning-result'
@@ -1854,6 +1859,7 @@ def test_sms_dispatch_relays_only_committed_root_custody_to_existing_callback(mo
     result=asyncio.run(bench.run_single_task('http://localhost:39999',task,
         on_agent_created=lambda name,aid:observed.append((name,aid))))
     assert result=='owning-result' and observed==[(task.name,ROOT)]
+    assert vars(task)=={'name':'owning-sms','runner':'sms'}
 
 
 @pytest.mark.parametrize('path',['success','cancel-verified','cancel-failed','success-foreign-receipt','cancel-verified-foreign-receipt'])
