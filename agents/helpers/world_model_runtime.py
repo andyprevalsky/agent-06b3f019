@@ -745,7 +745,7 @@ async def world_clock_activity(
     wait: JsonObject | None = None,
     session_scope_id: str | None = None,
 ) -> JsonObject:
-    """Register, finish, wait for, receive child results or read ("time") one agent on its world's shared clock.
+    """Register, finish, wait for, hold/release on children or read ("time") one agent on its world's shared clock.
 
     Waits long-poll the WMH (resumed=false after each poll) and heartbeat, so a
     retried activity rejoins the same wait_id. A root without a live world, or
@@ -775,10 +775,13 @@ async def world_clock_activity(
             return await _clock_request(base_url, path, {"parent": parent_agent_id}, 30)
         if operation == "finish":
             return await _clock_request(base_url, path, {}, 30)
-        if operation == "receive" and isinstance(wait, dict):
-            return await _clock_request(base_url, path, {"children": list(wait.get("children") or [])}, 30)
+        if operation == "hold" and isinstance(wait, dict):
+            return await _clock_request(base_url, path, {"hold_id": wait.get("hold_id")}, 30)
+        if operation == "release" and isinstance(wait, dict):
+            payload = {"hold_id": wait.get("hold_id"), "children": list(wait.get("children") or [])}
+            return await _clock_request(base_url, path, payload, 30)
         if operation != "wait" or not isinstance(wait, dict):
-            raise ValueError("World clock operation must be register, finish, wait, receive or time")
+            raise ValueError("World clock operation must be register, finish, wait, hold, release or time")
         payload = {key: wait[key] for key in ("wait_id", "until_ms", "duration_ms") if wait.get(key) is not None}
         payload["poll_seconds"] = 50
         while True:

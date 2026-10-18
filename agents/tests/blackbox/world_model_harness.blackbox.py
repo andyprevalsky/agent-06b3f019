@@ -3105,6 +3105,14 @@ async def test_runtime_world_clock_long_polls_waits_and_skips_without_a_world():
             assert (await runtime.world_clock_activity("finish", "child-1"))["agent_id"] == "child-1"
             assert requests[0] == ("/world_models/rose-archive/scopes/root-1/clock/agents/child-1/register", {"parent": "root-1"})
             assert requests[1][1] == {"wait_id": "w1", "duration_ms": day, "poll_seconds": 50}
+            # A parent blocked awaiting child results holds, then releases with the delivered children.
+            assert (await runtime.world_clock_activity("hold", "child-1", None, {"hold_id": "spawn-1:c"}))["time_ms"] == 0
+            await runtime.world_clock_activity("release", "child-1", None, {"hold_id": "spawn-1:c", "children": ["c"]})
+            assert requests[-2] == ("/world_models/rose-archive/scopes/root-1/clock/agents/child-1/hold", {"hold_id": "spawn-1:c"})
+            assert requests[-1] == (
+                "/world_models/rose-archive/scopes/root-1/clock/agents/child-1/release",
+                {"hold_id": "spawn-1:c", "children": ["c"]},
+            )
             resolve.return_value = (False, None, False, "root-without-world", None, False)
             assert await runtime.world_clock_activity("wait", "child-1", None, {"wait_id": "w2", "duration_ms": day}) == {
                 "skipped": "no_world_session"

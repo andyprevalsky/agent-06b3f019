@@ -519,6 +519,10 @@ def test_non_simulated_agents_keep_the_wall_clock_and_make_no_clock_calls(monkey
 
     monkeypatch.setattr(m.AgentWorkflow, '_execute_tool_once', tool, raising=False)
     assert asyncio.run(m.AgentWorkflow._execute_tool(wf, 'web_search', {}, 'c1')) == {'success': True, 'name': 'web_search'}
+    from helpers.wait_on_world_clock import hold_on_children, release_children
+
+    asyncio.run(hold_on_children(wf, 'spawn-1:child'))
+    asyncio.run(release_children(wf, 'spawn-1:child', ['child']))
     assert calls == [] and sleeps == [] and not m.AgentWorkflow._world_clock_missing(wf)
     assert simulated_now(wf, NOW) == NOW and simulated_timestamp_ms(wf, NOW) == _ms(NOW)
     assert advance_simulated_clock(wf, 300) == 0 and simulated_now(wf, NOW) == NOW
@@ -557,40 +561,174 @@ def test_an_acting_parent_reaches_a_childs_finish_only_when_it_receives_the_resu
     assert clock.receive("root", ["child", "stranger"]) == 5 * DAY  # idempotent; unknown ids ignored
 
 
-def test_the_result_delivering_tool_call_moves_an_acting_parents_cursor(monkeypatch):
+def test_a_parent_blocked_awaiting_its_child_holds_on_children_without_deadlock():
+    """The parent acted, spawned, then blocks on its child; waits must still advance world time."""
+    async def scenario():
+        clock = WorldClock(start_ms=0)
+        clock.register("root")
+        clock.commit("root", started_ms=0, elapsed_ms=1 * DAY)
+        clock.register("child", parent="root")
+        clock.register("other", parent="root")
+        clock.commit("root", started_ms=clock.action_time("root"), elapsed_ms=0)  # acted beside its children
+        assert clock.shared_time() == 1 * DAY, "an acting parent holds shared time"
+        clock.hold("root", "spawn-1:child")  # now blocked awaiting the child's result
+        clock.hold("root", "spawn-1:child")  # idempotent on activity retry
+        woke = []
+
+        async def waiter(agent, until):
+            result = await clock.wait(agent, "w", until_ms=until, poll_seconds=5)
+            woke.append((agent, result["time_ms"]))
+            clock.finish(agent)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.wait_for(asyncio.gather(waiter("child", 10 * DAY), waiter("other", 7 * DAY)), 1)
+        assert loop.time() - started < 0.5, "world jumps must not wait in real time"
+        assert woke == [("other", 7 * DAY), ("child", 10 * DAY)]
+        assert clock.time_of("root") == 1 * DAY, "the held parent receives the result only on release"
+        assert clock.release("root", "spawn-1:child", ["child"]) == 10 * DAY
+        assert {a["agent_id"]: a["state"] for a in clock.snapshot()["agents"]}["root"] == "running"
+
+    run(scenario())
+
+
+def test_the_blocking_spawn_call_holds_and_releases_the_parent_on_the_world_clock(monkeypatch):
+    """End to end: _execute_tool -> the real blocking spawn wait -> hold/release -> cursor refresh."""
+    import importlib
+
+    from domains.spawn_sub_agents import handler as spawn
+    from utils.simulated_clock import simulated_now
+
     clock = WorldClock(start_ms=_ms(PINNED))
     calls = []
     base = _clock_activity(clock, calls)
 
     async def activity(fn, **kw):
-        if kw['args'][0] == 'receive':
-            calls.append('receive')
-            return {'agent_id': kw['args'][1], 'time_ms': clock.receive(kw['args'][1], kw['args'][3]['children'])}
+        if getattr(fn, '__name__', '') != 'world_clock_activity':
+            return None  # terminal-result reconciliation: the completion signal has not arrived yet
+        operation, agent_id, _parent, payload = (list(kw['args']) + [None, None])[:4]
+        if operation in ('hold', 'release'):
+            calls.append(operation)
+            if operation == 'hold':
+                return {'agent_id': agent_id, 'time_ms': clock.hold(agent_id, payload['hold_id'])}
+            return {'agent_id': agent_id, 'time_ms': clock.release(agent_id, payload['hold_id'], payload['children'])}
         return await base(fn, **kw)
 
+    async def wait_condition(predicate, timeout=None):
+        while not predicate():
+            await asyncio.sleep(0)
+
     m = _patch_workflows(monkeypatch, activity)
-    root, child = _simulated_workflow('root'), _simulated_workflow('child', 'root')
-    root.child_tool_ids, root.child_results = {}, {}
+    fake = types.SimpleNamespace(
+        execute_activity=activity, now=lambda: NOW, wait_condition=wait_condition,
+        logger=types.SimpleNamespace(error=lambda *a: None),
+    )
+    monkeypatch.setattr(spawn, 'workflow', fake)
+    monkeypatch.setattr(importlib.import_module('helpers.wait_on_world_clock'), 'workflow', fake)
+
+    async def no_handoff(_wf):
+        return None
+
+    monkeypatch.setattr(importlib.import_module('helpers.wait_condition_or_handoff'), 'live_handoff_queue', no_handoff)
+    root = _simulated_workflow('root')
+    root.__dict__.update(child_tool_ids={}, child_results={}, pending_children=set(), child_workflow_ids={})
+
+    async def post_message(*_a, **_kw):
+        return None
+
+    root._post_message = post_message
     asyncio.run(m.AgentWorkflow._register_on_world_clock(root))
-    asyncio.run(m.AgentWorkflow._register_on_world_clock(child))
-    root.child_tool_ids['child'] = 'spawn-1:0'
 
-    async def tool(self, name, args, call_id):
-        if name == 'web_search':  # the parent keeps acting while its child runs
-            clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=DAY)
-        if name == 'spawn_agent':  # this call hands the parent its child's result
-            self.child_results['child'] = {'status': 'completed'}
-        return {'success': True}
+    woke = []
 
-    monkeypatch.setattr(m.AgentWorkflow, '_execute_tool_once', tool, raising=False)
-    asyncio.run(m.AgentWorkflow._execute_tool(root, 'web_search', {}, 'search-1'))
-    clock.commit('child', started_ms=clock.action_time('child'), elapsed_ms=5 * DAY)
-    asyncio.run(m.AgentWorkflow._world_clock_event(child, 'finish'))
-    asyncio.run(m.AgentWorkflow._execute_tool(root, 'web_search', {}, 'search-2'))
-    assert root.simulated_world_time_ms == _ms(PINNED) + 2 * DAY, 'the finish alone must not move the acting parent'
-    assert 'receive' not in calls
-    asyncio.run(m.AgentWorkflow._execute_tool(root, 'spawn_agent', {}, 'spawn-1'))
-    assert calls.count('receive') == 1
-    assert root.simulated_world_time_ms == _ms(PINNED) + 5 * DAY
-    asyncio.run(m.AgentWorkflow._execute_tool(root, 'spawn_agent', {}, 'spawn-1'))
-    assert calls.count('receive') == 1, 'each child result is received once'
+    async def scenario():
+        clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=DAY)  # the parent acts until 1d
+        clock.register('child', parent='root')
+        clock.register('other', parent='root')
+        clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=0)  # still acting after spawning
+
+        async def child_runs():
+            woke.append(('child', (await clock.wait('child', 'w', until_ms=_ms(PINNED) + 10 * DAY, poll_seconds=5))['time_ms']))
+            clock.finish('child')
+            root.child_results['child'] = {'status': 'completed', 'summary': 'done'}  # child_completed signal
+
+        async def other_runs():
+            woke.append(('other', (await clock.wait('other', 'w', until_ms=_ms(PINNED) + 7 * DAY, poll_seconds=5))['time_ms']))
+            clock.finish('other')
+
+        async def blocking_spawn(self, name, args, call_id):  # the tool call blocks in the real spawn wait
+            gen = spawn.SpawnSubAgentManager().finalize_child(
+                self, {'agent_id': 'child', 'goal': 'g'}, {'goal': 'g'}, call_id, 'bus')
+            return [event async for event in gen]
+
+        monkeypatch.setattr(m.AgentWorkflow, '_execute_tool_once', blocking_spawn, raising=False)
+
+        async def parent_blocks():
+            return await m.AgentWorkflow._execute_tool(root, 'spawn_agent', {}, 'spawn-1')
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        events, *_ = await asyncio.wait_for(asyncio.gather(parent_blocks(), child_runs(), other_runs()), 1)
+        assert loop.time() - started < 0.5, 'no deadlock and no real-time waiting'
+        return events
+
+    events = asyncio.run(scenario())
+    assert events[-1].status.name == 'FINISHED'
+    assert calls.count('hold') == 1 and calls.count('release') == 1
+    assert calls.index('hold') < calls.index('release') < len(calls) - 1 and calls[-1] == 'time'
+    assert woke == [('other', _ms(PINNED) + 7 * DAY), ('child', _ms(PINNED) + 10 * DAY)], 'world time jumps 7d, then 10d'
+    assert root.simulated_world_time_ms >= _ms(PINNED) + 10 * DAY
+    assert simulated_now(root, NOW) >= PINNED + timedelta(days=10)
+
+
+def test_leaving_a_blocking_child_wait_without_the_result_releases_the_hold(monkeypatch):
+    """A generation handoff (or any error) mid-wait must not leave the parent held."""
+    import importlib
+
+    from domains.spawn_sub_agents import handler as spawn
+    from helpers.generation_handoff import GenerationHandoffRequested
+
+    clock = WorldClock(start_ms=0)
+    calls = []
+
+    async def activity(fn, **kw):
+        if getattr(fn, '__name__', '') != 'world_clock_activity':
+            return None  # terminal-result reconciliation finds nothing yet
+        operation, agent_id, _parent, payload = (list(kw['args']) + [None, None])[:4]
+        calls.append((operation, payload))
+        if operation == 'hold':
+            return {'agent_id': agent_id, 'time_ms': clock.hold(agent_id, payload['hold_id'])}
+        if operation == 'release':
+            return {'agent_id': agent_id, 'time_ms': clock.release(agent_id, payload['hold_id'], payload['children'])}
+        raise AssertionError(operation)
+
+    fake = types.SimpleNamespace(execute_activity=activity, now=lambda: NOW, logger=types.SimpleNamespace(error=lambda *a: None))
+    monkeypatch.setattr(spawn, 'workflow', fake)
+    monkeypatch.setattr(importlib.import_module('helpers.wait_on_world_clock'), 'workflow', fake)
+
+    async def handoff(_wf):
+        return 'new-queue'
+
+    monkeypatch.setattr(importlib.import_module('helpers.wait_condition_or_handoff'), 'live_handoff_queue', handoff)
+    clock.register('root')
+    clock.register('child', parent='root')
+    clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=DAY)
+    root = _simulated_workflow('root')
+    root.__dict__.update(child_tool_ids={}, child_results={}, pending_children=set(), child_workflow_ids={},
+                         simulated_world_time_ms=DAY)
+
+    async def post_message(*_a, **_kw):
+        return None
+
+    root._post_message = post_message
+
+    async def blocking_spawn():
+        gen = spawn.SpawnSubAgentManager().finalize_child(root, {'agent_id': 'child', 'goal': 'g'}, {'goal': 'g'}, 'spawn-1', 'bus')
+        return [event async for event in gen]
+
+    with pytest.raises(GenerationHandoffRequested):
+        asyncio.run(blocking_spawn())
+    clock_calls = [call for call in calls if call[0] in ('hold', 'release')]
+    assert clock_calls == [('hold', {'hold_id': 'spawn-1:child'}), ('release', {'hold_id': 'spawn-1:child', 'children': []})]
+    assert {a['agent_id']: a['state'] for a in clock.snapshot()['agents']}['root'] == 'running'
+    assert clock.time_of('root') == DAY, 'no child result was delivered'

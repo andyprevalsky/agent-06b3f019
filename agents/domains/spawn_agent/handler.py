@@ -55,6 +55,7 @@ from helpers.source_connect_gates import raise_source_connect_gates
 from helpers.tracing import span
 from helpers.world_model_runtime import world_model_specialized_agent_activity
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+from helpers.wait_on_world_clock import hold_on_children, release_children
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
@@ -587,20 +588,28 @@ async def _recover_oai_demo_for_each_timeout(
         return None
     if child_agent_id in results:
         return results.get(child_agent_id)
-    while child_agent_id not in workflow_instance.child_results:
-        if await _reconcile_for_each_child_result(workflow_instance, child_agent_id):
-            break
-        try:
-            await wait_condition_or_generation_handoff(
-                lambda cid=child_agent_id: cid in workflow_instance.child_results,
-                workflow_instance,
-                timeout=timedelta(seconds=30),
-                workflow_mod=workflow,
-            )
-        except GenerationHandoffRequested:
-            raise
-        except (asyncio.TimeoutError, TimeoutError):
-            continue
+    # Simulate mode: blocked awaiting this child, the parent holds on its children.
+    hold_id = f"for_each_recovery:{child_agent_id}"
+    await hold_on_children(workflow_instance, hold_id)
+    try:
+        while child_agent_id not in workflow_instance.child_results:
+            if await _reconcile_for_each_child_result(workflow_instance, child_agent_id):
+                break
+            try:
+                await wait_condition_or_generation_handoff(
+                    lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                    workflow_instance,
+                    timeout=timedelta(seconds=30),
+                    workflow_mod=workflow,
+                )
+            except GenerationHandoffRequested:
+                raise
+            except (asyncio.TimeoutError, TimeoutError):
+                continue
+    except Exception:  # includes GenerationHandoffRequested
+        await release_children(workflow_instance, hold_id, [])
+        raise
+    await release_children(workflow_instance, hold_id, [child_agent_id])
     return workflow_instance.child_results.get(child_agent_id)
 
 

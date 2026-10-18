@@ -803,9 +803,13 @@ class ParallelWorldModel:
         session.clock.finish(agent_id)
         return {"agent_id": agent_id, "time_ms": session.clock.time_of(agent_id)}
 
-    def clock_receive(self, session_id, agent_id, children):
+    def clock_hold(self, session_id, agent_id, hold_id):
         session = self._clock_session(session_id)
-        return {"agent_id": agent_id, "time_ms": session.clock.receive(agent_id, children)}
+        return {"agent_id": agent_id, "time_ms": session.clock.hold(agent_id, hold_id)}
+
+    def clock_release(self, session_id, agent_id, hold_id, children):
+        session = self._clock_session(session_id)
+        return {"agent_id": agent_id, "time_ms": session.clock.release(agent_id, hold_id, children)}
 
     async def clock_wait(self, session_id, agent_id, wait_id, *, until_ms=None, duration_ms=None, poll_seconds=50):
         session = self._clock_session(session_id)
