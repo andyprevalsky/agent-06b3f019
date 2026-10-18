@@ -401,6 +401,53 @@ class RetainedWorkerTests(unittest.TestCase):
                 ):
                     self.assertFalse(native.waited)
 
+    def test_stopped_wait_retries_native_408_until_the_exact_version_settles(self):
+        """2026-10-18: a new-image reuse took ~20s; one 10s wait failed the cutover."""
+        from urllib.error import HTTPError
+
+        for pending, succeeds in ((2, True), (pool.STOPPED_WAIT_ATTEMPTS, False)):
+            with self.subTest(pending=pending):
+                value = self.released()
+                waits = []
+
+                class SlowStopHTTP(CapturedReplacingHTTP):
+                    def __call__(self, request, timeout):
+                        suffix = request.full_url.split("/machines/1234", 1)[1]
+                        if suffix.startswith("/wait?") and len(waits) < pending:
+                            self.assert_wait(request, suffix)
+                            waits.append(suffix)
+                            raise HTTPError(request.full_url, 408, "Request Timeout", {}, io.BytesIO(b""))
+                        return super().__call__(request, timeout)
+
+                native = SlowStopHTTP(value)
+                if succeeds:
+                    self.run_operation(native, args("reuse"), value)
+                    self.assertTrue(native.waited)
+                else:
+                    with self.assertRaises(HTTPError):
+                        self.run_operation(native, args("reuse"), value)
+                    self.assertEqual(len(waits), pool.STOPPED_WAIT_ATTEMPTS)
+                self.assertFalse(native.leased)
+                self.assertEqual(
+                    sum(method == "POST" and url.endswith("/machines/1234") for method, url, _ in native.requests),
+                    1,
+                )
+        # Any other native error is not a wait result and still fails closed at once.
+        value = self.released()
+        calls = []
+
+        class ForbiddenWaitHTTP(CapturedReplacingHTTP):
+            def __call__(self, request, timeout):
+                suffix = request.full_url.split("/machines/1234", 1)[1]
+                if suffix.startswith("/wait?"):
+                    calls.append(suffix)
+                    raise HTTPError(request.full_url, 403, "Forbidden", {}, io.BytesIO(b""))
+                return super().__call__(request, timeout)
+
+        with self.assertRaises(HTTPError):
+            self.run_operation(ForbiddenWaitHTTP(value), args("reuse"), value)
+        self.assertEqual(len(calls), 1)
+
     def test_lost_ack_retry_rejects_empty_or_nonstring_version_before_wait(self):
         for version in ("", None, 7):
             with self.subTest(version=version):

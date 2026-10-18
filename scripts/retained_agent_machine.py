@@ -18,6 +18,7 @@ import os
 import re
 import sys
 from contextlib import contextmanager
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -186,6 +187,25 @@ def initial_spare(machine, app, live_hash):
         and metadata(machine, CUSTODY_KEY).get("rootfs_disposition") == "stateless"
         and machine["config"].get("env", {}).get("TEMPORAL_WORKER_POOL_SPARE") == "1"
     )
+
+
+# Fly answers 408 while the exact version is still replacing; a new-image
+# update on a stopped worker can take longer than one wait. Bound the total
+# well inside the 500s lease and below the 30s HTTP timeout per request.
+STOPPED_WAIT_SECONDS = 20
+STOPPED_WAIT_ATTEMPTS = 9
+
+
+def wait_stopped(fly, version):
+    for attempt in range(STOPPED_WAIT_ATTEMPTS):
+        try:
+            return fly.request(
+                "GET",
+                f"/wait?state=stopped&instance_id={quote(version, safe='')}&timeout={STOPPED_WAIT_SECONDS}",
+            )
+        except HTTPError as exc:
+            if exc.code != 408 or attempt == STOPPED_WAIT_ATTEMPTS - 1:
+                raise
 
 
 class Fly:
@@ -406,10 +426,7 @@ def operate(args, expected, fly):
                 raise ValueError("Native updated worker has no exact instance version")
             # A lost acknowledgement can leave the exact target version still
             # replacing. Both paths require native stopped-state confirmation.
-            completed = fly.request(
-                "GET",
-                f"/wait?state=stopped&instance_id={quote(updated_version, safe='')}&timeout=10",
-            )
+            completed = wait_stopped(fly, updated_version)
             if not isinstance(completed, dict) or completed.get("ok") is not True:
                 raise ValueError("Native updated worker did not reach its stopped state")
             verified = fly.request("GET")
