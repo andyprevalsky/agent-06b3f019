@@ -4,22 +4,24 @@
 import base64
 import copy
 import json
+import os
 import runpy
+import subprocess
+import tempfile
+from contextlib import contextmanager
 import unittest
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-M = runpy.run_path(str(ROOT / "scripts/cloudbench-parked-reservations.py"))
+M = runpy.run_path(os.environ.get("CLOUDBENCH_PARKED_SOURCE", str(ROOT / "scripts/cloudbench-parked-reservations.py")))
 OLD = runpy.run_path(str(ROOT / "scripts/tests/cloudbench-unused-reservations.test.py"))
 H = M["H"]
 
 
 class Parked(unittest.TestCase):
     def setUp(self):
-        patch = mock.patch.dict(
-            M["qualify"].__globals__, protocol=lambda _: "fixture-source-sha"
-        )
+        patch = mock.patch.dict(M["qualify"].__globals__, protocol=lambda _: "fixture-source-sha")
         patch.start()
         self.addCleanup(patch.stop)
         self.fixture = OLD["Unused"]()
@@ -92,9 +94,7 @@ class Parked(unittest.TestCase):
             )
 
         reader = {"load": load, "validate": validate}
-        with mock.patch.dict(
-            M["U"]["prepare"].__globals__, recovered_reader=lambda: reader
-        ):
+        with mock.patch.dict(M["U"]["prepare"].__globals__, recovered_reader=lambda: reader):
             result = self.prepare()
         self.assertEqual(calls, ["load", "load", "validate"])
         self.assertEqual([r["machine_id"] for r in result["candidates"]], [f.mid])
@@ -103,18 +103,14 @@ class Parked(unittest.TestCase):
 
         omitted = copy.deepcopy(f.original["candidates"][0])
         omitted.update(machine_id="bbbbccccddddee", volume_id="vol_held")
-        omitted["predecessor"].update(
-            id=omitted["machine_id"], volume_id=omitted["volume_id"]
-        )
+        omitted["predecessor"].update(id=omitted["machine_id"], volume_id=omitted["volume_id"])
         f.original["candidates"].append(omitted)
         OLD["write"](
             f.outer / "archived-reuse-original.private.json",
             {
                 "schema": "original600-archived-admission-request-v1",
                 "request": f.original,
-                "sha256": H["sha"](
-                    json.dumps(f.original, sort_keys=True, allow_nan=False).encode()
-                ),
+                "sha256": H["sha"](json.dumps(f.original, sort_keys=True, allow_nan=False).encode()),
             },
         )
         context["held_rows"] = [
@@ -126,9 +122,7 @@ class Parked(unittest.TestCase):
                 "reuse_credit": False,
             }
         ]
-        with mock.patch.dict(
-            M["U"]["prepare"].__globals__, recovered_reader=lambda: reader
-        ):
+        with mock.patch.dict(M["U"]["prepare"].__globals__, recovered_reader=lambda: reader):
             result = self.prepare()
         self.assertEqual([row["machine_id"] for row in result["candidates"]], [f.mid])
         self.assertEqual(result["held_machine_ids"], [omitted["machine_id"]])
@@ -147,9 +141,7 @@ class Parked(unittest.TestCase):
             return value
 
         with (
-            mock.patch.dict(
-                M["U"]["prepare"].__globals__, recovered_reader=lambda: reader
-            ),
+            mock.patch.dict(M["U"]["prepare"].__globals__, recovered_reader=lambda: reader),
             mock.patch.dict(M["U"], prepare=missing_selected_evidence),
         ):
             with self.assertRaises(KeyError):
@@ -191,13 +183,9 @@ class Parked(unittest.TestCase):
         self.add_exclusion()
         before = copy.deepcopy(f.current)
         config = copy.deepcopy(before["config"])
-        config.setdefault("metadata", {})[H["MARKER"]] = H["canonical"](
-            self.proof["native_marker"]
-        ).decode()
+        config.setdefault("metadata", {})[H["MARKER"]] = H["canonical"](self.proof["native_marker"]).decode()
         config["init"] = {"cmd": ["sleep", "infinity"]}
-        ack = dict(
-            before, instance_id="new-claim-version", config=config, state="created"
-        )
+        ack = dict(before, instance_id="new-claim-version", config=config, state="created")
         self.put("archived-reuse-journal/original-native.json", before)
         self.put(
             "archived-reuse-journal/claim-intent.json",
@@ -206,9 +194,7 @@ class Parked(unittest.TestCase):
                 "config_sha256": H["config_sha"](config),
             },
         )
-        self.add_wire(
-            1, "POST", "/lease", {"ttl": 180}, {"data": {"nonce": "claim-lease"}}
-        )
+        self.add_wire(1, "POST", "/lease", {"ttl": 180}, {"data": {"nonce": "claim-lease"}})
         self.add_wire(
             2,
             "GET",
@@ -234,25 +220,185 @@ class Parked(unittest.TestCase):
         OLD["write"](f.inventory, inventory)
         return ack
 
+    def partial_proof_fixture(self, current_source=False):
+        f = self.fixture
+        old_source = subprocess.check_output(
+            ["git", "show", "c9d4817832720cc2b1bc6a212383973a77baf004:scripts/cloudbench-archived-machine-reuse.py"]
+        )
+        if current_source:
+            old_source = (ROOT / "scripts/cloudbench-archived-machine-reuse.py").read_bytes()
+        with tempfile.NamedTemporaryFile(dir=ROOT / "scripts", suffix=".py") as source:
+            source.write(old_source)
+            source.flush()
+            old = runpy.run_path(source.name)
+        destination = f.old.root / "actual-allocate"
+        destination.mkdir(mode=0o700)
+        current = copy.deepcopy(f.current)
+        calls = []
+        owner = self
+
+        class Adapter:
+            @contextmanager
+            def lease(inner, mid):
+                owner.add_wire(
+                    1,
+                    "POST",
+                    "/lease",
+                    {"description": "archived same-volume successor", "ttl": 180},
+                    {"data": {"nonce": "lease"}},
+                    status=201,
+                )
+                yield
+                owner.add_wire(5, "DELETE", "/lease", None, {}, {"fly-machine-lease-nonce": "lease"})
+
+            def request(inner, method, url, body=None, timeout=20):
+                calls.append(method)
+                if method == "POST":
+                    current.update(instance_id="actual-claim-version", config=body["config"], state="created")
+                    owner.add_wire(3, "POST", "", body, copy.deepcopy(current), {"fly-machine-lease-nonce": "lease"})
+                else:
+                    number = 2 if len(calls) == 1 else 4
+                    if number == 4:
+                        current["state"] = "stopped"
+                    owner.add_wire(
+                        number, "GET", "", None, copy.deepcopy(current), {"fly-machine-lease-nonce": "lease"}
+                    )
+                return copy.deepcopy(current)
+
+        with mock.patch.dict(
+            old["allocate"].__globals__,
+            selected_request=lambda *_: (f.request, self.row),
+            NativeAdapter=lambda *_: Adapter(),
+            module=lambda _: {"Fly": lambda *_: None},
+        ):
+            proof = old["allocate"](f.request_path, "unused", 0, self.successor, destination, "no-token")
+        self.assertEqual(proof, self.proof)
+        self.fixture.members[self.root] = None
+        self.fixture.members[self.root + "/archived-reuse-journal"] = None
+        self.fixture.members[self.root + "/archived-reuse-wire"] = None
+        for number in range(1, 6):
+            prefix = "archived-reuse-wire/" + f"{number:032x}" + "/"
+            self.fixture.members[self.root + "/" + prefix.rstrip("/")] = None
+            self.put(
+                prefix + "result.json",
+                json.loads(
+                    base64.b64decode(
+                        json.loads(self.fixture.members[self.root + "/" + prefix + "0001-wire.json"])["body_b64"]
+                    )
+                ),
+            )
+            self.put(prefix + "http-start.json", {"monotonic_ns": number})
+            self.put(prefix + "transport-start.json", {"monotonic_ns": number, "direct": False})
+            self.fixture.members[self.root + "/" + prefix + "stderr.private.log"] = b""
+
+        for path in destination.rglob("*.json"):
+            self.put(str(path.relative_to(destination)), json.loads(path.read_bytes()))
+        shell = subprocess.check_output(
+            ["git", "show", "c9d4817832720cc2b1bc6a212383973a77baf004:scripts/lib/cloudbench-archived-reuse.sh"]
+        )
+        registration = (
+            shell.decode()
+            .split("import runpy,sys\nfrom pathlib import Path\nh=runpy.run_path(sys.argv[1]);proof=")[1]
+            .split("\nPY")[0]
+        )
+        registration = "import runpy,sys\nfrom pathlib import Path\nh=runpy.run_path(sys.argv[1]);proof=" + registration
+        blocked = f.old.root / "blocked-registry"
+        blocked.write_text("not a directory")
+        with tempfile.NamedTemporaryFile(dir=ROOT / "scripts", suffix=".py") as source:
+            source.write(old_source)
+            source.flush()
+            result = subprocess.run(
+                [
+                    "python3",
+                    "-S",
+                    "-c",
+                    registration,
+                    source.name,
+                    str(destination / "archived-reuse-proof.json"),
+                    str(blocked),
+                    str(f.old.root / "audit"),
+                    str(f.old.root / "common"),
+                ],
+                capture_output=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((destination / ".cid").exists())
+        self.fixture.members["source/scripts/lib/cloudbench-archived-reuse.sh"] = shell
+        token = self.successor["owner_token"]
+        for kind, version in (("ownership", "2"), ("audits", "1")):
+            meta = dict(
+                version=version,
+                app=H["APP"],
+                fleet_owner_token=token,
+                run_id=self.successor["run_id"],
+                host=self.successor["controller_id"],
+            )
+            self.fixture.members["git-common/cloudbench-fleet-" + kind + "/" + token + "/meta"] = (
+                "\n".join(k + "=" + v for k, v in meta.items()) + "\n"
+            ).encode()
+        inventory = json.loads(f.inventory.read_bytes())
+        inventory[0] = current
+        OLD["write"](f.inventory, inventory)
+        return current
+
+    def test_actual_allocate_proof_before_assignment_is_typed_new_eligibility(self):
+        current = self.partial_proof_fixture()
+        with mock.patch.dict(
+            M["qualify"].__globals__,
+            protocol=lambda _: "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7",
+        ):
+            result = self.prepare()
+            self.assertEqual(len(result["candidates"]), 1, result.get("parked_claim_diagnostics"))
+            self.assertEqual(
+                result["candidates"][0]["parked_claim_proof"]["stage"], "PARTIAL_PROOF_PUBLICATION_BEFORE_ASSIGNMENT"
+            )
+            for path, data in [
+                (".cid", ("archived-reuse " + self.fixture.mid + "\n").encode()),
+                ("boot.intent.json", b"{}"),
+                ("archived-reuse-wire/" + "f" * 32 + "/transport-start.json", b"{}"),
+                ("archived-reuse-proof.json", b"{}"),
+                ("archived-reuse-journal/claim-ack.json", b"{}"),
+            ]:
+                key = self.root + "/" + path
+                previous = self.fixture.members.get(key)
+                self.fixture.members[key] = data
+                self.assertEqual(self.prepare()["candidates"], [])
+                if previous is None:
+                    del self.fixture.members[key]
+                else:
+                    self.fixture.members[key] = previous
+            changed = copy.deepcopy(current)
+            changed["instance_id"] = "foreign"
+            inventory = json.loads(self.fixture.inventory.read_bytes())
+            inventory[0] = changed
+            OLD["write"](self.fixture.inventory, inventory)
+            self.assertEqual(self.prepare()["candidates"], [])
+
+    def test_current_reviewed_allocate_has_same_proof_before_assignment_boundary(self):
+        self.partial_proof_fixture(current_source=True)
+        with mock.patch.dict(
+            M["qualify"].__globals__,
+            protocol=lambda _: "829cd14575c5e0d74ac0e969c7354719e03e311a79b97abcec8490474d53e8a1",
+        ):
+            value = self.prepare()
+            self.assertEqual(len(value["candidates"]), 1)
+            self.assertEqual(
+                value["candidates"][0]["parked_claim_proof"]["stage"], "PARTIAL_PROOF_PUBLICATION_BEFORE_ASSIGNMENT"
+            )
+
     def test_archived_effect_and_publication_protocol_is_git_bound(self):
         ref = "500babc9035912cbbdede1fa63b2d67ce960c7ac"
         self.assertEqual(len(M["protocol"](ref)), 64)
         original = (ROOT / "scripts/cloudbench-archived-machine-reuse.py").read_bytes()
-        changed = original.replace(
-            b"with api.lease(mid):", b"with api.foreign(mid):", 1
-        )
+        changed = original.replace(b"with api.lease(mid):", b"with api.foreign(mid):", 1)
         with (
             mock.patch.object(M["subprocess"], "check_output", return_value=changed),
             self.assertRaises(ValueError),
         ):
             M["protocol"](ref)
-        changed_selector = original.replace(
-            b"index = campaign_candidate_index(request, successor)", b"index = 0", 1
-        )
+        changed_selector = original.replace(b"index = campaign_candidate_index(request, successor)", b"index = 0", 1)
         with (
-            mock.patch.object(
-                M["subprocess"], "check_output", return_value=changed_selector
-            ),
+            mock.patch.object(M["subprocess"], "check_output", return_value=changed_selector),
             self.assertRaises(ValueError),
         ):
             M["protocol"](ref)
@@ -267,9 +413,7 @@ class Parked(unittest.TestCase):
             return real_git(command, **kwargs)
 
         with (
-            mock.patch.object(
-                M["subprocess"], "check_output", side_effect=changed_index
-            ),
+            mock.patch.object(M["subprocess"], "check_output", side_effect=changed_index),
             self.assertRaisesRegex(ValueError, "indexed selection protocol"),
         ):
             M["protocol"](new_ref)
@@ -338,43 +482,29 @@ class Parked(unittest.TestCase):
                     return (ROOT / "scripts/cloudbench-reuse-index.py").read_bytes()
                 return git(command, **kwargs)
 
-            with mock.patch.object(
-                M["subprocess"], "check_output", side_effect=new_git
-            ):
+            with mock.patch.object(M["subprocess"], "check_output", side_effect=new_git):
                 self.assertEqual(M["protocol"](new_ref), M["U"]["digest"](new))
                 changed = new.replace(b"return 'bound'", b"return 'foreign'")
 
                 def changed_git(command, **kwargs):
-                    if (
-                        command[-1]
-                        == new_ref + ":scripts/cloudbench-archived-machine-reuse.py"
-                    ):
+                    if command[-1] == new_ref + ":scripts/cloudbench-archived-machine-reuse.py":
                         return changed
                     return new_git(command, **kwargs)
 
                 with (
-                    mock.patch.object(
-                        M["subprocess"], "check_output", side_effect=changed_git
-                    ),
+                    mock.patch.object(M["subprocess"], "check_output", side_effect=changed_git),
                     self.assertRaises(ValueError),
                 ):
                     M["protocol"](new_ref)
-                altered = old.replace(
-                    b"with api.lease(mid):", b"with api.foreign(mid):", 1
-                )
+                altered = old.replace(b"with api.lease(mid):", b"with api.foreign(mid):", 1)
 
                 def old_git(command, **kwargs):
-                    if (
-                        command[-1]
-                        == new_ref + ":scripts/cloudbench-archived-machine-reuse.py"
-                    ):
+                    if command[-1] == new_ref + ":scripts/cloudbench-archived-machine-reuse.py":
                         return altered
                     return new_git(command, **kwargs)
 
                 with (
-                    mock.patch.object(
-                        M["subprocess"], "check_output", side_effect=old_git
-                    ),
+                    mock.patch.object(M["subprocess"], "check_output", side_effect=old_git),
                     self.assertRaises(ValueError),
                 ):
                     M["protocol"](new_ref)
@@ -383,9 +513,7 @@ class Parked(unittest.TestCase):
         result = self.prepare()
         self.assertEqual(len(result["candidates"]), 1)
         candidate = result["candidates"][0]
-        self.assertEqual(
-            candidate["parked_claim_proof"]["stage"], "PRE_CALL_UNCHANGED_RESERVED"
-        )
+        self.assertEqual(candidate["parked_claim_proof"]["stage"], "PRE_CALL_UNCHANGED_RESERVED")
         self.assertIsNone(candidate["parked_claim_proof"]["claim_id"])
         self.assertNotIn("reservation", candidate)
         self.assertEqual(candidate["parked_claim_proof"]["capacity_credit"], 0)
@@ -404,18 +532,12 @@ class Parked(unittest.TestCase):
         self.assertEqual(len(result["candidates"]), 1)
         candidate = result["candidates"][0]
         self.assertEqual(candidate["source_instance_id"], ack["instance_id"])
-        self.assertEqual(
-            candidate["prior_marker"], ack["config"]["metadata"][H["MARKER"]]
-        )
+        self.assertEqual(candidate["prior_marker"], ack["config"]["metadata"][H["MARKER"]])
         self.assertEqual(candidate["predecessor"], self.row["predecessor"])
-        self.assertEqual(
-            candidate["parked_claim_proof"]["stage"], "CONFIG_ACKED_UNPUBLISHED"
-        )
+        self.assertEqual(candidate["parked_claim_proof"]["stage"], "CONFIG_ACKED_UNPUBLISHED")
         self.assertTrue(candidate["parked_claim_proof"]["old_failure_retained"])
         self.assertEqual(result["held_machine_ids"], [])
-        self.assertFalse(
-            any(path.endswith("claim-ack.json") for path in self.fixture.members)
-        )
+        self.assertFalse(any(path.endswith("claim-ack.json") for path in self.fixture.members))
 
     def test_empty_post_ack_get_preserves_failure_and_new_eligibility(self):
         ack = self.acked()
@@ -442,9 +564,7 @@ class Parked(unittest.TestCase):
     def test_unknown_versioned_update_requires_unchanged_leased_prior_state(self):
         self.acked()
         f = self.fixture
-        before = json.loads(
-            f.members[self.root + "/archived-reuse-journal/original-native.json"]
-        )
+        before = json.loads(f.members[self.root + "/archived-reuse-journal/original-native.json"])
         wire_path = self.root + "/" + self.update_folder + "0001-wire.json"
         del f.members[wire_path]
         self.put(
@@ -462,9 +582,7 @@ class Parked(unittest.TestCase):
         self.assertEqual(proof["capacity_credit"], 0)
         self.assertNotIn(wire_path, f.members)
         # A different leased pre-read cannot certify this old transition.
-        request_path = (
-            self.root + "/archived-reuse-wire/" + format(2, "032x") + "/request.json"
-        )
+        request_path = self.root + "/archived-reuse-wire/" + format(2, "032x") + "/request.json"
         request = json.loads(f.members[request_path])
         request["headers"]["fly-machine-lease-nonce"] = "other-lease"
         f.members[request_path] = H["canonical"](request)
@@ -478,12 +596,10 @@ class Parked(unittest.TestCase):
         cases = {
             self.root + "/.cid": ("archived-reuse " + f.mid).encode(),
             self.root + "/archived-reuse-proof.json": H["canonical"](self.proof),
-            "git-common/cloudbench-archived-reuse/current/" + f.mid + ".json": H[
-                "canonical"
-            ]({"machine_id": f.mid}),
-            "context/fleet/runs/foreign/task/archived-reuse-journal/source-exclusion.json": H[
-                "canonical"
-            ]({"proof": self.proof, "predecessor": self.row}),
+            "git-common/cloudbench-archived-reuse/current/" + f.mid + ".json": H["canonical"]({"machine_id": f.mid}),
+            "context/fleet/runs/foreign/task/archived-reuse-journal/source-exclusion.json": H["canonical"](
+                {"proof": self.proof, "predecessor": self.row}
+            ),
         }
         for path, raw in cases.items():
             with self.subTest(path=path):
@@ -518,9 +634,7 @@ class Parked(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
         self.assertEqual(result["held_machine_ids"], [f.mid])
         diagnostic = result["archive"]["parked_classification"]["rows"][0]
-        self.assertEqual(
-            diagnostic["reason"], "malformed response is not an isolated read"
-        )
+        self.assertEqual(diagnostic["reason"], "malformed response is not an isolated read")
         self.assertEqual(
             diagnostic["malformed_json"],
             [{"path": path, "bytes": 0, "sha256": H["sha"](b"")}],
@@ -548,9 +662,7 @@ class Parked(unittest.TestCase):
             json.loads(self.fixture.members[request_key]),
         )
         self.assertEqual(self.prepare()["candidates"], [])
-        del self.fixture.members[
-            self.root + "/archived-reuse-wire/" + "e" * 32 + "/request.json"
-        ]
+        del self.fixture.members[self.root + "/archived-reuse-wire/" + "e" * 32 + "/request.json"]
         exclusion_key = self.root + "/archived-reuse-journal/source-exclusion.json"
         prior = self.fixture.members[exclusion_key]
         value = json.loads(prior)

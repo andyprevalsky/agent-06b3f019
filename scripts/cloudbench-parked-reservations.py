@@ -46,8 +46,7 @@ def protocol(ref):
     # Exact reviewed pre-reconciliation source remains a distinct protocol.
     old_source = (
         current
-        if U["digest"](current)
-        == "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7"
+        if U["digest"](current) == "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7"
         else subprocess.check_output(
             [
                 "git",
@@ -60,35 +59,24 @@ def protocol(ref):
         )
     )
     need(
-        U["digest"](old_source)
-        == "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7",
+        U["digest"](old_source) == "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7",
         "reviewed old claim protocol changed",
     )
     old_functions = selected(old_source)
     old_protocol = U["digest"](source) == U["digest"](old_source)
-    reference = (
-        old_functions
-        if old_protocol or not recovery.intersection(archived_functions)
-        else current_functions
-    )
+    reference = old_functions if old_protocol or not recovery.intersection(archived_functions) else current_functions
     if recovery.intersection(archived_functions):
         need(
             recovery <= set(archived_functions)
             and recovery <= set(current_functions)
-            and all(
-                archived_functions[name] == current_functions[name] for name in recovery
-            ),
+            and all(archived_functions[name] == current_functions[name] for name in recovery),
             "archived claim reconciliation protocol differs",
         )
     # The original allocator retained the full validated cohort while claiming
     # one row. Accept only those exact reviewed legacy bytes; the effect,
     # publication and index functions must still match the current protocol.
     allocator = next(
-        (
-            node
-            for node in ast.parse(source).body
-            if isinstance(node, ast.FunctionDef) and node.name == "allocate"
-        ),
+        (node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "allocate"),
         None,
     )
     legacy_allocator = (
@@ -102,14 +90,11 @@ def protocol(ref):
     )
     need(
         names <= set(archived_functions)
-        and all(
-            archived_functions[name] == reference[name] for name in names - {"allocate"}
-        )
+        and all(archived_functions[name] == reference[name] for name in names - {"allocate"})
         and (
             (
                 archived_functions["allocate"] == reference["allocate"]
-                and archived_functions.get("selected_request")
-                == reference.get("selected_request")
+                and archived_functions.get("selected_request") == reference.get("selected_request")
             )
             or legacy_allocator
         ),
@@ -136,6 +121,7 @@ def protocol(ref):
 def collect(closed, held, inputs):
     manifest = U["archive_manifest"](closed, inputs)
     roots = {}
+    owner_metadata = {}
     for row in held:
         for evidence in row["claim_evidence"]:
             path = evidence["path"]
@@ -145,9 +131,9 @@ def collect(closed, held, inputs):
                     "/archived-successor.json",
                 )
             ):
-                root = path.removesuffix(
-                    "/archived-reuse-journal/source-exclusion.json"
-                ).removesuffix("/archived-successor.json")
+                root = path.removesuffix("/archived-reuse-journal/source-exclusion.json").removesuffix(
+                    "/archived-successor.json"
+                )
                 roots.setdefault(
                     root,
                     {
@@ -158,6 +144,8 @@ def collect(closed, held, inputs):
                         "claim_evidence": row["claim_evidence"],
                         "published": [],
                         "malformed_json": [],
+                        "namespace": {},
+                        "producer_sha256": None,
                     },
                 )
                 need(
@@ -166,20 +154,46 @@ def collect(closed, held, inputs):
                 )
     with tarfile.open(closed / "export/originals.tar.gz", "r|gz") as archive:
         for member in archive:
+            if (
+                re.fullmatch(r"git-common/cloudbench-fleet-(?:ownership|audits)/[0-9a-f]{32}/meta", member.name)
+                and member.isfile()
+            ):
+                expected = manifest["files"][member.name]
+                raw = archive.extractfile(member).read(1048577)
+                need(
+                    len(raw) <= 1048576 and len(raw) == expected["bytes"] and U["digest"](raw) == expected["sha256"],
+                    "partial owner metadata differs",
+                )
+                owner_metadata[member.name] = raw
             parts = member.name.split("/")
             # context/fleet/runs/RUN/TASK is the canonical private task root.
             root = "/".join(parts[:5])
-            if root not in roots or not member.isfile():
+            if member.name == "source/scripts/lib/cloudbench-archived-reuse.sh" and member.isfile():
+                expected = manifest["files"][member.name]
+                raw = archive.extractfile(member).read(1048577)
+                need(
+                    len(raw) <= 1048576 and len(raw) == expected["bytes"] and U["digest"](raw) == expected["sha256"],
+                    "claim shell producer differs",
+                )
+                for group in roots.values():
+                    group["producer_sha256"] = U["digest"](raw)
+            if root not in roots:
                 continue
             relative = "/".join(parts[5:])
+            roots[root]["namespace"][relative] = manifest["files"][member.name]
+            if not member.isfile():
+                continue
             if relative in ("archived-reuse-proof.json", ".cid"):
                 roots[root]["published"].append(member.name)
-                continue
+                if relative == ".cid":
+                    continue
             if not member.name.endswith(".json"):
                 continue
-            if relative != "archived-successor.json" and not relative.startswith(
-                ("archived-reuse-journal/", "archived-reuse-wire/")
-            ):
+            if relative not in (
+                "archived-successor.json",
+                "archived-reuse-proof.json",
+                ".startup-state.json",
+            ) and not relative.startswith(("archived-reuse-journal/", "archived-reuse-wire/")):
                 continue
             expected = manifest["files"][member.name]
             need(
@@ -188,8 +202,7 @@ def collect(closed, held, inputs):
             )
             raw = archive.extractfile(member).read(16 * 1024 * 1024 + 1)
             need(
-                len(raw) == expected["bytes"] == member.size
-                and U["digest"](raw) == expected["sha256"],
+                len(raw) == expected["bytes"] == member.size and U["digest"](raw) == expected["sha256"],
                 "claim bytes changed",
             )
             roots[root]["hashes"][member.name] = U["digest"](raw)
@@ -199,22 +212,19 @@ def collect(closed, held, inputs):
                 roots[root]["malformed_json"].append(
                     {"path": member.name, "bytes": len(raw), "sha256": U["digest"](raw)}
                 )
+    for group in roots.values():
+        group["manifest_files"] = manifest["files"]
+        group["owner_metadata"] = owner_metadata
     return roots
 
 
 def records(files):
     result = []
     for name, request in files.items():
-        if not name.startswith("archived-reuse-wire/") or not name.endswith(
-            "/request.json"
-        ):
+        if not name.startswith("archived-reuse-wire/") or not name.endswith("/request.json"):
             continue
         prefix = name.removesuffix("request.json")
-        wires = [
-            value
-            for key, value in files.items()
-            if key.startswith(prefix) and key.endswith("-wire.json")
-        ]
+        wires = [value for key, value in files.items() if key.startswith(prefix) and key.endswith("-wire.json")]
         need(len(wires) <= 1, "ambiguous raw claim response")
         if not wires:
             started = files.get(prefix + "transport-start.json", {})
@@ -233,11 +243,131 @@ def records(files):
         )
         value = json.loads(raw) if 200 <= wire["status"] < 300 and raw.strip() else None
         if prefix + "result.json" in files:
-            need(
-                files[prefix + "result.json"] == value, "claim decoded response differs"
-            )
+            need(files[prefix + "result.json"] == value, "claim decoded response differs")
         result.append((wire["monotonic_ns"], request, value, wire["status"]))
     return result
+
+
+def validate_partial_proof(group, request, proof, wire, current, stage, source_sha):
+    need(
+        source_sha
+        in {
+            "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7",
+            "829cd14575c5e0d74ac0e969c7354719e03e311a79b97abcec8490474d53e8a1",
+        }
+        and group.get("producer_sha256") == "20c34a26e524e6beb9c7d077aa8705b45134106ec831e2ad616b3139df3ececc"
+        and stage == "CONFIG_ACKED_UNPUBLISHED",
+        "unknown partial claim publication producer",
+    )
+    files = group["files"]
+    need(
+        files["archived-reuse-proof.json"] == proof
+        and files["archived-reuse-journal/claim-ack.json"]
+        == dict(instance_id=current["instance_id"], native_marker_sha256=proof["native_marker_sha256"]),
+        "partial claim publication proof differs",
+    )
+    ordered = sorted(wire, key=lambda item: item[0] if type(item[0]) is int else -1)
+    url = "/machines/" + current["id"]
+    need(
+        len(ordered) == 5
+        and all(type(t) is int for t, *_ in ordered)
+        and [t for t, *_ in ordered] == sorted(set(t for t, *_ in ordered))
+        and [(q["method"], q["path"]) for _, q, _, _ in ordered]
+        == [("POST", url + "/lease"), ("GET", url), ("POST", url), ("GET", url), ("DELETE", url + "/lease")]
+        and [code for _, _, _, code in ordered] == [201, 200, 200, 200, 200],
+        "partial claim lease history is not closed",
+    )
+    wire_names = {name for name in group["namespace"] if name.startswith("archived-reuse-wire/")}
+    folders = {name.removesuffix("/request.json") for name in wire_names if name.endswith("/request.json")}
+    expected_names = folders | {
+        folder + "/" + name
+        for folder in folders
+        for name in (
+            "request.json",
+            "0001-wire.json",
+            "result.json",
+            "http-start.json",
+            "transport-start.json",
+            "stderr.private.log",
+        )
+    }
+    need(len(folders) == 5 and wire_names == expected_names, "partial claim wire namespace is not exact closed history")
+    need(
+        ordered[0][1].get("body") == {"description": "archived same-volume successor", "ttl": 180}
+        and all(ordered[i][1].get("body") is None for i in (1, 3, 4)),
+        "partial claim lease/read body differs",
+    )
+    nonce = ordered[0][2]["data"]["nonce"]
+    need(
+        all(q.get("headers", {}).get("fly-machine-lease-nonce") == nonce for _, q, _, _ in ordered[1:])
+        and all(
+            ordered[3][2].get(k) == current.get(k)
+            for k in ("id", "instance_id", "config", "name", "region", "created_at")
+        )
+        and ordered[3][2].get("state") == "stopped",
+        "partial claim readback differs",
+    )
+    successor = proof["successor"]
+    token = successor["owner_token"]
+    for kind, version in (("ownership", "2"), ("audits", "1")):
+        prefix = "git-common/cloudbench-fleet-" + kind + "/" + token
+        path = prefix + "/meta"
+        raw = group["owner_metadata"][path]
+        pairs = [line.split("=", 1) for line in raw.decode().splitlines()]
+        need(
+            all(len(pair) == 2 for pair in pairs) and len({pair[0] for pair in pairs}) == len(pairs),
+            "partial owner metadata malformed",
+        )
+        meta = dict(pairs)
+        need(
+            meta.get("version") == version
+            and meta.get("fleet_owner_token") == token
+            and meta.get("app") == H["APP"]
+            and meta.get("run_id") == successor["run_id"]
+            and (kind != "ownership" or meta.get("host") == successor["controller_id"]),
+            "partial owner lineage differs",
+        )
+        need(
+            not any(name.startswith(prefix + "/archived-reuse/") for name in group["manifest_files"]),
+            "partial owner already registered native reuse",
+        )
+        group["hashes"][path] = U["digest"](raw)
+    need(
+        "git-common/cloudbench-archived-reuse/current/" + current["id"] + ".json" not in group["manifest_files"],
+        "partial claim globally published",
+    )
+    for name, entry in group["namespace"].items():
+        allowed = (
+            name
+            in (
+                "",
+                "archived-reuse-journal",
+                "archived-reuse-wire",
+                "archived-successor.json",
+                "archived-reuse-proof.json",
+                ".startup-state.json",
+                "bench-e2e.started-epoch",
+            )
+            or name
+            in {
+                "archived-reuse-journal/" + n
+                for n in ("claim-ack.json", "claim-intent.json", "original-native.json", "source-exclusion.json")
+            }
+            or re.fullmatch(
+                r"archived-reuse-wire/[0-9a-f]{32}(?:/(?:request.json|0001-wire.json|result.json|transport-start.json|http-start.json|stderr.private.log))?",
+                name,
+            )
+        )
+        need(
+            allowed and entry.get("kind") in ("file", "directory"),
+            "partial claim contains task publication or foreign artifact",
+        )
+    startup = files.get(".startup-state.json")
+    if startup is not None:
+        need(
+            set(startup) == {"seen"} and set(startup["seen"]) <= {"cloning"},
+            "partial claim startup progressed beyond allocation",
+        )
 
 
 def qualify(
@@ -260,9 +390,11 @@ def qualify(
         group["root"] + "/archived-successor.json",
         group["root"] + "/archived-reuse-journal/source-exclusion.json",
     }
+    partial = group["published"] == [group["root"] + "/archived-reuse-proof.json"]
+    if partial:
+        allowed.add(group["root"] + "/archived-reuse-proof.json")
     need(
-        not group["published"]
-        and all(e["path"] in allowed for e in group["claim_evidence"]),
+        (not group["published"] or partial) and all(e["path"] in allowed for e in group["claim_evidence"]),
         "unaccounted claim or published task effect",
     )
     need(
@@ -287,7 +419,7 @@ def qualify(
     )
     need(
         not any(
-            key.endswith(("claim-ack.json", "retained-terminal.json")) for key in files
+            key.endswith("retained-terminal.json") or (key.endswith("claim-ack.json") and not partial) for key in files
         ),
         "completed claim belongs latest archive",
     )
@@ -308,11 +440,8 @@ def qualify(
         ),
         "foreign native action in claim history",
     )
-    posts = [
-        record
-        for record in wire
-        if record[1]["method"] == "POST" and record[1]["path"] == url
-    ]
+    posts = [record for record in wire if record[1]["method"] == "POST" and record[1]["path"] == url]
+    transition = None
     intent = files.get("archived-reuse-journal/claim-intent.json")
     if intent is None:
         need(not posts, "unknown native update without intent")
@@ -327,11 +456,7 @@ def qualify(
             inputs,
             reservation_context,
         )
-        stage = (
-            "PRE_CONFIG_UNCHANGED_RESERVED"
-            if exclusion
-            else "PRE_CALL_UNCHANGED_RESERVED"
-        )
+        stage = "PRE_CONFIG_UNCHANGED_RESERVED" if exclusion else "PRE_CALL_UNCHANGED_RESERVED"
     else:
         need(exclusion is not None, "claim intent without source exclusion")
         before = files["archived-reuse-journal/original-native.json"]
@@ -348,9 +473,7 @@ def qualify(
         need(len(posts) == 1, "unknown or repeated claim native update")
         at, update, ack, status = posts[0]
         expected = copy.deepcopy(before["config"])
-        expected.setdefault("metadata", {})[H["MARKER"]] = canonical(
-            proof["native_marker"]
-        ).decode()
+        expected.setdefault("metadata", {})[H["MARKER"]] = canonical(proof["native_marker"]).decode()
         expected["init"] = {"cmd": ["sleep", "infinity"]}
         need(
             intent
@@ -429,6 +552,9 @@ def qualify(
                 "current parked identity differs from ACK",
             )
             stage = "CONFIG_ACKED_UNPUBLISHED"
+    if partial:
+        validate_partial_proof(group, request, proof, wire, current, stage, source_sha)
+        stage = "PARTIAL_PROOF_PUBLICATION_BEFORE_ASSIGNMENT"
     candidate = copy.deepcopy(row)
     candidate.pop("reservation")
     candidate.update(
@@ -437,7 +563,10 @@ def qualify(
         prior_marker=current["config"].get("metadata", {}).get(H["MARKER"]),
     )
     candidate.setdefault("legacy_archive_sha256", candidate["archive_sha256"])
-    candidate["closed_transition_proof"] = {"unknown_read_responses": read_failures, "prior_effect": transition if intent is not None and stage != "CONFIG_ACKED_UNPUBLISHED" else None}
+    candidate["closed_transition_proof"] = {
+        "unknown_read_responses": read_failures,
+        "prior_effect": transition if intent is not None and stage != "CONFIG_ACKED_UNPUBLISHED" else None,
+    }
     candidate["parked_claim_proof"] = {
         "stage": stage,
         "archived_claim_source_sha256": source_sha,
@@ -449,6 +578,13 @@ def qualify(
         "old_liabilities": "UNRESOLVED",
         "capacity_credit": 0,
     }
+    if partial:
+        candidate["parked_claim_proof"].update(
+            native_claim_acknowledged=True,
+            assignment_published=False,
+            task_started_inferred=False,
+            task_namespace=group["namespace"],
+        )
     return candidate
 
 
@@ -456,21 +592,14 @@ def prepare(run, inventory_path):
     outer = Path(run).absolute()
     result = U["prepare"](outer, inventory_path)
     inputs = result["archive"]["inputs"]
-    original = U["obj"](outer / "archived-reuse-original.private.json", inputs)[
-        "request"
-    ]
+    original = U["obj"](outer / "archived-reuse-original.private.json", inputs)["request"]
     initial = {row["machine_id"]: row for row in original["candidates"]}
     closed, config = U["closed_run"](outer, inputs)
     latest = CLOSED["prepare"](closed, inventory_path)
     inputs.update(latest["inputs"])
-    request, reservation_context = U["request_for_closed"](
-        outer, closed, config, latest, inputs
-    )
+    request, reservation_context = U["request_for_closed"](outer, closed, config, latest, inputs)
     owned = set(latest["archived_ownership"])
-    native = {
-        row["id"]: row
-        for row in json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))
-    }
+    native = {row["id"]: row for row in json.loads(CLOSED["raw"](inventory_path, 256 * 1024 * 1024))}
     selected = {row["machine_id"] for row in request["candidates"]}
     held_ids = {row["machine_id"] for row in result["held_reservations"]}
     omitted = {
@@ -502,12 +631,7 @@ def prepare(run, inventory_path):
     qualified, diagnostics = set(), []
     for row in request["candidates"]:
         mid = row["machine_id"]
-        if (
-            mid in owned
-            or mid not in by_mid
-            or len(by_mid[mid]) != 1
-            or mid not in native
-        ):
+        if mid in owned or mid not in by_mid or len(by_mid[mid]) != 1 or mid not in native:
             diagnostics.append(
                 {
                     "machine_id": mid,
@@ -546,9 +670,7 @@ def prepare(run, inventory_path):
             )
             continue  # Unknown or conflicting claims remain held, never native retries.
         candidate["archive_sha256"] = result["archive"]["archive_sha256"]
-        candidate["parked_claim_proof"]["closed_archive_sha256"] = result["archive"][
-            "archive_sha256"
-        ]
+        candidate["parked_claim_proof"]["closed_archive_sha256"] = result["archive"]["archive_sha256"]
         result["candidates"].append(candidate)
         qualified.add(mid)
         diagnostics.append(
@@ -566,18 +688,12 @@ def prepare(run, inventory_path):
         "reason_counts": counts,
         "new_capacity_credit": 0,
     }
-    result["held_machine_ids"] = [
-        mid for mid in result["held_machine_ids"] if mid not in qualified
-    ]
-    result["held_reservations"] = [
-        row for row in result["held_reservations"] if row["machine_id"] not in qualified
-    ]
+    result["held_machine_ids"] = [mid for mid in result["held_machine_ids"] if mid not in qualified]
+    result["held_reservations"] = [row for row in result["held_reservations"] if row["machine_id"] not in qualified]
     result["candidates"].sort(key=lambda row: row["machine_id"])
     need(
-        len({r["machine_id"] for r in result["candidates"]})
-        == len(result["candidates"])
-        and len({r["volume_id"] for r in result["candidates"]})
-        == len(result["candidates"]),
+        len({r["machine_id"] for r in result["candidates"]}) == len(result["candidates"])
+        and len({r["volume_id"] for r in result["candidates"]}) == len(result["candidates"]),
         "duplicate parked candidate",
     )
     return result

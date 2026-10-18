@@ -138,3 +138,83 @@ and never clear an unknown intent or infer old task success to meet capacity.
 
 Prove eligibility for a new generation without changing the historical outcome
 or replaying an old effect.
+
+
+## Run77 recurrence: proof publication precedes task assignment
+
+On October 18, the next three-run full600 timing batch reached a new boundary:
+full saved-inventory preparation produced 571 eligible retained Machines while
+the canonical organization snapshot had 29 free slots. That is 600 slots;
+600 workers plus their controller require 601. The exact remaining held
+Machine `899766c6759018` was rejected with `unaccounted claim or published task
+effect`. Its immutable run77 archive has manifest SHA
+`4784c4389cf096e71c05364c7fc3aab4f6d7655164c244ce20216145963bd1ca`.
+All 62 supplied claim-member hashes for the two remaining holds were verified.
+
+This is a recurrence at the earlier parked reader's publication predicate.
+`collect` grouped both `archived-reuse-proof.json` and `.cid` as publication,
+then `qualify` rejected the entire group. The actual producer has another
+observable boundary: `allocate` durably saves the local proof after the
+accepted claim and readback, then the shell registers that proof in live and
+durable ownership and common-current records, and only then writes `.cid`.
+The fleet's task-launch phase requires `.cid`. A local proof by itself is
+therefore evidence of a completed native allocation, not proof that assignment
+or task execution occurred. The previous fixture explicitly expected every
+published proof to stay held and did not execute this intermediate producer
+boundary.
+
+For this exact identity, all five raw transactions are retained: lease 201,
+pre-read 200, one version-fenced config POST 200, post-read 200 and lease release
+200. The accepted new instance, complete intended config, marker, creation
+identity and stopped current native row agree. The local proof equals the
+source-exclusion proof and its claim ACK binds that exact new instance and
+marker. The complete 46-member task-root inventory contains only preallocation
+startup metadata and claim artifacts; `.cid` and task boot artifacts are absent.
+The matching live and durable owner metadata remain, while their reuse records
+and the common-current record for this MID are absent. No registry record may
+be invented to fill that gap.
+
+The correction must distinguish this fully proven partial publication from
+both an unpublished unknown write and a task assignment. Require the exact
+reviewed producer, complete root/claim namespace, exact computed proof,
+positive single-CAS ACK and closed lease, no `.cid` or other task/native effect,
+and exact inactive current identity. Preserve the completed native claim and
+original task failure honestly. Read-only preparation grants no reservation
+credit; the normal new-cohort lease, current-version CAS and readback remain
+mandatory. The other hold, `87e514c0092e28`, has an unknown historical config
+response and a changed current instance and remains held for this correction.
+
+Archive searches used `published task effect archived proof partial assignment`
+and the literal `unaccounted claim or published task effect`. This case is a
+recurrence of the same closed-claim eligibility class, not a provider outage.
+Golden-reference checks found atomic publication guards in
+`openclaw/src/commands/backup.atomic.test.ts:1` and
+`hermes-agent/tools/environments/base_session_env.py:140`; these are analogies
+for separating preparation from publication, not authority for native reuse.
+The exact local owning reproduction and actual saved-input outcome remain to
+be recorded below. The RCA stays open and establishes no full600 task pass.
+
+The user explicitly replaced the earlier stop-and-ask preference with approval
+to continue necessary benchmark fixes autonomously. Keep the three requested
+full experiments, infra early-stop disabled, original task/run/I/O bounds and
+the batch wall/monotonic origin including failed preparations.
+
+
+The permanent owning regression now executes the actual reviewed allocator,
+then the extracted real registration heredoc against a failed registry path,
+then full `P.prepare`. The identical new test fails on 0344cd67 with zero
+candidates and passes on the corrected reader. The author's 12 owning tests
+passed in 1.851 seconds, including the same positive publication boundary for
+both exact reviewed allocator hashes, and assignment, task-boot, changed-proof,
+claim-ACK and current-incarnation denials. Ruff passed. Root independently ran
+both old/current allocator boundary tests successfully and validated the exact
+899 claim against all 46 actual task-root members, both owner metadata records,
+five raw native responses and the Git-bound old producer. Provider calls were
+zero. A mistyped second root test name first caused an invocation error; the
+corrected command passed and the failed invocation remains in the proof log.
+
+Only the two reviewed complete allocator hashes and the reviewed shell
+publication hash are allowed. An orphan extra wire directory, changed lease
+history, hidden task artifact, `.cid`, unknown producer or current drift still
+refuses admission. The actual full normal preparation and three unchanged
+experiments remain pending; causal fixture success is not task outcome proof.
