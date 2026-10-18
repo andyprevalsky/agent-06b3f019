@@ -5731,7 +5731,7 @@ async def test_client_foundry_stream_exit_closes_http_owner():
             patch("providers.rose.client._openai_api_key", return_value=""),
             patch("providers.rose.client._cerebras_api_key", return_value=""),
             patch("providers.rose.client.load_config", lambda: SimpleNamespace(anthropic=SimpleNamespace(api_key=""))),
-            patch.object(foundry, "_auth_cooldown_until", 0.0),
+            patch.object(foundry, "_auth_cooldown_until", {}),
             patch.object(foundry, "_cooldown_until", {}),
             patch.dict(
                 os.environ,
@@ -5832,6 +5832,90 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert attempted == ["foundry", "openrouter"]
     assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "openai/gpt-6-sol"
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
+
+
+async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
+    """A rate-limited Azure region hands the Ultra call to another region, not OpenRouter.
+
+    Only when every configured region is cooling does the waterfall continue.
+    """
+    import providers.rose.foundry as foundry
+
+    regions = {
+        "a-4989-resource.openai.azure.com": ("", "key-1"),
+        "rose-eastus2.openai.azure.com": ("_2", "key-2"),
+        "rose-swedencentral.openai.azure.com": ("_3", "key-3"),
+    }
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"region ok"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    openrouter_sse = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "openrouter ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    attempted: list[str] = []
+    limited: set[str] = set()
+
+    def handler(req):
+        host = req.url.host
+        if host in regions:
+            assert req.headers["api-key"] == regions[host][1], "region used another region's key"
+            attempted.append(host)
+            if host in limited:
+                return httpx.Response(429, headers={"retry-after": "30"})
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        if host == "openrouter.ai":
+            attempted.append("openrouter")
+            return httpx.Response(200, text=openrouter_sse, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    env = {"GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}
+    for host, (suffix, key) in regions.items():
+        env[f"AZURE_FOUNDRY_ENDPOINT{suffix}"] = f"https://{host}"
+        env[f"AZURE_FOUNDRY_API_KEY{suffix}"] = key
+        env[f"AZURE_FOUNDRY_DEPLOYMENTS{suffix}"] = "gpt-6-sol"
+
+    async def run(agent_id: str) -> list:
+        return await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                agent_id=agent_id,
+                dump_context=False,
+                _exclude_anthropic_family=True,
+                call_site="test-foundry-region-failover",
+            )
+        )
+
+    set_mock_handler(handler)
+    with (
+        patch.dict(os.environ, env),
+        patch.object(foundry, "_cooldown_until", {}),
+        patch.object(foundry, "_auth_cooldown_until", {}),
+    ):
+        agent_id = "agent-region-failover"
+        plan = [r.host for r, _ in foundry._route_plan(foundry.foundry_regions(), "gpt-6-sol", agent_id)]
+        assert sorted(plan) == sorted(regions)
+        limited.add(plan[0])
+        chunks = await run(agent_id)
+        assert attempted == plan[:2], attempted
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6-sol-foundry"
+        assert any(c.kind == "content" and c.data.get("text") == "region ok" for c in chunks)
+
+        attempted.clear()
+        limited.update(regions)
+        chunks = await run(agent_id)
+        assert attempted == plan[1:] + ["openrouter"], attempted
+        assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
 
 
 async def test_client_foundry_luna_backs_mini_and_speed_pools():
@@ -8343,6 +8427,10 @@ async def run_all_tests():
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",
         test_client_foundry_server_error_falls_through_to_openrouter,
+    )
+    await r.record_async(
+        "client_foundry_region_rate_limit_fails_over_before_openrouter",
+        test_client_foundry_region_rate_limit_fails_over_before_openrouter,
     )
     await r.record_async(
         "client_foundry_luna_backs_mini_and_speed_pools",
