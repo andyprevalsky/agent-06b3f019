@@ -965,6 +965,27 @@ def summary_from_export(export):
     return None
 
 
+def scorecard_module(root):
+    return runpy.run_path(str(root / 'scripts/cloudbench-scorecard.py'))
+
+
+def experiment_fields(args, plan):
+    """Ledger identity for one actual sharded launch: goal, operator slice label and shape."""
+    label = getattr(args, 'label', None) or os.environ.get('RUN_BENCH_EXPERIMENT_LABEL') \
+        or re.sub(r'(-tasks)?(\.private)?$', '', Path(args.tasks).stem)
+    return dict(goal=getattr(args, 'goal', None) or os.environ.get('RUN_BENCH_GOAL') or 'original600',
+                slice=label, kind='sharded', surface='cloud', source_ref=args.source_ref,
+                tasks=len({task for shard in plan['shards'] for task in shard['tasks']}),
+                runs=plan['shards'][0]['runs'], scheduled_total=plan['copies'], controllers=plan['controllers'])
+
+
+def native_release_audit(root, directory, token, identities):
+    """Final read-only native audit of every owned guest/controller identity (never mutates)."""
+    capture = runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))
+    audit = runpy.run_path(str(root / 'scripts/cloudbench-native-release-audit.py'))
+    return audit['run'](directory, capture['Fly']('navi-whisper-lux-bench', token), identities=identities)
+
+
 def publish_shard_group(root, directory, args, runner, group_id, started_at, shards, outcomes=None, finished=None):
     """One Hub group for all shards: schedule first, final outcomes after every runner joined."""
     campaign = runpy.run_path(str(root / 'scripts/run-bench-campaign.py'))
@@ -1018,6 +1039,11 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     print(json.dumps(dict(directory=str(directory), status='SHARDED_ADMISSION_STARTED', controllers=controllers,
                           copies=copies, copies_per_controller_bound=plan['copies_per_controller_bound'],
                           native_slots_required=demand)), flush=True)
+    scorecard = scorecard_module(root)
+    ledger = runpy.run_path(str(root / 'scripts/cloudbench_experiments.py'))
+    fields = experiment_fields(args, plan)
+    ledger['record']('launch', directory.name, root=root, run_dir=str(directory), triggered_at=started_at, **fields)
+    scorecard['print_instruction'](directory)
     with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
         cap = capacity_snapshot(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
     cap.update(qualified_reuse_count=0, new_machine_demand=demand, qualified_ids=[], new_controller_slots=controllers,
@@ -1097,8 +1123,12 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=copies,
                                        infra_early_stop=args.infra_early_stop, respawn=respawn,
                                        stagger_seconds=coordinator['DEFAULT_SPAWN_STAGGER_SECONDS'])
-    summaries = [summary_from_export(Path(s['out']) / 'export') for s in shards]
+    exports = [scorecard['export_records'](Path(s['out']) / 'export') for s in shards]
+    summaries = [record['summary'] for record in exports]
     merged = coordinator['merge']([v for v in summaries if v is not None], copies)
+    # Bounded per-job rows (verdict, reason, cost, timing, release) let the scorecard render without archives.
+    merged['jobs'] = [row for record in exports if record['summary']
+                      for row in scorecard['compact_rows'](record['summary'], record['cards'])]
     merged.update(shards_without_summary=[s['index'] for s, v in zip(shards, summaries) if v is None],
                   coordination=record, hub_group=group_id)
     outcomes = {job['job_id']: dict(status=job.get('status'), controller_exit_code=job.get('controller_exit_code'))
@@ -1116,6 +1146,19 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     print(json.dumps(dict(directory=str(directory), status='SHARDS_JOINED', result=str(directory / 'result.json'),
                           observed_jobs=merged['observed_jobs'], missing_jobs=merged['missing_jobs'],
                           infra_failures=merged['infra_failures'])), flush=True)
+    owned = (set().union(*(r['owned_names'] for r in exports)), set().union(*(r['owned_ids'] for r in exports)),
+             sum(r['summary'] is not None for r in exports))
+    try:
+        audit = native_release_audit(root, directory, token, owned)
+        print(json.dumps(dict(status='NATIVE_RELEASE_AUDIT', released=audit['released'], present=audit['present'],
+                              checked_guests=len(audit['checked']['guest_names']))), flush=True)
+    except Exception as error:  # read-only evidence; its absence renders as an unverified release, never a pass
+        print(json.dumps(dict(status='NATIVE_RELEASE_AUDIT_UNAVAILABLE', error=type(error).__name__)), flush=True)
+    ledger['record']('end', directory.name, root=root, goal=fields['goal'], ended_at=record.get('finished_at'),
+                     state='ABORTED' if record.get('abort_reason') or record.get('terminate_reason') else 'ENDED',
+                     outcome={k: merged.get(k) for k in ('task_status', 'infra_failures', 'observed_jobs', 'missing_jobs',
+                                                         'resources_released', 'lifecycle_verified')})
+    scorecard['print_instruction'](directory)
     return 0 if all(code == 0 for code in record['exit_codes'].values()) and not merged['missing_jobs'] else 1
 
 
@@ -1978,6 +2021,8 @@ def main():
                         help='whole-campaign budget from the admission clock, seconds (default 5400, the operator deadline)')
     parser.add_argument('--worker-headroom', type=int, default=0, help='extra native Machine slots to require for autoscaled workers')
     parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
+    parser.add_argument('--goal', help='experiments-ledger goal for numbering and experiments/day (default original600)')
+    parser.add_argument('--label', help='operator slice label for the scorecard (default: tasks file name)')
     args = parser.parse_args()
     if args.controllers != 'auto' and not re.fullmatch('[1-9][0-9]{0,2}', args.controllers):
         raise ValueError("--controllers must be 'auto' or a positive integer")

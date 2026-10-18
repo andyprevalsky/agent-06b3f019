@@ -3,6 +3,7 @@
 import argparse
 import ast
 import base64
+import contextlib
 from contextlib import contextmanager
 import errno
 import gzip
@@ -2114,6 +2115,21 @@ class Portable(unittest.TestCase):
 
 
 class Sharded(unittest.TestCase):
+    def setUp(self):
+        # Launches append to the experiments ledger and run a read-only native audit;
+        # tests keep both away from the shared git-common ledger and the provider.
+        ledger = tempfile.NamedTemporaryFile(prefix='experiments-', suffix='.jsonl', delete=False)
+        ledger.close()
+        self.ledger = Path(ledger.name)
+        self.addCleanup(self.ledger.unlink, missing_ok=True)
+        self.audits = []
+        for patcher in (patch.dict(os.environ, CLOUDBENCH_EXPERIMENTS_LEDGER=str(self.ledger)),
+                        patch.object(CLI, 'native_release_audit', lambda root, directory, token, owned: (
+                            self.audits.append((directory, owned)) or dict(released=True, present=[],
+                                                                           checked=dict(guest_names=sorted(owned[0])))))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     """Fresh runs split across controllers sized to what one controller handles easily."""
 
     def args(self, directory, **overrides):
@@ -2354,11 +2370,18 @@ class Sharded(unittest.TestCase):
                                 for r in range(1, shard['runs']+1) for i in shard['task_indexes']]
                         export = self.out/'export'; export.mkdir(mode=0o700)
                         (export/'disposable-export.verified.json').write_text('{}')
+                        jobs[0].update(run_id='20261018-000000-4242', controller_pid=4242, wall_clock_seconds=61.5)
+                        card = dict(run_id='20261018-000000-4242', cost=dict(agents_llm_usd=0.25, wmh_grounding_usd=None),
+                                    per_task=[dict(name=None, status='passed', duration_s=42.0, cost_usd=0.25,
+                                                   failure_reason=None, lifecycle_stage='released')])
                         raw = json.dumps(dict(jobs=jobs)).encode()
                         import tarfile
                         with tarfile.open(export/'originals.tar.gz', 'w:gz') as tar:
-                            info = tarfile.TarInfo('context/benchmarks/campaigns/campaign-x/summary.json')  # actual export layout
-                            info.size = len(raw); tar.addfile(info, io.BytesIO(raw))
+                            for member, data in (('context/benchmarks/campaigns/campaign-x/summary.json', raw),  # actual export layout
+                                                 ('context/fleet/runs/20261018-000000-4242/_batch/report-card.json', json.dumps(card).encode()),
+                                                 ('context/fleet/runs/20261018-000000-4242/teardown-ownership/owned-clones.names', b'cloudbench-owned\n')):
+                                info = tarfile.TarInfo(member)
+                                info.size = len(data); tar.addfile(info, io.BytesIO(data))
                         self.code = 0
                     elif self.polls == 1:
                         self.status('ready')
@@ -2386,8 +2409,17 @@ class Sharded(unittest.TestCase):
                  patch.object(CLI, 'publish_shard_group', publish), \
                  patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
                  patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
-                 patch.object(CLI.subprocess, 'Popen', Runner):
+                 patch.object(CLI.subprocess, 'Popen', Runner), \
+                 contextlib.redirect_stdout(io.StringIO()) as printed:
                 code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
+            output = printed.getvalue()
+            self.assertEqual(output.count('scripts/run-bench scorecard '), 4, 'start and end both print the scorecard command')
+            self.assertIn('hand-written cards are non-compliant', output)
+            ledger = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+            self.assertEqual([(e['event'], e['goal']) for e in ledger], [('launch', 'original600'), ('end', 'original600')])
+            self.assertEqual((ledger[0]['scheduled_total'], ledger[0]['controllers'], ledger[0]['slice']), (36, 3, 'tasks'))
+            self.assertEqual(len(self.audits), 1)
+            self.assertIn('cloudbench-owned', self.audits[0][1][0], 'the native audit checks owned guest names from the exports')
             self.assertEqual([p['outcomes'] is None for p in published], [True, False])
             self.assertEqual({p['group_id'] for p in published}, {launched[0].config['shard']['group_run_id']})
             self.assertEqual(published[0]['members'], 36)
@@ -2401,6 +2433,9 @@ class Sharded(unittest.TestCase):
             admission = next((directory/'state').iterdir())
             result = json.loads((admission/'result.json').read_bytes())
             self.assertEqual((result['observed_jobs'], result['missing_jobs'], result['infra_failures']), (36, 0, 0))
+            self.assertEqual(len(result['jobs']), 36, 'result.json carries one bounded row per scheduled job')
+            costed = [row for row in result['jobs'] if row['cost_usd'] is not None]
+            self.assertEqual([(row['cost_usd'], row['exec_s'], row['wall_s']) for row in costed], [(0.25, 42.0, 61.5)] * 3)  # one carded job per shard
             self.assertEqual(json.loads((admission/'capacity-proof.private.json').read_bytes())['new_machine_demand'], 45)
 
     def test_sharded_run_refuses_a_hub_interpreter_without_agents_dependencies(self):

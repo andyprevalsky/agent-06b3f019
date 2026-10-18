@@ -15,8 +15,10 @@ Every launch prints the mandatory parent-agent format and maintenance contract.
 Read it before communicating or scheduling the next slice; retrieve it again
 without a launch with `scripts/run-bench report-format`. Its single source is
 `.claude/shared/benchmark-report-format.txt`, governed by
-`.claude/shared/report-display-format.md`. Use its inline CSS-colored scorecard
-on boxes.dev (the framed fallback only when HTML is unavailable): headline
+`.claude/shared/report-display-format.md`. Render the card only with the
+printed `scripts/run-bench scorecard <run-dir> --html <file>` command and publish
+that file; never hand-write it. Use its inline CSS-colored scorecard
+on boxes.dev (the `--text` fallback only when HTML is unavailable): headline
 QUEUED / IN_PROGRESS / COMPLETED, then PASS / HARNESS FAILURE / INFRA FAILURE.
 Preserve genuine agent failures, cancellations and unknown classifications
 separately; keep the infra threshold in a minor note. Include the latest three
