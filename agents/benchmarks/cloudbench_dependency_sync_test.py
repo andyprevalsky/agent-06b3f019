@@ -30645,6 +30645,8 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         )
     source = fleet_source_text().split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    # One unchanged tick of the owned aggregator; its loop runs until the controller stops it.
+    aggregate = aggregate.split("\nwhile True:\n    try:\n        aggregate_tick()", 1)[0] + "\naggregate_tick()\n"
     assert fleet_source_text().index("# ── ONE aggregated batch dashboard") < fleet_source_text().index(
         "# ── Phase 1: provision"
     ), "live publisher begins after allocation"
@@ -32480,6 +32482,11 @@ def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release_after
             {"epoch": 1791415838, "signature": [[name, "failed", None, None, "teardown", None] for name in names]}
         )
     )
+    # A campaign member's original attempt persisted its membership-bound Hub
+    # identity; recovery must republish that record, never the bare local RUN_ID.
+    expected_hub_run = f"{run_id}-m{'a1' * 6}" if hub_at_recovery == "live" else run_id
+    if expected_hub_run != run_id:
+        (batch / "hub-run-id").write_text(expected_hub_run + "\n")
     for name in names:
         (run / name).mkdir()
         (run / name / "bench-e2e.started-epoch").write_text("1791412976\n")
@@ -32606,6 +32613,7 @@ capacity_release_stale_owner_reservations() {{ return 0; }}
     assert {(run / name / "bench-e2e.finished-epoch").read_text().strip() for name in names} == {release}
     assert len(received) == 1, "recovered release never reached terminal publication"
     assert [(t["name"], t["lifecycle_stage"]) for t in received[0]["tasks"]] == [(n, "released") for n in names]
+    assert received[0]["run_id"] == expected_hub_run
 
 
 @pytest.mark.parametrize(

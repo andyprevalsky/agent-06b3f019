@@ -28,6 +28,7 @@ sources:
   - fleet run 20261012-202210-3281129
   - fleet run 20261012-202209-3281450
   - fleet run 20261012-222628-2896286
+  - hub run original600-1792319287448456235
 repro: back-end/src/tests/blackbox/benchmark-hub-index-read.blackbox.ts
 status: open
 ---
@@ -750,3 +751,75 @@ unchanged; the uploader SHA256
 requires an explicit extra source binding outside those25 files. This source
 checkpoint is not a live rollout or outcome proof. Historical latency cause
 remains OPEN, and no server change, HTTP request or paid trial was made here.
+
+### 2026-10-18 recurrence at width 600: offered live load collapsed the Hub
+
+Run600c (`original600-1792319287448456235`, 20 disposable controllers × 30
+copies, release 10:50:29Z) exited 1 on every sampled copy, including passed
+tasks (shard-09 `r001-j0010`), with `❌ terminal Hub publication failed after
+resource release` after four `The read operation timed out` attempts.
+
+Runtime evidence, correlated through the per-attempt request IDs:
+
+- Client: live payloads were about 1 KB (about 0.5 KB gzip), so payload size was
+  not the cause. From 10:43Z every shard-09 attempt timed out in phase `open` at
+  about 30 s, roughly 60 attempts/min per shard. Request `acb1a3273983` has a
+  server `span.start` at 10:50:34.9Z and no `span.end`.
+- Server (one Render instance, 4 CPU / 16 GB): POST starts ran at 747/min
+  (10:40), 1,037/min (10:43) and 1,116/min (10:52). Group-commit cycles of at
+  most 64 ran every 10-15 s, so the Hub admitted about 4-6 uploads/s while being
+  offered about 18/s. The 10:52 window shows zero POST responses, yet each cycle
+  still stored 56-64 uploads, all from clients that had already timed out.
+  Goodput was zero and the FIFO backlog had no bound.
+- Per-cycle cost grows with the archive: `index.json` was 21.4 MB decoded across
+  19,155 runs (7.7 MB on 10-12). Every cycle reads and writes it, and every put
+  copies the whole agent-run Map. Every `GET /runs/:id` also parses the whole
+  index.
+- The live publisher, not execution, offered the load. Each copy re-posted on
+  every startup-label change and every 15 s while unchanged, and after a
+  failure it retried on every 1 s tick.
+- Terminal phase: final bundles are p50 4.2 MB, max 31.5 MB. From 10:56Z cycles
+  stretched to 30-120 s. Postgres killed the advisory-lock transaction six times
+  (`terminating connection due to idle-in-transaction timeout` at 10:57-11:08Z,
+  followed by `Server has closed the connection.` for each 64-upload cycle).
+  Instance RSS grew from 0.85 GB (10:54) to 6.56 GB (11:20) at about 2 CPU.
+  Completed responses on all routes fell to 16, 4, 0, 1 and 2 per minute over
+  11:16-11:20. Render recorded `server_failed` (unhealthy, `dial tcp
+  …:10000: i/o timeout`, not evicted) at 11:21:23.98Z after `Server started` at
+  11:21:12.7Z. User routes (agent polling, agent-queue pointer, AgentCard MCP,
+  Slack webhook) were affected for about 5 minutes. No EMAXCONN/P2024 pool
+  exhaustion was logged.
+
+The 64-upload group commit from 10-12 raised throughput but kept the per-cycle
+whole-archive cost. Priority/batching inside the server cannot help when clients
+offer more than the cycle rate and the server processes abandoned requests.
+
+Client/CLI repair on `fix/hub-publication-at-width`. No backend change and no
+deploy:
+
+1. A host-shared, file-locked token bucket per Hub URL
+   (`BENCHMARK_HUB_LIVE_UPLOADS_PER_SECOND`, default 1/s per host). The sharded
+   operator divides a 2/s global live budget by K shards. Status, agent and
+   outcome changes keep a reserved token. Label/lifecycle churn and 60 s
+   unchanged refreshes use only the surplus.
+2. Failed live writes back off exponentially from 15 s to a 300 s cap, with
+   jitter.
+3. Terminal bundles take a host slot (`BENCHMARK_HUB_TERMINAL_CONCURRENCY`; the
+   operator caps the global count at 20 in flight) that preempts low-priority live
+   writes. They use a patient window (`BENCHMARK_HUB_TERMINAL_PUBLICATION_SECONDS`,
+   1,200 s for shards) with jittered exponential backoff to 60 s, and an exact
+   read-back before every identical replay. The Hub coalesces a replay with its
+   still-queued copy. The window fails closed; payloads are never truncated.
+4. Startup registration never waits. Without a token it stays pending, and the
+   first budgeted live write upserts the same run.
+
+RED/GREEN on the unchanged base `9d0025e93` vs the candidate, using the same
+fixtures: one shard of 30 copies for 1,000 s offered 30,000 vs 100 live POSTs,
+and a saturated (503) Hub got 600 vs 6 retries in 600 s. A terminal upload whose
+Hub is busy for six POSTs failed after 4 attempts vs published after 7, with a
+read-back between every POST.
+
+Backend capacity remains O(archive) per write cycle. Holding at 10k agents
+requires a backend change: shard or remove the global catalog read-modify-write,
+and move R2 I/O out of the Postgres transaction. That needs `/deploy` and was not
+done here. Status remains `open` for the backend cause.

@@ -109,6 +109,11 @@ class Planning(unittest.TestCase):
         self.assertEqual(env['CLOUDBENCH_APP_MACHINE_CEILING'], '962')
         self.assertEqual(env['CLOUDBENCH_SHARED_CPU_GOVERNOR'], '2428')
         self.assertEqual(env['CLOUDBENCH_SNAPSHOT_POLL_SECONDS'], '60')
+        # 20 shards share one Hub write budget instead of each offering it.
+        self.assertAlmostEqual(20 * float(env['BENCHMARK_HUB_LIVE_UPLOADS_PER_SECOND']),
+                               C['HUB_GLOBAL_LIVE_UPLOADS_PER_SECOND'])
+        self.assertLessEqual(20 * int(env['BENCHMARK_HUB_TERMINAL_CONCURRENCY']), C['HUB_GLOBAL_TERMINAL_IN_FLIGHT'])
+        self.assertEqual(env['BENCHMARK_HUB_TERMINAL_PUBLICATION_SECONDS'], '1200')
         self.assertEqual(C['shard_runtime_env'](machine_limit=1000, other_app_objects=37, extra_destroying=1,
                          planned_shared_cpus=10, baseline_shared_cpus=0, controllers=1)['CLOUDBENCH_SNAPSHOT_POLL_SECONDS'], '15')
 

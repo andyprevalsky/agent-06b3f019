@@ -11615,8 +11615,18 @@ PYEXIT
     fi
     fleet_finalize_released_projection || return 1
     finalize_terminal_projection "$original_ec" 1 || return 1
+    # The original attempt persisted its exact Hub identity; legacy runs used RUN_ID.
+    local hub_run_id="$RUN_ID"
+    if [ -e "$FLEET_DIR/_batch/hub-run-id" ] || [ -L "$FLEET_DIR/_batch/hub-run-id" ]; then
+        [ -f "$FLEET_DIR/_batch/hub-run-id" ] && [ ! -L "$FLEET_DIR/_batch/hub-run-id" ] || return 1
+        hub_run_id="$(cat "$FLEET_DIR/_batch/hub-run-id")" || return 1
+        case "$hub_run_id" in
+            "$RUN_ID"|"$RUN_ID"-m????????????) ;;
+            *) echo "❌ recovered Hub identity does not belong to $RUN_ID" >&2; return 1 ;;
+        esac
+    fi
     python3 "$HUB_UPLOAD_HELPER" --upload-final "$FLEET_DIR/_batch/run.json" \
-        --run-id "$RUN_ID" --source direct-cloud-fleet
+        --run-id "$hub_run_id" --source direct-cloud-fleet
 )
 }
 
@@ -14304,7 +14314,11 @@ require_in_app_hub_visibility() {
         active_run_id="$INHERITED_HUB_RUN_ID"
         python3 "$HUB_UPLOAD_HELPER" --verify-visible "$active_run_id" || return 1
     else
-        active_run_id="$RUN_ID"
+        # Campaign members publish under a membership-bound identity: identical
+        # disposable controllers reuse the same PID and second across hosts.
+        active_run_id="$(python3 "$HUB_UPLOAD_HELPER" --print-run-id "$RUN_ID")" || return 1
+        mkdir -p "$FLEET_DIR/_batch" || return 1
+        printf '%s\n' "$active_run_id" > "$FLEET_DIR/_batch/hub-run-id" || return 1
         # Retain terminal publication authority even if the starting POST is
         # still queued when its transport response times out.
         SELF_MANAGED_HUB_RUN="1"
