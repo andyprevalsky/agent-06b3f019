@@ -20,6 +20,11 @@ if [[ "${1:-}" == stop-all ]]; then
     shift
     exec python3 "$ROOT_DIR/scripts/cloudbench-stop-all.py" "$@"
 fi
+# Stopped task Machines still count against the Fly org Machine limit.
+if [[ "${1:-}" == reclaim-stopped ]]; then
+    shift
+    exec python3 "$ROOT_DIR/scripts/cloudbench-reclaim-stopped.py" "$@"
+fi
 # Reject --single-box BEFORE cd into agents/: cloudbench multi-workstream
 # sandboxes are scripts-only, and a failed cd would exit under `set -e` without
 # the parallel-safety message the guard exists to print.

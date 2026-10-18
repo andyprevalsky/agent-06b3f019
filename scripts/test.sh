@@ -397,6 +397,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Retained Successor Completion" python3 scripts/tests/cloudbench-retained-successor.test.py
   run_suite "Cloud Benchmark Disposable Outer Lifecycle" env CLOUDBENCH_TEST_DISPOSABLE_ONLY=1 bash scripts/tests/cloudbench-multi-workstream.test.sh
   run_suite "Cloud Benchmark App Stop All" python3 scripts/tests/cloudbench-stop-all.test.py
+  run_suite "Cloud Benchmark Reclaim Stopped Machines" python3 scripts/tests/cloudbench-reclaim-stopped.test.py
   run_suite "Cloud Benchmark Unstaged Worker Recovery" python3 scripts/tests/cloudbench-unstaged-worker-recovery.test.py
   run_suite "Cloud Benchmark Protected Resource Union" python3 scripts/tests/cloudbench-protected-resources.test.py
   run_suite "Cloud Benchmark Pool Run Token" python3 scripts/tests/cloudbench-pool-run-token.test.py
