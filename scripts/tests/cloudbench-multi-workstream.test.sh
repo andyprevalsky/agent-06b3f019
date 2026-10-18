@@ -2796,6 +2796,75 @@ for reservation in (temporary / "capacity-reservations/reservations").glob(regis
 PY_RESET
 }
 
+# Disposable lifecycle (60e18e354): a failed run whose runtime evidence is
+# incomplete keeps its failed result, owner and evidence-gap latch, while its
+# disposable Machines and Volumes are destroyed and verified absent.
+assert_and_reset_disposable_failed_owner() {  # <registry> <controller-log>
+    grep -qxF "❌ runtime evidence is incomplete; failed result retained while disposable resources are retired" "$2" ||
+        { echo "missing disposable runtime-evidence gap record in $2" >&2; return 1; }
+    python3 - "$1" "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR" "$TMP_ROOT" <<'PY_DISPOSED'
+import json
+from pathlib import Path
+import re
+import shlex
+import shutil
+import sys
+registry, ownership, fake, temporary = map(Path, sys.argv[1:])
+assert registry.parent == ownership and re.fullmatch(r"[0-9a-f]{32}", registry.name)
+assert registry.resolve() == registry and (registry / "runtime-evidence-unconfirmed").is_file()
+def fields(path):
+    return dict(line.split("=", 1) for line in path.read_text().splitlines())
+meta = fields(registry / "meta")
+assert meta["fleet_owner_token"] == registry.name
+assert (registry / "disposable-resources-v1").read_text().strip() == registry.name + "\n" + meta["app"]
+run = Path(meta["runs_root"]) / meta["run_id"]
+result = json.loads((run / "_batch/run.json").read_text())["summary"]
+assert result["failed"] >= 1 and result["passed"] == 0, result
+lifecycle = json.loads((run / "_batch/lifecycle.json").read_text())
+assert lifecycle["status"] == "failed" and lifecycle["controller_exit_code"] != 0, lifecycle
+assert lifecycle["fleet_owner_token"] == registry.name, lifecycle
+audit = ownership.parent / "cloudbench-fleet-audits" / registry.name
+assert Path(meta["audit_dir"]) == audit and audit.resolve() == audit
+allocated = [row for path in (audit / "fresh").iterdir() if (row := fields(path)).get("machine_id")]
+assert allocated
+state_path = fake / "state.json"
+state = json.loads(state_path.read_text())
+calls = [shlex.split(line) for line in (fake / "journal.log").read_text().splitlines()]
+for row in allocated:
+    machine, volume = row["machine_id"], row["volume_id"]
+    assert row["disposition"] in ("destroyed-verified-absent", "destroyed-provider-retained"), row
+    assert machine != "aaaa0000000001" and volume != "vol_aaaa0001", row
+    assert not any(item["id"] == machine for item in state["machines"]), row
+    assert all(item["state"] in ("pending_destroy", "destroyed") for item in state["volumes"] if item["id"] == volume), row
+    assert any(call[:2] == ["machine", "destroy"] and machine in call[2:] for call in calls), row
+    assert any(call[:2] == ["volumes", "destroy"] and volume in call[2:] for call in calls), row
+assert any(item["id"] == "aaaa0000000001" for item in state["machines"])
+assert any(item["id"] == "vol_aaaa0001" for item in state["volumes"])
+archive = temporary / "retained-fixture-ownership" / registry.name
+archive.parent.mkdir(exist_ok=True)
+shutil.copytree(registry, archive)
+shutil.rmtree(registry)
+for reservation in (temporary / "capacity-reservations/reservations").glob(registry.name + "-*"):
+    assert reservation.is_file() and not reservation.is_symlink()
+    reservation.unlink()
+PY_DISPOSED
+}
+
+assert_and_reset_disposable_failed_benchmark() {  # <bench> <controller-log>
+    local bench="$1" registry selected=""
+    for registry in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
+        [ -f "$registry/meta" ] || continue
+        local run_id runs_root
+        run_id="$(sed -n 's/^run_id=//p' "$registry/meta")"
+        runs_root="$(sed -n 's/^runs_root=//p' "$registry/meta")"
+        [ -d "$runs_root/$run_id/$bench" ] || continue
+        [ -z "$selected" ] || return 1
+        selected="$registry"
+    done
+    [ -n "$selected" ] || return 1
+    assert_and_reset_disposable_failed_owner "$selected" "$2"
+}
+
 assert_and_reset_retained_fake_benchmark() {
     local bench="$1" registry selected=""
     for registry in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
@@ -2880,6 +2949,21 @@ if [ "${CLOUDBENCH_TEST_DISPOSABLE_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_READINESS_RETRY_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_MANDATORY_METRICS_ONLY:-0}" != "1" ]; then
+# --provision-pool is a legacy new-pool request (043659fa8): without measured
+# new-Machine admission both concurrent workstreams must refuse before any
+# provider mutation and leave no pool ID, claim or fleet ownership behind.
+# Concurrent per-workstream isolation is proven on the supported disposable
+# path by scenario 2, whose clone barrier requires both clones in flight.
+# Model the normally parked donor so even an idempotent park is not needed.
+FAKE_STATE="$FAKE_DIR/state.json" python3 - <<'PY'
+import json, os
+path = os.environ["FAKE_STATE"]
+state = json.load(open(path))
+warm = next(m for m in state["machines"] if m["name"] == "cloudbench-warm")
+warm["config"]["guest"] = {"cpu_kind": "shared", "cpus": 1, "memory_mb": 2048}
+json.dump(state, open(path, "w"))
+PY
+cp "$FAKE_DIR/state.json" "$TMP_ROOT/scenario-1-state.before"
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-a.log" --provision-pool 1 &
 PID_A=$!
 PIDS+=("$PID_A")
@@ -2891,20 +2975,36 @@ status_a=0; wait "$PID_A" || status_a=$?
 status_b=0; wait "$PID_B" || status_b=$?
 PIDS=()
 
-[ "$status_a" -eq 0 ] || fail "workstream A's provisioning must succeed alongside a concurrent run (exit=$status_a)"
-[ "$status_b" -eq 0 ] || fail "workstream B's provisioning must succeed alongside a concurrent run (exit=$status_b)"
-assert_no_controller_script_snapshots "foreground provisioning cleanup"
-
-pool_a="$(grep -c . "$POOL_A" 2>/dev/null || echo 0)"
-pool_b="$(grep -c . "$POOL_B" 2>/dev/null || echo 0)"
-[ "$pool_a" = "1" ] || fail "workstream A must own exactly one pool machine (got $pool_a)"
-[ "$pool_b" = "1" ] || fail "workstream B must own exactly one pool machine (got $pool_b)"
-id_a="$(head -1 "$POOL_A")"
-id_b="$(head -1 "$POOL_B")"
-[ -n "$id_a" ] && [ -n "$id_b" ] && [ "$id_a" != "$id_b" ] ||
-    fail "concurrent workstreams must provision distinct machines (a=$id_a b=$id_b)"
+assert_pool_provisioning_refused() {  # <label> <status> <log> <pool-ledger>
+    local label="$1" status="$2" log="$3" ledger="$4"
+    [ "$status" -ne 0 ] || fail "$label: a legacy --provision-pool request fabricated success"
+    grep -qxF "❌ existing-Machine capacity gap (pool-provision-1.ids): new Machine allocation withheld; authenticated measured admission is not available" "$log" ||
+        fail "$label: the pool request was not refused by measured new-Machine admission"
+    if grep -qE "cloned |pool ready: [1-9]" "$log"; then
+        fail "$label: a refused pool request reported an allocation"
+    fi
+    [ ! -s "$ledger" ] || fail "$label: a refused pool request recorded pool IDs: $(cat "$ledger")"
+}
+assert_pool_provisioning_refused "workstream A" "$status_a" "$TMP_ROOT/controller-a.log" "$POOL_A"
+assert_pool_provisioning_refused "workstream B" "$status_b" "$TMP_ROOT/controller-b.log" "$POOL_B"
+assert_no_controller_script_snapshots "refused provisioning cleanup"
+if grep -qE '^(machine (clone|update|start|stop|destroy)|machines? (create|run)|volumes? (create|update|destroy|extend))( |$)' "$FAKE_DIR/journal.log"; then
+    fail "scenario 1: a refused pool request mutated the provider: $(grep -E '^(machine|volumes?) ' "$FAKE_DIR/journal.log" | head -3)"
+fi
+# Only reads and the optional, metadata-only dependency-proof publication.
+if grep -vE '^GET |^POST /v1/apps/[^/ ]+/machines/[0-9a-f]+/metadata/' "$FAKE_DIR/machines-api.log" 2>/dev/null | grep -q .; then
+    fail "scenario 1: a refused pool request sent a Machines API effect: $(grep -vE '^GET ' "$FAKE_DIR/machines-api.log" | head -3)"
+fi
+cmp -s "$TMP_ROOT/scenario-1-state.before" "$FAKE_DIR/state.json" ||
+    fail "scenario 1: a refused pool request changed provider inventory"
+if find "$SANDBOX/.git/cloudbench-pool-claims" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+    fail "scenario 1: a refused pool request left a pool claim"
+fi
+if find "$SANDBOX/.git/cloudbench-fleet-ownership" -path '*/clones/*' -print -quit 2>/dev/null | grep -q .; then
+    fail "scenario 1: a refused pool request left fleet clone ownership"
+fi
 journal_must_be_read_only "scenario 1"
-echo "PASS: scenario 1 — concurrent provisioning with isolated pool machines"
+echo "PASS: scenario 1 — concurrent legacy pool requests are refused without provider mutation or claims"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -4023,8 +4123,8 @@ grep -Fq "injected metrics data-plane failure" "$autoscaler_out/autoscaler-metri
 if grep -Fq "status data-plane proxy did not become ready" "$autoscaler_out/fleet-child.log"; then
     fail "metrics failure fixture may not fail at primary status admission"
 fi
-assert_and_reset_retained_fake_benchmark autoscaler-must-start ||
-    fail "autoscaler-must-start: missing runtime evidence must retain exact ownership"
+assert_and_reset_disposable_failed_benchmark autoscaler-must-start "$TMP_ROOT/controller-autoscaler-required.log" ||
+    fail "autoscaler-must-start: missing runtime evidence must retain the failed result while retiring disposable resources"
 rm -f "$FAKE_DIR/fail-metrics-proxy" "$FAKE_DIR/delay-status-proxy"
 echo "PASS: scenario 2b — a fleet fails closed when mandatory autoscaling cannot attach"
 }
@@ -4522,12 +4622,34 @@ grep -qF "1/1 passed" "$detached_log" ||
 if kill -0 "$detached_pid" 2>/dev/null; then
     fail "detached fleet controller did not exit after terminal cleanup"
 fi
-# The task's 9000s catalog timeout extends the unset default backstop across
-# the detach re-exec, while the operator's --timeout 240 stays a hard cap.
-grep -qF "[bench-default-detach] catalog timeout 9000s: run timeout 240s, execution backstop 9000s" "$detached_log" ||
-    fail "detached fleet did not derive the catalog task's execution budget"
-grep -qF "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=9000" "$FAKE_DIR/journal.log" ||
-    fail "detached fleet did not hand the catalog backstop to the guest"
+# fe66798fe: the operator's --timeout 240 is the task execution window, so it
+# also bounds the guest backstop across the detach re-exec; the task's 9000s
+# catalog timeout may extend neither.
+if grep -qF "[bench-default-detach] catalog timeout 9000s" "$detached_log"; then
+    fail "detached fleet let the catalog timeout extend an explicit --timeout"
+fi
+grep -qF "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=240" "$FAKE_DIR/journal.log" ||
+    fail "detached fleet did not hand the explicit --timeout to the guest backstop"
+if grep -qE "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=(9000|7200)( |$)" "$FAKE_DIR/journal.log"; then
+    fail "detached fleet handed the guest a backstop beyond the explicit --timeout"
+fi
+# The same production budget functions: without --timeout the catalog task's
+# 9000s extends both default budgets; an explicit backstop stays separate.
+fleet_budget_contract() (
+    eval "$(fleet_production_function apply_operator_timeout_backstop)"
+    eval "$(fleet_production_function bench_execution_budget)"
+    budgets() {  # <run-timeout> <run-set> <backstop> <backstop-set>
+        RUN_TIMEOUT="$1" RUN_TIMEOUT_OPERATOR_SET="$2"
+        BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="$3" BACKSTOP_OPERATOR_SET="$4"
+        apply_operator_timeout_backstop
+        printf '%s %s\n' "$(bench_execution_budget 9000 "$RUN_TIMEOUT" "$RUN_TIMEOUT_OPERATOR_SET")" \
+            "$(bench_execution_budget 9000 "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" "$BACKSTOP_OPERATOR_SET")"
+    }
+    [ "$(budgets 7200 0 7200 0)" = "9000 9000" ] || { echo "no --timeout: $(budgets 7200 0 7200 0)" >&2; exit 1; }
+    [ "$(budgets 240 1 7200 0)" = "240 240" ] || { echo "--timeout 240: $(budgets 240 1 7200 0)" >&2; exit 1; }
+    [ "$(budgets 240 1 600 1)" = "240 600" ] || { echo "explicit backstop: $(budgets 240 1 600 1)" >&2; exit 1; }
+)
+fleet_budget_contract || fail "fleet execution budgets must follow the catalog and operator timeout contract"
 # The detached PID has been reaped. Hubs remain isolated behind immutable
 # owner records and never enter the raw controller-PID cleanup list.
 PIDS=()
@@ -4776,25 +4898,9 @@ PY
     ! kill -0 "$driver_pid" 2>/dev/null ||
         fail "$bench: the guest benchmark process survived its stop"
     [ -f "$registry/meta" ] && [ -e "$registry/runtime-evidence-unconfirmed" ] ||
-        fail "$bench: cancellation released the exact owner before its evidence was preserved"
-    fake_machine_exists "$machine" ||
-        fail "$bench: cancellation destroyed the unconfirmed guest Machine"
-    FAKE_STATE="$FAKE_DIR/state.json" VOLUME="$volume" python3 - <<'PY' ||
-import json
-import os
-
-volumes = json.load(open(os.environ["FAKE_STATE"]))["volumes"]
-raise SystemExit(0 if any(item.get("id") == os.environ["VOLUME"] for item in volumes) else 1)
-PY
-        fail "$bench: cancellation destroyed the original evidence volume"
-    if grep -qE "^machine destroy |^volumes destroy " "$FAKE_DIR/journal.log"; then
-        fail "$bench: provider deletion ran on an unconfirmed cancellation path"
-    fi
-    machine_state="$(FAKE_STATE="$FAKE_DIR/state.json" MACHINE="$machine" python3 -c '
-import json, os
-machines = json.load(open(os.environ["FAKE_STATE"]))["machines"]
-print(next(m["state"] for m in machines if m["id"] == os.environ["MACHINE"]))
-')"
+        fail "$bench: cancellation released the exact owner before its evidence gap was recorded"
+    grep -qF "❌ primary runtime evidence remains incomplete: " "$log" ||
+        fail "$bench: the cancelled run did not record its runtime-evidence gap"
     output="$(sed -n 's/^runs_root=//p' "$registry/meta" | head -1)/$(sed -n 's/^run_id=//p' "$registry/meta" | head -1)/$bench"
     [ -d "$output" ] || fail "$bench: the retained owner does not name its run output"
     if [ "$expected_reason" = native-stop ]; then
@@ -4817,8 +4923,6 @@ stops = [shlex.split(line)[2] for line in open(os.environ["JOURNAL"]) if line.st
 assert stops == [os.environ["MACHINE"]] * 2, stops
 PY
             fail "$bench: the throttled native stop was not retried exactly once on the owned guest Machine"
-        [ "$machine_state" = stopped ] ||
-            fail "$bench: the undeliverable guest was not left natively stopped (state=$machine_state)"
         python3 - "$output/guest-native-stop.json" "$machine" "$volume" <<'PY' ||
 import json
 import sys
@@ -4860,12 +4964,13 @@ PY
             fail "$bench: the runner did not deliver the guest stop itself after the group $signal_name"
     fi
     grep -E "guest cleanup|guest shutdown|natively" "$log" || true
-    assert_and_reset_retained_fake_owner "$registry" ||
-        fail "$bench: retained group-$signal_name owner could not be safely reset"
+    [ -s "$output/fleet-child.log" ] || fail "$bench: the original guest log was not preserved"
+    assert_and_reset_disposable_failed_owner "$registry" "$log" ||
+        fail "$bench: the failed group-$signal_name run did not retain its result while retiring disposable resources"
     rm -f "$FAKE_DIR/throttle-first-machine-stop"
     assert_no_fixture_processes "$bench ($signal_name)"
     SESSION_CONTROLLERS=()
-    echo "PASS: scenario 2-group-term ($bench, $signal_name) — guest stopped via $expected_reason $(python3 -c 'import json, sys; print(round(json.load(open(sys.argv[1]))["stopped_epoch"] - int(sys.argv[2]), 1))' "$stop_file" "$term_epoch")s after process-group $signal_name (budget ${budget}s); exact owner, volume and evidence retained"
+    echo "PASS: scenario 2-group-term ($bench, $signal_name) — guest stopped via $expected_reason $(python3 -c 'import json, sys; print(round(json.load(open(sys.argv[1]))["stopped_epoch"] - int(sys.argv[2]), 1))' "$stop_file" "$term_epoch")s after process-group $signal_name (budget ${budget}s); failed result and evidence gap retained, disposable resources destroyed"
 }
 
 # A guest whose stop WAS delivered must drain undisturbed even when every
@@ -5337,8 +5442,8 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_FAKE_INVALID_METRICS=1 \
     fail "a fleet must fail when mandatory autoscaler metrics stay invalid"
 grep -qF "mandatory autoscaler startup timed out" "$TMP_ROOT/controller-autoscaler-metrics-required.log" ||
     fail "invalid mandatory-autoscaler metrics must produce an explicit startup failure"
-assert_and_reset_retained_fake_benchmark autoscaler-metrics-required ||
-    fail "autoscaler-metrics-required: missing runtime evidence must retain exact ownership"
+assert_and_reset_disposable_failed_benchmark autoscaler-metrics-required "$TMP_ROOT/controller-autoscaler-metrics-required.log" ||
+    fail "autoscaler-metrics-required: missing runtime evidence must retain the failed result while retiring disposable resources"
 rm -f "$FAKE_DIR/invalid-metrics"
 echo "PASS: scenario 2c — a live proxy without valid metrics fails closed"
 
@@ -6465,10 +6570,12 @@ rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$SANDBOX/.git/cloudbench-pool
 mkdir -p "$FAKE_DIR/markers"
 : > "$FAKE_DIR/journal.log"
 name_write_status=0
+# Legacy --provision-pool now refuses before naming a clone; drive the same
+# pre-allocation boundary through the supported disposable run path.
 CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT="$SANDBOX/.git/cloudbench-fleet-ownership" \
     CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-registry-name-failure.log" \
-    --provision-pool 1 || name_write_status=$?
+    bench-alpha --timeout 240 || name_write_status=$?
 [ "$name_write_status" -eq 1 ] || fail "clone-name ownership write failure must exit nonzero"
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
     fail "provider clone occurred after durable clone-name persistence failed"
@@ -6487,16 +6594,16 @@ rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$SANDBOX/.git/cloudbench-pool
 mkdir -p "$FAKE_DIR/markers"
 : > "$FAKE_DIR/journal.log"
 pool_write_status=0
+# A legacy pool request is refused before any clone exists to hand off, even
+# with a broken pool-ledger destination (043659fa8).
 CLOUDBENCH_FAKE_BREAK_POOL_LEDGER="$POOL_A" CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-pool-ledger-failure.log" \
     --provision-pool 1 || pool_write_status=$?
-[ "$pool_write_status" -eq 1 ] || fail "pool-ledger transfer failure must propagate nonzero"
-grep -qE '^machine clone' "$FAKE_DIR/journal.log" ||
-    fail "pool transfer regression did not cross provider allocation"
-grep -qE '^machine destroy' "$FAKE_DIR/journal.log" ||
-    fail "pool transfer failure did not reap through fleet teardown"
-grep -qF "retaining fleet ownership for teardown" "$TMP_ROOT/controller-pool-ledger-failure.log" ||
-    fail "pool transfer failure did not retain its fleet ownership"
+assert_pool_provisioning_refused "scenario 12" "$pool_write_status" \
+    "$TMP_ROOT/controller-pool-ledger-failure.log" "$POOL_A"
+if grep -qE '^machine (clone|destroy) ' "$FAKE_DIR/journal.log"; then
+    fail "scenario 12: a refused pool request allocated or destroyed a Machine"
+fi
 if FAKE_STATE="$FAKE_DIR/state.json" python3 - <<'PY'
 import json
 import os
@@ -6507,7 +6614,7 @@ PY
 then
     fail "pool-ledger transfer failure left an allocated clone alive"
 fi
-echo "PASS: scenario 12 — failed pool transfer retains ownership and reaps the clone"
+echo "PASS: scenario 12 — a legacy pool request is refused before any handoff can fail"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 13 — repeated provisioning extends, rather than truncates, ownership.
@@ -6517,33 +6624,20 @@ rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$SANDBOX/.git/cloudbench-pool
     "$SANDBOX/.git/cloudbench-pool-claims" "$FAKE_DIR/markers"
 mkdir -p "$FAKE_DIR/markers"
 : > "$FAKE_DIR/journal.log"
-CLOUDBENCH_TEST_BARRIER_MIN=1 \
-    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-pool-first.log" \
-    --provision-pool 1 || fail "first repeat-pool provisioning failed"
-first_pool_id="$(head -1 "$POOL_A")"
-[ -n "$first_pool_id" ] || fail "first repeat-pool ID was not persisted"
-CLOUDBENCH_TEST_BARRIER_MIN=1 \
-    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-pool-second.log" \
-    --provision-pool 1 || fail "second repeat-pool provisioning failed"
-[ "$(grep -c . "$POOL_A")" -eq 2 ] || fail "repeat provisioning truncated or failed to extend the pool ledger"
-[ "$(sort -u "$POOL_A" | grep -c .)" -eq 2 ] || fail "repeat provisioning did not persist two distinct IDs"
-grep -Fxq "$first_pool_id" "$POOL_A" || fail "repeat provisioning forgot the original pool ID"
-if ! FAKE_STATE="$FAKE_DIR/state.json" POOL_LEDGER="$POOL_A" python3 - <<'PY'
-import json
-import os
-
-with open(os.environ["POOL_LEDGER"]) as fh:
-    ids = [line.strip() for line in fh if line.strip()]
-with open(os.environ["FAKE_STATE"]) as fh:
-    machines = {machine["id"]: machine for machine in json.load(fh)["machines"]}
-assert len(ids) == 2
-assert all(machine_id in machines for machine_id in ids)
-assert all(machines[machine_id]["state"] == "stopped" for machine_id in ids)
-PY
-then
-    fail "repeat provisioning left a ledger ID absent or non-stopped"
+# Repeated legacy requests are each refused by measured new-Machine admission;
+# neither may record a pool ID nor mutate the provider (043659fa8).
+for attempt in first second; do
+    repeat_status=0
+    CLOUDBENCH_TEST_BARRIER_MIN=1 \
+        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-pool-$attempt.log" \
+        --provision-pool 1 || repeat_status=$?
+    assert_pool_provisioning_refused "scenario 13 ($attempt)" "$repeat_status" \
+        "$TMP_ROOT/controller-pool-$attempt.log" "$POOL_A"
+done
+if grep -qE '^machine (clone|update|start|stop|destroy) ' "$FAKE_DIR/journal.log"; then
+    fail "scenario 13: a refused pool request mutated a Machine"
 fi
-echo "PASS: scenario 13 — repeat provisioning preserves every prior pool owner record"
+echo "PASS: scenario 13 — repeated legacy pool requests are each refused without allocation"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Scenario 14 — the shared-warm-box RUN footgun is closed
@@ -6607,14 +6701,13 @@ touch -t 200001010000 "$phantom_record" 2>/dev/null || fail "scenario 15: could 
 phantom_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-phantom-aged.log" \
-    --provision-pool 1 || phantom_status=$?
+    bench-alpha --timeout 240 || phantom_status=$?
 [ "$phantom_status" -eq 0 ] ||
     fail "scenario 15: aged-out phantom must not block provisioning (exit=$phantom_status)"
 grep -qF "discarding aged-out phantom name-only clone '$phantom_name'" "$TMP_ROOT/controller-phantom-aged.log" ||
     fail "scenario 15: aged-out phantom discard was not reported"
 [ -f "$phantom_record" ] && fail "scenario 15: aged-out phantom record was not removed"
-pool_phantom_id="$(head -1 "$POOL_A" 2>/dev/null)"
-[ -n "$pool_phantom_id" ] ||
+grep -qE '^machine clone ' "$FAKE_DIR/journal.log" && grep -qF "1/1 passed" "$TMP_ROOT/controller-phantom-aged.log" ||
     fail "scenario 15: provisioning did not proceed after the phantom was discarded"
 # A FRESH name-only phantom (default TTL) must still fail closed — the age gate,
 # not blanket discard, is what protects a real lagging clone (Scenario 7).
@@ -6628,7 +6721,7 @@ write_dead_registry phantom-fresh reap "$owner_host" "$fresh_name"
 fresh_status=0
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-phantom-fresh.log" \
-    --provision-pool 1 || fresh_status=$?
+    bench-alpha --timeout 240 || fresh_status=$?
 [ "$fresh_status" -eq 1 ] ||
     fail "scenario 15: a FRESH name-only record must still fail closed (exit=$fresh_status)"
 [ -f "$SANDBOX/.git/cloudbench-fleet-ownership/phantom-fresh/clones/$fresh_name" ] ||
@@ -6659,12 +6752,12 @@ mkdir -p "$FAKE_DIR/markers"
 amb_status=0
 CLOUDBENCH_FAKE_CLONE_FAIL_ONCE=1 CLOUDBENCH_CLONE_LOOKUP_SECONDS=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-amb-clone.log" \
-    --provision-pool 1 || amb_status=$?
+    bench-alpha --timeout 240 || amb_status=$?
 [ "$amb_status" -eq 0 ] ||
     fail "scenario 16: provisioning must recover from an ambiguous clone failure (exit=$amb_status)"
-# The retry must have produced a real pool machine (the failure was survivable).
-amb_pool_id="$(head -1 "$POOL_A" 2>/dev/null)"
-[ -n "$amb_pool_id" ] ||
+# The retry must have produced a real Machine (the failure was survivable).
+[ -f "$FAKE_DIR/clone-failed-once" ] && [ "$(grep -c '^machine clone ' "$FAKE_DIR/journal.log")" -ge 2 ] \
+    && grep -qF "1/1 passed" "$TMP_ROOT/controller-amb-clone.log" ||
     fail "scenario 16: provisioning did not proceed after the ambiguous clone failure"
 # CRITICAL: no name-only (id-less) orphan may remain — that is the exact record
 # that poisons teardown and leaks siblings.

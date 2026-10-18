@@ -36,6 +36,20 @@ class NativeWireDeadline(Exception):
     """A lease request remains unknown when its complete wire budget expires."""
 
 
+class NativeRejected(Exception):
+    """The provider answered a write with a definitive no-effect rejection."""
+
+    def __init__(self, method, url, status, receipt):
+        super().__init__(f"Machines API {method} {url} rejected with HTTP {status}")
+        self.status = status
+        self.receipt = receipt
+
+
+# Only a rate-limit answer is a recorded definitive refusal to process a write;
+# every other failure, including timeouts and 5xx, stays an unknown outcome.
+NO_EFFECT_STATUSES = frozenset({429})
+
+
 class NativeAdapter:
     """Existing bounded Fly transport plus a native lease nonce on every owned write."""
 
@@ -83,10 +97,18 @@ class NativeAdapter:
         with open(
             directory / "stderr.private.log", "xb", opener=lambda path, flags: __import__("os").open(path, flags, 0o600)
         ) as errors:
-            if direct:
-                NativeAdapter(self.api, directory).perform_wire(request)
-            else:
-                self._run_wire(directory, method, url, body, timeout, headers, errors)
+            try:
+                if direct:
+                    NativeAdapter(self.api, directory).perform_wire(request)
+                else:
+                    self._run_wire(directory, method, url, body, timeout, headers, errors)
+            except Exception:
+                receipts = sorted(directory.glob("*-wire.json"))
+                if method != "GET" and len(receipts) == 1 and not (directory / "result.json").exists():
+                    receipt = json.loads(private(receipts[0]))
+                    if receipt.get("status") in NO_EFFECT_STATUSES:
+                        raise NativeRejected(method, url, receipt["status"], receipts[0]) from None
+                raise
         return json.loads(private(directory / "result.json"))
 
     def perform_wire(self, request):

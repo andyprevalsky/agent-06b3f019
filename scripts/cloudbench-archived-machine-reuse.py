@@ -1028,6 +1028,7 @@ retire_native = _EFFECTS["retire_native"]
 wait_inactive = _EFFECTS["wait_inactive"]
 ObservationDeadline = _EFFECTS["ObservationDeadline"]
 NativeWireDeadline = _EFFECTS["NativeWireDeadline"]
+NativeRejected = _EFFECTS["NativeRejected"]
 
 
 def external_command(proof, command):
@@ -1061,9 +1062,20 @@ def fenced_native_effect(api, mid, operation, journal):
             return
         need(not intent.exists(), "unknown predecessor native effect; reconcile only")
         save(intent, dict(machine=current, operation=operation))
-        result = api.request(
-            "DELETE" if operation == "destroy" else "POST", url + ("?force=true" if operation == "destroy" else "/stop")
-        )
+        try:
+            result = api.request(
+                "DELETE" if operation == "destroy" else "POST",
+                url + ("?force=true" if operation == "destroy" else "/stop"),
+            )
+        except NativeRejected as rejected:
+            # A recorded no-effect rejection (rate limit) performed nothing:
+            # retain the intent and receipt, then admit the caller's bounded retry.
+            attempt = sum(1 for _ in out.glob("rejected-*")) + 1
+            rejection = out / f"rejected-{attempt:04d}"
+            rejection.mkdir(mode=0o700)
+            save(rejection / "receipt.json", json.loads(private(rejected.receipt)))
+            os.replace(intent, rejection / "intent.json")
+            raise
         save(out / "ack.json", result)
 
 

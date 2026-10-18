@@ -886,6 +886,75 @@ class IntegratedControls(unittest.TestCase):
                 H["fenced_native_effect"](API(), current["id"], "stop", Path(tmp) / "foreign")
             self.assertEqual(len(posts), 3)
 
+    def test_rate_limited_predecessor_stop_is_retried_but_unknown_is_not(self):
+        import http.server
+        import threading
+
+        mid = "4dae154ae13c40"
+        machine = {"id": mid, "instance_id": "01FIXTURE", "state": "started", "config": {}}
+        answers, stops = [], []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def reply(self, status, value):
+                data = json.dumps(value).encode()
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                self.reply(200, machine)
+
+            def do_DELETE(self):
+                self.reply(200, {})
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                if self.path.endswith("/lease"):
+                    return self.reply(200, {"data": {"nonce": "fixture-nonce"}})
+                stops.append(self.headers.get("fly-machine-lease-nonce"))
+                status = answers.pop(0)
+                if status == 200:
+                    machine["state"] = "stopped"
+                self.reply(status, {"error": "fixture"} if status != 200 else {"ok": True})
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        api = object.__new__(H["module"]("cloudbench-original-volume-capture.py")["Fly"])
+        api.app, api.authorization, api.loopback = H["APP"], "Bearer private-fixture", True
+        api.base, api.env = f"http://127.0.0.1:{server.server_port}", dict(os.environ)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                journal = Path(tmp) / "limited"
+                answers[:] = [429, 200]
+                with self.assertRaises(H["NativeRejected"]):
+                    H["fenced_native_effect"](H["NativeAdapter"](api, journal / "wire"), mid, "stop", journal)
+                H["fenced_native_effect"](H["NativeAdapter"](api, journal / "wire"), mid, "stop", journal)
+                self.assertEqual(stops, ["fixture-nonce", "fixture-nonce"])
+                (incarnation,) = [path for path in journal.iterdir() if path.name != "wire"]
+                rejected = incarnation / "rejected-0001"
+                self.assertEqual(json.loads((rejected / "receipt.json").read_bytes())["status"], 429)
+                self.assertEqual(json.loads((rejected / "intent.json").read_bytes())["operation"], "stop")
+                self.assertTrue((incarnation / "ack.json").is_file())
+                machine["state"], stops[:] = "started", []
+                unknown = Path(tmp) / "unknown"
+                answers[:] = [500, 200]
+                with self.assertRaises(Exception) as failure:
+                    H["fenced_native_effect"](H["NativeAdapter"](api, unknown / "wire"), mid, "stop", unknown)
+                self.assertNotIsInstance(failure.exception, H["NativeRejected"])
+                with self.assertRaises(ValueError):
+                    H["fenced_native_effect"](H["NativeAdapter"](api, unknown / "wire"), mid, "stop", unknown)
+                self.assertEqual(len(stops), 1)
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
     def test_actual600_single_task_children_and_retry_indices(self):
         request, machines, successor = fixture(376)
         names = json.loads((Path(__file__).parent / "fixtures/original600-tasks.json").read_text())
