@@ -48,7 +48,7 @@ import unicodedata
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
@@ -14279,9 +14279,9 @@ async def _run_single_task_as_run_user(
                 passed = False
                 failure_reason = evaluator_reason
 
-        # Collect prod logs for diagnostics
-        print("    Collecting prod logs...")
-        logs = await collect_logs(agent_id, data, start_time)
+        # Collect diagnostic logs; prod log APIs only for prod-backed runs.
+        print("    Collecting logs...")
+        logs = await collect_logs(agent_id, data, start_time, backend_url=base_url)
         if declared_evaluator_results:
             logs["declared_evaluators"] = declared_evaluator_results
         # Keep hydrated Claude Code transcripts in the run JSON so durable FE
@@ -14457,8 +14457,8 @@ async def _run_single_task_as_run_user(
             except Exception:
                 data = {}
             try:
-                print("    Collecting prod logs...")
-                logs = await collect_logs(agent_id, data, start_time)
+                print("    Collecting logs...")
+                logs = await collect_logs(agent_id, data, start_time, backend_url=base_url)
                 log_summary = []
                 for key, label in [
                     ("backend_logs", "backend"),
@@ -14541,7 +14541,7 @@ async def _run_single_task_as_run_user(
         logs = None
         if agent_id:
             try:
-                logs = await collect_logs(agent_id, {}, start_time)
+                logs = await collect_logs(agent_id, {}, start_time, backend_url=base_url)
             except Exception:
                 pass
             archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
@@ -15108,6 +15108,35 @@ def _docker_daemon_ping(timeout_seconds: float = 1.0) -> bool:
         return False
 
 
+STALE_WORKFLOW_COUNT_ATTEMPTS = 3
+
+
+async def _count_stale_workflows(client, namespace: str, query: str, *, sleep=asyncio.sleep) -> int:
+    """Count running workflows with a bounded, jittered ResourceExhausted backoff.
+
+    CountWorkflowExecutions spends the namespace's shared Visibility API budget,
+    which production workers use too. The SDK's high-level count retries five
+    times in quick succession; at fleet width that multiplies every throttled
+    startup. Make at most three attempts and spread them instead.
+    """
+    from temporalio.api.workflowservice.v1 import CountWorkflowExecutionsRequest
+    from temporalio.service import RPCError, RPCStatusCode
+
+    for attempt in range(1, STALE_WORKFLOW_COUNT_ATTEMPTS + 1):
+        try:
+            response = await client.workflow_service.count_workflow_executions(
+                CountWorkflowExecutionsRequest(namespace=namespace, query=query),
+                retry=False,
+                timeout=timedelta(seconds=5),
+            )
+            return response.count
+        except RPCError as error:
+            if error.status != RPCStatusCode.RESOURCE_EXHAUSTED or attempt == STALE_WORKFLOW_COUNT_ATTEMPTS:
+                raise
+            await sleep(random.uniform(1.0, 2.0**attempt))
+    raise AssertionError("unreachable")
+
+
 async def _terminate_stale_workflows():
     """Terminate all running Temporal workflows on the local task queue.
 
@@ -15157,7 +15186,7 @@ async def _terminate_stale_workflows():
         )
 
         query = f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"'
-        count = (await client.count_workflows(query)).count
+        count = await _count_stale_workflows(client, config.temporal.namespace, query)
         if count == 0:
             print(f"  ✅ No stale workflows on {task_queue}")
             return
@@ -15748,7 +15777,7 @@ async def main_async(args):
         print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s ({note})")
 
     # Start Fly.io log streaming
-    fly_status = await start_fly_log_collector()
+    fly_status = await start_fly_log_collector(backend_url=base_url)
     print(f"  📡 {fly_status}")
     is_private_realtime = "localhost" not in base_url and "127.0.0.1" not in base_url
     realtime_started = False

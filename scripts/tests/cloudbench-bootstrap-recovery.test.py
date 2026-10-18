@@ -1576,11 +1576,25 @@ class ControllerExportContinuationTests(unittest.TestCase):
                 calls.append(1)
                 if len(calls)==2:os.utime(fifo,ns=(1,1))
                 return []
-            archive=self.base/'drift.tar.gz'
-            with patch.object(self.module,'writers',side_effect=writers):
-                with self.assertRaisesRegex(ValueError,'originals changed'):
-                    self.module.export(self.types.SimpleNamespace(record=self.oldrecord,archive=archive,manifest=self.base/'drift-manifest.json',pending=self.base/'drift-pending.json',capture_tool_ref=toolref))
-            self.assertFalse(archive.exists());self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode))
+            archive=self.base/'drift.tar.gz';manifest=self.base/'drift-manifest.json';pending=self.base/'drift-pending.json'
+            args=self.types.SimpleNamespace(record=self.oldrecord,archive=archive,manifest=manifest,pending=pending,capture_tool_ref=toolref)
+            # Persistent drift: no attempt is ever sealed, and the evidence names the FIFO.
+            def drifting(roots,permitted):
+                calls.append(1)
+                if len(calls)%2==0:os.utime(fifo,ns=(len(calls),len(calls)))
+                return []
+            with patch.object(self.module,'writers',side_effect=drifting),patch.object(self.module,'EXPORT_SETTLE_SECONDS',0):
+                self.assertEqual(self.module.export(args),75)
+            self.assertFalse(archive.exists());self.assertFalse(manifest.exists());self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode))
+            self.assertIn(str(fifo),[row['path'] for attempt in json.loads(pending.read_text())['snapshot_attempts'] for row in attempt['changed']])
+            pending.unlink();calls.clear()
+            # One drift during capture: the drifted snapshot is discarded and a fresh
+            # strict snapshot seals only the settled FIFO metadata.
+            with patch.object(self.module,'writers',side_effect=writers),patch.object(self.module,'EXPORT_SETTLE_SECONDS',0):
+                self.assertEqual(self.module.export(args),0)
+            self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode));self.assertFalse(pending.exists())
+            row=json.loads(manifest.read_text())['files']['context/native-retirement.pipe']
+            self.assertEqual((row['kind'],row['stat']['mtime_ns']),('fifo',1))
 
     def test_changed_source_continuation_preserves_original_seal_and_ownership(self):
         self.prepare();self.module.launch(self.launch)
@@ -3327,6 +3341,10 @@ class ClaimedPoolRetainedEvidenceStopTests(unittest.TestCase):
         source=(REPO/'scripts/run-bench-fleet').read_text()
         start=source.index('    # Return only machines this fleet actually claimed.')
         stop=source.index('    # Claims are independent recovery roots',start)
+        # The return branch verifies staged-boot evidence through these real
+        # helpers; outside the staged boot transport they are exact no-ops.
+        helpers_start=source.index('fleet_verify_staged_primary_return() {')
+        helpers=source[helpers_start:source.index('\n# The live-owner plan shares',helpers_start)+1]
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);(root/'claims').mkdir();(root/'claims/machine').write_text('exact claim')
             (root/'claimed').write_text('machine\n');(root/'tainted').write_text('machine\n' if tainted else '')
@@ -3334,7 +3352,7 @@ class ClaimedPoolRetainedEvidenceStopTests(unittest.TestCase):
 set -u
 CLAIMED_POOL_FILE="$ROOT/claimed";POOL_CLAIMS_DIR="$ROOT/claims";TAINTED_POOL_FILE="$ROOT/tainted"
 FLEET_TEARDOWN_OWNERSHIP_DIR="$ROOT/audit";APP=offline;FLEET_OWNER_TOKEN=owner;FLEET_OWNER_HOST=host;FLEET_OWNER_PID_START=birth
-CLOUDBENCH_POOL_STOP_REQUEST_ATTEMPTS=1;CLOUDBENCH_POOL_STOP_ATTEMPTS=3
+CLOUDBENCH_POOL_STOP_REQUEST_ATTEMPTS=1;CLOUDBENCH_POOL_STOP_ATTEMPTS=3;CLOUDBENCH_BOOT_TRANSPORT=config
 sleep(){ :; }
 fly_with_timeout(){ echo stop >> "$ROOT/stops"; return 0; }
 FLY(){
@@ -3351,6 +3369,7 @@ fleet_audit_record_pool_machine(){ echo released >> "$ROOT/audit-release"; }
 pool_claim_release_exact(){ rm "$ROOT/claims/machine"; }
 reap_machine(){ echo destroyed > "$ROOT/destroyed";return 0; }
 pool_ledger_remove_id(){ :; }
+''' + helpers + r'''
 run(){
  local ec=1 teardown_failed=1 guest_shutdown_failed="$GUEST" runtime_evidence_failed="$RUNTIME" billing_owned_joins="$JOINS"
  local id i out claim_path st presence machines round stop_pid pool_volume_id claim_digest machine_reap_status
@@ -3484,7 +3503,7 @@ fleet_registry_release_id(){ echo registry-release >> "$EVENTS"; }
         events,result=self.worker_branch(borrowed=True);self.assertEqual(events,['borrowed']);self.assertEqual(result,'0 0')
 
     def test_early_primary_routes_stop_and_defers_reap(self):
-        source=(REPO/'scripts/run-bench-fleet').read_text();a=source.index('fleet_retire_sealed_primary()');b=source.index('\nfleet_validate_reap_cohort()',a);body=source[a:b]
+        source=(REPO/'scripts/run-bench-fleet').read_text();a=source.index('fleet_retire_sealed_primary()');b=source.index('\n}\n',a)+2;body=source[a:b]
         start=body.rfind('    if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then')
         if start<0:start=body.rfind('    fleet_reap_registry_record ')
         tail=body[start:body.rfind('\n}')]
@@ -3613,11 +3632,13 @@ printf 'rc=%s\n' "$rc"
 
 
     def test_normal_reuse_stale_scan_preserves_all_historical_records(self):
-        source=(REPO/'scripts/run-bench-fleet').read_text();start=source.index('reconcile_stale_fleet_registries() {');end=source.index('\n}\n',start)+3
+        source=(REPO/'scripts/run-bench-fleet').read_text()
+        def function(name):
+            start=source.index(name+'() {');return source[start:source.index('\n}\n',start)+3]
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);old=root/'old';old.mkdir();meta=old/'meta';meta.write_text('version=2\napp=app\ncleanup_policy=reap\nhost=host\n')
             before=(meta.stat().st_ino,meta.read_bytes())
-            script=source[start:end]+"""
+            script=function('reconcile_stale_fleet_registries_full')+function('reconcile_stale_fleet_registries')+"""
 registry_meta_value() { sed -n "s/^$2=//p" "$1"; }
 fleet_registry_cleanup_state() { printf reap; }
 registry_owner_alive() { return 1; }
@@ -3639,7 +3660,7 @@ printf 'rc=%s mutated=%s\n' "$rc" "$FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED"
             root=Path(td);claims=root/'claims';claims.mkdir();mid='abcdef12345678'
             claim=claims/mid;claim.write_text('host=other-host\nfleet_owner_token=old-owner\n');before=(claim.stat().st_ino,claim.read_bytes())
             (root/'pool.ids').write_text(mid+'\n');(root/'claimed.ids').touch();(root/'pool-shapes.tsv').write_text(mid+' shared 2 4096\n')
-            script=function('reconcile_stale_fleet_registries')+'\n'+function('claim_pool_machine')+'''
+            script=function('reconcile_stale_fleet_registries_full')+function('reconcile_stale_fleet_registries')+'\n'+function('claim_pool_machine')+'''
 registry_meta_value() { sed -n "s/^$2=//p" "$1"; }
 pool_claim_cleanup_unconfirmed() { return 1; }
 registry_owner_alive() { return 2; }

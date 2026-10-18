@@ -1,10 +1,40 @@
 #!/usr/bin/env python3
 """One explicitly admitted disposable controller; root caller retains teardown ownership."""
-import argparse,hashlib,json,os,re,signal,stat,subprocess,time
+import argparse,base64,hashlib,json,os,random,re,signal,stat,subprocess,time
 from contextlib import contextmanager
 from pathlib import Path
 
 class Deadline(Exception):pass
+
+class VolumeNotFound(Exception):
+    pass
+
+# A received rate-limit/transient refusal of a GET had no provider effect, so the
+# read alone is repeated. Writes, transport loss and every other status stay terminal.
+TRANSIENT_READ_STATUSES=frozenset({429,500,502,503,504})
+READ_ATTEMPTS=6
+
+def read_retry_delay(failures,status,limit):
+    """Jittered 2->20 s backoff, only while the delay and one bounded read fit ``limit``."""
+    if status not in TRANSIENT_READ_STATUSES or failures>=READ_ATTEMPTS:return None
+    delay=random.uniform(.5,1)*min(20,2**failures)
+    return delay if delay+20<limit else None
+
+def action_budget(limit,reserve=25):
+    """Seconds left for GET-only waiting inside the active whole-action deadline."""
+    remaining=signal.getitimer(signal.ITIMER_REAL)[0]
+    return min(limit,remaining-reserve)if remaining else limit
+
+def released_volume(api,volume_id,end):
+    """After an accepted DELETE, re-read only until Fly reports deletion or ``end``.
+
+    Fly answers DELETE and then reports ``waiting_for_detach`` until the host
+    detach completes; one immediate read is not a deletion decision."""
+    while True:
+        native=api('GET','/volumes/'+volume_id)
+        need(native is None or native.get('id')==volume_id,'workspace identity changed during deletion')
+        if native is None or native.get('state')in('pending_destroy','destroyed') or time.monotonic()+2>=end:return native
+        time.sleep(2)
 
 def need(value,message):
     if not value:raise ValueError(message)
@@ -50,6 +80,7 @@ def authority(path,root,fresh=True):
     need(a['app']=='navi-whisper-lux-bench' and a['region']=='iad' and a['vm_size']=='performance-8x' and a['memory_mib']==32768 and a['workspace_size_gb']==256,'fixed controller profile required')
     need(Path(a['output_directory']).is_absolute() and Path(a['output_directory']).parent.resolve(strict=True)==Path(a['output_directory']).parent,'physical output parent required')
     need(type(a['org_machine_limit'])is int and 1<=a['org_machine_limit']<=1000,'measured organization Machine limit required')
+    need(type(a.get('sibling_controller_slots',0))is int and 0<=a.get('sibling_controller_slots',0)<a['org_machine_limit'],'invalid sibling controller slots')
     need(type(a['verified_epoch'])in(int,float) and a['verified_epoch']<=time.time() and (not fresh or time.time()-a['verified_epoch']<=300),'stale creation authority')
     need(birth(a['cleanup_owner_pid'])==a['cleanup_owner_birth'],'external cleanup owner must remain live')
     need(isinstance(a['protected_machines'],list) and isinstance(a['protected_volumes'],list) and len(a['protected_machines'])>=4,'explicit protected cohort required')
@@ -83,29 +114,50 @@ def env_files(a,directory):
         target=directory/('current-'+key+'.private.env')
         with os.fdopen(os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb')as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
 
-def admit(a,api):
-    rows=api('GET','/machines');need(isinstance(rows,list),'full current inventory required')
+def admit(a,api,fresh=True):
+    # Admission needs only identities. The full list carries every Machine's
+    # config files (~200 KB each); with hundreds of sharded guests booting it
+    # outran the action deadline and failed later controllers at startup.
+    rows=api('GET','/machines?summary=true');need(isinstance(rows,list),'full current inventory required')
+    need(not fresh or time.time()-a['verified_epoch']<=300,'stale creation authority')
     ids=[r['id']for r in rows];need(len(ids)==len(set(ids)),'duplicate Machine inventory')
-    need(type(a['org_object_count'])is int and len(ids)<=a['org_object_count'] and a['org_object_count']+1<=a['org_machine_limit'],'no measured organization room for one controller')
+    # K controllers admitted from one measured snapshot: each reserves room for
+    # its K-1 siblings, and later siblings may observe the earlier ones.
+    siblings=a.get('sibling_controller_slots',0)
+    need(type(a['org_object_count'])is int and len(ids)<=a['org_object_count']+siblings and a['org_object_count']+1+siblings<=a['org_machine_limit'],'no measured organization room for one controller')
     proof=read(a['capacity_proof']['path']);need(hashlib.sha256(proof).hexdigest()==a['capacity_proof']['sha256'],'organization capacity proof changed')
     need(set(a['protected_machines'])<=set(ids),'protected inventory changed')
     return rows
 
-def volume(a,path,api):
+def volume(a,path,api,read_pending=False,allow_absent=False):
     need(Path(path)==Path(a['output_directory'])/'workspace-volume.ownership.json','workspace outside exact authority directory')
-    v=json.loads(read(path));native=api('GET','/volumes/'+v['volume_id'])
+    v=json.loads(read(path))
     need(v['schema']=='cloudbench-controller-workspace-ownership-v1' and v['app']==a['app'] and v['source_ref']==a['source_ref'] and v['size_gb']==256,'wrong workspace ownership')
     need(v['volume_id']not in a['protected_volumes'],'protected workspace Volume')
+    end=time.monotonic()+180
+    while True:
+        try:
+            native=api('GET','/volumes/'+v['volume_id'])
+        except VolumeNotFound:
+            need(read_pending,'workspace native observation absent')
+            need(time.monotonic()<end,'workspace native observation pending')
+            time.sleep(min(1,max(0,end-time.monotonic())))
+            continue
+        if native is None and allow_absent:
+            return v,None
+        need(isinstance(native,dict),'workspace native response must be an object')
+        need(time.monotonic()<end,'late workspace native observation')
+        break
     for key,expected in [('id',v['volume_id']),('name',v['name']),('region',a['region']),('size_gb',256),('encrypted',True)]:need(native.get(key)==expected,'workspace native mismatch: '+key)
     return v,native
 
 def backup_off(a,path,directory,api):
-    v,before=volume(a,path,api);need(before.get('attached_machine_id')is None and before['state']=='created','new workspace must be detached and ready')
+    v,before=volume(a,path,api,read_pending=True);need(before.get('attached_machine_id')is None and before['state']=='created','new workspace must be detached and ready')
     need(type(before.get('auto_backup_enabled'))is bool,'unknown backup setting')
     if before['auto_backup_enabled']:
         save(directory/'workspace-backup.intent.json',dict(volume=v['volume_id'],auto_backup_enabled=False))
         api('PUT','/volumes/'+v['volume_id'],dict(auto_backup_enabled=False))
-    unused,after=volume(a,path,api)
+    unused,after=volume(a,path,api,read_pending=True)
     need(after.get('auto_backup_enabled')is False and after.get('attached_machine_id')is None,'workspace backup disable not verified')
     save(directory/'workspace-backup.verified.json',after)
 
@@ -155,22 +207,27 @@ def cleanup(a,auth_sha,path,directory,api):
         except Deadline as error:
             if not getattr(error,'reconcile_timeout',False):raise
         except Exception:pass
-    for unused in range(40):
-        native=api('GET','/volumes/'+vid)
-        if native is None or native.get('state')in('pending_destroy','destroyed'):
-            save(directory/'disposable-controller.release.json',dict(machine_id=mid,volume_id=vid,volume_disposition='ABSENT'if native is None else native['state'],machine_deleted=True));return
-        time.sleep(1)
+    native=released_volume(api,vid,time.monotonic()+action_budget(180))
+    if native is None or native.get('state')in('pending_destroy','destroyed'):
+        save(directory/'disposable-controller.release.json',dict(machine_id=mid,volume_id=vid,volume_disposition='ABSENT'if native is None else native['state'],machine_deleted=True));return
     raise ValueError('workspace deletion pending; no repeat')
 
 def cleanup_workspace(a,auth_sha,path,directory,api):
     """Only a provably detached allocation with no matching live Machine."""
     need(not (directory/'disposable-controller.ownership.json').exists(),'sealed host needs export cleanup')
-    v,native=volume(a,path,api)
+    marker=directory/'disposable-delete-volume.intent.json'
+    existing=json.loads(read(marker))if marker.exists()else None
+    v,native=volume(a,path,api,allow_absent=existing is not None)
+    value=dict(authority_sha256=auth_sha,kind='volume',identifier=v['volume_id'])
+    if existing is not None:
+        need(existing==value,'wrong Volume deletion intent')
     intent_path=directory/'machine-create.intent.json'
     if intent_path.exists():
         intent=json.loads(read(intent_path));need(intent['authority_sha256']==auth_sha and intent['workspace_sha256']==hashlib.sha256(read(path)).hexdigest(),'wrong Machine creation intent')
         rows=api('GET','/machines');need(isinstance(rows,list),'complete inventory required')
         need(all(m.get('name')!=intent['name'] and all(x.get('volume')!=v['volume_id']for x in (m.get('config')or{}).get('mounts',[]))for m in rows),'Machine allocation exists or is ambiguous; seal/export required')
+    if native is None:
+        save(directory/'disposable-controller.release.json',dict(machine_id=None,volume_id=v['volume_id'],volume_disposition='ABSENT',no_live_machine_observed=True,command_history_verified=False));return
     need(native.get('attached_machine_id')is None and native.get('state')in('created','pending_destroy','destroyed'),'workspace not provably detached')
     marker=directory/'disposable-delete-volume.intent.json';value=dict(authority_sha256=auth_sha,kind='volume',identifier=v['volume_id'])
     if marker.exists():need(json.loads(read(marker))==value,'wrong Volume deletion intent')
@@ -180,7 +237,7 @@ def cleanup_workspace(a,auth_sha,path,directory,api):
         except Deadline as error:
             if not getattr(error,'reconcile_timeout',False):raise
         except Exception:pass
-    after=api('GET','/volumes/'+v['volume_id'])
+    after=released_volume(api,v['volume_id'],time.monotonic()+action_budget(180))
     need(after is None or after.get('state')in('pending_destroy','destroyed'),'workspace deletion pending; GET-only reconciliation required')
     save(directory/'disposable-controller.release.json',dict(machine_id=None,volume_id=v['volume_id'],volume_disposition='ABSENT'if after is None else after['state'],no_live_machine_observed=True,command_history_verified=False))
 
@@ -203,17 +260,55 @@ def main():
         source=args.root/'scripts/cloudbench-original-volume-capture.py';expected=subprocess.check_output(['git','--no-replace-objects','-C',str(args.root),'show',a['source_ref']+':scripts/cloudbench-original-volume-capture.py']);need(source.read_bytes()==expected,'native transport source changed')
         scope={'__file__':str(source),'__name__':'disposable_controller_transport'};exec(compile(expected,str(source),'exec'),scope)
         client=scope['Fly'](a['app'],os.environ.get('FLY_API_TOKEN')or scope['resolve_token']({'workspace':str(args.root)}))
+        observations=None
+        if args.directory is not None:
+            observations=args.directory/('native-'+args.action+'-'+str(time.monotonic_ns()))
+            observations.mkdir(mode=0o700)
+        sequence=0
+        def read_limit():
+            # Remaining whole-action time; a creation admission also stays
+            # inside its measured authority's 300 s freshness window.
+            limit=signal.getitimer(signal.ITIMER_REAL)[0]or float('inf')
+            if args.action=='admit':limit=min(limit,a['verified_epoch']+300-time.time())
+            return limit
         def api(method,path,body=None):
+            failures=0
+            while True:
+                status=[]
+                try:return attempt(method,path,body,status)
+                except Exception as error:
+                    delay=None
+                    if method=='GET' and status and status[-1]in TRANSIENT_READ_STATUSES and isinstance(error,scope['CaptureFailure']):
+                        failures+=1;delay=read_retry_delay(failures,status[-1],read_limit())
+                    if delay is None:raise
+                time.sleep(delay)
+        def attempt(method,path,body,status):
+            nonlocal sequence
+            sequence+=1
+            prefix=observations/('observation-%06d'%sequence)if observations is not None else None
+            if prefix is not None:
+                save(prefix.with_suffix('.request.json'),dict(method=method,path=path,body=body))
+            def observed(observed_method,observed_path,code,payload):
+                need(observed_method==method and observed_path==path,'native observation request changed')
+                status.append(code)
+                if prefix is not None:
+                    save(prefix.with_suffix('.raw.json'),dict(method=method,path=path,status=code,body_base64=base64.b64encode(payload).decode(),body_sha256=hashlib.sha256(payload).hexdigest()))
             with bounded(20,reconcile_timeout=True):
-                try:return client.api(method,path,body,timeout=20)
+                try:
+                    value=client.api(method,path,body,timeout=20,observer=observed)
+                    if method=='GET' and path.startswith('/volumes/'):
+                        need(isinstance(value,dict),'native response must be an object')
+                    return value
                 except scope['NotFound']:
+                    if method=='GET' and path.startswith('/volumes/') and args.action=='backup-off':
+                        raise VolumeNotFound() from None
                     if method=='GET':return None
                     raise
         if args.action=='admit':admit(a,api)
         elif args.action=='continue-allocation':
             reserve(args.authority,a,digest,args.driver_pid,allow_new=False)
             unused,native=volume(a,args.workspace,api);need(native.get('attached_machine_id')is None and native.get('auto_backup_enabled')is False,'allocation not ready for one controller')
-            admit(a,api)
+            admit(a,api,fresh=False)
         elif args.action=='backup-off':backup_off(a,args.workspace,args.directory,api)
         elif args.action=='cleanup-workspace':cleanup_workspace(a,digest,args.workspace,args.directory,api)
         elif args.action=='seal':seal(a,digest,args.workspace,args.directory,args.machine,args.name,args.image,api)

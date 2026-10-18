@@ -125,15 +125,29 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
         # invalid/read-error statuses must never fall through to an unbounded
         # successful wait. A shell job check avoids signalling a reused PID if
         # an unsupported detached descendant retained a FIFO descriptor.
+        # Signal the native children first and keep their wrapper shell alive:
+        # while it runs, `-P "$pid"` still names exactly this invocation's
+        # children. Terminating the wrapper first reparents a TERM-surviving
+        # flyctl to init, where the KILL escalation can no longer reach it.
         running="$(jobs -pr)"
         if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
             pkill -TERM -P "$pid" 2>/dev/null || true
-            kill -TERM "$pid" 2>/dev/null || true
-            sleep 2
-            running="$(jobs -pr)"
+            local grace
+            for grace in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                running="$(jobs -pr)"
+                [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]] || break
+                sleep 0.1
+            done
             if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
                 pkill -KILL -P "$pid" 2>/dev/null || true
-                kill -KILL "$pid" 2>/dev/null || true
+                for grace in 1 2 3 4 5 6 7 8 9 10; do
+                    running="$(jobs -pr)"
+                    [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]] || break
+                    sleep 0.1
+                done
+                if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
+                    kill -KILL "$pid" 2>/dev/null || true
+                fi
             fi
         fi
         wait "$pid" 2>/dev/null || true
@@ -254,7 +268,7 @@ _refresh_inventory_snapshot_unlocked() {
     fi
     inventory_refresh_diagnostic publish-index pending "" "$started" || true
     status=0
-    python3 "$MACHINE_READINESS_SCRIPT" --publish-index \
+    python3 -S "$MACHINE_READINESS_SCRIPT" --publish-index \
         "$machines_tmp" "$volumes_tmp" "$INVENTORY_INDEX" > "$publish_tmp" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         inventory_refresh_diagnostic publish-index "$status" "$publish_tmp" "$started" || true
@@ -526,6 +540,14 @@ fleet_admission_machines_json() {
 }
 fleet_volumes_json()  { _fresh_snapshot_or "$VOLUMES_SNAPSHOT" FLY volumes list -a "$APP" --json; }
 
+inventory_borrowed_generation_wait_seconds() {
+    # A borrower cannot refresh the parent feed. One healthy publication cycle is
+    # the publisher's deliberate sleep (poll plus at most two seconds of jitter)
+    # followed by the existing bounded refresh budget. Sharded campaigns lengthen
+    # the poll (60 s at 20 controllers); a budget sized for 15 s cannot cover it.
+    printf '%s' "${CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS:-$((SNAPSHOT_POLL + 2 + SNAPSHOT_REFRESH_TIMEOUT * 3 + 5))}"
+}
+
 machines_snapshot_identity() {
     local key value generation="missing"
     [ -s "$INVENTORY_INDEX/current/health" ] || { printf '%s' "$generation"; return; }
@@ -541,7 +563,7 @@ refresh_machines_snapshot_after() {  # <prior-identity> [original-caller-deadlin
         # They never become a second producer or take its refresh mutex: a slow
         # child native CLI would otherwise prevent the healthy parent publishing.
         local borrowed_prior="$1" before after health_status wait_seconds deadline caller_deadline="${2:-}"
-        wait_seconds="${CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS:-$((SNAPSHOT_REFRESH_TIMEOUT * 3 + 5))}"
+        wait_seconds="$(inventory_borrowed_generation_wait_seconds)"
         case "$wait_seconds" in ''|*[!0-9]*) return 1 ;; esac
         deadline=$((SECONDS + wait_seconds))
         if [ -n "$caller_deadline" ]; then

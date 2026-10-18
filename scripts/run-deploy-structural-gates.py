@@ -100,6 +100,10 @@ GATES = (
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
+    Gate(
+        "benchmark-provider-capacity",
+        ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
+    ),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate(

@@ -32,6 +32,14 @@ set -euo pipefail
 umask 077
 ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 cd "$ROOT_DIR"
+# Optional CLOUDBENCH_GATE_NAME_SUFFIX keeps controller names distinct when several
+# gates start in the same second (sharded controllers). Validated before any effect.
+GATE_NAME_SUFFIX="${CLOUDBENCH_GATE_NAME_SUFFIX:-}"
+if [ -n "$GATE_NAME_SUFFIX" ] && ! [[ "$GATE_NAME_SUFFIX" =~ ^[a-z0-9-]{1,12}$ ]]; then
+  echo "invalid CLOUDBENCH_GATE_NAME_SUFFIX: expected [a-z0-9-]{1,12}" >&2; exit 2
+fi
+gate_machine_name() { printf 'cloudbench-gate-%s-%s%s\n' "${GATE_REF:0:8}" "$STAMP" "${GATE_NAME_SUFFIX:+-$GATE_NAME_SUFFIX}"; }
+python3 -I -B "$ROOT_DIR/scripts/cloudbench-operator-preflight.py" --require-flyctl
 DISPOSABLE_AUTHORITY=""
 if [ "${1:-}" = "--disposable-controller" ]; then
   [ "$#" -ge 4 ] && [ "${3:-}" = -- ] || { echo "usage: --disposable-controller AUTHORITY -- COMMAND" >&2; exit 2; }
@@ -63,10 +71,66 @@ controller_machine_creation_admission() {
   echo "Controller capacity gap: reuse an existing retained controller; new Machine creation requires measured admission, which this entrypoint does not provide." >&2
   return 78
 }
+# The typed no-effect receipt lets an external cleanup owner end without a
+# provider audit. It is provable only before the first custody directory,
+# workspace-volume or Machine intent; that section clears this flag for good.
+GATE_NO_EFFECT_PROVABLE=1
+gate_no_effect_receipt() {
+  [ -n "${CLOUDBENCH_GATE_NO_EFFECT_RECEIPT:-}" ] || return 0
+  [ "$GATE_NO_EFFECT_PROVABLE" = 1 ] || { echo "no-effect receipt refused: allocation intents may exist" >&2; return 1; }
+  python3 -I -B - "$CLOUDBENCH_GATE_NO_EFFECT_RECEIPT" "$1" "$2" "$$" "${CLOUDBENCH_GATE_EXPORT_DIR:-}" <<'PY_NO_EFFECT'
+import json, os
+from pathlib import Path
+import sys
+path=Path(sys.argv[1]).absolute();reason=sys.argv[2]
+assert reason in ('github-token-missing','controller-admission-refused')
+assert path.parent.resolve(strict=True)==path.parent
+info=path.parent.stat()
+assert info.st_uid==os.getuid() and not info.st_mode&0o077
+# Intents live in the export directory; once it exists no-effect is unprovable.
+assert not sys.argv[5] or not os.path.lexists(sys.argv[5])
+value=dict(schema='original600-gate-preallocation-failure-v1',
+           reason=reason,source_ref=sys.argv[3],gate_pid=int(sys.argv[4]),
+           allocation_attempted=False)
+fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+try:os.fsync(fd)
+finally:os.close(fd)
+PY_NO_EFFECT
+}
+# Admission only reads the provider and writes local reservation markers, so a
+# refusal at these early sites is a typed pre-provider failure.
+early_controller_admission() {
+  local status=0
+  controller_machine_creation_admission || status=$?
+  [ "$status" = 0 ] && return 0
+  gate_no_effect_receipt controller-admission-refused "${CLOUDBENCH_GATE_REF:-$(git rev-parse HEAD)}" || true
+  exit "$status"
+}
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0
 fi
-controller_machine_creation_admission || exit $?
+# The payload travels as a file, never as a large argv/env string. Validate
+# before admission or any provider effect, including after the private self-copy.
+GATE_PAYLOAD_FILES=()
+if [ -n "${CLOUDBENCH_GATE_PAYLOAD_FILE:-}${CLOUDBENCH_GATE_PAYLOAD_SHA256:-}" ]; then
+  python3 -I -B - "$CLOUDBENCH_GATE_PAYLOAD_FILE" "$CLOUDBENCH_GATE_PAYLOAD_SHA256" <<'PY_LAUNCH_PAYLOAD'
+import hashlib,os,re,stat,sys
+from pathlib import Path
+p=Path(sys.argv[1]);assert p.is_absolute() and p.resolve(strict=True)==p
+assert re.fullmatch('[0-9a-f]{64}',sys.argv[2])
+with os.fdopen(os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as f:
+ s=os.fstat(f.fileno())
+ assert stat.S_ISREG(s.st_mode) and s.st_uid==os.geteuid() and not s.st_mode&0o077 and s.st_nlink==1 and 0<s.st_size<256*1024
+ raw=f.read(s.st_size+1);after=os.fstat(f.fileno())
+ stable=lambda value:(value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid,value.st_nlink,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+ assert stable(s)==stable(after) and len(raw)==s.st_size and hashlib.sha256(raw).hexdigest()==sys.argv[2]
+PY_LAUNCH_PAYLOAD
+  GATE_PAYLOAD_FILES=(--file-local "/tmp/controller-launch-payload.json.gz=$CLOUDBENCH_GATE_PAYLOAD_FILE")
+fi
+early_controller_admission
 # Bash reads a script incrementally. A fix landing in this file while a gate is
 # running (2026-10-06) made the running controller resume at a shifted offset
 # and die with a syntax error after GATE_RESULT, before it could fetch the
@@ -160,7 +224,7 @@ fi
 
 # This public route always allocates a controller. Existing-controller reuse
 # requires the separately verified retained-host caller, never an implicit run.
-controller_machine_creation_admission || exit $?
+early_controller_admission
 
 if [ -z "${FLY_API_TOKEN:-}" ]; then
   FLY_API_TOKEN="$(grep -E '^FLY_API_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
@@ -187,7 +251,11 @@ fi
 if [ -z "$GITHUB_TOKEN_VALUE" ]; then
   GITHUB_TOKEN_VALUE="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
 fi
-[ -n "$GITHUB_TOKEN_VALUE" ] || { echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)" >&2; exit 1; }
+if [ -z "$GITHUB_TOKEN_VALUE" ]; then
+  echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)" >&2
+  gate_no_effect_receipt github-token-missing "$GATE_REF" || true
+  exit 1
+fi
 
 IMAGE_REF="${WARM_IMAGE_REF:-}"
 if [ -z "$IMAGE_REF" ]; then
@@ -216,7 +284,7 @@ except Exception:
 GATE_NODE_VERSION="${GATE_NODE_VERSION:-v24.21.0}"
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
-MACHINE_NAME="cloudbench-gate-${GATE_REF:0:8}-${STAMP}"
+MACHINE_NAME="$(gate_machine_name)"
 # Repeated log pulls overlap; drop repeats but keep arrival order so each
 # suite's GATE_FAIL_TAIL section stays readable (sort -u interleaved them).
 dedupe_machine_log() {
@@ -252,6 +320,8 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Custody, workspace-volume and Machine intents may exist from here on.
+GATE_NO_EFFECT_PROVABLE=0
 if [ "$EXPORT_HOST" = 1 ]; then
   case "$IMAGE_REF" in *@sha256:*) ;; *) echo "controller export requires a pinned image digest" >&2; exit 2 ;; esac
   GATE_EXPORT_HELPER="$(mktemp -t cloudbench-export-helper.XXXXXX)"
@@ -296,6 +366,9 @@ fi
 {
   echo '#!/usr/bin/env bash'
   echo 'set -uo pipefail'
+  if [ -n "${CLOUDBENCH_GATE_PAYLOAD_FILE:-}" ]; then
+    echo 'chown rose /tmp/controller-launch-payload.json.gz && chmod 600 /tmp/controller-launch-payload.json.gz || { echo "GATE_RESULT exit=94 payload_permissions"; exit 94; }'
+  fi
   echo 'echo "GATE_START $(date -u +%FT%TZ) $(uname -srm)"'
   echo 'token="$(cat /tmp/gate-github-token)"; rm -f /tmp/gate-github-token'
   echo '[ -z "${GATE_WORKSPACE_VOLUME_ID:-}" ] || mountpoint -q /tmp/gate || { echo "GATE_RESULT exit=93 workspace_not_mounted"; exit 93; }'
@@ -388,6 +461,13 @@ except FileNotFoundError:value=dict(pid=pid,already_joined=True,machine_id=os.en
 with os.fdopen(os.open('/tmp/gate/controller-command.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w')as stream:json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
 PY_COMMAND_IDENTITY
 wait "$command_pid"; rc=$?
+python3 -I -B - "$$" "$rc" <<'PY_COMMAND_JOINED'
+import hashlib,json,os,sys
+from pathlib import Path
+pid=int(sys.argv[1]);fields=Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1].split()
+value=dict(driver_pid=pid,driver_birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+fields[19],exit_code=int(sys.argv[2]),command_sha256=hashlib.sha256(Path('/tmp/gate/controller-command.json').read_bytes()).hexdigest())
+with os.fdopen(os.open('/tmp/gate/controller-command.joined.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w')as stream:json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
+PY_COMMAND_JOINED
 REMOTE_COMMAND_IDENTITY
     else
     printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/bin:/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
@@ -396,7 +476,9 @@ REMOTE_COMMAND_IDENTITY
   done
   echo 'echo "GATE_FAILED_STEPS${failed_steps}"'
   if [ "$EXPORT_HOST" = 1 ]; then
-    echo 'bound_controller_export export --record /tmp/gate/controller-host-custody/launch.json --archive /tmp/gate/controller-host-custody/originals.tar.gz --manifest /tmp/gate/controller-host-custody/manifest.json --pending /tmp/gate/controller-host-custody/pending.json; export_rc=$?; echo "GATE_EXPORT exit=$export_rc"'
+    finalize_hubs=""
+    [ -z "$DISPOSABLE_AUTHORITY" ] || finalize_hubs=" --finalize-disposable-hubs"
+    printf '%s\n' 'bound_controller_export export'"$finalize_hubs"' --record /tmp/gate/controller-host-custody/launch.json --archive /tmp/gate/controller-host-custody/originals.tar.gz --manifest /tmp/gate/controller-host-custody/manifest.json --pending /tmp/gate/controller-host-custody/pending.json; export_rc=$?; echo "GATE_EXPORT exit=$export_rc"'
   fi
   echo 'echo "GATE_RESULT exit=$overall"'
   echo '# Fly returns ~100 log lines per read, so a failed suite'"'"'s tail is lost in the'
@@ -470,7 +552,7 @@ flyctl machine run "$IMAGE_REF" \
   -a "$APP" --region "$REGION" --name "$MACHINE_NAME" \
   --vm-size "$VM_SIZE" --vm-memory "$VM_MEMORY" \
   --restart no "${MACHINE_LIFETIME_ARGS[@]}" "${MACHINE_STORAGE_ARGS[@]}" "${WORKSPACE_VOLUME_ARGS[@]}" --detach \
-  --entrypoint "/bin/bash" "${GATE_EXPORT_FILES[@]}" \
+  --entrypoint "/bin/bash" "${GATE_EXPORT_FILES[@]}" "${GATE_PAYLOAD_FILES[@]}" \
   --file-local "/tmp/gate.sh=$GATE_SCRIPT" \
   --file-local "/tmp/gate-github-token=$GATE_TOKEN_FILE" \
   -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" -e "GATE_NODE_VERSION=$GATE_NODE_VERSION" \
@@ -619,11 +701,27 @@ if [ "$EXPORT_HOST" = 1 ]; then
   for member in launch.json manifest.json originals.tar.gz; do
     remaining=$((deadline - SECONDS))
     if [ -e "$export_dir/$member" ] || [ -L "$export_dir/$member" ] || [ "$remaining" -le 0 ] || ! python3 -I -B - "$remaining" "$APP" "$MACHINE_ID" "$member" "$export_dir/$member" <<'PY_EXPORT_GET'
-import subprocess,sys
-try:
-    result=subprocess.run(['flyctl','ssh','sftp','get','-a',sys.argv[2],'--machine',sys.argv[3],'/tmp/gate/controller-host-custody/'+sys.argv[4],sys.argv[5]],timeout=int(sys.argv[1]),capture_output=True)
-    raise SystemExit(result.returncode)
-except subprocess.TimeoutExpired: raise SystemExit(75)
+import json,os,subprocess,sys,time
+budget,app,machine,member,target=int(sys.argv[1]),*sys.argv[2:6]
+end=time.monotonic()+budget;attempts=[];code=75
+# A verified remote export must not be retained for one transient transfer loss:
+# bounded attempts inside the gate deadline, each attempt's output retained.
+for attempt in range(1,4):
+    left=int(end-time.monotonic())
+    if left<=0:break
+    try:
+        result=subprocess.run(['flyctl','ssh','sftp','get','-a',app,'--machine',machine,'/tmp/gate/controller-host-custody/'+member,target],timeout=left,capture_output=True)
+        code=result.returncode;attempts.append(dict(attempt=attempt,exit_code=code,stdout=result.stdout.decode(errors='replace')[-4096:],stderr=result.stderr.decode(errors='replace')[-4096:]))
+    except subprocess.TimeoutExpired:
+        code=75;attempts.append(dict(attempt=attempt,exit_code=None,timeout_s=left))
+    if code==0 and os.path.isfile(target) and not os.path.islink(target):break
+    code=code or 75
+    # The caller proved the destination absent; only this owned attempt wrote it.
+    if os.path.lexists(target):os.unlink(target)
+    if attempt<3:time.sleep(max(0,min(5,end-time.monotonic())))
+fd=os.open(os.path.join(os.path.dirname(target),'export-download-'+member+'.attempts.private.json'),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as out:json.dump(dict(member=member,attempts=attempts),out,sort_keys=True);out.flush();os.fsync(out.fileno())
+raise SystemExit(code)
 PY_EXPORT_GET
     then export_ok=0; break; fi
   done

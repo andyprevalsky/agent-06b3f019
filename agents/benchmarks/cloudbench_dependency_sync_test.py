@@ -1622,6 +1622,36 @@ done
     assert "DETACH_ENV_UNSET=(-u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS)" in fleet
 
 
+def test_explicit_timeout_is_the_guest_backstop_that_stops_agents() -> None:
+    """--timeout 1200 alone left the guest backstop at 7200 s (or a longer catalog
+    timeout), so agents ran past the requested execution window."""
+    fleet = FLEET_SCRIPT.read_text()
+    apply_fn = _extract_fleet_function(fleet, "apply_operator_timeout_backstop() {")
+    budget_fn = _extract_fleet_function(fleet, "bench_execution_budget() {")
+    script = f"""set -euo pipefail
+{apply_fn}
+{budget_fn}
+case_run() {{
+    RUN_TIMEOUT="$1"; RUN_TIMEOUT_OPERATOR_SET="$2"
+    BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="$3"; BACKSTOP_OPERATOR_SET="$4"
+    apply_operator_timeout_backstop
+    printf '%s %s %s\\n' "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" "$BACKSTOP_OPERATOR_SET" \\
+        "$(bench_execution_budget 12600 "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" "$BACKSTOP_OPERATOR_SET")"
+}}
+case_run 1200 1 7200 0
+case_run 7200 0 7200 0
+case_run 1200 1 900 1
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "1200 1 1200",  # explicit window: agents stop at 1200 s, a 12600 s catalog timeout cannot extend it
+        "7200 0 12600",  # no explicit window: the default still yields to a longer catalog timeout
+        "900 1 900",    # an explicit backstop stays the operator's choice
+    ]
+    assert fleet.index("apply_operator_timeout_backstop\nCHILD_RUN_TIMEOUT=") > fleet.index('RUN_TIMEOUT="${2:-}"; RUN_TIMEOUT_OPERATOR_SET="1"')
+
+
 def test_fleet_catalog_preflight_rejects_timeouts_shell_arithmetic_cannot_hold(
     tmp_path: Path,
 ) -> None:
@@ -8352,6 +8382,7 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     clone_function = (
         _worker_ledger_lock_bundle(fleet)
         + "\n"
+        + _disposable_volume_backup_function(fleet)
         + "\n".join(
             _extract_fleet_function(fleet, signature)
             for signature in (
@@ -8907,7 +8938,7 @@ def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
             "fleet_clone_with_queue_admission() {",
             "clone_machine_target() {",
         )
-    )
+    ) + "\n" + _disposable_volume_backup_function(fleet)
     registry = tmp_path / "registry"
     (registry / "clones").mkdir(parents=True)
     ledger = tmp_path / "owned.ids"
@@ -10612,6 +10643,18 @@ def _worker_ledger_lock_bundle(source: str) -> str:
     )
 
 
+def _disposable_volume_backup_function(source: str) -> str:
+    """Production backup step that every storage-ready clone runs.
+
+    It is a subshell-bodied function, so it ends at ``)`` rather than ``}``.
+    Outside the disposable lifecycle it returns success without provider calls;
+    fixtures exercising clone retry/identity therefore load the real function
+    instead of stubbing a step that clone_machine_target always reaches.
+    """
+    start = source.index("fleet_disable_disposable_volume_snapshots() (")
+    return source[start : source.index("\n)\n", start) + 3]
+
+
 def _clone_machine_bundle(source: str) -> str:
     return "\n".join(
         (
@@ -10620,6 +10663,7 @@ def _clone_machine_bundle(source: str) -> str:
             "reap_volume() { :; }",
             "fleet_audit_update_fresh_clone() { return 0; }",
             _worker_ledger_lock_bundle(source),
+            _disposable_volume_backup_function(source),
             _extract_fleet_function(source, "clone_failure_definitively_unallocated() {"),
             _extract_fleet_function(source, "clone_failure_owned_volume_id() {"),
             _extract_fleet_function(source, "fleet_clone_with_queue_admission() {"),
@@ -12648,6 +12692,469 @@ grep -Fxq "$REG {clone_name}   not-allocated-verified" "$AUDIT_CALLS" || exit 25
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_ambiguous_408_clone_absent_at_lookup_is_reaped_at_teardown(
+    tmp_path: Path,
+) -> None:
+    """run600c: a 408 launch created a Machine the short name lookup missed.
+
+    Fly returned ``failed to launch VM: ... 408`` after it had already created
+    the Machine; the borrowed inventory wait timed out and one native list
+    within the lookup window did not include the name. The controller then
+    recorded ``not-allocated-verified``, released the name and retried, so the
+    started guest outlived teardown. The exact name-only ownership must instead
+    survive provisioning, and final teardown must resolve the now-visible
+    Machine by name and destroy exactly it.
+    """
+    fleet = fleet_source_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "volume_inventory_contains_id() {",
+            "reap_volume() {",
+            "registry_meta_value() {",
+            "fleet_registry_record_name() {",
+            "fleet_registry_record_volume() {",
+            "fleet_registry_release_name() {",
+            "clone_failure_definitively_unallocated() {",
+            "clone_failure_owned_volume_id() {",
+            "fleet_clone_with_queue_admission() {",
+            "clone_machine_target() {",
+            "registry_record_machine_identity() {",
+            "fleet_current_disposable_registry() {",
+            "fleet_with_native_reap_permit() {",
+            "fleet_validate_reap_cohort() {",
+            "fleet_reap_registry_record_native() {",
+            "fleet_reap_registry_record() {",
+            "reap_registry_clones() {",
+        )
+    ) + "\n" + _disposable_volume_backup_function(fleet)
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("a" * 32)
+    (registry / "clones").mkdir(parents=True)
+    (registry / "meta").write_text("version=1\n")
+    ledger = tmp_path / "primary.ids"
+    calls = tmp_path / "calls"
+    audit = tmp_path / "audit"
+    materialized = tmp_path / "materialized"
+    clone_count = tmp_path / "clone-count"
+    uuid_count = tmp_path / "uuid-count"
+    for path in (calls, audit):
+        path.write_text("")
+    for path in (clone_count, uuid_count):
+        path.write_text("0\n")
+    late = "cloudbench-111111111111111111111111"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=8ed16dc75ee958
+WARM_VOLUME_ID=vol_warm
+SNAP_ID=vs_xA6B3617AO9TaeovZ3OKN42
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+LEDGER={shlex.quote(str(ledger))}
+CALLS={shlex.quote(str(calls))}
+AUDIT={shlex.quote(str(audit))}
+MATERIALIZED={shlex.quote(str(materialized))}
+CLONE_COUNT={shlex.quote(str(clone_count))}
+UUID_COUNT={shlex.quote(str(uuid_count))}
+inventory_machine_field() {{ printf '1'; }}
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+CLOUDBENCH_CLONE_RETRY_SECONDS=0
+CLOUDBENCH_CLONE_RETRY_MAX_SECONDS=0
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=1
+sleep() {{ :; }}
+fly_with_timeout() {{ shift; FLY "$@"; }}
+python3() {{
+  case "$*" in
+    *uuid.uuid4*)
+      count="$(cat "$UUID_COUNT")"; count=$((count + 1))
+      printf '%s\\n' "$count" > "$UUID_COUNT"
+      if [ "$count" = 1 ]; then
+        printf '%s\\n' 111111111111111111111111
+      else
+        printf '%s\\n' 222222222222222222222222
+      fi ;;
+    *) command python3 "$@" ;;
+  esac
+}}
+FLY() {{
+  printf '%s\\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "machine clone")
+      count="$(cat "$CLONE_COUNT")"; count=$((count + 1))
+      printf '%s\\n' "$count" > "$CLONE_COUNT"
+      if [ "$count" = 1 ]; then
+        printf '%s\\n' \\
+          'Cloning Machine 8ed16dc75ee958 into region iad' \\
+          "Volume 'cloudbench_t10_ord_85a7e2c' will start empty" \\
+          'Error: failed to launch VM: request returned non-2xx status: 408:  (Request ID: 01M579R79FT9V2THFJ0HP885ZM-iad)' >&2
+        return 1
+      fi
+      printf '%s\\n' 'Machine feedface000002 has been created...'
+      return 0 ;;
+  esac
+  return 97
+}}
+fleet_audit_record_fresh_clone() {{ printf 'record %s\\n' "$*" >> "$AUDIT"; }}
+fleet_audit_update_fresh_clone() {{ printf 'update %s\\n' "$*" >> "$AUDIT"; }}
+fleet_audit_update_registry_clone() {{ printf 'registry-update %s\\n' "$*" >> "$AUDIT"; }}
+fleet_registry_record_id() {{
+  printf 'name=%s\\nid=%s\\nvolume_id=%s\\n' "$1" "$2" "$3" > "$FLEET_REGISTRY_DIR/clones/$1"
+}}
+# The borrowed parent generation wait timed out, then the exact native list
+# omitted the name although the provider had created the Machine.
+machine_id_for_clone_name() {{ return 1; }}
+registry_resolve_name() {{
+  printf 'resolve %s\\n' "$1" >> "$CALLS"
+  if [ -e "$MATERIALIZED" ] && [ "$1" = {late} ]; then
+    printf '%s' deadbeef000001
+    return 0
+  fi
+  return 1
+}}
+registry_machine_details() {{
+  case "$1" in
+    feedface000002) printf 'started cloudbench-222222222222222222222222' ;;
+    deadbeef000001) [ -e "$MATERIALIZED" ] || return 1; printf 'started %s' {late} ;;
+    *) return 2 ;;
+  esac
+}}
+machine_volume_id() {{
+  case "$1" in
+    feedface000002) printf '%s' vol_success ;;
+    deadbeef000001) printf '%s' vol_late ;;
+  esac
+}}
+reap_machine() {{ printf 'reap_machine %s %s\\n' "$1" "$3" >> "$CALLS"; }}
+registry_record_is_stale_phantom() {{ return 1; }}
+machine_storage_ready() {{ return 0; }}
+machine_storage_failed() {{ return 1; }}
+worker_ledger_lock_acquire() {{ return 0; }}
+worker_ledger_lock_release() {{ return 0; }}
+{functions}
+target="$(clone_machine_target "$LEDGER")" || exit 90
+[ "$target" = feedface000002 ] || exit 91
+late_record="$FLEET_REGISTRY_DIR/clones/{late}"
+# (a) An unresolved name keeps its exact durable ownership.
+[ -f "$late_record" ] || exit 92
+[ -z "$(registry_meta_value "$late_record" id)" ] || exit 93
+if grep -F 'update {late}' "$AUDIT" | grep -Fq not-allocated-verified; then exit 94; fi
+if grep -Fxq {late} "${{LEDGER%.ids}}.names"; then exit 95; fi
+grep -Fq 'clone name={late} absent after ambiguous failure; exact name ownership retained for teardown' "${{LEDGER%.ids}}.log" || exit 96
+# The provider list catches up before final teardown.
+touch "$MATERIALIZED"
+FLEET_CLONE_PRODUCERS_JOINED=1 reap_registry_clones "$FLEET_REGISTRY_DIR" current || exit 97
+# (b) Teardown resolves the exact name and destroys only that Machine.
+grep -Fxq 'reap_machine deadbeef000001 vol_late' "$CALLS" || exit 98
+[ ! -e "$late_record" ] || exit 99
+grep -Fq 'registry-update {registry} {late} deadbeef000001 vol_late destroyed-verified-absent' "$AUDIT" || exit 100
+"""
+    result = subprocess.run(
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    call_log = calls.read_text().splitlines()
+    assert sum(call.startswith("machine clone ") for call in call_log) == 2
+    assert "reap_machine feedface000002 vol_success" in call_log
+    assert sum(call.startswith("reap_machine ") for call in call_log) == 2
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["joined-aged", "unjoined-aged", "joined-young", "unsafe-read"],
+)
+def test_current_teardown_retires_name_only_clone_only_after_joined_aged_absence(
+    tmp_path: Path, scenario: str
+) -> None:
+    """A live owner retires an absent name only with the dead-owner proof."""
+    fleet = fleet_source_text()
+    reaper = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_await_name_only_visibility_window() {",
+            "fleet_current_disposable_registry() {",
+            "fleet_with_native_reap_permit() {",
+            "fleet_validate_reap_cohort() {",
+            "fleet_reap_registry_record_native() {",
+            "fleet_reap_registry_record() {",
+            "reap_registry_clones() {",
+        )
+    )
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("d" * 32)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    phantom = clones / "cloudbench-phantom"
+    phantom.write_text("name=cloudbench-phantom\n")
+    sibling = clones / "cloudbench-sibling"
+    sibling.write_text("name=cloudbench-sibling\nid=abc123\nvolume_id=vol_sibling\n")
+    calls = tmp_path / "calls"
+    joined = "0" if scenario == "unjoined-aged" else "1"
+    aged = "1" if scenario == "joined-young" else "0"
+    resolve = "2" if scenario == "unsafe-read" else "1"
+
+    script = f"""set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+REG={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=1
+# A record that never ages within the bounded teardown wait stays retained.
+CLOUDBENCH_PHANTOM_TEARDOWN_WAIT_SECONDS=0
+sleep() {{ :; }}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_resolve_name() {{ printf 'resolve %s\\n' "$1" >> "$CALLS"; return {resolve}; }}
+registry_record_is_stale_phantom() {{ return {aged}; }}
+registry_machine_details() {{ printf 'started cloudbench-sibling'; }}
+fleet_registry_reconcile_mounted_volume() {{ printf '%s' vol_sibling; }}
+reap_machine() {{ printf 'reap_machine %s %s\\n' "$1" "$3" >> "$CALLS"; }}
+fleet_audit_update_registry_clone() {{ printf 'audit %s\\n' "$*" >> "$CALLS"; }}
+{reaper}
+rc=0
+FLEET_CLONE_PRODUCERS_JOINED={joined} reap_registry_clones "$REG" current || rc=$?
+printf 'rc=%s\\n' "$rc" >> "$CALLS"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=20
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    log = calls.read_text().splitlines()
+    # Known exact siblings are reaped regardless of the name-only outcome.
+    assert "reap_machine abc123 vol_sibling" in log
+    assert not sibling.exists()
+    retired = f"audit {registry} cloudbench-phantom   not-allocated-verified"
+    if scenario == "joined-aged":
+        assert log[-1] == "rc=0"
+        assert retired in log
+        assert not phantom.exists()
+    else:
+        assert log[-1] != "rc=0"
+        assert retired not in log
+        assert phantom.read_text() == "name=cloudbench-phantom\n"
+    if scenario == "joined-young":
+        assert "stayed unresolved through its bounded visibility wait" in result.stderr
+
+
+# polar70b r001-j0068 (fleet 20261018-193944-18625): the ambiguous attempt's
+# name record was touched at 1792352414 and final teardown read it absent at
+# 1792353004, 590 s into the 900 s provider-visibility window.
+_PHANTOM_TOUCH_EPOCH = 1792352414
+_PHANTOM_TEARDOWN_EPOCH = 1792353004
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["evidence-absent", "late-visible", "unreadable", "unjoined", "future-mtime"],
+)
+def test_final_teardown_waits_out_young_name_only_clone_visibility_window(
+    tmp_path: Path, scenario: str
+) -> None:
+    """A joined final teardown must not fail a run whose phantom window is open.
+
+    The task PASSED and every guest acknowledged cleanup, but the name-only
+    record from a ``failed to launch VM: volume not found`` attempt was only
+    590 s old at final teardown, so the controller retained ownership and
+    failed the job although no Machine with that name existed. With every
+    clone producer joined, final teardown re-resolves the exact name until the
+    window measured from the attempt's return closes: it destroys a late
+    Machine, retires an authoritative aged absence, and still fails closed on
+    an unreadable list, an unjoined producer or an unbounded (future) mtime.
+    """
+    fleet = fleet_source_text()
+    reaper = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_record_is_stale_phantom() {",
+            "registry_await_name_only_visibility_window() {",
+            "fleet_current_disposable_registry() {",
+            "fleet_with_native_reap_permit() {",
+            "fleet_validate_reap_cohort() {",
+            "fleet_reap_registry_record_native() {",
+            "fleet_reap_registry_record() {",
+            "reap_registry_clones() {",
+        )
+    )
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("e" * 32)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    name = "cloudbench-0b8b827d95fd4db49f39e716"
+    phantom = clones / name
+    phantom.write_text(f"name={name}\n")
+    touch = _PHANTOM_TOUCH_EPOCH
+    if scenario == "future-mtime":
+        touch = _PHANTOM_TEARDOWN_EPOCH + 3600
+    os.utime(phantom, (touch, touch))
+    sibling = clones / "cloudbench-be2f7075f090447caf9e2969"
+    sibling.write_text(
+        "name=cloudbench-be2f7075f090447caf9e2969\nid=84eee56ae64668\n"
+        "volume_id=vol_vz8z6dojpjw7nxev\n"
+    )
+    calls = tmp_path / "calls"
+    clock = tmp_path / "clock"
+    clock.write_text(f"{_PHANTOM_TEARDOWN_EPOCH}\n")
+    joined = "0" if scenario == "unjoined" else "1"
+    late_epoch = _PHANTOM_TEARDOWN_EPOCH + 120
+
+    script = f"""set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+REG={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+CLOCK={shlex.quote(str(clock))}
+SCENARIO={shlex.quote(scenario)}
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=1
+date() {{ if [ "$*" = +%s ]; then cat "$CLOCK"; else command date "$@"; fi; }}
+sleep() {{
+  printf 'sleep %s\\n' "$1" >> "$CALLS"
+  printf '%s\\n' "$(( $(cat "$CLOCK") + $1 ))" > "$CLOCK"
+}}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_resolve_name() {{
+  now="$(cat "$CLOCK")"
+  printf 'resolve %s %s\\n' "$1" "$now" >> "$CALLS"
+  [ "$1" = {name} ] || return 2
+  case "$SCENARIO" in
+    late-visible) [ "$now" -lt {late_epoch} ] || {{ printf '%s' deadbeef000001; return 0; }} ;;
+    unreadable) [ "$now" = {_PHANTOM_TEARDOWN_EPOCH} ] || return 2 ;;
+  esac
+  return 1
+}}
+registry_machine_details() {{
+  case "$1" in
+    84eee56ae64668) printf 'started cloudbench-be2f7075f090447caf9e2969' ;;
+    deadbeef000001) printf 'started %s' {name} ;;
+    *) return 2 ;;
+  esac
+}}
+machine_volume_id() {{ [ "$1" = deadbeef000001 ] && printf '%s' vol_late; }}
+registry_record_machine_identity() {{
+  printf 'name=%s\\nid=%s\\nvolume_id=%s\\n' "$2" "$3" "$4" > "$1"
+}}
+fleet_registry_reconcile_mounted_volume() {{
+  case "$3" in
+    84eee56ae64668) printf '%s' vol_vz8z6dojpjw7nxev ;;
+    deadbeef000001) printf '%s' vol_late ;;
+    *) return 1 ;;
+  esac
+}}
+reap_machine() {{ printf 'reap_machine %s %s\\n' "$1" "$3" >> "$CALLS"; }}
+fleet_audit_update_registry_clone() {{ printf 'audit %s\\n' "$*" >> "$CALLS"; }}
+{reaper}
+rc=0
+FLEET_CLONE_PRODUCERS_JOINED={joined} reap_registry_clones "$REG" current || rc=$?
+printf 'rc=%s\\n' "$rc" >> "$CALLS"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=20
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    log = calls.read_text().splitlines()
+    assert "reap_machine 84eee56ae64668 vol_vz8z6dojpjw7nxev" in log
+    assert not sibling.exists()
+    waited = sum(int(line.split()[1]) for line in log if line.startswith("sleep "))
+    retired = f"audit {registry} {name}   not-allocated-verified"
+    if scenario == "evidence-absent":
+        assert log[-1] == "rc=0", result.stderr
+        assert retired in log
+        assert not phantom.exists()
+        # Only the window's remainder from the attempt's return is spent, and
+        # the absence that retires the name is read after the window closes.
+        assert waited == 900 - (_PHANTOM_TEARDOWN_EPOCH - _PHANTOM_TOUCH_EPOCH)
+        final_resolve = [line for line in log if line.startswith("resolve ")][-1]
+        assert int(final_resolve.split()[-1]) >= _PHANTOM_TOUCH_EPOCH + 900
+        assert "is not provider-visible yet" not in result.stderr
+        _assert_proven_sibling_reaped_before_name_lookup(log, name)
+        return
+    if scenario == "late-visible":
+        assert log[-1] == "rc=0", result.stderr
+        assert "reap_machine deadbeef000001 vol_late" in log
+        assert f"audit {registry} {name} deadbeef000001 vol_late destroyed-verified-absent" in log
+        assert retired not in log
+        assert not phantom.exists()
+        assert waited < 900 - (_PHANTOM_TEARDOWN_EPOCH - _PHANTOM_TOUCH_EPOCH)
+        _assert_proven_sibling_reaped_before_name_lookup(log, name)
+        return
+    assert log[-1] != "rc=0"
+    assert retired not in log
+    assert not any(line.startswith("reap_machine deadbeef") for line in log)
+    assert phantom.read_text() == f"name={name}\n"
+    if scenario == "unjoined":
+        assert waited == 0
+        assert "is not provider-visible yet" in result.stderr
+    elif scenario == "future-mtime":
+        # A stepped clock cannot extend the bounded wait past one window.
+        assert 0 < waited <= 900
+    else:
+        assert 0 < waited < 900 - (_PHANTOM_TEARDOWN_EPOCH - _PHANTOM_TOUCH_EPOCH)
+    _assert_proven_sibling_reaped_before_name_lookup(log, name)
+
+
+def _assert_proven_sibling_reaped_before_name_lookup(log: list[str], name: str) -> None:
+    # A visibility wait must not delay destroying already proven siblings.
+    assert log.index("reap_machine 84eee56ae64668 vol_vz8z6dojpjw7nxev") < log.index(
+        f"resolve {name} {_PHANTOM_TEARDOWN_EPOCH}"
+    )
+
+
+@pytest.mark.parametrize("inventory", ["present", "absent", "unreadable", "none-owned"])
+def test_final_audit_fails_closed_when_unallocated_owned_name_exists(
+    tmp_path: Path, inventory: str
+) -> None:
+    """not-allocated-verified must be natively true before the audit seals."""
+    fleet = fleet_source_text()
+    function = _extract_fleet_function(fleet, "fleet_audit_verify_unallocated_names_absent() {")
+    audit = tmp_path / "audit"
+    (audit / "fresh").mkdir(parents=True)
+    name = "cloudbench-7965914459fc4c859374ba4a"
+    disposition = "destroyed-verified-absent" if inventory == "none-owned" else "not-allocated-verified"
+    machine = "185d747b64e248" if inventory == "none-owned" else ""
+    (audit / "fresh" / name).write_text(
+        f"version=1\nclone_name={name}\nmachine_id={machine}\nvolume_id=\n"
+        f"disposition={disposition}\n"
+    )
+    calls = tmp_path / "calls"
+    listing = {
+        "present": f'[{{"id":"8744531f65d768","name":"{name}","state":"started"}},'
+        '{"id":"185d747b64e248","name":"cloudbench-other","state":"destroyed"}]',
+        "absent": f'[{{"id":"8744531f65d768","name":"{name}","state":"destroyed"}}]',
+        "unreadable": "",
+        "none-owned": "[]",
+    }[inventory]
+    script = f"""set -uo pipefail
+APP=navi-whisper-lux-bench
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+CALLS={shlex.quote(str(calls))}
+CLOUDBENCH_UNALLOCATED_NAME_AUDIT_SECONDS=0
+sleep() {{ :; }}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+FLY() {{ printf '%s\\n' "$*" >> "$CALLS"; printf '%s' {shlex.quote(listing)}; [ -n {shlex.quote(listing)} ]; }}
+{function}
+fleet_audit_verify_unallocated_names_absent
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=20
+    )
+    provider_calls = calls.read_text().splitlines() if calls.exists() else []
+    if inventory == "none-owned":
+        assert result.returncode == 0, result.stderr
+        assert provider_calls == []
+        return
+    assert provider_calls == ["machines list -a navi-whisper-lux-bench --json"]
+    if inventory == "absent":
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+    if inventory == "present":
+        assert f"'{name}' recorded not-allocated-verified exists natively as Machine 8744531f65d768 (state=started)" in result.stderr
 
 
 @pytest.mark.parametrize("preferred", ["", "0", "positive", "invalid", "1023"])
@@ -22759,11 +23266,15 @@ def test_clone_burst_is_rate_limit_resilient() -> None:
     assert 'max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"' in fleet
     # Launch burst is staggered, not simultaneous.
     assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in fleet
-    # Exponential backoff (bit-shift by attempt) with a cap and jitter.
+    # Exponential backoff (clamped bit-shift by attempt) with a cap and jitter.
     clone_fn = _clone_machine_bundle(fleet)
-    assert "1 << (attempt - 1)" in clone_fn
+    assert "backoff_shift=$((attempt - 1))" in clone_fn
+    assert "retry_delay * 2 ** backoff_shift" in clone_fn
     assert "CLOUDBENCH_CLONE_RETRY_MAX_SECONDS" in clone_fn
-    assert "RANDOM % 5" in clone_fn
+    assert "jitter_span=5" in clone_fn and "RANDOM % jitter_span" in clone_fn
+    # run600c: proven pre-allocation throttles spend a bounded window, not the
+    # attempt cap; behavior is covered by cloudbench-clone-rate-response.test.py.
+    assert "CLOUDBENCH_CLONE_RATE_LIMIT_WINDOW_SECONDS:-600" in clone_fn
     # The old fixed-delay retry (`sleep "$retry_delay"` unconditionally) is gone.
     assert 'sleep "$retry_delay"\n' not in clone_fn
 
@@ -27042,6 +27553,7 @@ def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(
             "fleet_audit_update_registry_clone() {",
             "fleet_registry_remove_if_empty() {",
             "fleet_audit_finalize_provider_teardown() {",
+            "fleet_audit_verify_unallocated_names_absent() {",
             "fleet_finalize_released_projection() {",
             "reap_machine() {",
             "reap_volume() {",
@@ -27762,6 +28274,7 @@ def _private_source_identity_command(registry: Path, audit: Path, body: str):
             "registry_record_machine_identity() {",
             "fleet_registry_record_id() {",
             "fleet_audit_finalize_provider_teardown() {",
+            "fleet_audit_verify_unallocated_names_absent() {",
         )
     )
     workspace = registry.parent.parent / "workspace"
@@ -27928,8 +28441,18 @@ def test_private_fleet_source_terminal_audit_preserves_digest(
         if successor_source == "unset"
         else f"PRIVATE_SOURCE_SHA256={'e' * 64}\nPRIVATE_SOURCE_FILE=/does-not-exist"
     )
-    result = _private_source_identity_command(registry, audit, setup + "\nfleet_audit_finalize_provider_teardown\n")
+    # The final audit proves this not-allocated-verified name natively absent
+    # with exactly one complete inventory read; no other provider call occurs.
+    provider_calls = tmp_path / "provider-calls"
+    inventory = (
+        f'FLY() {{ printf "%s\\n" "$*" >> {shlex.quote(str(provider_calls))}; '
+        '[ "$1 $2" = "machines list" ] || return 99; printf "[]"; }'
+    )
+    result = _private_source_identity_command(
+        registry, audit, setup + "\n" + inventory + "\nfleet_audit_finalize_provider_teardown\n"
+    )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert provider_calls.read_text() == "machines list -a navi-whisper-lux-bench --json\n"
     published = tmp_path / "workspace/.context/fleet/runs/fixture-run/teardown-ownership"
     assert "status=provider-teardown-verified\n" in (audit / "meta").read_text()
     assert (published / "meta").read_bytes() == (audit / "meta").read_bytes()
@@ -30597,6 +31120,8 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         )
     source = fleet_source_text().split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    # One unchanged tick of the owned aggregator; its loop runs until the controller stops it.
+    aggregate = aggregate.split("\nwhile True:\n    try:\n        aggregate_tick()", 1)[0] + "\naggregate_tick()\n"
     assert fleet_source_text().index("# ── ONE aggregated batch dashboard") < fleet_source_text().index(
         "# ── Phase 1: provision"
     ), "live publisher begins after allocation"
@@ -32432,6 +32957,11 @@ def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release_after
             {"epoch": 1791415838, "signature": [[name, "failed", None, None, "teardown", None] for name in names]}
         )
     )
+    # A campaign member's original attempt persisted its membership-bound Hub
+    # identity; recovery must republish that record, never the bare local RUN_ID.
+    expected_hub_run = f"{run_id}-m{'a1' * 6}" if hub_at_recovery == "live" else run_id
+    if expected_hub_run != run_id:
+        (batch / "hub-run-id").write_text(expected_hub_run + "\n")
     for name in names:
         (run / name).mkdir()
         (run / name / "bench-e2e.started-epoch").write_text("1791412976\n")
@@ -32481,6 +33011,7 @@ def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release_after
             "recover_exact_stale_fleet_owner() {",
             "fleet_registry_remove_if_empty() {",
             "fleet_audit_finalize_provider_teardown() {",
+            "fleet_audit_verify_unallocated_names_absent() {",
             "fleet_audit_finalize_recovered_registry() {",
             "fleet_finalize_released_projection() {",
             "fleet_publish_recovered_terminal_projection() {",
@@ -32558,6 +33089,7 @@ capacity_release_stale_owner_reservations() {{ return 0; }}
     assert {(run / name / "bench-e2e.finished-epoch").read_text().strip() for name in names} == {release}
     assert len(received) == 1, "recovered release never reached terminal publication"
     assert [(t["name"], t["lifecycle_stage"]) for t in received[0]["tasks"]] == [(n, "released") for n in names]
+    assert received[0]["run_id"] == expected_hub_run
 
 
 @pytest.mark.parametrize(

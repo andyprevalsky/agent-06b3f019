@@ -57,6 +57,12 @@ def isolated_parent(self, *args, **kwargs):
         fields = list(observed)
         fields[2] = int(os.environ['RESERVE_TEST_DEVICE'])
         return os.stat_result(fields)
+    if str(self).endswith('/cleanup-disk-reserve'):
+        with (state.parent / 'storage.lock').open('a+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            allocated = json.loads(state.read_text())['allocations'].get(str(self))
+        if allocated is not None:
+            return os.stat_result(tuple(observed), {'st_blocks': allocated // 512})
     return observed
 Path.lstat = isolated_parent
 def allocate(fd, offset, size):
@@ -87,7 +93,13 @@ original_run = subprocess.run
 def ancestry_transport(arguments, *args, **kwargs):
     if os.environ.get('RESERVE_TEST_UNKNOWN_PARENT') == '1' and arguments == ['ps', '-axo', 'pid=,ppid=']:
         return subprocess.CompletedProcess(arguments, 0, '', '')
-    return original_run(arguments, *args, **kwargs)
+    result = original_run(arguments, *args, **kwargs)
+    if os.environ.get('RESERVE_TEST_UNKNOWN_PARENT') == '1' and arguments == ['ps', '-axo', 'pid=,ppid=,lstart=']:
+        # Preserve real native births while withholding only the ancestry map.
+        result.stdout = '\\n'.join(fields[0] + ' ? ' + fields[2]
+                                  for line in result.stdout.splitlines()
+                                  if len(fields := line.split(None, 2)) == 3)
+    return result
 subprocess.run = ancestry_transport
 ''')
 df = transport / "df"

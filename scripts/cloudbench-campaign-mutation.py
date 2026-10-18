@@ -9,6 +9,7 @@ import types
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -92,23 +93,44 @@ def feed(app: str, *, validate_inventory: bool = False) -> bool:
     for pid, stamp in [('pid', 'pid_start'), ('parent_pid', 'parent_start')]:
         if int(fields[pid]) < 1 or not live(int(fields[pid]), fields[stamp]):
             raise ValueError('mutation admission campaign owner is not alive')
-    health = directory / 'inventory/current/health'
-    snapshot = directory / 'machines.json'
-    if not health.exists() or not snapshot.exists():
+    # The existing publisher validates the full provider lists ONCE, writes a
+    # generation completely, then atomically publishes its current symlink.
+    # Admission consumes that real generation/health binding, not O(N) JSON.
+    index = directory / 'inventory'
+    if index.is_symlink() or not index.is_dir():
+        raise ValueError('unsafe mutation inventory index')
+    current = index / 'current'
+    try:
+        target = os.readlink(current)
+    except FileNotFoundError:
         return False
-    regular(health)
-    regular(snapshot)
-    if not health.stat().st_size or not snapshot.stat().st_size:
+    if not re.fullmatch(r'[.]generation-[A-Za-z0-9._-]+', target):
+        raise ValueError('foreign mutation inventory generation')
+    generation = index / target
+    if generation.is_symlink() or not generation.is_dir() or generation.stat().st_uid != os.getuid():
+        raise ValueError('unsafe mutation inventory generation')
+    health = generation / 'health'
+    snapshot = generation / 'admission-machines.json'
+    try:
+        regular(health)
+        regular(snapshot)
+        if not health.stat().st_size or not snapshot.stat().st_size:
+            return False
+        pairs = [line.split('=', 1) for line in health.read_text().splitlines()]
+        health_fields = dict(pairs)
+        if (len(pairs) != len(health_fields)
+                or set(health_fields) != {'publisher_token', 'valid_until', 'generation'}
+                or health_fields['generation'] != target):
+            raise ValueError('malformed mutation inventory generation health')
+        if health_fields['publisher_token'] != fields['token']:
+            raise ValueError('foreign mutation admission feed token')
+        expiry = health_fields['valid_until']
+        if not expiry.isdigit():
+            raise ValueError('malformed mutation admission feed health')
+        return os.readlink(current) == target and int(expiry) >= time.time()
+    except FileNotFoundError:
+        # A publisher can retire an old generation while this read is in flight.
         return False
-    health_fields = dict(line.split('=', 1) for line in health.read_text().splitlines())
-    if health_fields.get('publisher_token') != fields['token']:
-        raise ValueError('foreign mutation admission feed token')
-    expiry = health_fields['valid_until']
-    if not expiry.isdigit():
-        raise ValueError('malformed mutation admission feed health')
-    if validate_inventory and not isinstance(json.loads(snapshot.read_text()), list):
-        raise ValueError('malformed mutation admission inventory')
-    return int(expiry) >= time.time()
 
 
 def strict_primary_deadline(args: argparse.Namespace) -> float:
@@ -120,14 +142,40 @@ def strict_primary_deadline(args: argparse.Namespace) -> float:
     if (barrier.is_symlink() or barrier.name != cohort
             or barrier.parent.resolve() != (directory.parent / 'startup-cohorts').resolve()):
         raise ValueError('foreign strict clone queue')
-    manifest = barrier / 'manifest.json'
-    regular(manifest)
-    record = json.loads(manifest.read_text())
-    if record.get('cohort_id') != cohort or not isinstance(record.get('jobs'), dict):
-        raise ValueError('invalid strict clone membership')
-    if type(record['jobs'].get(job)) is not int or record['jobs'][job] != args.owner_pid:
-        raise ValueError('strict clone owner changed')
-    deadline = record.get('e2e_deadline_monotonic')
+    ticket_directory = os.environ.get('RUN_BENCH_CLEANUP_COHORT_DIR')
+    if ticket_directory:
+        if (Path(ticket_directory) != barrier
+                or os.environ.get('RUN_BENCH_CLEANUP_COHORT_ID') != cohort
+                or os.environ.get('RUN_BENCH_CLEANUP_JOB') != job):
+            raise ValueError('foreign strict cleanup ticket scope')
+        name = 'cloudbench-cleanup-tickets.py'
+        raw = Path(__file__).with_name(name).read_bytes()
+        if AUTHORITY['source']['sha256'].get(name) != hashlib.sha256(raw).hexdigest():
+            raise ValueError('strict cleanup ticket interpreter differs from approved source')
+        helper = types.ModuleType('strict_cleanup_identity')
+        helper.__file__ = str(Path(__file__).with_name(name))
+        exec(compile(raw, helper.__file__, 'exec'), helper.__dict__)
+        base = helper.base_for(barrier)
+        budget, _ = helper.selected(base, job)
+        number = int(os.environ['RUN_BENCH_CLEANUP_GENERATION'])
+        owner = helper.read(helper.generation(base, 'owners', job, number))
+        if (number < 1 or budget['cohort_id'] != cohort
+                or not helper.parent_active(budget) or (base / 'closing.json').exists()
+                or owner != dict(job=job, generation=number, owner_pid=args.owner_pid,
+                                 owner_start=args.owner_start, budget_sha256=helper.digest(budget))
+                or helper.read(helper.keyed(base, 'current', job)) != owner):
+            raise ValueError('strict cleanup ticket owner changed')
+        deadline = budget['deadline']
+    else:
+        # Legacy campaigns retain their original full-manifest validation.
+        manifest = barrier / 'manifest.json'
+        regular(manifest)
+        record = json.loads(manifest.read_text())
+        if record.get('cohort_id') != cohort or not isinstance(record.get('jobs'), dict):
+            raise ValueError('invalid strict clone membership')
+        if type(record['jobs'].get(job)) is not int or record['jobs'][job] != args.owner_pid:
+            raise ValueError('strict clone owner changed')
+        deadline = record.get('e2e_deadline_monotonic')
     if (isinstance(deadline, bool) or not isinstance(deadline, (int, float))
             or not math.isfinite(deadline) or deadline <= time.monotonic()
             or str(deadline) != os.environ.get('RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC')):
@@ -157,18 +205,49 @@ def strict_primary_not_finished(barrier: Path, task: Path) -> None:
         raise ValueError('strict clone campaign cancelled or task finished')
 
 
+def provider_backoff(path: Path, app: str) -> float:
+    regular(path)
+    record = json.loads(path.read_text())
+    if (set(record) != {'app', 'host', 'until', 'response_code'}
+            or record['app'] != app or record['host'] != HOST
+            or record['response_code'] not in ('429', 'resource_exhausted')
+            or isinstance(record['until'], bool) or not isinstance(record['until'], (int, float))
+            or not math.isfinite(record['until']) or record['until'] < 0):
+        raise ValueError('foreign or malformed provider backoff')
+    return float(record['until'])
+
+
+def write_json(path: Path, value: dict, *, replace: bool = False) -> None:
+    target = path.with_name('.' + path.name + '.' + uuid.uuid4().hex) if replace else path
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as output:
+        json.dump(value, output)
+        output.flush()
+        os.fsync(output.fileno())
+    if replace:
+        target.replace(path)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['pace', 'acquire', 'release', 'start-native', 'join-native'])
+    parser.add_argument('action', choices=['pace', 'acquire', 'release', 'start-native', 'join-native', 'backoff'])
     parser.add_argument('--app', required=True)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--owner-pid', type=int, required=True)
     parser.add_argument('--owner-start', default=os.environ.get('CLOUDBENCH_MUTATION_CALLER_START'))
     parser.add_argument('--wait-seconds', type=int)
-    parser.add_argument('--slots', type=int, default=4)
+    parser.add_argument('--slots', type=int, default=4, help='legacy input; campaign leases have no fixed concurrency cap')
     parser.add_argument('--lease', default='')
+    parser.add_argument('--response-code', choices=['429', 'resource_exhausted'])
+    parser.add_argument('--retry-after', type=float)
     parser.add_argument('--native-owner-pid', type=int)
     parser.add_argument('--strict-primary', action='store_true')
+    parser.add_argument('--print-budget', action='store_true')
     parser.add_argument('--task-root', type=Path)
     args = parser.parse_args()
     if args.owner_pid < 1 or args.slots < 1 or not args.app or '/' in args.app:
@@ -181,13 +260,30 @@ def main() -> int:
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if directory.is_symlink() or directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o022:
         raise ValueError('unsafe mutation admission directory')
-    lock_path = directory / 'lock'
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    regular(lock_path)
-    with os.fdopen(fd, 'r+') as lock:
-        if args.action in ['release', 'start-native', 'join-native']:
-            token = uuid.UUID(args.lease).hex
+    if args.action in ['release', 'start-native', 'join-native', 'backoff']:
+        # Only a provider-error publication shares a writer lock. Native owner
+        # transitions lock their exact key; unrelated orphans remain untouched.
+        token = None if args.action == 'backoff' else uuid.UUID(args.lease).hex
+        lock_path = directory / ('provider-backoff.lock' if token is None else f'lease-{token}.lock')
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        regular(lock_path)
+        with os.fdopen(fd, 'r+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            if (os.fstat(lock.fileno()).st_dev, os.fstat(lock.fileno()).st_ino) != (lock_path.stat().st_dev, lock_path.stat().st_ino):
+                raise ValueError('mutation key lock changed')
+            if args.action == 'backoff':
+                if (args.response_code is None or args.retry_after is None
+                        or not math.isfinite(args.retry_after) or not 0 < args.retry_after <= 90):
+                    raise ValueError('actual rate response and bounded retry interval required')
+                if not feed(args.app, validate_inventory=True):
+                    raise ValueError('rate response authority temporarily unknown')
+                state = directory / 'provider-backoff.json'
+                until = time.monotonic() + args.retry_after
+                if state.exists():
+                    until = max(until, provider_backoff(state, args.app))
+                write_json(state, {'app': args.app, 'host': HOST, 'until': until,
+                                   'response_code': args.response_code}, replace=True)
+                return 0
             path = directory / f'lease-{token}.json'
             regular(path)
             record = json.loads(path.read_text())
@@ -199,120 +295,65 @@ def main() -> int:
                 if record.get('joined') is not True:
                     raise ValueError('native mutation child has no joined receipt')
                 path.unlink()
+                return 0
+            if args.native_owner_pid is None or args.native_owner_pid < 1:
+                raise ValueError('missing native mutation owner')
+            if not caller_ancestor(args.native_owner_pid):
+                raise ValueError('foreign native mutation owner ancestry')
+            native_birth = birth(args.native_owner_pid)
+            if args.action == 'start-native':
+                if not feed(args.app, validate_inventory=True):
+                    raise ValueError('native mutation feed is temporarily unknown')
+                if record.get('native_pid') is not None and record.get('joined') is not True:
+                    raise ValueError('previous native mutation owner is unconfirmed')
+                record.update(native_pid=args.native_owner_pid, native_birth=native_birth, joined=False)
             else:
-                if args.native_owner_pid is None or args.native_owner_pid < 1:
-                    raise ValueError('missing native mutation owner')
-                if not caller_ancestor(args.native_owner_pid):
-                    raise ValueError('foreign native mutation owner ancestry')
-                native_birth = birth(args.native_owner_pid)
-                if args.action == 'start-native':
-                    if not feed(args.app, validate_inventory=True):
-                        raise ValueError('native mutation feed is temporarily unknown')
-                    if record.get('native_pid') is not None and record.get('joined') is not True:
-                        raise ValueError('previous native mutation owner is unconfirmed')
-                    record.update(native_pid=args.native_owner_pid, native_birth=native_birth, joined=False)
-                else:
-                    if record.get('native_pid') != args.native_owner_pid or record.get('native_birth') != native_birth:
-                        raise ValueError('foreign native mutation joined receipt')
-                    record['joined'] = True
-                temporary = path.with_name('.' + path.name + '.' + uuid.uuid4().hex)
-                with temporary.open('x') as output:
-                    json.dump(record, output)
-                temporary.replace(path)
+                if record.get('native_pid') != args.native_owner_pid or record.get('native_birth') != native_birth:
+                    raise ValueError('foreign native mutation joined receipt')
+                record['joined'] = True
+            write_json(path, record, replace=True)
             return 0
-        if args.wait_seconds is None or args.wait_seconds < 1:
-            raise ValueError('invalid existing mutation wait budget')
-        if args.strict_primary and args.action != 'pace':
-            raise ValueError('strict queue supports only primary create admission')
+    if args.wait_seconds is None or args.wait_seconds < 1:
+        raise ValueError('invalid existing mutation wait budget')
+    if args.strict_primary and args.action != 'pace':
+        raise ValueError('strict queue supports only primary create admission')
+    if args.strict_primary:
+        feed(args.app)
+        deadline = strict_primary_deadline(args)
+    else:
+        deadline = time.monotonic() + args.wait_seconds
+    while time.monotonic() < deadline:
+        if not live(args.owner_pid, owner_birth):
+            raise ValueError('mutation caller owner changed')
+        ready = feed(args.app, validate_inventory=True)
         if args.strict_primary:
-            feed(args.app)
-            deadline = strict_primary_deadline(args)
-        else:
-            deadline = time.monotonic() + args.wait_seconds
-        while time.monotonic() < deadline:
-            if not live(args.owner_pid, owner_birth):
-                raise ValueError('mutation caller owner changed')
-            ready = feed(args.app)
-            if args.strict_primary:
-                strict_primary_not_finished(Path(os.environ['RUN_BENCH_CAMPAIGN_BARRIER_DIR']), args.task_root)
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                time.sleep(0.1)
-                continue
-            try:
-                if not ready or not feed(args.app):
-                    continue
-                if args.action == 'pace':
-                    state = directory / 'create.json'
-                    now = time.monotonic()
-                    if state.exists():
-                        regular(state)
-                        record = json.loads(state.read_text())
-                        if set(record) != {'app', 'host', 'last_dispatch'} or record['app'] != args.app or record['host'] != HOST:
-                            raise ValueError('foreign or malformed create pacing state')
-                        last_dispatch = record['last_dispatch']
-                        if isinstance(last_dispatch, bool) or not isinstance(last_dispatch, (int, float)) or not math.isfinite(last_dispatch) or last_dispatch < 0 or last_dispatch > now:
-                            raise ValueError('invalid create pacing timestamp')
-                        if now - last_dispatch < 1:
-                            continue
-                    if not feed(args.app, validate_inventory=True):
-                        continue
-                    native_budget = args.wait_seconds
-                    if args.strict_primary:
-                        if strict_primary_deadline(args) != deadline:
-                            raise ValueError('original strict deadline changed')
-                        native_budget = min(args.wait_seconds, math.floor(deadline - time.monotonic() - 0.1))
-                        if native_budget < 1:
-                            raise ValueError('no original campaign budget remains for native clone')
-                    temporary = directory / f'.create-{uuid.uuid4().hex}'
-                    temporary.write_text(json.dumps({'app': args.app, 'host': HOST, 'last_dispatch': now}))
-                    temporary.replace(state)
-                    if args.strict_primary:
-                        print(native_budget)
-                    return 0
-                policy = directory / 'update-policy.json'
-                expected_policy = {'app': args.app, 'host': HOST, 'slots': args.slots}
-                if policy.exists():
-                    regular(policy)
-                    if json.loads(policy.read_text()) != expected_policy:
-                        raise ValueError('shared update concurrency policy changed')
-                else:
-                    with policy.open('x') as output:
-                        json.dump(expected_policy, output)
-                occupied = 0
-                for path in directory.glob('lease-*.json'):
-                    regular(path)
-                    record = json.loads(path.read_text())
-                    if set(record) != {'app', 'host', 'pid', 'birth', 'token', 'native_pid', 'native_birth', 'joined'} or record['app'] != args.app or record['host'] != HOST or path.name != f"lease-{record['token']}.json":
-                        raise ValueError('foreign or malformed update lease')
-                    status = IDENTITY._process_identity_state(record['pid'], record['birth'])
-                    if status in ['absent', 'mismatch']:
-                        # Only the exact native wrapper can publish this after
-                        # joining its child. Death alone proves no cleanup.
-                        if record['joined'] is True and isinstance(record['native_pid'], int) and record['native_pid'] > 0 and isinstance(record['native_birth'], str) and record['native_birth']:
-                            path.unlink()
-                        else:
-                            raise ValueError('unconfirmed dead update lease owner')
-                    elif status == 'match':
-                        occupied += 1
-                    else:
-                        raise ValueError('unknown update lease owner')
-                if occupied < args.slots:
-                    if not feed(args.app, validate_inventory=True):
-                        continue
-                    token = uuid.uuid4().hex
-                    path = directory / f'lease-{token}.json'
-                    with path.open('x') as output:
-                        json.dump({'app': args.app, 'host': HOST, 'pid': args.owner_pid, 'birth': owner_birth, 'token': token, 'native_pid': None, 'native_birth': None, 'joined': False}, output)
-                    print(token, flush=True)
-                    return 0
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
-                # Observations and permit waits spend the original caller clock.
-                time.sleep(0.1)
-        print('mutation admission exhausted existing wait budget', file=__import__('sys').stderr)
-        return 1
+            strict_primary_not_finished(Path(os.environ['RUN_BENCH_CAMPAIGN_BARRIER_DIR']), args.task_root)
+        state = directory / 'provider-backoff.json'
+        remaining = provider_backoff(state, args.app) - time.monotonic() if state.exists() else 0
+        if ready and remaining <= 0:
+            if args.action == 'pace':
+                native_budget = math.floor(deadline - time.monotonic())
+                if args.strict_primary:
+                    if strict_primary_deadline(args) != deadline:
+                        raise ValueError('original strict deadline changed')
+                    native_budget = min(args.wait_seconds, math.floor(deadline - time.monotonic() - 0.1))
+                if native_budget < 1:
+                    raise ValueError('no original mutation budget remains')
+                if args.strict_primary or args.print_budget:
+                    print(native_budget)
+                return 0
+            token = uuid.uuid4().hex
+            path = directory / f'lease-{token}.json'
+            write_json(path, {'app': args.app, 'host': HOST, 'pid': args.owner_pid,
+                             'birth': owner_birth, 'token': token, 'native_pid': None,
+                             'native_birth': None, 'joined': False})
+            print(token, flush=True)
+            return 0
+        # Waiting is caused by an actual published provider response or unknown
+        # publisher generation, never by a fixed create/update batch size.
+        time.sleep(min(0.05, max(0, deadline - time.monotonic()), remaining if remaining > 0 else 0.05))
+    print('mutation admission exhausted existing wait budget', file=sys.stderr)
+    return 1
 
 
 if __name__ == '__main__':

@@ -373,6 +373,20 @@ open in the local FE; the runner keeps that isolated stack alive and prints the
 resume command. To reuse a pre-existing export instead of generating one, pass
 `--checkpoint-source-json`; optional tree cloning uses `--checkpoint-tree-json`.
 
+### Provider rate-limit concurrency cap
+
+Benchmark guests share the Parallel Search+Extract and Kernel browser keys with
+production. `scripts/cloudbench-provider-limits.json` records each enforced
+limit, the measured run600c per-bench peak and a 20% production reserve; the
+cap is `floor(limit × 0.8 / per-bench peak)`, minimum across enforced providers
+(`python3 scripts/cloudbench-provider-capacity.py cap`, `cap --json` for the
+table). `run-original600-controller.py` (including `--check`), campaigns (whole
+sharded group), fleets and `--local` refuse a wider global simultaneous width
+with exit 78 before any credential or provider call. Do not retry, split or
+work around a refusal: ask the user to raise the provider limits (then record
+them in the registry in a reviewed change) or rerun at or below the cap.
+Task-free `--infra-probe` fleets and validated `--demo-cache` replays are exempt.
+
 ## Suites (tags)
 
 The curated tag vocabulary (each task carries zero or more):
@@ -536,6 +550,15 @@ curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT"
 - **Fly.io**: `flyctl logs` streams as a background process for the entire benchmark run, capturing live worker output, then filtered by agent_id after each task completes
 - **Supabase**: REST API call to `api.supabase.com/v1/projects/.../analytics/endpoints/logs.all` with time window, filtered for completions-related requests
 - **Messages**: Extracted from the agent GET response (always available, no external API needed)
+
+These production sources are queried only when the backend under test is
+production (`--prod` or a non-loopback `--url`). A loopback stack — `run-bench
+--local`, `scripts/run.sh` or an isolated cloud guest — runs its own backend,
+worker and completions, so prod stores cannot contain its agents. Its
+`worker_logs` come from the stack's local worker files, and `backend_logs` /
+`research_logs` carry a skip note; the full stack logs stay in its run archive.
+`SUPABASE_PROJECT_REF` falls back only to the project named by the configured
+`SUPABASE_URL`, never to a hard-coded production project.
 
 ### Token Setup
 

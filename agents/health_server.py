@@ -6,6 +6,7 @@ import importlib
 import os
 import sys
 import threading
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -50,9 +51,19 @@ def _min_machines_floor() -> int:
     return max(value, 1)
 
 
-# Queue metrics (updated by background poller in worker.py)
-_task_queue_backlog = 0
-_running_workflow_count = 0
+# Queue metrics (updated by background poller in worker.py). None = unknown:
+# this worker has no current observation (a follower without a leader view, or
+# an observer whose Temporal calls failed). Unknown is published as NaN, never 0,
+# because a zero backlog is a scale-down signal.
+_task_queue_backlog: Optional[int] = None
+_running_workflow_count: Optional[int] = None
+_queue_metrics_observed_at: Optional[float] = None  # time.monotonic() of the observation
+_queue_metrics_source: Optional[str] = None  # "self" (this worker's Temporal calls) | "leader" (mirrored)
+# Leader election state (worker.py). Peers read it from /autoscaler/peer.
+_autoscaler_role: Optional[str] = None  # "leader" | "follower" | "unknown"
+_autoscaler_leader_eligible = False
+_autoscaler_observes_queue = False
+_local_metrics_published_at: Optional[float] = None  # time.monotonic() of the last local reading
 # Pre-computed floor; matches worker MIN_MACHINES (prod=2, per-bench cloud=1).
 _desired_machine_count = _min_machines_floor()
 _current_machine_count = 1  # Observed via Fly DNS
@@ -164,8 +175,6 @@ def set_queue_metrics(
 ):
     """Update queue metrics from background poller. Thread-safe via GIL."""
     global \
-        _task_queue_backlog, \
-        _running_workflow_count, \
         _desired_machine_count, \
         _current_machine_count, \
         _is_leader, \
@@ -186,8 +195,7 @@ def set_queue_metrics(
         _machine_memory_used_percent, \
         _autoscaler_memory_threshold_percent, \
         _autoscaler_memory_signal_percent
-    _task_queue_backlog = backlog
-    _running_workflow_count = workflow_count
+    _record_queue_observation(backlog, workflow_count, source="self", age_seconds=0.0)
     _desired_machine_count = desired_machines
     _current_machine_count = current_machines
     _is_leader = is_leader
@@ -210,11 +218,154 @@ def set_queue_metrics(
     _autoscaler_memory_signal_percent = autoscaler_memory_signal_percent
 
 
+def _record_queue_observation(
+    backlog: Optional[int], workflow_count: Optional[int], *, source: str, age_seconds: float
+) -> None:
+    global _task_queue_backlog, _running_workflow_count, _queue_metrics_observed_at, _queue_metrics_source
+    if backlog is None or workflow_count is None:
+        _task_queue_backlog = None
+        _running_workflow_count = None
+        _queue_metrics_observed_at = None
+        _queue_metrics_source = None
+        return
+    _task_queue_backlog = int(backlog)
+    _running_workflow_count = int(workflow_count)
+    _queue_metrics_observed_at = time.monotonic() - max(float(age_seconds), 0.0)
+    _queue_metrics_source = source
+
+
+def set_queue_observation(
+    backlog: Optional[int],
+    workflow_count: Optional[int],
+    *,
+    desired_machines: int,
+    current_machines: int,
+    age_seconds: float = 0.0,
+    source: str = "self",
+    autoscaler_memory_signal_percent: Optional[float] = None,
+    autoscaler_memory_threshold_percent: Optional[float] = None,
+) -> None:
+    """Publish the Temporal queue observation; None backlog/count means unknown."""
+    global \
+        _desired_machine_count, \
+        _current_machine_count, \
+        _autoscaler_memory_signal_percent, \
+        _autoscaler_memory_threshold_percent
+    _record_queue_observation(backlog, workflow_count, source=source, age_seconds=age_seconds)
+    _desired_machine_count = int(desired_machines)
+    _current_machine_count = int(current_machines)
+    if autoscaler_memory_signal_percent is not None:
+        _autoscaler_memory_signal_percent = autoscaler_memory_signal_percent
+    if autoscaler_memory_threshold_percent is not None:
+        _autoscaler_memory_threshold_percent = autoscaler_memory_threshold_percent
+
+
+def set_local_autoscaler_metrics(
+    *,
+    machine_memory_used_percent: float,
+    observed_capacity: Optional[int] = None,
+    activity_slots_used: Optional[int] = None,
+    activity_slots_available: Optional[int] = None,
+    resource_slots_cpu_usage: Optional[float] = None,
+    resource_slots_mem_usage: Optional[float] = None,
+    resource_slots_cpu_pid_output: Optional[float] = None,
+    resource_slots_mem_pid_output: Optional[float] = None,
+    activity_task_pollers: Optional[int] = None,
+    workflow_task_pollers: Optional[int] = None,
+    sticky_workflow_task_pollers: Optional[int] = None,
+    activity_admission_open: Optional[bool] = None,
+    activity_admission_memory_percent: Optional[float] = None,
+    activity_admission_close_memory_percent: Optional[float] = None,
+    activity_admission_open_memory_percent: Optional[float] = None,
+) -> None:
+    """Publish this machine's own readings. Needs no Temporal call, so it never
+    waits behind (or freezes with) the queue observation."""
+    global \
+        _machine_memory_used_percent, \
+        _observed_task_capacity, \
+        _activity_slots_used, \
+        _activity_slots_available, \
+        _resource_slots_cpu_usage, \
+        _resource_slots_mem_usage, \
+        _resource_slots_cpu_pid_output, \
+        _resource_slots_mem_pid_output, \
+        _activity_task_pollers, \
+        _workflow_task_pollers, \
+        _sticky_workflow_task_pollers, \
+        _activity_admission_open, \
+        _activity_admission_memory_percent, \
+        _activity_admission_close_memory_percent, \
+        _activity_admission_open_memory_percent, \
+        _local_metrics_published_at
+    _machine_memory_used_percent = machine_memory_used_percent
+    _observed_task_capacity = observed_capacity
+    _activity_slots_used = activity_slots_used
+    _activity_slots_available = activity_slots_available
+    _resource_slots_cpu_usage = resource_slots_cpu_usage
+    _resource_slots_mem_usage = resource_slots_mem_usage
+    _resource_slots_cpu_pid_output = resource_slots_cpu_pid_output
+    _resource_slots_mem_pid_output = resource_slots_mem_pid_output
+    _activity_task_pollers = activity_task_pollers
+    _workflow_task_pollers = workflow_task_pollers
+    _sticky_workflow_task_pollers = sticky_workflow_task_pollers
+    _activity_admission_open = activity_admission_open
+    _activity_admission_memory_percent = activity_admission_memory_percent
+    _activity_admission_close_memory_percent = activity_admission_close_memory_percent
+    _activity_admission_open_memory_percent = activity_admission_open_memory_percent
+    _local_metrics_published_at = time.monotonic()
+
+
+def set_autoscaler_role(role: Optional[str], *, leader_eligible: bool, observes_queue: bool) -> None:
+    """Publish this worker's election state for peers and dashboards."""
+    global _autoscaler_role, _autoscaler_leader_eligible, _autoscaler_observes_queue, _is_leader
+    _autoscaler_role = role
+    _autoscaler_leader_eligible = bool(leader_eligible)
+    _autoscaler_observes_queue = bool(observes_queue)
+    _is_leader = role == "leader"
+
+
+def _age_seconds(at: Optional[float]) -> Optional[float]:
+    return None if at is None else max(time.monotonic() - at, 0.0)
+
+
+def autoscaler_peer_view() -> dict:
+    """The view peers elect the observing leader from (served at /autoscaler/peer).
+
+    Only this worker's own observation is advertised as `queue`: a mirrored copy
+    is never re-advertised, so a stale value cannot propagate down a chain.
+    """
+    queue = None
+    if _queue_metrics_source == "self" and _task_queue_backlog is not None:
+        queue = {
+            "backlog": _task_queue_backlog,
+            "workflow_count": _running_workflow_count,
+            "desired_machines": _desired_machine_count,
+            "current_machines": _current_machine_count,
+            "age_seconds": _age_seconds(_queue_metrics_observed_at),
+            "source": "self",
+        }
+    return {
+        "surface_hash": (os.getenv("TEMPORAL_WORKER_SURFACE_HASH") or "").strip(),
+        "role": _autoscaler_role,
+        "leader_eligible": _autoscaler_leader_eligible,
+        "heartbeat_age_seconds": _age_seconds(_local_metrics_published_at),
+        "machine_memory_used_percent": (
+            _machine_memory_used_percent if _local_metrics_published_at is not None else None
+        ),
+        "activity_admission_open": _activity_admission_open,
+        "activity_slots_used": _activity_slots_used,
+        "queue": queue,
+    }
+
+
 def get_queue_metrics_snapshot() -> dict:
     """Return the latest queue/worker-capacity snapshot for trace metadata."""
     snapshot = {
         "task_queue_backlog": _task_queue_backlog,
         "running_workflow_count": _running_workflow_count,
+        "task_queue_metrics_source": _queue_metrics_source,
+        "task_queue_metrics_age_seconds": _age_seconds(_queue_metrics_observed_at),
+        "autoscaler_role": _autoscaler_role,
         "desired_machine_count": _desired_machine_count,
         "current_machine_count": _current_machine_count,
         "autoscaler_is_leader": _is_leader,
@@ -307,13 +458,21 @@ machine_memory_available_bytes {vm.available}
 # TYPE machine_memory_used_percent gauge
 machine_memory_used_percent {_machine_memory_used_percent or vm.percent}
 
-# HELP task_queue_backlog Approximate tasks waiting in Temporal task queue (activity + workflow)
+# HELP task_queue_backlog Approximate tasks waiting in Temporal task queue (activity + workflow); NaN when unobserved
 # TYPE task_queue_backlog gauge
-task_queue_backlog {_task_queue_backlog}
+task_queue_backlog {_prom_value(_task_queue_backlog)}
 
-# HELP running_workflow_count Number of currently running Temporal workflows
+# HELP running_workflow_count Number of currently running Temporal workflows; NaN when unobserved
 # TYPE running_workflow_count gauge
-running_workflow_count {_running_workflow_count}
+running_workflow_count {_prom_value(_running_workflow_count)}
+
+# HELP task_queue_metrics_present Whether task_queue_backlog/running_workflow_count hold a current observation
+# TYPE task_queue_metrics_present gauge
+task_queue_metrics_present {_prom_present(_task_queue_backlog)}
+
+# HELP task_queue_metrics_age_seconds Age of the published queue observation (NaN when unobserved)
+# TYPE task_queue_metrics_age_seconds gauge
+task_queue_metrics_age_seconds {_prom_value(_age_seconds(_queue_metrics_observed_at))}
 
 # HELP desired_machine_count Adaptive autoscaler: desired number of Fly machines
 # TYPE desired_machine_count gauge
@@ -326,6 +485,14 @@ current_machine_count {_current_machine_count}
 # HELP autoscaler_is_leader Whether this instance is the autoscaler leader (1=leader, 0=follower)
 # TYPE autoscaler_is_leader gauge
 autoscaler_is_leader {1 if _is_leader else 0}
+
+# HELP autoscaler_leadership_known Whether this instance verified its leader/follower role (0=unknown)
+# TYPE autoscaler_leadership_known gauge
+autoscaler_leadership_known {1 if _autoscaler_role in ("leader", "follower") else 0}
+
+# HELP autoscaler_observes_queue Whether this instance itself spends Temporal visibility calls on the queue
+# TYPE autoscaler_observes_queue gauge
+autoscaler_observes_queue {1 if _autoscaler_observes_queue else 0}
 
 # HELP observed_task_capacity Dynamic activity task capacity per machine (from SDK resource-based tuner)
 # TYPE observed_task_capacity gauge
@@ -401,6 +568,12 @@ autoscaler_memory_signal_percent {_autoscaler_memory_signal_percent or _machine_
 """
 
     return metrics_text, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
+@app.route("/autoscaler/peer")
+def autoscaler_peer():
+    """Election/fleet view for peer workers on the private network (no Temporal call)."""
+    return jsonify(autoscaler_peer_view()), 200
 
 
 @app.route("/benchmark/memory-baseline", methods=["POST"])

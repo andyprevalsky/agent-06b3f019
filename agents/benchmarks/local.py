@@ -2783,6 +2783,17 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
     return subprocess.run(command, cwd=AGENTS_DIR, env=env).returncode
 
 
+def enforce_provider_capacity(benches: int) -> None:
+    """Refuse a local width above the shared provider rate-limit cap (the cloud registry)."""
+    capacity = runpy.run_path(str(REPO_ROOT / "scripts/cloudbench-provider-capacity.py"))
+    try:
+        refused = capacity["check"](benches)
+    except capacity["RegistryError"] as error:
+        raise SystemExit(f"❌ {error}; no local benchmark stack started") from None
+    if refused:
+        raise SystemExit(refused)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     world_ready_fd = getattr(args, "world_ready_fd", None)
@@ -2800,6 +2811,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         finally:
             os.close(world_ready_fd)
     selected_tasks = tasks_from_args(args)
+    if not getattr(args, "cohort_tasks", []) and not args.eval_suite:
+        # Before any stack, child world or provider call; child worlds belong
+        # to this already-admitted parent width.
+        enforce_provider_capacity(min(args.max_concurrency, len(selected_tasks)))
     validate_benchmark_archive_environment()
     validate_agentcard_org_credentials(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:

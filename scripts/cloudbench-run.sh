@@ -860,6 +860,8 @@ chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || finish 1
 cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || finish 1
+cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
+    "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}" || finish 1
 cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
@@ -1110,6 +1112,12 @@ fi
 if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${TASK_WORKER_ENV[@]}")
 fi
+case "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}" in
+    ''|*[!0-9]*|0) ;;
+    # Controller-budgeted queue observation: N guests share the Temporal
+    # namespace's Visibility API budget with production workers.
+    *) STACK_ENV+=("AUTOSCALER_POLL_INTERVAL_SECONDS=$CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS") ;;
+esac
 if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
     # The probe executes no benchmark task. One Temporal worker proves stack
     # readiness without starting eight idle Python processes on a 4 GB guest

@@ -11,6 +11,8 @@ import inspect
 import json
 import math
 import os
+import re
+import runpy
 import secrets
 import shlex
 import shutil
@@ -18,8 +20,9 @@ import signal
 import subprocess
 import sys
 import time
+import tempfile
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -47,16 +50,264 @@ def write_json_atomic(path: Path, value: dict[str, object]) -> None:
     temporary.replace(path)
 
 
-def publish_campaign_group(
-    root: Path,
-    campaign_dir: Path,
-    state: dict[str, object],
+# Sharded campaigns: an operator runs K campaigns that form one Hub group and
+# one externally released startup cohort. Unset variables keep the original
+# single-campaign behaviour; children and nested canaries never inherit them.
+CAMPAIGN_SHARD_VARIABLES = (
+    "RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER",
+    "RUN_BENCH_CAMPAIGN_TASK_INDEXES",
+    "RUN_BENCH_CAMPAIGN_GROUP_TOTAL",
+    "RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT",
+)
+EXTERNAL_BARRIER_READY_SCHEMA = "campaign-external-barrier-ready-v1"
+EXTERNAL_BARRIER_RELEASE_SCHEMA = "campaign-external-barrier-release-v1"
+EXTERNAL_BARRIER_ABORT_SCHEMA = "campaign-external-barrier-abort-v1"
+HUB_GROUP_MAX_MEMBERS = 100000  # The Hub's own schedule/member bound.
+
+
+def campaign_jobs(
+    tasks: list[str],
+    runs: int,
+    task_indexes: list[int] | None = None,
+    task_total: int | None = None,
+) -> list[dict[str, object]]:
+    """The exact ordered schedule a campaign admits: every task, run by run.
+
+    With task_indexes (each task's 0-based position in the full manifest of
+    task_total names), job IDs are the ones a single controller would assign
+    to those tasks for the whole manifest, so shards never collide.
+    """
+    if type(runs) is not int or runs < 1:
+        raise ValueError("campaign runs must be a positive integer")
+    if (
+        not isinstance(tasks, (list, tuple))
+        or not tasks
+        or any(not isinstance(task, str) for task in tasks)
+    ):
+        raise ValueError("campaign tasks must be a nonempty list of names")
+    if task_indexes is None:
+        if task_total is not None:
+            raise ValueError("campaign task total requires task indexes")
+        positions, width = list(range(len(tasks))), len(tasks)
+    else:
+        if type(task_total) is not int or task_total < 1:
+            raise ValueError("campaign task indexes require the manifest task total")
+        positions, width = list(task_indexes), task_total
+        if (
+            len(positions) != len(tasks)
+            or any(type(value) is not int or not 0 <= value < width for value in positions)
+            or len(set(positions)) != len(positions)
+        ):
+            raise ValueError(
+                "campaign task indexes must be distinct manifest positions, one per task"
+            )
+    jobs: list[dict[str, object]] = []
+    for run_number in range(1, runs + 1):
+        for task, position in zip(tasks, positions):
+            index = (run_number - 1) * width + position + 1
+            jobs.append(
+                {
+                    "index": index,
+                    "job_id": f"r{run_number:03d}-j{index:04d}",
+                    "task": task,
+                    "run": run_number,
+                }
+            )
+    return jobs
+
+
+def sharded_campaign_jobs(
+    shards: list[dict[str, object]], task_total: int
+) -> list[dict[str, object]]:
+    """All shard schedules as one group, in single-controller job order."""
+    combined: list[dict[str, object]] = []
+    for shard in shards:
+        combined.extend(
+            campaign_jobs(shard["tasks"], shard["runs"], shard["task_indexes"], task_total)
+        )
+    identifiers = [job["job_id"] for job in combined]
+    if not combined or len(identifiers) > HUB_GROUP_MAX_MEMBERS:
+        raise ValueError("sharded campaign member count is outside the Hub bound")
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("sharded campaign job IDs are not unique")
+    return sorted(combined, key=lambda job: job["index"])
+
+
+def campaign_group_timestamp(epoch: object) -> str:
+    """The one Hub group timestamp derived from the operator's shared epoch."""
+    if (
+        isinstance(epoch, bool)
+        or not isinstance(epoch, (int, float))
+        or not math.isfinite(epoch)
+        or epoch <= 0
+    ):
+        raise ValueError("campaign group start must be a positive finite epoch")
+    return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
+
+
+def campaign_group_state(
+    group_run_id: str,
+    group_started_at: float,
+    jobs: list[dict[str, object]],
     *,
-    live: bool,
-    stop_requested: Callable[[], bool],
-) -> bool:
-    """The schedule is a real Hub resource; task results remain child-owned."""
-    record = {
+    status: str = "running",
+    finished_at: str | None = None,
+    wall_clock_seconds: float | None = None,
+) -> dict[str, object]:
+    """State accepted by publish_campaign_group for an operator-owned group."""
+    if not isinstance(group_run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9._-]+", group_run_id
+    ):
+        raise ValueError("invalid campaign group identity")
+    identifiers = [job["job_id"] for job in jobs]
+    if not jobs or len(set(identifiers)) != len(identifiers):
+        raise ValueError("campaign group members must be nonempty and unique")
+    return {
+        "campaign_id": group_run_id,
+        "started_at": campaign_group_timestamp(group_started_at),
+        "status": status,
+        "finished_at": finished_at,
+        "wall_clock_seconds": wall_clock_seconds,
+        "jobs": [
+            {
+                "job_id": job["job_id"],
+                "task": job["task"],
+                "run": job["run"],
+                "status": job.get("status", "queued"),
+                "controller_exit_code": job.get("controller_exit_code"),
+            }
+            for job in jobs
+        ],
+    }
+
+
+def campaign_shard_settings(
+    environment: Mapping[str, str],
+    *,
+    tasks: list[str],
+    runs: int,
+    concurrency: int,
+    strict: bool,
+) -> dict[str, object]:
+    """Validate the shard environment before any campaign artifact exists."""
+    job_count = len(tasks) * runs
+    settings: dict[str, object] = {
+        "external_barrier": None,
+        "task_indexes": None,
+        "task_total": None,
+        "group_total": None,
+        "group_started_at": None,
+    }
+    raw_barrier = environment.get("RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER")
+    if raw_barrier is not None:
+        directory = Path(raw_barrier)
+        if not directory.is_absolute() or directory.is_symlink() or not directory.is_dir():
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER must be an existing absolute directory"
+            )
+        if not strict or job_count > concurrency:
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER requires --strict-barrier with exactly one startup cohort"
+            )
+        settings["external_barrier"] = directory
+    raw_total = environment.get("RUN_BENCH_CAMPAIGN_GROUP_TOTAL")
+    raw_started = environment.get("RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT")
+    if (raw_total is not None or raw_started is not None) and not environment.get(
+        "BENCHMARK_HUB_GROUP_RUN_ID"
+    ):
+        # Without a preset group this campaign would publish its own schedule,
+        # which can never match a total or timestamp shared with other shards.
+        raise ValueError(
+            "RUN_BENCH_CAMPAIGN_GROUP_TOTAL/STARTED_AT require a preset BENCHMARK_HUB_GROUP_RUN_ID"
+        )
+    if raw_total is not None:
+        if not re.fullmatch(r"[1-9][0-9]{0,5}", raw_total) or not (
+            job_count <= int(raw_total) <= HUB_GROUP_MAX_MEMBERS
+        ):
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_GROUP_TOTAL must be an integer group size covering this shard"
+            )
+        settings["group_total"] = int(raw_total)
+    if raw_started is not None:
+        try:
+            settings["group_started_at"] = campaign_group_timestamp(float(raw_started))
+        except ValueError:
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT must be a positive finite epoch"
+            ) from None
+    raw_indexes = environment.get("RUN_BENCH_CAMPAIGN_TASK_INDEXES")
+    if raw_indexes is not None:
+        total = settings["group_total"]
+        if total is None or total % runs:
+            # Single-controller IDs need the whole manifest width: total / runs.
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_TASK_INDEXES requires RUN_BENCH_CAMPAIGN_GROUP_TOTAL as a multiple of --runs"
+            )
+        fields = raw_indexes.split(",")
+        if any(not re.fullmatch(r"0|[1-9][0-9]{0,5}", field) for field in fields):
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_TASK_INDEXES must be comma-separated non-negative integers"
+            )
+        indexes = [int(field) for field in fields]
+        try:
+            campaign_jobs(tasks, runs, indexes, total // runs)
+        except ValueError:
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_TASK_INDEXES must be distinct manifest positions, one per --task"
+            ) from None
+        settings["task_indexes"] = indexes
+        settings["task_total"] = total // runs
+    return settings
+
+
+def external_barrier_release_id(directory: Path) -> str | None:
+    """A valid coordinator release; an incompletely written file is not yet one."""
+    path = directory / "release.json"
+    if path.is_symlink():
+        raise ValueError("external barrier release is not a regular file")
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        receipt = json.loads(raw)
+    except ValueError:
+        return None
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema") != EXTERNAL_BARRIER_RELEASE_SCHEMA
+        or not isinstance(receipt.get("release_id"), str)
+        or not re.fullmatch(r"[0-9a-f]{8,128}", receipt["release_id"])
+    ):
+        raise ValueError("external barrier release is invalid")
+    return receipt["release_id"]
+
+
+def external_barrier_abort(directory: Path) -> dict[str, object] | None:
+    """Any abort request before release aborts; its contents are evidence only."""
+    path = directory / "abort.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        request = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {"reason": "unreadable external abort request", "release_id": None}
+    if (
+        not isinstance(request, dict)
+        or request.get("schema") != EXTERNAL_BARRIER_ABORT_SCHEMA
+        or not isinstance(request.get("reason"), str)
+    ):
+        return {"reason": "invalid external abort request", "release_id": None}
+    release_id = request.get("release_id")
+    return {
+        "reason": request["reason"] or "external abort requested",
+        "release_id": release_id if isinstance(release_id, str) else None,
+    }
+
+
+def campaign_group_record(state: dict[str, object]) -> dict[str, object]:
+    """The Hub schedule record; members carry no task results."""
+    return {
         "run_id": state["campaign_id"],
         "timestamp": state["started_at"],
         "source": "benchmark-campaign",
@@ -68,8 +319,8 @@ def publish_campaign_group(
             "wall_clock_seconds": state.get("wall_clock_seconds"),
             "outcomes": {
                 str(job["job_id"]): {
-                    "status": job["status"],
-                    "controller_exit_code": job["controller_exit_code"],
+                    "status": job.get("status", "queued"),
+                    "controller_exit_code": job.get("controller_exit_code"),
                 }
                 for job in state["jobs"]
             },
@@ -83,6 +334,18 @@ def publish_campaign_group(
             ],
         },
     }
+
+
+def publish_campaign_group(
+    root: Path,
+    campaign_dir: Path,
+    state: dict[str, object],
+    *,
+    live: bool,
+    stop_requested: Callable[[], bool],
+) -> bool:
+    """The schedule is a real Hub resource; task results remain child-owned."""
+    record = campaign_group_record(state)
     target = campaign_dir / "hub-group.json"
     write_json_atomic(target, record)
     if stop_requested():
@@ -116,7 +379,9 @@ def publish_campaign_group(
         os.chmod(log, 0o600)
         result = subprocess.Popen(
             [
-                sys.executable,
+                # hub_upload's tree helpers need the agents venv (httpx); an
+                # operator on system Python names that interpreter explicitly.
+                os.environ.get("RUN_BENCH_HUB_PYTHON") or sys.executable,
                 str(root / "agents/benchmarks/hub_upload.py"),
                 "--register-starting" if live else "--upload-final",
                 str(target),
@@ -297,6 +562,34 @@ def stress_default_environment(requirements: dict[str, object], environment: dic
     return result
 
 
+def cleanup_ticket_module(root: Path) -> ModuleType:
+    """Bind and execute the exact immutable helper once in the campaign parent."""
+    cached = getattr(cleanup_ticket_module, "_checked", None)
+    if cached is not None:
+        if cached[0] != root:
+            raise ValueError("cleanup ticket control root changed")
+        return cached[1]
+    helper = root / "scripts/cloudbench-cleanup-tickets.py"
+    ref = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    checked = subprocess.check_output(["git", "-C", str(root), "show", ref + ":scripts/cloudbench-cleanup-tickets.py"])
+    if helper.read_bytes() != checked:
+        raise ValueError("cleanup ticket interpreter differs from immutable controller source")
+    module = ModuleType("cleanup_parent_identity")
+    module.__file__ = str(helper)
+    exec(compile(checked, str(helper), "exec"), module.__dict__)
+    cleanup_ticket_module._checked = (root, module)
+    return module
+
+
+def cleanup_ticket_command(root: Path, action: str, cohort: dict[str, object],
+                           *arguments: str) -> object:
+    """Cohort-wide work runs once; assigning one selected job is constant-size."""
+    module = cleanup_ticket_module(root)
+    args = module.parse([action, "--cohort", str(cohort["_directory"]),
+                         "--cohort-id", str(cohort["cohort_id"]), *map(str, arguments)])
+    return getattr(module, action)(args)
+
+
 def stress_inventory_baseline(root: Path, authority: str) -> tuple[int, list[dict[str, object]] | None]:
     """Borrow the exact parent feed with existing checks; temporary absence never fans out."""
     expected = json.loads(authority)
@@ -378,7 +671,9 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
             and (fleet / "teardown-ownership/meta").read_bytes() == meta_bytes
             and (fleet / "teardown-ownership/provider-teardown-verified.epoch").read_bytes() == epoch_bytes
             and math.isfinite(float(epoch_bytes)) and float(epoch_bytes) > 0
-            and not registry.exists() and not registry.is_symlink()
+            and ((not registry.exists() and not registry.is_symlink()) or runpy.run_path(
+                str(Path(__file__).with_name("cloudbench-retained-successor.py"))
+            )["released"](registry, audit, fleet, owner, run_id))
             and lifecycle.get("hub_publication_failed") is False
             and task.get("lifecycle_stage") == "released"
         )
@@ -396,30 +691,20 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
 
 
 def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
+    """Send one cancellation TERM to each live controller's process group.
+
+    Each fleet controller releases its own guests and provider resources in its
+    EXIT cleanup, whose phases carry their own bounds (guest acknowledgement,
+    native stop, evidence, destroy). Callers keep joining every controller and
+    record its real exit. Never SIGKILL a controller: KILL cannot run that
+    cleanup, so started guests would stay allocated without an owner acting.
+    """
     for process_id, job in active.items():
         process = job["_process"]
         assert isinstance(process, subprocess.Popen)
         if process.poll() is None:
             try:
                 os.killpg(process_id, signal.SIGTERM)
-                job["_terminated_by_campaign"] = True
-            except ProcessLookupError:
-                pass
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if all(
-            isinstance(job["_process"], subprocess.Popen)
-            and job["_process"].poll() is not None
-            for job in active.values()
-        ):
-            return
-        time.sleep(0.1)
-    for process_id, job in active.items():
-        process = job["_process"]
-        assert isinstance(process, subprocess.Popen)
-        if process.poll() is None:
-            try:
-                os.killpg(process_id, signal.SIGKILL)
                 job["_terminated_by_campaign"] = True
             except ProcessLookupError:
                 pass
@@ -480,13 +765,170 @@ def start_shared_inventory(
     return process, log, directory
 
 
+def archive_shared_relay(directory: Path, archive: Path) -> None:
+    """A crashed control socket is evidence metadata, not an exportable file."""
+    import stat
+    def non_records(parent: str, names: list[str]) -> list[str]:
+        return [name for name in names if not (stat.S_ISREG((Path(parent) / name).lstat().st_mode) or stat.S_ISDIR((Path(parent) / name).lstat().st_mode))]
+    shutil.copytree(directory, archive, dirs_exist_ok=True, ignore=non_records)
+
+
+def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
+                       inventory: Path, deadline: float | None) -> dict:
+    """Own one canonical Fly bootstrap and one relay until all children join."""
+    ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+    checked = {}
+    for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
+        raw = subprocess.check_output(['git', '-C', str(root), 'show', ref + ':' + relative])
+        if (root / relative).read_bytes() != raw:
+            raise ValueError('shared relay source differs from reviewed controller')
+        checked[relative] = raw
+    # Unix sockets have a short pathname limit; campaign identifiers can be long.
+    directory = Path(tempfile.mkdtemp(prefix='cb-relay-', dir='/tmp'))
+    archive = campaign_dir / 'shared-relay'
+    write_json_atomic(campaign_dir / 'shared-relay-location.json', {'directory': str(directory)})
+    owner = dict(line.split('=', 1) for line in (inventory / 'owner').read_text().splitlines())
+    app = owner['app']
+    identity = cleanup_ticket_module(root)
+    parent_start = identity.birth(os.getpid())
+    environment = os.environ.copy()
+    # Resolve the same complete bench-token precedence as existing native reads.
+    token = subprocess.check_output(['bash', '-c', 'source "$1"; resolve_fly_token',
+                                    'relay', str(root / 'scripts/lib/cloudbench-inventory.sh')],
+                                   cwd=workspace, env=environment, timeout=20, text=True).strip()
+    if not token: raise ValueError('missing shared transport credential')
+    environment['FLY_API_TOKEN'] = token
+    # One private agent belongs to the singleton bootstrap, never to a route.
+    # Official flyctl isolated mode ties its child agent to bootstrap stdin EOF.
+    agent_socket = directory / 'fly-agent.sock'
+    environment['FLY_AGENT_SOCKET_PATH'] = str(agent_socket)
+    environment['FLY_AGENT_ISOLATED'] = '1'
+    metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
+                              env=environment, capture_output=True, timeout=30)
+    metadata_path = directory / 'app-metadata.private.json'
+    metadata_path.write_bytes(metadata.stdout); metadata_path.chmod(0o600)
+    if metadata.returncode: raise ValueError('shared transport app metadata unavailable')
+    native = json.loads(metadata.stdout)
+    organization = native['Organization']
+    org = organization.get('Slug', organization.get('slug'))
+    network = native.get('Network', '')
+    if native.get('Name') != app or not isinstance(org, str) or not org or not isinstance(network, str):
+        raise ValueError('shared transport app metadata identity invalid')
+    if network == 'default': network = ''
+    ports = []
+    for relative, name in [('scripts/run-bench-cloud', 'REMOTE_STATUS_PORT'), ('scripts/run-bench-cloud', 'REMOTE_BACKEND_PORT'), ('scripts/run-bench-fleet', 'BOX_HEALTH_PORT')]:
+        import re
+        match = re.search(rb'^' + name.encode() + rb'="([0-9]+)"', checked[relative], re.M)
+        if not match or not 1 <= int(match[1]) <= 65535: raise ValueError('invalid configured relay port')
+        ports.append(int(match[1]))
+    authority = dict(schema='shared-relay-authority-v1', app=app, org_slug=org,
+                     network=network, parent_pid=os.getpid(), parent_start=parent_start,
+                     source_sha256=hashlib.sha256(checked['scripts/cloudbench-shared-relay.py']).hexdigest(),
+                     agent_socket=str(agent_socket), inventory_directory=str(inventory.resolve()),
+                     inventory_owner=owner, allowed_remote_ports=sorted(set(ports)), deadline=deadline if deadline is not None else sys.float_info.max)
+    authority_path = directory / 'authority.private.json'
+    authority_path.write_text(json.dumps(authority) + '\n'); authority_path.chmod(0o600)
+    log = (directory / 'broker.private.log').open('w'); os.chmod(log.name, 0o600)
+    bootstrap_log = (directory / 'bootstrap.private.log').open('w'); os.chmod(bootstrap_log.name, 0o600)
+    value = dict(directory=directory, archive=archive, authority=authority_path, parent_start=parent_start,
+                 module=root / 'scripts/cloudbench-shared-relay.py', log=log,
+                 bootstrap_log=bootstrap_log, process=None, bootstrap=None)
+    try:
+        value['bootstrap'] = subprocess.Popen(['flyctl', 'proxy', '0:1', '::1', '-a', app,
+                                               '--bind-addr', '127.0.0.1', '-q'],
+                                              cwd=workspace, env=environment, stdout=bootstrap_log,
+                                              stderr=subprocess.STDOUT, start_new_session=True)
+        write_json_atomic(directory / 'bootstrap-owner.json', {'pid': value['bootstrap'].pid, 'birth': identity.birth(value['bootstrap'].pid), 'parent_pid': os.getpid(), 'parent_start': parent_start})
+        bootstrap_deadline = min(deadline or math.inf, time.monotonic() + 180)
+        while True:
+            if value['bootstrap'].poll() is not None or time.monotonic() >= bootstrap_deadline:
+                raise ValueError('shared transport bootstrap did not initialize')
+            bootstrap_log.flush()
+            if agent_socket.is_socket() and 'Proxying localhost:' in Path(bootstrap_log.name).read_text(): break
+            time.sleep(.1)
+        value['process'] = subprocess.Popen([sys.executable, str(value['module']), 'serve',
+                                            '--authority', str(authority_path), '--directory', str(directory)],
+                                           cwd=workspace, env=environment, stdout=log,
+                                           stderr=subprocess.STDOUT, start_new_session=True)
+        write_json_atomic(directory / 'broker-owner.json', {'pid': value['process'].pid, 'birth': identity.birth(value['process'].pid), 'parent_pid': os.getpid(), 'parent_start': parent_start})
+        while not (directory / 'ready.json').is_file():
+            if value['process'].poll() is not None or time.monotonic() >= bootstrap_deadline:
+                raise ValueError('shared transport broker did not initialize')
+            time.sleep(.1)
+        ready = json.loads((directory / 'ready.json').read_text())
+        if ready['pid'] != value['process'].pid or identity.birth(ready['pid']) != ready['birth']:
+            raise ValueError('shared transport broker identity changed')
+        value['agent'] = ready['agent']
+        value['environment'] = dict(CLOUDBENCH_SHARED_RELAY_AUTHORITY=str(authority_path),
+                                    CLOUDBENCH_SHARED_RELAY_DIRECTORY=str(directory),
+                                    CLOUDBENCH_SHARED_RELAY_PID=str(ready['pid']),
+                                    CLOUDBENCH_SHARED_RELAY_BIRTH=ready['birth'],
+                                    CLOUDBENCH_SHARED_RELAY_AGENT_PID=str(ready['agent']['pid']),
+                                    CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH=ready['agent']['birth'],
+                                    # Every agent in this HOME loads the same single
+                                    # WireGuard peer. A child ssh/sftp call that
+                                    # starts the default agent opens a second session
+                                    # on it and stalls this relay's CONNECTs; so
+                                    # children reuse this one agent and tunnel.
+                                    FLY_AGENT_SOCKET_PATH=str(agent_socket))
+        return value
+    except BaseException:
+        # No task child has been dispatched yet; these exact local children
+        # cannot own a route. Join them before propagating the startup failure.
+        for name in ['process', 'bootstrap']:
+            process = value[name]
+            if process is not None:
+                if process.poll() is None: process.terminate()
+                process.wait()
+        # Joining the bootstrap delivers EOF to its private agent, but before
+        # broker readiness there is no sealed agent identity to verify retirement.
+        write_json_atomic(directory / 'startup-cleanup.json', {
+            'bootstrap_joined': value['bootstrap'] is not None and value['bootstrap'].returncode is not None,
+            'broker_joined': value['process'] is not None and value['process'].returncode is not None,
+            'agent_shutdown_verified': False, 'agent_retirement_pending': value['bootstrap'] is not None})
+        log.close(); bootstrap_log.close()
+        try: archive_shared_relay(directory, archive)
+        except OSError: pass  # Preserve the original startup failure and records.
+        raise
+
+
+def stop_shared_relay(value: dict) -> bool:
+    """Called only after all campaign task controllers have been joined."""
+    process = value['process']
+    acknowledged = False
+    while process.poll() is None:
+        result = subprocess.run([sys.executable, str(value['module']), 'shutdown',
+                                 '--authority', str(value['authority']), '--directory', str(value['directory']),
+                                 '--owner-pid', str(os.getpid()), '--owner-start', value['parent_start'],
+                                 '--token', 'campaign-shutdown'], stdout=value['log'], stderr=subprocess.STDOUT)
+        acknowledged = acknowledged or result.returncode == 0
+        try: process.wait(timeout=1)
+        except subprocess.TimeoutExpired: pass
+    process.wait()
+    bootstrap = value['bootstrap']
+    if bootstrap.poll() is None: bootstrap.terminate()
+    bootstrap.wait()
+    # The private agent is the bootstrap's own isolated child. Keep the parent
+    # alive through its EOF shutdown; never signal a shared/default daemon.
+    identity = cleanup_ticket_module(Path(value['module']).parent.parent)
+    agent = value['agent']
+    while identity.birth(agent['pid']) == agent['birth']:
+        try: state = Path('/proc', str(agent['pid']), 'stat').read_text().rsplit(') ', 1)[1].split()[0]
+        except FileNotFoundError: break
+        if state in ('Z', 'X'): break
+        time.sleep(.1)
+    value['log'].close(); value['bootstrap_log'].close()
+    archive_shared_relay(value['directory'], value['archive'])
+    return acknowledged and process.returncode == 0
+
+
 def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -> str:
     """Mint the expected feed identity in its actual owning campaign parent."""
     source_root = Path(__file__).resolve().parent.parent
     source_ref = subprocess.check_output(["git", "-C", str(source_root), "rev-parse", "HEAD"], text=True).strip()
     hashes = {}
     checked = {}
-    for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "run-bench-campaign.py", "cloudbench-port-lease.py", "lib/cloudbench-env.sh"):
+    for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "run-bench-campaign.py", "cloudbench-port-lease.py", "cloudbench-cleanup-tickets.py", "cloudbench-cohort-reconcile.py", "lib/cloudbench-env.sh"):
         bound = subprocess.check_output(["git", "-C", str(source_root), "show", source_ref + ":scripts/" + name])
         if (source_root / "scripts" / name).read_bytes() != bound:
             raise ValueError("mutation authority differs from immutable controller source")
@@ -514,6 +956,35 @@ def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -
         raise ValueError("mutation inventory belongs to another publisher session")
     return json.dumps({"directory": str(directory.resolve()), "owner": fields,
                        "source": {"ref": source_ref, "sha256": hashes}}, sort_keys=True)
+
+
+def bind_shared_relay(environment, relay):
+    """Use only the relay already owned by this campaign for every consumer."""
+    for key in (
+        "CLOUDBENCH_SHARED_RELAY_AUTHORITY",
+        "CLOUDBENCH_SHARED_RELAY_DIRECTORY",
+        "CLOUDBENCH_SHARED_RELAY_PID",
+        "CLOUDBENCH_SHARED_RELAY_BIRTH",
+        "CLOUDBENCH_SHARED_RELAY_AGENT_PID",
+        "CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH",
+    ):
+        environment.pop(key, None)
+    if relay is not None:
+        # The campaign agent is the only agent; isolated mode would start another.
+        environment.pop("FLY_AGENT_ISOLATED", None)
+        environment.update(relay["environment"])
+
+
+def bind_mutation_inventory(environment, inventory_directory, mutation_authority):
+    """Pass the same parent-minted feed authority to every owned consumer."""
+    for key, value in (
+        ("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", inventory_directory),
+        ("CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY", mutation_authority),
+    ):
+        if value is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = str(value)
 
 
 def stop_shared_inventory(
@@ -591,6 +1062,31 @@ def campaign_workspace(root: Path, forward_args: list[str]) -> tuple[Path, dict[
                        "snapshot": str(snapshot), "snapshot_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}
 
 
+PROVIDER_GLOBAL_BENCHES_ENV = "CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES"
+
+
+def campaign_simultaneous_benches(concurrency: int, job_count: int, group_total: int | None) -> int:
+    """Global simultaneous benches: this campaign's width, or the whole sharded group's."""
+    if concurrency < 1 or job_count < 1:
+        raise ValueError("campaign width requires positive concurrency and jobs")
+    # A shard's own --concurrency is only its slice of one externally released
+    # group; every shard's members run at the same time.
+    return max(min(concurrency, job_count), group_total or 0)
+
+
+def provider_capacity_refusal(benches: int) -> int:
+    """0 when the provider rate-limit cap admits `benches`; else its refusal exit code.
+
+    The helper and its reviewed registry ship beside this control script, so a
+    separate task workspace cannot substitute other limits.
+    """
+    capacity = runpy.run_path(str(Path(__file__).resolve().with_name("cloudbench-provider-capacity.py")))
+    try:
+        return capacity["check"](benches)
+    except capacity["RegistryError"] as error:
+        raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
+
+
 def main() -> int:
     args = parse_args()
     if args.runs < 1 or args.concurrency < 1 or not args.task:
@@ -603,6 +1099,21 @@ def main() -> int:
         raise SystemExit("--e2e-started-at must be the original past epoch")
     if args.e2e_started_at is not None and args.e2e_timeout is None:
         raise SystemExit("--e2e-started-at requires --e2e-timeout")
+    strict_start = (
+        "--strict-barrier" in args.forward_arg
+        or os.environ.get("CLOUDBENCH_STRICT_BARRIER") == "1"
+    )
+    try:
+        shard = campaign_shard_settings(
+            os.environ,
+            tasks=args.task,
+            runs=args.runs,
+            concurrency=args.concurrency,
+            strict=strict_start,
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    external_barrier = shard["external_barrier"]
     e2e_started_at = args.e2e_started_at if args.e2e_started_at is not None else time.time()
     e2e_deadline = time.monotonic() + args.e2e_timeout - (time.time() - e2e_started_at) if args.e2e_timeout is not None else None
 
@@ -618,6 +1129,17 @@ def main() -> int:
         rows = get_task_metadata(root / "agents/benchmarks/tasks.json", args.task)
         print(json.dumps(stress_default_requirements(root, rows, peak=args.concurrency, baseline=None, repetitions=args.runs if args.concurrency == 600 else 1), indent=2))
         return 2  # Planning only: baseline unknown, no campaign/provider mutation.
+    global_benches = campaign_simultaneous_benches(
+        args.concurrency, len(args.task) * args.runs, shard["group_total"]
+    )
+    if "--demo-cache" in args.forward_arg:
+        # Read-only DEMO replays: each child's run-bench admits only replay
+        # tasks (no browser) before provisioning; no live task-agent calls.
+        print("🧊 provider rate-limit cap not applied: --demo-cache replay makes no live task-agent provider calls")
+    else:
+        refused = provider_capacity_refusal(global_benches)
+        if refused:
+            return refused
     controller_nice = os.environ.get("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE", "0")
     if controller_nice not in ("0", "10"):
         raise SystemExit("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE must be 0 or 10")
@@ -670,30 +1192,27 @@ def main() -> int:
     lock_prefix = hashlib.sha256(safe_id.encode()).hexdigest()[:12]
 
     jobs: list[dict[str, object]] = []
-    index = 0
-    for run_number in range(1, args.runs + 1):
-        for task in args.task:
-            index += 1
-            job_id = f"r{run_number:03d}-j{index:04d}"
-            jobs.append(
-                {
-                    "index": index,
-                    "job_id": job_id,
-                    "task": task,
-                    "run": run_number,
-                    "status": "queued",
-                    "controller_exit_code": None,
-                    "started_at": None,
-                    "finished_at": None,
-                    "wall_clock_seconds": None,
-                    "controller_lock": (
-                        f"cloudbench-controller-campaign-{lock_prefix}-{index}.lock"
-                    ),
-                    "log": str(campaign_dir / f"{job_id}.log"),
-                    "attempt": 1,
-                    "attempts": [],
-                }
-            )
+    for scheduled in campaign_jobs(
+        args.task, args.runs, shard["task_indexes"], shard["task_total"]
+    ):
+        index = scheduled["index"]
+        job_id = scheduled["job_id"]
+        jobs.append(
+            {
+                **scheduled,
+                "status": "queued",
+                "controller_exit_code": None,
+                "started_at": None,
+                "finished_at": None,
+                "wall_clock_seconds": None,
+                "controller_lock": (
+                    f"cloudbench-controller-campaign-{lock_prefix}-{index}.lock"
+                ),
+                "log": str(campaign_dir / f"{job_id}.log"),
+                "attempt": 1,
+                "attempts": [],
+            }
+        )
 
     state: dict[str, object] = {
         "campaign_id": safe_id,
@@ -712,10 +1231,19 @@ def main() -> int:
         "e2e_timeout_seconds": args.e2e_timeout,
         "e2e_timeout_exceeded": False,
     }
-    strict_start = (
-        "--strict-barrier" in args.forward_arg
-        or os.environ.get("CLOUDBENCH_STRICT_BARRIER") == "1"
-    )
+    for key in ("task_indexes", "group_total", "group_started_at"):
+        if shard[key] is not None:
+            state[key] = shard[key]
+    if external_barrier is not None:
+        state["external_barrier"] = {
+            "directory": str(external_barrier),
+            "status": None,
+            "status_history": [],
+            "release_id": None,
+            "abort": None,
+        }
+    cleanup_identity_module = cleanup_ticket_module(root) if strict_start else None
+    cleanup_parent_birth = cleanup_identity_module.birth(os.getpid()) if strict_start else ""
     cohorts: list[dict[str, object]] = []
     parent_lock = None
     if strict_start:
@@ -786,6 +1314,12 @@ def main() -> int:
     print(
         "   controller status/exit is separate from monitor.task_outcomes; retain genuine task FAIL."
     )
+    if external_barrier is not None:
+        print(
+            f"   external barrier: cohort readiness -> {external_barrier / 'ready.json'}; "
+            "release waits for release.json there, abort.json aborts before release; "
+            "each fleet keeps its own startup deadline."
+        )
     if args.retry_infra:
         print(f"   INFRA-only retry: at most {args.retry_infra} fresh attempt(s) per task, after original full release and terminal publication; healthy peers continue.")
         print("   attempts keep separate logs/evidence within the original Hub group; genuine task FAIL is not retried and the E2E clock never resets.")
@@ -832,7 +1366,64 @@ def main() -> int:
     barrier_failure = False
     current_cohort: dict[str, object] | None = None
 
-    def abort_startup_cohort(cohort: dict[str, object], reason: str) -> None:
+    def publish_external_barrier(cohort: dict[str, object], status: str) -> None:
+        """Atomic coordinator projection, rewritten only on change; terminal is sticky."""
+        if external_barrier is None or cohort.get("_external_terminal"):
+            return
+        value = {
+            "schema": EXTERNAL_BARRIER_READY_SCHEMA,
+            "cohort_id": cohort["cohort_id"],
+            "status": status,
+            "ready_count": cohort["ready_count"],
+            "failed_count": cohort["failed_count"],
+            "expected_count": cohort["expected_count"],
+            "survivor_count": cohort["expected_count"] - cohort["failed_count"],
+        }
+        if cohort.get("_external_published") == value:
+            return
+        cohort["_external_published"] = value
+        cohort["_external_terminal"] = status in ("failed", "aborted", "released")
+        write_json_atomic(external_barrier / "ready.json", {**value, "updated_at": utc_now()})
+        record = state["external_barrier"]
+        if record["status"] != status:
+            record["status"] = status
+            record["status_history"].append({"status": status, "at": utc_now()})
+            write_json_atomic(summary_path, state)
+
+    def external_abort_pending() -> bool:
+        return external_barrier is not None and (
+            (external_barrier / "abort.json").exists()
+            or (external_barrier / "abort.json").is_symlink()
+        )
+
+    def observe_external_abort() -> bool:
+        """Abort the single cohort before release; later requests are ignored."""
+        nonlocal barrier_failure, first_failure
+        if external_barrier is None:
+            return False
+        cohort = cohorts[0]
+        if state["external_barrier"]["abort"] is not None:
+            return True
+        if cohort["status"] not in ("queued", "waiting"):
+            return False
+        request = external_barrier_abort(external_barrier)
+        if request is None:
+            return False
+        state["external_barrier"]["abort"] = {**request, "observed_at": utc_now()}
+        barrier_failure = True
+        first_failure = first_failure or 1
+        abort_startup_cohort(
+            cohort, "external barrier abort: " + str(request["reason"]), status="aborted"
+        )
+        print(
+            f"🛑 campaign startup {cohort['cohort_id']}: external barrier aborted before release"
+        )
+        write_json_atomic(summary_path, state)
+        return True
+
+    def abort_startup_cohort(
+        cohort: dict[str, object], reason: str, status: str = "failed"
+    ) -> None:
         if cohort["status"] == "released":
             return
         cohort["status"] = "aborted"
@@ -847,13 +1438,17 @@ def main() -> int:
         # Waiting fleets observe the marker and exit through their existing
         # owned teardown. Booting fleets do the same on reaching the gate. Do
         # not turn an ordinary cohort startup failure into the user's explicit
-        # signal-cancellation path, which can escalate to SIGKILL after 30s.
+        # signal-cancellation path, which signals every controller group.
         for job in cohort["_jobs"]:
             if "_process" in job:
                 job["_aborted_by_campaign"] = True
+        publish_external_barrier(cohort, status)
 
     def release_ready_cohort(cohort: dict[str, object]) -> None:
+        nonlocal barrier_failure, first_failure
         if cohort["status"] != "waiting":
+            return
+        if observe_external_abort():
             return
         ready_count = 0
         failed_count = 0
@@ -892,10 +1487,29 @@ def main() -> int:
             write_json_atomic(summary_path, state)
         if not survivors:
             cohort["status"] = "failed"
+            publish_external_barrier(cohort, "failed")
             write_json_atomic(summary_path, state)
             return
         if ready_count != len(survivors):
+            publish_external_barrier(cohort, "waiting")
             return
+        if external_barrier is not None:
+            # Every survivor is ready; only the coordinator's global release
+            # remains. Each fleet still fails strictly at its own deadline.
+            publish_external_barrier(cohort, "ready")
+            try:
+                release_id = external_barrier_release_id(external_barrier)
+            except (OSError, ValueError):
+                barrier_failure = True
+                first_failure = first_failure or 1
+                state["external_barrier"]["release_error"] = "invalid release request"
+                abort_startup_cohort(cohort, "external barrier release request is invalid")
+                write_json_atomic(summary_path, state)
+                return
+            if release_id is None:
+                return
+            state["external_barrier"]["release_id"] = release_id
+            state["external_barrier"]["released_at"] = utc_now()
         cohort["released_at"] = utc_now()
         cohort["released_count"] = ready_count
         write_json_atomic(
@@ -907,6 +1521,7 @@ def main() -> int:
             },
         )
         cohort["status"] = "released"
+        publish_external_barrier(cohort, "released")
         print(
             f"🚦 campaign startup {cohort['cohort_id']}: releasing all {ready_count} ready copies"
         )
@@ -923,6 +1538,7 @@ def main() -> int:
         if classified.returncode not in {0, 1}:
             raise SystemExit("campaign production-only classification failed")
         all_production_only = classified.returncode == 0
+    shared_relay = None
     inventory_process = None
     inventory_log = None
     inventory_directory = None
@@ -957,6 +1573,8 @@ def main() -> int:
                 print(
                     "Campaign inventory: one parent-owned native feed for all cloud controllers; capacity and resource mutation checks remain live"
                 )
+                if os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_RELAY", "1") == "1" and sys.platform.startswith("linux"):
+                    shared_relay = start_shared_relay(root, campaign_dir, workspace, inventory_directory, e2e_deadline)
                 state["shared_inventory"] = {
                     "directory": str(inventory_directory),
                     "publisher_pid": inventory_process.pid,
@@ -974,6 +1592,8 @@ def main() -> int:
                 state["e2e_timeout_exceeded"] = True
                 request_stop(signal.SIGTERM, None)
                 print("Whole-experiment limit reached; no new attempt admitted, exact controllers continue through owned cleanup.")
+            if external_barrier is not None:
+                observe_external_abort()
             if inventory_process is not None and inventory_process.poll() is not None:
                 barrier_failure = True
                 first_failure = first_failure or 1
@@ -1017,10 +1637,34 @@ def main() -> int:
                     first_failure = first_failure or 1
                     state["stress_defaults_failed"] = True
                     write_json_atomic(summary_path, state)
+            if strict_start and not active and current_cohort and current_cohort.get("_cleanup_tickets_prepared") and not current_cohort.get("_cleanup_tickets_retired") and all(member["status"] not in {"queued", "running"} for member in current_cohort["_jobs"]):
+                try:
+                    cleanup_ticket_command(root, "retire", current_cohort)
+                    current_cohort["_cleanup_tickets_retired"] = True
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    first_failure = first_failure or 1
+                    current_cohort["cleanup_budget_retirement_pending"] = True
             if strict_start and not active and not barrier_failure and not (pending and pending[0].get("_independent_retry")):
                 current_cohort = pending[0]["_cohort"] if pending else None
                 if current_cohort:
+                    if not current_cohort.get("_cleanup_tickets_prepared"):
+                        common = subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()
+                        reserve_root = Path(common) / "cloudbench-fleet-ownership"
+                        reserve_root.mkdir(mode=0o700, exist_ok=True)
+                        policy = stress_environment if stress_environment is not None else os.environ
+                        cleanup_ticket_command(root, "prepare", current_cohort,
+                            "--manifest", str(current_cohort["_directory"] / "manifest.json"),
+                            "--reserve-root", str(reserve_root),
+                            "--parent-pid", str(os.getpid()), "--parent-start", cleanup_parent_birth,
+                            "--preferred", policy.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512"),
+                            "--minimum", policy.get("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "32"),
+                            "--headroom", policy.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256"),
+                            "--canary-script", str(root / "scripts/cloudbench-infra-canary-preflight.py"),
+                            "--canary-lock", policy.get("FLEET_INFRA_CANARY_LOCK", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock")),
+                            "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
+                        current_cohort["_cleanup_tickets_prepared"] = True
                     current_cohort["status"] = "waiting"
+                    publish_external_barrier(current_cohort, "waiting")
                     if inventory_directory is not None:
                         try:
                             log = (
@@ -1057,6 +1701,7 @@ def main() -> int:
                                             stop_signal
                                             or deadline_expired()
                                             or inventory_process.poll() is not None
+                                            or external_abort_pending()
                                         ):
                                             result.terminate()
                                             interrupted = True
@@ -1076,14 +1721,136 @@ def main() -> int:
                         except (OSError, ValueError):
                             first_failure = first_failure or 1
                             barrier_failure = True
-                            abort_startup_cohort(
-                                current_cohort,
-                                "canonical fixture full GET failed before child admission",
-                            )
-                            print(
-                                "Campaign canonical fixture preflight failed; no cohort controller admitted"
-                            )
+                            if not observe_external_abort():
+                                abort_startup_cohort(
+                                    current_cohort,
+                                    "canonical fixture full GET failed before child admission",
+                                )
+                                print(
+                                    "Campaign canonical fixture preflight failed; no cohort controller admitted"
+                                )
                         write_json_atomic(summary_path, state)
+                    if not barrier_failure and not current_cohort.get("_canary_proof"):
+                        try:
+                            policy = (
+                                dict(stress_environment)
+                                if stress_environment is not None
+                                else os.environ.copy()
+                            )
+                            for key in (
+                                "CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT",
+                                "CLOUDBENCH_COHORT_PREFLIGHT_SHA256",
+                                *CAMPAIGN_SHARD_VARIABLES,
+                            ):
+                                policy.pop(key, None)
+                            ref = subprocess.check_output(
+                                ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+                            ).strip()
+                            requested_ref = next(
+                                (
+                                    args.forward_arg[i + 1]
+                                    for i, arg in enumerate(args.forward_arg[:-1])
+                                    if arg == "--ref"
+                                ),
+                                ref,
+                            )
+                            bench_ref = subprocess.check_output(
+                                ["git", "-C", str(workspace), "rev-parse", requested_ref + "^{commit}"],
+                                text=True,
+                            ).strip()
+                            bind_mutation_inventory(policy, inventory_directory, mutation_authority)
+                            bind_shared_relay(policy, shared_relay)
+                            policy.update(
+                                RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(current_cohort["_directory"]),
+                                RUN_BENCH_CAMPAIGN_COHORT=str(current_cohort["cohort_id"]),
+                                RUN_BENCH_CLEANUP_COHORT_DIR=str(current_cohort["_directory"]),
+                                RUN_BENCH_CLEANUP_COHORT_ID=str(current_cohort["cohort_id"]),
+                                RUN_BENCH_CLEANUP_JOB="__campaign_preflight__",
+                                RUN_BENCH_CLEANUP_GENERATION="1",
+                                CLOUDBENCH_CAMPAIGN_PARENT_PREFLIGHT="1",
+                                CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="1"
+                                if "--cold-primary-bootstrap" in args.forward_arg
+                                else "0",
+                                CLOUDBENCH_INFRA_CANARY_REF=bench_ref,
+                            )
+                            if e2e_deadline is not None:
+                                policy["RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC"] = str(e2e_deadline)
+                            for key, default in (
+                                ("FLEET_INFRA_CANARY_TTL_SECONDS", "3600"),
+                                ("FLEET_INFRA_CANARY_PREFLIGHT_N", "2"),
+                            ):
+                                if (
+                                    not policy.get(key, default).isdigit()
+                                    or int(policy.get(key, default)) <= 0
+                                ):
+                                    policy[key] = default
+                            argv = [
+                                sys.executable,
+                                "-S",
+                                str(root / "scripts/cloudbench-infra-canary-preflight.py"),
+                                "--stamp",
+                                policy.get(
+                                    "FLEET_INFRA_CANARY_STAMP",
+                                    str(workspace / ".context/fleet-infra-canary.last-pass"),
+                                ),
+                                "--lock",
+                                policy.get(
+                                    "FLEET_INFRA_CANARY_LOCK",
+                                    str(
+                                        workspace / ".context/fleet-infra-canary-preflight.transaction.lock"
+                                    ),
+                                ),
+                                "--ttl-seconds",
+                                policy.get("FLEET_INFRA_CANARY_TTL_SECONDS", "3600"),
+                                "--width",
+                                policy.get("FLEET_INFRA_CANARY_PREFLIGHT_N", "2"),
+                                "--canary",
+                                str(root / "scripts/run-fleet-infra-canary"),
+                                "--nested-controller-lock",
+                                "cloudbench-controller-infra-canary-preflight.lock",
+                            ]
+                            log = current_cohort["_directory"] / "infra-canary-preflight.private.log"
+                            with log.open("w") as stream:
+                                log.chmod(0o600)
+                                child = subprocess.Popen(
+                                    argv, cwd=workspace, env=policy, stdout=stream, stderr=subprocess.STDOUT
+                                )
+                                terminated = False
+                                try:
+                                    while child.poll() is None:
+                                        if not terminated and (
+                                            stop_signal
+                                            or deadline_expired()
+                                            or inventory_process is not None
+                                            and inventory_process.poll() is not None
+                                            or external_abort_pending()
+                                        ):
+                                            child.terminate()
+                                            terminated = True
+                                        try:
+                                            child.wait(timeout=0.2)
+                                        except subprocess.TimeoutExpired:
+                                            pass
+                                finally:
+                                    if child.poll() is None:
+                                        child.terminate()
+                                        child.wait()
+                            if child.returncode or stop_signal or deadline_expired() or external_abort_pending():
+                                raise ValueError("parent infrastructure canary did not pass")
+                            receipt = current_cohort["_directory"] / "infra-canary-preflight.pass.json"
+                            current_cohort["_canary_proof"] = {
+                                "path": str(receipt),
+                                "sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+                            }
+                        except (OSError, ValueError, subprocess.SubprocessError):
+                            first_failure = first_failure or 1
+                            barrier_failure = True
+                            if not observe_external_abort():
+                                abort_startup_cohort(
+                                    current_cohort, "canonical parent N2 failed before worker admission"
+                                )
+                            write_json_atomic(summary_path, state)
+            launched_this_round = False
             while (
                 pending
                 and len(active) < args.concurrency
@@ -1093,7 +1860,10 @@ def main() -> int:
                 and (not strict_start or pending[0].get("_independent_retry") or pending[0]["_cohort"] is current_cohort)
             ):
                 job = pending.popleft()
+                launched_this_round = True
                 environment = dict(stress_environment) if stress_environment is not None else os.environ.copy()
+                for key in ("CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT", "CLOUDBENCH_COHORT_PREFLIGHT_SHA256", "CLOUDBENCH_CAMPAIGN_PARENT_PREFLIGHT", *CAMPAIGN_SHARD_VARIABLES):
+                    environment.pop(key, None)
                 # Group membership is distinct from publication ownership. Each
                 # child still registers, publishes and acknowledges its own run;
                 # the Hub projects these durable members as one campaign.
@@ -1103,9 +1873,19 @@ def main() -> int:
                             "BENCHMARK_HUB_GROUP_RUN_ID"
                         )
                         or safe_id,
-                        "RUN_BENCH_CAMPAIGN_STARTED_AT": str(state["started_at"]),
-                        "RUN_BENCH_CAMPAIGN_TOTAL_JOBS": str(len(jobs)),
+                        # A shard publishes the operator's shared group clock and size.
+                        "RUN_BENCH_CAMPAIGN_STARTED_AT": str(
+                            shard["group_started_at"] or state["started_at"]
+                        ),
+                        "RUN_BENCH_CAMPAIGN_TOTAL_JOBS": str(
+                            shard["group_total"] or len(jobs)
+                        ),
                         "RUN_BENCH_CAMPAIGN_CHILD": "1",
+                        # Fleets pace guest Temporal visibility calls across
+                        # every concurrently admitted campaign controller.
+                        "CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS": str(args.concurrency),
+                        # The provider rate-limit check counts the whole group.
+                        PROVIDER_GLOBAL_BENCHES_ENV: str(global_benches),
                         "RUN_BENCH_CAMPAIGN_JOB_ID": str(job["job_id"]),
                         "RUN_BENCH_CAMPAIGN_RUN": str(job["run"]),
                         "RUN_BENCH_CAMPAIGN_TASK": str(job["task"]),
@@ -1116,22 +1896,17 @@ def main() -> int:
                     environment["RUN_BENCH_CAMPAIGN_ATTEMPT"] = str(job["attempt"])
                 else:
                     environment.pop("RUN_BENCH_CAMPAIGN_ATTEMPT", None)
-                if inventory_directory is not None:
-                    environment["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"] = str(
-                        inventory_directory
-                    )
-                else:
-                    environment.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
-                if mutation_authority is not None:
-                    environment["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"] = mutation_authority
-                else:
-                    environment.pop("CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY", None)
+                bind_mutation_inventory(environment, inventory_directory, mutation_authority)
+                bind_shared_relay(environment, shared_relay)
                 environment.pop("CLOUDBENCH_CAMPAIGN_SEED_PROOF", None)
                 if strict_start and not job.get("_independent_retry"):
                     if current_cohort.get("_seed_proof"):
                         environment["CLOUDBENCH_CAMPAIGN_SEED_PROOF"] = str(
                             current_cohort["_seed_proof"]
                         )
+                    proof = current_cohort["_canary_proof"]
+                    environment["CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT"] = proof["path"]
+                    environment["CLOUDBENCH_COHORT_PREFLIGHT_SHA256"] = proof["sha256"]
                     environment.update(
                         {
                             "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(
@@ -1149,6 +1924,11 @@ def main() -> int:
                     environment.pop("RUN_BENCH_CAMPAIGN_BARRIER_DIR", None)
                     environment.pop("RUN_BENCH_CAMPAIGN_COHORT", None)
                     environment.pop("RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC", None)
+                if strict_start:
+                    environment["RUN_BENCH_CLEANUP_COHORT_DIR"] = str(job["_cohort"]["_directory"])
+                    environment["RUN_BENCH_CLEANUP_COHORT_ID"] = str(job["_cohort"]["cohort_id"])
+                    environment["RUN_BENCH_CLEANUP_JOB"] = str(job["job_id"])
+                    environment["RUN_BENCH_CLEANUP_GENERATION"] = str(job.get("attempt", 1))
                 command = [
                     "bash",
                     str(root / "scripts" / "run-bench"),
@@ -1172,20 +1952,30 @@ def main() -> int:
                 job["started_at"] = utc_now()
                 job["status"] = "running"
                 active[process.pid] = job
+                if strict_start:
+                    cleanup_ticket_command(root, "assign", job["_cohort"],
+                        "--job", str(job["job_id"]), "--owner-pid", str(process.pid),
+                        "--owner-start", cleanup_identity_module.birth(process.pid),
+                        "--generation", str(job.get("attempt", 1)))
                 if strict_start and not job.get("_independent_retry"):
                     current_cohort["_manifest"]["jobs"][str(job["job_id"])] = (
                         process.pid
                     )
-                    write_json_atomic(
-                        current_cohort["_directory"] / "manifest.json",
-                        current_cohort["_manifest"],
-                    )
+                    # Keyed owner tickets authorize children immediately. Seal
+                    # the complete barrier PID projection once after dispatch,
+                    # rather than rewrite N-member JSON for every new child.
                 state["peak_concurrency"] = max(
                     int(state["peak_concurrency"]), len(active)
                 )
                 print(
                     f"▶ {job['job_id']} task={job['task']} run={job['run']} pid={process.pid}"
                 )
+                # Dispatch does not wait for admission/allocation. Publish the
+                # aggregate projection once after this natural launch loop.
+
+            if launched_this_round:
+                if strict_start and current_cohort and current_cohort.get("_cleanup_tickets_prepared"):
+                    write_json_atomic(current_cohort["_directory"] / "manifest.json", current_cohort["_manifest"])
                 write_json_atomic(summary_path, state)
 
             if stop_signal and not termination_requested:
@@ -1300,6 +2090,10 @@ def main() -> int:
             if current_cohort:
                 abort_startup_cohort(current_cohort, "campaign parent is exiting")
             terminate_owned_children(active)
+        if external_barrier is not None:
+            # A coordinator must never wait on a campaign that can no longer
+            # release; released and aborted projections are already terminal.
+            publish_external_barrier(cohorts[0], "failed")
         for job in active.values():
             process = job.get("_process")
             if isinstance(process, subprocess.Popen):
@@ -1307,12 +2101,24 @@ def main() -> int:
             handle = job.get("_log_handle")
             if handle is not None:
                 handle.close()
+        if shared_relay is not None:
+            if not stop_shared_relay(shared_relay):
+                first_failure = first_failure or 1
+                state['shared_transport_cleanup_pending'] = True
         if inventory_process is not None:
             if not stop_shared_inventory(
                 inventory_process, inventory_log, inventory_directory
             ):
                 first_failure = first_failure or 1
                 state["shared_inventory_failed"] = True
+        for cohort in cohorts:
+            if cohort.get("_cleanup_tickets_prepared") and not cohort.get("_cleanup_tickets_retired"):
+                try:
+                    cleanup_ticket_command(root, "retire", cohort)
+                    cohort["_cleanup_tickets_retired"] = True
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    first_failure = first_failure or 1
+                    cohort["cleanup_budget_retirement_pending"] = True
         if parent_lock is not None:
             parent_lock.close()
 

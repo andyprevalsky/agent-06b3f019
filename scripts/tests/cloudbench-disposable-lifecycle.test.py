@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """Owning create/retire decisions; provider boundaries are local filesystem fakes."""
 from pathlib import Path
-import json,os,re,subprocess,tempfile,unittest
-SOURCE=Path(__file__).resolve().parents[1]/'run-bench-fleet'
+import json
+import os
+import re
+import shlex
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+SOURCE=Path(os.environ.get('CLOUDBENCH_TEST_FLEET_SOURCE',Path(__file__).resolve().parents[1]/'run-bench-fleet'))
 def function(name):
  override={'fleet_reap_registry_record':'CLOUDBENCH_TEST_OLD_REAPER','fleet_release_cleanup_capacity':'CLOUDBENCH_TEST_OLD_CAPACITY_SOURCE'}.get(name)
  source=Path(os.environ[override]) if override and os.environ.get(override) else SOURCE
@@ -66,7 +73,7 @@ claim_pool_machine(){ echo BORROWED >> "$CASE/claims";echo existing; }
 clone_machine_target(){ machine_creation_admission "$1"||return $?;echo CREATE >> "$CASE/creates";echo new123; }
 primary_clone_storage_mode(){ echo fresh; }
 mkdir -p "$CASE/out"
-'''.replace('MODE','1'if disposable else'0')+body
+'''.replace('MODE','1'if disposable else'0')+'source '+shlex.quote(str(SOURCE.parent/'lib/cloudbench-archived-reuse.sh'))+'\n'+body
    r=subprocess.run(['bash','-c',script],env=dict(os.environ,CASE=d),capture_output=True,text=True)
    read=lambda n:(p/n).read_text()if(p/n).exists()else''
    return r,{n:read(n)for n in ('calls','audit-log','claims','creates','out/.cid','capacity-result')},list((reg/'clones').iterdir()) if (reg/'clones').exists() else []
@@ -112,4 +119,94 @@ capacity_reserve_slots "$FLEET_OWNER_TOKEN-next" 1 1 1 1 0 0 primary > "$CASE/ca
   r,v,_=self.capacity_case(foreign=True);self.assertNotEqual(r.returncode,0);self.assertIn('DENY_MACHINE',v['capacity-result'])
  def test_explicit_keep_does_not_change_creation_policy(self):
   r,v,_=self.run_case('KEEP_CLONES=1;provision_primary_machine bench "$CASE/out"');self.assertEqual(r.returncode,0);self.assertEqual(v['claims'],'');self.assertEqual(v['creates'],'CREATE\n')
+class CapacityMetadata(unittest.TestCase):
+    def test_one_boot_and_pid_read_for_repeated_live_owner(self):
+        import builtins, contextlib, io, sys
+
+        code = function("capacity_reserve_slots").split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        raw = Path(f"/proc/{os.getpid()}/stat").read_text()
+        start = raw[raw.rfind(")") + 2 :].split()[19]
+        owner = "e" * 32
+        birth = f"proc-start:{boot}:{start}"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = root / "reservations"
+            records.mkdir()
+            for index in range(600):
+                token = owner + "-worker-" + f"{index:032x}"
+                (records / token).write_text(
+                    f"version=1\napp=fixture\nhost=fixture\npid={os.getpid()}\npid_start={birth}\nrun_id=run\ntoken={token}\nfleet_owner_token={owner}\nmachine_slots=1\nshared_units=0\nkind=worker\n"
+                )
+            counts = {"boot": 0, "pid": 0}
+            original = builtins.open
+
+            def counted(path, *args, **kwargs):
+                if str(path) == "/proc/sys/kernel/random/boot_id":
+                    counts["boot"] += 1
+                if str(path) == f"/proc/{os.getpid()}/stat":
+                    counts["pid"] += 1
+                return original(path, *args, **kwargs)
+
+            argv = [
+                "inline",
+                str(root),
+                owner + "-primary",
+                "fixture",
+                "fixture",
+                str(os.getpid()),
+                birth,
+                "newrun",
+                owner,
+                str(root / "owners"),
+                "1",
+                "0",
+                "1000",
+                "1000",
+                "0",
+                "0",
+                "primary",
+            ]
+            output = io.StringIO()
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch("builtins.open", side_effect=counted),
+                contextlib.redirect_stdout(output),
+            ):
+                exec(compile(code, "capacity_reserve_slots", "exec"), {})
+            self.assertEqual(output.getvalue().strip(), "OK 600 0 601 0")
+            self.assertEqual(counts, {"boot": 1, "pid": 1})
+
+    def test_all_capacity_calls_skip_unrelated_site_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "sitecustomize.py").write_text("import os\nos._exit(85)\n")
+            names = (
+                "capacity_reserve_slots",
+                "capacity_release_reservation",
+                "capacity_release_owner_reservations",
+                "capacity_release_stale_owner_reservations",
+            )
+            script = (
+                "set -eu\n"
+                + "".join(function(name) for name in names)
+                + r"""
+APP=fixture;FLEET_OWNER_HOST=fixture;FLEET_OWNER_PID_START=fixture
+FLEET_OWNER_TOKEN=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+FLEET_OWNERSHIP_ROOT="$CASE/owners";CAPACITY_RESERVATION_ROOT="$CASE/capacity";RUN_ID=run
+registry_meta_value(){ case "$2" in pid) echo $$;;pid_start) echo fixture;;host) echo fixture;;fleet_owner_token) echo "$FLEET_OWNER_TOKEN";;esac; }
+capacity_reserve_slots "$FLEET_OWNER_TOKEN-primary" 1 0 1000 1000 0 0 primary
+capacity_release_reservation "$FLEET_OWNER_TOKEN-primary"
+capacity_release_owner_reservations
+capacity_release_stale_owner_reservations unused "$FLEET_OWNER_TOKEN-primary"
+"""
+            )
+            result = subprocess.run(
+                ["bash", "-c", script],
+                env=dict(os.environ, PYTHONPATH=str(root), CASE=str(root)),
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "OK 0 0 1 0")
 if __name__=='__main__':unittest.main()

@@ -61,6 +61,7 @@ class StructuralGateDocumentationTests(unittest.TestCase):
             {
                 "bash scripts/tests/descend-command.test.sh",
                 "python3 scripts/tests/benchmark-live-results.test.py",
+                "python3 scripts/tests/cloudbench-provider-capacity.test.py",
                 "bash scripts/tests/campaign-hub-grouping.test.sh",
                 "bash scripts/tests/cloudbench-fetch-ref.test.sh",
                 "python3 scripts/tests/verify-successful-llm-queries.test.py",

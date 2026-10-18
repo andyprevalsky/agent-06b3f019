@@ -471,7 +471,6 @@ PY
 
 # CAMPAIGN_LIFECYCLE_REGRESSIONS_BEGIN
 python3 - "$ROOT_DIR" <<'PY'
-import argparse
 import importlib.util
 import json
 import os
@@ -502,6 +501,21 @@ case "$1" in
     touch "$RUN_BENCH_CAMPAIGN_ROOT/child-ready"
     # The campaign signals the whole group. If TERM reaches this sleep before
     # the shell, errexit must not end the shell ahead of its own TERM trap.
+    while :; do sleep 0.1 || true; done
+    ;;
+  draining)
+    # Mirrors run-bench-fleet: TERM announces itself and exits through an EXIT
+    # cleanup that ignores further signals, spends its full guest
+    # acknowledgement window and only then releases the exact guest.
+    release() {
+      trap '' HUP INT TERM
+      touch "$RUN_BENCH_CAMPAIGN_ROOT/cleanup-started"
+      sleep $(( ${CLOUDBENCH_CHILD_TERM_SECONDS:-30} + 2 ))
+      touch "$RUN_BENCH_CAMPAIGN_ROOT/guest-released"
+    }
+    trap release EXIT
+    trap 'echo "controller received TERM"; exit 143' TERM
+    touch "$RUN_BENCH_CAMPAIGN_ROOT/child-ready"
     while :; do sleep 0.1 || true; done
     ;;
   passed|queued) exit 0 ;;
@@ -564,7 +578,42 @@ esac
                 process.send_signal(signal.SIGTERM)
                 process.communicate(timeout=35)
 
-    def test_stop_runs_one_bounded_teardown_before_delayed_reap(self):
+    def test_cancel_joins_controller_cleanup_past_former_kill_deadline(self):
+        # 2026-10-18 diag100: the campaign SIGKILLed every cancelled fleet 30 s
+        # after its group TERM. Fleets whose guests had accepted the stop were
+        # still inside their own CLOUDBENCH_CHILD_TERM_SECONDS acknowledgement
+        # window, so no native stop or release ran and 17 guests stayed started.
+        environment = {**self.environment, "CLOUDBENCH_CHILD_TERM_SECONDS": "30"}
+        process = subprocess.Popen(
+            self.command("draining"), env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.root / "child-ready").exists():
+                self.assertIsNone(process.poll(), "campaign exited before its child was ready")
+                self.assertLess(time.monotonic(), deadline, "child never became ready")
+                time.sleep(0.02)
+            process.send_signal(signal.SIGTERM)
+            output, _ = process.communicate(timeout=120)
+            self.assertEqual(process.returncode, 143, output)
+            self.assertTrue((self.root / "cleanup-started").exists(), output)
+            job = self.summary()["jobs"][0]
+            self.assertTrue(
+                (self.root / "guest-released").exists(),
+                f"campaign ended the controller (exit {job['controller_exit_code']}) "
+                "before its owned EXIT cleanup released the guest",
+            )
+            self.assertEqual(job["status"], "cancelled")
+            self.assertEqual(job["controller_exit_code"], 143)
+            log = Path(job["log"]).read_text()
+            self.assertIn("controller received TERM", log)
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                process.communicate(timeout=120)
+
+    def test_stop_signals_once_and_joins_delayed_controller_cleanup(self):
         spec = importlib.util.spec_from_file_location("campaign_lifecycle", campaign_script)
         campaign = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(campaign)
@@ -573,42 +622,43 @@ esac
         clock = 0
         signals = []
 
-        class DelayedReapProcess:
+        class DelayedCleanupProcess:
             pid = 777
 
             def __init__(self, *_args, **_kwargs):
                 nonlocal child
                 child = self
-                self.killed = False
-                self.polls_after_kill = 0
+                self.terminated = False
+                self.polls_after_term = 0
                 handlers[signal.SIGTERM](signal.SIGTERM, None)
 
             def poll(self):
-                if not self.killed:
+                if not self.terminated:
                     return None
-                self.polls_after_kill += 1
-                return None if self.polls_after_kill == 1 else -signal.SIGKILL
+                self.polls_after_term += 1
+                # Its owned EXIT cleanup outlives several 31 s clock steps.
+                return None if self.polls_after_term < 5 else 143
 
         def killpg(pid, signum):
             self.assertEqual(pid, child.pid)
             signals.append(signum)
-            if signum == signal.SIGKILL:
-                child.killed = True
+            if signum == signal.SIGTERM:
+                child.terminated = True
 
         def monotonic():
             nonlocal clock
             clock += 31
             return clock
 
-        args = argparse.Namespace(
-            root=self.root, runs=1, concurrency=1, task=["waiting"], forward_arg=[],
-            retry_infra=0, e2e_timeout=None, e2e_started_at=None,
-        )
+        argv = [
+            str(campaign_script), "--root", str(self.root),
+            "--runs", "1", "--concurrency", "1", "--task", "waiting",
+        ]
         with (
             patch.dict(os.environ, self.environment),
-            patch.object(campaign, "parse_args", return_value=args),
+            patch.object(campaign.sys, "argv", argv),
             patch.object(campaign, "publish_campaign_group", return_value=None),
-            patch.object(campaign.subprocess, "Popen", DelayedReapProcess),
+            patch.object(campaign.subprocess, "Popen", DelayedCleanupProcess),
             patch.object(campaign.signal, "signal", side_effect=lambda signum, handler: handlers.update({signum: handler})),
             patch.object(campaign.os, "killpg", side_effect=killpg),
             patch.object(campaign.time, "monotonic", side_effect=monotonic),
@@ -616,9 +666,11 @@ esac
             patch.object(campaign, "terminate_owned_children", wraps=campaign.terminate_owned_children) as teardown,
         ):
             self.assertEqual(campaign.main(), 143)
-        self.assertEqual(teardown.call_count, 1, "stop repeated its full shutdown window")
-        self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
-        self.assertEqual(self.summary()["jobs"][0]["status"], "cancelled")
+        self.assertEqual(teardown.call_count, 1, "stop repeated its cancellation signal")
+        self.assertEqual(signals, [signal.SIGTERM], "a controller's owned cleanup must never be SIGKILLed")
+        job = self.summary()["jobs"][0]
+        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(job["controller_exit_code"], 143)
 
 
 unittest.main()

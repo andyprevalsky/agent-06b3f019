@@ -1,10 +1,11 @@
-"""Supervise the original 600-job campaign; stop at 30 unique infrastructure failures."""
+"""Supervise original600 with an explicitly bound infrastructure-stop policy."""
 import fcntl
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import stat
 import subprocess
@@ -13,9 +14,48 @@ import time
 from contextlib import contextmanager
 
 TERMINAL = {'failed', 'passed', 'cancelled'}
+INFRA_THRESHOLD = 30
+ORIGINAL_TASK_NAMES_SHA256 = '660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bcb0a8987f1b59f5'
+SHARD_FIELDS = {'index', 'count', 'tasks', 'tasks_sha256', 'task_indexes', 'runs',
+                'group_run_id', 'group_total', 'group_started_at'}
+# Optional bound shard fields; absent means the original600 value (runner SHARD_OPTIONAL).
+SHARD_OPTIONAL = {'infra_threshold', 'manifest_sha256', 'task_timeout', 'e2e_timeout'}
+DEFAULT_TASK_TIMEOUT = 1200
+RUN_DEADLINE = 5400
+STARTUP_ALLOWANCE = 2100
 
-def fold(summary):
+def names_sha256(tasks):
+    return hashlib.sha256(('\n'.join(tasks)+'\n').encode()).hexdigest()
+
+def shard_timeouts(shard):
+    """The shard's bound task/e2e timeouts; the runner's campaign_timeouts bounds."""
+    if shard.get('task_timeout') == DEFAULT_TASK_TIMEOUT or shard.get('e2e_timeout') == RUN_DEADLINE:
+        raise ValueError('default timeouts are encoded by absence')
+    task, e2e = shard.get('task_timeout', DEFAULT_TASK_TIMEOUT), shard.get('e2e_timeout', RUN_DEADLINE)
+    if type(task) is not int or not 60 <= task <= RUN_DEADLINE-STARTUP_ALLOWANCE:
+        raise ValueError('invalid bound task timeout')
+    if type(e2e) is not int or not task+STARTUP_ALLOWANCE <= e2e <= RUN_DEADLINE:
+        raise ValueError('invalid bound e2e timeout')
+    return task, e2e
+
+def bound_manifest(tasks, shard):
+    """The ordered launch manifest: the pinned original 200, or a shard's explicitly bound one."""
+    bound = ORIGINAL_TASK_NAMES_SHA256 if shard is None else shard.get('manifest_sha256', ORIGINAL_TASK_NAMES_SHA256)
+    if shard is not None and 'manifest_sha256' in shard and (
+            not isinstance(bound, str) or not re.fullmatch('[0-9a-f]{64}', bound) or bound == ORIGINAL_TASK_NAMES_SHA256):
+        raise ValueError('invalid bound manifest hash')
+    if (not isinstance(tasks, list) or not tasks or len(set(tasks)) != len(tasks)
+            or any(not isinstance(t, str) or not t for t in tasks)):
+        raise ValueError('distinct ordered tasks required')
+    if bound == ORIGINAL_TASK_NAMES_SHA256 and len(tasks) != 200:
+        raise ValueError('original 200 tasks required')
+    if names_sha256(tasks) != bound:
+        raise ValueError('original ordered 200 tasks changed' if bound == ORIGINAL_TASK_NAMES_SHA256 else 'bound ordered tasks changed')
+
+def fold(summary, threshold=INFRA_THRESHOLD):
     """Count affected logical jobs once, retaining every physical outcome."""
+    if type(threshold) is not int or threshold < 1:
+        raise ValueError('invalid infrastructure threshold')
     records, seen, jobs = [], set(), set()
     infra, unknown, agent, cancelled = set(), set(), set(), set()
     for job in summary['jobs']:
@@ -47,10 +87,12 @@ def fold(summary):
             'infra_false': sum(r.get('infra_failure') is False for r in records),
             'infra_unknown': len(unknown), 'agent_failed_unique': len(agent),
             'cancelled_unique': len(cancelled), 'infra_job_ids': sorted(infra),
-            'trigger': len(infra) >= 30, 'records': records}
+            'trigger': len(infra) >= threshold, 'records': records}
 
-def should_stop(result, trigger_saved):
-    return result['trigger'] or trigger_saved
+def should_stop(result, trigger_saved, policy='enabled'):
+    if policy not in ('enabled', 'disabled'):
+        raise ValueError('invalid infrastructure early-stop policy')
+    return policy == 'enabled' and (result['trigger'] or trigger_saved)
 
 def birth(pid):
     raw = Path('/proc', str(pid), 'stat').read_text()
@@ -60,13 +102,59 @@ def birth(pid):
     boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
     return 'proc-start:'+boot+':'+fields[19]
 
-def validate_snapshot(summary, manifest, epoch, campaign_id, deadline, tasks=None):
+def validate_shard(shard, manifest):
+    """An ordered subset of its bound manifest (the pinned original when unbound); returns the shard job count."""
+    if not isinstance(shard, dict) or not SHARD_FIELDS <= set(shard) <= SHARD_FIELDS | SHARD_OPTIONAL:
+        raise ValueError('exact shard fields required')
+    bound_manifest(manifest, shard)
+    index, count, runs, names = shard['index'], shard['count'], shard['runs'], shard['tasks']
+    if any(type(x) is not int for x in (index, count, runs)) or not 0 <= index < count or runs < 1:
+        raise ValueError('invalid shard index/count/runs')
+    if (not isinstance(names, list) or not names or len(set(names)) != len(names)
+            or any(not isinstance(t, str) or not t for t in names)):
+        raise ValueError('distinct shard tasks required')
+    if hashlib.sha256(('\n'.join(names)+'\n').encode()).hexdigest() != shard['tasks_sha256']:
+        raise ValueError('shard task hash changed')
+    indexes = shard['task_indexes']
+    if (not isinstance(indexes, list) or len(indexes) != len(names) or len(set(indexes)) != len(indexes)
+            or any(type(i) is not int or not 0 <= i < len(manifest) for i in indexes)):
+        raise ValueError('distinct task indexes for every shard task required')
+    if any(manifest[i] != t for i, t in zip(indexes, names)) or indexes != sorted(indexes):
+        raise ValueError('shard tasks must be an ordered subset of the bound manifest at their indexes')
+    if not isinstance(shard['group_run_id'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', shard['group_run_id']):
+        raise ValueError('invalid shared group id')
+    total, started = shard['group_total'], shard['group_started_at']
+    if type(total) is not int or not len(names)*runs <= total <= len(manifest)*runs or total % runs:
+        raise ValueError('invalid shared group total')
+    if any(i >= total//runs for i in indexes):
+        raise ValueError('task index outside the group width')
+    if type(started) not in (int, float) or not math.isfinite(started) or started <= 0:
+        raise ValueError('invalid shared group start')
+    threshold = shard.get('infra_threshold', INFRA_THRESHOLD)
+    if type(threshold) is not int or threshold < 1:
+        raise ValueError('invalid infrastructure threshold')
+    shard_timeouts(shard)
+    return len(names)*runs
+
+def shard_job_ids(shard):
+    """Group-wide job IDs r{run}-j{(run-1)*width+index+1} of exactly this shard's tasks."""
+    width = shard['group_total']//shard['runs']
+    return {f'r{run:03d}-j{(run-1)*width+index+1:04d}': (task, run)
+            for run in range(1, shard['runs']+1) for index, task in zip(shard['task_indexes'], shard['tasks'])}
+
+def shard_membership(jobs, shard):
+    expected = shard_job_ids(shard)
+    if set(jobs) != set(expected) or any((job.get('task'), job.get('run')) != expected[jid] for jid, job in jobs.items()):
+        raise ValueError('shard task/run/job identities mismatch')
+
+def validate_snapshot(summary, manifest, epoch, campaign_id, deadline, tasks=None, shard=None):
     if summary.get('campaign_id') != campaign_id or summary.get('e2e_started_at_epoch') != epoch:
         raise ValueError('campaign/epoch mismatch')
-    if summary.get('total_jobs') != 600 or summary.get('concurrency') != 600 or len(summary['jobs']) != 600:
-        raise ValueError('600 membership mismatch')
+    expected = 600 if shard is None else len(shard['tasks'])*shard['runs']
+    if summary.get('total_jobs') != expected or summary.get('concurrency') != expected or len(summary['jobs']) != expected:
+        raise ValueError(str(expected)+' membership mismatch')
     jobs = {j['job_id']: j for j in summary['jobs']}
-    if len(jobs) != 600 or manifest.get('cohort_id') != 'c001' or set(manifest['jobs']) != set(jobs):
+    if len(jobs) != expected or manifest.get('cohort_id') != 'c001' or set(manifest['jobs']) != set(jobs):
         raise ValueError('original manifest membership mismatch')
     if type(deadline) not in (int,float) or not math.isfinite(deadline) or deadline <= 0:
         raise ValueError('invalid original deadline')
@@ -75,7 +163,11 @@ def validate_snapshot(summary, manifest, epoch, campaign_id, deadline, tasks=Non
     for pid in manifest['jobs'].values():
         if pid is not None and (type(pid) is not int or pid <= 0):
             raise ValueError('invalid manifest PID')
-    if tasks is not None:
+    if shard is not None:
+        if summary.get('group_total') != shard['group_total']:
+            raise ValueError('shared group total changed')
+        shard_membership(jobs, shard)
+    elif tasks is not None:
         from collections import Counter
         if len(tasks) != 200 or len(set(tasks)) != 200:
             raise ValueError('original 200 task membership mismatch')
@@ -83,8 +175,35 @@ def validate_snapshot(summary, manifest, epoch, campaign_id, deadline, tasks=Non
             raise ValueError('original task/k3 mismatch')
         if {(j.get('task'), j.get('run')) for j in jobs.values()} != {(t, r) for t in tasks for r in (1, 2, 3)}:
             raise ValueError('original task/run identities mismatch')
-    # Ready/released counts never change the fixed 30/600 denominator.
-    return fold(summary)
+    # Ready/released counts never change the fixed threshold/scheduled denominator.
+    return fold(summary, INFRA_THRESHOLD if shard is None else shard.get('infra_threshold', INFRA_THRESHOLD))
+
+def publish_status(path, value):
+    """Atomically replace a small private status file for the external runner PROBE."""
+    temporary = path.with_name('.'+path.name+'.'+str(os.getpid()))
+    fd = os.open(temporary, os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(encode(value))
+        os.replace(temporary, path)
+    finally:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+
+def shard_controls(shard, identity_path, environment):
+    """The launch environment carries exactly this shard's campaign controls."""
+    if not identity_path:
+        raise ValueError('sharded supervisor identity required')
+    expected = {'RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER': str(Path(identity_path).with_suffix('.barrier')),
+                'RUN_BENCH_CAMPAIGN_TASK_INDEXES': ','.join(map(str, shard['task_indexes'])),
+                'RUN_BENCH_CAMPAIGN_GROUP_TOTAL': str(shard['group_total']),
+                'RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT': str(shard['group_started_at']),
+                'BENCHMARK_HUB_GROUP_RUN_ID': shard['group_run_id'],
+                'CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION': '1'}
+    for key, value in expected.items():
+        if environment.get(key) != value:
+            raise ValueError('shard campaign control changed: '+key)
+    return Path(identity_path).with_suffix('.infra.json')
 
 def save_once(path, raw):
     fd = os.open(path, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
@@ -184,24 +303,38 @@ def main():
     ref = os.environ['REVIEWED_OPERATOR_SOURCE_REF']
     if len(ref) != 40 or any(c not in '0123456789abcdef' for c in ref):
         raise ValueError('final source is not bound')
-    task_ref = '570830dbf17635e13d16a6f03b4d705f6b6443b1'
+    task_ref = '1387ae608e7cfb8e3f0a876daae92093f503b465'
     task_raw = Path(os.environ['REVIEWED_OPERATOR_TASKS']).read_bytes()
     if hashlib.sha256(task_raw).hexdigest() != os.environ['REVIEWED_OPERATOR_TASKS_SHA256']:
         raise ValueError('original tasks bytes changed')
     tasks = json.loads(task_raw)
-    if not isinstance(tasks, list) or len(tasks) != 200 or len(set(tasks)) != 200:
-        raise ValueError('original 200 tasks required')
-    if hashlib.sha256(('\n'.join(tasks)+'\n').encode()).hexdigest() != '660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bcb0a8987f1b59f5':
-        raise ValueError('original ordered 200 tasks changed')
+    # An optional shard is a bound launch input; absent keeps the original 600/k3 checks.
+    # The shard binds its ordered manifest hash; without one the pinned original 200 applies.
+    shard = None
+    if os.environ.get('REVIEWED_OPERATOR_SHARD'):
+        shard_raw = Path(os.environ['REVIEWED_OPERATOR_SHARD']).read_bytes()
+        if hashlib.sha256(shard_raw).hexdigest() != os.environ.get('REVIEWED_OPERATOR_SHARD_SHA256'):
+            raise ValueError('shard launch input changed')
+        shard = json.loads(shard_raw)
+        validate_shard(shard, tasks)
+    else:
+        bound_manifest(tasks, None)
+    expected_jobs = 600 if shard is None else len(shard['tasks'])*shard['runs']
+    expected_runs = 3 if shard is None else shard['runs']
+    task_timeout, e2e_timeout = (DEFAULT_TASK_TIMEOUT, RUN_DEADLINE) if shard is None else shard_timeouts(shard)
     epoch = float(sys.argv[1])
     args = sys.argv[2:]
     if not args or args[:2] != ['bash','scripts/run-bench']:
         raise ValueError('unexpected reviewed command')
-    for flag, value in [('--concurrency','600'), ('-k','3'), ('--retry-infra','1'), ('--timeout','1200'), ('--e2e-timeout','5400'), ('--e2e-started-at',sys.argv[1]), ('--ref',task_ref)]:
+    for flag, value in [('--concurrency',str(expected_jobs)), ('-k',str(expected_runs)), ('--retry-infra','1'), ('--timeout',str(task_timeout)), ('--e2e-timeout',str(e2e_timeout)), ('--e2e-started-at',sys.argv[1]), ('--ref',task_ref)]:
         if args.count(flag) != 1 or args[args.index(flag)+1] != value:
             raise ValueError('original rollout option changed: '+flag)
-    if args[-200:] != tasks:
-        raise ValueError('original ordered task arguments changed')
+    if shard is None:
+        if args[-200:] != tasks:
+            raise ValueError('original ordered task arguments changed')
+    elif args[args.index('--ref')+2:] != shard['tasks'] or '--stress-defaults' in args:
+        raise ValueError('shard ordered task arguments changed')
+    infra_path = None if shard is None else shard_controls(shard, os.environ.get('REVIEWED_OPERATOR_IDENTITY_PATH'), os.environ)
     if subprocess.check_output(['git','--no-replace-objects','-C',str(repo),'rev-parse','HEAD'],text=True).strip() != ref:
         raise ValueError('harness source changed before launch')
     if '--strict-barrier' not in args or '--qualify-worker' in args or '--reuse-pool-only' in args:
@@ -213,9 +346,12 @@ def main():
     campaign = repo/'.context/benchmarks/campaigns'/campaign_id
     if campaign.exists():
         raise ValueError('new campaign destination exists')
+    policy = os.environ.get('CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP', 'enabled')
+    should_stop({'trigger': False}, False, policy)
     env = dict(os.environ, RUN_BENCH_CAMPAIGN_ID=campaign_id)
     destination = repo/'.context/stress200-host'/campaign_id
     destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+    save_once(destination/'infra-early-stop-policy.safe.json', encode(dict(infra_early_stop=policy, source_ref=ref, original_epoch=epoch, task_timeout_seconds=task_timeout, run_timeout_seconds=e2e_timeout)))
     with owned_parent(args,repo,env,destination,ref,epoch) as (parent,expected_birth):
         if parent.poll() is not None:
             return parent.wait()
@@ -239,12 +375,21 @@ def main():
                     fence(repo,parent,expected_birth,ref,campaign)
                     original_deadline = manifest['e2e_deadline_monotonic']
                     original_membership = sorted(manifest['jobs'])
-                    validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline,tasks)
+                    validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline,tasks,shard)
                     save_once(destination/'threshold-original-parent.private.json',encode({
                         'parent_pid':parent.pid,'parent_birth':expected_birth,'source_ref':ref,
                         'original_epoch':epoch,'campaign_id':campaign_id,
                         'e2e_deadline_monotonic':original_deadline,'members':original_membership}))
-                result = validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline,tasks)
+                result = validate_snapshot(summary,manifest,epoch,campaign_id,original_deadline,tasks,shard)
+                if infra_path is not None:
+                    try:
+                        publish_status(infra_path, {'schema':'original600-shard-infra-v1','infra_true':result['infra_true'],
+                                                    'unique_jobs':len(summary['jobs']),'observed_at':time.time()})
+                    except OSError as error:  # status only; never a reason to stop the campaign parent
+                        message = 'INFRA_STATUS_WRITE_FAILED '+type(error).__name__
+                        if message != last_refusal:
+                            print(message, file=sys.stderr, flush=True)
+                            last_refusal = message
                 if result['infra_true'] and not first_reported:
                     evidence = {'summary_sha256':hashlib.sha256(raw).hexdigest(),
                                 'observed_epoch':time.time(),**result}
@@ -253,7 +398,9 @@ def main():
                     first = next(r for r in result['records'] if r.get('infra_failure') is True and r.get('status') != 'cancelled')
                     print('FIRST_AUTHENTIC_INFRA '+json.dumps({k:first.get(k) for k in ['job_id','task','attempt','log','run_id','task_status']}),flush=True)
                     first_reported = True
-                if should_stop(result, (destination/'first-infra-threshold-trigger.private.json').exists()) and not stopped and parent.poll() is None:
+                if result['trigger'] and not (destination/'infra-threshold-observed.private.json').exists():
+                    save_once(destination/'infra-threshold-observed.private.json', encode(dict(infra_early_stop=policy, summary_sha256=hashlib.sha256(raw).hexdigest(), original_epoch=epoch, observed_epoch=time.time(), **result)))
+                if should_stop(result, (destination/'first-infra-threshold-trigger.private.json').exists(), policy) and not stopped and parent.poll() is None:
                     trigger = {'source_ref':ref,'parent_pid':parent.pid,'parent_birth':expected_birth,
                                'original_epoch':epoch,'original_deadline':original_deadline,
                                'summary_sha256':hashlib.sha256(raw).hexdigest(),
@@ -265,7 +412,7 @@ def main():
                     fence(repo,parent,expected_birth,ref,campaign)
                     current = json.loads((campaign/'summary.json').read_bytes())
                     current_manifest = json.loads((campaign/'startup-cohorts/c001/manifest.json').read_bytes())
-                    validate_snapshot(current,current_manifest,epoch,campaign_id,original_deadline,tasks)
+                    validate_snapshot(current,current_manifest,epoch,campaign_id,original_deadline,tasks,shard)
                     # The preserved first trigger is irrevocable, even if later cancellations dilute it.
                     if sorted(current_manifest['jobs']) != original_membership:
                         raise ValueError('original members changed')
