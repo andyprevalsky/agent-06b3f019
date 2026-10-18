@@ -2135,18 +2135,20 @@ elif args[:1] == ["proxy"]:
         print(f"{remote_host}: host was not found in DNS", file=sys.stderr)
         sys.exit(1)
     with locked_state() as state:
-        target = next(
-            (
-                machine
-                for machine in state["machines"]
-                if machine.get("private_ip") == remote_host
-                or machine.get("id") == remote_host.split(".vm.", 1)[0]
-            ),
-            None,
-        )
-    if target is None:
+        targets = [
+            machine
+            for machine in state["machines"]
+            if machine.get("private_ip") == remote_host
+            or machine.get("id") == remote_host.split(".vm.", 1)[0]
+        ]
+    if not targets:
         print(f"unknown proxy target: {remote_host}", file=sys.stderr)
         sys.exit(1)
+    if len(targets) != 1:
+        # A real 6PN address names exactly one Machine; never guess a guest.
+        print(f"ambiguous proxy target: {remote_host}", file=sys.stderr)
+        sys.exit(1)
+    target = targets[0]
     if (
         os.path.exists(os.path.join(FAKE_DIR, "stale-started-inventory"))
         and target.get("state") != "started"
@@ -2673,6 +2675,8 @@ EOF
 add_fake_machine() {  # add_fake_machine <id> <name> <state> <runner-count> [probe-error] [ignore-stop]
     FAKE_STATE="$FAKE_DIR/state.json" MACHINE_ID="$1" MACHINE_NAME="$2" \
         MACHINE_STATE="$3" RUNNER_COUNT="$4" PROBE_ERROR="${5:-0}" IGNORE_STOP="${6:-0}" python3 - <<'PY'
+import hashlib
+import ipaddress
 import json
 import os
 
@@ -2680,6 +2684,13 @@ path = os.environ["FAKE_STATE"]
 with open(path) as fh:
     state = json.load(fh)
 volume_id = "vol_" + os.environ["MACHINE_ID"]
+# Fly gives every Machine its own 6PN address, and the data-plane proxy selects
+# a guest by that address. A shared seeded value routed a claimed pool member's
+# status proxy to another seeded Machine that was never booted.
+private_ip = str(ipaddress.IPv6Address(
+    (0xFDAA << 112) | (0x5EED << 64)
+    | int(hashlib.sha256(os.environ["MACHINE_ID"].encode()).hexdigest()[:16], 16)
+))
 state["machines"].append({
     "id": os.environ["MACHINE_ID"],
     "name": os.environ["MACHINE_NAME"],
@@ -2688,7 +2699,7 @@ state["machines"].append({
     "probe_error": os.environ["PROBE_ERROR"] == "1",
     "ignore_stop": os.environ["IGNORE_STOP"] == "1",
     "region": "iad",
-    "private_ip": "fdaa::dead",
+    "private_ip": private_ip,
     "config": {"mounts": [{"volume": volume_id, "size_gb": 40}]},
 })
 state["volumes"].append(
