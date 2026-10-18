@@ -1,0 +1,111 @@
+{
+    "old_box_id": "1233b1c7-8b1f-4ce6-a962-73100c8f37a4",
+    "new_box_id": "b81310e1-dbb0-45cc-b7b8-e109ec47fa43",
+    "new_box_id_source": "managed daemon config.controlAuth.instanceId",
+    "new_thread_id": "thr_d9204167e68b42ad90dc6c9acfcf1956",
+    "thread_url": "https://boxes.dev/thread/thr_d9204167e68b42ad90dc6c9acfcf1956",
+    "harness": "codex",
+    "checkpoint_sha": "8a2c8981701511d4ee8b933ffd1b48af5b18d39f",
+    "handoff_path": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4.md",
+    "utc_time": "2026-10-12T23:49:31.742252+00:00",
+    "checkout_verification": {
+        "head_matches_checkpoint": true,
+        "remote_branch_matches_checkpoint": true,
+        "unexpected_dirty_state": false,
+        "handoff_read_completely": true
+    },
+    "preservation_hash_verification": [
+        {
+            "artifact": "evidence-files.json",
+            "verified": true,
+            "sha256": "67681539cc4163c5281b38493932cb043204138df1b510426ae6c6294af6d283"
+        },
+        {
+            "artifact": "inherited-local-refs.txt",
+            "verified": true,
+            "sha256": "aa6d5491e40821093127a41277d47223471e19ec81f04473c14890bd588b2500"
+        },
+        {
+            "artifact": "inherited-stash.bundle",
+            "verified": true,
+            "sha256": "cde6058535add83822724033d50f23a0495a82d2d7ff9e23fd6680e711d18ce3"
+        },
+        {
+            "artifact": "native-session.tar.gz",
+            "verified": true,
+            "sha256": "26f9c7cbb4058edd3c6ec314f48ae9f26c89d75b4fe9879f104f7ced90926e29"
+        },
+        {
+            "artifact": "task-evidence.tar.gz",
+            "verified": true,
+            "sha256": "a710b7c8e0e8f05fdb03e9daa80f31b786081fe4a9c8d1c400a29cd06c6b8596"
+        }
+    ],
+    "byte_exact_source_originals_verified": 22,
+    "authoritative_env_verification": [
+        {
+            "location": "/home/boxes/rose/agents/.env",
+            "exists": true,
+            "nonempty": true
+        },
+        {
+            "location": "/home/boxes/rose/back-end/.env",
+            "exists": true,
+            "nonempty": true
+        },
+        {
+            "location": "/home/boxes/rose/front-end/.env",
+            "exists": true,
+            "nonempty": true
+        }
+    ],
+    "backend_api_key_present_and_matching": true,
+    "fresh_runtime_identity": {
+        "files": [
+            {
+                "location": "/home/boxes/rose/agents/.env",
+                "exists": true,
+                "nonempty": true
+            },
+            {
+                "location": "/home/boxes/rose/back-end/.env",
+                "exists": true,
+                "nonempty": true
+            },
+            {
+                "location": "/home/boxes/rose/front-end/.env",
+                "exists": true,
+                "nonempty": true
+            }
+        ],
+        "backend_api_key_present_and_matching": true,
+        "workspace": "cloud-452e0019",
+        "base_port": "3001",
+        "queue": "navi-agent-tasks-cloud-452e0019-resume-20261012",
+        "database": "victoria_cloud-452e0019",
+        "database_host": "localhost",
+        "database_port": 5432
+    },
+    "first_continuation": [
+        {
+            "command": "cd back-end && env -u FLY_APP_NAME bash scripts/run-blackbox-tests.sh browser-origin-payload",
+            "domain": "browser-origin-payload",
+            "exit_code": 0,
+            "result": "1 passed, 0 failed, 1 total",
+            "log_sha256": "eb3cbf3ffade71eae58fed14f02ff037a3f402fbda103a1b1dc17c2b0837a04d"
+        },
+        {
+            "command": "cd back-end && env -u FLY_APP_NAME bash scripts/run-blackbox-tests.sh browser-origin-injection-memory",
+            "domain": "browser-origin-injection-memory",
+            "exit_code": 0,
+            "result": "1 passed, 0 failed, 1 total",
+            "log_sha256": "091eb454c8d2b4c1abd47dc04f74b837d590d1e9be3a100ca7d93c0a0b6e2ebb"
+        }
+    ],
+    "initial_runner_invocation": {
+        "result": "rejected multiple domain arguments before tests; corrected to separate canonical invocations",
+        "exit_code": 1
+    },
+    "old_services_imported": false,
+    "old_box_destroyed_by_continuation": false
+}
