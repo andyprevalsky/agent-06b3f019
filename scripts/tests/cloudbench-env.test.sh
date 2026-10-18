@@ -694,14 +694,21 @@ clone_function_source="$(awk '
 ' "$ROOT_DIR/scripts/run-bench-fleet")"
 [ -n "$clone_function_source" ] || fail "could not load production clone command builder"
 fleet_production_function() {
+  # Subshell-bodied functions (`name() (`) close with a column-zero `)`.
   awk -v function_name="$1" '
-    $0 ~ "^" function_name "\\(\\)" { capture = 1 }
+    !capture && $0 ~ "^" function_name "\\(\\)" {
+      capture = 1
+      terminator = ($0 ~ "^" function_name "\\(\\) \\(") ? ")" : "}"
+    }
     capture { print }
-    capture && /^}$/ { exit }
+    capture && $0 == terminator { exit }
   ' "$ROOT_DIR/scripts/run-bench-fleet" "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh"
 }
+# clone_machine_target verifies every new storage-ready target through the
+# production disposable-Volume bridge; outside a disposable lifecycle that
+# bridge is an exact no-op, so load it rather than stubbing the call away.
 for function_name in machine_creation_admission fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release \
-  inventory_index_healthy inventory_machine_record_path inventory_machine_field; do
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots; do
   function_source="$(fleet_production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
   eval "$function_source"
@@ -765,7 +772,7 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
 unset -f clone_machine_target machine_creation_admission fleet_registry_record_name fleet_registry_record_id \
   fleet_registry_release_name machine_volume_id machine_storage_ready machine_storage_failed fly_with_timeout \
   fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
-  inventory_index_healthy inventory_machine_record_path inventory_machine_field
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots
 unset INVENTORY_INDEX INVENTORY_CLOCK_EPOCH INVENTORY_CLOCK_SECONDS SNAPSHOT_LOOP_PID SNAPSHOT_LOOP_TOKEN
 
 resize_function_source="$(awk '
@@ -811,6 +818,10 @@ normalize_function_source="$(awk '
   fail "could not load production pool shape normalizer"
 eval "$shape_function_source"
 eval "$normalize_function_source"
+# The normalizer first honors explicit per-Machine reuse admissions under the
+# git-common directory; keep that real guard on an isolated empty root.
+GIT_COMMON_DIR="$TMP_ROOT/shape-normalize-common"
+mkdir -p "$GIT_COMMON_DIR"
 POOL_IDS_FILE="$TMP_ROOT/shape-pool.ids"
 printf 'old-shape\ncorrect-shape\n' > "$POOL_IDS_FILE"
 FLEET_DIR="$TMP_ROOT/shape-run"
