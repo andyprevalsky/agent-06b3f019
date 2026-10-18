@@ -348,6 +348,7 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     DOORDASH_FOOD_PLAN_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
     "agent-payment-setup-resume",
+    "sms-supervisor-fill-form-searches-then-delegates",
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
@@ -14039,6 +14040,13 @@ async def run_single_task(
     if task.runner == "sms":
         from benchmarks.sms_runner import build_deps_from_module, run_sms_task
 
+        if resolve_live_fixtures(getattr(task, "environment", None)):
+            with _benchmark_run_user_scope(_run_user_id_override_for_task(task, base_url)):
+                manifests = await _apply_live_fixtures(task, base_url)
+                try:
+                    return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__], other_task_roots, on_agent_created, task.name))
+                finally:
+                    await _restore_live_fixture_scenarios_async(manifests)
         return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__], other_task_roots, on_agent_created, task.name))
     if _effective_harness(task) == "codex":
         if not await _check_codex_harness_credentials(base_url):

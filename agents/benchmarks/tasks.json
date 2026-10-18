@@ -9428,13 +9428,14 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
+      "live_fixtures": ["live-tamy-account-snapshot"],
       "services": [
         "sms-supervisor",
         "surge-inbound-webhook"
       ],
       "secrets": [],
       "live_targets": [],
-      "context_notes": "Drives the real SMS supervisor over the local benchmark stack: real inbound Surge webhook, real context build, real LLM tool loop. The prod supervisor state at the failing turn is seeded: the 30 prior thread messages verbatim, the completed creator-analysis root agent with 50 completed children and its five completion summaries, and the orphaned 'Sign in to walmart.com' attention request. A synthetic Apple Notes 'Travel docs' row is seeded into UserDataDocument so the answers exist in the user's grep-searchable data. All seeded rows are removed after the run. Remaining differences from prod: the benchmark user's own profile (name, email, phone, address) and no Mexico City time zone. web_search is stubbed with canada.ca eTA text. Outbound Surge is intercepted by BLACKBOX_TEST_FAKE_SURGE so no human is texted."
+      "context_notes": "Drives the real SMS supervisor over the local benchmark stack: real inbound Surge webhook, real context build, real LLM tool loop. The prod supervisor state at the failing turn is seeded: the 30 prior thread messages verbatim, the completed creator-analysis root agent with 50 completed children and its five completion summaries, and the orphaned 'Sign in to walmart.com' attention request. A synthetic Apple Notes 'Travel docs' row is seeded into UserDataDocument so the answers exist in the user's grep-searchable data. All seeded rows are removed after the run. Runs as Tamy using the existing live-tamy-account-snapshot fixture: her account and profile are seeded from prod into the isolated DB, and browser auth is not synced. The seeded regression conversation, agent tree, Travel docs, and evaluator criteria remain unchanged. web_search is stubbed with canada.ca eTA text. Outbound Surge is intercepted by BLACKBOX_TEST_FAKE_SURGE so no human is texted."
     },
     "evaluators": [
       {

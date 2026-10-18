@@ -1840,6 +1840,49 @@ def test_early_root_sql_failure_has_durable_false_custody(tmp_path,monkeypatch):
     assert disk==receipt and finalizer.await_count==0
 
 
+@pytest.mark.parametrize("failure", [None, "fixture", "driver"])
+def test_sms_tamy_fixture_precedes_driver_and_restores_user_scope(monkeypatch, failure):
+    from benchmarks import sms_runner as sms
+    from benchmarks.live_fixtures import TAMY_IDENTITY_USER_ID
+
+    task = get_task_by_name("sms-supervisor-fill-form-searches-then-delegates")
+    assert task.environment["live_fixtures"] == ["live-tamy-account-snapshot"]
+    previous_user = bench._current_benchmark_user_id()
+    calls = []
+    monkeypatch.setattr(bench, "_validate_task_target", lambda *args: None)
+
+    async def apply(actual, url):
+        assert bench._current_benchmark_user_id() == TAMY_IDENTITY_USER_ID
+        calls.append("fixture")
+        if failure == "fixture":
+            raise RuntimeError("fixture failed")
+        return [{"fixture": "live-tamy-account-snapshot"}]
+
+    async def drive(url, actual, deps):
+        assert calls == ["fixture"]
+        assert deps.benchmark_user_id() == TAMY_IDENTITY_USER_ID
+        calls.append("driver")
+        if failure == "driver":
+            raise RuntimeError("driver failed")
+        return "result"
+
+    async def restore(manifests):
+        assert manifests == [{"fixture": "live-tamy-account-snapshot"}]
+        assert bench._current_benchmark_user_id() == TAMY_IDENTITY_USER_ID
+        calls.append("restore")
+
+    monkeypatch.setattr(bench, "_apply_live_fixtures", apply)
+    monkeypatch.setattr(bench, "_restore_live_fixture_scenarios_async", restore)
+    monkeypatch.setattr(sms, "run_sms_task", drive)
+    if failure:
+        with pytest.raises(RuntimeError, match=f"{failure} failed"):
+            asyncio.run(bench.run_single_task("http://localhost:39999", task))
+    else:
+        assert asyncio.run(bench.run_single_task("http://localhost:39999", task)) == "result"
+    assert calls == (["fixture"] if failure == "fixture" else ["fixture", "driver", "restore"])
+    assert bench._current_benchmark_user_id() == previous_user
+
+
 def test_sms_dispatch_relays_only_committed_root_custody_to_existing_callback(monkeypatch):
     from benchmarks import sms_runner as sms
     observed=[]
