@@ -1587,9 +1587,12 @@ class Portable(unittest.TestCase):
             try:
                 with patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
                      patch.object(CLI.subprocess, 'run', return_value=apps):
-                    with self.assertRaises(RUNNER['Deadline']):
+                    # capacity() loads its own runner copy; whichever nested bound
+                    # fires first raises that copy's Deadline class.
+                    with self.assertRaises(BaseException) as raised:
                         with RUNNER['bounded'](.15):
                             CLI.capacity(API, 'fixture', 'personal', Path(name), 1)
+                self.assertEqual(type(raised.exception).__name__, 'Deadline')
                 self.assertLess(time.monotonic()-start, .6)
                 self.assertFalse((Path(name)/'capacity-proof.private.json').exists())
             finally:
