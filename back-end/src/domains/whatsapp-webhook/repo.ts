@@ -7,9 +7,7 @@
  * itself is shared per-user via the smsSupervisor session store.
  */
 
-import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
-import { OLDEST_ACCOUNT_FIRST, phoneOwnerWhere } from '../../providers/phoneAccountLookup';
 
 /**
  * Find-or-create the User for an inbound number: the message proves possession

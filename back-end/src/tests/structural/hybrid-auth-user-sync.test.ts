@@ -57,7 +57,9 @@ function fakeStore(options?: {
       return options?.phoneOwner ?? null;
     },
     isUniqueViolation(error) {
-      return error !== undefined && (error === options?.createError || error === options?.updateError);
+      return (
+        error !== undefined && (error === options?.createError || error === options?.updateError)
+      );
     },
   };
   return { store, calls };

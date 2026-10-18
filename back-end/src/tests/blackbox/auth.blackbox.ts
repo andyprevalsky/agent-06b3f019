@@ -2628,6 +2628,7 @@ async function runAll() {
       uniqueFakePhone,
       canSeedAuthFlow,
       seedTwilioVerifyCheck,
+      seedSupabaseAdminCreate,
     }),
   ];
 

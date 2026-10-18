@@ -312,14 +312,7 @@ export async function verifyOtpAndInitUser(params: {
   let existingUser = await repo.findUserById(userId);
 
   if (existingUser === null) {
-    const created = await handleNewUser(
-      userId,
-      phone,
-      firstName,
-      lastName,
-      email,
-      anonymousUserId
-    );
+    const created = await handleNewUser(userId, phone, firstName, lastName, email, anonymousUserId);
     if (!created) {
       // Lost a create race: sign in to the account that won it.
       existingUser = await resolveRacedAccount(userId, phone);

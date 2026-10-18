@@ -81,3 +81,19 @@ export async function testConcurrentFirstTextsProvisionOneAccount(
     await prisma.user.deleteMany({ where: { userId: { in: ids } } });
   }
 }
+
+/** The phone-form/provisioning cases, registered by sms-webhook.blackbox.ts. */
+export function phoneFormCases(
+  deps: PhoneFormDeps
+): Array<{ name: string; fn: () => Promise<void> }> {
+  return [
+    {
+      name: 'provisioning -- known phone in other stored form reuses its account',
+      fn: () => testKnownPhoneInOtherStoredFormReusesAccount(deps),
+    },
+    {
+      name: 'provisioning -- concurrent first texts from one number create one account',
+      fn: () => testConcurrentFirstTextsProvisionOneAccount(deps),
+    },
+  ];
+}

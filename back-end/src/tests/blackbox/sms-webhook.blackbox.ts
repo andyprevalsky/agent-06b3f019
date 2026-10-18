@@ -43,10 +43,7 @@
 
 import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
-import {
-  testConcurrentFirstTextsProvisionOneAccount,
-  testKnownPhoneInOtherStoredFormReusesAccount,
-} from './sms-webhook.phone-forms.case';
+import { phoneFormCases } from './sms-webhook.phone-forms.case';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -730,14 +727,7 @@ async function runAll() {
       name: 'coverage -- /clear from known phone clears SmsSession',
       fn: testCoverage_clearCommandFromKnownPhone,
     },
-    {
-      name: 'provisioning -- known phone in other stored form reuses its account',
-      fn: () => testKnownPhoneInOtherStoredFormReusesAccount({ postInbound, uniqueSmsPhone }),
-    },
-    {
-      name: 'provisioning -- concurrent first texts from one number create one account',
-      fn: () => testConcurrentFirstTextsProvisionOneAccount({ postInbound, uniqueSmsPhone }),
-    },
+    ...phoneFormCases({ postInbound, uniqueSmsPhone }),
     {
       name: 'coverage -- code-like approval routes to supervisor',
       fn: testCoverage_codeLikeApprovalRoutesToSupervisor,

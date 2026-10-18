@@ -34,6 +34,7 @@ import { PrismaClient } from '@prisma/client';
 import { createHmac } from 'node:crypto';
 import { deepStrictEqual } from 'node:assert';
 import { verifyMetaSignature } from '../../providers/whatsappCloud';
+import { testInboundKnownNumberReusesAccount } from './whatsapp-webhook.phone-ownership.case';
 import {
   mediaProcessingTests,
   testInbound_mediaOnlyPersistsRoutesAndDeduplicates,
@@ -496,9 +497,13 @@ async function testInbound_newNumberProvisionsAndRoutes() {
     const body = res.data as { ok?: boolean };
     if (body.ok !== true) throw new Error(`Expected { ok: true }, got ${JSON.stringify(res.data)}`);
 
-    const user = await prisma.user.findFirst({ where: { phone } });
+    const users = await prisma.user.findMany({ where: { phone: { in: [phone, wa] } } });
+    const user = users[0];
     if (!user) throw new Error('Expected new WhatsApp number to be provisioned as a User row');
     userId = user.userId;
+    if (users.length !== 1) {
+      throw new Error(`Expected exactly one account for the new number, found ${users.length}`);
+    }
     // An inbound WhatsApp message marks the user reachable so lifecycle/onboarding
     // notifications mirror to WhatsApp (and self-heal a previously-unreachable flag).
     if (user.whatsappReachable !== true) {
@@ -643,6 +648,16 @@ async function runAll() {
           {
             name: 'POST /whatsapp/webhook -- new number provisions + routes to supervisor',
             fn: testInbound_newNumberProvisionsAndRoutes,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- known number reuses its existing account',
+            fn: () =>
+              testInboundKnownNumberReusesAccount({
+                baseUrl: BASE_URL,
+                request,
+                inboundPayload,
+                uniqueWaNumber,
+              }),
           },
         ];
 
