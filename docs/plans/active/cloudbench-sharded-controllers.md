@@ -104,6 +104,14 @@ where `<identity_stem>` is the supervisor identity filename without `.json`.
 `copy_bound(profile) = min(4 × vCPU, (memory_MiB − 4096) // 700, 40)`; performance-8x/32 GB → 32 copies.
 `tasks_per_controller = max(1, copy_bound // runs)`; `K = ceil(T / tasks_per_controller)`, shard sizes balanced to ±1.
 Flags: `--controllers auto|K`, `--tasks-per-controller C`. K = 1 reproduces today's config exactly.
+`--tasks` may name any ordered manifest of distinct tasks that are ready, cloud-root and LIVE eligible in the
+unified catalog at the runner's `TASK_REF` (`fleet_infra_sample.eligible_pool`, checked locally before any
+provider read). A non-original manifest runs only fresh sharded controllers; each shard binds its
+`manifest_sha256`, which the runner and guest supervisor check instead of the original 200-task pin.
+`--task-timeout S` (default 1200, 60..3300) and `--e2e-timeout S` (default 5400; at least S + 2100 startup/release,
+at most the 5400-second operator deadline) become the campaign's `--timeout`/`--e2e-timeout` and are bound as
+shard `task_timeout`/`e2e_timeout` only when they differ from the defaults, so original-manifest shards keep
+their historical bytes. Archived reuse and continuations remain original-200, default-timeout only.
 
 ## Verification (automated)
 

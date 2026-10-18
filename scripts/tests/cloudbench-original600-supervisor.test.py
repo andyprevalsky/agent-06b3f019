@@ -262,9 +262,9 @@ class Shard(unittest.TestCase):
   for bad in (dict(tasks=swapped,tasks_sha256=hashlib.sha256(('\n'.join(swapped)+'\n').encode()).hexdigest(),task_indexes=[50,1,199]),dict(task_indexes=[1,51,199]),dict(task_indexes=[1,50]),
               dict(task_indexes=[1,50,200]),dict(task_indexes=[1,50,True]),dict(tasks_sha256='0'*64),dict(job_prefix='s02-'),dict(runs=0),dict(index=20),dict(group_total=8),dict(group_total=598),dict(extra=True)):
    with self.subTest(bad=bad),self.assertRaises(ValueError):S['validate_shard'](shard_fixture(self.tasks,**bad),self.tasks)
- def run_main(self,repo,shard,environment,infra=0,ending=None):
+ def run_main(self,repo,shard,environment,infra=0,ending=None,tasks_path=None,timeouts=None):
   import hashlib
-  tasks_path=Path(__file__).parent/'fixtures/original600-tasks.json';epoch=time.time();ref='a'*40;context=repo/'.context';context.mkdir(exist_ok=True)
+  tasks_path=tasks_path or Path(__file__).parent/'fixtures/original600-tasks.json';epoch=time.time();ref='a'*40;context=repo/'.context';context.mkdir(exist_ok=True)
   identity=context/'original600-supervisor.fixture.json';identity.write_text(json.dumps(dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth=S['birth'](os.getpid()),machine='1234567890abcd',source_ref=ref,epoch=epoch)));shard_path=identity.with_suffix('.shard.json');shard_path.write_text(json.dumps(shard,sort_keys=True)+'\n')
   script=repo/'run-bench-campaign.py'
   script.write_text("import fcntl,signal,sys,time\nfrom pathlib import Path\np=Path(sys.argv[1]);f=(p/'startup-cohorts/parent.lock').open('w');fcntl.flock(f,fcntl.LOCK_EX)\ndef done(*a):\n (p/'ending').write_text('term');sys.exit(7)\nsignal.signal(signal.SIGTERM,done);(p/'ready').write_text('ready');time.sleep(.6);(p/'ending').write_text('natural')\n")
@@ -278,7 +278,8 @@ class Shard(unittest.TestCase):
    while not(campaign/'ready').exists()and time.monotonic()<end:time.sleep(.01)
    return child
   jobs=str(len(shard['tasks'])*shard['runs'])
-  command=['operator',str(epoch),'bash','scripts/run-bench','--strict-barrier','--concurrency',jobs,'-k',str(shard['runs']),'--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref','c9875959893737ed352b6ccd08372faa94a4745d',*shard['tasks']]
+  task_timeout,e2e_timeout=timeouts or (str(shard.get('task_timeout',1200)),str(shard.get('e2e_timeout',5400)))
+  command=['operator',str(epoch),'bash','scripts/run-bench','--strict-barrier','--concurrency',jobs,'-k',str(shard['runs']),'--retry-infra','1','--timeout',task_timeout,'--e2e-timeout',e2e_timeout,'--e2e-started-at',str(epoch),'--ref','c9875959893737ed352b6ccd08372faa94a4745d',*shard['tasks']]
   env=dict(REVIEWED_OPERATOR_ROOT=str(repo),REVIEWED_OPERATOR_SOURCE_REF=ref,REVIEWED_OPERATOR_TASKS=str(tasks_path),REVIEWED_OPERATOR_TASKS_SHA256=hashlib.sha256(tasks_path.read_bytes()).hexdigest(),
            REVIEWED_OPERATOR_IDENTITY_PATH=str(identity),REVIEWED_OPERATOR_SHARD=str(shard_path),REVIEWED_OPERATOR_SHARD_SHA256=hashlib.sha256(shard_path.read_bytes()).hexdigest(),
            RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER=str(identity.with_suffix('.barrier')),RUN_BENCH_CAMPAIGN_TASK_INDEXES=','.join(map(str,shard['task_indexes'])),RUN_BENCH_CAMPAIGN_GROUP_TOTAL=str(shard['group_total']),
@@ -307,6 +308,43 @@ class Shard(unittest.TestCase):
     repo=Path(name);(repo/'agents').mkdir()
     with self.assertRaises(ValueError):self.run_main(repo,shard_fixture(self.tasks),environment)
     self.assertFalse((repo/'.context/benchmarks').exists())
+class BoundManifest(unittest.TestCase):
+ """A fresh sharded run of any ordered manifest: the shard binds its hash and timeouts."""
+ def setUp(self):
+  import hashlib
+  self.tasks=['polar-fixture-%02d'%i for i in range(70)];self.sha=hashlib.sha256(('\n'.join(self.tasks)+'\n').encode()).hexdigest()
+ def shard(self,**changes):
+  import hashlib
+  names=self.tasks[0::3]
+  value=dict(index=0,count=3,tasks=names,tasks_sha256=hashlib.sha256(('\n'.join(names)+'\n').encode()).hexdigest(),task_indexes=list(range(0,70,3)),runs=1,
+             group_run_id='original600-fixture',group_total=70,group_started_at=1792287011.18,manifest_sha256=self.sha,task_timeout=480)
+  value.update(changes);return value
+ def test_shard_validates_against_its_bound_manifest_and_timeouts(self):
+  self.assertEqual(S['validate_shard'](self.shard(),self.tasks),24);self.assertEqual(S['shard_timeouts'](self.shard()),(480,5400))
+  original=json.loads((Path(__file__).parent/'fixtures/original600-tasks.json').read_bytes())
+  self.assertEqual(S['validate_shard'](shard_fixture(original),original),9);self.assertEqual(S['shard_timeouts'](shard_fixture(original)),(1200,5400))
+  unbound={k:v for k,v in self.shard().items() if k!='manifest_sha256'}
+  for manifest,value,message in [(self.tasks,unbound,'original 200 tasks required'),(list(reversed(self.tasks)),self.shard(),'bound ordered tasks changed'),
+                                 (self.tasks+[self.tasks[0]],self.shard(),'distinct ordered tasks'),(original,self.shard(manifest_sha256=S['ORIGINAL_TASK_NAMES_SHA256']),'invalid bound manifest hash'),
+                                 (self.tasks,self.shard(task_timeout=1200),'encoded by absence'),(self.tasks,self.shard(task_timeout=30),'task timeout'),
+                                 (self.tasks,self.shard(e2e_timeout=2000),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=9000),'e2e timeout'),(self.tasks,self.shard(group_total=71),'group total')]:
+   with self.subTest(message=message),self.assertRaisesRegex(ValueError,message):S['validate_shard'](value,manifest)
+ def test_main_runs_the_bound_manifest_with_its_timeouts_and_refuses_original_options(self):
+  with tempfile.TemporaryDirectory()as name:
+   repo=Path(name);(repo/'agents').mkdir();tasks_path=repo/'polar-tasks.json';tasks_path.write_text(json.dumps(self.tasks,sort_keys=True)+'\n')
+   result,campaigns,children,identity=Shard.run_main(self,repo,self.shard(),{},tasks_path=tasks_path)
+   self.assertEqual(result,0);self.assertEqual((campaigns[0]/'ending').read_text(),'natural')
+   policy=json.loads(next((repo/'.context/stress200-host').glob('*/infra-early-stop-policy.safe.json')).read_bytes())
+   self.assertEqual((policy['task_timeout_seconds'],policy['run_timeout_seconds']),(480,5400))
+  for timeouts in (('1200','5400'),('480','3000')):
+   with self.subTest(timeouts=timeouts),tempfile.TemporaryDirectory()as name:
+    repo=Path(name);(repo/'agents').mkdir();tasks_path=repo/'polar-tasks.json';tasks_path.write_text(json.dumps(self.tasks,sort_keys=True)+'\n')
+    with self.assertRaisesRegex(ValueError,'original rollout option changed: --(e2e-)?timeout'):Shard.run_main(self,repo,self.shard(),{},tasks_path=tasks_path,timeouts=timeouts)
+    self.assertFalse((repo/'.context/benchmarks').exists())
+  with tempfile.TemporaryDirectory()as name:
+   repo=Path(name);(repo/'agents').mkdir();tasks_path=repo/'polar-tasks.json';tasks_path.write_text(json.dumps(self.tasks[:69])+'\n')
+   with self.assertRaisesRegex(ValueError,'bound ordered tasks changed'):Shard.run_main(self,repo,self.shard(),{},tasks_path=tasks_path)
+   self.assertFalse((repo/'.context/benchmarks').exists())
 class RunnerSelfTest(unittest.TestCase):
  def test_runner_built_in_self_test_runs_in_this_registered_suite(self):
   # The runner's shard argv/env, RELEASE/ABORT and delivery controls live in its

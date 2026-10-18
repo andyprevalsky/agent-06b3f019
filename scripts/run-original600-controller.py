@@ -740,7 +740,7 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
     stamp = time.time() if started_at is None else started_at
     if not 0 <= time.time()-stamp < 5400:
         raise ValueError('original campaign clock expired during admission')
-    runner['campaign_argv'](tasks, stamp)  # Exact task-name hash and all original arguments.
+    runner['campaign_argv'](tasks, stamp, shard)  # Exact bound task-name hash and all campaign arguments.
     auth = dict(schema='cloudbench-disposable-controller-authority-v1', allowed=True, single_host=True,
                 app=facts['app'], region='iad', vm_size='performance-8x', memory_mib=32768,
                 workspace_size_gb=256, org_machine_limit=cap['machine_limit'],
@@ -823,16 +823,95 @@ def simultaneous_copies(args, runner):
     return selected_task_count(args, json.loads(runner['read'](args.tasks))) * args.repetitions
 
 
+def bound_timeouts(args, runner):
+    """The run's (--task-timeout, --e2e-timeout), within the runner's operator deadline."""
+    return runner['campaign_timeouts'](getattr(args, 'task_timeout', runner['DEFAULT_TASK_TIMEOUT']),
+                                       getattr(args, 'e2e_timeout', runner['RUN_DEADLINE']))
+
+
+def original_manifest(manifest, runner):
+    return (isinstance(manifest, list) and all(isinstance(t, str) for t in manifest)
+            and runner['manifest_sha'](manifest) == runner['TASK_NAMES_SHA'])
+
+
+def shard_bindings(args, runner):
+    """Bound shard fields beyond the original600 defaults; empty for the original manifest and timeouts."""
+    manifest = json.loads(runner['read'](args.tasks))
+    task_timeout, e2e_timeout = bound_timeouts(args, runner)
+    extra = {} if original_manifest(manifest, runner) else dict(manifest_sha256=runner['manifest_sha'](manifest))
+    if task_timeout != runner['DEFAULT_TASK_TIMEOUT']:
+        extra['task_timeout'] = task_timeout
+    if e2e_timeout != runner['RUN_DEADLINE']:
+        extra['e2e_timeout'] = e2e_timeout
+    return extra
+
+
+def bound_shard(item, args, runner, group_id, group_total, started_at):
+    """One shard's exact launch object: its tasks, global indexes, shared group and bound manifest/timeouts."""
+    return dict(item, tasks_sha256=digest(('\n'.join(item['tasks']) + '\n').encode()), group_run_id=group_id,
+                group_total=group_total, group_started_at=started_at, **shard_bindings(args, runner))
+
+
+def catalog_ineligible_reason(root, runner, tasks, backend_env):
+    """None when every name is ready, Linux/cloud-root and LIVE eligible in the unified catalog at TASK_REF."""
+    import tempfile
+    members = ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
+               'agents/providers/fast_cache/normalize.py', 'agents/utils/__init__.py',
+               'agents/utils/oai_demo.py', 'agents/utils/oai_demo_july.py')
+    with tempfile.TemporaryDirectory(prefix='manifest-catalog-') as scratch:
+        for member in members:
+            target = Path(scratch, member)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                                        runner['TASK_REF'] + ':' + member]))
+        # Phone-callee assignments come from the selected backend env, as the benchmark reads them.
+        Path(scratch, 'back-end').mkdir()
+        Path(scratch, 'back-end/.env').symlink_to(Path(backend_env).absolute())
+        pool = Path(scratch, 'manifest.json')
+        pool.write_text(json.dumps(tasks))
+        sys.path.insert(0, str(root / 'scripts'))
+        try:
+            sample = runpy.run_path(str(root / 'scripts/fleet_infra_sample.py'))
+            # The canonical CLI eligibility: ready, cloud-root runnable and LIVE (no zero-spend/DEMO replay).
+            eligible = sample['eligible_pool'](Path(scratch), pool, require_cloud_root=True, minimum_successful_llm=3)
+        except ValueError as error:  # includes the unified catalog's CatalogError
+            return str(error)
+        finally:
+            sys.path.remove(str(root / 'scripts'))
+    return None if eligible == tasks else 'manifest tasks are not all LIVE eligible: ' + ', '.join(sorted(set(tasks) - set(eligible)))
+
+
+def task_manifest(args, root, runner):
+    """The ordered --tasks manifest: the pinned original 200, or distinct catalog-eligible names; local only."""
+    manifest = json.loads(runner['read'](args.tasks))
+    task_timeout, e2e_timeout = bound_timeouts(args, runner)
+    if original_manifest(manifest, runner):
+        runner['campaign_argv'](manifest, time.time())
+        return dict(sha256=runner['TASK_NAMES_SHA'], tasks=len(manifest), original=True,
+                    task_timeout=task_timeout, e2e_timeout=e2e_timeout)
+    if (not isinstance(manifest, list) or not manifest or any(not isinstance(t, str) or not t for t in manifest)
+            or len(set(manifest)) != len(manifest)):
+        raise ValueError('--tasks must be an ordered JSON list of distinct task names')
+    reason = catalog_ineligible_reason(root, runner, manifest, args.backend_env)
+    if reason:
+        raise ValueError('--tasks refused at task ref ' + runner['TASK_REF'] + ': ' + reason)
+    return dict(sha256=runner['manifest_sha'](manifest), tasks=len(manifest), original=False,
+                task_timeout=task_timeout, e2e_timeout=e2e_timeout, catalog_eligible=len(manifest))
+
+
 def shard_selection(args, runner):
     """Ordered task selection and shard plan for a fresh run (None = legacy single controller)."""
     manifest = json.loads(runner['read'](args.tasks))
     count = selected_task_count(args, manifest)
-    if args.controllers == '1' and count == len(manifest) and args.repetitions == 3:
+    # Only the pinned original manifest at its original timeouts has the legacy single-controller shape.
+    legacy_shape = (count == len(manifest) and args.repetitions == 3 and original_manifest(manifest, runner)
+                    and not shard_bindings(args, runner))
+    if args.controllers == '1' and legacy_shape:
         return None  # explicit single controller: the original 200x3 shape
     coordinator = runpy.run_path(str(Path(__file__).with_name('cloudbench-shard-coordinator.py')))
     controllers = args.controllers if args.controllers == 'auto' else int(args.controllers)
     plan = coordinator['plan_shards'](manifest[:count], args.repetitions, controllers, args.tasks_per_controller)
-    legacy = plan['controllers'] == 1 and count == len(manifest) and args.repetitions == 3
+    legacy = plan['controllers'] == 1 and legacy_shape
     return None if legacy else plan
 
 
@@ -928,7 +1007,8 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
         raise ValueError('private physical current-owner state directory required')
     binding = admission_binding(args, runner)
     binding['shards'] = dict(controllers=plan['controllers'], copies=plan['copies'],
-                             tasks=[s['tasks'] for s in plan['shards']], runs=plan['shards'][0]['runs'])
+                             tasks=[s['tasks'] for s in plan['shards']], runs=plan['shards'][0]['runs'],
+                             **shard_bindings(args, runner))
     directory, started_at = open_admission(parent, None, binding, runner, False)
     token = token_from_agents(runner['read'](args.agents_env))
     os.environ['FLY_API_TOKEN'] = token
@@ -960,8 +1040,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     for item in plan['shards']:
         shard_dir = directory / ('shard-%02d' % item['index'])
         shard_dir.mkdir(mode=0o700)
-        shard = dict(item, tasks_sha256=digest(('\n'.join(item['tasks']) + '\n').encode()), group_run_id=group_id,
-                     group_total=copies, group_started_at=started_at)
+        shard = bound_shard(item, args, runner, group_id, copies, started_at)
         config = prepare(args, root, pins, runner, shard_dir, cap, started_at=started_at, shard=shard,
                          runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
                          guest_env=guest_env)
@@ -1894,6 +1973,9 @@ def main():
     parser.add_argument('--tasks-per-controller', type=int, help='explicit tasks per controller (all repetitions of a task share one controller)')
     parser.add_argument('--task-count', type=int, help='run only the first N manifest tasks (diagnostic ladder)')
     parser.add_argument('--repetitions', type=int, default=3, help='copies per task (default 3)')
+    parser.add_argument('--task-timeout', type=int, default=1200, help='per-task execution window, seconds (default 1200)')
+    parser.add_argument('--e2e-timeout', type=int, default=5400,
+                        help='whole-campaign budget from the admission clock, seconds (default 5400, the operator deadline)')
     parser.add_argument('--worker-headroom', type=int, default=0, help='extra native Machine slots to require for autoscaled workers')
     parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
     args = parser.parse_args()
@@ -1921,7 +2003,11 @@ def main():
     for archive in args.archive_run + recovery:
         if archive.resolve(strict=True) != archive or not archive.is_dir():
             raise ValueError('original archive run must be a physical directory')
-    runner['campaign_argv'](json.loads(runner['read'](args.tasks)), time.time())
+    manifest = task_manifest(args, root, runner)
+    if (not manifest['original'] or shard_bindings(args, runner)) and (
+            args.archive_run or recovery or args.resume_bound_launch or args.resume_admission
+            or args.resume_incomplete_admission or args.prepare_admission_request or args.prelaunch_failure):
+        raise ValueError('archived reuse and continuations run the original 200-task manifest at its original timeouts only')
     # Every mode (--check, --run and continuations) admits all copies at once:
     # refuse a width above the provider rate-limit cap before any credential,
     # Fly CLI or provider read.
@@ -1967,8 +2053,12 @@ def main():
         check = dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=warm.pop('provider_calls'),
                      warm_snapshot=warm, infra_early_stop=args.infra_early_stop,
                      guest_temporal_namespace=guest_env['temporal_namespace'], guest_env_delivery=guest_env['delivery'])
+        check.update(manifest=manifest)
         plan = None if (args.archive_run or args.resume_admission) else shard_selection(args, runner)
         if plan is not None:
+            first = bound_shard(plan['shards'][0], args, runner, 'original600-check', plan['copies'], time.time())
+            argv = runner['campaign_argv'](json.loads(runner['read'](args.tasks)), first['group_started_at'], first)
+            check.update(shard_campaign_options=argv[2:argv.index('--e2e-started-at')], shard_bindings=shard_bindings(args, runner))
             check.update(controllers=plan['controllers'], copies=plan['copies'],
                          copies_per_controller_bound=plan['copies_per_controller_bound'],
                          native_slots_required=runpy.run_path(str(root/'scripts/cloudbench-shard-coordinator.py'))['capacity_demand'](

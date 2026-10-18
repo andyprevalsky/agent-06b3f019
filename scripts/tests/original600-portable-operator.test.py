@@ -41,6 +41,20 @@ def private(path, value):
 
 
 PROVIDER_CAPACITY_MEMBERS = ('cloudbench-provider-capacity.py', 'cloudbench-provider-limits.json')
+MANIFEST_CATALOG_MEMBERS = ('fleet_infra_sample.py', 'cloudbench_catalog.py')
+
+
+def polar_names(count=70):
+    """Ready Polar task names from the runner's TASK_REF catalog, in catalog order."""
+    rows = json.loads(subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT), 'show',
+                                               RUNNER['TASK_REF'] + ':agents/benchmarks/polar_tasks.json']))
+    return [row['name'] for row in rows if row.get('status', 'ready') == 'ready'][:count]
+
+
+def catalog_names(predicate):
+    rows = json.loads(subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT), 'show',
+                                               RUNNER['TASK_REF'] + ':agents/benchmarks/tasks.json']))
+    return [row['name'] for row in rows if predicate(row)]
 PROVIDER_REFUSAL_600 = """\
 ❌ Benchmark concurrency is limited by provider rate limits: requested 600 concurrent benches, maximum 70.
 Limiting providers (20% of each limit reserved for production):
@@ -1700,9 +1714,12 @@ class Portable(unittest.TestCase):
             (root/'scripts/lib').mkdir(exist_ok=True)
             (root/'scripts/lib/cloudbench-env.sh').write_bytes((ROOT/'scripts/lib/cloudbench-env.sh').read_bytes())
             # The committed provider rate-limit helper and its reviewed registry.
-            for member in PROVIDER_CAPACITY_MEMBERS:
+            for member in PROVIDER_CAPACITY_MEMBERS + MANIFEST_CATALOG_MEMBERS:
                 (root/'scripts'/member).write_bytes((ROOT/'scripts'/member).read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            # The manifest eligibility check reads the runner's TASK_REF catalog: borrow its objects read-only.
+            common = Path(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True).strip())
+            (root/'.git/objects/info/alternates').write_text(str(common/'objects') + '\n')
             subprocess.run(['git', '-C', str(root), 'add', 'scripts'], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
                             '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], check=True)
@@ -1804,6 +1821,56 @@ class Portable(unittest.TestCase):
             # Disabled/invalid policy runs read twice each; local refusals read nothing.
             self.assertEqual(len(requests), 2)
             self.assertEqual(list(state.iterdir()), [])
+
+    def test_public_check_binds_an_arbitrary_manifest_and_timeouts_or_refuses_it_before_provider_reads(self):
+        requests = []
+        with self.public_check(warm_fixture(time.time()), requests) as fx:
+            names = polar_names()
+            manifest = private(fx.inputs/'polar70', names)
+            args = fx.args[:fx.args.index('--tasks')+1] + [str(manifest)] + fx.args[fx.args.index('--tasks')+2:]
+            result = subprocess.run(args + ['--repetitions', '1', '--task-timeout', '480'], cwd='/', env=fx.env,
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            check = json.loads(result.stdout)
+            self.assertEqual((check['status'], check['controllers'], check['copies'], check['copies_per_controller_bound'], check['provider_calls']),
+                             ('CHECKED_NOT_LAUNCHED', 3, 70, 32, 2))
+            self.assertEqual(check['manifest'], dict(sha256=RUNNER['manifest_sha'](names), tasks=70, original=False, task_timeout=480,
+                                                     e2e_timeout=5400, catalog_eligible=70))
+            self.assertEqual(check['shard_bindings'], dict(manifest_sha256=RUNNER['manifest_sha'](names), task_timeout=480))
+            self.assertEqual(check['shard_campaign_options'], ['--strict-barrier', '--concurrency', '24', '-k', '1', '--retry-infra', '1',
+                                                               '--timeout', '480', '--e2e-timeout', '5400'])
+            self.assertEqual(len(requests), 2)
+            requests.clear()
+            not_ready = catalog_names(lambda row: row.get('status', 'ready') != 'ready')[:1]
+            rootless = catalog_names(lambda row: row.get('runner') == 'sms' and row.get('status', 'ready') == 'ready')[:1]
+            self.assertEqual((len(not_ready), len(rootless)), (1, 1))
+            for label, bad, flags, message in [('unknown', names[:3] + ['no-such-benchmark-task'], [], 'non-ready tasks'),
+                                               ('not-ready', names[:3] + not_ready, [], 'non-ready tasks'),
+                                               ('duplicate', names[:3] + names[:1], [], 'distinct task names'),
+                                               ('rootless', names[:3] + rootless, [], 'cloud-root'),
+                                               ('timeout', names, ['--task-timeout', '30'], 'task-timeout must be 60'),
+                                               ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '2000'], 'e2e-timeout must cover'),
+                                               ('continuation', names, ['--resume-admission', str(fx.state)], 'original 200-task manifest')]:
+                with self.subTest(label=label):
+                    path = fx.inputs/('bad-'+label)
+                    path.unlink(missing_ok=True)
+                    bad_args = fx.args[:fx.args.index('--tasks')+1] + [str(private(path, bad))] + fx.args[fx.args.index('--tasks')+2:]
+                    refused = subprocess.run(bad_args + ['--repetitions', '1'] + flags, cwd='/', env=fx.env,
+                                             capture_output=True, text=True, timeout=60)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn(message, refused.stderr)
+                    self.assertNotIn('CHECKED_NOT_LAUNCHED', refused.stdout)
+            # Every refusal is local: no Fly API or flyctl call, no GitHub read and no state.
+            self.assertEqual(requests, [])
+            self.assertFalse(fx.marker.exists())
+            self.assertEqual(list(fx.state.iterdir()), [])
+            # The pinned original 200 keeps its unchanged check: no manifest binding, 20 controllers.
+            original = subprocess.run(fx.args + ['--task-count', '35', '--repetitions', '2'], cwd='/', env=fx.env,
+                                      capture_output=True, text=True, timeout=60)
+            self.assertEqual(original.returncode, 0, original.stderr)
+            value = json.loads(original.stdout)
+            self.assertEqual((value['manifest']['original'], value['shard_bindings'], value['copies']), (True, {}, 70))
+            self.assertEqual(value['shard_campaign_options'][7:11], ['--timeout', '1200', '--e2e-timeout', '5400'])
 
     def test_provider_capacity_refuses_600_copies_before_any_credential_or_provider_read(self):
         requests = []
@@ -2106,6 +2173,71 @@ class Sharded(unittest.TestCase):
             self.assertEqual(json.loads((shard_dir/'attempt-start.safe.json').read_bytes())['scheduled_total'], 30)
             for key in set(legacy) - {'started_at_epoch', 'authority_template', 'remote_env', 'shard'}:
                 self.assertEqual(value[key], legacy[key], key)
+
+    def test_arbitrary_manifest_binds_its_hash_and_timeouts_into_every_shard_config(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            names = polar_names()
+            args = self.args(directory, tasks=private(directory/'polar70', names), repetitions=1, task_timeout=480, e2e_timeout=5400)
+            bound = CLI.task_manifest(args, ROOT, RUNNER)
+            self.assertEqual((bound['original'], bound['sha256'], bound['tasks'], bound['task_timeout']), (False, RUNNER['manifest_sha'](names), 70, 480))
+            plan = CLI.shard_selection(args, RUNNER)
+            self.assertEqual((plan['controllers'], plan['copies'], plan['copies_per_controller_bound']), (3, 70, 32))
+            # A complete non-original manifest at the original 3 copies on one controller is still a bound shard.
+            ten = self.args(directory, tasks=private(directory/'polar10', names[:10]), repetitions=3, controllers='1')
+            self.assertEqual(CLI.shard_selection(ten, RUNNER)['controllers'], 1)
+            cap = self.capacity(directory)
+            configs = []
+            for item in plan['shards']:
+                shard = CLI.bound_shard(item, args, RUNNER, 'original600-fixture', plan['copies'], 1792287011.18)
+                self.assertEqual({k: shard[k] for k in ('manifest_sha256', 'task_timeout')}, dict(manifest_sha256=bound['sha256'], task_timeout=480))
+                self.assertNotIn('e2e_timeout', shard)
+                out = directory/('shard-%d' % item['index'])
+                out.mkdir(mode=0o700)
+                configs.append(json.loads(CLI.prepare(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, out, cap, shard=shard,
+                                                      runtime_env=dict(CLOUDBENCH_APP_MACHINE_CEILING='962', CLOUDBENCH_SHARED_CPU_GOVERNOR='2428'),
+                                                      sibling_controller_slots=2, scheduled_total=70).read_bytes()))
+            self.assertEqual(sorted(t for c in configs for t in c['shard']['tasks']), sorted(names))
+            for config in configs:
+                argv = RUNNER['campaign_argv'](json.loads(Path(config['tasks_path']).read_bytes()), 1792287011.18, config['shard'])
+                self.assertEqual(argv[argv.index('--timeout')+1:argv.index('--timeout')+4], ['480', '--e2e-timeout', '5400'])
+                self.assertEqual(argv[argv.index('--ref')+2:], config['shard']['tasks'])
+            # A changed manifest after binding no longer matches the shard's bound hash.
+            with self.assertRaisesRegex(ValueError, 'bound ordered task manifest required'):
+                RUNNER['campaign_argv'](list(reversed(names)), 1792287011.18, configs[0]['shard'])
+            # Refusals precede any provider read and leave no state.
+            for bad, message in [(names[:2] + ['no-such-benchmark-task'], 'non-ready tasks'), (names[:2] + names[:1], 'distinct task names'),
+                                 (names[:2] + catalog_names(lambda row: row.get('status', 'ready') != 'ready')[:1], 'non-ready tasks')]:
+                path = directory/'bad'
+                path.unlink(missing_ok=True)
+                with self.subTest(bad=bad[-1]), patch.object(CLI, 'capacity_snapshot', side_effect=AssertionError('no provider read')):
+                    with self.assertRaisesRegex(ValueError, message):
+                        CLI.task_manifest(self.args(directory, tasks=private(path, bad)), ROOT, RUNNER)
+
+    def test_original_manifest_shards_keep_their_historical_bytes(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            args = self.args(directory)
+            self.assertEqual((CLI.task_manifest(args, ROOT, RUNNER)['original'], CLI.shard_bindings(args, RUNNER)), (True, {}))
+            plan = CLI.shard_selection(args, RUNNER)
+            item = plan['shards'][7]
+            historical = dict(item, tasks_sha256=CLI.digest(('\n'.join(item['tasks']) + '\n').encode()), group_run_id='g',
+                              group_total=600, group_started_at=1.0)
+            shard = CLI.bound_shard(item, args, RUNNER, 'g', 600, 1.0)
+            self.assertEqual(json.dumps(shard, sort_keys=True), json.dumps(historical, sort_keys=True))
+            tasks = json.loads(args.tasks.read_text())
+            self.assertEqual(RUNNER['campaign_argv'](tasks, 1.0, shard)[:13], ['bash', 'scripts/run-bench', '--strict-barrier', '--concurrency', '30', '-k', '3',
+                                                                             '--retry-infra', '1', '--timeout', '1200', '--e2e-timeout', '5400'])
+            self.assertEqual(json.dumps(RUNNER['campaign_argv'](tasks, 1.0)), json.dumps(
+                ['bash', 'scripts/run-bench', '--stress-defaults', '--strict-barrier', '--concurrency', '600', '-k', '3', '--retry-infra', '1',
+                 '--timeout', '1200', '--e2e-timeout', '5400', '--e2e-started-at', '1.0', '--ref', RUNNER['TASK_REF'], *tasks]))
+            self.assertIsNone(CLI.shard_selection(self.args(directory, controllers='1'), RUNNER))
+            # Non-default timeouts never select the legacy single-controller 200x3 shape.
+            timed = self.args(directory, task_timeout=480)
+            self.assertEqual(CLI.shard_bindings(timed, RUNNER), dict(task_timeout=480))
+            self.assertEqual(CLI.shard_selection(timed, RUNNER)['controllers'], 20)
+            with self.assertRaisesRegex(ValueError, 'exceed 32 copies'):
+                CLI.shard_selection(self.args(directory, task_timeout=480, controllers='1'), RUNNER)
 
     def test_guest_env_binds_override_namespace_without_changing_controller_env(self):
         """Guests decode the bench-app secrets; the operator binds the namespace they must carry."""

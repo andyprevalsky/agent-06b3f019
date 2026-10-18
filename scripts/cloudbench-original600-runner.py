@@ -13,7 +13,7 @@ APP='navi-whisper-lux-bench'
 WARM_MACHINE_NAME='cloudbench-warm-t10-ord-85a7e2c'
 WARM_MACHINE_ID='8ed16dc75ee958'
 WARM_VOLUME_NAME='cloudbench_t10_ord_85a7e2c'
-WARM_SNAPSHOT_ID='vs_xA6B3617AO9TaeovZ3OKN42'
+WARM_SNAPSHOT_ID='vs_Q89eV90n82yS7LOVbwYOV2n'
 class Deadline(BaseException):pass
 
 def need(v,m):
@@ -47,9 +47,36 @@ def bounded(seconds):
   if old[0]:signal.setitimer(signal.ITIMER_REAL,max(.000001,old[0]-(time.monotonic()-start)))
 
 SHARD_FIELDS={'index','count','tasks','tasks_sha256','task_indexes','runs','group_run_id','group_total','group_started_at'}
+# Optional bound shard fields. Absent means the original600 values, so an
+# original-manifest shard with default timeouts keeps its exact historical bytes.
+SHARD_OPTIONAL={'infra_threshold','manifest_sha256','task_timeout','e2e_timeout'}
+DEFAULT_TASK_TIMEOUT=1200
+# Every operator receipt, transfer and TERM fence is bound to epoch+RUN_DEADLINE;
+# a campaign --e2e-timeout must fit inside it.
+RUN_DEADLINE=5400
+# Controller boot, canary/preflight release, fleet readiness and final evidence/release
+# (Eval Suite stage targets 720+900+480) outside the per-task execution window.
+STARTUP_ALLOWANCE=2100
+def manifest_sha(tasks):return sha(('\n'.join(tasks)+'\n').encode())
+def campaign_timeouts(task_timeout=DEFAULT_TASK_TIMEOUT,e2e_timeout=RUN_DEADLINE):
+ """The bound per-task execution window and whole-campaign budget, in seconds."""
+ need(type(task_timeout)is int and 60<=task_timeout<=RUN_DEADLINE-STARTUP_ALLOWANCE,'--task-timeout must be 60..%d seconds'%(RUN_DEADLINE-STARTUP_ALLOWANCE))
+ need(type(e2e_timeout)is int and task_timeout+STARTUP_ALLOWANCE<=e2e_timeout<=RUN_DEADLINE,'--e2e-timeout must cover the task timeout plus %ds startup/release and fit the %ds operator deadline'%(STARTUP_ALLOWANCE,RUN_DEADLINE))
+ return task_timeout,e2e_timeout
+def shard_timeouts(shard):
+ # One canonical encoding: a bound field is present only when it differs from the original value.
+ need(shard.get('task_timeout')!=DEFAULT_TASK_TIMEOUT and shard.get('e2e_timeout')!=RUN_DEADLINE,'default timeouts are encoded by absence')
+ return campaign_timeouts(shard.get('task_timeout',DEFAULT_TASK_TIMEOUT),shard.get('e2e_timeout',RUN_DEADLINE))
+def shard_manifest(shard,manifest):
+ """The shard's bound ordered manifest: an explicit sha, or the pinned original when absent."""
+ bound=shard.get('manifest_sha256',TASK_NAMES_SHA)
+ need(isinstance(bound,str) and re.fullmatch('[0-9a-f]{64}',bound) and ('manifest_sha256' not in shard or bound!=TASK_NAMES_SHA),'invalid bound manifest hash')
+ need(isinstance(manifest,list) and manifest and all(isinstance(t,str) and t for t in manifest) and len(set(manifest))==len(manifest) and manifest_sha(manifest)==bound,
+      'bound ordered task manifest required' if 'manifest_sha256' in shard else 'original ordered task manifest required')
+ return bound
 def shard_shape(shard):
  """Self-consistent shard fields; returns the shard's logical job count."""
- need(isinstance(shard,dict) and SHARD_FIELDS<=set(shard)<=SHARD_FIELDS|{'infra_threshold'},'exact shard fields required')
+ need(isinstance(shard,dict) and SHARD_FIELDS<=set(shard)<=SHARD_FIELDS|SHARD_OPTIONAL,'exact shard fields required')
  index,count,runs,names=shard['index'],shard['count'],shard['runs'],shard['tasks']
  need(all(type(x)is int for x in (index,count,runs)) and 0<=index<count and runs>=1,'invalid shard index/count/runs')
  need(isinstance(names,list) and names and all(isinstance(t,str) and t for t in names) and len(set(names))==len(names),'distinct shard tasks required')
@@ -61,21 +88,23 @@ def shard_shape(shard):
  need(all(i<shard['group_total']//runs for i in indexes),'task index outside the group width')
  started=shard['group_started_at'];need(type(started)in(int,float) and math.isfinite(started) and started>0,'invalid shared group start')
  threshold=shard.get('infra_threshold',30);need(type(threshold)is int and threshold>=1,'invalid infrastructure threshold')
+ shard_timeouts(shard)
  return len(names)*runs
 def validate_shard(shard,manifest):
- """A shard is an ordered subset of the pinned original manifest."""
- jobs=shard_shape(shard);indexes=shard['task_indexes']
+ """A shard is an ordered subset of its bound manifest (the pinned original when unbound)."""
+ jobs=shard_shape(shard);shard_manifest(shard,manifest);indexes=shard['task_indexes']
  # Job IDs stay the single-controller r{run}-j{global index}, so each task carries its manifest index.
- need(all(i<len(manifest) and manifest[i]==t for i,t in zip(indexes,shard['tasks'])) and indexes==sorted(indexes),'shard tasks must be an ordered subset of the original manifest at their indexes')
- need(shard['group_total']<=len(manifest)*shard['runs'],'group total exceeds the original manifest')
+ need(all(i<len(manifest) and manifest[i]==t for i,t in zip(indexes,shard['tasks'])) and indexes==sorted(indexes),'shard tasks must be an ordered subset of the bound manifest at their indexes')
+ need(shard['group_total']<=len(manifest)*shard['runs'],'group total exceeds the bound manifest')
  return jobs
 def campaign_argv(tasks,epoch,shard=None):
- need(len(tasks)==len(set(tasks))==200 and sha(('\n'.join(tasks)+'\n').encode())==TASK_NAMES_SHA,'original ordered task manifest required')
- if shard is None:return ['bash','scripts/run-bench','--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref',TASK_REF,*tasks]
+ if shard is None:
+  need(len(tasks)==len(set(tasks))==200 and sha(('\n'.join(tasks)+'\n').encode())==TASK_NAMES_SHA,'original ordered task manifest required')
+  return ['bash','scripts/run-bench','--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref',TASK_REF,*tasks]
  # --stress-defaults admits only the complete 200-task k3 profile; a shard
  # instead carries the operator's global limits in shard_env.
- jobs=validate_shard(shard,tasks)
- return ['bash','scripts/run-bench','--strict-barrier','--concurrency',str(jobs),'-k',str(shard['runs']),'--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref',TASK_REF,*shard['tasks']]
+ jobs=validate_shard(shard,tasks);task_timeout,e2e_timeout=shard_timeouts(shard)
+ return ['bash','scripts/run-bench','--strict-barrier','--concurrency',str(jobs),'-k',str(shard['runs']),'--retry-infra','1','--timeout',str(task_timeout),'--e2e-timeout',str(e2e_timeout),'--e2e-started-at',str(epoch),'--ref',TASK_REF,*shard['tasks']]
 def shard_env(remote_env,shard,identity_name):
  """Legacy (no shard) returns remote_env unchanged; a shard adds only its bound campaign controls."""
  if shard is None:return remote_env
@@ -794,6 +823,30 @@ def self_test():
                dict(group_run_id='bad id'),dict(group_started_at=float('nan')),dict(infra_threshold=0),dict(unexpected=1)]:
     with self.subTest(bad=bad),self.assertRaises(ValueError):campaign_argv(tasks,epoch,self.shard(tasks,**bad))
    self.assertEqual(validate_shard(self.shard(tasks,index=7,infra_threshold=5),tasks),9)
+  def test_bound_manifest_shard_argv_carries_its_hash_and_timeouts(self):
+   # Any ordered manifest of distinct names: the shard binds its sha; the original pins stay for the unbound path.
+   tasks=['polar-fixture-%02d'%i for i in range(70)];epoch=1792287011.18;names=tasks[1::3]
+   shard=dict(index=1,count=3,tasks=names,tasks_sha256=sha(('\n'.join(names)+'\n').encode()),task_indexes=list(range(1,70,3)),runs=1,
+              group_run_id='original600-fixture',group_total=70,group_started_at=epoch,manifest_sha256=manifest_sha(tasks),task_timeout=480)
+   argv=campaign_argv(tasks,epoch,shard)
+   self.assertEqual(argv,['bash','scripts/run-bench','--strict-barrier','--concurrency','23','-k','1','--retry-infra','1','--timeout','480','--e2e-timeout','5400',
+                          '--e2e-started-at',str(epoch),'--ref',TASK_REF,*names])
+   self.assertEqual(campaign_argv(tasks,epoch,dict(shard,e2e_timeout=3000))[9:13],['--timeout','480','--e2e-timeout','3000'])
+   self.assertEqual(validate_shard(shard,tasks),23)
+   with self.assertRaisesRegex(ValueError,'original ordered task manifest required'):campaign_argv(tasks,epoch)
+   other=list(reversed(tasks));unbound={k:v for k,v in shard.items() if k!='manifest_sha256'}
+   for manifest,value,message in [(tasks,unbound,'original ordered task manifest required'),(other,shard,'bound ordered task manifest required'),
+                                  (tasks+[tasks[0]],dict(shard,manifest_sha256=manifest_sha(tasks+[tasks[0]])),'bound ordered task manifest required'),
+                                  (self.manifest(),dict(shard,manifest_sha256=TASK_NAMES_SHA),'invalid bound manifest hash'),(tasks,dict(shard,manifest_sha256='A'*64),'invalid bound manifest hash'),
+                                  (tasks,dict(shard,task_timeout=1200),'encoded by absence'),(tasks,dict(shard,e2e_timeout=5400),'encoded by absence'),
+                                  (tasks,dict(shard,task_timeout=59),'task-timeout'),(tasks,dict(shard,task_timeout=3301),'task-timeout'),(tasks,dict(shard,task_timeout=480.0),'task-timeout'),
+                                  (tasks,dict(shard,task_timeout=True),'task-timeout'),(tasks,dict(shard,e2e_timeout=2579),'e2e-timeout'),(tasks,dict(shard,e2e_timeout=5401),'e2e-timeout'),
+                                  (tasks,dict(shard,group_total=71),'group total exceeds the bound manifest'),(tasks,dict(shard,task_indexes=list(range(2,70,3))),'ordered subset of the bound manifest')]:
+    with self.subTest(message=message,value={k:value[k] for k in SHARD_OPTIONAL&set(value)}),self.assertRaisesRegex(ValueError,message):campaign_argv(manifest,epoch,value)
+   self.assertEqual(campaign_timeouts(),(1200,5400));self.assertEqual(campaign_timeouts(3300,5400),(3300,5400))
+   # The original-manifest shard encodes neither field: its bytes and argv are the historical ones.
+   original=self.shard(self.manifest());self.assertFalse(SHARD_OPTIONAL&set(original))
+   self.assertEqual(campaign_argv(self.manifest(),epoch,original)[9:13],['--timeout','1200','--e2e-timeout','5400'])
   def test_remote_launch_stages_private_barrier_and_bound_shard(self):
    tasks=self.manifest();shard=self.shard(tasks)
    with tempfile.TemporaryDirectory()as d:

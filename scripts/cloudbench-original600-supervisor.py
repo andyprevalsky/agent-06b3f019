@@ -18,6 +18,39 @@ INFRA_THRESHOLD = 30
 ORIGINAL_TASK_NAMES_SHA256 = '660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bcb0a8987f1b59f5'
 SHARD_FIELDS = {'index', 'count', 'tasks', 'tasks_sha256', 'task_indexes', 'runs',
                 'group_run_id', 'group_total', 'group_started_at'}
+# Optional bound shard fields; absent means the original600 value (runner SHARD_OPTIONAL).
+SHARD_OPTIONAL = {'infra_threshold', 'manifest_sha256', 'task_timeout', 'e2e_timeout'}
+DEFAULT_TASK_TIMEOUT = 1200
+RUN_DEADLINE = 5400
+STARTUP_ALLOWANCE = 2100
+
+def names_sha256(tasks):
+    return hashlib.sha256(('\n'.join(tasks)+'\n').encode()).hexdigest()
+
+def shard_timeouts(shard):
+    """The shard's bound task/e2e timeouts; the runner's campaign_timeouts bounds."""
+    if shard.get('task_timeout') == DEFAULT_TASK_TIMEOUT or shard.get('e2e_timeout') == RUN_DEADLINE:
+        raise ValueError('default timeouts are encoded by absence')
+    task, e2e = shard.get('task_timeout', DEFAULT_TASK_TIMEOUT), shard.get('e2e_timeout', RUN_DEADLINE)
+    if type(task) is not int or not 60 <= task <= RUN_DEADLINE-STARTUP_ALLOWANCE:
+        raise ValueError('invalid bound task timeout')
+    if type(e2e) is not int or not task+STARTUP_ALLOWANCE <= e2e <= RUN_DEADLINE:
+        raise ValueError('invalid bound e2e timeout')
+    return task, e2e
+
+def bound_manifest(tasks, shard):
+    """The ordered launch manifest: the pinned original 200, or a shard's explicitly bound one."""
+    bound = ORIGINAL_TASK_NAMES_SHA256 if shard is None else shard.get('manifest_sha256', ORIGINAL_TASK_NAMES_SHA256)
+    if shard is not None and 'manifest_sha256' in shard and (
+            not isinstance(bound, str) or not re.fullmatch('[0-9a-f]{64}', bound) or bound == ORIGINAL_TASK_NAMES_SHA256):
+        raise ValueError('invalid bound manifest hash')
+    if (not isinstance(tasks, list) or not tasks or len(set(tasks)) != len(tasks)
+            or any(not isinstance(t, str) or not t for t in tasks)):
+        raise ValueError('distinct ordered tasks required')
+    if bound == ORIGINAL_TASK_NAMES_SHA256 and len(tasks) != 200:
+        raise ValueError('original 200 tasks required')
+    if names_sha256(tasks) != bound:
+        raise ValueError('original ordered 200 tasks changed' if bound == ORIGINAL_TASK_NAMES_SHA256 else 'bound ordered tasks changed')
 
 def fold(summary, threshold=INFRA_THRESHOLD):
     """Count affected logical jobs once, retaining every physical outcome."""
@@ -70,9 +103,10 @@ def birth(pid):
     return 'proc-start:'+boot+':'+fields[19]
 
 def validate_shard(shard, manifest):
-    """An ordered subset of the pinned original manifest; returns the shard job count."""
-    if not isinstance(shard, dict) or not SHARD_FIELDS <= set(shard) <= SHARD_FIELDS | {'infra_threshold'}:
+    """An ordered subset of its bound manifest (the pinned original when unbound); returns the shard job count."""
+    if not isinstance(shard, dict) or not SHARD_FIELDS <= set(shard) <= SHARD_FIELDS | SHARD_OPTIONAL:
         raise ValueError('exact shard fields required')
+    bound_manifest(manifest, shard)
     index, count, runs, names = shard['index'], shard['count'], shard['runs'], shard['tasks']
     if any(type(x) is not int for x in (index, count, runs)) or not 0 <= index < count or runs < 1:
         raise ValueError('invalid shard index/count/runs')
@@ -86,7 +120,7 @@ def validate_shard(shard, manifest):
             or any(type(i) is not int or not 0 <= i < len(manifest) for i in indexes)):
         raise ValueError('distinct task indexes for every shard task required')
     if any(manifest[i] != t for i, t in zip(indexes, names)) or indexes != sorted(indexes):
-        raise ValueError('shard tasks must be an ordered subset of the original manifest at their indexes')
+        raise ValueError('shard tasks must be an ordered subset of the bound manifest at their indexes')
     if not isinstance(shard['group_run_id'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', shard['group_run_id']):
         raise ValueError('invalid shared group id')
     total, started = shard['group_total'], shard['group_started_at']
@@ -99,6 +133,7 @@ def validate_shard(shard, manifest):
     threshold = shard.get('infra_threshold', INFRA_THRESHOLD)
     if type(threshold) is not int or threshold < 1:
         raise ValueError('invalid infrastructure threshold')
+    shard_timeouts(shard)
     return len(names)*runs
 
 def shard_job_ids(shard):
@@ -273,11 +308,8 @@ def main():
     if hashlib.sha256(task_raw).hexdigest() != os.environ['REVIEWED_OPERATOR_TASKS_SHA256']:
         raise ValueError('original tasks bytes changed')
     tasks = json.loads(task_raw)
-    if not isinstance(tasks, list) or len(tasks) != 200 or len(set(tasks)) != 200:
-        raise ValueError('original 200 tasks required')
-    if hashlib.sha256(('\n'.join(tasks)+'\n').encode()).hexdigest() != ORIGINAL_TASK_NAMES_SHA256:
-        raise ValueError('original ordered 200 tasks changed')
     # An optional shard is a bound launch input; absent keeps the original 600/k3 checks.
+    # The shard binds its ordered manifest hash; without one the pinned original 200 applies.
     shard = None
     if os.environ.get('REVIEWED_OPERATOR_SHARD'):
         shard_raw = Path(os.environ['REVIEWED_OPERATOR_SHARD']).read_bytes()
@@ -285,13 +317,16 @@ def main():
             raise ValueError('shard launch input changed')
         shard = json.loads(shard_raw)
         validate_shard(shard, tasks)
+    else:
+        bound_manifest(tasks, None)
     expected_jobs = 600 if shard is None else len(shard['tasks'])*shard['runs']
     expected_runs = 3 if shard is None else shard['runs']
+    task_timeout, e2e_timeout = (DEFAULT_TASK_TIMEOUT, RUN_DEADLINE) if shard is None else shard_timeouts(shard)
     epoch = float(sys.argv[1])
     args = sys.argv[2:]
     if not args or args[:2] != ['bash','scripts/run-bench']:
         raise ValueError('unexpected reviewed command')
-    for flag, value in [('--concurrency',str(expected_jobs)), ('-k',str(expected_runs)), ('--retry-infra','1'), ('--timeout','1200'), ('--e2e-timeout','5400'), ('--e2e-started-at',sys.argv[1]), ('--ref',task_ref)]:
+    for flag, value in [('--concurrency',str(expected_jobs)), ('-k',str(expected_runs)), ('--retry-infra','1'), ('--timeout',str(task_timeout)), ('--e2e-timeout',str(e2e_timeout)), ('--e2e-started-at',sys.argv[1]), ('--ref',task_ref)]:
         if args.count(flag) != 1 or args[args.index(flag)+1] != value:
             raise ValueError('original rollout option changed: '+flag)
     if shard is None:
@@ -316,7 +351,7 @@ def main():
     env = dict(os.environ, RUN_BENCH_CAMPAIGN_ID=campaign_id)
     destination = repo/'.context/stress200-host'/campaign_id
     destination.mkdir(mode=0o700, parents=True, exist_ok=False)
-    save_once(destination/'infra-early-stop-policy.safe.json', encode(dict(infra_early_stop=policy, source_ref=ref, original_epoch=epoch, task_timeout_seconds=1200, run_timeout_seconds=5400)))
+    save_once(destination/'infra-early-stop-policy.safe.json', encode(dict(infra_early_stop=policy, source_ref=ref, original_epoch=epoch, task_timeout_seconds=task_timeout, run_timeout_seconds=e2e_timeout)))
     with owned_parent(args,repo,env,destination,ref,epoch) as (parent,expected_birth):
         if parent.poll() is not None:
             return parent.wait()
