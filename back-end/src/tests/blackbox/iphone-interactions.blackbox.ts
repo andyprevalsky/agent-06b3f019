@@ -1,7 +1,7 @@
 /** Browser-task discovery and durable observation cursors through real routes and DB. */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { Harness } from './iphone-control.fixtures';
 
 function object(value: unknown): Record<string, unknown> {
@@ -43,6 +43,45 @@ async function main() {
       assert.equal(result.data.lastOperation, null);
       assert.equal(h.calls.length, before);
     });
+    await check(
+      'browsers without phone interactions do not contend on the phone lock',
+      async () => {
+        let release!: () => void;
+        let locked!: () => void;
+        const lockReady = new Promise<void>((resolve) => {
+          locked = resolve;
+        });
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const owner = runTransactionWithRetry(async (tx) => {
+          await tx.$queryRaw`SELECT id FROM "IPhoneDevice" WHERE id = ${f.deviceId} FOR UPDATE`;
+          locked();
+          await released;
+        });
+        await lockReady;
+        const read = h.request(f.userId, `/interactions/${f.taskId}`);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const result = await Promise.race([
+            read,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error('Unused browser waited for the shared phone lock')),
+                2500
+              );
+            }),
+          ]);
+          assert.equal(result.status, 200);
+          assert.equal(result.data.lease, null);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+          release();
+          await owner;
+          await read;
+        }
+      }
+    );
     const originalKey = randomUUID(),
       aliasKey = randomUUID();
     await check(
@@ -200,7 +239,7 @@ async function main() {
     await h.close();
     await prisma.$disconnect();
   }
-  process.stdout.write(`Passed ${passed}/11 iphone interaction cases\n`);
+  process.stdout.write(`Passed ${passed}/12 iphone interaction cases\n`);
 }
 main().catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.stack : 'Interaction test failed'}\n`);

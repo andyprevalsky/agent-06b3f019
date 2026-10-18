@@ -29,6 +29,8 @@ export async function interaction(
   clientFactory: PhoneClientFactory = defaultPhoneClient
 ) {
   const task = await repo.requireBrowserTask(userId, taskId);
+  if (requestKey === undefined && !(await repo.hasInteraction(task.deviceId, taskId)))
+    return presentInteraction(null);
   await cleanupPhoneIfConfigured(userId, clientFactory);
   const result =
     requestKey === undefined

@@ -64,6 +64,14 @@ regressions also passed (81 tests). At 10k agents classification performs consta
 work per exchange, stores no private payload, and introduces no shared lock,
 subscription or per-user fan-in.
 
+A follow-up exercised the Rose API hop with the same canary mechanism. Run
+`1792351893-2491876-3382` failed because `/api/iphone/.../operations` retained
+request and response bodies even though direct provider traffic was private.
+The unchanged expanded test passed in `1792351933-2498388-20750` after classifying
+the exact phone API path and subpaths as private too. It now asserts six real
+upstream calls, including repeated first-party inputs, and private replay keys
+for both hops. The existing capture unit regressions also passed (2 tests).
+
 ## Human feedback
 
 None recorded.

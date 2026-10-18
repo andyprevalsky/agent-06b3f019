@@ -52,13 +52,23 @@ async function main(): Promise<void> {
         headers: { Authorization: `Bearer ${canary}` },
         body: JSON.stringify({ op: 'input.text', kw: { s: password } }),
       });
+      await fetch(`https://rose-api.test/api/iphone/leases/${canary}/operations`, {
+        method: 'POST',
+        body: JSON.stringify({ operation: 'input.text', args: { s: password } }),
+      });
     }
     await assert.rejects(fetch(`${grantUrl}/error`));
     const capture = JSON.stringify(await (await fetch(`${base}/captures`)).json());
     assert(!capture.includes(canary), 'phone capabilities and credentials leaked into capture');
     const key = outboundReplayCacheKey(`${grantUrl}/op`, 'POST', password);
     assert(!key.includes(canary), 'phone credentials leaked into replay keys');
-    assert.equal(upstream, 4, 'physical phone operations must never replay from fixtures');
+    const firstPartyKey = outboundReplayCacheKey(
+      `https://rose-api.test/api/iphone/leases/${canary}/operations`,
+      'POST',
+      password
+    );
+    assert(!firstPartyKey.includes(canary), 'phone interaction identity leaked into replay keys');
+    assert.equal(upstream, 6, 'physical phone operations must never replay from fixtures');
     process.stdout.write('PASS phone capture privacy and live-operation replay exclusion\n');
   } finally {
     if (server !== undefined)

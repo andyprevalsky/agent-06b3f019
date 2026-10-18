@@ -17,7 +17,17 @@ export async function requireBrowserTask(userId: string, taskId: string) {
   if (agent === null) throw new IPhoneError(404, 'Browser task not found');
   const device = await leases.capabilityData(userId);
   if (device === null || !device.enabled) throw new IPhoneError(403, 'iPhone access denied');
-  return task;
+  return { ...task, deviceId: device.id };
+}
+
+/** Unused browser tasks must not join the physical phone's serialization path. */
+export async function hasInteraction(deviceId: string, taskId: string): Promise<boolean> {
+  return (
+    (await prisma.iPhoneLease.findFirst({
+      where: { deviceId, browserTaskId: taskId },
+      select: { id: true },
+    })) !== null
+  );
 }
 
 async function interactionView(tx: Transaction, leaseId: string | null) {

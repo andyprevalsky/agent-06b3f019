@@ -540,13 +540,15 @@ test('rejected auth releases promptly even before heartbeat expiry', async () =>
   await expectStatus(view(f.userId, active.id), 'RELEASED');
   await expectStatus(view(f.userId, waiting.id), 'ACTIVE');
 });
-test('persisted explicit account IDs bypass anonymous but phone fallback does not', async () => {
-  for (const userId of [
-    'c49b4ce3-3489-499d-bfbd-846d04ba6275',
-    '8283e892-b0a4-4298-9ef7-b95bcc67e46b',
-  ]) {
-    assert(permitted({ userId, phone: null, isAnonymous: true }), 'explicit account denied');
-  }
+test('Andy is enabled while deferred accounts and anonymous phone fallback stay disabled', async () => {
+  assert(
+    permitted({ userId: 'c49b4ce3-3489-499d-bfbd-846d04ba6275', phone: null, isAnonymous: true }),
+    'Andy account denied'
+  );
+  assert(
+    !permitted({ userId: '8283e892-b0a4-4298-9ef7-b95bcc67e46b', phone: null, isAnonymous: false }),
+    'Deferred account was enabled'
+  );
   assert(!permitted(null), 'missing user allowed');
   assert(deadlineElapsed(new Date(1000), new Date(1000)), 'deadline equality must expire');
   assert(!deadlineElapsed(new Date(1001), new Date(1000)), 'future deadline expired');
