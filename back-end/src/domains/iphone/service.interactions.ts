@@ -9,16 +9,17 @@ import {
 } from './service.operations';
 import type { PhoneClientFactory } from './types.operations';
 
-function presentInteraction(result: Awaited<ReturnType<typeof repo.readInteraction>>) {
+async function presentInteraction(result: Awaited<ReturnType<typeof repo.readInteraction>>) {
   if (result instanceof IPhoneError) throw result;
   if (result === null)
     return { lease: null, cursor: 0, lastOperation: null, pendingOperation: null };
   return {
     ...present(result),
     cursor: result.lease.actionCursor,
-    lastOperation: result.lastOperation === null ? null : publicOperation(result.lastOperation),
+    lastOperation:
+      result.lastOperation === null ? null : await publicOperation(result.lastOperation),
     pendingOperation:
-      result.pendingOperation === null ? null : publicOperation(result.pendingOperation),
+      result.pendingOperation === null ? null : await publicOperation(result.pendingOperation),
   };
 }
 

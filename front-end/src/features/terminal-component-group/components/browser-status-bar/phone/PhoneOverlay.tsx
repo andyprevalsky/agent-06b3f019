@@ -3,6 +3,8 @@
  * [ACTIVE_AGENT] --confirmed takeover/bounds--> [ACTIVE_USER] tap/drag/text/navigation
  * [ACTIVE_USER] --handback--> [ACTIVE_AGENT]; pending/unknown disables all new input.
  * [HIDDEN|RELEASED] -> revoke frame and restore the still-mounted browser beneath.
+ * All visible states share a replay-blocked subtree (including image pixels);
+ * separate autocapture text masking does not replace replay exclusion.
  * Portrait screen fits the remaining pane; controls/progress stay outside its pixels.
  */
 import { useEffect, useRef, type PointerEvent } from 'react';
@@ -89,6 +91,8 @@ export function PhoneOverlay({ phone, readOnly }: { phone: PhoneOverlayModel; re
   return (
     <section
       ref={region}
+      data-amp-block=""
+      data-amp-mask=""
       role="region"
       aria-label="Cloud iPhone"
       tabIndex={-1}

@@ -70,7 +70,7 @@ def is_payment_cdn_url(url: str) -> bool:
 def should_cache(method: str, resource_type: str, url: str) -> bool:
     method_upper = method.upper()
     resource_lower = resource_type.lower()
-    path = urlsplit(url).path
+    path = urlsplit(url).path.lower()
     if path == "/api/iphone" or path.startswith("/api/iphone/"):
         return False
     if is_payment_cdn_url(url):

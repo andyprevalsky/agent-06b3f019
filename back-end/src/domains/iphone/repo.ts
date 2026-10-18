@@ -1,5 +1,6 @@
 /** Durable admission: device FOR UPDATE -> reconcile -> mutate -> FIFO admit.
  * Every process uses this lock order. Transactions perform database I/O only. */
+import { resumePrivacy } from './repo.privacy';
 import { databaseNow } from './repo.clock';
 export { databaseNow } from './repo.clock';
 import { closeLease, reconcile } from './repo.lifecycle';
@@ -219,6 +220,8 @@ export async function mutate(
       },
     });
   } else {
+    if (action === 'control' && actor === 'user' && input.mode === 'agent')
+      await resumePrivacy(tx, lease.deviceId);
     await tx.iPhoneLease.update({
       where: { id: lease.id },
       data: {

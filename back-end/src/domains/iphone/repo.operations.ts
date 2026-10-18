@@ -1,6 +1,8 @@
 /** Per-device command slot. Provider calls happen only after this transaction commits. */
 import { sealPhoneValue, phoneCommandHash } from '../../providers/phoneHarnessCredentials';
 import * as leases from './repo';
+import { privateResult } from './privacy';
+import { claimPrivacy } from './repo.privacy';
 import { LEASE_TIMEOUT_MS } from './config';
 import { IPhoneError, type Transaction } from './types';
 import type { CommandClaim, PhoneActor, PhoneCommand } from './types.operations';
@@ -74,6 +76,8 @@ export async function claimCommand(
       select: { id: true },
     });
     if (inFlight !== null) return new IPhoneError(409, 'A phone request is still running');
+    const privacyError = await claimPrivacy(tx, device, input, actor, observation, taskBound);
+    if (privacyError !== null) return privacyError;
     const now = await leases.databaseNow(tx);
     const command = await tx.iPhoneOperation.create({
       data: {
@@ -133,9 +137,12 @@ export async function finishCommand(
   value: unknown,
   errorCode?: string
 ) {
-  const resultEncrypted = sealPhoneValue(value);
   return leases.transaction(async (tx) => {
     await rawLock(tx, claim.device.id);
+    const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: claim.device.id } });
+    const resultEncrypted = sealPhoneValue(
+      privateResult({ ...claim.command, state }, value, device.privateInputEncrypted)
+    );
     const now = await leases.databaseNow(tx);
     await tx.iPhoneOperation.updateMany({
       where: { id: claim.command.id, state: { in: ['CONNECTING', 'RUNNING'] } },

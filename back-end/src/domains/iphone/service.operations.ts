@@ -1,5 +1,7 @@
 /** Browser/user action -> durable command claim -> one physical operation -> encrypted receipt. */
 import { PhoneHarnessClient, PhoneHarnessError } from '../../providers/phoneHarness';
+import { operationPrivacy } from './repo.privacy';
+import { privateResult } from './privacy';
 import { openPhoneValue } from '../../providers/phoneHarnessCredentials';
 import * as commands from './repo.operations';
 import { IPhoneError, type IPhoneOperation } from './types';
@@ -13,7 +15,8 @@ import { cleanupPhone, ensurePhoneSession, PhoneConnectionPending } from './serv
 
 export const defaultPhoneClient: PhoneClientFactory = () => new PhoneHarnessClient();
 
-export function publicOperation(command: IPhoneOperation) {
+export async function publicOperation(command: IPhoneOperation) {
+  const encryptedPrivacy = await operationPrivacy(command.deviceId);
   return {
     id: command.requestKey,
     cursor: command.cursor,
@@ -21,7 +24,13 @@ export function publicOperation(command: IPhoneOperation) {
     status: command.state,
     errorCode: command.errorCode,
     result:
-      command.resultEncrypted === null ? null : openPhoneValue<unknown>(command.resultEncrypted),
+      command.resultEncrypted === null
+        ? null
+        : privateResult(
+            command,
+            openPhoneValue<unknown>(command.resultEncrypted),
+            encryptedPrivacy
+          ),
   };
 }
 
@@ -81,7 +90,7 @@ export async function performPhoneCommand(
     } catch (error) {
       const failure = safeFailure(error, input.operation);
       command = await commands.finishCommand(claim, 'FAILED', failure.value, failure.code);
-      return { operation: publicOperation(command) };
+      return { operation: await publicOperation(command) };
     }
     command =
       (await runClaim(claim, input, client)) ??
@@ -89,13 +98,13 @@ export async function performPhoneCommand(
       command;
   }
   const phone = await cleanupPhoneIfConfigured(userId, clientFactory);
-  return { operation: publicOperation(command), ...(phone === null ? {} : { phone }) };
+  return { operation: await publicOperation(command), ...(phone === null ? {} : { phone }) };
 }
 
 export async function phoneOperationStatus(userId: string, leaseId: string, operationId: string) {
   const command = await commands.ownedCommand(userId, leaseId, operationId);
   if (command === null) throw new IPhoneError(404, 'Phone operation not found');
-  return { operation: publicOperation(command) };
+  return { operation: await publicOperation(command) };
 }
 
 export async function cleanupPhoneIfConfigured(userId: string, clientFactory = defaultPhoneClient) {

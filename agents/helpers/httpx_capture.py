@@ -186,7 +186,9 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
                 request.url.path.rstrip("/"),
             )
         )
-        phone_private = request.url.path == "/api/iphone" or request.url.path.startswith("/api/iphone/")
+        # Match Express's case-insensitive mount without changing the request.
+        phone_path = request.url.path.lower()
+        phone_private = phone_path == "/api/iphone" or phone_path.startswith("/api/iphone/")
         metadata_only = credential_exchange or phone_private
         if phone_private:
             # Never retain opaque task/lease/operation IDs, query, origin,

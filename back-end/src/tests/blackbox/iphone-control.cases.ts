@@ -1,3 +1,4 @@
+import { privacyCases } from './iphone-control.privacy.cases';
 import { viewCases } from './iphone-control.view.cases';
 import { cleanupCases } from './iphone-control.cleanup.cases';
 import assert from 'node:assert/strict';
@@ -62,6 +63,7 @@ async function queued(h: Harness, userId: string) {
   return waiter;
 }
 export const cases: Case[] = [
+  ...privacyCases,
   ...cleanupCases,
   ...viewCases,
   [

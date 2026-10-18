@@ -2,6 +2,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
+import { snapshot } from '@amplitude/rrweb-snapshot';
+import { createPrivacyRecorderOptions } from '@amplitude/session-replay-dom-privacy';
+import { PhoneOverlay } from '@/features/terminal-component-group/components/browser-status-bar/phone/PhoneOverlay';
+import type { PhoneOverlayModel } from '@/features/terminal-component-group/components/browser-status-bar/phone/usePhoneOverlay';
+import { emptyView } from '@/features/terminal-component-group/components/browser-status-bar/phone/phoneOverlaySession';
 import { server } from './msw/server';
 import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
 import type { Message } from '@/features/terminal-component-group/hooks';
@@ -127,6 +132,7 @@ function fixture(status = 'ACTIVE') {
     }),
   );
   return {
+    interaction: () => snapshot,
     reads,
     writes,
     controls,
@@ -561,4 +567,56 @@ it('does not claim input was unapplied for an unrelated FAILED receipt', async (
   expect(await screen.findByText(/Phone request rejected. Check the screen/)).toBeInTheDocument();
   expect(screen.queryByText(/Phone input was not applied/)).not.toBeInTheDocument();
   expect(screen.queryByText(/PRIVATE-PROVIDER-DETAIL/)).not.toBeInTheDocument();
+});
+
+// Use the installed Session Replay SDK's own recorder policy, not a local selector imitation.
+describe('phone overlay recorder privacy', () => {
+  it.each(['agent', 'user', 'readOnly', 'queue'] as const)(
+    'excludes the real %s phone subtree, including image, input and echoed status',
+    (state) => {
+      const canary = 'UNREGISTERED-PHONE-REPLAY-CANARY-6a';
+      const frame = `data:image/svg+xml;base64,${btoa(`<svg xmlns="http://www.w3.org/2000/svg"><text>${canary}</text></svg>`)}`;
+      const interaction = fixture(state === 'queue' ? 'WAITING' : 'ACTIVE').interaction();
+      interaction.lease.controlOwner = state === 'user' ? 'user' : 'agent';
+      const phone: PhoneOverlayModel = {
+        ...emptyView('task-a'),
+        visible: true,
+        frame: state === 'queue' ? null : frame,
+        bounds: { x: 0, y: 0, w: 430, h: 932 },
+        notice: canary,
+        snapshot: interaction as PhoneOverlayModel['snapshot'],
+        control: vi.fn(),
+        input: vi.fn(),
+        invalidateBounds: vi.fn(),
+        refreshView: vi.fn(),
+      };
+      render(
+        <>
+          <button>Public browser status</button>
+          <PhoneOverlay phone={phone} readOnly={state === 'readOnly'} />
+        </>,
+      );
+      const region = screen.getByRole('region', { name: 'Cloud iPhone' });
+      expect(region).toHaveAttribute('data-amp-block', '');
+      expect(region).toHaveAttribute('data-amp-mask', '');
+      expect(region).toContainElement(screen.getByText(canary));
+      if (state !== 'queue') {
+        const image = screen.getByAltText('Cloud iPhone screen');
+        expect(image.closest('[data-amp-block]')).toBe(region);
+      }
+      if (state === 'user') {
+        fireEvent.click(screen.getByRole('button', { name: 'Type' }));
+        const input = screen.getByRole('textbox', { name: 'Text to type on phone' });
+        fireEvent.change(input, { target: { value: canary } });
+        expect(input).toHaveValue(canary);
+        expect(input.closest('[data-amp-block]')).toBe(region);
+      }
+      const serialized = JSON.stringify(snapshot(document, createPrivacyRecorderOptions()));
+      expect(serialized).toContain('Public browser status');
+      expect(serialized).not.toContain(canary);
+      expect(serialized).not.toContain(frame);
+      expect(serialized).not.toContain('"tagName":"img"');
+      expect(serialized).not.toContain('"tagName":"input"');
+    },
+  );
 });

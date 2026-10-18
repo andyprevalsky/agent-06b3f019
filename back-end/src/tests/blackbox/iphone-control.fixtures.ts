@@ -90,6 +90,9 @@ export class Harness {
   beforeStop?: () => Promise<void>;
   createUnknown = false;
   hideReceipt = false;
+  echoInputResult = false;
+  observationResult: unknown = undefined;
+  errorEcho: string | undefined;
   inputMode: 'success' | 'unknown' | 'disconnect' | 'unsupported' | 'echo-error' = 'success';
   missingCredentials = false;
   private readonly users: string[] = [];
@@ -284,18 +287,22 @@ export class Harness {
             }
             if (this.inputMode === 'echo-error') {
               json(400, {
-                error: `${CANARY_PASSWORD} ${CANARY_TOKEN} ${CANARY_KEY} https://api.phone-harness.com/iphone/c/cap-canary`,
+                error:
+                  this.errorEcho ??
+                  `${CANARY_PASSWORD} ${CANARY_TOKEN} ${CANARY_KEY} https://api.phone-harness.com/iphone/c/cap-canary`,
               });
               return;
             }
           }
           json(200, {
             result:
-              op === 'screen.bounds'
-                ? this.screenBounds
-                : op === 'screen.text'
-                  ? { text: 'Visible screen observation' }
-                  : true,
+              this.echoInputResult && op === 'input.text'
+                ? { text: kw.s, error: kw.s }
+                : op === 'screen.bounds'
+                  ? this.screenBounds
+                  : op === 'screen.text'
+                    ? (this.observationResult ?? { text: 'Visible screen observation' })
+                    : true,
           });
           return;
         }
@@ -401,6 +408,9 @@ export class Harness {
     this.cleanupComplete = false;
     this.createUnknown = false;
     this.inputMode = 'success';
+    this.echoInputResult = false;
+    this.observationResult = undefined;
+    this.errorEcho = undefined;
     this.missingCredentials = false;
     this.hideReceipt = false;
   }
