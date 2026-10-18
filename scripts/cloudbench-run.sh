@@ -283,7 +283,9 @@ request_graceful_shutdown() {
     local signal_rc=0 signal_ignored_mask="unreadable" signal_caught_mask="unreadable" signal_process_group="unreadable"
     ACTIVE_COMMAND_SHUTDOWN_PENDING=1
     log "guest shutdown requested; draining benchmark root before stack teardown"
-    if [ -n "$ACTIVE_COMMAND_PID" ] && kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; then
+    # An already-cancelled command may exit (and be reaped) before a repeated
+    # request; run_with_heartbeat still owns its wait and exit status.
+    if [ -n "$ACTIVE_COMMAND_PID" ] && { [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ] || kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; }; then
         if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
             ACTIVE_COMMAND_SIGNALLED=1
             # Bash defers traps while a foreground `sleep` is running. The
