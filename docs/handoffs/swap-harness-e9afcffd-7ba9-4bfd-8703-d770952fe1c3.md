@@ -59,3 +59,11 @@ Four archives, each uploaded and fully read back (every frame authenticated, eve
 
 ## Replacement
 Start key: `swap-harness-replacement-e9afcffd-7ba9-4bfd-8703-d770952fe1c3-20261018T0228Z`. Replacement IDs, continuation receipt and archive disposition are appended below.
+
+## Replacement (actual)
+- Start key above; accepted request `f8db6d1e-6ee3-4553-a4ab-da4f51a94fda`. Launch reported devbox `7d3c917c-03d6-49e7-acf2-01a68a836d5e`, thread `ph77g7y3qw0ht4vay0vp392ejn8gg7k3` (public `thr_fbdefb2e238e431abd1cfac3c76ad29c`, https://boxes.dev/thread/thr_fbdefb2e238e431abd1cfac3c76ad29c).
+- Continuation receipt: `docs/handoffs/swap-harness-e9afcffd-7ba9-4bfd-8703-d770952fe1c3-resumed.json` (2026-10-18T04:05Z). The replacement authenticated all four archives (A 28796, B 20833, C 32305, D 10 files).
+
+## Archive disposition: HELD (old box NOT destroyed)
+1. Fly app `navi-whisper-lux-bench` still retains stopped Machine `820224f7e069e8` (`whm-deploy-g4-fb24dd03-20261015`) and volume `vol_r7ymddjdkx9y21gr`, found by the replacement's read-only check. Ownership/retirement is undecided (a peer message said it was deliberately retained). Needs an owner decision.
+2. About 190 commits on old unrelated local branches and `stash@{0}` exist only on this box (not WHM-owned; bundle too large for free disk). The user should confirm they are disposable.
