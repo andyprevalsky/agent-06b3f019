@@ -24,7 +24,6 @@ import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from domains.param_populator.config import PARAM_POPULATOR_MODEL
 from domains.reasoning.config import MAX_CONTEXT_MESSAGES as REASONING_MAX_CONTEXT_MESSAGES
 from helpers.llm import _pending_llm_context, call_llm_activity
 from loop.context_utils import poll_and_update_context
@@ -1081,12 +1080,11 @@ async def _execute_single_task(
             # mutating the schema per DAG node.
             if not tool_names:
                 raise ValueError("DAG param population requires the full execute-phase tool schema")
-            # Force ultra even when the parent agent is lite. Same conversation
-            # prefix, different pool — lite/sonnet-5 fans out one spawn_agent
-            # per sibling; ultra follows the exactly-one contract.
+            # Use the agent's selected model for parameter population. The
+            # required_tool contract below still enforces exactly one action.
             llm_args = [
                 agent_id,
-                PARAM_POPULATOR_MODEL,
+                model,
                 tool_names,
                 256,
                 agent_id,

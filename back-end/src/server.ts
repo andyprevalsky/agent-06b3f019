@@ -5,6 +5,7 @@ import cors from 'cors';
 import { authenticate } from './providers/auth';
 import agentsRouter from './domains/agents/routes';
 import agentQueuePointerRouter from './domains/agent-queue-pointer/routes';
+import workerProcessRuntimeRouter from './domains/worker-process-runtime/routes';
 import formatRouter from './domains/format/routes';
 import toolsRouter from './domains/tools/routes';
 import waitlistRouter from './domains/waitlist/routes';
@@ -507,6 +508,7 @@ if (x402ReceivingWallet) {
 // Note: Each router handles its own auth per-route (hybridAuth for agents)
 app.use('/api/agents', agentsRouter);
 app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
+app.use('/api/worker-process-runtime', workerProcessRuntimeRouter);
 app.use('/api/auth-options', authOptionsRouter);
 app.use('/api/auth-assistance', authAssistanceRouter);
 app.use('/api/credential-propagation', credentialPropagationRouter);
@@ -567,6 +569,15 @@ app.use(
       ...(uuidMatch ? { agent_id: uuidMatch[1] } : {}),
       stack: errObj.stack,
     });
+
+    const retryAfter = (err as { retryAfterSeconds?: unknown }).retryAfterSeconds;
+    if (
+      statusCode === 503 &&
+      typeof retryAfter === 'number' &&
+      Number.isFinite(retryAfter) &&
+      retryAfter > 0
+    )
+      res.setHeader('Retry-After', String(Math.ceil(retryAfter)));
 
     // Return appropriate status code
     res.status(statusCode).json({

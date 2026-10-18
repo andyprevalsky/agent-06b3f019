@@ -13,6 +13,7 @@ from _test_utils import (
     assert_captured_call,
     get_captured_requests,
     setup_mock,
+    setup_mock_fn,
     teardown_mock,
 )
 
@@ -55,18 +56,23 @@ def test_generated_agent_title_normalization():
 def test_generated_response_schema_preserves_constraints():
     from helpers.llm import _GeneratedResponseSchema, _schema_from_generated_model
 
-    generated = _GeneratedResponseSchema.model_validate({
-        "reasoning": "Two entries and an optional note.",
-        "fields": [
-            {
-                "name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
-                "properties": [
-                    {"name": "label", "type": "str", "minLength": 3, "maxLength": 30},
-                    {"name": "note", "type": "str", "required": False},
-                ],
-            },
-        ],
-    })
+    generated = _GeneratedResponseSchema.model_validate(
+        {
+            "reasoning": "Two entries and an optional note.",
+            "fields": [
+                {
+                    "name": "items",
+                    "type": "list[object]",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "properties": [
+                        {"name": "label", "type": "str", "minLength": 3, "maxLength": 30},
+                        {"name": "note", "type": "str", "required": False},
+                    ],
+                },
+            ],
+        }
+    )
     field = _schema_from_generated_model(generated)["fields"][0]
     assert field["minItems"] == field["maxItems"] == 2
     assert field["properties"][0]["minLength"] == 3
@@ -123,25 +129,33 @@ async def test_schema_generation_preserves_peer_compute_usage():
 def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
     from pydantic import ValidationError
     from helpers.llm import (
-        _GeneratedResponseSchema, _schema_from_generated_model,
-        _build_verifier_json_schema, _build_verifier_response_model,
+        _GeneratedResponseSchema,
+        _schema_from_generated_model,
+        _build_verifier_json_schema,
+        _build_verifier_response_model,
         _structured_response_satisfies_schema,
     )
     from providers.rose.schema import build_openai_response_format
     from utils.prompts import build_verifier_prompt
 
-    generated = _GeneratedResponseSchema.model_validate({
-        "reasoning": "A count and optional extra details.",
-        "fields": [
-            {"name": "total", "type": "int", "required": True},
-            {"name": "estimate", "type": "int", "required": False},
-            {"name": "rows", "type": "list[object]", "required": False,
-             "properties": [
-                 {"name": "name", "type": "str", "required": True},
-                 {"name": "rank", "type": "int", "required": False},
-             ]},
-        ],
-    })
+    generated = _GeneratedResponseSchema.model_validate(
+        {
+            "reasoning": "A count and optional extra details.",
+            "fields": [
+                {"name": "total", "type": "int", "required": True},
+                {"name": "estimate", "type": "int", "required": False},
+                {
+                    "name": "rows",
+                    "type": "list[object]",
+                    "required": False,
+                    "properties": [
+                        {"name": "name", "type": "str", "required": True},
+                        {"name": "rank", "type": "int", "required": False},
+                    ],
+                },
+            ],
+        }
+    )
     schema = _schema_from_generated_model(generated)
     assert schema["fields"][1]["required"] is False
     assert schema["fields"][2]["properties"][1]["required"] is False
@@ -177,9 +191,12 @@ def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
         except ValidationError:
             pass
     try:
-        _GeneratedResponseSchema.model_validate({
-            "reasoning": "No required output", "fields": [{"name": "estimate", "type": "int", "required": False}],
-        })
+        _GeneratedResponseSchema.model_validate(
+            {
+                "reasoning": "No required output",
+                "fields": [{"name": "estimate", "type": "int", "required": False}],
+            }
+        )
         raise AssertionError("generated schema must retain one required signal")
     except ValidationError:
         pass
@@ -189,16 +206,21 @@ def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
     from pydantic import ValidationError
     from helpers.llm import _build_verifier_json_schema, _build_verifier_response_model
 
-    schema = {"fields": [
-        {
-            "name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
-            "properties": [
-                {"name": "label", "type": "str", "minLength": 3, "maxLength": 8},
-                {"name": "note", "type": "str", "nullable": True},
-            ],
-        },
-        {"name": "summary", "type": "str", "nullable": True},
-    ]}
+    schema = {
+        "fields": [
+            {
+                "name": "items",
+                "type": "list[object]",
+                "minItems": 2,
+                "maxItems": 2,
+                "properties": [
+                    {"name": "label", "type": "str", "minLength": 3, "maxLength": 8},
+                    {"name": "note", "type": "str", "nullable": True},
+                ],
+            },
+            {"name": "summary", "type": "str", "nullable": True},
+        ]
+    }
     output = _build_verifier_json_schema(schema)["json_schema"]["schema"]["properties"]["output"]
     items = output["properties"]["items"]
     assert (items["minItems"], items["maxItems"]) == (2, 2)
@@ -208,10 +230,17 @@ def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
     assert "null" in output["properties"]["summary"]["type"]
 
     model = _build_verifier_response_model(schema)
-    valid = {"output": {"items": [
-        {"label": "Desk", "note": None},
-        {"label": "Lamp", "note": "Used"},
-    ], "summary": None}, "reasoning": "Grounded", "score": 1}
+    valid = {
+        "output": {
+            "items": [
+                {"label": "Desk", "note": None},
+                {"label": "Lamp", "note": "Used"},
+            ],
+            "summary": None,
+        },
+        "reasoning": "Grounded",
+        "score": 1,
+    }
     model.model_validate(valid)
     for missing_or_unmarked_null in (
         {**valid, "output": {"items": valid["output"]["items"]}},
@@ -225,9 +254,16 @@ def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
     for invalid in (
         {**valid, "output": {**valid["output"], "items": valid["output"]["items"][:1]}},
         {**valid, "output": {**valid["output"], "items": valid["output"]["items"] * 2}},
-        {**valid, "output": {**valid["output"], "items": [
-            {"label": "No", "note": None}, valid["output"]["items"][1],
-        ]}},
+        {
+            **valid,
+            "output": {
+                **valid["output"],
+                "items": [
+                    {"label": "No", "note": None},
+                    valid["output"]["items"][1],
+                ],
+            },
+        },
     ):
         try:
             model.model_validate(invalid)
@@ -239,33 +275,55 @@ def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
 def test_structured_output_schema_respects_constraints():
     from helpers.llm import _structured_response_satisfies_schema
 
-    schema = {"fields": [
-        {"name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
-         "properties": [{"name": "title", "type": "str", "minLength": 3}]},
-        {"name": "note", "type": "str", "nullable": True},
-    ]}
-    assert _structured_response_satisfies_schema({
-        "items": [{"title": "Desk"}, {"title": "Lamp"}], "note": None,
-    }, schema)
+    schema = {
+        "fields": [
+            {
+                "name": "items",
+                "type": "list[object]",
+                "minItems": 2,
+                "maxItems": 2,
+                "properties": [{"name": "title", "type": "str", "minLength": 3}],
+            },
+            {"name": "note", "type": "str", "nullable": True},
+        ]
+    }
+    assert _structured_response_satisfies_schema(
+        {
+            "items": [{"title": "Desk"}, {"title": "Lamp"}],
+            "note": None,
+        },
+        schema,
+    )
     assert not _structured_response_satisfies_schema({"items": [{"title": "Desk"}], "note": None}, schema)
-    assert not _structured_response_satisfies_schema({
-        "items": [{"title": "No"}, {"title": "Lamp"}], "note": None,
-    }, schema)
-    assert not _structured_response_satisfies_schema({
-        "items": [{"title": "Desk"}, {"title": "Lamp"}],
-    }, schema)
-    zero_schema = {"fields": [
-        {"name": "items", "type": "list[str]", "maxItems": 0},
-        {"name": "summary", "type": "str", "maxLength": 0},
-    ]}
+    assert not _structured_response_satisfies_schema(
+        {
+            "items": [{"title": "No"}, {"title": "Lamp"}],
+            "note": None,
+        },
+        schema,
+    )
+    assert not _structured_response_satisfies_schema(
+        {
+            "items": [{"title": "Desk"}, {"title": "Lamp"}],
+        },
+        schema,
+    )
+    zero_schema = {
+        "fields": [
+            {"name": "items", "type": "list[str]", "maxItems": 0},
+            {"name": "summary", "type": "str", "maxLength": 0},
+        ]
+    }
     assert _structured_response_satisfies_schema({"items": [], "summary": ""}, zero_schema)
     # Optional fields may be omitted or present-and-empty, but a present value
     # must still have the declared shape.
-    optional_pointer = {"fields": [
-        {"name": "total", "type": "int"},
-        {"name": "report", "type": "file_pointer", "required": False},
-        {"name": "tags", "type": "list[str]", "required": False},
-    ]}
+    optional_pointer = {
+        "fields": [
+            {"name": "total", "type": "int"},
+            {"name": "report", "type": "file_pointer", "required": False},
+            {"name": "tags", "type": "list[str]", "required": False},
+        ]
+    }
     assert _structured_response_satisfies_schema({"total": 1}, optional_pointer)
     assert _structured_response_satisfies_schema({"total": 1, "tags": []}, optional_pointer)
     assert _structured_response_satisfies_schema({"total": 1, "report": {"path": "/out/r.md"}}, optional_pointer)
@@ -273,10 +331,12 @@ def test_structured_output_schema_respects_constraints():
     assert not _structured_response_satisfies_schema({"total": 1, "report": {"note": "x"}}, optional_pointer)
     assert not _structured_response_satisfies_schema({"total": 1, "report": ""}, optional_pointer)
     assert not _structured_response_satisfies_schema({"total": 1, "report": {}}, optional_pointer)
-    optional_pointer_list = {"fields": [
-        {"name": "total", "type": "int"},
-        {"name": "reports", "type": "list[file_pointer]", "required": False},
-    ]}
+    optional_pointer_list = {
+        "fields": [
+            {"name": "total", "type": "int"},
+            {"name": "reports", "type": "list[file_pointer]", "required": False},
+        ]
+    }
     assert _structured_response_satisfies_schema({"total": 1}, optional_pointer_list)
     assert not _structured_response_satisfies_schema({"total": 1, "reports": []}, optional_pointer_list)
 
@@ -288,7 +348,9 @@ async def test_live_schema_generation_chooses_file_for_large_goal():
 
     goal = Path(goal_path).read_text(encoding="utf-8").strip()
     schema, title, usage = await _generate_response_schema_with_rose(
-        goal, agent_id="schema-gen-live-proof", include_title=True,
+        goal,
+        agent_id="schema-gen-live-proof",
+        include_title=True,
     )
     proof_path = os.getenv("SCHEMA_GEN_LIVE_PROOF_FILE")
     if proof_path:
@@ -1519,8 +1581,6 @@ def test_build_verifier_response_model_requires_nested_object_properties():
     assert raised
 
 
-
-
 _OFFER_MESSAGE_GOAL = (
     "1. Quantity: 1\n"
     "Item Name: RECCI AirFrame California King bed frame, beige chenille\n"
@@ -1784,33 +1844,54 @@ def test_extract_payment_card_last4_dedupes_same_tool_call_id():
     assert _extract_payment_card_last4_from_verifier_messages(messages) == ["1617"]
 
 
+def _credential_fixture(path, payload):
+    import httpx
+
+    requests = []
+
+    def handler(request: httpx.Request):
+        assert request.method == "GET"
+        assert request.url.path == path
+        assert request.headers["x-api-key"] == "fixture-backend-key"
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    teardown_mock()
+    setup_mock_fn(handler)
+    config = SimpleNamespace(
+        backend=SimpleNamespace(api_url="https://credentials.example.test", api_key="fixture-backend-key")
+    )
+    return requests, config
+
+
+def _assert_private_credential_capture(path, token):
+    from urllib.parse import urlsplit
+
+    assert len(get_captured_requests()) == 1
+    call = assert_captured_call(url_contains=path, method="GET")
+    assert urlsplit(call["url"]).path == path
+    assert urlsplit(call["url"]).query == ""
+    assert call["requestHeaders"] == {}
+    assert call["requestBody"] is None
+    assert call["responseBody"] is None
+    assert call["responseStatus"] == 200
+    assert token not in json.dumps(call)
+
 
 async def test_fetch_claude_max_token_activity():
-    """fetch_claude_max_token_activity GETs /api/integrations/claude-code/credentials/token."""
-    setup_mock(
-        {
-            "/api/integrations/claude-code/credentials/token": {
-                "status": 200,
-                "json": {"accessToken": "test-claude-token-123", "source": "user", "poolTokenId": None},
-            },
-        }
-    )
-
-    with patch("temporalio.activity.heartbeat"):
+    """Credential headers reach the backend but never enter capture metadata."""
+    path = "/api/integrations/claude-code/credentials/token"
+    payload = {"accessToken": "test-claude-token-123", "source": "user", "poolTokenId": None}
+    requests, config = _credential_fixture(path, payload)
+    with patch("helpers.llm.load_config", return_value=config), patch("temporalio.activity.heartbeat"):
         from helpers.llm import fetch_claude_max_token_activity
 
         result = await fetch_claude_max_token_activity("user-abc")
-
-    assert result == {
-        "accessToken": "test-claude-token-123",
-        "source": "user",
-        "poolTokenId": None,
-    }
-    assert_captured_call(
-        url_contains="/api/integrations/claude-code/credentials/token",
-        method="GET",
-        header_present="X-API-Key",
-    )
+    assert result == payload
+    assert len(requests) == 1
+    assert requests[0].headers["x-user-id"] == "user-abc"
+    assert dict(requests[0].url.params) == {}
+    _assert_private_credential_capture(path, payload["accessToken"])
 
 
 async def test_fetch_claude_max_token_activity_not_found():
@@ -1871,25 +1952,23 @@ async def test_fetch_claude_max_token_activity_missing_token_field():
 
 
 async def test_fetch_compute_token_activity_passes_lineage_params():
-    """Unified compute token fetch sends lineage metadata to backend."""
-    setup_mock(
-        {
-            "/api/integrations/compute-code/credentials/token": {
-                "status": 200,
-                "json": {
-                    "type": "gpt",
-                    "accessToken": "gpt-token",
-                    "accountId": "acct-1",
-                    "source": "pool",
-                    "poolTokenId": "pool-1",
-                    "lineageKey": "agent:a-1",
-                    "fastCacheAffinityKey": "affinity-1",
-                },
-            },
-        }
-    )
-
-    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": ""}), patch("temporalio.activity.heartbeat"):
+    """Lineage metadata reaches the backend without entering captures."""
+    path = "/api/integrations/compute-code/credentials/token"
+    payload = {
+        "type": "gpt",
+        "accessToken": "gpt-token",
+        "accountId": "acct-1",
+        "source": "pool",
+        "poolTokenId": "pool-1",
+        "lineageKey": "agent:a-1",
+        "fastCacheAffinityKey": "affinity-1",
+    }
+    requests, config = _credential_fixture(path, payload)
+    with (
+        patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "", "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "0"}),
+        patch("helpers.llm.load_config", return_value=config),
+        patch("temporalio.activity.heartbeat"),
+    ):
         from helpers.llm import fetch_compute_token_activity
 
         result = await fetch_compute_token_activity(
@@ -1899,55 +1978,38 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
             root_agent_id="root-1",
             fast_cache_affinity_key="affinity-1",
         )
-
-    assert result == {
-        "type": "gpt",
-        "accessToken": "gpt-token",
-        "accountId": "acct-1",
-        "source": "pool",
-        "poolTokenId": "pool-1",
+    assert result == payload
+    assert len(requests) == 1
+    assert requests[0].headers["x-user-id"] == "user-1"
+    assert dict(requests[0].url.params) == {
         "lineageKey": "agent:a-1",
+        "agentId": "a-1",
+        "rootAgentId": "root-1",
         "fastCacheAffinityKey": "affinity-1",
     }
-    call = assert_captured_call(
-        url_contains="/api/integrations/compute-code/credentials/token",
-        method="GET",
-    )
-    assert "lineageKey=agent%3Aa-1" in call["url"]
-    assert "agentId=a-1" in call["url"]
-    assert "rootAgentId=root-1" in call["url"]
-    assert "fastCacheAffinityKey=affinity-1" in call["url"]
-    assert "tokenType=" not in call["url"]
+    _assert_private_credential_capture(path, payload["accessToken"])
 
 
 async def test_fetch_compute_token_activity_pins_benchmark_provider():
-    """Predeploy cache measurements lease one provider across repeated calls."""
-    setup_mock(
-        {
-            "/api/integrations/compute-code/credentials/token": {
-                "status": 200,
-                "json": {
-                    "type": "claude",
-                    "accessToken": "claude-token",
-                    "source": "pool",
-                    "poolTokenId": "pool-claude-1",
-                },
-            },
-        }
-    )
-
-    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude"}), patch("temporalio.activity.heartbeat"):
+    """The provider pin reaches the backend without entering captures."""
+    path = "/api/integrations/compute-code/credentials/token"
+    payload = {"type": "claude", "accessToken": "claude-token", "source": "pool", "poolTokenId": "pool-claude-1"}
+    requests, config = _credential_fixture(path, payload)
+    with (
+        patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude", "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "0"}),
+        patch("helpers.llm.load_config", return_value=config),
+        patch("temporalio.activity.heartbeat"),
+    ):
         from helpers.llm import fetch_compute_token_activity
 
         result = await fetch_compute_token_activity("user-1")
-
     assert result is not None
     assert result["type"] == "claude"
-    call = assert_captured_call(
-        url_contains="/api/integrations/compute-code/credentials/token",
-        method="GET",
-    )
-    assert "tokenType=claude" in call["url"]
+    assert result["accessToken"] == payload["accessToken"]
+    assert len(requests) == 1
+    assert requests[0].headers["x-user-id"] == "user-1"
+    assert dict(requests[0].url.params) == {"tokenType": "claude"}
+    _assert_private_credential_capture(path, payload["accessToken"])
 
 
 async def test_fetch_compute_token_activity_pin_blocks_cross_provider_rotation():
@@ -1974,17 +2036,13 @@ async def test_fetch_compute_token_activity_pin_blocks_cross_provider_rotation()
     from helpers.httpx_capture import clear_captures, get_captures
 
     clear_captures()
-    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude"}), patch(
-        "temporalio.activity.heartbeat"
-    ):
+    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude"}), patch("temporalio.activity.heartbeat"):
         from helpers.llm import fetch_compute_token_activity
 
         result = await fetch_compute_token_activity("user-1", token_type="gpt")
 
     assert result is None
-    assert get_captures() == [], (
-        "pinned cross-provider rotation must not HTTP-lease a compute token"
-    )
+    assert get_captures() == [], "pinned cross-provider rotation must not HTTP-lease a compute token"
 
 
 def test_benchmark_compute_token_type_rejects_conflicting_provider_policy():
@@ -2006,34 +2064,31 @@ def test_benchmark_compute_token_type_rejects_conflicting_provider_policy():
 
 
 async def test_fetch_compute_token_activity_excludes_claude_tokens_by_policy():
-    """Anthropic exclusion constrains unified compute leases to GPT tokens."""
-    setup_mock(
-        {
-            "/api/integrations/compute-code/credentials/token": {
-                "status": 200,
-                "json": {
-                    "type": "gpt",
-                    "accessToken": "gpt-token",
-                    "accountId": "acct-1",
-                    "source": "pool",
-                    "poolTokenId": "pool-gpt-1",
-                },
-            },
-        }
-    )
-
-    with patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}), patch("temporalio.activity.heartbeat"):
+    """Anthropic exclusion sends a GPT-only lease selection without capture leakage."""
+    path = "/api/integrations/compute-code/credentials/token"
+    payload = {
+        "type": "gpt",
+        "accessToken": "gpt-token",
+        "accountId": "acct-1",
+        "source": "pool",
+        "poolTokenId": "pool-gpt-1",
+    }
+    requests, config = _credential_fixture(path, payload)
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1", "BENCHMARK_COMPUTE_TOKEN_TYPE": ""}),
+        patch("helpers.llm.load_config", return_value=config),
+        patch("temporalio.activity.heartbeat"),
+    ):
         from helpers.llm import fetch_compute_token_activity
 
         result = await fetch_compute_token_activity("user-1")
-
     assert result is not None
     assert result["type"] == "gpt"
-    call = assert_captured_call(
-        url_contains="/api/integrations/compute-code/credentials/token",
-        method="GET",
-    )
-    assert "tokenType=gpt" in call["url"]
+    assert result["accessToken"] == payload["accessToken"]
+    assert len(requests) == 1
+    assert requests[0].headers["x-user-id"] == "user-1"
+    assert dict(requests[0].url.params) == {"tokenType": "gpt"}
+    _assert_private_credential_capture(path, payload["accessToken"])
 
 
 async def test_heartbeat_compute_token_lineage_activity_posts_lineage_key():
@@ -2322,9 +2377,7 @@ async def test_set_response_schema_activity_replaces_cached_task_output_title():
     assert result is not None
     assert result["title"] == "Creator Brand Strategy"
     schema_save = next(
-        request
-        for request in get_captured_requests()
-        if "/api/agents/agent-cached-title" in request["url"]
+        request for request in get_captured_requests() if "/api/agents/agent-cached-title" in request["url"]
     )
     assert json.loads(schema_save["requestBody"])["generated_title"] == "Creator Brand Strategy"
 
@@ -2389,9 +2442,7 @@ async def test_set_response_schema_activity_dual_reads_lite_pool_alias():
     assert result["title"] == "Creator Brand Strategy"
     assert lookup_keys_seen and len(lookup_keys_seen[0]) >= 2
     schema_save = next(
-        request
-        for request in get_captured_requests()
-        if "/api/agents/agent-lite-alias" in request["url"]
+        request for request in get_captured_requests() if "/api/agents/agent-lite-alias" in request["url"]
     )
     assert json.loads(schema_save["requestBody"])["generated_title"] == "Creator Brand Strategy"
 
@@ -2593,9 +2644,7 @@ async def test_set_response_schema_activity_mass_agent_title_when_generation_fai
 
     class FakeRoseClient:
         async def collect(self, **kwargs):
-            raise RuntimeError(
-                "Strict read-only benchmark cache miss for response_schema; live fallback is disabled"
-            )
+            raise RuntimeError("Strict read-only benchmark cache miss for response_schema; live fallback is disabled")
 
     with (
         patch("temporalio.activity.heartbeat"),
@@ -2610,9 +2659,7 @@ async def test_set_response_schema_activity_mass_agent_title_when_generation_fai
         else:
             raise AssertionError("schema failure must reach the native activity retry owner")
     schema_save = next(
-        request
-        for request in get_captured_requests()
-        if "/api/agents/agent-mass-title-fail" in request["url"]
+        request for request in get_captured_requests() if "/api/agents/agent-mass-title-fail" in request["url"]
     )
     body = json.loads(schema_save["requestBody"])
     assert body["generated_title"] == OAI_DEMO_ROOT_TITLE
@@ -4503,15 +4550,11 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert "set_plan" not in rendered
 
 
-
 def _soft_complete_bench_goal() -> str:
     from pathlib import Path
     import json as _json
-    tasks = _json.loads(
-        (Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(
-            encoding="utf-8"
-        )
-    )
+
+    tasks = _json.loads((Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(encoding="utf-8"))
     return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
 
 
@@ -5063,9 +5106,7 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
             "title": "Progress: 40%",
         },
     }
-    assert _completed_child_task_structured_handoff(
-        [*base_context, local_rejected_feedback], schema
-    ) == (
+    assert _completed_child_task_structured_handoff([*base_context, local_rejected_feedback], schema) == (
         {"answer": "older valid answer"},
         "browser-older",
     )
@@ -5126,6 +5167,97 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
     assert result["score"] == 1.0
     assert result["structured_response"] == structured_response
     assert result["usage"]["actual_model"] == "structured_response"
+
+
+async def test_simulated_planner_sees_its_world_date_not_the_wall_clock():
+    """A simulated agent plans at its world's pinned date (the WMH clock), not today's date."""
+    import httpx
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_planner_llm_activity
+
+    plan_json = json.dumps(
+        {"title": "Plan", "tasks": [{"task_idx": "0", "goal": "g", "tool_name": "spawn_explore_agent", "depends_on": []}],
+         "join": "all"}
+    )
+    body = _anthropic_sse_body(text=plan_json, input_tokens=10, output_tokens=5)
+    systems = []
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            systems.append("\n".join(block["text"] for block in json.loads(req.content.decode())["system"]))
+            return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    world = int(datetime(2026, 9, 28, 14, tzinfo=timezone.utc).timestamp() * 1000)
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.world_model_runtime.world_time_ms", AsyncMock(return_value=world)) as clock,
+    ):
+        await call_planner_llm_activity(
+            messages=[{"role": "user", "content": "raise money"}],
+            model="rose",
+            tools_description="web_search: search the web",
+            user_context="",
+            claude_max_token="ct-planner-123",
+            agent_id="agent-simulated",
+            claude_token_user_id="planner-user",
+        )
+    clock.assert_awaited_once_with("agent-simulated")
+    assert systems and "Current UTC date: 2026-09-28." in systems[0]
+
+
+async def test_planner_world_clock_failure_stops_liveness_and_never_uses_wall_clock():
+    """An unreadable or unrepresentable world clock fails the planner and stops its heartbeat."""
+    import httpx
+
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_planner_llm_activity
+    from helpers.world_model_runtime import WorldClockUnavailable
+
+    llm_requests = []
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            llm_requests.append(req)
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+
+    def liveness_tasks():
+        return [
+            task
+            for task in asyncio.all_tasks()
+            if getattr(task.get_coro(), "__qualname__", "").endswith("_planner_liveness_heartbeat")
+        ]
+
+    for clock, expected in (
+        (AsyncMock(side_effect=WorldClockUnavailable("World clock unavailable")), WorldClockUnavailable),
+        (AsyncMock(return_value=10**20), (OverflowError, ValueError, OSError)),
+    ):
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.world_model_runtime.world_time_ms", clock),
+        ):
+            try:
+                await call_planner_llm_activity(
+                    messages=[{"role": "user", "content": "raise money"}],
+                    model="rose",
+                    tools_description="web_search: search the web",
+                    user_context="",
+                    claude_max_token="ct-planner-123",
+                    agent_id="agent-simulated",
+                    claude_token_user_id="planner-user",
+                )
+                raise AssertionError("a failed world clock must fail the planner")
+            except expected:
+                pass
+        await asyncio.sleep(0)
+        assert not [task for task in liveness_tasks() if not task.done()], "planner heartbeat outlived the activity"
+    assert llm_requests == [], "the planner must not prompt with the wall-clock date"
 
 
 async def test_call_planner_llm_activity_happy_path():
@@ -6296,10 +6428,14 @@ async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
     intermediate = "x" * 80_000
     # ~30k deliverable: fits the deliverable cap and leaves room under the total
     # budget after the intermediate is reduced to the small non-deliverable cap.
-    deliverable = '{"repos":[' + ",".join(
-        f'{{"name":"repo_{i:03d}","url":"https://github.com/org/repo_{i:03d}","stars":{10000-i},"desc":"cuda kernels for workload {i:03d}"}}'
-        for i in range(350)
-    ) + "]}"
+    deliverable = (
+        '{"repos":['
+        + ",".join(
+            f'{{"name":"repo_{i:03d}","url":"https://github.com/org/repo_{i:03d}","stars":{10000 - i},"desc":"cuda kernels for workload {i:03d}"}}'
+            for i in range(350)
+        )
+        + "]}"
+    )
     assert 20_000 < len(deliverable) < VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
 
     ctx = [
@@ -6377,7 +6513,7 @@ def test_verifier_file_evidence_caps_nondeliverable_shortlist_small():
     )
 
     assert not _VERIFIER_DELIVERABLE_FILENAME_RE.search("_prefiltered_shortlist.json")
-    huge = ("repo,stars\n" + "\n".join(f"org/r{i},{100000-i}" for i in range(200000)))
+    huge = "repo,stars\n" + "\n".join(f"org/r{i},{100000 - i}" for i in range(200000))
     assert len(huge) > VERIFIER_MAX_INLINE_FILE_CHARS
     kept = _truncate_text_for_verifier_inline(
         huge,
@@ -6436,9 +6572,7 @@ def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agen
         build_verifier_context_messages,
     )
 
-    huge_table = "| repo | stars |\n" + "\n".join(
-        f"| org/cuda-repo-{i} | {100000 - i} |" for i in range(2000)
-    )
+    huge_table = "| repo | stars |\n" + "\n".join(f"| org/cuda-repo-{i} | {100000 - i} |" for i in range(2000))
     assert len(huge_table) > VERIFIER_MAX_TOOL_RESULT_CHARS
 
     ctx = [
@@ -6459,7 +6593,9 @@ def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agen
         },
         {
             "role": "TOOL",
-            "text": '{"repos":[' + ",".join(f'{{"rank":{i},"url":"https://github.com/o/r{i}"}}' for i in range(100)) + "]}",
+            "text": '{"repos":['
+            + ",".join(f'{{"rank":{i},"url":"https://github.com/o/r{i}"}}' for i in range(100))
+            + "]}",
             "timestamp": "2026-09-03T08:02:00Z",
             "metadata": {
                 "toolName": "attempt_completion",
@@ -6474,7 +6610,9 @@ def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agen
     joined = "\n\n".join(user_blobs)
     assert "verifier truncated" in joined or "[omitted: verifier tool-result budget exhausted]" in joined
     # spawn_agent body must be capped; attempt_completion deliverable may use the larger cap
-    spawn_segments = [s for s in joined.split("TOOL_RESULT ") if '"tool_name": "spawn_agent"' in s or '"tool_name":"spawn_agent"' in s]
+    spawn_segments = [
+        s for s in joined.split("TOOL_RESULT ") if '"tool_name": "spawn_agent"' in s or '"tool_name":"spawn_agent"' in s
+    ]
     assert spawn_segments, joined[:500]
     assert len(spawn_segments[0]) <= VERIFIER_MAX_TOOL_RESULT_CHARS + 64
     tool_only = sum(len(s) for s in joined.split("\n\n") if s.startswith("TOOL_RESULT "))
@@ -6501,9 +6639,7 @@ def test_build_verifier_context_messages_skips_budget_for_declared_evaluator():
             "repo_name": f"org/cuda-repo-{i}",
             "repo_url": f"https://github.com/org/cuda-repo-{i}",
             "stars": 100000 - i,
-            "description": (
-                f"CUDA kernel library number {i} with enough text to inflate the payload"
-            ),
+            "description": (f"CUDA kernel library number {i} with enough text to inflate the payload"),
         }
         for i in range(1, 101)
     ]
@@ -6544,20 +6680,12 @@ def test_build_verifier_context_messages_skips_budget_for_declared_evaluator():
 
     truncated = build_verifier_context_messages(ctx, "system", call_site="verifier")
     truncated_joined = "\n".join(
-        m["content"]
-        for m in truncated
-        if m.get("role") == "user" and isinstance(m.get("content"), str)
+        m["content"] for m in truncated if m.get("role") == "user" and isinstance(m.get("content"), str)
     )
     assert "verifier truncated" in truncated_joined
 
-    kept = build_verifier_context_messages(
-        ctx, "system", call_site="benchmark_declared_evaluator"
-    )
-    kept_joined = "\n".join(
-        m["content"]
-        for m in kept
-        if m.get("role") == "user" and isinstance(m.get("content"), str)
-    )
+    kept = build_verifier_context_messages(ctx, "system", call_site="benchmark_declared_evaluator")
+    kept_joined = "\n".join(m["content"] for m in kept if m.get("role") == "user" and isinstance(m.get("content"), str))
     assert "verifier truncated" not in kept_joined
     # Nested JSON is escaped inside TOOL_RESULT; assert on unique repo markers.
     assert "cuda-repo-1" in kept_joined
@@ -7274,13 +7402,9 @@ async def test_call_llm_escalates_max_tokens_on_finish_reason_length():
     from unittest.mock import patch
     from helpers.llm import call_llm
 
-    truncated = (
-        "Subject: LLM and Cloud Credit Amounts for Speedrun Marketplace\n"
-        "Hi Speedrun Team,\n\nPlease share the"
-    )
+    truncated = "Subject: LLM and Cloud Credit Amounts for Speedrun Marketplace\nHi Speedrun Team,\n\nPlease share the"
     full = (
-        truncated
-        + " exact credit amounts by provider for OpenAI, Anthropic, AWS, "
+        truncated + " exact credit amounts by provider for OpenAI, Anthropic, AWS, "
         "Google Cloud, Azure, and Runpod.\n\nThanks,\nAndy"
     )
     calls: list[int] = []
@@ -7738,7 +7862,9 @@ async def test_structured_stream_profile_accounts_for_terminal_waits():
             if event == "stream.profile":
                 profiles.append(fields)
 
-        expected_error = {"deadline": ValueError, "error": RuntimeError, "cancelled": asyncio.CancelledError}.get(ending)
+        expected_error = {"deadline": ValueError, "error": RuntimeError, "cancelled": asyncio.CancelledError}.get(
+            ending
+        )
         with (
             patch("helpers.llm._safe_time", side_effect=lambda: clock[0]),
             patch("helpers.llm.RoseClient", FakeRoseClient),
@@ -8166,9 +8292,7 @@ async def test_july_gp_execute_caps_distinct_explores_then_completes():
                 {
                     "id": call_id,
                     "name": "spawn_agent",
-                    "arguments": json.dumps(
-                        {"type": "explore", "goal": f"research-{marker}"}
-                    ),
+                    "arguments": json.dumps({"type": "explore", "goal": f"research-{marker}"}),
                 }
             ],
             "usage": {"from_fast_cache": True, "marker": marker},
@@ -8218,9 +8342,7 @@ async def test_july_gp_execute_caps_distinct_explores_then_completes():
     ):
         for base_step in range(1, 4):
             ctx = FastCacheContext(enabled=True, goal=goal, base_step=base_step)
-            stored, _ = await rose_cache.lookup_llm_cache(
-                ctx, "execute_loop", {"messages": messages}
-            )
+            stored, _ = await rose_cache.lookup_llm_cache(ctx, "execute_loop", {"messages": messages})
             if stored is None:
                 break
             selected.append(stored)
@@ -9044,9 +9166,203 @@ def test_ensure_tool_result_pairing_preserves_well_formed_messages():
     assert fixed == msgs, f"Well-formed messages mutated:\nin={msgs}\nout={fixed}"
 
 
+async def test_structured_validation_retries_exclude_only_repeated_known_candidate():
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from utils.tool_schemas import create_agent_action_model
+    import providers.fast_cache.rose_cache as cache_module
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    for bad_count, hide_metadata in (
+        (0, False),
+        (1, False),
+        (2, False),
+        (3, False),
+        (2, True),
+        (2, "no-usage"),
+        (2, "synthetic-no-usage"),
+    ):
+        requests = []
+
+        def handler(request, requests=requests, bad_count=bad_count):
+            if request.url.host not in {"api.cerebras.ai", "openrouter.ai"}:
+                return httpx.Response(200, json={})
+            body = json.loads(request.content)
+            requests.append((request.url.host, body))
+            assert body["tools"][0]["function"]["parameters"]["properties"]["labels"]["type"] == "array"
+            args = {"labels": '["typed"]' if len(requests) <= bad_count else ["typed"]}
+            data = [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": f"t{len(requests)}",
+                                        "type": "function",
+                                        "function": {"name": "typed_lookup", "arguments": json.dumps(args)},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+            return httpx.Response(
+                200,
+                text="\n".join("data: " + json.dumps(x) for x in data) + "\ndata: [DONE]\n",
+                headers={"content-type": "text/event-stream"},
+            )
+
+        setup_mock_fn(handler)
+        original_cached = cache_module.cached_complete
+
+        async def filtered(*args, _original=original_cached, _mode=hide_metadata, **kwargs):
+            async for chunk in _original(*args, **kwargs):
+                if _mode in {"no-usage", "synthetic-no-usage"} and chunk.kind == "usage":
+                    continue
+                if _mode is True and chunk.kind == "metadata":
+                    continue
+                if _mode == "synthetic-no-usage" and chunk.kind == "metadata":
+                    chunk = type(chunk)(kind="metadata", data={**chunk.data, "actual_model": "fast-cache"})
+                yield chunk
+
+        async def on_chunk(*args):
+            pass
+
+        with (
+            patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline"}),
+            patch.object(cache_module, "cached_complete", filtered if hide_metadata else original_cached),
+        ):
+            try:
+                result, _, _ = await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": "offline typed data"}],
+                    model="rose-labs/rose-1-flash",
+                    temperature=1,
+                    max_tokens=128,
+                    response_model=model,
+                    on_chunk=on_chunk,
+                    call_site="test",
+                    _exclude_anthropic_family=True,
+                    skip_cache_write=True,
+                )
+            except LLMStructuredOutputError:
+                assert bad_count == 3
+            else:
+                assert bad_count < 3
+                assert result.tool_calls[0].labels == ["typed"]
+        expected_count = min(bad_count + 1, 3)
+        assert len(requests) == expected_count
+        expected_hosts = ["api.cerebras.ai"] * min(expected_count, 2)
+        if expected_count == 3:
+            expected_hosts.append(
+                "api.cerebras.ai" if hide_metadata in {True, "synthetic-no-usage"} else "openrouter.ai"
+            )
+        assert [host for host, _ in requests] == expected_hosts
+        for _, body in requests[1:]:
+            assert any(
+                row.get("role") == "tool" and "valid list" in str(row.get("content")) for row in body["messages"]
+            )
+        if hide_metadata not in {True, "synthetic-no-usage"} and expected_count == 3:
+            assert requests[-1][1]["model"] == "google/gemini-3.8-flash"
+
+
+async def test_structured_validation_exhausted_candidate_preserves_typed_error():
+    """A lone eligible native model may fail schema twice, without losing the typed contract."""
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    response_model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+        body = json.loads(request.content)
+        requests.append(body)
+        assert body["model"] == "moonshotai/kimi-k3"
+        events = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": f"invalid-{len(requests)}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "typed_lookup",
+                                        "arguments": json.dumps({"labels": '["invalid-string-array"]'}),
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return httpx.Response(
+            200,
+            text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    setup_mock_fn(handler)
+    failure = None
+    with patch.dict(
+        os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}
+    ):
+        try:
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "Return typed labels from the existing OSS pool."}],
+                model="rose-labs/rose-1-oss",
+                temperature=1,
+                max_tokens=128,
+                response_model=response_model,
+                on_chunk=AsyncMock(),
+                call_site="test_exhausted_structured_candidate",
+                skip_cache_write=True,
+                _exclude_anthropic_family=True,
+            )
+        except Exception as error:
+            failure = error
+    assert len(requests) == 2, f"Only the two invalid candidate responses should reach a provider: {len(requests)}"
+    assert all(body["model"] == "moonshotai/kimi-k3" for body in requests)
+    assert isinstance(failure, LLMStructuredOutputError), (
+        f"Exhausted structured validation lost its typed error: {type(failure).__name__}: {failure}"
+    )
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "structured_validation_exhausted_candidate_typed_error",
+        test_structured_validation_exhausted_candidate_preserves_typed_error,
+    )
+    await r.record_async(
+        "structured_validation_candidate_eligibility",
+        test_structured_validation_retries_exclude_only_repeated_known_candidate,
+    )
     r.record("prepare_schema_for_openai", test_prepare_schema_for_openai)
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)
@@ -9138,7 +9454,9 @@ async def run_all_tests():
     r.record("verifier_enforces_size_bounds_and_nullable_nested_fields", test_verifier_enforces_size_bounds_and_nullable_nested_fields)
     r.record("structured_output_schema_respects_constraints", test_structured_output_schema_respects_constraints)
     if os.getenv("SCHEMA_GEN_LIVE_GOAL_FILE"):
-        await r.record_async("live_schema_generation_chooses_file", test_live_schema_generation_chooses_file_for_large_goal)
+        await r.record_async(
+            "live_schema_generation_chooses_file", test_live_schema_generation_chooses_file_for_large_goal
+        )
     r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
@@ -9396,6 +9714,13 @@ async def run_all_tests():
         test_check_progress_browser_success_uses_fast_cache_write_only,
     )
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
+    await r.record_async(
+        "simulated_planner_sees_world_date", test_simulated_planner_sees_its_world_date_not_the_wall_clock
+    )
+    await r.record_async(
+        "planner_world_clock_failure_stops_liveness",
+        test_planner_world_clock_failure_stops_liveness_and_never_uses_wall_clock,
+    )
     # Additional llm coverage
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)
     await r.record_async(

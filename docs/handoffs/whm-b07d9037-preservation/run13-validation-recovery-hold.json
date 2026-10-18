@@ -1,0 +1,65 @@
+{
+  "schema": "rose.whm.validation_recovery_hold.v1",
+  "utc": "2026-10-13T10:25:04.673202+00:00",
+  "base_head": "b6941d3f46df2adc5b4c2c6d89e6b1fd775bfa57",
+  "status": "PRIVATE_PROPOSAL_HOLD_UNAPPLIED",
+  "user_direction": "Inspect strict schema validation and reuse existing Rose completion recovery; no unmentioned proposal is approved.",
+  "causal_mechanism": "WHM semantic/parser validation currently occurs after shared recover_truncated; _WMHInvalidPrediction is ValueError while recovery catches RoseError, so schema failure bypasses existing fallback.",
+  "candidate_mechanism": "WHM-only ContextVar recorder activates pre-done strict validation around actual Rose._complete_once; RetryablePrediction retains _WMHInvalidPrediction and also subclasses RoseError; invokes unchanged shared recover_truncated, no second retry loop.",
+  "patch": "/home/boxes/rose-wmh-resumed/.context/whm-migration/rca-20261013/json/user-retry-review/proposed-whm-validation-recovery.patch",
+  "patch_sha256": "1b489f5e1d162f43cf64f54ee82c48b94039fcfacfe9bd2014109090e9c73f4e",
+  "private_receipt": "/home/boxes/rose-wmh-resumed/.context/whm-migration/rca-20261013/json/user-retry-review/final-proposal-receipt.json",
+  "private_receipt_sha256": "0f94f95569bbbbc3a7b2296aef20869602228fe7f8bbfb8282d29896608e000b",
+  "manifest_sha256": "91364521cf8783a27539f67dddda257200d851892f946f18bdd5018fc368bc88",
+  "scope_files": 11,
+  "proof": {
+    "baseline": {
+      "result": "5 FAIL / 1 PASS / integration deselected",
+      "duration_s": 0.55,
+      "log": "frozen-permanent-baseline.log"
+    },
+    "candidate": {
+      "result": "7 PASS",
+      "duration_s": 16.43,
+      "log": "frozen-permanent-candidate.log"
+    },
+    "owning_family": {
+      "result": "192 PASS",
+      "duration_s": 21.36,
+      "log": "frozen-full-owning-candidate.log"
+    },
+    "caller_cancellation": "Existing shield contract preserved; admitted caller rejoins once.",
+    "retirement": "Exact native writer joined, rejected attempt retained, no additional history commit.",
+    "parallel_isolation": true,
+    "qualification": "Offline synthetic provider controls through real pinned native/bridge owners; not original provider replay, invoice evidence or exact fundraiser outcome proof."
+  },
+  "hold_reasons": [
+    "HOLD: current proposal adds native-provider-rejections with new schema; it reuses existing native redaction/atomic-write primitives, not the current nested native-predictions record_prediction writer. A shared owner extraction and schema-compatible per-attempt/export/replay contract must be reviewed and reproved before production application. Do not simply move invented native intervals into existing store.",
+    "No original rejected raw strings were recovered; mock invalid strings are owning-boundary controls, not replay of paid Run13 generation or proof it will generate correct/fundraising-efficient trajectories.",
+    "Mixed validation/provider partial or transport terminal error paths and partial-usage uncertainty need explicit owner proof. No invented unknown usage. Known rejected usage during cancellation is privately captured but not newly reconciled into the existing aggregate cancellation ledger.",
+    "Model-price test proves per-model arithmetic using synthetic prices; no live Azure invoice validation or per-provider cache pricing change. Do not retroactively revise Run13 cache/spend ratios.",
+    "Each rejection starts an actual native writer subprocess (~1second observed on initial fixtures); capture sink/process overhead and scale behavior are not production benchmarked.",
+    "Single-cancellation lifecycle is proved; repeated independent cancellation, missing interpreter/permission/disk-full failure, process crash/restart recovery and store-export/replay compatibility are not comprehensive.",
+    "Private admission packet is a local trusted process boundary; it is not an external endpoint capability. No new HTTP capture endpoint is added."
+  ],
+  "preservation": {
+    "candidate_files_and_originals_verified": 11,
+    "proof_hashes_verified": 7,
+    "git_apply_check_exit": 0,
+    "production_applied": false,
+    "goal_filter_patch_applied": false,
+    "paid_calls": 0,
+    "paid_benchmark": false,
+    "merge": false,
+    "deploy": false
+  },
+  "private_archive_receipt": "docs/handoffs/whm-b07d9037-preservation/run13-retry-proposal-private-receipt.json",
+  "rca_status": "Original malformed-generation cause and exact fundraising outcome OPEN; one-store/export/replay integration unresolved.",
+  "independent_review": {
+    "verdict": "HOLD",
+    "receipt": "/home/boxes/rose-wmh-resumed/.context/whm-migration/rca-20261013/json/user-retry-review/independent-review-step-limits.json",
+    "sha256": "472d6d75fc701574809585445022269eedf7c81ba1da9410bec8de72c1d75bbc",
+    "source_files_verified": 11,
+    "production_application_approved": false
+  }
+}

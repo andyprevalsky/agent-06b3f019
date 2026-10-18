@@ -13,6 +13,7 @@ import {
   recordAgentWorkflowExecution,
 } from '../../providers/workflowGeneration';
 import { createTestHarness } from './trace-archive-test-utils';
+import { nonLocalDatabaseReason } from '../../utils/localDatabaseUrl';
 
 const { test, finish } = createTestHarness('workflow generation lock unit tests');
 
@@ -30,11 +31,18 @@ async function withAgent(fn: (agentId: string) => Promise<void>): Promise<void> 
   try {
     await fn(agentId);
   } finally {
-    await prisma.agent.deleteMany({ where: { id: agentId } });
+    try {
+      await prisma.agentAttentionRequest.deleteMany({ where: { agentId } });
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: agentId } });
+    }
   }
 }
 
 async function main(): Promise<void> {
+  const unsafeDatabase = nonLocalDatabaseReason(process.env.DATABASE_URL ?? '');
+  if (unsafeDatabase)
+    throw new Error(`Workflow generation tests require an owned local database: ${unsafeDatabase}`);
   await test('shared locks overlap while an exclusive cutover waits for every reader', async () => {
     await withAgent(async (agentId) => {
       let releaseFirst = () => {};

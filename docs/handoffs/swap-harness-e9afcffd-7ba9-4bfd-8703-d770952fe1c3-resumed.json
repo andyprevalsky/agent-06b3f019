@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "utc": "2026-10-18T04:05:00+00:00",
+  "phase": "private archives A-D verified; review-finding verification in progress",
+  "old_devbox_id": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "old_internal_thread_id": "ph7cc73xma14jdg6chxpnhbgth8g7c1a",
+  "old_public_thread_id": "thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "replacement_devbox_id": "unknown (not exposed by dvb-onbox or the environment on this box)",
+  "replacement_public_thread_id": "thr_fbdefb2e238e431abd1cfac3c76ad29c",
+  "replacement_thread_url": "https://boxes.dev/thread/thr_fbdefb2e238e431abd1cfac3c76ad29c",
+  "harness": "claude",
+  "supplied_checkpoint_sha": "173151a355e33913de60a31d2d93897cf3699131",
+  "checkout_path": "/home/boxes/rose-wmh",
+  "local_branch": "claude/wmh-resume-20261018",
+  "existing_pr_branch": "codex/wmh-experiential-parallel-20261006",
+  "handoff_path": "docs/handoffs/swap-harness-e9afcffd-7ba9-4bfd-8703-d770952fe1c3.md",
+  "first_continuation_action": "private_archive.py verify --receipt for A,B,C,D plus read-only Fly inventory check",
+  "first_continuation_result": {
+    "archives": {"A": "rc=0, 28796 authenticated files", "B": "rc=0, 20833", "C": "rc=0, 32305", "D": "rc=0, 10"},
+    "fly_readonly": "NOT CLEAN: navi-whisper-lux-bench retains stopped Machine 820224f7e069e8 (whm-deploy-g4-fb24dd03-20261015) and volume vol_r7ymddjdkx9y21gr (state created, attached). Not touched; needs an owner decision before any native action."
+  }
+}

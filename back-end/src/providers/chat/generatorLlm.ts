@@ -32,6 +32,7 @@ import {
 } from './routerLlm';
 import type { ChatProviderRoute } from './phaseModels';
 import type { ChatCompletionParams } from './completionOptions';
+import { withCurrentTimeContext } from '../currentTimeContext';
 import { runAfterStreamCommit, type TransactionalStreamGate } from './earlyDirectGenerator';
 import {
   createGeneratorAttentionLifecycle,
@@ -149,7 +150,7 @@ function extractStreamableReasoning(
 export function buildGeneratorCompletionOptions(params: ChatCompletionParams): CompletionOptions {
   return {
     model: params.model,
-    messages: params.messages,
+    messages: withCurrentTimeContext(params.messages),
     temperature: 0.7,
     // Bound Cerebras's upfront token reservation while leaving room for a
     // substantive answer and the structured response's reasoning field.

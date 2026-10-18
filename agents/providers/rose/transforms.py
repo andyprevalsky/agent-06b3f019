@@ -49,6 +49,7 @@ VISION_MODELS: frozenset[str] = frozenset({
     "openai/gpt-5.6-sol",
     "openai/gpt-6-luna",
     "openai/gpt-6-sol",
+    "openai/gpt-6.1-sol",
     "google/gemini-2.5-flash",
     "google/gemini-2.5-pro",
     "google/gemini-3-pro-preview",

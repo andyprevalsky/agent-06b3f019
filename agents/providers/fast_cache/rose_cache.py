@@ -34,6 +34,7 @@ from providers.fast_cache.normalize import (
 )
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
+from providers.rose.truncation import model_key
 from utils.oai_demo import is_oai_demo_bound_child_goal, is_oai_demo_goal
 
 if TYPE_CHECKING:
@@ -379,7 +380,7 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
             response_schema = response_model.model_json_schema()
         except Exception:
             response_schema = getattr(response_model, "__name__", str(response_model))
-    return {
+    material = {
         "pool": pool_name,
         "pool_contract": pool_contract,
         "messages": complete_kwargs.get("messages"),
@@ -393,12 +394,22 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "effort": complete_kwargs.get("effort"),
         "provider_fast_mode": complete_kwargs.get("provider_fast_mode"),
         "cache_namespace": complete_kwargs.get("cache_namespace"),
+        # Opt-in WHM behavior must not reuse an ordinary Flash response. Preserve
+        # the exact existing material for every caller that leaves these off.
+        **({"prefer_azure": True} if complete_kwargs.get("prefer_azure") else {}),
+        **({"retry_partial_errors": True} if complete_kwargs.get("retry_partial_errors") else {}),
+        **({"json_mode": True} if complete_kwargs.get("json_mode") else {}),
         "exclude_anthropic_family": anthropic_family_excluded(
             bool(complete_kwargs.get("_exclude_anthropic_family", False))
         ),
         "response_schema": response_schema,
         "env_fingerprint": os.getenv("FAST_MODE_AGENT_ENV_FINGERPRINT", "default"),
     }
+
+    exclusions = sorted({model_key(model) for model in complete_kwargs.get("_skip_models", ()) if model_key(model)})
+    if exclusions:
+        material["skip_models"] = exclusions
+    return material
 
 
 def swf_scrape_passthrough(messages: Any) -> Dict[str, Any]:
@@ -928,6 +939,12 @@ async def lookup_llm_cache(
                 key_material=key_material,
             )
             stored, hit_key = await july_explore_resolve(ctx, call_site, stored, hit_key)
+            exclusions = key_material.get("skip_models", []) if isinstance(key_material, dict) else []
+            if stored is not None and exclusions:
+                actual = stored.get("actual_model") if isinstance(stored, dict) else None
+                if not actual or actual == "unknown" or model_key(actual) in exclusions:
+                    logger.warning("fast_cache.candidate_excluded", actual_model=actual, skip_models=exclusions)
+                    return None, None
             return stored, hit_key
         except FastCacheLookupError:
             raise
@@ -1149,7 +1166,7 @@ async def cached_complete(
         "BENCHMARK_ISOLATED_RUN", ""
     ).strip().lower() in {"1", "true", "yes", "on"}:
         raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
-    if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
+    if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
         raise FastCacheLookupError(
             f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
         )
@@ -1165,10 +1182,10 @@ async def cached_complete(
         _accumulate(acc, chunk)
         if chunk.kind == "done" and ctx.should_write and not structured_response_model:
             try:
-                await cache_client.cache_set(
+                stored = await cache_client.cache_set(
                     key, "llm", ctx.goal_hash, acc, goal=ctx.goal, root_goal=ctx.root_goal
                 )
-                logger.info("llm.cache.stored", call_site=call_site, key=key)
+                logger.info("llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key)
             except Exception as exc:
                 logger.warning("fast_cache.set_error", key=key, error=str(exc))
         yield chunk

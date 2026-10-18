@@ -1,186 +1,145 @@
 #!/usr/bin/env bash
-# Exercise the real cutover script with Fly/npm/Prisma fakes. A Fly clone may
-# exist even when the first deploy command timed out waiting for it to start.
+# The former clone-recovery owner now verifies the allocation-free queue entry.
+# Native bank recovery is exercised by retained-agent-machine and worker-pool tests.
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/bin"
-
+mkdir -p "$TMP/bin" "$TMP/docker-config"
+export DOCKER_CONFIG="$TMP/docker-config"
+export TEST_REAL_NODE="$(command -v node)"
+export TEST_QUEUE_DIR="$TMP"
+cat > "$TMP/bin/node" <<'PY'
+#!/usr/bin/env python3
+import hashlib, json, os, pathlib, sys
+args = sys.argv[1:]
+folder = pathlib.Path(os.environ['TEST_QUEUE_DIR'])
+if 'scripts/worker-deployment-queue.ts' not in args:
+    os.execv(os.environ['TEST_REAL_NODE'], [os.environ['TEST_REAL_NODE'], *args])
+action = args[args.index('scripts/worker-deployment-queue.ts') + 1]
+with (folder / 'journal').open('a') as log:
+    log.write(action + '\n')
+if action == 'enqueue':
+    path = pathlib.Path(args[args.index('--plan') + 1])
+    assert path.stat().st_mode & 0o777 == 0o600
+    plan = json.loads(path.read_text())
+    assert plan['buildId'] == plan['sourceCommit']
+    assert plan['imageRef'] == 'registry.fly.io/test-prod@sha256:' + 'd' * 64
+    assert len(plan['surfaceHash']) == 12
+    identity = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+    (folder / 'plan-readback.json').write_text(json.dumps(plan))
+    (folder / 'job-id').write_text(identity)
+    print(json.dumps({'jobId': identity, 'identity': plan, 'stage': 'QUEUED'}))
+elif action == 'run':
+    assert args[args.index('--job-id') + 1] == (folder / 'job-id').read_text()
+    command = args[args.index('--') + 1:]
+    assert command[0] == 'python3' and command[1].endswith('/scripts/worker_pool_cutover.py')
+else:
+    raise AssertionError('unexpected queue operation: ' + action)
+PY
+cat > "$TMP/bin/flyctl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == 'auth docker' ]]; then
+  printf 'auth\n' >> "$TEST_QUEUE_DIR/journal"
+  if [[ "${TEST_AUTH_FAILURE:-0}" != 0 ]]; then exit "$TEST_AUTH_FAILURE"; fi
+  [[ "$FLY_API_TOKEN" == fixture-token ]]
+  printf '{"auths":{"registry.fly.io":{"auth":"offline-fixture"}}}\n' > "$DOCKER_CONFIG/config.json"
+  exit 0
+fi
+[[ "$*" == 'deploy --local-only --build-only --push --image-label '* ]] || exit 90
+[[ "$*" == *' -a test-prod' ]] || exit 91
+printf 'build\n' >> "$TEST_QUEUE_DIR/journal"
+exit "${TEST_BUILD_FAILURE:-0}"
+SH
+cat > "$TMP/bin/docker" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == 'buildx imagetools inspect registry.fly.io/test-prod:cutover-'* ]] || exit 92
+if ! python3 - <<'PYAUTH'
+import json, os, pathlib
+path = pathlib.Path(os.environ['DOCKER_CONFIG']) / 'config.json'
+assert path.is_file(), 'clean Docker config has no Fly registry credential'
+assert json.loads(path.read_text())['auths']['registry.fly.io']['auth'] == 'offline-fixture'
+PYAUTH
+then
+  echo 'offline registry inspect rejected unauthenticated Docker (401)' >&2
+  exit 93
+fi
+printf 'inspect\n' >> "$TEST_QUEUE_DIR/journal"
+printf '"sha256:%064d"\n' 0 | tr 0 d
+SH
 cat > "$TMP/bin/npm" <<'SH'
 #!/usr/bin/env bash
-exit 0
+[[ "$*" == 'ci --workspaces=false --ignore-scripts' ]]
+SH
+cat > "$TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" != -C ]] || shift 2
+case "$*" in
+  'rev-parse HEAD') printf '%s\n' "${TEST_CHECKOUT_SHA:-$BUILD_ID}";;
+  'diff --quiet HEAD') exit "${TEST_DIRTY_SOURCE:-0}";;
+  'ls-files --others --exclude-standard') exit 0;;
+  archive\ *:agents) tar -cf - --files-from /dev/null;;
+  *) exit 95;;
+esac
 SH
 cat > "$TMP/bin/npx" <<'SH'
 #!/usr/bin/env bash
-if [[ "$*" == *'set-agent-queue-pointer.ts --read'* ]]; then
-  echo null
-elif [[ "$*" == *'set-agent-queue-pointer.ts --queue'* ]]; then
-  echo flip >> "$FAKE_FLY_JOURNAL"
-fi
+[[ "$*" == 'prisma generate' ]]
 SH
-cat > "$TMP/bin/sleep" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-cat > "$TMP/bin/flyctl" <<'PY'
-#!/usr/bin/env python3
-import json
-import os
-import sys
-from pathlib import Path
-
-args = sys.argv[1:]
-path = Path(os.environ['FAKE_FLY_STATE'])
-machines = json.loads(path.read_text())
-journal = Path(os.environ['FAKE_FLY_JOURNAL'])
-
-def save():
-    path.write_text(json.dumps(machines))
-
-if args[0] == 'deploy':
-    print('image: registry.fly.io/test:cutover-abc-token')
-elif args[:2] == ['machines', 'list']:
-    list_failures = Path(os.environ['FAKE_FLY_LIST_FAILURES'])
-    remaining = int(list_failures.read_text())
-    if remaining > 0 and 'start-refused' in journal.read_text():
-        list_failures.write_text(str(remaining - 1))
-        journal.write_text(journal.read_text() + 'list-failed\n')
-        print('Error: failed to list machines: request returned non-2xx status: 503', file=sys.stderr)
-        sys.exit(1)
-    print(json.dumps(machines))
-elif args[:2] == ['machine', 'clone']:
-    assert '--detach' in args, 'clone must return on creation, not wait for template startup'
-    name = args[args.index('--name') + 1]
-    new_id = f'{len(machines) + 1:014x}'
-    machines.append({'id': new_id, 'name': name, 'state': 'stopped',
-                     'config': {'env': {'TEMPORAL_WORKER_SURFACE_HASH': 'old'}}})
-    save()
-    journal.write_text(journal.read_text() + 'clone\n')
-    print(f'Machine {new_id} has been created...')
-elif args[:2] == ['machine', 'update']:
-    assert '--skip-start' in args and '--skip-health-checks' in args
-    failures = Path(os.environ['FAKE_FLY_UPDATE_FAILURES'])
-    remaining = int(failures.read_text())
-    if remaining > 0:
-        failures.write_text(str(remaining - 1))
-        journal.write_text(journal.read_text() + 'update-408\n')
-        print(f'Error: could not update machine {args[2]}: failed to update VM {args[2]}: '
-              'request returned non-2xx status: 408:  (Request ID: fake-iad)', file=sys.stderr)
-        sys.exit(1)
-    machine = next(m for m in machines if m['id'] == args[2])
-    for pos, arg in enumerate(args):
-        if arg == '--env':
-            key, value = args[pos + 1].split('=', 1)
-            machine['config']['env'][key] = value
-    machine['state'] = 'stopped'
-    save()
-    journal.write_text(journal.read_text() + f'update {machine["id"]}\n')
-elif args[:2] == ['machines', 'start']:
-    refusals = Path(os.environ['FAKE_FLY_START_REFUSALS'])
-    remaining = int(refusals.read_text())
-    if remaining > 0:
-        refusals.write_text(str(remaining - 1))
-        journal.write_text(journal.read_text() + 'start-refused\n')
-        print(f'Error: could not start machine {args[2]}: failed to start VM {args[2]}: '
-              'failed_precondition: machine getting replaced, refusing to start '
-              '(Request ID: fake-iad)', file=sys.stderr)
-        sys.exit(1)
-    machine = next(m for m in machines if m['id'] == args[2])
-    machine['state'] = 'started'
-    save()
-else:
-    raise AssertionError(args)
-PY
-chmod +x "$TMP/bin/"*
-
-seed_state() {
-  local orphans="$1"
-  local previous_hash="$2"
-  printf '%s' "$3" > "$TMP/update-failures"
-  printf '%s' "${4:-0}" > "$TMP/start-refusals"
-  printf '%s' "${5:-0}" > "$TMP/list-failures"
-  python3 - "$TMP/state.json" "$orphans" "$previous_hash" <<'PY'
-import json, sys
-orphans = int(sys.argv[2])
-previous_hash = sys.argv[3]
-machines = [{'id': '00000000000001', 'name': 'old-template', 'state': 'started',
-             'config': {'env': {'TEMPORAL_WORKER_SURFACE_HASH': 'old'}}}]
-for i in range(orphans):
-    machines.append({'id': f'{i + 2:014x}', 'name': f'gen-abc-previous-{i}',
-                     'state': 'stopped',
-                     'config': {'env': {'TEMPORAL_WORKER_SURFACE_HASH': previous_hash,
-                                        'TEMPORAL_WORKER_DEPLOYMENT_TOKEN': 'earlier'}}})
-open(sys.argv[1], 'w').write(json.dumps(machines))
-PY
-  : > "$TMP/journal"
-}
-
-run_cutover() {
-  PATH="$TMP/bin:$PATH" FAKE_FLY_STATE="$TMP/state.json" \
-    FAKE_FLY_JOURNAL="$TMP/journal" FAKE_FLY_UPDATE_FAILURES="$TMP/update-failures" \
-    FAKE_FLY_START_REFUSALS="$TMP/start-refusals" \
-    FAKE_FLY_LIST_FAILURES="$TMP/list-failures" \
-    FLY_API_TOKEN=fake APP=test \
-    SURFACE_HASH=abc GENERATION_QUEUE=navi-agent-tasks@abc \
-    BUILD_ID=build DEPLOYMENT_TOKEN=token \
-    bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/output" 2>&1
-}
-
-run_case() {
-  local orphans="$1"
-  local update_failures="${3:-0}"
-  local start_refusals="${4:-0}"
-  local list_failures="${5:-0}"
-  seed_state "$orphans" "${2:-old}" "$update_failures" "$start_refusals" "$list_failures"
-  run_cutover || { cat "$TMP/output" >&2; echo "FAIL: cutover exited non-zero" >&2; exit 1; }
-  python3 - "$TMP/state.json" "$TMP/journal" "$orphans" "$update_failures" <<'PY'
-import json, sys
-machines = json.load(open(sys.argv[1]))
-journal = open(sys.argv[2]).read()
-orphans = int(sys.argv[3])
-update_failures = int(sys.argv[4])
-new = [m for m in machines if m['config']['env'].get('TEMPORAL_WORKER_SURFACE_HASH') == 'abc']
-assert len(new) == 8 and all(m['state'] == 'started' for m in new), (len(new), new, journal)
-assert len(machines) == 9, ('a retried update must not clone extra machines', machines)
-assert journal.count('clone\n') == 8 - orphans, journal
-assert journal.count('update ') == 8, journal
-assert journal.count('update-408\n') == update_failures, journal
-assert journal.count('flip\n') == 1, journal
-PY
-}
-
-run_case 8 # retry adopts every clone created by a previous failed attempt
-run_case 8 abc # retry restarts machines already updated to the target hash
-run_case 0 # fresh rollout clones with --detach and configures every machine
-run_case 0 old 2 # Fly Machines API 408s on update are retried in-run, not fatal
-run_case 0 old 0 4 # starts refused while Fly is still replacing the VM are re-issued
-run_case 8 abc 0 4 # adopted clones refused at start are re-issued too
-run_case 0 old 0 4 2 # a transient machines-list failure while waiting is retried, not fatal
-
-# Surplus target-generation clones: only the machines needed to reach MIN start.
-seed_state 9 abc 0 9
-run_cutover || { cat "$TMP/output" >&2; echo "FAIL: surplus cutover exited non-zero" >&2; exit 1; }
-python3 - "$TMP/state.json" "$TMP/journal" <<'PY'
-import json, sys
-machines = json.load(open(sys.argv[1]))
-journal = open(sys.argv[2]).read()
-new = [m for m in machines if m['config']['env'].get('TEMPORAL_WORKER_SURFACE_HASH') == 'abc']
-assert len(new) == 9, new
-assert sum(m['state'] == 'started' for m in new) == 8, (new, journal)
-assert journal.count('flip\n') == 1, journal
-PY
-
-seed_state 0 old 4
-if run_cutover; then
-  echo "FAIL: cutover succeeded although every machine update attempt failed" >&2
-  exit 1
+chmod 755 "$TMP/bin/"*
+export PATH="$TMP/bin:$PATH" FLY_API_TOKEN=fixture-token APP=test-prod
+export DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:1/not-contacted
+export BUILD_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export SURFACE_HASH=bbbbbbbbbbbb DEPLOYMENT_TOKEN=attempt-one
+export DEPLOY_REUSE_ONLY=1
+: > "$TMP/journal"
+if bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/normal.log" 2>&1; then
+  :
+else
+  result=$?
+  cat "$TMP/normal.log" >&2
+  exit "$result"
 fi
-grep -q 'failed after 4 attempts' "$TMP/output" ||
-  { cat "$TMP/output" >&2; echo "FAIL: exhausted update retries were not reported" >&2; exit 1; }
-if grep -q '^flip$' "$TMP/journal"; then
-  echo "FAIL: queue pointer flipped although a new-generation machine never configured" >&2
-  exit 1
+[[ "$(cat "$TMP/journal")" == $'build\nauth\ninspect\nenqueue\nrun' ]]
+FIRST_JOB=$(cat "$TMP/job-id")
+export BUILD_ID=cccccccccccccccccccccccccccccccccccccccc
+rm "$DOCKER_CONFIG/config.json"
+bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/next.log" 2>&1
+[[ "$FIRST_JOB" != "$(cat "$TMP/job-id")" ]]
+: > "$TMP/journal"
+if DEPLOY_REUSE_ONLY=0 bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/creation.log" 2>&1; then
+  echo 'unsafe fresh allocation was accepted' >&2; exit 1
 fi
-echo 'PASS: cooperative Fly clone recovery and fresh generation provisioning'
+[[ ! -s "$TMP/journal" ]]
+if BUILD_ID=wrong bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/invalid.log" 2>&1; then
+  echo 'invalid source identity was accepted' >&2; exit 1
+fi
+[[ ! -s "$TMP/journal" ]]
+for source_failure in mismatch dirty; do
+  if [[ "$source_failure" == mismatch ]]; then
+    export TEST_CHECKOUT_SHA=ffffffffffffffffffffffffffffffffffffffff
+  else
+    unset TEST_CHECKOUT_SHA
+    export TEST_DIRTY_SOURCE=1
+  fi
+  if bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/source-$source_failure.log" 2>&1; then
+    echo 'unqualified build source was accepted' >&2; exit 1
+  fi
+  [[ ! -s "$TMP/journal" ]]
+done
+unset TEST_CHECKOUT_SHA TEST_DIRTY_SOURCE
+if TEST_BUILD_FAILURE=31 bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/build-failure.log" 2>&1; then
+  echo 'failed build was admitted' >&2; exit 1
+fi
+[[ "$(cat "$TMP/journal")" == build ]]
+: > "$TMP/journal"
+rm "$DOCKER_CONFIG/config.json"
+if TEST_AUTH_FAILURE=33 bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/auth-failure.log" 2>&1; then
+  echo 'failed registry authentication was admitted' >&2; exit 1
+fi
+[[ "$(cat "$TMP/journal")" == $'build\nauth' ]]
+[[ ! -e "$DOCKER_CONFIG/config.json" ]]
+echo 'worker pool entry: PASS (allocation-free build, immutable enqueue, shared runner, failures before admission)'

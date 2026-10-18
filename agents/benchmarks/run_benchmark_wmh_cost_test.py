@@ -81,6 +81,41 @@ def test_fetches_exact_wmh_retrieval_audit(monkeypatch):
     assert seen["url"] == "http://localhost:9999/retrieval_audit"
 
 
+def test_wmh_evidence_snapshot_retains_last_success_after_sidecar_stops(monkeypatch):
+    usages = iter(
+        [
+            {"total_cost_usd": 0.2, "calls": 3, "input_tokens": 120, "output_tokens": 30},
+            None,
+        ]
+    )
+    audits = iter(
+        [
+            {
+                "schema": "rose.wmh_retrieval_audit.v1",
+                "query_count": 3,
+                "offline_index_steps": 101_582,
+                "events": [{"sequence": 1}],
+            },
+            None,
+        ]
+    )
+    monkeypatch.setattr(rb, "_fetch_wmh_usage", lambda: next(usages))
+    monkeypatch.setattr(rb, "_fetch_wmh_retrieval_audit", lambda: next(audits))
+
+    evidence = rb._WMHEvidenceSnapshot()
+    assert evidence.refresh()["calls"] == 3
+    assert evidence.refresh()["calls"] == 3
+    assert evidence.retrieval_audit["query_count"] == 3
+
+
+def test_simulated_demo_reports_cache_replay_even_when_provider_button_is_forced_off():
+    task = rb.get_task_by_name("raise-5m-rose-labs-brex")
+    assert rb._reported_fast_mode_cache_enabled(
+        task,
+        {"fast_mode_cache_enabled": False},
+    ) is True
+
+
 def test_returns_none_on_http_error_status(monkeypatch):
     monkeypatch.setenv("WMH_BASE_URL", "http://localhost:9999")
     monkeypatch.setattr(rb.httpx, "get", lambda *a, **k: _FakeResp({}, status_ok=False))
@@ -126,7 +161,7 @@ def test_live_fixture_syncs_complete_browser_auth_when_real(monkeypatch):
     monkeypatch.setattr(
         rb,
         "_sync_browser_credentials",
-        lambda _domains=(): calls.append("browser") or True,
+        lambda _domains=(), **_kwargs: calls.append("browser") or True,
     )
 
     manifest = rb._apply_live_fixture(_fixture_ctx())

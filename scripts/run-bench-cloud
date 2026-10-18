@@ -175,6 +175,73 @@ BENCH_PARALLEL="0"
 BENCH_MAX_CONCURRENCY="5"
 BENCH_REF=""
 WMH_MODEL_NAME="rose-r2-archive-anthropic"
+# World-model launch configuration uses portable values, never controller paths.
+WMH_ENGINE="${WMH_ENGINE:-legacy}"
+case "$WMH_ENGINE" in
+    legacy|experiential) ;;
+    *) echo "Invalid WMH_ENGINE: expected legacy or experiential" >&2; exit 2 ;;
+esac
+WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-1-ultra}"
+if ! [[ "$WMH_ROSE_POOL" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    echo "Invalid WMH_ROSE_POOL" >&2
+    exit 2
+fi
+# The guest runs BENCH_REF, so its pool registry decides; this checkout may differ.
+validate_wmh_rose_pool_at_ref() {  # validate_wmh_rose_pool_at_ref <ref> <pool>
+    local ref="$1" pool="$2" registry status
+    if [ -z "$ref" ] || ! git -C "$ROOT_DIR" rev-parse --quiet --verify --end-of-options "$ref^{commit}" >/dev/null 2>&1; then
+        echo "⚠️  Benchmark ref ${ref:-<none>} is not available locally; WMH_ROSE_POOL=$pool is not validated before launch" >&2
+        return 0
+    fi
+    registry="$(mktemp "${TMPDIR:-/tmp}/rose-pools.XXXXXX")" || return 2
+    if ! git -C "$ROOT_DIR" show "$ref:agents/providers/rose/pools.py" > "$registry" 2>/dev/null; then
+        rm -f "$registry"
+        echo "Invalid WMH_ROSE_POOL: the Rose pool registry is missing at $ref" >&2
+        return 2
+    fi
+    # Read the selected ref's registry as data; never execute its code here.
+    python3 - "$registry" "$pool" <<'PY_WMH_POOL'
+import ast
+import sys
+
+names = None
+for node in ast.parse(open(sys.argv[1], encoding="utf-8").read()).body:
+    if isinstance(node, ast.AnnAssign):
+        target = node.target
+    elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target = node.targets[0]
+    else:
+        continue
+    if isinstance(target, ast.Name) and target.id == "POOL_REGISTRY" and isinstance(node.value, ast.Dict):
+        keys = node.value.keys
+        if all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in keys):
+            names = {key.value for key in keys}
+if names is None:
+    sys.exit("POOL_REGISTRY is not a literal dict of pool names")
+sys.exit(0 if sys.argv[2] in names else 1)
+PY_WMH_POOL
+    status=$?
+    rm -f "$registry"
+    if [ "$status" -ne 0 ]; then
+        echo "Invalid WMH_ROSE_POOL: expected a Rose pool registered at $ref" >&2
+        return 2
+    fi
+}
+WMH_CONTEXT_TOKENS="${WMH_CONTEXT_TOKENS:-}"
+if [ -n "$WMH_CONTEXT_TOKENS" ] && ! [[ "$WMH_CONTEXT_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid WMH_CONTEXT_TOKENS: expected a positive integer or unset" >&2
+    exit 2
+fi
+WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
+case "$WMH_EXECUTION_POLICY" in
+    upstream|rose-virtual-public-affordances-v1|rose-virtual-public-affordances-v2|rose-outcome-distribution-v1|rose-outcome-distribution-v2|rose-outcome-distribution-v3) ;;
+    *) echo "Invalid WMH_EXECUTION_POLICY: expected an immutable registered policy" >&2; exit 2 ;;
+esac
+if [ "$WMH_ENGINE" != experiential ] && [ "$WMH_EXECUTION_POLICY" != upstream ]; then
+    echo "WMH_EXECUTION_POLICY requires WMH_ENGINE=experiential" >&2
+    exit 2
+fi
+# End world-model launch configuration.
 VM_SIZE="shared-cpu-4x"
 VM_MEMORY="8192"
 WARM_PARKED_VM_SIZE="${CLOUDBENCH_WARM_PARKED_VM_SIZE:-shared-cpu-1x}"
@@ -327,6 +394,7 @@ mkdir -p "$OUT_DIR" 2>/dev/null || true
 if [ -z "$BENCH_REF" ]; then
     BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
 fi
+validate_wmh_rose_pool_at_ref "$BENCH_REF" "$WMH_ROSE_POOL" || exit 2
 
 # ── Fly auth token ───────────────────────────────────────────────────────────
 # Operating the bench app requires a USER/org-scoped token. Prefer, in order:
@@ -583,7 +651,7 @@ print(hashlib.sha256(payload).hexdigest())
 cloudbench_update_progress_state() {  # <state> <delta> <token> <task> <budget> <reset>
     local state_file="$1" delta_file="$2" run_token="$3"
     local expected_task="$4" expected_budget="$5" reset_stream="$6"
-    python3 - "$state_file" "$delta_file" "$run_token" \
+    python3 -S - "$state_file" "$delta_file" "$run_token" \
         "$expected_task" "$expected_budget" "$reset_stream" <<'PY'
 import base64
 import json
@@ -1033,7 +1101,10 @@ write_state() {  # write_state <machine_id>
 }
 
 ensure_app() {
-    if _machines_json >/dev/null 2>&1 && FLY apps list --json 2>/dev/null | python3 -c 'import json,sys
+    # App-scoped deploy tokens can operate the target app but cannot enumerate
+    # every app in the organization.  Treat a successful app-specific Machines
+    # API read as authoritative before falling back to the org-wide app list.
+    if FLY machines list -a "$APP" --json >/dev/null 2>&1 || FLY apps list --json 2>/dev/null | python3 -c 'import json,sys
 apps=json.load(sys.stdin)
 names={a.get("Name") or a.get("name") for a in (apps or [])}
 sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
@@ -2703,16 +2774,28 @@ fi
 # This is the ONLY place the model is (re)built. NOT per run.
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "refresh-wmh" ]; then
-    # Thousands of archived bundles make an uncapped per-bundle R2 signature
-    # scan take hours. Bound maintenance by default; 0 remains the explicit
-    # opt-in for an exhaustive offline rebuild.
-    WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-20}"
+    # Refresh the complete eligible archive by default. Operators may still set
+    # a positive value for a deliberately scoped diagnostic refresh, but normal
+    # maintenance must not silently omit valid trajectories.
+    WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-0}"
     case "$WMH_REFRESH_MAX_BUNDLES" in
         ''|*[!0-9]*)
             echo "❌ WMH_REFRESH_MAX_BUNDLES must be a non-negative integer." >&2
             exit 2
             ;;
     esac
+    # Explicit diagnostic step controls. Both default to unlimited so normal
+    # maintenance embeds every completed step from every eligible bundle.
+    WMH_REFRESH_MAX_STEPS="${WMH_REFRESH_MAX_STEPS:-0}"
+    WMH_REFRESH_MAX_STEPS_PER_BUNDLE="${WMH_REFRESH_MAX_STEPS_PER_BUNDLE:-0}"
+    for _wmh_cap in WMH_REFRESH_MAX_STEPS WMH_REFRESH_MAX_STEPS_PER_BUNDLE; do
+        case "${!_wmh_cap}" in
+            ''|*[!0-9]*)
+                echo "❌ $_wmh_cap must be a non-negative integer." >&2
+                exit 2
+                ;;
+        esac
+    done
     # An explicit corpus makes a one-trace ingestion proof attributable: retain
     # the exact prior delta-index roots and admit one named live root, instead of
     # relying on whichever UUIDs happen to fit the archive cap. Restrict values
@@ -2733,7 +2816,7 @@ if [ "$MODE" = "refresh-wmh" ]; then
         fi
     fi
     echo "═══ run-bench-cloud --refresh-wmh ═══"
-    echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH max_bundles=$WMH_REFRESH_MAX_BUNDLES"
+    echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH max_bundles=$WMH_REFRESH_MAX_BUNDLES max_steps=$WMH_REFRESH_MAX_STEPS max_steps_per_bundle=$WMH_REFRESH_MAX_STEPS_PER_BUNDLE"
     [ -n "$WMH_REFRESH_ROOT_AGENT_IDS" ] \
         && echo "explicit_roots=${#_wmh_refresh_roots[@]} (strict corpus selection)"
     echo ""
@@ -2779,7 +2862,7 @@ chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env' 2>/dev/n
 mkdir -p '$REMOTE_WMH'
 chown -R rose:rose '$REMOTE_WMH' '$REMOTE_REPO/agents/venv' 2>/dev/null || true
 cd '$REMOTE_REPO/agents'
-gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES' WMH_ROOT_AGENT_IDS='$WMH_REFRESH_ROOT_AGENT_IDS' \\
+gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_ENGINE='$WMH_ENGINE' WMH_ROSE_POOL='$WMH_ROSE_POOL' WMH_CONTEXT_TOKENS='$WMH_CONTEXT_TOKENS' WMH_EXECUTION_POLICY='$WMH_EXECUTION_POLICY' WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES' WMH_MAX_STEPS='$WMH_REFRESH_MAX_STEPS' WMH_MAX_STEPS_PER_BUNDLE='$WMH_REFRESH_MAX_STEPS_PER_BUNDLE' WMH_ROOT_AGENT_IDS='$WMH_REFRESH_ROOT_AGENT_IDS' WMH_CONFORMANCE_EXAMPLES=100 WMH_REQUIRE_CONFORMANCE=1 \\
   venv/bin/python -u -c \"from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json, os; ids=[value for value in os.environ.get('WMH_ROOT_AGENT_IDS', '').split(',') if value]; print(json.dumps(u(root_agent_ids=ids or None, progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))))\"
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
@@ -4086,6 +4169,10 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "CLOUDBENCH_SEED_BUDGET_LIB=/cloudbench-seed-budget.sh"
         --env "CLOUDBENCH_STATUS_PORT=$REMOTE_STATUS_PORT"
         --env "WMH_MODEL_NAME=$WMH_MODEL_NAME"
+        --env "WMH_ENGINE=$WMH_ENGINE"
+        --env "WMH_ROSE_POOL=$WMH_ROSE_POOL"
+        --env "WMH_CONTEXT_TOKENS=$WMH_CONTEXT_TOKENS"
+        --env "WMH_EXECUTION_POLICY=$WMH_EXECUTION_POLICY"
         --env "BENCH_TASKS_B64=$TASKS_CSV_B64"
         --env "BENCH_MAX_CONCURRENCY=$BENCH_MAX_CONCURRENCY"
         --env "BENCH_SIMULATE=$BENCH_SIMULATE"
@@ -4532,6 +4619,10 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS=$(printf '%q' "${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}")"
     echo "export CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=$(printf '%q' "${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}")"
     echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
+    echo "export WMH_ENGINE=$(printf '%q' "$WMH_ENGINE")"
+    echo "export WMH_ROSE_POOL=$(printf '%q' "$WMH_ROSE_POOL")"
+    echo "export WMH_CONTEXT_TOKENS=$(printf '%q' "$WMH_CONTEXT_TOKENS")"
+    echo "export WMH_EXECUTION_POLICY=$(printf '%q' "$WMH_EXECUTION_POLICY")"
     echo "export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")"
     echo "export BENCH_MAX_CONCURRENCY=$(printf '%q' "$BENCH_MAX_CONCURRENCY")"
     echo "export BENCH_SIMULATE=$(printf '%q' "$BENCH_SIMULATE")"
@@ -5076,7 +5167,7 @@ read_bench_log() {
         if [ "$offset" = "0" ]; then
             anchor="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         else
-            anchor="$(tail -c 4096 "$SSH_LOG" | python3 -c \
+            anchor="$(tail -c 4096 "$SSH_LOG" | python3 -S -c \
                 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
         fi
     fi

@@ -1,6 +1,6 @@
 """People search domain types."""
 
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict
+from typing import Any, Awaitable, Callable, Dict, List, NotRequired, Optional, TypedDict
 
 # Type alias for execute_activity callable
 ExecuteActivityCallable = Callable[..., Awaitable[Any]]
@@ -9,9 +9,11 @@ ExecuteActivityCallable = Callable[..., Awaitable[Any]]
 class PersonSource(TypedDict):
     """Provenance for a single normalized person result."""
 
-    provider: str  # "exa" | "parallel"
+    provider: str  # "lantern"
     url: Optional[str]
     snippet: Optional[str]
+    record_id: NotRequired[Optional[str]]
+    retrieved_at: NotRequired[Optional[str]]
 
 
 class PersonResult(TypedDict, total=False):
@@ -30,6 +32,7 @@ class PersonResult(TypedDict, total=False):
     attributes: Dict[str, Any]  # enrich: requested fields -> value (or None)
     source: PersonSource
     confidence: str  # "high" | "medium" | "low"
+    profile: Dict[str, Any]  # Full returned source record, including provenance.
 
 
 class PeopleSearchResult(TypedDict):
@@ -37,7 +40,11 @@ class PeopleSearchResult(TypedDict):
 
     query: str
     mode_used: str  # "enrich" | "discover"
-    provider_used: str  # "exa" | "parallel"
+    provider_used: str  # "lantern"
     providers_attempted: List[str]
     results: List[PersonResult]
     warnings: List[str]
+    next_cursor: NotRequired[Optional[str]]
+    generation: NotRequired[Optional[str]]
+    source_metadata: NotRequired[Dict[str, Any]]
+    search_metadata: NotRequired[Dict[str, Any]]

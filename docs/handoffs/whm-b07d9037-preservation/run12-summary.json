@@ -1,0 +1,55 @@
+{
+  "source_sha": "39a0433b8850f38996c7fb1433c043998b6f9eeb",
+  "root_agent_id": "65889659-9f08-4488-917e-9611223be811",
+  "run_id": "6f4ddc5c-6874-4121-b36e-ca5f2f34ce81",
+  "native_session_id": "78d15f8582e54904891498644fe4c1da",
+  "terminal_result": "FAILURE",
+  "passed": 0,
+  "duration_seconds": 3665.3,
+  "failure_reason": "Timeout after 3602s (task timeout=3600s) | Investigate: python agents/benchmarks/agent_latency.py 65889659-9f08-4488-917e-9611223be811 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+  "wmh_usage": {
+    "call_sites": [
+      "wmh_world_model_distribution_v1",
+      "wmh_world_model_timed_distribution_v1"
+    ],
+    "provider_metered_requests": 108,
+    "provider_requests_with_cached_input": 106,
+    "provider_cached_input_tokens": 17673634,
+    "provider_total_input_tokens": 18443391,
+    "provider_cache_write_tokens": 769433,
+    "provider_output_tokens": 700143,
+    "provider_token_hit_pct": 95.82638,
+    "provider_plain_input_tokens": 324,
+    "provider_input_cost_vs_no_cache": 0.1001,
+    "actual_models": [
+      "gpt-6.1-sol-foundry",
+      "openai/gpt-6.1-sol"
+    ],
+    "demo_hits": 0,
+    "demo_misses": 116,
+    "demo_lookups": 116,
+    "demo_hit_pct": 0.0,
+    "demo_stores": 107,
+    "demo_write_only": 0
+  },
+  "result_original_path": "/home/boxes/rose-wmh-merge/agents/benchmarks/runs/20261012_234833_6f4ddc5c-6874-4121-b36e-ca5f2f34ce81_raise-5m-rose-labs-brex.json",
+  "result_sha256": "ced3f734e3a80b0d3cca1acc421c7955e6844bd1d7ac29aa112ed466227cea1a",
+  "original_benchmark_db": "removed by normal owned launcher cleanup before migration snapshot; original transcript/native state retained, fixture source dumps preserved",
+  "finished_utc": "2026-10-12T23:49:23Z",
+  "cleanup": {
+    "benchmark": "clean",
+    "stack": "clean",
+    "wmh": "scope retired; all exact owned processes absent"
+  },
+  "durable_fe_url": "https://www.roselabs.ai/?agent-id=65889659-9f08-4488-917e-9611223be811",
+  "fresh_browser_verified": true,
+  "verified_messages": 55,
+  "private_archive_status": "complete old-host source/private capture; independent replacement authenticated/decrypted all44485original members and restored usable original state; meaningful continuation63eb4817c independently verified; own OLD archival request pending",
+  "native_retirement": {
+    "joined": true,
+    "revision": 105,
+    "completed_world_steps": 105,
+    "receipt_sha256": "e7fe63858245cc665c368098779805995a70824cf646bc2ca5eea1b5364ff0a9"
+  },
+  "unmetered_attempts_notice": "116 DEMO lookups,108 final metered provider rows; do not infer complete billing for attempts without final usage."
+}

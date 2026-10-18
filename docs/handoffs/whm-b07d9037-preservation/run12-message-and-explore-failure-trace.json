@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "status": "Preliminary runtime findings plus executed offline record replay; causal fix and unchanged benchmark outcome remain open",
+  "runId": "wmh-raise-5m-rose-labs-brex-1791845194",
+  "originalSourceSha": "39a0433b8850f38996c7fb1433c043998b6f9eeb",
+  "emailDelivery": {
+    "recipient": "hello@afore.vc",
+    "actualSchedulingBoundary": "agents/domains/message_person/handler.py:MessagePersonManager._deliver_message",
+    "startToCloseSeconds": 60,
+    "maximumAttempts": 1,
+    "simulateModeUsesNativeWMHInsteadOfRealGmail": true,
+    "attempts": [
+      {
+        "toolCallId": "call_XLPRt2gsk7iP6FHWHa6tzxZy",
+        "uiSendingUtc": "2026-10-12T23:37:30.440Z",
+        "uiTimeoutUtc": "2026-10-12T23:38:30.821Z",
+        "nativePredictionId": "bbf7101ba26d4c5290514f083a52d4ae",
+        "nativeStartedUtc": "2026-10-12T23:37:30.739Z",
+        "nativeFinishedUtc": "2026-10-12T23:39:41.484Z",
+        "nativeElapsedSeconds": 130.745,
+        "agentResult": "activity StartToClose timeout",
+        "laterNativeResult": "simulated Gmail provider_accepted send"
+      },
+      {
+        "toolCallId": "call_lMpGlvnkTxg258VUQG8MxZM7",
+        "uiSendingUtc": "2026-10-12T23:42:06.222Z",
+        "uiTimeoutUtc": "2026-10-12T23:43:06.606Z",
+        "nativePredictionId": "49c24f07f89b45d99d336afe52ab86d1",
+        "nativeStartedUtc": "2026-10-12T23:42:06.580Z",
+        "nativeFinishedUtc": "2026-10-12T23:45:07.623Z",
+        "nativeElapsedSeconds": 181.043,
+        "agentResult": "activity StartToClose timeout",
+        "laterNativeResult": "simulated Gmail provider_accepted send"
+      }
+    ],
+    "confirmedCompletedAgentSends": 0,
+    "lateNativeAcceptedSendRecords": 2,
+    "limit": "Scheduling audit confirms60s is shorter than both original native prediction intervals. No fresh live Temporal red/green repair or unchanged benchmark outcome proof was performed; caller cancellation versus late native commit semantics still require an owning-boundary repair. Do not raise a timeout merely to hide the failure."
+  },
+  "exploreFailureCards": {
+    "count": 14,
+    "modelGeneratedSampledErrors": {
+      "count": 8,
+      "GmailHTTP503": 5,
+      "readTimeout": 2,
+      "referenceNotFound": 1,
+      "actualGmailOrWhatsAppServiceResponses": false,
+      "selectedOutcomeProbabilityRange": [0.05, 0.15],
+      "allEightReplayedExactlyThroughOriginalParserSelectionAndCurrentRuntimeAdapter": true,
+      "originalDrawsAndDistributionHashesPreserved": true,
+      "realExecutorCallsDuringReplay": 0,
+      "whyModelsAssignedThoseProbabilities": "Not causally established; probability calibration/model intelligence claim would need a controlled original-request replay. Do not suppress error outcomes or resample to manufacture success."
+    },
+    "actualWMHProviderFailures": {
+      "count": 3,
+      "toolCallIds": ["call_2yg7BvJabu5r7lgTxqGnKajH", "call_SDLOVlP7pYyG58o81acl1F9f", "call_gDN6LZhKeLFCvL8QHywzOvf3"],
+      "nativeResult": "HTTP500 from WMH",
+      "providerObservation": "Part of the previously recorded4 partial-output RoseDeadlineError failures: idle120s; fourth call was browser",
+      "uiResult": "Activity task failed",
+      "exactProviderRequestToNativePredictionMapping": "not captured",
+      "underlyingProviderIdleCause": "open; raw wire capture unavailable"
+    },
+    "runCutoffCancellations": {
+      "count": 3,
+      "toolCallIds": ["call_58EiVTbKadD9ZvCwPMMNqmso", "call_LMwmcNTRBxHcBFEY0G2dY0Ev", "b89906a6-6220-4857-8dfe-e9332d9a89a0"],
+      "nativeFinishedUtcRange": ["2026-10-12T23:48:12.587Z", "2026-10-12T23:48:12.588Z"],
+      "uiResult": "Activity task failed"
+    }
+  },
+  "offlineChecks": {
+    "recordReplayCommand": "cd agents && source venv/bin/activate && PYTHONPATH=. python /home/boxes/rose-wmh-resumed/.context/whm-migration/replay-run12-failures.py",
+    "recordReplayExitCode": 0,
+    "exactFailedExploreRecords": 8,
+    "budgetAuditCommand": "same command plus --require-delivery-budget",
+    "budgetAuditExitCode": 1,
+    "budgetAuditAssertion": "delivery scheduling budget60s does not cover original native send prediction durations181.043s and130.745s",
+    "scope": "Actual delivery scheduling invocation plus recorded-response parsing, preserved-draw selection and runtime normalization; supporting evidence, not live Temporal or benchmark outcome proof",
+    "privateReplayScriptSha256": "d8bfc993deb8e470954a16121c4768ad06ddad5fd3d552f10494d1ce2908aa9f"
+  },
+  "fixtureChanged": false,
+  "nativePolicyOrPromptChanged": false,
+  "sampleOnceReplayKeysChanged": false,
+  "runtimeSourceChanged": false,
+  "newPaidModelCalls": 0,
+  "merged": false,
+  "deployed": false
+}

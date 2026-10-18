@@ -511,17 +511,19 @@ async function syncIntegrations(options: SyncIntegrationsOptions = {}): Promise<
   // Compute overlays omit agentcard so local agentcard-setup reset/complete fixtures hold.
   activeRemotePoolIntegrationIds.clear();
   const computeTokensOnly = options.computeTokensOnly === true;
-  // Full seed imports every Integration for the user. Compute-token overlays
-  // must stay scoped to claude_code/gpt_code (+ the shared compute pool).
+  // Rotating Lantern grants stay with their dedicated owner, never a seed replica.
+  // Compute overlays remain scoped to claude_code/gpt_code (+ the shared pool).
   const userIntegrations = await findProdIntegrations(
     computeTokensOnly
       ? { userId: SEED_USER_ID, name: { in: [...COMPUTE_INTEGRATION_NAMES] } }
-      : { userId: SEED_USER_ID }
+      : { userId: SEED_USER_ID, name: { not: 'lantern_people' } }
   );
   const poolIntegrations = await findProdIntegrations({
     poolingEnabled: true,
     userId: { not: SEED_USER_ID },
-    ...(computeTokensOnly ? { name: { in: [...COMPUTE_INTEGRATION_NAMES] } } : {}),
+    ...(computeTokensOnly
+      ? { name: { in: [...COMPUTE_INTEGRATION_NAMES] } }
+      : { name: { not: 'lantern_people' } }),
   });
   const previouslyPooledLocalIntegrations = await local.integration.findMany({
     where: {
@@ -1406,7 +1408,9 @@ async function sync() {
     if (personIds.length === 0) return 0;
 
     // Cap at the latest 10k messages across all contacts to keep seed fast and
-    // local DB lean; older history isn't needed for dev/testing.
+    // local DB lean; older history isn't needed for dev/testing. A fixture that
+    // must hold a user's whole history raises SEED_MESSAGE_LIMIT; peak heap stays
+    // bounded by the page size either way.
     //
     // PAGED, not materialised. `findMany({ take: 10_000 })` held every row AND
     // its message body in one array before the first write; on a 4GB fleet
@@ -1414,12 +1418,13 @@ async function sync() {
     // SIGKILL (rc=137) which dropped a box from the 2026-07-29 fleet run before
     // its start barrier. Peak heap is now bounded by PAGE x row size, not by the
     // whole table. Enforced by src/tests/unit/seed-memory-ratchet.test.ts.
-    const MESSAGE_LIMIT = 10_000;
+    const MESSAGE_LIMIT = positivePageSize('SEED_MESSAGE_LIMIT', 10_000);
     let messagesSynced = 0;
     for (let skip = 0; skip < MESSAGE_LIMIT; skip += MESSAGE_PAGE_SIZE) {
       const page = await remote.messageRecord.findMany({
         where: { personId: { in: personIds } },
-        orderBy: { timestamp: 'desc' },
+        // id breaks timestamp ties so offset pages never repeat or skip a row.
+        orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
         skip,
         take: Math.min(MESSAGE_PAGE_SIZE, MESSAGE_LIMIT - skip),
         // Production may still be on the previous schema during a deploy.

@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "private/whm-e9afcffd/run16-outreach-grounding-20261014.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "fbe3e0b7d94ef8160d916c37b85919e9f2884fd1b9ba5d03371086f527066ff0",
+  "gzip_sha256": "aed43632523c41f902f671f564f1442dc9ae2bd3dd0d5b15ec42f9110c00f983",
+  "stored_bytes": 4452141,
+  "frames": 1,
+  "files": 15,
+  "original_bytes": 14686728,
+  "manifest_sha256": "5ac0dd3354ea7093e03e4af3701cf1290daae4ad144909fcd13aa538a1074167",
+  "full_readback_verified": true
+}

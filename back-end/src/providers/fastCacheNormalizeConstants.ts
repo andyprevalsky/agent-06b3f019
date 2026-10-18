@@ -1,5 +1,34 @@
 export const CACHE_KEY_VERSION = 'v42';
 
+// Immutable registry metadata mirrors benchmarks/wmh_execution_policy.py.
+// The full policy text remains in Python; owning tests check its SHA.
+const WMH_PUBLIC_AFFORDANCES_POLICY = 'rose-virtual-public-affordances-v1';
+const WMH_PUBLIC_AFFORDANCES_VERSION = '1';
+const WMH_PUBLIC_AFFORDANCES_SHA256 =
+  '49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79';
+const WMH_EXECUTION_POLICIES = new Map([
+  [
+    WMH_PUBLIC_AFFORDANCES_POLICY,
+    { version: WMH_PUBLIC_AFFORDANCES_VERSION, sha256: WMH_PUBLIC_AFFORDANCES_SHA256 },
+  ],
+  [
+    'rose-virtual-public-affordances-v2',
+    { version: '2', sha256: '5dd9924e9a1ff4c54a95ee53c78414961f83ae62deec84b1ed7a670d0d3083c4' },
+  ],
+  [
+    'rose-outcome-distribution-v1',
+    { version: '1', sha256: '650945bf68ee4ba66a6c9f9dca1c3d66be85dd50360f287cb5c924edb2c8ad70' },
+  ],
+  [
+    'rose-outcome-distribution-v2',
+    { version: '2', sha256: '23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0' },
+  ],
+  [
+    'rose-outcome-distribution-v3',
+    { version: '3', sha256: '3ace77b6b1a3a33ca94e69541cd1e671a4c3a7694d3612b9ddc68f1ccdf6da8a' },
+  ],
+]);
+
 /**
  * Cache-key namespace segment for world-model-simulated runs (mirror of
  * agents/providers/fast_cache/normalize.py:world_model_cache_scope — keep in
@@ -12,7 +41,16 @@ export function worldModelCacheScope(): string {
   const mode = (process.env.BENCHMARK_WORLD_MODEL_MODE || 'real').trim().toLowerCase() || 'real';
   if (mode !== 'simulate') return '';
   const model = process.env.WMH_MODEL_NAME || process.env.WORLD_MODEL_NAME || 'rose-archive';
-  return `sim.${model.replace(/[^A-Za-z0-9._-]/g, '-')}:`;
+  let scope = `sim.${model.replace(/[^A-Za-z0-9._-]/g, '-')}`;
+  const policy = process.env.WMH_EXECUTION_POLICY ?? 'upstream';
+  if (policy !== 'upstream') {
+    const registered = WMH_EXECUTION_POLICIES.get(policy);
+    if (registered === undefined) {
+      throw new Error('Unknown WMH execution policy; choose an immutable registered version');
+    }
+    scope += `.policy.${policy}.${registered.version}.${registered.sha256.slice(0, 16)}`;
+  }
+  return `${scope}:`;
 }
 
 export type CacheKind =

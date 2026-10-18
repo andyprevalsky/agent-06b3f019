@@ -597,6 +597,20 @@ async def mock_resolve_fast_cache_goal_activity(
     return {"goal": persisted, "root_goal": persisted}
 
 
+@activity.defn(name="resolve_fast_cache_context_activity")
+async def mock_resolve_fast_cache_context_activity(agent_id: str) -> dict:
+    persisted = await mock_resolve_fast_cache_goal_activity(agent_id)
+    enabled = agent_id in {"agent-test-fastcache", LEFTOVER_CHILD_AGENT_ID}
+    return {
+        "enabled": enabled,
+        "goal": persisted["goal"] if enabled else None,
+        "write_enabled": enabled,
+        "root_agent_id": agent_id,
+        "root_goal": persisted["root_goal"] if enabled else None,
+        "provider_fast_mode": enabled,
+    }
+
+
 @activity.defn(name="call_llm_activity")
 async def mock_call_llm_activity(
     messages_or_agent_id: Any,
@@ -1069,6 +1083,7 @@ MOCK_ACTIVITIES = [
     mock_persist_response_schema_activity,
     mock_send_direct_sms_activity,
     mock_resolve_fast_cache_goal_activity,
+    mock_resolve_fast_cache_context_activity,
     mock_create_approval_request_activity,
     mock_spawn_browser_agent_activity_v3,
     mock_resolve_code_agent_provider_activity,
@@ -2005,6 +2020,8 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.agent_source = "SMS"
     wf.user_context_section = "cached user context"
     wf.fast_cache_goal = "stable persisted goal"
+    # A simulated agent's clock reads world time (two weeks before today here).
+    wf.simulated_clock_offset_seconds = -1_209_600
     context = [{"role": "USER", "text": "durable context"}]
 
     args = wf._continuation_args(context)
@@ -2038,6 +2055,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored.start_time == wf.start_time
     assert restored.user_context_section == "cached user context"
     assert restored.context == context
+    assert restored.simulated_clock_offset_seconds == -1_209_600
     assert restored._continuation_resume_state(context) == state
     # Button (LLM speed) must survive continue_as_new even when DEMO cache is off.
     wf.provider_fast_mode = True
@@ -2972,6 +2990,9 @@ class _FakeWorkflowModule:
 
     def uuid4(self):
         return "00000000-0000-0000-0000-000000000001"
+
+    def patched(self, _patch_id: str) -> bool:
+        return True
 
     def info(self):
         class _Info:
@@ -5751,6 +5772,62 @@ async def test_workflow_mark_failed_signals_parent_with_context():
         assert child_completed["result"]["structured_response"] == {"answer": "best effort"}
     finally:
         _restore_workflow(original)
+
+
+async def test_simulated_agent_finishes_on_the_world_clock_before_signalling_its_parent():
+    """A parent resumes at its children's finish times, so the finish lands first (V8, V10)."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "child-1"
+    wf.parent_agent_id = "root-1"
+    wf.user_id = "u-1"
+    wf.goal = "fail goal"
+    wf.parent_workflow_id = "parent-wf"
+    wf.world_model_mode = "simulate"
+    fake = _FakeWorkflowModule()
+    order = []
+    original_execute = fake.execute_activity
+
+    world_start = int(datetime(2026, 9, 28, tzinfo=timezone.utc).timestamp() * 1000)
+
+    async def execute_activity(fn, args=None, **kwargs):
+        order.append(("activity", getattr(fn, "__name__", "?"), list(args or [])))
+        if getattr(fn, "__name__", "") == "world_clock_activity":
+            return {"agent_id": "child-1", "time_ms": world_start}
+        return await original_execute(fn, args=args, **kwargs)
+
+    fake.execute_activity = execute_activity
+    original_handle = fake.get_external_workflow_handle
+
+    def handle(wf_id):
+        order.append(("signal", wf_id))
+        return original_handle(wf_id)
+
+    fake.get_external_workflow_handle = handle
+    original = _patch_workflow(fake)
+    try:
+        await wf._world_clock_event("register")
+        # The agent's own clock now reads world time (the pinned scenario date).
+        assert wf.simulated_clock_offset_seconds == world_start // 1000 - int(fake.now().timestamp())
+        await wf._world_clock_event("register")
+        await wf._mark_failed(context=[], reason="error", message="Something broke")
+    finally:
+        _restore_workflow(original)
+    clock = [entry for entry in order if entry[0] == "activity" and entry[1] == "world_clock_activity"]
+    assert [entry[2] for entry in clock] == [["register", "child-1", "root-1"], ["finish", "child-1", None]]
+    finish_at = order.index(clock[-1])
+    signal_at = next(index for index, entry in enumerate(order) if entry[0] == "signal")
+    assert finish_at < signal_at
+
+    real = _bare_workflow_instance()
+    real.agent_id = "root-2"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await real._world_clock_event("register")
+        await real._mark_failed(context=[], reason="error", message="Something broke")
+    finally:
+        _restore_workflow(original)
+    assert "world_clock_activity" not in [call[0] for call in fake.activity_calls]
 
 
 async def test_workflow_mark_failed_no_parent_no_signal():
@@ -10334,10 +10411,7 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
         ]
         assert len(llm_args) <= len(positional_params)
         assert llm_args[2] == wf._current_tools, "JIT must preserve the execute-phase tool schema"
-        from domains.param_populator.config import PARAM_POPULATOR_MODEL
-
-        assert llm_args[1] == PARAM_POPULATOR_MODEL
-        assert llm_args[1] != wf.model
+        assert llm_args[1] == wf.model
         assert llm_args[8] == "approval_param_populator"
         assert llm_args[9] == "stable system prompt"
         assert "its 1:45pm local time" in llm_args[10]
@@ -11300,6 +11374,10 @@ async def run_all_tests():
     await r.record_async("wf_get_model_pricing_cache", test_workflow_get_model_pricing_uses_cache)
     await r.record_async("wf_mark_failed_signals_parent", test_workflow_mark_failed_signals_parent_with_context)
     await r.record_async("wf_mark_failed_no_parent", test_workflow_mark_failed_no_parent_no_signal)
+    await r.record_async(
+        "wf_simulated_agent_finishes_on_world_clock_before_parent_signal",
+        test_simulated_agent_finishes_on_the_world_clock_before_signalling_its_parent,
+    )
     await r.record_async(
         "wf_paused_continuation_preserves_state",
         test_workflow_paused_continue_as_new_preserves_deployment_state,

@@ -134,3 +134,26 @@ export async function requireOwnedLiveFixtureCustomer(
   }
   return customer.id;
 }
+
+/** Select local LIVE aliases without changing deployed/global credentials or choosing an identity. */
+export function configureLiveFixtureEnvironment(
+  cardholderId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  const liveId = env.AGENTCARD_ORG_OAUTH_CLIENT_ID_LIVE?.trim() ?? '';
+  const liveSecret = env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET_LIVE?.trim() ?? '';
+  if (Boolean(liveId) !== Boolean(liveSecret)) {
+    throw new Error(
+      'A complete AgentCard LIVE credential pair is required when either alias is set'
+    );
+  }
+  const selected = cardholderId?.trim();
+  if (cardholderId !== undefined && !selected) {
+    throw new Error('--agentcard-cardholder-id requires a nonempty dedicated cardholder ID');
+  }
+  if (liveId && liveSecret) {
+    env.AGENTCARD_ORG_OAUTH_CLIENT_ID = liveId;
+    env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = liveSecret;
+  }
+  if (selected) env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = selected;
+}

@@ -52,7 +52,7 @@
       "title": "Raise Money",
       "raw_user_idea": "Raise me money",
       "normalized_goal": "Build a fundraising target list, personalize outreach, manage follow-ups, and produce approval-gated sends.",
-      "status": "idea",
+      "status": "promoted",
       "likely_environment_modes": [
         "synthetic",
         "hybrid"

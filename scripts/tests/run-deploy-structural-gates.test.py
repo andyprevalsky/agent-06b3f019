@@ -40,7 +40,9 @@ def _registry_commands() -> set[str]:
         parts = re.findall(r'"([^"]*)"', match.group(1))
         if len(parts) >= 2:
             commands.add(" ".join(parts))
-    assert len(commands) == len(listed), f"parsed {len(commands)} gates, runner lists {len(listed)}"
+    assert len(commands) == len(listed), (
+        f"parsed {len(commands)} gates, runner lists {len(listed)}"
+    )
     return commands
 
 
@@ -66,7 +68,10 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         self.assertTrue((ROOT / "front-end" / "src").is_dir())
 
     def test_clone_recovery_is_registered(self) -> None:
-        self.assertIn("bash scripts/tests/deploy-agent-clone-recovery.test.sh", _registry_commands())
+        self.assertIn(
+            "bash scripts/tests/deploy-agent-clone-recovery.test.sh",
+            _registry_commands(),
+        )
 
     def test_compact_benchmark_gates_are_always_registered(self) -> None:
         self.assertTrue(
@@ -111,14 +116,18 @@ class StructuralGateDocumentationTests(unittest.TestCase):
     def test_deploy_md_lists_every_registered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
         missing = sorted(c for c in _registry_commands() if f"`{c}`" not in deploy_md)
-        self.assertEqual(missing, [], f"deploy.md Step 4s is missing registered gate(s): {missing}")
+        self.assertEqual(
+            missing, [], f"deploy.md Step 4s is missing registered gate(s): {missing}"
+        )
 
     def test_deploy_md_lists_no_unregistered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
         registry = _registry_commands()
         documented = {match.group(1) for match in re.finditer(r"`((?:bash|python3) scripts/tests/[^`]+)`", deploy_md)}
         stale = sorted(documented - registry)
-        self.assertEqual(stale, [], f"deploy.md names gate(s) absent from the registry: {stale}")
+        self.assertEqual(
+            stale, [], f"deploy.md names gate(s) absent from the registry: {stale}"
+        )
 
     def test_agents_blackbox_registration_guard_is_a_deploy_gate(self) -> None:
         self.assertIn(
@@ -153,7 +162,9 @@ class StructuralGatePortIsolationTests(unittest.TestCase):
             script = ROOT / command.split()[-1]
             if not script.exists():
                 continue
-            for low, high in re.findall(r"seq\s+(\d{4,5})\s+(\d{4,5})", script.read_text()):
+            for low, high in re.findall(
+                r"seq\s+(\d{4,5})\s+(\d{4,5})", script.read_text()
+            ):
                 ranges.setdefault(script.name, []).append((int(low), int(high)))
 
         overlaps = []
@@ -278,12 +289,118 @@ class LinuxGateFailedStepTests(unittest.TestCase):
 
 
 class StructuralGateRunnerTests(unittest.TestCase):
+    def test_workflow_behavior_has_one_registered_execution(self) -> None:
+        """Execute the real semantic ownership stanza and dispatcher commands.
+
+        Inert owner scripts count invocations and return real child statuses;
+        they stand in for the expensive fleet/workflow fixtures, not the wiring
+        under test. Running the whole semantic suite here would itself duplicate
+        its independently registered parser and session controls.
+        """
+        spec = importlib.util.spec_from_file_location("deploy_runner_owners", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        semantic_source = (
+            ROOT / "scripts/tests/semantic-deploy-gate.test.sh"
+        ).read_text()
+        ownership = semantic_source.split(
+            "# /descend is part of the deploy orchestration surface.", 1
+        )[1]
+        ownership = ownership.split("\n", 1)[1]
+        ownership = ownership.split('node --test "$PROD_SESSION_TEST"', 1)[0]
+        selected = tuple(
+            gate
+            for gate in module.GATES
+            if gate.name
+            in {
+                "descend-command",
+                "auto-rca-workflow",
+                "semantic-deploy",
+            }
+        )
+        cases = (
+            (None, None),
+            ("descend-command", None),
+            ("auto-rca-workflow", None),
+            (None, "missing"),
+            (None, "duplicate"),
+            (None, "wrong-command"),
+        )
+        for failing_owner, registry_fault in cases:
+            with (
+                self.subTest(
+                    failing_owner=failing_owner, registry_fault=registry_fault
+                ),
+                tempfile.TemporaryDirectory(
+                    prefix="deploy-runner-owners-"
+                ) as temporary,
+            ):
+                root = Path(temporary)
+                scripts = root / "scripts/tests"
+                scripts.mkdir(parents=True)
+                calls = root / "calls"
+                for name, filename in (
+                    ("descend-command", "descend-command.test.sh"),
+                    ("auto-rca-workflow", "auto-rca-workflow.test.sh"),
+                ):
+                    (scripts / filename).write_text(
+                        f"printf '%s\\n' {name!r} >> \"$GATE_CALLS\"\n"
+                        f"exit {7 if name == failing_owner else 0}\n"
+                    )
+                registry_path = RUNNER
+                if registry_fault:
+                    registry_path = root / "registry.py"
+                    faults = {
+                        "missing": 'GATES = tuple(gate for gate in GATES if gate.name != "descend-command")',
+                        "duplicate": 'GATES += (Gate("duplicate", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),)',
+                        "wrong-command": 'GATES = tuple(Gate(gate.name, ("bash", "wrong-owner.sh")) if gate.name == "auto-rca-workflow" else gate for gate in GATES)',
+                    }
+                    registry_path.write_text(
+                        RUNNER.read_text() + "\n" + faults[registry_fault] + "\n"
+                    )
+                (scripts / "semantic-deploy-gate.test.sh").write_text(
+                    "set -euo pipefail\n"
+                    f"DESCEND_COMMAND_TEST={str(scripts / 'descend-command.test.sh')!r}\n"
+                    f"AUTO_RCA_WORKFLOW_TEST={str(scripts / 'auto-rca-workflow.test.sh')!r}\n"
+                    f"DEPLOY_COMMAND={str(DEPLOY_MD)!r}\n"
+                    f"DEPLOY_STRUCTURAL_RUNNER={str(registry_path)!r}\n"
+                    'fail() { echo "FAIL: $1" >&2; exit 1; }\n'
+                    'require_text() { grep -Fq -- "$2" "$1" || fail "$3"; }\n'
+                    + ownership
+                )
+                output = io.StringIO()
+                with (
+                    patch.object(module, "ROOT", root),
+                    patch.dict(os.environ, {"GATE_CALLS": str(calls)}),
+                    contextlib.redirect_stdout(output),
+                ):
+                    result = module.run_gates(selected, max_workers=3)
+                observed = calls.read_text().splitlines()
+                self.assertEqual(
+                    sorted(observed),
+                    ["auto-rca-workflow", "descend-command"],
+                    output.getvalue(),
+                )
+                self.assertEqual(
+                    result,
+                    1 if failing_owner or registry_fault else 0,
+                    output.getvalue(),
+                )
+                if registry_fault:
+                    self.assertIn(
+                        "must have exactly one registered behavior owner",
+                        output.getvalue(),
+                    )
+
     def test_default_admission_is_bounded_and_runs_every_gate_once(self) -> None:
         spec = importlib.util.spec_from_file_location("deploy_runner_admission", RUNNER)
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
-        with tempfile.TemporaryDirectory(prefix="deploy-runner-admission-") as temporary:
+        with tempfile.TemporaryDirectory(
+            prefix="deploy-runner-admission-"
+        ) as temporary:
             root = Path(temporary)
             release = root / "release"
             gates = tuple(
@@ -405,7 +522,11 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
             )
             try:
                 deadline = time.monotonic() + 60
-                while not started.exists() and process.poll() is None and time.monotonic() < deadline:
+                while (
+                    not started.exists()
+                    and process.poll() is None
+                    and time.monotonic() < deadline
+                ):
                     time.sleep(0.02)
                 self.assertTrue(started.exists(), "the first gate did not start")
 
@@ -413,7 +534,9 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
                 try:
                     output, _ = process.communicate(timeout=60)
                 except subprocess.TimeoutExpired:
-                    self.fail("runner did not escalate a TERM-resistant gate to SIGKILL")
+                    self.fail(
+                        "runner did not escalate a TERM-resistant gate to SIGKILL"
+                    )
             finally:
                 if process.poll() is None:
                     process.send_signal(signal.SIGTERM)
@@ -421,11 +544,16 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
                     process.communicate(timeout=60)
                 except subprocess.TimeoutExpired:
                     if process.poll() is not None:
-                        self.fail("reaped harness left an open pipe; child ownership is unverified")
+                        self.fail(
+                            "reaped harness left an open pipe; child ownership is unverified"
+                        )
                     # Gate sessions are separate from the outer harness group.
                     # Retire only direct child groups still owned by this parent.
                     children = subprocess.run(
-                        ["pgrep", "-P", str(process.pid)], capture_output=True, text=True, timeout=60
+                        ["pgrep", "-P", str(process.pid)],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
                     )
                     for child in children.stdout.split():
                         identity = subprocess.run(
@@ -444,7 +572,9 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
                     process.communicate(timeout=60)
 
             self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
-            self.assertFalse(never_started.exists(), "signal must not launch pending gates")
+            self.assertFalse(
+                never_started.exists(), "signal must not launch pending gates"
+            )
 
 
 if __name__ == "__main__":

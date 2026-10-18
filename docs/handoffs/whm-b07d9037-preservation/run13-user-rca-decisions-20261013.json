@@ -1,0 +1,53 @@
+{
+  "schema": "rose.wmh.user_rca_decisions.v1",
+  "utc": "2026-10-13T09:38:06.262197+00:00",
+  "base_sha": "d78767ad7622d3becc23fc2aaa7b049a1bc90d89",
+  "decisions": {
+    "Schema-descriptions-20261013": "approved and applied",
+    "DEMO cache reporting": "approved; existing fix retained",
+    "WHM-context-20261013": "not approved; user asked why filtering dropped the goal; proposal remains unapplied",
+    "fixture query-reader": "rejected and superseded by static full-network startup prefix requirement",
+    "unmentioned proposed changes": "rejected; no substitution or application",
+    "WHM errors": "inspect strict validation and reuse existing Rose.complete recovery; original generating cause remains unproven"
+  },
+  "implementation": {
+    "production_change": "Two typed optional description fields; exact approved diff.",
+    "source_hashes": {
+      "back-end/src/domains/agents/types.ts": "a3ae0aef1dcc9f8f32a53ba4ef1f5766625d7d534327a44b6f90e212560340fc",
+      "back-end/src/tests/blackbox/agents-configuration.cases.ts": "99ebdc56f0e7b17c2df1ea11b5d6ff91be4aadddb9c3ba3e3cf4e3ef69ef1e47",
+      "back-end/src/tests/blackbox/agents-response-schema-descriptions.cases.ts": "99cc503f0f1241b7bcab232b53e736fa235bf1705c07f65f4e4063da4dcd2c7d",
+      "back-end/src/tests/blackbox/agents-edge-routes.cases.ts": "7ef41cd1412cf4b3a32ccfc1e8971a67d9fe5bbe659d646e2e787ba13bff8111"
+    },
+    "registered_validator_cases": 7,
+    "POST_PATCH_persistence_GET_readback": "passed",
+    "full_backend_agents_domain": {
+      "passed": true,
+      "seconds": 29.156,
+      "run_id": "whm-schema-descriptions-e9afcffd-20261013",
+      "owned_database": "victoria_whm-gen1-e9afcffd-schema",
+      "backend_port": 28850,
+      "fake_temporal": true,
+      "outbound_replay": true,
+      "owned_backend_cleanup_verified": true
+    },
+    "prettier": "passed",
+    "eslint": "passed",
+    "typescript": "passed"
+  },
+  "preservation": {
+    "originals_retained": true,
+    "Freedom_unchanged": true,
+    "protected_instructions_unchanged": true,
+    "frozen_Tamy_fixture_unchanged": true,
+    "context_patch_applied": false,
+    "new_paid_model_calls": 0,
+    "new_paid_benchmark": false,
+    "PR_merge": false,
+    "deploy": false
+  },
+  "remaining": {
+    "benchmark_outcome": "open; no new paid trial authorized",
+    "static_network_prefix": "preparing exact source/context proof; no runtime reader",
+    "validation_retry": "offline owning-boundary proof in progress; no retry-semantics source change applied"
+  }
+}

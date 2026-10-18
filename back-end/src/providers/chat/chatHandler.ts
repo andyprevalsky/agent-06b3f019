@@ -1,3 +1,4 @@
+import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
 /**
  * Chat Handler - Core orchestrator for chat mode.
  * Implements the fixed LLM call sequence based on Manus architecture:
@@ -208,6 +209,7 @@ export async function handleChatMessage(config: {
         prefetchedAgent
       );
     } catch (error) {
+      if (isWorkflowStartAdmissionPending(error)) throw error;
       // Pre-acceptance failures only: startTemporalWorkflowForChat swallows
       // post-acceptance broadcast errors and returns true after acceptance.
       // Always rethrow after terminalizing so we never claim `complete` while an

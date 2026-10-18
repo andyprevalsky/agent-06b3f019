@@ -627,6 +627,7 @@ def verify_bootstrap_current(
                     "🧠 Re-ensuring Fast Mode cache schema (post-restore)...",
                     "🗜️  Saving seed dump for fast future warm-starts",
                     "📦 Installing front-end dependencies...",
+                    "📦 Ensuring Playwright browser assets...",
                     "🌱 Local database already seeded; syncing browser credentials...",
                     "🌱 Syncing production data to local database",
                 )

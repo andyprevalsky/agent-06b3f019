@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import ssl
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -90,6 +91,7 @@ async def foundry_complete(
     cache_namespace: Optional[str],
     ttft_timeout_s: float,
     idle_timeout_s: Optional[float],
+    max_tokens: Optional[int] = None,
 ) -> AsyncIterator[StreamChunk]:
     global _auth_cooldown_until
     endpoint = os.environ["AZURE_FOUNDRY_ENDPOINT"].strip().rstrip("/")
@@ -120,7 +122,11 @@ async def foundry_complete(
                 provider_fast_mode=provider_fast_mode,
                 cache_namespace=cache_namespace,
                 request_id=request_id,
+                # Foundry Standard deployments honor caller cache markers as breakpoints.
+                cache_breakpoints=True,
             )
+            if max_tokens is not None:
+                body["max_output_tokens"] = max_tokens
             if foundry_model(pool_spec) in _NO_REASONING_MODELS:
                 body.pop("reasoning", None)
                 body.pop("include", None)
@@ -129,6 +135,9 @@ async def foundry_complete(
                 async with client.stream("POST", url, headers={"api-key": key}, json=body) as response:
                     if response.status_code != 200:
                         status = response.status_code
+                        from providers.rose.whm_retry_observation import observe_http_failure
+
+                        await observe_http_failure(foundry_model(pool_spec), response, body_read_required=True)
                         # Consume the error for connection reuse; never log its body or key.
                         await response.aread()
                         if status == 429:
@@ -178,7 +187,8 @@ async def foundry_complete(
                         logger.warning(
                             "rose.foundry.stream_failed", deployment=deployment, error_type=type(exc).__name__
                         )
-            except httpx.TransportError as exc:
+            # TLS record alerts can escape httpx as raw SSLError while reading headers.
+            except (httpx.TransportError, ssl.SSLError) as exc:
                 if yielded_visible:
                     raise
                 last_error = RoseServerError(f"Foundry transport failed: {type(exc).__name__}")

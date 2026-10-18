@@ -1,0 +1,276 @@
+{
+  "schemaVersion": 1,
+  "generatedUtc": "2026-10-13T05:04:47.765026+00:00",
+  "kind": "Single original-user-authorized 60-minute simulated fundraising benchmark; analytical scorecard, no outcome qualification",
+  "replacementDevbox": "e9afcffd-7ba9-4bfd-8703-d770952fe1c3",
+  "replacementThread": "https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa",
+  "checkpointSha": "677068533e050195c62afc8118f3d35a8511f5ea",
+  "runSourceSha": "badbbc2b31dc1c09ff84c20101e085cd8875b313",
+  "offlineFollowupCodeSha": "cfc294282",
+  "runId": "f0a05573-f50e-49c2-b3c9-43b3b90dfbf9",
+  "localRunId": "wmh-raise-5m-rose-labs-brex-1791863069",
+  "rootAgent": "882b536f-5210-4c83-bf10-f2b4ce034228",
+  "nativeSession": "69eeb4a4a80d4975af6c7998ba7086b8",
+  "frontendUrl": "https://www.roselabs.ai/?agent-id=882b536f-5210-4c83-bf10-f2b4ce034228",
+  "frontendVerification": {
+    "freshBrowser": true,
+    "rootMessages": 161,
+    "verificationUsesPublisherSignedBenchmarkShareGrant": true,
+    "privateManifest": ".context/rca_evidence/882b536f-5210-4c83-bf10-f2b4ce034228/manifest.json"
+  },
+  "outcome": {
+    "passed": false,
+    "failureReason": "Timeout after 3600s (task timeout=3600s) | Investigate: python agents/benchmarks/agent_latency.py 882b536f-5210-4c83-bf10-f2b4ce034228 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+    "executionWindowSeconds": 3600,
+    "reportedDurationSeconds": 3653.6,
+    "nativeColdStartupSeconds": 604,
+    "launcherStartedToFinishedSeconds": 4399,
+    "simulatedWorldElapsedSeconds": 618018.1,
+    "finalWorldUtc": "2026-10-20T02:40:18.100Z"
+  },
+  "progress": {
+    "approximateTrajectoryPct": 22,
+    "previousRun12Pct": 20,
+    "calibrated": false,
+    "cashCompletionPct": 0,
+    "basis": "More initial form/intake submissions and a longer simulated interval; this is a qualitative position within the 10\u201325% initial-outreach band. It is not the fraction of dollars raised or a success probability.",
+    "worldSteps": 414,
+    "priorWorldSteps": 105,
+    "researchAttempts": 283,
+    "browserAttempts": 121,
+    "codeAttempts": 9,
+    "positiveSubmissionRecords": 11,
+    "distinctSubmissionDestinations": 10,
+    "destinations": [
+      "Initialized Capital",
+      "First Round Capital",
+      "DCVC",
+      "Menlo Ventures",
+      "Bessemer Venture Partners",
+      "NEA",
+      "Zetta Venture Partners",
+      "CRV",
+      "Madrona",
+      "Craft Ventures"
+    ],
+    "qualification": "Native simulated form/intake receipts, not ten qualified investor conversations; NEA appears twice. First Round eligibility and current pitch-material authorization are not fully qualified.",
+    "sourceVerifiedWarmIntroPaths": 0,
+    "emailSendActions": 0,
+    "emailFollowupSequences": 0,
+    "pendingFormReviewEvents": 10,
+    "scheduledEventQualification": "Descriptions say firms may review/respond; these are not sent emails, outreach follow-up schedules, investor replies or meetings.",
+    "investorRepliesEstablished": 0,
+    "investorMeetingsEstablished": 0,
+    "commitments": 0,
+    "signedInstruments": 0,
+    "pendingWires": 0,
+    "settledProceedsCents": 0
+  },
+  "runtime": {
+    "nativeArtifact": "grounded-world-model-785e30597233ee43e354",
+    "manifestSha256": "cdc82bf8b55b35309c5e6925659fd7e74e51825dbccf2dc338b5777fbdffe703",
+    "executionIdentity": {
+      "schema": "rose.wmh_native_execution.v1",
+      "base_world_model_id": "grounded-world-model-785e30597233ee43e354",
+      "base_world_model_manifest_sha256": "cdc82bf8b55b35309c5e6925659fd7e74e51825dbccf2dc338b5777fbdffe703",
+      "base_protocol_version": "text-world-model-v3",
+      "base_protocol_sha256": "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122",
+      "policy_id": "rose-outcome-distribution-v3",
+      "policy_version": "3",
+      "policy_sha256": "3ace77b6b1a3a33ca94e69541cd1e671a4c3a7694d3612b9ddc68f1ccdf6da8a",
+      "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+      "effective_system_sha256": "d772e38450ffae45f44598e215b9cf50237062f86ad867d4a1d4fa7c9c198041",
+      "prediction_protocol": "rose-timed-outcome-distribution-v1",
+      "runtime_config": {
+        "inference_pool": "rose-1-flash",
+        "inference_pool_sha256": "86d6cf8a469f551ae43a8b68aafa642f1656652763d11efb6b58bf77f1f6261c",
+        "azure_first": true,
+        "exclude_failed_tool_examples": true
+      },
+      "execution_sha256": "06108d0f161565de09492f220413478882bbeed5441872fdd7dd3970359ec78d"
+    },
+    "baseArtifactAndPolicyPreserved": true,
+    "JSONModeInThisRun": false,
+    "nextPreparedJSONMode": true,
+    "nativeParallelismAndSharedStatePreserved": true,
+    "sampleOnceAndReplayKeysPreserved": true
+  },
+  "fixture": {
+    "frozenSource": "whm_gen1_e9afcffd_fixture_20261012",
+    "seedMessageLimit": 100000,
+    "runningDatabaseVerifiedTamyMessages": 42910,
+    "byChannel": {
+      "IMESSAGE": 23130,
+      "EMAIL": 10593,
+      "WHATSAPP": 9187
+    },
+    "nativeStartingContactsCount": 2225,
+    "limitation": "All 42,910 messages were seeded correctly. The native seed contains source counts/connectivity; whole specialized simulation bypasses the real grep-backed Explore path. One tested long message-line prefix shared by two fixture rows appears later in a candidate goal and five histories; absence of IDs/prefixes does not prove absence of paraphrases. Full-history source access is not demonstrated.",
+    "nativeInitialStateDefaultSerializedBytes": 10523,
+    "nativeInitialStateRawFileBytes": 13909,
+    "nativeInitialStateCompactCanonicalBytes": 10151,
+    "nativeInitialStateSha256": "cdf955f29336eb54f70e3779bc8c07b79db6bf2c4a80f7d5bf0c61ba5e183c49",
+    "offlineSourceAccessPreparation": {
+      "messageRecords": 42910,
+      "contactRecords": 2225,
+      "snapshotRecords": 45135,
+      "messageDocumentBytes": 73266788,
+      "contactDocumentBytes": 733549,
+      "genericGrepReadOnlyVerified": true,
+      "runtimeWired": false
+    }
+  },
+  "latency": {
+    "agent_latency": {
+      "terminal_calls": 522,
+      "starts_without_terminal": 0,
+      "mean_seconds": 7.813372406130268,
+      "p95_seconds": 26.259796,
+      "p99_seconds": 42.199525
+    },
+    "wmh_latency": {
+      "terminal_calls": 540,
+      "starts_without_terminal": 0,
+      "mean_seconds": 8.024074074074074,
+      "p95_seconds": 11.0,
+      "p99_seconds": 14.0
+    }
+  },
+  "latencyQualification": "1-second log timestamps; failed-JSON completions are included when their Rose terminal event exists",
+  "cache": {
+    "DEMO": {
+      "hitPct": 0,
+      "nativeHits": 0,
+      "nativeLookups": 540,
+      "agentHits": 0,
+      "agentLookups": 416,
+      "combinedLookups": 956,
+      "durableStoresVerified": 0,
+      "loggedNativeStores": 415,
+      "explicitFrozenWriteSkips": 415
+    },
+    "agentPrompt": {
+      "final_metered_calls": 522,
+      "all_input_tokens": 7711094,
+      "cache_read_tokens": 6303112,
+      "prompt_cache_hit_pct": 81.7408269176851
+    },
+    "WMHPrompt": {
+      "final_metered_calls": 540,
+      "all_input_tokens": 128970655,
+      "cache_read_tokens": 123694509,
+      "prompt_cache_hit_pct": 95.90903372554013
+    },
+    "normalization": "Prompt cache = read/all input; DEMO = complete-response replay/lookups. Original benchmark snapshot uses read/(read+write) and reported 83.2%, separate from final all-input agent rate81.7408%."
+  },
+  "cost": {
+    "azureWMHUsd": 6.026273560000002,
+    "azureAgentUsd": 8.742181900000002,
+    "azureTotalUsd": 14.768455460000004,
+    "openrouterCurrentListEstimateUsd": 0.047505588,
+    "openrouterRepositoryRecordedEstimateUsd": 0.05197929999999999,
+    "totalMeteredListEstimateUsd": 14.815961048000004,
+    "currency": "USD",
+    "invoiceReconciled": false,
+    "coverage": "All final owned worker/native metering including invalid replies and cleanup; incomplete usage, infrastructure, region/deployment/contract differences not reconciled. Azure funded-credit user-facing0 is not Azure spend0.",
+    "ratesPerMillion": {
+      "AzureLuna": {
+        "plainInput": 0.2,
+        "read": 0.02,
+        "write": 0.25,
+        "output": 1.2
+      },
+      "AzureSol": {
+        "plainInput": 2,
+        "read": 0.2,
+        "write": 2.5,
+        "output": 10
+      }
+    },
+    "longContext": {
+      "thresholdInput": 272000,
+      "inputMultiplier": 2,
+      "outputMultiplier": 1.5,
+      "nativeLongContextCalls": 214
+    },
+    "pricingSources": [
+      "https://azure.microsoft.com/en-us/blog/gpt-5-6-now-available-in-microsoft-foundry/",
+      "https://azure.microsoft.com/en-us/blog/gpt-6-astra-sol-and-luna-for-production-agents-in-microsoft-foundry/",
+      "https://openrouter.ai/qwen/qwen3.8-27b"
+    ]
+  },
+  "failureDiagnostics": {
+    "nativeAttempts": 540,
+    "firstAttemptRejections": 100,
+    "repairAttemptRejections": 25,
+    "exhaustedRepairDistinctCallIds": 21,
+    "subsequentlyCommittedAfterActivityRetry": 17,
+    "ultimatelyUncommittedCallIds": 4,
+    "activityStartToCloseTimeoutMentions": 0,
+    "failedGeneralPurposeAgentsByStepLimit": 8,
+    "sampledLiveToolIsErrorObservations": 0,
+    "semanticPredictionFidelityMeasured": false,
+    "rawRejectedRepliesInThisRun": "Not retained by original provider; exact sent Rose wire layouts also not captured. Canonical inputs alone do not prove identical wire messages. New prepared code captures rejected bytes and credential-free collect inputs privately.",
+    "retrievedExampleAppearances": 2318,
+    "failedRetrievedExampleAppearances": 0,
+    "rejectedProtocolAttempts": 125,
+    "rejectedProtocolAttemptPct": 23.14814814814815,
+    "rejectedProtocolQualification": "125 native protocol errors: 111 JSON syntax/trailing-data errors and 14 structural/semantic errors; JSON mode alone does not enforce all native invariants.",
+    "failedGeneralPurposeAgentQualification": "Eight investor task children reached 25 execute calls each; these are general-purpose agent caps, not eight Explore-loop caps. Verifier-context investigation is separate from sampled tool failures.",
+    "rejectionBreakdown": {
+      "expectingCommaDelimiter": 91,
+      "extraData": 18,
+      "expectingColonDelimiter": 1,
+      "expectingPropertyName": 1,
+      "duplicateJSONKey": 7,
+      "invalidToolObservationOrCallIdentity": 3,
+      "probabilitiesDoNotSumToOne": 3,
+      "invalidOutcomeKeys": 1
+    },
+    "distinctRejectedCallIds": 93,
+    "meteredCompletionsFinishStop": 540,
+    "rejectedAttemptActualModels": {
+      "gpt-5.6-luna-foundry": 124,
+      "qwen/qwen3.8-27b": 1
+    },
+    "rootVerifierScoreQualification": "Internal root verifier reported 1.0 with zero funding; canonical benchmark remained FAIL. Original USER goal and field-description loss are separate investigated contracts; no causal model replay or fundraiser repair claimed.",
+    "nativeProtocolRejectionsOnFailedGPChildren": 92,
+    "failedGPChildRejectionBreakdown": {
+      "syntax": 82,
+      "protocol": 10
+    }
+  },
+  "preservation": {
+    "allOriginalSixArchivesRemainAuthenticatedAndPreserved": true,
+    "newPrivateArchiveReceipt": "docs/handoffs/whm-b07d9037-preservation/run13-private-results-receipt.json",
+    "newPrivateArchiveFiles": 981,
+    "newPrivateArchiveFullAuthenticatedReadback": true,
+    "privateDbSnapshot": "Pre-cutoff consistent dump, captured2026-10-13T04:41:00Z; not claimed as final DB bytes.",
+    "finalTranscriptAndNativeRetirementPreserved": true,
+    "additionalPrivateAgentDumpsReceipt": "docs/handoffs/whm-b07d9037-preservation/run13-agent-dumps-receipt.json",
+    "additionalPrivateFiles": 417,
+    "additionalPrivateFullAuthenticatedReadback": true,
+    "totalNewPrivateFilesAuthenticated": 1398
+  },
+  "cleanup": {
+    "benchmark": "clean",
+    "stack": "clean",
+    "nativeScope": "retired",
+    "nativeJoinVerified": true,
+    "exactOwnedProcessIdsAbsent": [
+      4085375,
+      4182967,
+      4085435,
+      4085640
+    ]
+  },
+  "validation": {
+    "runSourceBeforeLaunch": "native58/provider194; Rose224; fast-cache-client, message-person, spawn-agent, workflow and workflow-determinism passed",
+    "offlineFollowup": "native59/provider200, Rose224 and cache suites passed; source files copied exactly from tested separate worktree; no new paid trial",
+    "RCAOutcomeStillOpen": true,
+    "offlineRCAOwningSuites": "world-model-harness and fast-cache-client: 2 domains passed in 16.5s; 59 native and 208 provider/reliability cases; isolated Ruff 0.17.0 passed"
+  },
+  "merged": false,
+  "deployed": false,
+  "nextPaidTrialAuthorized": false
+}

@@ -1,0 +1,1020 @@
+{
+  "schema": "rose.native_policy_conformance_portable_qualification.v1",
+  "scope": "Local native fixed-suite open-loop qualification only. No full-loop fundraising, viewer replay or production deployment claim. Contains aggregate metrics and opaque immutable evidence references; no raw goals, state, private facts, demo prose or provider output.",
+  "report": {
+    "path": ".context/native-policy-live-20261007-tls-fixed/conformance.json",
+    "sha256": "0c91846b6a9688a08b982186a9f9965af21b597c2fcca353ad4ac5e0ba114e7b"
+  },
+  "audit": {
+    "path": ".context/native-policy-live-20261007-tls-fixed/conformance-saved-capture-review.json",
+    "sha256": "198534dc2e0fdcf18be3e509a9fdc1b2c660cfc391ab501e2128bcac4a4f5597"
+  },
+  "source_snapshot": {
+    "path": ".context/native-policy-live-20261007-tls-fixed/source-snapshot.json",
+    "sha256": "6a424c124d8d89c574f0a837d42a151b6d44f9a59dad6e20e68e565914f55b59"
+  },
+  "startup": {
+    "path": ".context/native-policy-live-20261007-tls-fixed/startup.json",
+    "sha256": "a2c1379c107c253242b2b6983aa2dc4ae65c9260ec7be387c83d492c5b5431ec"
+  },
+  "session_owners": {
+    "path": ".context/native-policy-live-20261007-tls-fixed/conformance-session-ids.json",
+    "sha256": "0cdeb1d17108dcb35a199d31a538dc994cb8b73e349fbd9d696d145738e1f232"
+  },
+  "native_execution_identity": {
+    "schema": "rose.wmh_native_execution.v1",
+    "base_world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+    "base_world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+    "base_protocol_version": "text-world-model-v3",
+    "base_protocol_sha256": "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122",
+    "policy_id": "rose-virtual-public-affordances-v1",
+    "policy_version": "1",
+    "policy_sha256": "49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79",
+    "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+    "effective_system_sha256": "fcb2596385c9456e62d6e21f3fe1ac6b64b693e833c3e4bb0a78e1f4fe21007f",
+    "execution_sha256": "6db30ce3489b2d492af88afc22c0589036ec0eca70faa685c440a5152ee960f9"
+  },
+  "actual_source_sha256": {
+    "agents/benchmarks/wmh_execution_policy.py": "0de27ed2cd7fc92f44c73571ea0b023912e27ad469de643872ca8141749d37cf",
+    "agents/benchmarks/experiential_world_model.py": "44216bbbbaaefd3620be35af5cc04c5481d9b0c96780601ebb0a306e841b96c1",
+    "agents/benchmarks/serve_experiential_world_model.py": "3ab6f17e61b72413873f9f1bda59261a1e2fdc1becaa680362e2b0cb288e052b",
+    "agents/benchmarks/experiential_bridge.py": "520b115c1f1040c02fc3da8748766f12fe5d1c00a0f957303bcbf2e04f64c1f4",
+    "agents/benchmarks/wmh_rose_provider.py": "a424a38e38aadf00bd484b0b6eef77408890f6b0e051dac776c9883fde735be7",
+    "agents/benchmarks/world_model_harness.py": "eb0df7034233c7bb1f71540245f97c29e5614d8595f5f2e6163cc65fd3aca4bc",
+    "agents/benchmarks/run_world_model_conformance.py": "9bdc3e4f4f80bfc386cd6f75ccf57e12619296a2d084f8863ee01c5ef1c2ad1f",
+    "agents/providers/fast_cache/normalize.py": "2f567a90d3af4886ec96e546ca1239297b8f4c33d879cd2bb5bf1cb3cb4af37d",
+    "agents/tests/fast_cache/test_fast_cache.py": "b42318bd4c561db568da00b9d1497747d40158d2906a7b5d87f9ce2aae01999d",
+    "agents/tests/blackbox/world_model_harness.blackbox.py": "13cfee3b5212b3e9af2afae2ebfdf0f03097a6076a3454c4a612e33224daa93f",
+    "scripts/run-bench-cloud": "cb7a802b8fe64d9e2d491d899fab56dc3e00581f0b1298b0869fb257a57e086d",
+    "agents/benchmarks/serve_world_model.py": "c33eb725bfa9ef26fc27193081c513b1ed58a63a918c73004603025e488fe6c3",
+    "agents/benchmarks/wmh_rose_provider_test.py": "151f0a3f8ca1ece02c3c328153a1b581675590c2fbd83b855b080e7bce6cf322",
+    "agents/benchmarks/experiential_world_model_checks.py": "b539daec41a846f97d2ef16dc379211fce85bc5a2d7b8c3bd9f98444b35193b7",
+    "back-end/src/providers/fastCacheNormalizeConstants.ts": "8ddb397920ac5be649f2978cca20c17313f9ab4d951c0746f5b726edd344e249",
+    "back-end/src/tests/unit/fast-cache-normalize.test.ts": "635641b0836830f4f007e1d97f5d653baf95186f3b37f2881a00f41f17e94ab0",
+    "agents/providers/rose/waterfall.py": "a0426cb480a77b5c21a8124295677f6f2a40703a7ea96e956da7632cb5f623e5",
+    "agents/tests/blackbox/rose.blackbox.py": "cb9fd75719dec7fd09a3d91cce96ed4d52dcd76b23da9bbe5783dcb0c6ae0092",
+    "back-end/src/tests/unit/fast-cache-normalize-policy-controls.ts": "82c1ad7bd32371482b437a59f08572b88524d6b2fa4c4fad18fb9240f430237e"
+  },
+  "source_snapshot_head": "f647c1c8be39a54ba1f97747fbd2a5456c69f431",
+  "current_repo_head": "64f856257b6dcdd4783296c76a13e7967c4fe875",
+  "source_snapshot_byte_match": true,
+  "gate": {
+    "status": "passed",
+    "examples": 100,
+    "mean_score": 0.8609351795633334,
+    "prediction_errors": 0,
+    "dimensions": {
+      "artifact_refs": 0.77,
+      "content_accuracy": 0.584675897816665,
+      "error_behavior": 0.95,
+      "schema_validity": 1.0,
+      "state_transition_correctness": 1.0
+    },
+    "min_mean_score": 0.7,
+    "min_content_accuracy": 0.25
+  },
+  "proof": {
+    "independent_report_and_category_aggregates_match": true,
+    "independent_mean_score": 0.8609351795633334,
+    "independent_dimension_means": {
+      "artifact_refs": 0.77,
+      "content_accuracy": 0.584675897816665,
+      "error_behavior": 0.95,
+      "schema_validity": 1.0,
+      "state_transition_correctness": 1.0
+    },
+    "all_100_official_request_hash_and_candidate_call_valid": true,
+    "official_provider_free_scorer_matches_report_cases": 100,
+    "failed_prediction_capture_count": 0,
+    "official_native_parser_and_call_validator_passes": 100,
+    "all_dimensions_match_tolerance": 1e-12,
+    "unique_current_generation_sessions": 100,
+    "selection": "Current ready-to-report capture for exact call ID with exact health/suite/report execution descriptor, effective-system SHA and complete request SHA; each successful case additionally matches official parser/scorer and every reported dimension; any failed case retains its exact native error capture.",
+    "current_generation_ready_at_ms": 1791387258022,
+    "report_file_at_ms": 1791387550269,
+    "excluded_capture_counts": {
+      "older_file_mtime": 673
+    },
+    "actual_model_counts": {
+      "openai/gpt-6-sol": 47,
+      "gpt-6-sol-gpt": 53
+    },
+    "zero_retained_demo_cases": [
+      10,
+      11,
+      13,
+      14,
+      15,
+      17,
+      24,
+      29,
+      31,
+      32
+    ],
+    "exact_target_transition_retrieved_cases": [],
+    "cases_score_below_0_7_count": 16,
+    "content_below_0_25_count": 24,
+    "error_behavior_mismatch_count": 5,
+    "artifact_refs_incomplete_count": 23
+  },
+  "attempt_accounting": {
+    "native_captured_attempts": 101,
+    "successful_scored_cases": 100,
+    "case_prediction_errors": 0,
+    "recoverable_attempt_errors": 1,
+    "recovered_case": 4,
+    "protocol_repair": 1,
+    "error_type": "TextWorldModelProtocolError",
+    "error": "WMH prediction rejected: Extra data: line 1 column 2659 (char 2658)",
+    "provider_accounting_rows": 101,
+    "provider_log": {
+      "path": ".context/native-policy-live-20261007-tls-fixed/serve.log",
+      "sha256": "3cb6a94e77d1cc2fbf82a7648928b6b7578c74299472d31041b7d454ec636f58"
+    },
+    "accounting_line_numbers": [
+      132,
+      144,
+      149,
+      152,
+      201,
+      227,
+      230,
+      249,
+      254,
+      264,
+      290,
+      310,
+      317,
+      350,
+      370,
+      386,
+      404,
+      412,
+      430,
+      449,
+      471,
+      484,
+      491,
+      529,
+      535,
+      562,
+      572,
+      591,
+      616,
+      622,
+      646,
+      660,
+      705,
+      710,
+      717,
+      763,
+      775,
+      812,
+      819,
+      837,
+      859,
+      866,
+      874,
+      915,
+      938,
+      949,
+      973,
+      986,
+      1003,
+      1008,
+      1018,
+      1042,
+      1061,
+      1068,
+      1089,
+      1111,
+      1117,
+      1129,
+      1140,
+      1179,
+      1185,
+      1196,
+      1218,
+      1231,
+      1251,
+      1267,
+      1288,
+      1299,
+      1317,
+      1324,
+      1330,
+      1354,
+      1392,
+      1413,
+      1420,
+      1425,
+      1481,
+      1495,
+      1513,
+      1518,
+      1530,
+      1563,
+      1570,
+      1577,
+      1604,
+      1621,
+      1633,
+      1656,
+      1659,
+      1662,
+      1667,
+      1690,
+      1722,
+      1739,
+      1747,
+      1751,
+      1759,
+      1765,
+      1771,
+      1777,
+      1783
+    ],
+    "limits": "Provider completion rows and native attempts are preserved separately; 101 completions does not mean101casepasses. Costs are provider-side accounting, not an invoice claim."
+  },
+  "category_audit": [
+    {
+      "category": "auth_approval",
+      "examples": 1,
+      "mean_score": 1.0,
+      "content_accuracy": 1.0,
+      "cases_score_below_0_7": [],
+      "cases_content_below_0_25": [],
+      "cases_error_behavior_mismatch": [],
+      "cases_artifact_ref_mismatch": [],
+      "failed_prediction_indices": [],
+      "worst_case_index": 0,
+      "worst_case_score": 1.0,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/0e80962a28654f0f8b3b230cefe2dc39/03b10a8b157d4f11ac2581cd6e401525.json",
+        "sha256": "9b7c6a8e409a896794ce1f04d64f194281262979bd807cced370c6c739c3d899"
+      },
+      "exact_real_retrieved_example_receipts": [
+        {
+          "position": 0,
+          "transition_id": "rag-transition-feb081ac3d854ae9651f",
+          "context_ref": "context-4133c5fdc9480933107f7b4d654ebd42dbf933c7ec50c132fd513a55e51e1f5f",
+          "tool_name": "rose.auth_approval.request_user_approval",
+          "action_sha256": "63ecf049ef4070e476e1da968d6c174f251c383957368f480ca43f677a47ffe8",
+          "observation_sha256": "68b623a35b1ad92dc58370cc199947784f745c6b249f37f852eb8022b2a171e7",
+          "context_sha256": "4133c5fdc9480933107f7b4d654ebd42dbf933c7ec50c132fd513a55e51e1f5f",
+          "exact_example_sha256": "968a86b4675a6522422c7c38fe875e51b4305f83dcfa35a07d6dc1c6715a7176",
+          "observation_is_error": false,
+          "observation_characters": 954
+        },
+        {
+          "position": 1,
+          "transition_id": "rag-transition-5e8f2c616f24c457e18b",
+          "context_ref": "context-f7846e2b2b6a1c37985f8bddfab30229b0627c02f07f421d2ca5a4ca99890381",
+          "tool_name": "rose.auth_approval.request_user_approval",
+          "action_sha256": "75c96f2f04479cc6d65c2e13eaf4c04f57e9e7409e924554c2dede27017f821e",
+          "observation_sha256": "c1faa2377b68a7b710be984541b67d74f74f11854d62ae469a4ef82399058029",
+          "context_sha256": "f7846e2b2b6a1c37985f8bddfab30229b0627c02f07f421d2ca5a4ca99890381",
+          "exact_example_sha256": "8c754df7ff02c017062ae8c5da7482fcd41e0634089e5277597441f6059f29fe",
+          "observation_is_error": false,
+          "observation_characters": 1047
+        },
+        {
+          "position": 2,
+          "transition_id": "rag-transition-3f91cd39e0e021685818",
+          "context_ref": "context-3657d034665ba116c06eca59d85a581826d579bede35983c49ab3effaa45932f",
+          "tool_name": "rose.auth_approval.request_user_approval",
+          "action_sha256": "a68196e3582d9e30c8cb2d4507fb6150678bcfee8548784287d0e6109ba8efe3",
+          "observation_sha256": "c1ce369949c47a11bdd0c3cf496a3005a293e40893d8f7002a976663b3f360ee",
+          "context_sha256": "3657d034665ba116c06eca59d85a581826d579bede35983c49ab3effaa45932f",
+          "exact_example_sha256": "0265b501a7a6f75fe1c12de64b132ed4a29186c89f71a67351f6f49c6b7d8dc9",
+          "observation_is_error": false,
+          "observation_characters": 1062
+        },
+        {
+          "position": 3,
+          "transition_id": "rag-transition-67e58d14dca718bd2427",
+          "context_ref": "context-d96195468ea377a3b9305ace9987d9921634530e14337519bc27b8ab4ded0567",
+          "tool_name": "rose.auth_approval.request_user_approval",
+          "action_sha256": "e32da0a7d05dbb4d58c0eb1399c8c5a1352f8700362cb4fee89cfe94fd60a580",
+          "observation_sha256": "1eed7ade7e8b3587feb2772d94902e7378e8465b348be3ecb5a98f104b7c9ed2",
+          "context_sha256": "d96195468ea377a3b9305ace9987d9921634530e14337519bc27b8ab4ded0567",
+          "exact_example_sha256": "3551fbf4d059ece0f2d853fbcec5206d117a273a70ce24f230d94778fbd896a8",
+          "observation_is_error": false,
+          "observation_characters": 951
+        },
+        {
+          "position": 4,
+          "transition_id": "rag-transition-029d5b5607d7dd41fd11",
+          "context_ref": "context-d83ac452ec97cc17ee88459866a9408a445e42b8c32cbd67d1d56d2585c5b439",
+          "tool_name": "rose.auth_approval.request_user_approval",
+          "action_sha256": "2f29c79ba42945b31ca7cf51303a21284c887ffe37ec051c147302ee0c50bde8",
+          "observation_sha256": "1933843fc85e09d04c7471b324c80b865c3a2685c018bbf73a2cece011745dfc",
+          "context_sha256": "d83ac452ec97cc17ee88459866a9408a445e42b8c32cbd67d1d56d2585c5b439",
+          "exact_example_sha256": "992dfc0d13919deaecc3a3c634a7b4add2ad3e260a888937c5a94de9d21c5f28",
+          "observation_is_error": false,
+          "observation_characters": 1080
+        }
+      ]
+    },
+    {
+      "category": "browser",
+      "examples": 42,
+      "mean_score": 0.9330524705468974,
+      "content_accuracy": 0.6890718765440107,
+      "cases_score_below_0_7": [
+        60
+      ],
+      "cases_content_below_0_25": [
+        39,
+        80,
+        84
+      ],
+      "cases_error_behavior_mismatch": [],
+      "cases_artifact_ref_mismatch": [
+        60
+      ],
+      "failed_prediction_indices": [],
+      "worst_case_index": 60,
+      "worst_case_score": 0.6643478260869565,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/eb2b74380e684f40b47a71816774b033/8679c61305e1496cb1b179cf74a201e5.json",
+        "sha256": "a51f7e05aaa09a27f3aa34100e4b868c02fdf7faaf96cd6ddea61bd0ba4ea688"
+      },
+      "exact_real_retrieved_example_receipts": [
+        {
+          "position": 0,
+          "transition_id": "rag-transition-668104b15b1464b564a8",
+          "context_ref": "context-3b96fa3c001feed8c99b327a33648f0ebfa9c69be1c98e7e393be3951aedb27e",
+          "tool_name": "rose.browser.browser_action",
+          "action_sha256": "3ff76b6c7adacf85e6cfa0efa4f01da0deb74f9e3dd5a284aa88b26b0de2fbb8",
+          "observation_sha256": "bdc483d1a9dbdf40453a81c0b6b1d1ad2f97dd16c58cebe255542e9e5a3ac828",
+          "context_sha256": "34b50ba13fd273a23c2e2be69cf9786344005d0aba3d8abed05fbeb4cbf06171",
+          "exact_example_sha256": "39141a4f8fa21c44a68acd0b38f3680060bd77f896cc777f1e658b181eb1ee9f",
+          "observation_is_error": false,
+          "observation_characters": 753
+        },
+        {
+          "position": 1,
+          "transition_id": "rag-transition-8a5368de341b184ce21b",
+          "context_ref": "context-91c7077340212025ae26a7daaaf8bf5d492cff3710ad7c01e8bed60ed96855f9",
+          "tool_name": "rose.browser.browser_action",
+          "action_sha256": "779da370a34fa8f8d56aefe706f77f7e6da1f77c29987e7cd32edcd6294f57c5",
+          "observation_sha256": "0dfb5435f124377fb9830c548bf32eac3feeb1e2005a772afd5b7396c5dd06e7",
+          "context_sha256": "18b67a8cb8c20327698425b2b0e4afce07008e724dbc97dceccbd42245c863fd",
+          "exact_example_sha256": "ed377716eede353bfc042672bfe352dca3ecd30ff7280357d24ffeff48c158bf",
+          "observation_is_error": false,
+          "observation_characters": 926
+        },
+        {
+          "position": 2,
+          "transition_id": "rag-transition-c7c9e950d21935a02911",
+          "context_ref": "context-23ab62dbce827dd645c84ada2c9d102a718cd360f6677c267c5f2c1c177ef710",
+          "tool_name": "rose.browser.browser_action",
+          "action_sha256": "1fb8ac407a3609106ffe8c3fffc6a46a7996100bed4cd1c2b9b9cafd683f44e0",
+          "observation_sha256": "27b6b6f72e5db5e825e4dfed81ad8c887987df430932aff9a5345add54cfc3af",
+          "context_sha256": "4ceb91f34fd071ed4983f3e340fdbd1696a2141b518320821fdd61b41f5b474a",
+          "exact_example_sha256": "2b8aa81198a9a09f5a083c5519bdcdf319512124b71781e6815287c191d753e2",
+          "observation_is_error": false,
+          "observation_characters": 753
+        },
+        {
+          "position": 3,
+          "transition_id": "rag-transition-31cb4d6e11cf65502507",
+          "context_ref": "context-c8dfa2f8d0376bd813f613b82af70548f5af685cc8b3b513ece27317830c441d",
+          "tool_name": "rose.browser.browser_action",
+          "action_sha256": "f286b720e1b9941681fba1e291c555d8186aa6b81a8f88166e5e04b6456da46a",
+          "observation_sha256": "10d0194164a3203120ca9182f8ea7781ddbc173d4aeb6e43ba003da880cb1fd9",
+          "context_sha256": "181977d5b87ef5b10ef85605daa2d57f7ff4f748467aaba2b0b22e1c1f7c12fe",
+          "exact_example_sha256": "0ebba75b97457a54c42d31c16ff82096709191cc554f3019f106b0ed3bbded83",
+          "observation_is_error": true,
+          "observation_characters": 1427
+        },
+        {
+          "position": 4,
+          "transition_id": "rag-transition-6bc6032f41bf72ceb315",
+          "context_ref": "context-9f3160db629ff1cb469230b143e5ba4b615a454a7906506bf94f872356112020",
+          "tool_name": "rose.browser.browser_action",
+          "action_sha256": "d46290cdc823a37659c2a32d29b7cfbef6bb5881a3c6720a7802859fb01605f1",
+          "observation_sha256": "2c0b01af339063bceabb4b9c6a7db0673212b923bc4343f272aeaf2f284cdb81",
+          "context_sha256": "c76ac1edaafb711f2440be0f1c69dbaac0694e045b968381b7be260e5d513c30",
+          "exact_example_sha256": "18a81e528c7e45a2d9dc7505442bff808589d83992cc1fbde1501b9f245e3aa2",
+          "observation_is_error": true,
+          "observation_characters": 2492
+        }
+      ]
+    },
+    {
+      "category": "code",
+      "examples": 2,
+      "mean_score": 0.9442728442728443,
+      "content_accuracy": 0.7213642213642214,
+      "cases_score_below_0_7": [],
+      "cases_content_below_0_25": [],
+      "cases_error_behavior_mismatch": [],
+      "cases_artifact_ref_mismatch": [],
+      "failed_prediction_indices": [],
+      "worst_case_index": 2,
+      "worst_case_score": 0.8885456885456886,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/4df465af7b17451f974236b151d0afb3/0fce8e6aad4e46c3a672121468f27311.json",
+        "sha256": "82e726e657cec4574d7db84198e290ae6a8e3627fc20b5fb18948cd93dec7c7b"
+      },
+      "exact_real_retrieved_example_receipts": [
+        {
+          "position": 0,
+          "transition_id": "rag-transition-45f8953c92f98819cf88",
+          "context_ref": "context-29b27d7452d2a6d5d1b1519fae2ac9773036b294b361ed21d3d2151e4231e090",
+          "tool_name": "rose.code.spawn_claude_code_agent",
+          "action_sha256": "016dcda46a10811c3596a7fa0865ba83e5415b43b06e11d318913c5777f29595",
+          "observation_sha256": "42ae075142ef5e1909e7dfe827b850aa308a7f6f1282d5dd33757a65af344353",
+          "context_sha256": "29b27d7452d2a6d5d1b1519fae2ac9773036b294b361ed21d3d2151e4231e090",
+          "exact_example_sha256": "5023204f9bde6db14c136cd814f58f8c8f0e4004a823fe7c56369bca92b49141",
+          "observation_is_error": false,
+          "observation_characters": 12898
+        },
+        {
+          "position": 1,
+          "transition_id": "rag-transition-908dc50633551b03386e",
+          "context_ref": "context-8dba301cdb186b18625c6e0c1b4680ad28ed47a360fd1d940169f6b9eea120fd",
+          "tool_name": "rose.code.spawn_claude_code_agent",
+          "action_sha256": "ac6db7a63f2000de55b550c42b4664cc67d0b421eb804d85e5ba563a112d6a29",
+          "observation_sha256": "28bbb16fcff776108eb4d12fbd6ebe40db0c4777ff39e85780fc48c79f6bb74b",
+          "context_sha256": "8dba301cdb186b18625c6e0c1b4680ad28ed47a360fd1d940169f6b9eea120fd",
+          "exact_example_sha256": "5249a2f9273005c7a7cdc36d1eecdf3df8ef0ba45ff491cb40e75cbb6e058280",
+          "observation_is_error": false,
+          "observation_characters": 15586
+        },
+        {
+          "position": 2,
+          "transition_id": "rag-transition-28b68190b916cd8ff3ff",
+          "context_ref": "context-1c0945cf584e4b14097749d47bbdcba51de6c9600a5e2aaf635f10065af64c69",
+          "tool_name": "rose.code.spawn_claude_code_agent",
+          "action_sha256": "c3d4863ccce43ea30965dcaa366ea783b9cc38cb7a3c0be620b8e3cad37a7798",
+          "observation_sha256": "736bb809ea8a4f6e8b66a5f640df620140beaf3dace05434d3dc6f396779a99c",
+          "context_sha256": "1c0945cf584e4b14097749d47bbdcba51de6c9600a5e2aaf635f10065af64c69",
+          "exact_example_sha256": "ccbbeb9bfcec65eaf3715138fefaee5922d5df4a7912ca330e110e3b42d92374",
+          "observation_is_error": false,
+          "observation_characters": 19344
+        },
+        {
+          "position": 3,
+          "transition_id": "rag-transition-65cb01b6543699c079ef",
+          "context_ref": "context-eeccdc3ed61695a26a1cb6126f96c055dbba6829d2c8023b50e51e00870de920",
+          "tool_name": "rose.code.spawn_claude_code_agent",
+          "action_sha256": "90f702ce0f622f4b4957dd22bc2e7836b0e71a62d1ca846ff0db5635d722be46",
+          "observation_sha256": "bc20715b5485f57f4ebfa5135ac05d10e659695272337dc56b407916748a2cf2",
+          "context_sha256": "eeccdc3ed61695a26a1cb6126f96c055dbba6829d2c8023b50e51e00870de920",
+          "exact_example_sha256": "341e4b67efe142e66b18c41df05e380d6c24de355ebbdaac161a0b6a1c49e4fd",
+          "observation_is_error": false,
+          "observation_characters": 18988
+        },
+        {
+          "position": 4,
+          "transition_id": "rag-transition-438a246b52f38f74b86b",
+          "context_ref": "context-2f1378a19b7b53db22671fbe539981ecbf5b11efe710ba5fa7bc89fa54df756b",
+          "tool_name": "rose.code.spawn_claude_code_agent",
+          "action_sha256": "b0dd270c60b758eea52d2333f87a23576f64332d7dbbf0038e52ad6cf3e9bb96",
+          "observation_sha256": "81df5ad7f9c74ca8df17c6190a546fcd4565aa042a783944b6f9843f547019a8",
+          "context_sha256": "2f1378a19b7b53db22671fbe539981ecbf5b11efe710ba5fa7bc89fa54df756b",
+          "exact_example_sha256": "46772b0b5abb465d13eb59bb938da1ec54746e7c5a4817ad28b92766febc3877",
+          "observation_is_error": false,
+          "observation_characters": 1163
+        }
+      ]
+    },
+    {
+      "category": "explore",
+      "examples": 7,
+      "mean_score": 0.8162711972441273,
+      "content_accuracy": 0.3670702719349229,
+      "cases_score_below_0_7": [
+        59,
+        66
+      ],
+      "cases_content_below_0_25": [
+        59
+      ],
+      "cases_error_behavior_mismatch": [
+        59
+      ],
+      "cases_artifact_ref_mismatch": [
+        66
+      ],
+      "failed_prediction_indices": [],
+      "worst_case_index": 59,
+      "worst_case_score": 0.6005788712011577,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/dfd8fc7d9bd442e3be4f93b53fd0af39/3f7379c85ea2406eaac59f82c5b64bfc.json",
+        "sha256": "01a07c70200b3f06bf12e1e768099fb20b3e505d94b4ff888466098dcf3b29d8"
+      },
+      "exact_real_retrieved_example_receipts": [
+        {
+          "position": 0,
+          "transition_id": "rag-transition-30300ae3388ea7e32caa",
+          "context_ref": "context-5e4f1aba37c850d1af8eb2ae347b753d3172c6a43c0cc2d83c86133c6bde4170",
+          "tool_name": "rose.explore.spawn_explore_agent",
+          "action_sha256": "1f1fd8f83be376f7d95074269f79673f08c4366001933c51625d8b822999201f",
+          "observation_sha256": "479bb4480476cb6334a040fdc6c3f90839ac770e81469ccde8f6d2c54bd0f978",
+          "context_sha256": "5e4f1aba37c850d1af8eb2ae347b753d3172c6a43c0cc2d83c86133c6bde4170",
+          "exact_example_sha256": "469a64af2d6142806e5dd01e83b6b60ec81efd87eb714dd75a66b5c4637cd3a7",
+          "observation_is_error": false,
+          "observation_characters": 10195
+        },
+        {
+          "position": 1,
+          "transition_id": "rag-transition-03b5c5810de59be1e971",
+          "context_ref": "context-d7c88079e5ce2729cafdae09f9e8ddd5e12df8cc94259193352c49622d6654f0",
+          "tool_name": "rose.explore.spawn_explore_agent",
+          "action_sha256": "d20e03cab7cf78711b582371c06b69d81e4ba84e1a2806727cbbf059a6db8caf",
+          "observation_sha256": "bb15d9d2b0eeeb8c3872e30f2683e4f3fbd16150fba0b4dd33344bb22e924166",
+          "context_sha256": "d7c88079e5ce2729cafdae09f9e8ddd5e12df8cc94259193352c49622d6654f0",
+          "exact_example_sha256": "f08ab6329538181819b8a8fcb5b5bf04779ed7afbbeb060c1afc731a2fa74725",
+          "observation_is_error": false,
+          "observation_characters": 5183
+        },
+        {
+          "position": 2,
+          "transition_id": "rag-transition-7f7fcdadaa254c2dbad7",
+          "context_ref": "context-429ae399470507d7cce38c2afff08cca3719bd101c0edf95cf474e2941932fef",
+          "tool_name": "rose.explore.spawn_explore_agent",
+          "action_sha256": "6539853724fbb880a27cd4d7f1fa10d904c7e5876d4454fcc7e25454125d2d67",
+          "observation_sha256": "18a7b3338acb22584cbfad3884e7d56d607a788a3b7788d72e90fc2109362df8",
+          "context_sha256": "429ae399470507d7cce38c2afff08cca3719bd101c0edf95cf474e2941932fef",
+          "exact_example_sha256": "570c5b1294a1e7fcd087f723433e9cae549f9f74e7559f7936fefab8bc5e8634",
+          "observation_is_error": false,
+          "observation_characters": 5528
+        },
+        {
+          "position": 3,
+          "transition_id": "rag-transition-0ab7c99c4b6e00459647",
+          "context_ref": "context-0f8901412bbd60c614c0f488419971ecfb97d2e3efe1f430d8014f10cb1b0205",
+          "tool_name": "rose.explore.spawn_explore_agent",
+          "action_sha256": "4887ad9e74e2f1a0b06c29ccff306d02027c2dd28a76a1753964bbd35d74fccd",
+          "observation_sha256": "c7a97c19c9a33aa9160507f7d67d033961a0ea3aa9f8e14db5c91d02ee18822a",
+          "context_sha256": "0f8901412bbd60c614c0f488419971ecfb97d2e3efe1f430d8014f10cb1b0205",
+          "exact_example_sha256": "ed744bd4c2d940a5767c86a6dc3cf47aac2eb6cd8058e4caa7051057f49a10a8",
+          "observation_is_error": false,
+          "observation_characters": 6211
+        },
+        {
+          "position": 4,
+          "transition_id": "rag-transition-558535e75fe84c0c75bf",
+          "context_ref": "context-a59e0a4cf2466ecff570f0e2e2da503d80b36562826d124ca3663b189575f224",
+          "tool_name": "rose.explore.spawn_explore_agent",
+          "action_sha256": "c7fe481c90531bd335edf89e60c7614c7e6567f36f7405d6897a5d0ef3a64e7f",
+          "observation_sha256": "ac71aea6c864b4a24f3c1f8fc92563c5c488d938d46ee9496a21009b02536a73",
+          "context_sha256": "a59e0a4cf2466ecff570f0e2e2da503d80b36562826d124ca3663b189575f224",
+          "exact_example_sha256": "9d9c5dafac985f5c81e39abdf33671cbd419a539df62538918bac0c637b01876",
+          "observation_is_error": false,
+          "observation_characters": 7524
+        }
+      ]
+    },
+    {
+      "category": "for_each",
+      "examples": 1,
+      "mean_score": 1.0,
+      "content_accuracy": 1.0,
+      "cases_score_below_0_7": [],
+      "cases_content_below_0_25": [],
+      "cases_error_behavior_mismatch": [],
+      "cases_artifact_ref_mismatch": [],
+      "failed_prediction_indices": [],
+      "worst_case_index": 4,
+      "worst_case_score": 1.0,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/1f948ec753514a9891d6fd485a0670d7/8971e509708448089b506134781edbc0.json",
+        "sha256": "9a0134040c202ca7444adc92a5c1aa58a67d778bb4b450aa74d2fd5eedfdc9b1"
+      },
+      "exact_real_retrieved_example_receipts": [
+        {
+          "position": 0,
+          "transition_id": "rag-transition-d65f8c99ae5b66dc922c",
+          "context_ref": "context-28a1238df68af3112a454e4b52afedb7e71c0cb5b641eec0ed932ca38a2aca48",
+          "tool_name": "rose.for_each.spawn_general_purpose_agent_for_each",
+          "action_sha256": "4fd817dd50f8710c98eb819e715434b985f2ac5efd3cfed08b9f8b31e1ddba1e",
+          "observation_sha256": "ab410ac623d6b678ad34a0c2bc2036a484fbbf9bd7518abec3e1f183d8a21d81",
+          "context_sha256": "28a1238df68af3112a454e4b52afedb7e71c0cb5b641eec0ed932ca38a2aca48",
+          "exact_example_sha256": "e170ea3bfb9ebad0e7e7b878a3de8b759017ff45f711a66c3270a382307d5d82",
+          "observation_is_error": false,
+          "observation_characters": 413
+        },
+        {
+          "position": 1,
+          "transition_id": "rag-transition-cde02b61102d15bc0a5f",
+          "context_ref": "context-36dc1cdf08ea4716838711a2467a52ebd62bcc02d1bd10b064ac55f2a2d19a6c",
+          "tool_name": "rose.for_each.spawn_general_purpose_agent_for_each",
+          "action_sha256": "3bdf4ceaf344f246a37293a648da3a07aff1e8f627dba5f9c40ec666f4d4d340",
+          "observation_sha256": "49426b8a78a33fe32393d3a3c7372e19b80be5fc153c0abdc640bf81da97d9f7",
+          "context_sha256": "36dc1cdf08ea4716838711a2467a52ebd62bcc02d1bd10b064ac55f2a2d19a6c",
+          "exact_example_sha256": "91998ec251600835750cd3b1c4906c6c9226aee13716bf15104773a817c990bd",
+          "observation_is_error": false,
+          "observation_characters": 413
+        },
+        {
+          "position": 2,
+          "transition_id": "rag-transition-457ab973efe00d1d1e5f",
+          "context_ref": "context-f57d3f8476498ba897a68106b8ea8c490426b21791d46fb74f0bcfa7deb5fe3b",
+          "tool_name": "rose.for_each.spawn_general_purpose_agent_for_each",
+          "action_sha256": "2e64ca26185066ac41ba9530c9797ccbf53af1ea55ae368643429aa9311331f1",
+          "observation_sha256": "a6bb7cf1fdc8b1460139c79e28d24ae977b9b58c276ec97fec86689fe62a8b03",
+          "context_sha256": "f57d3f8476498ba897a68106b8ea8c490426b21791d46fb74f0bcfa7deb5fe3b",
+          "exact_example_sha256": "a101cdfa9f19c6fbbee2e6ab75f63de354b715643568604505f79241f70f2f9f",
+          "observation_is_error": false,
+          "observation_characters": 413
+        },
+        {
+          "position": 3,
+          "transition_id": "rag-transition-f2fb0521493b6bd48801",
+          "context_ref": "context-24bba1e6dbb8b166e12e6765bd30607a435b4f661cb5b97e0815bfdf335c20a9",
+          "tool_name": "rose.for_each.spawn_general_purpose_agent_for_each",
+          "action_sha256": "5ade61e8cb18b74a51d0d8a5e00392f139df51908ea33636e40a66ec0db7ec32",
+          "observation_sha256": "c37c49cd6923d8367cbed1d735f06a76941d9832264c44b05105864bcc38710c",
+          "context_sha256": "24bba1e6dbb8b166e12e6765bd30607a435b4f661cb5b97e0815bfdf335c20a9",
+          "exact_example_sha256": "197cadca7e0b6e07f61c4370269ee56acb6615db25754488aed500bc405b9f8b",
+          "observation_is_error": false,
+          "observation_characters": 413
+        },
+        {
+          "position": 4,
+          "transition_id": "rag-transition-3cae8026b385d1729d45",
+          "context_ref": "context-a2ecc4a1fe006cdb230ed26c1ed5cddc594ba2e4443ad9ee45848a0eb3e971d2",
+          "tool_name": "rose.for_each.spawn_general_purpose_agent_for_each",
+          "action_sha256": "8efaaafb65a0d85dbb6e3dbdcd6980266a555fbd1ceccd679c77716633483cd7",
+          "observation_sha256": "a52d9519aa254d0bd64ec0e14a4ba717904a4bfc166014c82a9beaae98ebc575",
+          "context_sha256": "a2ecc4a1fe006cdb230ed26c1ed5cddc594ba2e4443ad9ee45848a0eb3e971d2",
+          "exact_example_sha256": "9e1c439e8666ebdf5f14c79cdca88b698d2af2577fe193b9fd796f67bae374fa",
+          "observation_is_error": false,
+          "observation_characters": 413
+        }
+      ]
+    },
+    {
+      "category": "grep",
+      "examples": 3,
+      "mean_score": 0.8524796548734955,
+      "content_accuracy": 0.26239827436747776,
+      "cases_score_below_0_7": [],
+      "cases_content_below_0_25": [
+        5,
+        20
+      ],
+      "cases_error_behavior_mismatch": [],
+      "cases_artifact_ref_mismatch": [],
+      "failed_prediction_indices": [],
+      "worst_case_index": 5,
+      "worst_case_score": 0.8260162601626015,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/8745872729eb45c6a68c78b8b258fc27/baf9384f035a4136b62897ad176bb74e.json",
+        "sha256": "7c4baf1a913b29c4524bf6dafeecb9a03a0c85af0d5d38b393600f59b3af9fc8"
+      },
+      "exact_real_retrieved_example_receipts": [
+        {
+          "position": 0,
+          "transition_id": "rag-transition-a4813467594dc27f445b",
+          "context_ref": "context-76dc53d0d5c7489fb56773517ef511d6e6bf7e8d3f17c9046c8f468796aa59e1",
+          "tool_name": "rose.grep.web_search",
+          "action_sha256": "737aa97e7e8e87c4382a474bffef48856ef3db236e5689cc68ca493603941ddc",
+          "observation_sha256": "db05e8f85deeab8e56382376e499892b065edb1dc2d2186361fbf447432f5fa8",
+          "context_sha256": "76dc53d0d5c7489fb56773517ef511d6e6bf7e8d3f17c9046c8f468796aa59e1",
+          "exact_example_sha256": "14fc8dc2498bdc2b465ce2b63b3c309a07fe536f9dcebe079e8a4c1308cdfe62",
+          "observation_is_error": false,
+          "observation_characters": 5049
+        },
+        {
+          "position": 1,
+          "transition_id": "rag-transition-5a9733379bdb351f86f4",
+          "context_ref": "context-035f933e3c71ea3b7c6c20bbdd2a773517552a33e5b7a76b553bb87cb1de11a3",
+          "tool_name": "rose.grep.web_search",
+          "action_sha256": "03b2ed750fec6146ba927599558ade1f6ae7a8e30fb9af809aa4934b8d3baa0e",
+          "observation_sha256": "57d9d9e864fe0fcdc88bcd554bd5d17dcbfed6f8936ab7631002c4a681ee8c46",
+          "context_sha256": "035f933e3c71ea3b7c6c20bbdd2a773517552a33e5b7a76b553bb87cb1de11a3",
+          "exact_example_sha256": "1813dd6c47e942892e9fc720a3e018cf91a94f05ae50eab418e04daa80ca0ec5",
+          "observation_is_error": false,
+          "observation_characters": 3754
+        },
+        {
+          "position": 2,
+          "transition_id": "rag-transition-7faa750418fe140e8ca2",
+          "context_ref": "context-0f2e2d61fdd274e92869b193f0337c59c0476c56eff36d2096dc6a228143c15d",
+          "tool_name": "rose.grep.web_search",
+          "action_sha256": "d54b25312e06ca604917249c97d8c5081eb1f0ca2f06a5db69e2110f6acc47cb",
+          "observation_sha256": "8c53f2e7e6b996022e1c126c2799e72f893f652c46040e02d95957161fff767d",
+          "context_sha256": "0f2e2d61fdd274e92869b193f0337c59c0476c56eff36d2096dc6a228143c15d",
+          "exact_example_sha256": "e6babc564d0da887f79c3f69eb53373095ad72e2d14579fb9dba2733f0e635f2",
+          "observation_is_error": false,
+          "observation_characters": 3885
+        },
+        {
+          "position": 3,
+          "transition_id": "rag-transition-2a6d0a7cca45783f5d36",
+          "context_ref": "context-485dd8162245321b3d37a622a0bb55876f961e88b33fc2cac612e9653ddccb76",
+          "tool_name": "rose.grep.web_search",
+          "action_sha256": "0252f0fcd902f8b5ec1e192415b9004c6815f450c3095f92697053a79763f4a2",
+          "observation_sha256": "79d8cef4c749473e82152d6d4946000c0ee2aaa404a17a6ab6f61168ebca1183",
+          "context_sha256": "485dd8162245321b3d37a622a0bb55876f961e88b33fc2cac612e9653ddccb76",
+          "exact_example_sha256": "09bddeee9953815c660af1df2919edb4820fd80af7e4cba878cb0c4d2092398a",
+          "observation_is_error": false,
+          "observation_characters": 10774
+        },
+        {
+          "position": 4,
+          "transition_id": "rag-transition-00fb672164abd7bc74d5",
+          "context_ref": "context-b4e4acede43c12ba891a178383b8b66ce9cca1516e3cddf6c4423372d4177b15",
+          "tool_name": "rose.grep.web_search",
+          "action_sha256": "2f7b3e53126bd9dc869a5da6ab29b138175aca211e1c6c7688426efc10b176e7",
+          "observation_sha256": "a6de1e0843129574900392511f627d7bf48438257514f2daeb78d907f03a10a2",
+          "context_sha256": "b4e4acede43c12ba891a178383b8b66ce9cca1516e3cddf6c4423372d4177b15",
+          "exact_example_sha256": "7899c7b878b052557b655a140b52218b690c8fea22e6944a75bd281477f00ef2",
+          "observation_is_error": false,
+          "observation_characters": 9237
+        }
+      ]
+    },
+    {
+      "category": "message",
+      "examples": 2,
+      "mean_score": 0.914939684503557,
+      "content_accuracy": 0.5746984225177854,
+      "cases_score_below_0_7": [],
+      "cases_content_below_0_25": [],
+      "cases_error_behavior_mismatch": [],
+      "cases_artifact_ref_mismatch": [],
+      "failed_prediction_indices": [],
+      "worst_case_index": 6,
+      "worst_case_score": 0.8528301886792452,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/a98761631fad495fa36343d2cd410860/19b5598073e547979a839bbbaf3d3734.json",
+        "sha256": "0d919f4d86da3a0ce9d53f16b275c2f98b1af3d9c3e226c705bf7904c2d8f0b2"
+      },
+      "exact_real_retrieved_example_receipts": [
+        {
+          "position": 0,
+          "transition_id": "rag-transition-2ef029d52fd70a9e7940",
+          "context_ref": "context-25aafa3c749579dde021583e0f6b11de52fa6eb9bfd3313cc72b5f2a5140b7a8",
+          "tool_name": "rose.message.send_message_to_user",
+          "action_sha256": "d9330a85dde91c41a2e42c8d5de37500d6e0a0ef13a218fbeca02912f01ed81d",
+          "observation_sha256": "feacf0e1c58a9c9038556374159b49d92faddb0f1acd9c80526ca98ed18d1ce4",
+          "context_sha256": "25aafa3c749579dde021583e0f6b11de52fa6eb9bfd3313cc72b5f2a5140b7a8",
+          "exact_example_sha256": "ef41c0a9672b56e1c502f438c3cea937baefcd3b27ccc9041f34634a4b4ab1ba",
+          "observation_is_error": false,
+          "observation_characters": 408
+        },
+        {
+          "position": 1,
+          "transition_id": "rag-transition-425cac737bb7e0f333b9",
+          "context_ref": "context-5327d054412af6e4ab2e294e15b0dbbb1648be292cae2a8c35179de251fe1b7b",
+          "tool_name": "rose.message.send_message_to_user",
+          "action_sha256": "104874cb751e84107d57132786851f72090eda6656c50f5a8dd01fc078d1f648",
+          "observation_sha256": "fffa92e22eb8cf1ceadbb8d7139edfb1db115aa168b2276bb6cd275d3885d762",
+          "context_sha256": "5327d054412af6e4ab2e294e15b0dbbb1648be292cae2a8c35179de251fe1b7b",
+          "exact_example_sha256": "b75725ff572a6ff001f91fc143714d0b04562fb4149a557ce9894781ce1a4193",
+          "observation_is_error": false,
+          "observation_characters": 491
+        },
+        {
+          "position": 2,
+          "transition_id": "rag-transition-bb0554cf72917ff4c776",
+          "context_ref": "context-4132c2b7a48dcfc967fa5c2efad78e3d20b06648d1ddba25375d003b780a7fcd",
+          "tool_name": "rose.message.send_message_to_user",
+          "action_sha256": "ace8a0937f4d630384d0fe6a40d31bd29bc12b07afdd81ffb9528694c86fc651",
+          "observation_sha256": "bcb8605262737be41a986a596384d83a6b87dd019ea72f5c596c645ff808bd6d",
+          "context_sha256": "4132c2b7a48dcfc967fa5c2efad78e3d20b06648d1ddba25375d003b780a7fcd",
+          "exact_example_sha256": "3e04dab4974f9a8afff88893d96a4576a7af066f25d78cb9c97969146d05236a",
+          "observation_is_error": false,
+          "observation_characters": 712
+        },
+        {
+          "position": 3,
+          "transition_id": "rag-transition-a062e8ab35b0481a7db9",
+          "context_ref": "context-2931a30cc1f2a51a7374cd10bdc51a82e181e5cb1dcdefd04361bd679ea86c22",
+          "tool_name": "rose.message.send_message_to_user",
+          "action_sha256": "ab9e6346f2c8156e36916c1ab06d297ba59676278286c8360bf22867815363af",
+          "observation_sha256": "ef37d78444b3f83424dd0dddff8f9a80ff90cc490dce60737098e09649e0be2c",
+          "context_sha256": "2931a30cc1f2a51a7374cd10bdc51a82e181e5cb1dcdefd04361bd679ea86c22",
+          "exact_example_sha256": "7ce8517f39ebfc5e47afb0ff53e7c41347d3c88a53b5c38a5c7d19b8db10f922",
+          "observation_is_error": false,
+          "observation_characters": 419
+        },
+        {
+          "position": 4,
+          "transition_id": "rag-transition-994402b284e9ec8d5128",
+          "context_ref": "context-9cc8a79d76c315d020934600bfb758190b7bcb886c9f8213f762f4dc66e926d4",
+          "tool_name": "rose.message.send_message_to_user",
+          "action_sha256": "0efd7b8036a7b73a7ff24424d0b15fdc66e1b16eed788eecf5bacfb66ac10f5b",
+          "observation_sha256": "62da940cf76057dd10227e0915fb16f3f69333308d1fb701845653a4f1be4872",
+          "context_sha256": "9cc8a79d76c315d020934600bfb758190b7bcb886c9f8213f762f4dc66e926d4",
+          "exact_example_sha256": "65546443049794ffdd1b677fdce0f17172fe8da8e22afea85692b8f1b3d1c918",
+          "observation_is_error": false,
+          "observation_characters": 396
+        }
+      ]
+    },
+    {
+      "category": "payment",
+      "examples": 1,
+      "mean_score": 0.994059405940594,
+      "content_accuracy": 0.9702970297029703,
+      "cases_score_below_0_7": [],
+      "cases_content_below_0_25": [],
+      "cases_error_behavior_mismatch": [],
+      "cases_artifact_ref_mismatch": [],
+      "failed_prediction_indices": [],
+      "worst_case_index": 7,
+      "worst_case_score": 0.994059405940594,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/1bf7fa0dc4de4c58a6f006829e0d76df/a6db6cab0b1445f8a80ab402afe5edb9.json",
+        "sha256": "aab8a6bba279c8caf7c16be629e95a06090d3b5c94ec9a0544c000e2bcda0d65"
+      },
+      "exact_real_retrieved_example_receipts": [
+        {
+          "position": 0,
+          "transition_id": "rag-transition-cda4389ec215e5ec833f",
+          "context_ref": "context-2d0e4533b41a3269d9179495e9dd5bd612a37ed2068bb9abc8a59b5e15ade4c4",
+          "tool_name": "rose.payment.request_payment_card",
+          "action_sha256": "ab1d095855becd72fb8cb05ebafc57a4d7450b7e94fded61ddca538702cc0bb6",
+          "observation_sha256": "1c9e37e051960c59eea375cd2193f04d17e658b7811b53c21aec78a41374c7d8",
+          "context_sha256": "02137c687ec139cb69dd67b876b4f6e4d68d5e9a4cad7c9f13514ddefddb02a8",
+          "exact_example_sha256": "e07ff64e21424348a7b05224b94886722c2c017dc8aba0b11aa213c6382c2d7f",
+          "observation_is_error": false,
+          "observation_characters": 930
+        }
+      ]
+    },
+    {
+      "category": "tool",
+      "examples": 40,
+      "mean_score": 0.7759445628834377,
+      "content_accuracy": 0.5047228144171879,
+      "cases_score_below_0_7": [
+        10,
+        11,
+        13,
+        14,
+        15,
+        17,
+        24,
+        29,
+        30,
+        31,
+        32,
+        42,
+        45
+      ],
+      "cases_content_below_0_25": [
+        10,
+        11,
+        13,
+        14,
+        15,
+        17,
+        24,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        43,
+        61,
+        76,
+        94
+      ],
+      "cases_error_behavior_mismatch": [
+        14,
+        17,
+        29,
+        45
+      ],
+      "cases_artifact_ref_mismatch": [
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        19,
+        21,
+        23,
+        24,
+        25,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        42
+      ],
+      "failed_prediction_indices": [],
+      "worst_case_index": 14,
+      "worst_case_score": 0.4,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/036a305cbeff48bf8ba6186342db16c1/b4833d9b294d4ef4b3e3eb6cfeadc8b3.json",
+        "sha256": "968c30ef016d9162b990009cae8464a66465688b5a05628c019f36cc1490fe12"
+      },
+      "exact_real_retrieved_example_receipts": []
+    },
+    {
+      "category": "vapi",
+      "examples": 1,
+      "mean_score": 0.8837098692033294,
+      "content_accuracy": 0.41854934601664684,
+      "cases_score_below_0_7": [],
+      "cases_content_below_0_25": [],
+      "cases_error_behavior_mismatch": [],
+      "cases_artifact_ref_mismatch": [],
+      "failed_prediction_indices": [],
+      "worst_case_index": 9,
+      "worst_case_score": 0.8837098692033294,
+      "worst_case_capture": {
+        "path": ".context/world-model-native/native-predictions/df2628b32cd64ec3aa9f063dca63480f/7e1293039e534acc9b02c05071235599.json",
+        "sha256": "36d084e3c7930ee3cfdad949fac72917c5a693de53f4b5d440d73db9a4b24aac"
+      },
+      "exact_real_retrieved_example_receipts": [
+        {
+          "position": 0,
+          "transition_id": "rag-transition-e94b2d682ef47216c35d",
+          "context_ref": "context-6c156d259749735bcda03970993c133d247fa2d019f1e368096cedca805b010e",
+          "tool_name": "rose.vapi.call_phone_number",
+          "action_sha256": "5fa3a00d23ff03942af21c8bb0ca1418d48945fa2437deaf1cc0c354ad283eee",
+          "observation_sha256": "277268c8fc956db077566c637883ef475be65cf2711750f0fa65f1b79965f488",
+          "context_sha256": "6c156d259749735bcda03970993c133d247fa2d019f1e368096cedca805b010e",
+          "exact_example_sha256": "d0e7de0e4e7340ace7d1d7658caca03bd2099867d424022ab4d8b61048dba451",
+          "observation_is_error": false,
+          "observation_characters": 2165
+        },
+        {
+          "position": 1,
+          "transition_id": "rag-transition-fa6d92ba9dca3cf4feaa",
+          "context_ref": "context-401ad13e7bcdc25eb3bddbc904a1c666039a332fbe0a29e084df829b83c116e5",
+          "tool_name": "rose.vapi.call_phone_number",
+          "action_sha256": "0f2c8c62757ff64ff82ced59b0eb25ad7a2a69d43ba0fd7139c8d7cde2c3759d",
+          "observation_sha256": "9820af3c5265da6cc21cfbbcc78f024240a748f3270e59c725e3688102a24f5c",
+          "context_sha256": "401ad13e7bcdc25eb3bddbc904a1c666039a332fbe0a29e084df829b83c116e5",
+          "exact_example_sha256": "a454faf5ba8ebf2fe35041200a9c90dbdf81dadd4dd033d813fc2ce5d25671bc",
+          "observation_is_error": false,
+          "observation_characters": 1204
+        },
+        {
+          "position": 2,
+          "transition_id": "rag-transition-44dc432ab26fcdec3d85",
+          "context_ref": "context-0b4eae1d627f880976776fd033389ca74beaed9b27c4804a30e8d4a7bb5507b9",
+          "tool_name": "rose.vapi.call_phone_number",
+          "action_sha256": "9ab4e3959defec819efeab2a17c209067317675c687c2dd475eabce0ca18044d",
+          "observation_sha256": "6428cd7df648986d95cae6690aa95156af697b7d57242b547525622f868dffb0",
+          "context_sha256": "0b4eae1d627f880976776fd033389ca74beaed9b27c4804a30e8d4a7bb5507b9",
+          "exact_example_sha256": "02065b071a99bf5393ea56aa31dc8047ec23bd2e5231d4ab1dc14c09f217593b",
+          "observation_is_error": false,
+          "observation_characters": 1713
+        },
+        {
+          "position": 3,
+          "transition_id": "rag-transition-0a4bc98b35a79bc4b61c",
+          "context_ref": "context-d0efb327f23e2dd0190ab8b12c6458309d9373360887adee21b174a1da54bdb4",
+          "tool_name": "rose.vapi.call_phone_number",
+          "action_sha256": "0337fed164d982dc9979bbb26b931f9b3bfc5d583d46c681b44481b8099da263",
+          "observation_sha256": "27ecb4dd3e13eb0859678f063cabe770c21fcace233d234ea3fbb4d984830212",
+          "context_sha256": "d0efb327f23e2dd0190ab8b12c6458309d9373360887adee21b174a1da54bdb4",
+          "exact_example_sha256": "6475beaa7ae8d9ceb9d4ddbe5e86da1995a4a77999ef4eb22e6b0a937832c323",
+          "observation_is_error": false,
+          "observation_characters": 2179
+        },
+        {
+          "position": 4,
+          "transition_id": "rag-transition-175e0e984b01c0d7b699",
+          "context_ref": "context-949dec60b37d55aaa98e4d3032f8c33608d4e0511784983243a3ba3edc785ed2",
+          "tool_name": "rose.vapi.call_phone_number",
+          "action_sha256": "66768df242245877031e39656522392a22f621e94d0fd496b3ad5e8b464f803c",
+          "observation_sha256": "601881c16bcafd0f2181700d4138b6aa312c871ce907ce6ab4fef5972e48b0a7",
+          "context_sha256": "949dec60b37d55aaa98e4d3032f8c33608d4e0511784983243a3ba3edc785ed2",
+          "exact_example_sha256": "afce4413b04a8148c61710de9ba58e7444f835430730af3ce6e97b87d222e9b8",
+          "observation_is_error": false,
+          "observation_characters": 2582
+        }
+      ]
+    }
+  ],
+  "private_fact_coverage": {
+    "declared_protected_fields_examined": 0,
+    "cases_with_declared_fields": [],
+    "conclusion": "This fixed suite supplies no direct declared unknown-Rose/private-financing fact coverage. Its scorer does not semantically grade private fact invention. Separate bounded negative controls remain separate evidence, not full-loop guarantees."
+  },
+  "limits": [
+    "The exact reported status/error count is preserved. Aggregate floors do not waive prediction errors. A failed case has no scored dimensions and is never treated as a valid protocol response.",
+    "Aggregate mean/content gates have no category or individual-case thresholds; per-category and individual weaknesses remain reported.",
+    "Content accuracy is deterministic token F1, not semantic correctness; five dimensions have equal weights.",
+    "State transition dimension is automatically1 when archived observation has no state_note, rather than grading full predicted world state.",
+    "The100-case scorer does not directly grade invented private company facts. A bounded declared-field scan is included; lack of such fields is lack of coverage, not proof all private facts were preserved.",
+    "Cases start independent sessions from archived states: this is open-loop prediction, not a closed-loop fundraiser.",
+    "Cases come from the same verified corpus; target-in-demo leakage is measured, not assumed absent.",
+    "Exact request/demo identities come from saved captures, without reloading RAG. Excerpts are display-only and sanitized; full records are pinned by path/hash.",
+    "Running service uses its own fresh source snapshot; prior-generation scores/captures are excluded. No claim is made from source edits after this serving generation started.",
+    "A passing fixed suite does not establish a policy improvement over upstream; this is not a paired causal comparison of policy accuracy.",
+    "The one recoverable bridge422 protocol rejection had provider output but no native response field; response-field absence alone cannot classify before-output failures."
+  ]
+}

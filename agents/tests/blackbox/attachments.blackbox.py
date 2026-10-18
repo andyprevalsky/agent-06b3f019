@@ -1,6 +1,8 @@
 """Blackbox tests for attachments domain."""
 
 import asyncio
+import logging
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -667,9 +669,70 @@ async def test_get_file_from_pointer_download():
     assert "dl-1" in _file_cache
 
 
+async def test_parent_attachment_success_preserves_metadata_and_logs():
+    """Successful parent fetches retain maps and emit no failure warning."""
+    from helpers import attachments
+
+    class Records(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    original_client = httpx.AsyncClient
+    for pointers in [[], [{
+        "id": "parent-file-1", "storage_path": "offline/brief.txt",
+        "original_filename": "brief.txt", "mime_type": "text/plain",
+        "size_bytes": 12, "created_at": "2026-10-13T00:00:00Z",
+    }]]:
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, json={"messages": [
+                {"role": "USER", "filePointer": pointer} for pointer in pointers
+            ]})
+
+        def client(**kwargs):
+            return original_client(transport=httpx.MockTransport(respond), **kwargs)
+
+        handler = Records()
+        logger = logging.Logger("parent-attachment-regression", logging.INFO)
+        logger.addHandler(handler)
+        config = SimpleNamespace(backend=SimpleNamespace(
+            api_url="http://offline.invalid", api_key="offline-test-key"
+        ))
+        with patch.object(attachments, "load_config", return_value=config), \
+             patch.object(attachments, "logger", logger), \
+             patch.object(attachments.httpx, "AsyncClient", side_effect=client):
+            result = await attachments.fetch_parent_attachments_activity("parent-1")
+
+        assert len(requests) == 1
+        assert requests[0].url.path == "/api/agents/parent-1"
+        assert requests[0].headers["X-API-Key"] == "offline-test-key"
+        assert result["filename_to_pointer"] == {
+            p["original_filename"]: p for p in pointers
+        }
+        assert result["all_pointers_by_id"] == {p["id"]: p for p in pointers}
+        assert not [record for record in handler.records if record.levelno >= logging.WARNING], \
+            "Successful parent attachment extraction emitted a failure warning"
+        records = [record for record in handler.records if record.levelno == logging.INFO]
+        assert len(records) == 1
+        assert records[0].getMessage() == "Extracted parent attachments"
+        assert records[0].parent_agent_id == "parent-1"
+        assert records[0].attachment_count == len(pointers)
+        # Attachment names can contain personal data; only the count is logged.
+        assert not hasattr(records[0], "filenames")
+        for pointer in pointers:
+            assert pointer["original_filename"] not in str(vars(records[0]))
+
+
 async def run_all_tests():
     print("attachments blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("parent_attachment_success_logging", test_parent_attachment_success_preserves_metadata_and_logs)
     await r.record_async("extract_attachments", test_extract_attachments_from_context)
     await r.record_async("build_metadata_text", test_build_attachment_metadata_text)
     await r.record_async("build_metadata_text_kb", test_build_attachment_metadata_text_small_kb)

@@ -78,12 +78,30 @@ function useActionRunner(
       toast(spec.successToast);
     } catch (error) {
       console.error(`[AttentionInbox] ${spec.errorToast.title}:`, error);
-      toast({ ...spec.errorToast, variant: 'destructive' });
+      toast({
+        ...spec.errorToast,
+        description: error instanceof Error ? error.message : spec.errorToast.description,
+        variant: 'destructive',
+      });
     } finally {
       setLoading(false);
     }
   };
   return { loading, run };
+}
+
+function skipActionSpec(requests: AttentionRequest[], requestId: string): ActionSpec {
+  const remaining = countRemaining(requests, requestId);
+  return {
+    requestId,
+    mutate: () => skipAttentionRequest(requestId),
+    successToast: {
+      title: 'Request skipped',
+      description: remainingDescription(remaining, 'No more pending requests'),
+    },
+    errorToast: { title: 'Error', description: 'Failed to skip request' },
+    keepOpen: true,
+  };
 }
 
 function createRespondHandler(
@@ -141,17 +159,7 @@ export function useAttentionActions({
   const handleRespond = createRespondHandler(requests, responses, run);
 
   const handleSkip = (requestId: string) => {
-    const remaining = countRemaining(requests, requestId);
-    void run({
-      requestId,
-      mutate: () => skipAttentionRequest(requestId),
-      successToast: {
-        title: 'Request skipped',
-        description: remainingDescription(remaining, 'No more pending requests'),
-      },
-      errorToast: { title: 'Error', description: 'Failed to skip request' },
-      keepOpen: true,
-    });
+    void run(skipActionSpec(requests, requestId));
   };
 
   const handleReject = (requestId: string) => {

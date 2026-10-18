@@ -1,0 +1,21 @@
+{
+  "schema": "rose.wmh_patch_packaging_verification.v1",
+  "results": [
+    {
+      "iteration": 2,
+      "sequential_patch_applied": true,
+      "expected_source_sha256": "9cb7804354512c2224340f97e6247a4b7ce7e834c50188c66414148835660375",
+      "unchanged_history_reproduction_and_expanded_guards": "16 passed",
+      "runtime_source_modified": false
+    },
+    {
+      "iteration": 3,
+      "sequential_patch_applied": true,
+      "expected_source_sha256": "424415aafecb49a16ea4ca03bece17928f5dbc2b86df6e79bcbabe84613d8adc",
+      "unchanged_history_reproduction_and_expanded_guards": "16 passed",
+      "runtime_source_modified": false
+    }
+  ],
+  "scope": "Temporary source copies only; no paid LLM calls or runtime activation. Live iteration measurements still pending.",
+  "apply_command": "git apply --unidiff-zero <patch>; zero context avoids whitespace-only context lines in tracked patch evidence"
+}

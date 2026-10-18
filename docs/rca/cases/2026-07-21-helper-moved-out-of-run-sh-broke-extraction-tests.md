@@ -57,6 +57,8 @@ cache-schema pooler retry).
 
 ## Human feedback
 
+October 6 relative: the worker receipt-failure fixture extracted `kill_tree_hard` but omitted its `descendant_pids` dependency after main integration. The full coverage domain failed cleanup; the standalone worker repro reproduced it (28 pass, one fail), and the exact receipt-failure function passed after adding the dependency to the extracted fixture. Production cleanup code was retained. Evidence: `.context/wmh-worker-repro.log`, `.context/wmh-worker-receipt-after.log`. Two other timeout observations passed unchanged in the standalone repro and remain unclassified until full coverage revalidation.
+
 None recorded.
 
 ## Reusable lesson
@@ -154,3 +156,60 @@ Independent review binds each correction to its exact patch and private normal
 RED/GREEN receipts. The complete mandatory command registry must still pass on
 the composed source; these focused results claim no fresh whole-suite coverage,
 paid task acceptance, native rollout, or LIVE50 credit.
+
+
+## Recurrence: reusable-bank drain budget owner (2026-10-16)
+
+Full agents coverage at exact source
+`8171b24d0f934b38a5b932f836b8726f40b07a96` reported 109 passed domains and
+one failed domain. The registered `explore_timeouts_drain_within_deploy_cutover`
+case in `spawn_agent.blackbox.py` failed with
+`deploy-agents-cooperative-cutover.sh must default DRAIN_TIMEOUT_SECONDS`.
+The coverage owner joined exit 1; fast-cache, unit and coverage aggregation did
+not run after the blackbox phase failed. Structural and seed follow-ons were
+held. The failed full coverage is retained and is not relabelled green.
+
+The existing case searched only the old shell launcher's Bash default. The
+reusable-bank implementation moved the unchanged 2700-second budget into the
+canonical Python driver, `scripts/worker_pool_cutover.py`, which the shell
+launcher invokes. Quick/medium explores remain 600 seconds, deep remains 1800,
+and cancellation grace remains 15: the original deepest safety inequality is
+still **1815 < 2700**. Driver expiry retains the old bank; this test failure did
+not demonstrate an activity-drain runtime regression.
+
+Archive searches used the literal assertion and `helper moved extraction test
+source file stale`; this is the existing source-location-coupled fixture class.
+The isolated test-only correction pins the launcher's canonical driver handoff,
+reads the driver's single integer budget with the Python AST without importing
+or executing it, and preserves the exact per-depth safety inequality and native
+Fly shutdown-grace assertions. Only that existing test and its explanatory
+docstring change. No runtime, timeout, policy, fixture response, skip, evaluator,
+or test registration was altered.
+
+The original registered RED was executed by the normal full coverage command:
+
+```bash
+cd agents
+source venv/bin/activate
+bash ../scripts/run-deploy-stage agents-coverage-blackbox --reuse-passed -- env AGENTS_COVERAGE_CONCURRENCY=6 bash scripts/run-coverage.sh
+```
+
+After all that coverage owner's children joined, the corrected normal owning
+registry was run once in an isolated exact-source copy:
+
+```bash
+cd /home/boxes/rose/.context/lantern-spawn-drain-8171/agents
+/home/boxes/rose/agents/venv/bin/python /tmp/lantern-review-reds-run-owner.py spawn-agent
+```
+
+The private wrapper sets only offline test-process placeholders and invokes the
+unchanged `scripts/run_blackbox_tests.py spawn-agent` registry through `runpy`.
+The registered case and complete spawn-agent owner passed in 2.7 seconds.
+Original domain RED and post-correction owner GREEN are retained under
+`.context/test-runs/agents-coverage-20261016-185506-802488/spawn-agent.log` and
+`.context/spawn-drain-8171-rca/owning-green.log`. Canonical scratch-local Ruff,
+changed-hunk formatting, and diff checks passed. All owned verification processes
+joined. ROOT remained at the original immutable source for sibling verification;
+only the detached correction was prepared. The full Test Loop on the composed
+new source is still required; no whole-coverage, native deployment or provider
+acceptance credit is claimed from this focused GREEN.

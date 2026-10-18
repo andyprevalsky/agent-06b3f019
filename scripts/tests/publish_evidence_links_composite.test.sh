@@ -62,5 +62,37 @@ except SystemExit as exc:
 else:
     raise AssertionError("missing transcript must fail closed")
 
+# Evidence renders stay private under the checkout on hosts without Cursor's
+# artifact mount; the default used to fail after the Hub upload with EACCES.
+repo = mod.REPO_ROOT
+assert mod.evidence_artifacts_root({}, cursor_mount_exists=False) == repo / ".context" / "rca_evidence"
+assert mod.evidence_artifacts_root({}, cursor_mount_exists=True) == Path("/opt/cursor/artifacts/rca_evidence")
+assert mod.evidence_artifacts_root(
+    {"CURSOR_ARTIFACTS_DIR": "/tmp/cursor"}, cursor_mount_exists=False
+) == Path("/tmp/cursor/rca_evidence")
+assert mod.evidence_artifacts_root(
+    {"RCA_EVIDENCE_ARTIFACTS_ROOT": "/tmp/explicit", "CURSOR_ARTIFACTS_DIR": "/tmp/cursor"},
+    cursor_mount_exists=True,
+) == Path("/tmp/explicit")
+
+
+# Latest evidence follows the captured canonical ID->node tree, never unrelated dumps.
+import tempfile
+with tempfile.TemporaryDirectory() as temporary:
+    mod.REPO_ROOT = Path(temporary)
+    root = "00000000-0000-4000-8000-000000000001"
+    child = "00000000-0000-4000-8000-000000000002"
+    grandchild = "00000000-0000-4000-8000-000000000003"
+    foreign = "00000000-0000-4000-8000-000000000004"
+    for owner, filename in [(root, "100-root.json"), (child, "200-child.json"), (grandchild, "300-grandchild.json"), (foreign, "999-foreign.json")]:
+        folder = mod.REPO_ROOT / ".llm-dumps" / owner
+        folder.mkdir(parents=True)
+        (folder / filename).write_text("{}")
+    tree = {root: {"parent_agent_id": None}, child: {"parent_agent_id": root}, grandchild: {"parent_agent_id": child}, foreign: {"parent_agent_id": "other"}}
+    captured = {"tasks": [{"agent_id": root, "logs": {"tree": tree}}]}
+    assert mod.latest_dump_for_agent(root, bundle=captured).name == "300-grandchild.json"
+    assert mod.latest_dump_for_agent(root).name == "100-root.json"
+mod.REPO_ROOT = repo
+
 print("publish_evidence_links composite projection checks passed")
 PY

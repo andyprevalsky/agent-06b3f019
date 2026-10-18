@@ -77,6 +77,7 @@ class TaskResult:
     payment_lifecycle: Optional[dict] = None
     world_model_fidelity: Optional[dict] = None
     world_model_mode: Optional[str] = None
+    wmh_initial_state: Optional[dict] = None  # scenario seed hash, provenance, and seeded session id
     # Agent lifecycle status is a snapshot (for example PAUSED after a passed
     # abandonment check), not the evaluator or harness outcome.
     benchmark_status: Optional[str] = None

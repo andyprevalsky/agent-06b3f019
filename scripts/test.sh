@@ -317,6 +317,8 @@ run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behav
 run_suite "LLM Trajectory Injection Guard Unit Tests" bash scripts/tests/check-llm-trajectory-injection-approval.test.sh
 run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.py
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
+run_suite "run.sh Process Tree Reaper" bash scripts/tests/run-sh-kill-tree.test.sh
+run_suite "Fleet Post-Child Autoscaler Settle" bash scripts/tests/fleet-post-child-settle.test.sh
 run_suite "RCA Model Intelligence Contract" bash scripts/tests/rca-model-intelligence-category.test.sh
 run_suite "RCA Prompt-Edit Abstraction Contract" bash scripts/tests/rca-prompt-edit-abstraction.test.sh
 run_suite "RCA Archive New Command" bash scripts/tests/rca-archive-new.test.sh
@@ -328,6 +330,13 @@ run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Benchmark Live Results" python3 scripts/tests/benchmark-live-results.test.py
 run_suite "Benchmark Campaign Grouping" bash scripts/tests/campaign-hub-grouping.test.sh
 run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
+run_suite "Controller Operator Preflight" python3 scripts/tests/cloudbench-operator-preflight.test.py
+run_suite "Playwright Browser Bootstrap" python3 scripts/tests/playwright-browser-bootstrap.test.py
+run_suite "Cloud Benchmark Inventory Stdlib Startup" python3 scripts/tests/cloudbench-inventory-site-startup.test.py
+run_suite "Cloud Benchmark Poll Stdlib Startup" python3 scripts/tests/cloudbench-poll-site-startup.test.py
+run_suite "Cloud Benchmark Hub Admission Stdlib Startup" python3 scripts/tests/cloudbench-hub-admission-site-startup.test.py
+run_suite "Cloud Benchmark Persistent Aggregator" python3 scripts/tests/cloudbench-persistent-aggregator.test.py
+run_suite "Cloud Benchmark Fleet Card Stdlib Startup" python3 scripts/tests/cloudbench-fleet-card-site-startup.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
 run_suite "Cloud Benchmark Quiesced Forensic Retirement" python3 scripts/tests/cloudbench-forensic-quiesced.test.py
 run_suite "Cloud Benchmark Native Linux Runner" python3 scripts/tests/cloudbench-controller-linux.test.py

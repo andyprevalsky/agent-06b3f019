@@ -56,6 +56,7 @@ const MACHINE_DATA_ROUTES: Record<string, string[]> = {
     '/gpt-code/credentials/upload',
   ],
   'integrations/routes.passkeys.ts': ['/passkeys/upload'],
+  'integrations/routes.lantern.ts': ['/lantern-people/credentials/upload'],
   'integrations/routes.documents.ts': ['/documents/upload'],
   'upload/routes.ts': ['/'],
   'download-telemetry/routes.ts': ['/'],

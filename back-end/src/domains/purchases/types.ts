@@ -36,6 +36,8 @@ export interface MintPurchaseInput extends PurchaseReceipt {
   fingerprint: string;
   merchant: string;
   agentId?: string;
+  /** Reuse this approved purchase only; never admit a new financial operation. */
+  reusePurchaseId?: string;
 }
 
 export interface MintPurchaseResult {
@@ -49,6 +51,7 @@ export interface MintPurchaseResult {
 }
 
 export interface PurchaseLookupResult {
+  usageItems?: Array<Record<string, unknown>>;
   found: boolean;
   reusable: boolean;
   purchase: Pick<

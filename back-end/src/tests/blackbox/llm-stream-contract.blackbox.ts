@@ -20,11 +20,21 @@ import {
   parseOpenAISSE,
   parseResponsesSSE,
 } from '../../providers/rose/streaming';
-import type { RoseStreamChunk } from '../../providers/rose/types';
+import type { CompletionMessage, RoseStreamChunk } from '../../providers/rose/types';
 import { CEREBRAS_API_URL, OPENAI_RESPONSES_API_URL } from '../../providers/rose/transport';
 import { buildRouterCompletionOptions } from '../../providers/chat/routerLlm';
 import { buildGeneratorCompletionOptions } from '../../providers/chat/generatorLlm';
 import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
+import { callSupervisorLlm } from '../../providers/smsSupervisor/supervisorLlm';
+import { markCacheable } from '../../providers/rose/cache';
+import { transformMessagesForAnthropic } from '../../providers/rose/transforms';
+import { buildEnvironmentToolMessages } from '../../providers/smsSupervisor/environmentMessages';
+import { formatUserTemporalContext } from '../../providers/smsSupervisor/timeContext';
+import { buildAnthropicBody } from '../../providers/rose/claudeAuth';
+import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
+import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCerebrasRoute';
+import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
+import { getPool } from '../../providers/rose/pools';
 
 type ProviderFormat = 'anthropic' | 'openai_chat' | 'openai_responses';
 
@@ -244,7 +254,7 @@ async function testChatCompletionDumps(consumerClose = false): Promise<void> {
         const dump = JSON.parse(fs.readFileSync(path.join(dumpDir, files[0]), 'utf8'));
         assert.equal(dump.agent_id, agentId);
         assert.equal(dump.call_site, callSite);
-        assert.deepEqual(dump.messages, messages);
+        assert.deepEqual(dump.messages, JSON.parse(JSON.stringify(options.messages)));
         assert.deepEqual(dump.response_format, options.response_format);
         assert.equal(dump.extra.output, expectedOutput);
         if (consumerClose) assert.equal(dump.extra.consumer_closed, true);
@@ -269,7 +279,250 @@ async function main(): Promise<void> {
   await withIsolatedFundedKeyCooldowns(testCompletionClientPreservesItemProvenance);
   await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps());
   await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps(true));
+  await withIsolatedFundedKeyCooldowns(testInteractiveClockGrounding);
+  testInteractiveClockProviderCachePrefixes();
   console.log(`PASS llm-stream-contract (${fixtures.cases.length} shared provider fixtures)`);
+}
+
+/** Inspect provider bodies, including cache markers and Responses routing keys. */
+function testInteractiveClockProviderCachePrefixes(): void {
+  const messages: CompletionMessage[] = [
+    markCacheable('cache-stable system prompt'),
+    { role: 'user', content: 'Earlier question' },
+    { role: 'assistant', content: 'Earlier answer' },
+    { role: 'user', content: 'Continue with the current information.' },
+  ];
+  const options = buildRouterCompletionOptions({
+    agentId: 'clock-cache-contract',
+    model: 'rose-labs/rose-1-flash',
+    messages,
+    providerFastMode: true,
+  });
+  const poolSpec = getPool('rose-1-flash');
+  const nativeBefore = buildAnthropicBody({ poolSpec, messages });
+  const nativeAfter = buildAnthropicBody({ poolSpec, messages: options.messages });
+  assert.deepEqual(
+    nativeAfter.system,
+    nativeBefore.system,
+    'Anthropic system cache blocks stay identical'
+  );
+  assert.deepEqual(
+    (nativeAfter.messages as unknown[]).slice(0, -1),
+    nativeBefore.messages,
+    'Anthropic preserves history content AND its existing cache breakpoint'
+  );
+  assert(
+    !JSON.stringify((nativeAfter.messages as unknown[]).at(-1)).includes('cache_control'),
+    'fresh clock remains beyond the history cache breakpoint'
+  );
+
+  const responseBefore = buildCodexResponsesBody({
+    poolSpec,
+    messages,
+    requestId: 'clock-cache-contract',
+  });
+  const responseAfter = buildCodexResponsesBody({
+    poolSpec,
+    messages: options.messages,
+    requestId: 'clock-cache-contract',
+  });
+  assert.equal(
+    responseAfter.instructions,
+    responseBefore.instructions,
+    'Responses instructions stay identical'
+  );
+  assert.equal(
+    responseAfter.prompt_cache_key,
+    responseBefore.prompt_cache_key,
+    'Responses cache routing key stays identical'
+  );
+  assert.deepEqual(
+    (responseAfter.input as unknown[]).slice(0, -1),
+    responseBefore.input,
+    'Responses keeps all existing input before the clock'
+  );
+  assert(
+    JSON.stringify((responseAfter.input as unknown[]).at(-1)).includes('<system-reminder>'),
+    'Responses retains the clock'
+  );
+  for (const buildBody of [
+    buildOpenRouterCerebrasBody,
+    (params: typeof options) => buildOpenRouterFastChatBody(params, 'clock-cache-contract'),
+  ]) {
+    const before = buildBody({ ...options, messages });
+    const after = buildBody(options);
+    assert.deepEqual(
+      (after.messages as unknown[]).slice(0, -1),
+      before.messages,
+      'OpenRouter keeps the full history prefix'
+    );
+    assert(
+      JSON.stringify((after.messages as unknown[]).at(-1)).includes('<system-reminder>'),
+      'OpenRouter retains the clock'
+    );
+  }
+}
+
+/** Exercise the real completion boundaries; replace only the provider HTTP response. */
+async function testInteractiveClockGrounding(): Promise<void> {
+  const originalFetch = global.fetch;
+  const originalDate = globalThis.Date;
+  const originalEnv = { ...process.env };
+  const requests: Array<{ messages: CompletionMessage[] }> = [];
+  const failures: unknown[] = [];
+  let instant = '2026-10-16T19:57:35.000Z';
+  class ClockDate extends originalDate {
+    constructor(value?: string | number | Date) {
+      super(value ?? instant);
+    }
+    static now(): number {
+      return new originalDate(instant).getTime();
+    }
+  }
+  process.env.CEREBRAS_API_KEY = 'contract-test-key';
+  delete process.env.BENCHMARK_SMS_SUPERVISOR_MODEL;
+  delete process.env.BENCHMARK_SMS_SUPERVISOR_ROUTE;
+  delete process.env.BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON;
+  global.fetch = async (input, init) => {
+    assert.equal(String(input), CEREBRAS_API_URL, 'only the fixture provider may be called');
+    requests.push(JSON.parse(String(init?.body)));
+    const output = JSON.stringify({
+      reasoning: 'recorded provider response',
+      response: 'fixture',
+      tool_calls: [{ tool: 'attempt_completion', arguments: {} }],
+    });
+    return new Response(
+      sseBody([
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: output }, finish_reason: 'stop' }] })}`,
+        'data: [DONE]',
+      ]),
+      { headers: { 'Content-Type': 'text/event-stream' } }
+    );
+  };
+  const messages: CompletionMessage[] = [
+    markCacheable('static interactive prompt'),
+    { role: 'user', content: 'is codex open source? what parts of it are closed source?' },
+    { role: 'assistant', content: 'Previously we discussed releases in 2025.' },
+    { role: 'user', content: 'What is current? Also compare the 2025 release.' },
+  ];
+  const originalMessages = structuredClone(messages);
+  try {
+    globalThis.Date = ClockDate as DateConstructor;
+    for (const nextInstant of ['2026-10-16T19:57:35.000Z', '2027-01-01T00:00:01.000Z']) {
+      instant = nextInstant;
+      for (const phase of [
+        'initial',
+        'after_search',
+        'search_budget_spent',
+        'generator',
+        'sms',
+        'reaction',
+      ] as const) {
+        try {
+          const inputMessages =
+            phase === 'sms' || phase === 'reaction'
+              ? [
+                  ...messages,
+                  ...buildEnvironmentToolMessages(
+                    formatUserTemporalContext(new Date(instant), 'America/Los_Angeles'),
+                    1
+                  ),
+                ]
+              : messages;
+          const originalInput = structuredClone(inputMessages);
+          if (phase === 'sms' || phase === 'reaction') {
+            await callSupervisorLlm(inputMessages, null, 'clock-contract', phase === 'reaction');
+          } else {
+            const params = {
+              agentId: 'clock-contract',
+              model: 'rose-labs/rose-1-flash',
+              messages: inputMessages,
+              providerRoute: 'direct-cerebras' as const,
+              providerFastMode: false,
+            };
+            const options =
+              phase === 'generator'
+                ? buildGeneratorCompletionOptions(params)
+                : buildRouterCompletionOptions({ ...params, stage: phase });
+            for await (const chunk of await createStreamingCompletion(options)) void chunk;
+          }
+          const sent = requests.at(-1)?.messages;
+          assert(sent, `${phase}: provider request captured`);
+          assert.equal(sent[0]?.role, 'system', `${phase}: static prompt precedes clock`);
+          assert.equal(
+            sent.filter((message) => message.role === 'system').length,
+            1,
+            'Cerebras accepts one system message'
+          );
+          assert.equal(sent[0]?.content, originalMessages[0].content, 'static prefix unchanged');
+          assert.deepEqual(
+            sent.slice(0, -1),
+            originalInput,
+            `${phase}: entire existing prompt and history remain the cacheable prefix`
+          );
+          assert(
+            JSON.stringify(sent).startsWith(`${JSON.stringify(originalInput).slice(0, -1)},`),
+            `${phase}: serialized provider message prefix is byte-identical`
+          );
+          const clock = sent.at(-1);
+          assert.equal(clock?.role, 'user', `${phase}: runtime metadata follows history`);
+          assert.match(String(clock?.content), /^<system-reminder>\n/);
+          assert.match(String(clock?.content), /\n<\/system-reminder>$/);
+          assert.equal(
+            transformMessagesForAnthropic(sent).staticSystem,
+            transformMessagesForAnthropic(originalMessages).staticSystem,
+            'clock stays outside static cache prefix'
+          );
+          assert.match(
+            String(clock?.content),
+            new RegExp(`Current UTC time: ${instant.replaceAll('.', '\\.')}`),
+            `${phase}: fresh UTC instant`
+          );
+          const expectedDate = nextInstant.startsWith('2026')
+            ? 'Friday, October 16, 2026'
+            : 'Friday, January 1, 2027';
+          assert(
+            String(clock?.content).includes(expectedDate),
+            `${phase}: calendar date and weekday agree with clock`
+          );
+          assert(
+            String(clock?.content).includes("user's local time"),
+            `${phase}: UTC/local distinction`
+          );
+          assert.deepEqual(
+            transformMessagesForAnthropic(sent).messages.slice(0, -1),
+            transformMessagesForAnthropic(originalInput).messages,
+            'Anthropic conversion preserves the entire conversation prefix'
+          );
+          assert.deepEqual(
+            messages,
+            originalMessages,
+            'runtime clock never enters persisted input'
+          );
+          assert.deepEqual(
+            inputMessages,
+            originalInput,
+            'SMS local-time environment remains intact'
+          );
+        } catch (error) {
+          failures.push(new Error(`${phase} at ${instant}`, { cause: error }));
+        }
+      }
+    }
+    assert.equal(requests.length, 12, 'one provider request per inference');
+    if (failures.length) throw new AggregateError(failures, 'interactive clock grounding');
+  } finally {
+    global.fetch = originalFetch;
+    globalThis.Date = originalDate;
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, originalEnv);
+    fs.rmSync(path.join(repoRoot, '.llm-dumps', 'clock-contract'), {
+      recursive: true,
+      force: true,
+    });
+  }
 }
 
 main().catch((error) => {

@@ -6,6 +6,7 @@ Uses run_agent for the core loop. Workflow handles:
 - continue_as_new for context overflow
 """
 
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 import asyncio
 import contextlib
 import hashlib
@@ -26,7 +27,6 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.param_populator.config import PARAM_POPULATOR_MODEL
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
@@ -47,8 +47,7 @@ with workflow.unsafe.imports_passed_through():
         mark_finished,
         poll_new_messages,
         post_agent_message,
-        resolve_fast_cache_goal_activity,
-        unpack_fast_cache_goal_resolution,
+        resolve_fast_cache_context_activity,
         update_agent_status,
     )
     from helpers.completion_summary_contract import (
@@ -80,6 +79,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+    from helpers.world_model_runtime import world_clock_activity
     from loop.dag_executor import (
         TaskDAG,
         execute_dag,
@@ -745,6 +745,9 @@ class AgentWorkflow:
         # Independent of DEMO cache replay (self.fast_mode_cache_enabled).
         self.provider_fast_mode: bool = True
         self.world_model_mode: str = "real"
+        # Simulate-mode logical clock: seconds of wall-clock wait that wait_for /
+        # wait_seconds skipped (utils/simulated_clock.py). Always 0 in real mode.
+        self.simulated_clock_offset_seconds: int = 0
         self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
         self.verifier: Optional[Dict] = None
@@ -891,6 +894,7 @@ class AgentWorkflow:
         # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
         self.agent_source: str = "WEB"
         self._deployment_resume: bool = False
+        self._world_clock_events: set[str] = set()
         self._resume_prior_status: str = "ACTIVE"
         self._resume_status_message: Optional[str] = None
         self._resume_progress: float = 0.0
@@ -949,6 +953,8 @@ class AgentWorkflow:
         prior_status_message = state.get("prior_status_message")
         self._resume_status_message = prior_status_message if isinstance(prior_status_message, str) else None
         self._resume_progress = float(_number("progress"))
+        # A simulated agent keeps reading world time after continue-as-new.
+        self.simulated_clock_offset_seconds = int(_number("simulated_clock_offset_seconds"))
         self.token_count = int(_number("token_count"))
         self.tokens_in = int(_number("tokens_in"))
         self.tokens_out = int(_number("tokens_out"))
@@ -1249,6 +1255,7 @@ class AgentWorkflow:
             "prior_status": prior_status,
             "prior_status_message": self._resume_status_message,
             "progress": self._resume_progress,
+            "simulated_clock_offset_seconds": self.simulated_clock_offset_seconds,
             "token_count": self.token_count,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
@@ -1829,6 +1836,7 @@ class AgentWorkflow:
         self.user_id = user_id
         self.goal = goal
         self.fast_cache_goal = goal  # Overridden by the persisted row goal below
+        self.fast_cache_root_goal = goal
         self.model = model
         self.current_phase = "PLAN"
         self.reasoning_max_tokens = reasoning_max_tokens
@@ -1847,6 +1855,7 @@ class AgentWorkflow:
         self.fast_mode_cache_enabled = is_demo_cache_task(self)
         self.world_model_mode = world_model_mode if world_model_mode in {"simulate", "shadow"} else "real"
         self.memory_enabled = bool(memory_enabled)
+        self.simulated_clock_offset_seconds = 0
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.compute_token_lineage_key = f"agent:{agent_id}"
@@ -1927,6 +1936,7 @@ class AgentWorkflow:
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
 
         if not self._deployment_resume:
+            await self._world_clock_event("register")
             await self._advance_cloud_agent_lifecycle(PREPARING_CLOUD_AGENT_TITLE, "IN_PROGRESS")
 
         # Post an early heartbeat so external monitors (FE tree, benchmark
@@ -2016,43 +2026,40 @@ class AgentWorkflow:
         # DB-row goal once and thread it into all cache keying (the DAG path
         # already resolves it via ensure_position_context; this aligns the
         # explicitly-threaded plan/execute/verifier/summary paths with it).
-        if (
-            self.provider_fast_mode
-            or self.fast_mode_cache_enabled
-            or self.parent_workflow_id
-            or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
-        ):
-            try:
-                persisted_goal, resolved_root_goal = unpack_fast_cache_goal_resolution(
-                    await workflow.execute_activity(
-                        resolve_fast_cache_goal_activity,
-                        args=[agent_id],
-                        start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                )
-                if resolved_root_goal:
-                    self.root_goal = resolved_root_goal
-                if persisted_goal and persisted_goal != self.fast_cache_goal:
+        try:
+            cache_context = await workflow.execute_activity(
+                resolve_fast_cache_context_activity,
+                args=[agent_id],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            persisted_goal = cache_context.get("goal") if isinstance(cache_context, dict) else None
+            root_goal = cache_context.get("root_goal") if isinstance(cache_context, dict) else None
+            if persisted_goal:
+                if persisted_goal != self.fast_cache_goal:
                     workflow.logger.info(
                         "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
                     )
-                    self.fast_cache_goal = persisted_goal
-                if persisted_goal or resolved_root_goal:
-                    # Recompute DEMO cache gate after durable child + root goals
-                    # are known. Leftover GPs inherit demo wait_for from root_goal.
-                    self.fast_mode_cache_enabled = is_demo_cache_task(self)
-                    # Compute-token cache affinity pins by the child's goal —
-                    # keep it on the same stable namespace, not the root's.
-                    self.compute_token_fast_cache_affinity_key = (
-                        _fast_cache_compute_affinity_key(
-                            user_id, self.fast_cache_goal or persisted_goal or self.goal
-                        )
-                        if self.fast_mode_cache_enabled
-                        else None
-                    )
-            except Exception as e:
-                workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
+                self.fast_cache_goal = persisted_goal
+            if root_goal:
+                self.fast_cache_root_goal = root_goal
+                self.root_goal = root_goal
+            if isinstance(cache_context, dict) and cache_context.get(
+                "resolved", isinstance(persisted_goal, str)
+            ):
+                self.fast_mode_cache_enabled = bool(cache_context.get("enabled"))
+                self.provider_fast_mode = bool(
+                    cache_context.get("provider_fast_mode", self.provider_fast_mode)
+                )
+            self.compute_token_fast_cache_affinity_key = (
+                _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal)
+                if self.fast_mode_cache_enabled
+                else None
+            )
+        except Exception as e:
+            workflow.logger.warning(
+                f"Failed to resolve Fast Mode cache context, using workflow input goal: {e}"
+            )
 
         # Helper: gate is open unless explicitly False
         def _gate_open(name: str) -> bool:
@@ -2069,7 +2076,7 @@ class AgentWorkflow:
                 self._deferred_startup_sms_handle = workflow.start_activity(
                     notify_sms_event_activity,
                     args=notification_args,
-                    start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
+                    **wmh_activity_timeout_options(self.world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 workflow.logger.info("Started agent_started SMS notification (deferred await)")
@@ -4092,7 +4099,7 @@ class AgentWorkflow:
             call_llm_activity,
             args=[
                 self.agent_id,
-                PARAM_POPULATOR_MODEL,
+                self.model,
                 self._current_tools,
                 256,
                 self.agent_id,
@@ -5069,7 +5076,7 @@ class AgentWorkflow:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
+                        **wmh_activity_timeout_options(self.world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     workflow.logger.info("Sent cost_limit SMS notification")
@@ -5398,6 +5405,42 @@ class AgentWorkflow:
             "steps_taken": steps_taken,
         }
 
+    async def _world_clock_event(self, operation: str) -> None:
+        """Simulate mode: register or finish this agent on its world's shared clock.
+
+        Children start at their parent's world time; a finished child lets its
+        parent resume at the children's latest finish, so finish precedes the
+        parent signal. Best effort: an unavailable clock leaves the run intact.
+        """
+        if self.world_model_mode != "simulate" or operation in self._world_clock_events:
+            return
+        pending = getattr(self, "_world_clock_pending_events", None)
+        if pending is None:
+            pending = self._world_clock_pending_events = {}
+        if operation in pending:
+            await pending[operation].wait()
+            return
+        completed = asyncio.Event()
+        pending[operation] = completed
+        result = None
+        try:
+            with contextlib.suppress(Exception):
+                result = await workflow.execute_activity(
+                    world_clock_activity,
+                    args=[operation, self.agent_id, self.parent_agent_id if operation == "register" else None],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+        finally:
+            pending.pop(operation, None)
+            completed.set()
+        if isinstance(result, dict) and type(result.get("time_ms")) is int:
+            self._world_clock_events.add(operation)
+        if operation == "register" and isinstance(result, dict) and type(result.get("time_ms")) is int:
+            # This agent's own clock reads world time from its first step: the
+            # world starts at its pinned scenario date, not today's date.
+            self.simulated_clock_offset_seconds = result["time_ms"] // 1000 - int(workflow.now().timestamp())
+
     async def _mark_failed(
         self,
         context: List[Dict],
@@ -5421,6 +5464,7 @@ class AgentWorkflow:
         # Latch the terminal flag FIRST — see _mark_complete for the regression
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
         self._is_finished = True
+        await self._world_clock_event("finish")
         await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
@@ -5626,6 +5670,7 @@ class AgentWorkflow:
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
         # overwrite the COMPLETED status with ACTIVE/Processing.
         self._is_finished = True
+        await self._world_clock_event("finish")
         await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
@@ -5889,7 +5934,7 @@ class AgentWorkflow:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
+                        **wmh_activity_timeout_options(self.world_model_mode, timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS)),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     workflow.logger.info(f"Sent completion SMS notification: agent={self.agent_id}")

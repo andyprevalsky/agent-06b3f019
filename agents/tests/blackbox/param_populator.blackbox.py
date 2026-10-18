@@ -157,6 +157,7 @@ async def test_populate_raises_on_unknown_tool():
             tool_name="totally_not_a_tool",
             goal="x",
             agent_id="agent-1",
+            model="rose-fast",
         )
     except ValueError as e:
         assert "Unknown tool" in str(e)
@@ -164,13 +165,11 @@ async def test_populate_raises_on_unknown_tool():
         raise AssertionError("Expected ValueError for unknown tool")
 
 
-async def test_populate_forces_ultra_model():
-    """Param populator always calls rose-1-ultra, ignoring the unused activity model arg."""
-    from domains.param_populator.config import PARAM_POPULATOR_MODEL
+async def test_populate_uses_agent_model():
+    """Param populator uses the model selected for the agent."""
     from domains.param_populator.service import populate_tool_params
     import domains.param_populator.service as svc
 
-    assert PARAM_POPULATOR_MODEL == "rose-labs/rose-1-ultra"
     seen: dict = {}
 
     async def fake_fetch_agent_context(agent_id: str):
@@ -185,12 +184,12 @@ async def test_populate_forces_ultra_model():
     svc.fetch_agent_context = fake_fetch_agent_context
     svc.call_llm_structured_streaming = fake_call_llm_structured_streaming
     try:
-        await populate_tool_params(tool_name="web_search", goal="Find AI news", agent_id="agent-1")
+        await populate_tool_params(tool_name="web_search", goal="Find AI news", agent_id="agent-1", model="rose-fast")
     finally:
         svc.fetch_agent_context = original_fetch
         svc.call_llm_structured_streaming = original_call
 
-    assert seen["model"] == "rose-labs/rose-1-ultra"
+    assert seen["model"] == "rose-fast"
     assert seen["call_site"] == "dag_param_populator"
 
 
@@ -209,6 +208,7 @@ async def test_populate_happy_path_returns_params_and_usage():
             tool_name="web_search",
             goal="Find AI news",
             agent_id="agent-1",
+            model="rose-fast",
         )
     finally:
         _restore_populate_mocks(mp)
@@ -239,6 +239,7 @@ async def test_populate_fallback_to_first_tool_call_on_mismatch():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
+            model="rose-fast",
         )
     finally:
         _restore_populate_mocks(mp)
@@ -259,6 +260,7 @@ async def test_populate_raises_when_no_tool_calls():
                 tool_name="web_search",
                 goal="g",
                 agent_id="agent-1",
+                model="rose-fast",
             )
         except ValueError as e:
             assert "did not call any tools" in str(e)
@@ -283,6 +285,7 @@ async def test_populate_raises_on_empty_required_field():
                 tool_name="web_search",
                 goal="Some goal",
                 agent_id="agent-1",
+                model="rose-fast",
             )
         except ValueError as e:
             assert "Required field" in str(e)
@@ -309,6 +312,7 @@ async def test_populate_prefers_matching_tool_call():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
+            model="rose-fast",
         )
     finally:
         _restore_populate_mocks(mp)
@@ -330,6 +334,7 @@ async def test_populate_skips_none_tool_call_entries():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
+            model="rose-fast",
         )
     finally:
         _restore_populate_mocks(mp)
@@ -356,6 +361,7 @@ async def test_populate_heartbeat_is_invoked():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
+            model="rose-fast",
             heartbeat=hb,
         )
     finally:
@@ -400,7 +406,10 @@ async def test_handler_returns_service_result():
     """populate_tool_params_activity returns the service result on success."""
     from domains.param_populator import handler as handler_mod
 
+    received: dict = {}
+
     async def fake_populate(**kwargs):
+        received.update(kwargs)
         return {"params": {"query": "ok"}, "usage": {"total_tokens": 1}}
 
     original = handler_mod.populate_tool_params
@@ -410,12 +419,13 @@ async def test_handler_returns_service_result():
             tool_name="web_search",
             goal="g",
             agent_id="agent-1",
-            model="unused",
+            model="rose-fast",
         )
     finally:
         handler_mod.populate_tool_params = original
 
     assert result == {"params": {"query": "ok"}, "usage": {"total_tokens": 1}}
+    assert received["model"] == "rose-fast"
 
 
 async def run_all_tests():
@@ -430,7 +440,7 @@ async def run_all_tests():
     r.record("build_prompt_non_spawn_tool_no_ephemeral_warning", test_build_prompt_non_spawn_tool_no_ephemeral_warning)
     r.record("build_prompt_file_attachment_rules_included", test_build_prompt_file_attachment_rules_included)
     await r.record_async("populate_raises_on_unknown_tool", test_populate_raises_on_unknown_tool)
-    await r.record_async("populate_forces_ultra_model", test_populate_forces_ultra_model)
+    await r.record_async("populate_uses_agent_model", test_populate_uses_agent_model)
     await r.record_async("populate_happy_path", test_populate_happy_path_returns_params_and_usage)
     await r.record_async("populate_fallback_first_tool_call", test_populate_fallback_to_first_tool_call_on_mismatch)
     await r.record_async("populate_raises_no_tool_calls", test_populate_raises_when_no_tool_calls)

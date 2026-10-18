@@ -44,6 +44,83 @@ The Step 4 classification remains **unresolved** and the Step 5a bucket remains 
 
 No runtime, prompt, benchmark definition, timeout, or test limit was changed. The isolated stack logs, exact agent response, and replay inputs/results are saved under `.context/rca-parallel-tool-calls/` in this workspace. The exact failed suite run was observed locally; there is no deterministic owning-boundary regression test that fails on the buggy code and passes after a fix, and no fixed-revision `scripts/run-bench --local parallel-tool-calls` pass. This RCA remains open. Before calling it fixed, establish that deterministic boundary proof, run the unchanged exact task before and after the repair, and record both FE-visible runs. A rerun that happens to pass does not prove a repair.
 
+### October 16 cc65 city-research timeout: slow fetch and repeated selection
+
+A later unchanged `parallel-tool-calls` attempt at source
+cc65de6809344b97fd0c8b08767f470f431b5c42, run
+037a3d17-b7b0-442b-a65d-25cb6f5e56c6, agent
+38257983-e729-49bf-8f94-6cd9df56a2c4 failed with ACTIVE rather than COMPLETED.
+Native duration was 365.4 seconds; the poll reported Timeout after 359s with
+effective task timeout 356s. The normal resolver retained the catalog's 300s
+minimum and extended it using recent passing p95 158.0s, n=646, multiplied by
+2.25 and rounded up. No definition, evaluator, model, provider pin, timeout,
+retry count or budget changed. This is a task failure, not an infrastructure
+exclusion or a successful result inferred from partial findings.
+
+This occurrence differs from the original five-wave research trace. The root
+GPT-6 Sol response launched one medium Explore per city concurrently at
+13:57:32Z. Austin completed in 23.983s and Lisbon in 46.522s. Denver remained
+on the critical path until benchmark cancellation: its parent tool span was
+352.604s and worker activity 362.238s including cancellation drain. Its main
+model calls selected qwen-3.8-27b. Those are logical model/provider observations,
+not a claim that one provider or model universally caused the outcome.
+
+At 13:58:43Z Denver selected the NOAA Colorado normals PDF at
+https://www.ncdc.noaa.gov/climatenormals/clim20supp1/states/CO.pdf.
+The web_fetch dispatch consumed 212.131s: scrape attempts of 104.927s and
+106.198s with the normal one-second retry interval. Each attempt observed
+Firecrawl HTTP 500, then Parallel Extract returned no results with a target
+HTTP 503 entry. The error reached the tool result. The actual stored next
+request, 1792159335364-15c15eb65aa9-explore_agent.json (18 messages), includes
+that failure; the model explicitly reasons that the PDF failed 503 and chooses
+to retry it alongside a new web search. That response took 2.341s. The new
+fetch ran another 77.059s before cancellation. An earlier unrelated WRCC page
+also had a captured certificate-hostname mismatch. No conclusion about the
+remote origin's deeper failure is supported by these transport observations.
+
+The trace does not establish an owned invariant violation. Three spawns were
+parallel, two children completed, the slow fetch returned typed errors through
+its two configured attempts, the error remained in the next model context,
+and the medium child retained its normal 600s parent/activity bound. The
+benchmark's shorter independent 356s outcome budget expired first. Existing
+Firecrawl 500/Parallel 503 retry classification and fallback sequencing explain
+the measured path; changing them merely to clear this task would change an
+existing policy without a causal defect proof. The root never reached final
+synthesis while awaiting Denver. Partial city findings do not satisfy the
+COMPLETED assertion.
+
+All 31 local model input/output dumps (1,754,098 bytes), worker/backend logs,
+raw run/task data and original automatic diagnostics were preserved privately
+under `.context/parallel382-RCA/`. The exact final Denver dump preserves full
+messages, tools, generation settings, candidate routing and output. No live
+model replay was performed or authorized; no old/new model separation was
+proved. A source-only contract inspection is not a deterministic failing
+owning-boundary test, and no runtime repair or fixed task outcome is claimed.
+
+The prescribed local diagnostic commands were started in parallel from the
+original owned preflight agents checkout. Agent latency used the saved worker
+log, explicit local FE base http://localhost:56200 and
+--no-record-span-history; it completed. Agent logs used --tree --diagnostics
+--url http://localhost:56200 and failed with ConnectError because the normal
+stack had already retired. The original run's automatic agent_logs diagnostic
+had succeeded before teardown and remains available. Its later PAUSED status
+reflects benchmark cleanup, not the status at the timeout. The post-run latency
+trace extends through cleanup and must not replace the native 365.4s benchmark result
+duration, which includes finalization. No production endpoint was queried and no database or
+stack was recreated.
+
+The deeper cause remains open. Falsifiers requiring further evidence include
+an actual error omitted from a reconstructed model request, unintended
+serialization or timer drift, a non-retryable response incorrectly classified
+under the declared provider contract, or a controlled unchanged request replay
+that separates a concrete client defect from model choice. The captured request
+already falsifies lost-error-context as an explanation for the second PDF
+selection. Provider 500/503 responses alone do not prove a general provider
+outage, and variable model research is not a proved intelligence limitation.
+An eventual unchanged full smoke pass would establish that run's qualification
+only; it would not fix or waive this failure. No new test, suppression, prompt,
+task definition or runtime source change accompanies this archive addition.
+
 ## Human feedback
 
 None recorded.

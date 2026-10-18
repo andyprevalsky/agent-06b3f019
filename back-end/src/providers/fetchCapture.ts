@@ -142,7 +142,31 @@ export function isRetryableOutboundResponseStatus(status: number): boolean {
 }
 
 export function outboundReplayCacheKey(url: string, method: string, body: string | null): string {
+  if (isCredentialExchange(url)) {
+    return `call:${JSON.stringify([credentialMetadataUrl(url), method, null])}`;
+  }
   return `call:${JSON.stringify([url, method, body])}`;
+}
+
+function isCredentialExchange(url: string): boolean {
+  try {
+    const path = new URL(url).pathname.replace(/\/+$/, '');
+    return (
+      path === '/oauth/token' ||
+      path === '/v1/oauth/token' ||
+      /^\/api\/integrations\/(lantern-people|claude-code|gpt-code|compute-code)\/credentials\/(token|upload)$/.test(
+        path
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function credentialMetadataUrl(url: string): string {
+  const parsed = new URL(url);
+  for (const field of ['search', 'hash', 'username', 'password'] as const) parsed[field] = '';
+  return parsed.toString();
 }
 
 function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
@@ -249,10 +273,18 @@ class FetchReplayClient {
 
 const captures: CapturedCall[] = [];
 let nextId = 1;
+let nextRequestId = 1;
 let fsCache: NonBlockingFileCache | null = null;
+
+// Cursor IDs follow publication, so an earlier slow request cannot appear
+// behind a cursor that already observed a later, faster request.
+function publishCapture(entry: Omit<CapturedCall, 'id'>): void {
+  captures.push({ ...entry, id: nextId++ });
+}
 
 /** Control-plane calls create mutable remote resources and must never be replayed. */
 export function shouldBypassOutboundReplay(url: string): boolean {
+  if (isCredentialExchange(url)) return true;
   try {
     const hostname = new URL(url).hostname.toLowerCase();
     return (
@@ -305,7 +337,8 @@ export function installFetchCapture(): Router {
 
     // Only intercept outbound calls (skip localhost/test-internal calls)
     const isOutbound = !url.includes('localhost') && !url.includes('127.0.0.1');
-    if (!isOutbound) {
+    const credentialExchange = isCredentialExchange(url);
+    if (!isOutbound && !credentialExchange) {
       return originalFetch(input, init);
     }
 
@@ -318,66 +351,46 @@ export function installFetchCapture(): Router {
       const trimmed = String(raw || 'GET').trim();
       const upper = trimmed.toUpperCase();
       // Fetch canonicalizes the standard method tokens; preserve custom methods.
-      const standard = new Set([
-        'GET',
-        'HEAD',
-        'POST',
-        'PUT',
-        'DELETE',
-        'CONNECT',
-        'OPTIONS',
-        'TRACE',
-        'PATCH',
-      ]);
+      const standard = new Set('GET HEAD POST PUT DELETE CONNECT OPTIONS TRACE PATCH'.split(' '));
       return standard.has(upper) ? upper : trimmed || 'GET';
     };
 
     // Mutable control-plane calls bypass replay. E2B also uses Request objects
     // with streaming bodies that cannot round-trip through the string cache.
     // Captures are still recorded for outbound boundary assertions.
+    const id = nextRequestId++;
     if (shouldBypassOutboundReplay(url)) {
-      const captureId = nextId++;
       const captureStart = Date.now();
-      const captureMethod = resolveMethod();
+      const entry: Omit<CapturedCall, 'id'> = {
+        timestamp: new Date().toISOString(),
+        url: credentialExchange ? credentialMetadataUrl(url) : url,
+        method: resolveMethod(),
+        requestHeaders: {},
+        requestBody: null,
+        responseStatus: null,
+        responseBody: null,
+        durationMs: 0,
+        error: null,
+        cached: false,
+        captureToken: captureTokenStore.getStore() ?? null,
+      };
       try {
         const response = await originalFetch(input, init);
-        const entry: CapturedCall = {
-          id: captureId,
-          timestamp: new Date().toISOString(),
-          url,
-          method: captureMethod,
-          requestHeaders: {},
-          requestBody: null,
-          responseStatus: response.status,
-          responseBody: null,
-          durationMs: Date.now() - captureStart,
-          error: null,
-          cached: false,
-          captureToken: captureTokenStore.getStore() ?? null,
-        };
-        captures.push(entry);
+        entry.responseStatus = response.status;
         return response;
       } catch (err) {
-        const entry: CapturedCall = {
-          id: captureId,
-          timestamp: new Date().toISOString(),
-          url,
-          method: captureMethod,
-          requestHeaders: {},
-          requestBody: null,
-          responseStatus: null,
-          responseBody: null,
-          durationMs: Date.now() - captureStart,
-          error: err instanceof Error ? err.message : String(err),
-          cached: false,
-          captureToken: captureTokenStore.getStore() ?? null,
-        };
-        captures.push(entry);
+        entry.error = credentialExchange
+          ? 'Credential exchange failed'
+          : err instanceof Error
+            ? err.message
+            : String(err);
         throw err;
+      } finally {
+        entry.durationMs = Date.now() - captureStart;
+        publishCapture(entry);
       }
     }
 
-    const id = nextId++;
     const start = Date.now();
     const method = resolveMethod();
 
@@ -413,8 +426,7 @@ export function installFetchCapture(): Router {
     // real API. Pass the original request through untouched and record a
     // capture entry so boundary assertions still see the outbound call.
     if (!bodySerializable) {
-      const passthroughEntry: CapturedCall = {
-        id,
+      const passthroughEntry: Omit<CapturedCall, 'id'> = {
         timestamp: new Date().toISOString(),
         url,
         method,
@@ -431,12 +443,12 @@ export function installFetchCapture(): Router {
         const response = await originalFetch(input, init);
         passthroughEntry.durationMs = Date.now() - start;
         passthroughEntry.responseStatus = response.status;
-        captures.push(passthroughEntry);
+        publishCapture(passthroughEntry);
         return response;
       } catch (err) {
         passthroughEntry.durationMs = Date.now() - start;
         passthroughEntry.error = err instanceof Error ? err.message : String(err);
-        captures.push(passthroughEntry);
+        publishCapture(passthroughEntry);
         throw err;
       }
     }
@@ -456,8 +468,7 @@ export function installFetchCapture(): Router {
       redactedHeaders[k] = redactHeader(k, v);
     }
 
-    const entry: CapturedCall = {
-      id,
+    const entry: Omit<CapturedCall, 'id'> = {
       timestamp: new Date().toISOString(),
       url,
       method,
@@ -480,7 +491,7 @@ export function installFetchCapture(): Router {
       entry.durationMs = Date.now() - start;
       entry.responseStatus = response.status;
       entry.responseBody = await response.clone().text();
-      captures.push(entry);
+      publishCapture(entry);
       return response;
     }
 
@@ -498,7 +509,7 @@ export function installFetchCapture(): Router {
       entry.durationMs = Date.now() - start;
       entry.responseStatus = status;
       entry.responseBody = body;
-      captures.push(entry);
+      publishCapture(entry);
 
       return new globalThis.Response(body, {
         status,
@@ -543,7 +554,7 @@ export function installFetchCapture(): Router {
       entry.durationMs = Date.now() - start;
       entry.responseStatus = 200;
       entry.responseBody = body;
-      captures.push(entry);
+      publishCapture(entry);
 
       return new globalThis.Response(body, {
         status: 200,
@@ -579,7 +590,7 @@ export function installFetchCapture(): Router {
       entry.durationMs = Date.now() - start;
       entry.responseStatus = 201;
       entry.responseBody = body;
-      captures.push(entry);
+      publishCapture(entry);
 
       return new globalThis.Response(body, {
         status: 201,
@@ -597,12 +608,12 @@ export function installFetchCapture(): Router {
         const response = await originalFetch(input, init);
         entry.durationMs = Date.now() - start;
         entry.responseStatus = response.status;
-        captures.push(entry);
+        publishCapture(entry);
         return response;
       } catch (err) {
         entry.durationMs = Date.now() - start;
         entry.error = err instanceof Error ? err.message : String(err);
-        captures.push(entry);
+        publishCapture(entry);
         throw err;
       }
     }
@@ -635,14 +646,14 @@ export function installFetchCapture(): Router {
         entry.responseBody = entry.responseBody.slice(0, 2000) + '...[truncated]';
       }
 
-      captures.push(entry);
+      publishCapture(entry);
 
       // Reconstruct a Response object from the serialized data (base64 for binary).
       return responseFromSerialized(serialized);
     } catch (err) {
       entry.durationMs = Date.now() - start;
       entry.error = err instanceof Error ? err.message : String(err);
-      captures.push(entry);
+      publishCapture(entry);
       throw err;
     }
   };
@@ -738,12 +749,9 @@ function assignHeadersInto(target: Record<string, string>, rawHeaders: unknown):
 }
 
 function redactHeader(key: string, value: string): string {
-  const lower = key.toLowerCase();
-  if (lower === 'authorization' || lower === 'apikey' || lower === 'x-api-key') {
-    if (value.length > 16) {
-      return value.slice(0, 16) + '...[redacted]';
-    }
-    return '[redacted]';
-  }
-  return value;
+  const sensitive =
+    'authorization apikey x-api-key x-supermemory-api-key x-perplexity-key cookie set-cookie'.split(
+      ' '
+    );
+  return sensitive.includes(key.toLowerCase()) ? '[redacted]' : value;
 }

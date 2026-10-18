@@ -8,6 +8,7 @@ This module provides:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -17,6 +18,8 @@ import time
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urljoin, urlparse
+
+from browser_tools.secret_refs import mask_secret_values, register_logging_secret_refs
 
 logger = logging.getLogger(__name__)
 
@@ -531,6 +534,38 @@ class ActionHistory:
     def __init__(self):
         self._entries: List[ActionHistoryEntry] = []
         self._next_step = 1
+        self._dom_service: Optional["DOMService"] = None
+
+    def bind_dom_service(self, dom_service: "DOMService") -> None:
+        """Keep one private redaction policy across browser reconnections."""
+        if self._dom_service is not None and self._dom_service is not dom_service:
+            dom_service.restore_secret_redaction_state(self._dom_service.secret_redaction_state())
+        self._dom_service = dom_service
+
+    def _model_visible_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        if self._dom_service is None:
+            return entry
+        safe_entry = self._dom_service.model_visible_value(entry)
+        for key in ("params", "result"):
+            if key in entry:
+                # Their outer keys are tool protocol. Nested evaluate result
+                # keys still belong to the page and remain subject to masking.
+                safe_entry[key] = self._dom_service.model_visible_value(entry[key])
+        if not self._dom_service.secret_values_used and entry.get("screenshot"):
+            safe_entry["screenshot"] = entry["screenshot"]
+        # These are harness-owned mechanics, rather than page echoes. A CVV
+        # equal to a step/index must not change the chosen target or make a
+        # durable history entry invalid on restore.
+        for key in ("step", "action", "index", "coordinates"):
+            if key in entry:
+                safe_entry[key] = entry[key]
+        return safe_entry
+
+    def secret_redaction_state(self) -> Dict[str, Any]:
+        return self._dom_service.secret_redaction_state() if self._dom_service is not None else {}
+
+    def model_visible_value(self, value: Any) -> Any:
+        return self._dom_service.model_visible_value(value) if self._dom_service is not None else value
 
     async def record_action(
         self,
@@ -564,6 +599,10 @@ class ActionHistory:
             The recorded ActionHistoryEntry
         """
         step = self._next_step
+        # Bind before deriving descriptions: DOM labels can echo a value that
+        # was just entered, even when params and the tool result are safe.
+        if callable(inspect.getattr_static(dom_service, "model_visible_value", None)):
+            self.bind_dom_service(dom_service)
 
         # Convert between index and coordinates
         coords_dict = None
@@ -620,6 +659,7 @@ class ActionHistory:
             screenshot=screenshot,
         )
 
+        entry = ActionHistoryEntry(**self._model_visible_entry(asdict(entry)))
         self._entries.append(entry)
         self._next_step = step + 1
         logger.debug(f"Recorded action {step}: {action} (index={index}, coords={coords_dict})")
@@ -628,7 +668,7 @@ class ActionHistory:
 
     def get_entries(self) -> List[Dict[str, Any]]:
         """Get all entries as dicts for Rose API request."""
-        return [entry.to_dict() for entry in self._entries]
+        return [self._model_visible_entry(entry.to_dict()) for entry in self._entries]
 
     def restore_entries(self, entries: Optional[List[Dict[str, Any]]]) -> None:
         """Restore action history after a durable workflow pause.
@@ -647,7 +687,7 @@ class ActionHistory:
             values = {key: value for key, value in raw_entry.items() if key in allowed_fields}
             if not isinstance(values.get("step"), int) or not isinstance(values.get("action"), str):
                 continue
-            restored.append(ActionHistoryEntry(**values))
+            restored.append(ActionHistoryEntry(**self._model_visible_entry(values)))
         self._entries = restored
         self._next_step = max((entry.step for entry in restored), default=0) + 1
 
@@ -700,6 +740,11 @@ class DOMService:
         self.downloads_path = downloads_path or browser_downloads_path_for_provider()
         self._session = None
         self._selector_map: Dict[int, Any] = {}
+        self._runtime_current_url = ""
+        # Execution bindings may change realms. Retain every prior value only
+        # for output redaction, scoped to this browser activity/session.
+        self._secret_redaction_refs: Dict[str, str] = {}
+        self.secret_values_used = False
         # Passkey (cloud-custody) state.
         #
         # Chrome scopes a CDP virtual authenticator (and WebAuthn.enable's
@@ -741,6 +786,126 @@ class DOMService:
         # VA rebuild (environment loss / CDP session swap).
         self._passkey_pending_auth_reload_targets: set = set()
         self._captcha_indicator_task: Optional[asyncio.Task] = None
+
+    def register_secret_refs(self, refs: Optional[Dict[str, str]]) -> None:
+        """Retain private bindings without reusing a previous realm for input."""
+        current = {
+            str(ref): value for ref, value in (refs or {}).items()
+            if isinstance(value, str) and value
+        }
+        for ref, value in current.items():
+            prior = self._secret_redaction_refs.get(ref)
+            if prior is not None and prior != value:
+                key = ref + ":previous"
+                while key in self._secret_redaction_refs and self._secret_redaction_refs[key] != prior:
+                    key += ":previous"
+                self._secret_redaction_refs[key] = prior
+        # Current aliases come first so readbacks advertise a reference that
+        # execution can still resolve; historical aliases are redaction only.
+        self._secret_redaction_refs = {
+            **current,
+            **{ref: value for ref, value in self._secret_redaction_refs.items() if ref not in current},
+        }
+        register_logging_secret_refs(self._secret_redaction_refs)
+
+    def mark_secret_used(self) -> None:
+        """Stop raster/media observations before a private value reaches a page."""
+        self.secret_values_used = True
+
+    def secret_redaction_state(self) -> Dict[str, Any]:
+        """Private durable state; callers must encrypt it before persistence."""
+        return {
+            "secret_redaction_refs": dict(self._secret_redaction_refs),
+            "secret_values_used": self.secret_values_used,
+        }
+
+    def restore_secret_redaction_state(self, state: Any) -> None:
+        if not isinstance(state, dict):
+            return
+        refs = state.get("secret_redaction_refs")
+        if isinstance(refs, dict):
+            self.register_secret_refs(refs)
+        if state.get("secret_values_used"):
+            self.mark_secret_used()
+
+    def model_visible_value(self, value: Any) -> Any:
+        """Redact registered values and omit media after private entry.
+
+        Raster pixels, canvas output and arbitrary remote images cannot be
+        validated with string redaction. Once a secret has been entered, use
+        redacted DOM observations for this session, including durable resumes.
+        """
+        def omit_media(item: Any) -> Any:
+            if isinstance(item, dict):
+                if isinstance(item.get("type"), str) and item["type"] in {"image_url", "image", "input_image"}:
+                    return {"type": "text", "text": "[image withheld after private credential entry]"}
+                return {
+                    key: omit_media(nested)
+                    for key, nested in item.items()
+                    if key not in {
+                        "screenshot", "screenshot_b64", "media_candidates", "frame", "website_frame",
+                        "image_url", "media",
+                    }
+                }
+            if isinstance(item, list):
+                return [omit_media(nested) for nested in item]
+            if isinstance(item, tuple):
+                return tuple(omit_media(nested) for nested in item)
+            if isinstance(item, str) and item.lstrip().startswith("data:image/"):
+                return "[image withheld after private credential entry]"
+            return item
+
+        safe_value = omit_media(value) if self.secret_values_used else value
+        return mask_secret_values(safe_value, self._secret_redaction_refs)
+
+    def model_visible_action_result(self, action_name: str, result: Any) -> Any:
+        """Redact page payloads while preserving trusted action bookkeeping."""
+        safe = self.model_visible_value(result)
+        if not isinstance(result, dict) or not isinstance(safe, dict):
+            return safe
+        if "credential_ref" in result:
+            safe["credential_ref"] = result["credential_ref"]
+        if action_name == "request_payment_card":
+            # Typed operational receipt text must survive every action projection,
+            # before the activity's final return. Raster/media policy stays generic.
+            payment = result.get("payment_request")
+            visible_payment = safe.get("payment_request")
+            if isinstance(payment, dict) and isinstance(visible_payment, dict):
+                items_key = "line_items" if "line_items" in payment else "lineItems"
+                original_items = payment.get(items_key)
+                visible_items = visible_payment.get(items_key)
+                if isinstance(original_items, list) and isinstance(visible_items, list):
+                    for original, visible in zip(original_items, visible_items):
+                        if not isinstance(original, dict) or not isinstance(visible, dict):
+                            continue
+                        url = original.get("image_url")
+                        if isinstance(url, str) and url.startswith(("https://", "http://")):
+                            visible["image_url"] = self.model_visible_value(url)
+        if action_name in {"screenshot", "read_browser_state"} and not self.secret_values_used:
+            # Only these action outputs contain trusted raster transport.
+            # A coincidental CVV in PNG base64 is not a page-text readback.
+            for key in ("screenshot", "screenshot_b64"):
+                if isinstance(result.get(key), str):
+                    safe[key] = result[key]
+        if action_name != "read_browser_state":
+            return safe
+        for key in ("viewport", "scroll_position", "page_stats"):
+            if key in result:
+                safe[key] = result[key]
+        if isinstance(result.get("tabs"), list):
+            safe["tabs"] = []
+            for tab in result["tabs"]:
+                visible_tab = self.model_visible_value(tab)
+                if isinstance(tab, dict) and "id" in tab:
+                    visible_tab["id"] = tab["id"]
+                safe["tabs"].append(visible_tab)
+        if "formatted_state" in result and "dom_tree" in safe:
+            from providers.rose.browser_use import format_browser_state_for_tool
+
+            # Rebuild from redacted page strings plus exact harness geometry;
+            # never reuse an unredacted preformatted page string.
+            safe["formatted_state"] = format_browser_state_for_tool(safe)
+        return safe
 
     async def connect(self) -> None:
         """Connect to the browser via CDP.
@@ -1949,6 +2114,8 @@ class DOMService:
         ]
 
     async def _capture_surface_screenshot(self, state: Any) -> Optional[str]:
+        if self.secret_values_used:
+            return None
         try:
             target_id = self._session.agent_focus_target_id
             if not target_id:
@@ -1960,6 +2127,8 @@ class DOMService:
                 {"format": "png", "fromSurface": True},
                 session_id=cdp_session.session_id,
             )
+            if self.secret_values_used:
+                return None
             screenshot = cdp_result.get("data")
             logger.info(f"📸 CDP surface screenshot captured (len={len(screenshot) if screenshot else 0})")
             return screenshot
@@ -2032,12 +2201,19 @@ class DOMService:
             page = await self._session.get_current_page()
             page_url = getattr(page, "url", None)
             if page_url:
-                return str(page_url)
+                self._runtime_current_url = str(page_url)
+                return self._runtime_current_url
             evaluated = await page.evaluate("() => location.href")
-            return str(evaluated or fallback)
+            if evaluated:
+                self._runtime_current_url = str(evaluated)
+            return self.runtime_current_url(fallback=fallback)
         except Exception as error:
             logger.warning(f"Failed to read current URL: {error}")
             return fallback
+
+    def runtime_current_url(self, *, fallback: str = "") -> str:
+        """Return private browser identity for navigation/auth mechanics only."""
+        return self._runtime_current_url or fallback
 
     async def get_page_identity(self) -> Dict[str, Any]:
         """Return ``{url, title}`` of the focused tab without touching the renderer.
@@ -2053,8 +2229,9 @@ class DOMService:
             raise RuntimeError("Not connected. Call connect() first.")
         if not self._session.agent_focus_target_id:
             raise RuntimeError("No focused target")
+        self._runtime_current_url = str(await self._session.get_current_page_url() or "")
         return {
-            "url": str(await self._session.get_current_page_url() or ""),
+            "url": self._runtime_current_url,
             "title": str(await self._session.get_current_page_title() or ""),
         }
 
@@ -2079,7 +2256,9 @@ class DOMService:
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        state = await self._session.get_browser_state_summary(include_screenshot=include_screenshot)
+        capture_screenshot = include_screenshot and not self.secret_values_used
+        state = await self._session.get_browser_state_summary(include_screenshot=capture_screenshot)
+        self._runtime_current_url = str(state.url or "")
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
         geometry = self._page_geometry(state)
@@ -2109,14 +2288,20 @@ class DOMService:
             "tabs": self._summarized_tabs(state),
             "page_stats": page_stats,
         }
-        if media_candidates:
+        if media_candidates and not self.secret_values_used:
             result["media_candidates"] = media_candidates
         if getattr(state, "recent_events", None):
             result["recent_events"] = state.recent_events
         if getattr(state, "closed_popup_messages", None):
             result["closed_popups"] = state.closed_popup_messages
-        screenshot_to_use = await self._capture_surface_screenshot(state) if include_screenshot else None
-        if include_screenshot and not screenshot_to_use:
+        screenshot_to_use = await self._capture_surface_screenshot(state) if capture_screenshot else None
+        if self.secret_values_used:
+            capture_screenshot = False
+            screenshot_to_use = None
+        if include_screenshot and self.secret_values_used:
+            result["screenshot_placeholder"] = True
+            result["screenshot_suppressed_reason"] = "Private credentials were entered; use redacted DOM observations."
+        if capture_screenshot and not screenshot_to_use:
             logger.info(f"📸 No screenshot available, generating blank for {result.get('url', 'unknown')}")
             screenshot_to_use = self._blank_screenshot(viewport_width, viewport_height)
             # A synthetic white frame is not page evidence; evidence consumers
@@ -2125,10 +2310,24 @@ class DOMService:
         if include_screenshot and screenshot_to_use:
             result["screenshot"] = screenshot_to_use
             self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)
-        return result
+        safe_result = self.model_visible_value(result)
+        if not self.secret_values_used and screenshot_to_use:
+            # PNG base64 is binary transport, not page text. A short CVV can
+            # coincidentally occur in it; textual substitution corrupts pixels.
+            safe_result["screenshot"] = screenshot_to_use
+        # Geometry and counts come from the harness, not credential readbacks.
+        # Preserve their numeric types even when a CVV equals a coordinate.
+        for key in ("viewport", "scroll_position", "page_stats"):
+            safe_result[key] = result[key]
+        for original, visible in zip(result["tabs"], safe_result.get("tabs", [])):
+            if "id" in original:
+                visible["id"] = original["id"]
+        return safe_result
 
     async def get_page_image_urls(self) -> List[str]:
         """Every image URL rendered on the current page, read from a fresh DOM snapshot."""
+        if self.secret_values_used:
+            return []
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
