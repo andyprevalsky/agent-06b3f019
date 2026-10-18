@@ -264,7 +264,10 @@ def test_final_report_matches_actual_ocr_heading_without_settings_assumption(mon
                 "metadata": {
                     "toolName": "completion_summary",
                     "toolStatus": "FINISHED",
-                    "completionSummary": {"summary": "Visible heading: Paired Computers", "outputs": []},
+                    "completionSummary": {
+                        "summary": "Visible heading: Paired Computers",
+                        "outputs": [{"key": "visible_heading", "value": "Paired Computers"}],
+                    },
                 },
             }
         ]
@@ -453,7 +456,10 @@ def test_real_finished_completion_summary_card_parser():
         "metadata": {
             "toolName": "completion_summary",
             "toolStatus": "FINISHED",
-            "completionSummary": {"summary": "Visible heading: Paired Computers", "outputs": []},
+            "completionSummary": {
+                "summary": "Visible heading: Paired Computers",
+                "outputs": [{"key": "visible_heading", "value": "Paired Computers"}],
+            },
         },
     }
     assert phone.reported_heading({"messages": [card]}) == "Paired Computers"
@@ -484,8 +490,11 @@ def test_failed_phone_cleanup_drains_owned_collectors_and_preserves_error(monkey
         owned = []
         published = []
         receipt = tmp_path / "cleanup.status"
-        original = (phone.PhoneCleanupBlocked("original physical cleanup blocked") if original_phone_error
-                    else RuntimeError("original execution failure"))
+        original = (
+            phone.PhoneCleanupBlocked("original physical cleanup blocked")
+            if original_phone_error
+            else RuntimeError("original execution failure")
+        )
         final_error = phone.PhoneCleanupBlocked("later cleanup still blocked; retain isolated database")
 
         async def collector(started):
@@ -534,10 +543,18 @@ def test_failed_phone_cleanup_drains_owned_collectors_and_preserves_error(monkey
         monkeypatch.setattr(phone, "apply_fixture", AsyncMock())
         cleanup = AsyncMock(side_effect=final_error)
         monkeypatch.setattr(phone, "cleanup_phone", cleanup)
-        for name in ("prepare_sandbox_payment_residual", "_apply_live_fixtures", "_apply_memory_fixtures",
-                     "_apply_auth_test_site", "subscribe_supabase_realtime_agent", "post_world_model_update_events",
-                     "archive_agent_start", "_restore_live_fixture_scenarios_async", "_release_auth_test_site",
-                     "ensure_payment_lifecycle_cleanup"):
+        for name in (
+            "prepare_sandbox_payment_residual",
+            "_apply_live_fixtures",
+            "_apply_memory_fixtures",
+            "_apply_auth_test_site",
+            "subscribe_supabase_realtime_agent",
+            "post_world_model_update_events",
+            "archive_agent_start",
+            "_restore_live_fixture_scenarios_async",
+            "_release_auth_test_site",
+            "ensure_payment_lifecycle_cleanup",
+        ):
             monkeypatch.setattr(runner, name, AsyncMock(return_value=None))
         monkeypatch.setattr(runner, "_is_simulate_mode", lambda: False)
         monkeypatch.setattr(runner, "_local_victoria_database_url", lambda: "postgresql://localhost/synthetic")
@@ -579,3 +596,61 @@ def test_failed_phone_cleanup_drains_owned_collectors_and_preserves_error(monkey
             await asyncio.gather(*owned, foreign, return_exceptions=True)
 
     asyncio.run(exercise())
+
+
+def test_captured_canonical_finished_card_reads_typed_visible_heading():
+    """Sanitized fixed shape from retry 6a6d0399's actual FINISHED root card."""
+    from copy import deepcopy
+
+    card = {
+        "role": "TOOL",
+        "metadata": {
+            "toolName": "completion_summary",
+            "toolStatus": "FINISHED",
+            "completionSummary": {
+                "outputs": [
+                    {
+                        "key": "visible_heading",
+                        "label": "Exact OCR heading visible on the cloud iPhone screen after launching Settings.",
+                        "value": "Paired Computers",
+                    },
+                    {
+                        "key": "phone_released",
+                        "label": "True if the cloud phone was released after completing the connectivity check.",
+                        "value": True,
+                    },
+                ],
+                "summary": "The cloud iPhone connectivity check opened Settings, read the visible screen, and released the phone. Visible heading: Paired Computers",
+                "toolUsage": [
+                    {"name": "agent_init", "count": 1},
+                    {"name": "cloud_agent", "count": 1},
+                    {"name": "spawn_agent", "count": 1},
+                    {"name": "spawn_browser_agent", "count": 3},
+                ],
+                "costDollars": 0.0029,
+                "totalToolCalls": 6,
+                "durationSeconds": 84,
+            },
+        },
+    }
+    assert phone.reported_heading({"messages": [card]}) == "Paired Computers"
+    for status in ("IN_PROGRESS", "ERROR", "REJECTED"):
+        rejected = deepcopy(card)
+        rejected["metadata"]["toolStatus"] = status
+        assert phone.reported_heading({"messages": [rejected]}) == ""
+    attempt = deepcopy(card)
+    attempt["metadata"]["toolName"] = "attempt_completion"
+    assert phone.reported_heading({"messages": [attempt]}) == ""
+    for value in (None, True, 42, "", "   ", {}, []):
+        invalid = deepcopy(card)
+        invalid["metadata"]["completionSummary"]["outputs"][0]["value"] = value
+        assert phone.reported_heading({"messages": [card, invalid]}) == "", "latest FINISHED card owns the report"
+    for outputs in (None, {}, [], [{"key": "other", "value": "Paired Computers"}]):
+        missing = deepcopy(card)
+        missing["metadata"]["completionSummary"]["outputs"] = outputs
+        assert phone.reported_heading({"messages": [missing]}) == "", (
+            "summary prose cannot substitute for the typed field"
+        )
+    assert (
+        phone.reported_heading({"messages": [{"role": "ASSISTANT", "text": "Visible heading: Paired Computers"}]}) == ""
+    )

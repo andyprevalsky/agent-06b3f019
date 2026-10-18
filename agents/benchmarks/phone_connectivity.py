@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import re
 import subprocess
 import time
 from pathlib import Path
@@ -135,11 +134,15 @@ def reported_heading(data):
     cards = _completion_cards_from_messages(data.get("messages", []) or [])
     if not cards:
         return ""
-    summary = cards[-1].get("summary")
-    if not isinstance(summary, str):
+    outputs = cards[-1].get("outputs")
+    if not isinstance(outputs, list):
         return ""
-    matches = re.findall(r"(?:^|\n)Visible heading: ([^\n]+)", summary)
-    return matches[-1].strip() if matches else ""
+    headings = [
+        output.get("value") for output in outputs if isinstance(output, dict) and output.get("key") == "visible_heading"
+    ]
+    if len(headings) != 1 or not isinstance(headings[0], str):
+        return ""
+    return headings[0].strip()
 
 
 class PhoneCleanupBlocked(RuntimeError):
