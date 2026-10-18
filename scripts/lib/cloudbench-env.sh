@@ -350,6 +350,123 @@ cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
   return 1
 }
 
+# Benchmark guests may use their own Temporal Cloud namespace so their workers,
+# autoscaler queue observations and stale-workflow sweeps never spend the
+# production namespace's action and Visibility API budgets.
+#
+#   controller agents/.env + back-end/.env ──(unchanged, prod settings)──┐
+#   private override (.env.benchmark-temporal, 0600) ──► guest copies only ─┴─► AGENTS_ENV_B64/BACKEND_ENV_B64
+#
+# The override file holds exactly CLOUDBENCH_GUEST_TEMPORAL_ADDRESS,
+# CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE and CLOUDBENCH_GUEST_TEMPORAL_API_KEY.
+# Default location: beside the real (symlink-resolved) agents/.env, else the
+# main checkout's agents/.env.benchmark-temporal for a linked Git worktree. Set
+# CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=<path> to choose another file (which must
+# then exist) or =off to stage the controller's settings unchanged. No file at
+# the default locations keeps the historical byte-identical staging.
+cloudbench_guest_temporal_override_file() {  # [agents-env]; prints path or nothing
+  local explicit="${CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE-}" agents_env="${1:-agents/.env}" candidate common
+  [ "$explicit" = off ] && return 0
+  if [ -n "$explicit" ]; then
+    [ -f "$explicit" ] || {
+      echo "❌ CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=$explicit does not exist." >&2
+      return 1
+    }
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  candidate="$(python3 -c 'import os, sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])), ".env.benchmark-temporal"))' "$agents_env")" || return 1
+  if [ ! -e "$candidate" ] && [ ! -L "$candidate" ]; then
+    common="$(git -C "$(dirname "$agents_env")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common=""
+    candidate=""
+    if [ "$(basename "${common:-x}")" = .git ]; then
+      candidate="$(dirname "$common")/agents/.env.benchmark-temporal"
+    fi
+  fi
+  if [ -n "$candidate" ] && { [ -e "$candidate" ] || [ -L "$candidate" ]; }; then
+    printf '%s\n' "$candidate"
+  fi
+  return 0
+}
+
+# cloudbench_write_guest_temporal_env_files <agents-env> <backend-env> <override> <private-out-dir>
+# Writes <out>/agents.env and <out>/backend.env: byte copies of the sources with
+# only TEMPORAL_ADDRESS/TEMPORAL_NAMESPACE/TEMPORAL_API_KEY replaced (appended
+# when absent). Never modifies the sources. Prints the guest namespace.
+cloudbench_write_guest_temporal_env_files() {
+  python3 - "$@" <<'PY'
+import os, re, stat, sys
+
+agents_env, backend_env, override, out_dir = sys.argv[1:5]
+REQUIRED = {
+    "CLOUDBENCH_GUEST_TEMPORAL_ADDRESS": "TEMPORAL_ADDRESS",
+    "CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE": "TEMPORAL_NAMESPACE",
+    "CLOUDBENCH_GUEST_TEMPORAL_API_KEY": "TEMPORAL_API_KEY",
+}
+
+def die(message):
+    print("❌ guest Temporal override: " + message, file=sys.stderr)
+    raise SystemExit(1)
+
+info = os.stat(override)
+if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    die("%s must be a regular file owned by this user with mode 0600" % override)
+values = {}
+with open(override, encoding="utf-8") as handle:
+    for number, line in enumerate(handle, 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"(?:export\s+)?([A-Z0-9_]+)=(.*)", line)
+        if not match or match.group(1) not in REQUIRED:
+            die("%s line %d is not one of %s" % (override, number, ", ".join(sorted(REQUIRED))))
+        value = match.group(2).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not value or re.search(r"[\s\"'#]", value):
+            die("%s has an empty or unquotable %s" % (override, match.group(1)))
+        if match.group(1) in values:
+            die("%s repeats %s" % (override, match.group(1)))
+        values[match.group(1)] = value
+missing = sorted(set(REQUIRED) - set(values))
+if missing:
+    die("%s is missing %s" % (override, ", ".join(missing)))
+if not re.fullmatch(r"[A-Za-z0-9.-]+:[0-9]+", values["CLOUDBENCH_GUEST_TEMPORAL_ADDRESS"]):
+    die("CLOUDBENCH_GUEST_TEMPORAL_ADDRESS must be host:port")
+replacements = {target: values[source] for source, target in REQUIRED.items()}
+pattern = re.compile(rb"^(\s*(?:export\s+)?)(" + b"|".join(k.encode() for k in replacements) + rb")\s*=")
+
+info = os.lstat(out_dir)
+if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    die("output directory must be a private directory")
+
+for source, name in ((agents_env, "agents.env"), (backend_env, "backend.env")):
+    with open(source, "rb") as handle:
+        raw = handle.read()
+    lines = raw.splitlines(keepends=True)
+    seen = set()
+    rendered = []
+    for line in lines:
+        match = pattern.match(line)
+        if match:
+            key = match.group(2).decode()
+            seen.add(key)
+            ending = line[len(line.rstrip(b"\r\n")):]
+            line = match.group(1) + match.group(2) + b"=" + replacements[key].encode() + ending
+        rendered.append(line)
+    body = b"".join(rendered)
+    absent = [key for key in replacements if key not in seen]
+    if absent and body and not body.endswith(b"\n"):
+        body += b"\n"
+    for key in absent:
+        body += key.encode() + b"=" + replacements[key].encode() + b"\n"
+    fd = os.open(os.path.join(out_dir, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(body)
+print(replacements["TEMPORAL_NAMESPACE"])
+PY
+}
+
 cloudbench_verify_env_file() {
   local path="$1" expected="$2" label="$3" actual
   [ -n "$expected" ] || {
