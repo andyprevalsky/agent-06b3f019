@@ -40,6 +40,18 @@ esac
     echo "Native wheel SHA-256 differs from SOURCES.txt" >&2
     exit 1
 }
+# Non-interactive shells often lack the user's uv install dir on PATH.
+uv() {
+    local candidate
+    for candidate in "$(type -P uv || true)" "$repo_root/agents/venv/bin/uv" "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            "$candidate" "$@"
+            return
+        fi
+    done
+    echo "Native simulator setup requires uv: run 'agents/venv/bin/python -m pip install uv' (scripts/cloud-build.sh does this)" >&2
+    return 127
+}
 write_signature=false
 if [ -n "${WMH_NATIVE_PYTHON:-}" ]; then
     native_python="$WMH_NATIVE_PYTHON"

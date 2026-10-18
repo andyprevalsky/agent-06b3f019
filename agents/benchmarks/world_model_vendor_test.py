@@ -53,7 +53,8 @@ def test_vendored_world_model_wheel_resolves_offline_beside_its_requirements(tmp
 
 def _native_setup_control(tmp_path, *, override=False, cached=False, missing='', corrupt=False,
                           sources='valid', version=VERSION, python_version='3.12',
-                          absent_native=False, mac_hash=False, caller_cwd=None, find_links_base=None):
+                          absent_native=False, mac_hash=False, caller_cwd=None, find_links_base=None,
+                          uv_home_local=False):
     """Run the actual Bash owner; only installer/native execution is synthetic."""
     checkout = tmp_path / 'checkout'
     (checkout / 'scripts').mkdir(parents=True)
@@ -120,7 +121,12 @@ if sys.argv[1]=='venv':
     shutil.copy2(os.environ['CONTROL_SHIM'],target/'python')
 ''')
     uv.chmod(0o700)
-    env = {'PATH':str(binaries), 'PYTHONDONTWRITEBYTECODE':'1', 'UV_CALLS':str(calls),
+    home = tmp_path / 'home'
+    if uv_home_local:
+        # A non-interactive shell lacks the user's ~/.local/bin on PATH.
+        (home / '.local/bin').mkdir(parents=True)
+        uv.rename(home / '.local/bin/uv')
+    env = {'PATH':str(binaries), 'HOME':str(home), 'PYTHONDONTWRITEBYTECODE':'1', 'UV_CALLS':str(calls),
            'CONTROL_SHIM':str(shim), 'CONTROL_MISSING':missing, 'CONTROL_VERSION':version,
            'CONTROL_PYTHON_VERSION':python_version}
     if find_links_base:
@@ -200,6 +206,14 @@ def test_native_setup_path_independence_preserves_override_and_cached_no_install
                 assert marker.read_text().strip() == signature
             else:
                 assert not marker.exists()
+
+
+def test_native_setup_finds_user_local_uv_when_it_is_not_on_path(tmp_path):
+    """A restored devbox's tool shells had uv only in ~/.local/bin (`uv: command not found`)."""
+    result, calls, marker, signature = _native_setup_control(tmp_path, absent_native=True, uv_home_local=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [c.split()[0] for c in calls] == ["venv", "pip", "pip"]
+    assert marker.read_text().strip() == signature
 
 
 def test_vendored_wheel_contains_every_reviewed_patch():
