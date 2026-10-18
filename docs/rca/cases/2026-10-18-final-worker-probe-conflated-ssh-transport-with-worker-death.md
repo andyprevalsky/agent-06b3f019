@@ -71,7 +71,10 @@ Timeline (controller files plus `/home/rose/.fly/agent-logs`):
   was `#175/#176`: `establish personal` at 08:03:33, then `err Error contacting
   Fly.io API when probing "personal": timed out` at 08:03:38. That is the
   client's pre-connect tunnel probe. No `connect …:22` followed, so the probe
-  never reached the worker. flyctl exits 1 with that error, and
+  never reached the worker. Only one other client used this agent: the
+  readiness loop for polar-odysseys-e1184e98c9a0's worker 83dd001f7040e8. It
+  finished with a successful 87 ms session (`#173`, 08:02:53) and did not use
+  SSH again until its 08:05:19 capture. flyctl exits 1 with that error, and
   `worker_operational` discarded the output (`>/dev/null 2>&1`) and returned 1.
   The fleet then printed "became unhealthy".
 - 08:03:48–53 the worker-evidence capture (`#177–#179`) failed with the same
