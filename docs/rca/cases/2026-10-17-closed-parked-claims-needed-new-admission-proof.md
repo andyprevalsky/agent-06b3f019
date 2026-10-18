@@ -218,3 +218,67 @@ publication hash are allowed. An orphan extra wire directory, changed lease
 history, hidden task artifact, `.cid`, unknown producer or current drift still
 refuses admission. The actual full normal preparation and three unchanged
 experiments remain pending; causal fixture success is not task outcome proof.
+
+
+## Run81 recurrence: current intended claim with an unknown old response
+
+Actual full saved-input preparation on 0c6ca2b0 passed with 572 candidates and
+six retained holds, confirming the proof-before-assignment correction. The
+next normal admission nevertheless stopped before any reservation or controller.
+The organization inventory contained 971 objects, but the operator deliberately
+subtracts one additional unlisted/destroying allowance: 1000 - 971 - 1 = 28,
+not 29. Thus 572 + 28 is still one short of 601. The minimum-one check was
+introduced with the portable operator and remains mandatory for its non-atomic
+organization reads. Do not remove that safeguard to satisfy arithmetic.
+
+The remaining claim `87e514c0092e28` has exactly four recorded operations:
+lease 201, pre-read 200, one version-fenced config POST with no raw response or
+local ACK, and lease release 200. The historical response remains UNKNOWN.
+The complete saved current native object is stopped, has a new instance, and
+matches the entire intended claim config and unique successor marker. Its
+creation identity, name, region and physical volume are unchanged. The previous
+`T.unchanged` path correctly refuses it because both current instance and config
+differ from the prior reservation. That prior-state-only guard does not cover
+positive current custody after an uncertain historical response.
+
+The distinct new-admission proof must preserve these two facts independently:
+the old write has an unknown response, while the current object exactly matches
+the intended claim. Require the reviewed producer, positive prior reservation,
+complete source exclusion, one CAS fenced to the old instance, a closed original
+lease, a new stopped current instance with the exact complete config and marker,
+and a complete preassignment namespace with no `.cid`, claim ACK, published
+proof or other task/native effect. Do not manufacture an ACK, mark the old
+attempt successful or resend its update. Eligibility itself has zero capacity
+credit. The ordinary new-cohort lease, exact current-version check, new CAS and
+readback remain required. A late old CAS still names the old instance and cannot
+overwrite the newer instance; any changed fresh state must deny the new credit.
+
+The executor also resolved the historical destroying object
+`e82943b02d5538` with one exact GET returning a retained raw 404. That closes the
+specific historical observation without changing the minimum-one allowance or
+replaying any deletion. The reader correction uses independently proven reuse,
+not a quota-policy exception. Owning reproduction and actual-input verification
+for this distinct current-state branch remain pending below.
+
+
+The owning control now executes each exact reviewed allocator with a native
+adapter that commits the config update and loses its response while the lease
+finally closes, then runs full `P.prepare`. The old 0c6ca2b0 reader retains the
+row with `prior native state changed`; the corrected reader returns only new
+eligibility and explicitly keeps `native_claim_acknowledged=false` and
+`old_outcome=UNKNOWN_RETAINED`. All 16 owning tests passed in 2.912 seconds,
+including full current-version reservation and intervening-conflict/no-credit
+controls. Root independently ran three focused controls in 0.469 seconds and
+ran the unchanged lost-response reproduction against the old reader: one
+expected failure (`0 != 1`) in 0.454555 seconds. No provider calls occurred.
+
+Actual-input calibration verifies all 36 archived task-root members, the four
+raw/missing-response operations, current native row and three startup/lifecycle
+metadata files. Root also invokes the real Git-bound protocol check. Independent
+review passed the exact source and proof hashes. Inspection of the complete
+manifest caught `bench-e2e.finished-epoch` before adoption; the reader now hashes
+and validates the finite ordered start/end pair as local lifecycle metadata,
+without treating it as task success or this uncertain native claim's release.
+The old T prior-state branch, positive-ACK branch, `.cid` and foreign-effect
+rejections remain intact. Full normal preparation and the three requested
+campaign outcomes remain pending and are not inferred from these controls.

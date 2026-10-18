@@ -8,8 +8,8 @@ import os
 import runpy
 import subprocess
 import tempfile
-from contextlib import contextmanager
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -340,6 +340,227 @@ class Parked(unittest.TestCase):
         inventory[0] = current
         OLD["write"](f.inventory, inventory)
         return current
+
+    def unknown_intended_fixture(self, current_source=False):
+        f = self.fixture
+        source = subprocess.check_output(
+            ["git", "show", "c9d4817832720cc2b1bc6a212383973a77baf004:scripts/cloudbench-archived-machine-reuse.py"]
+        )
+        if current_source:
+            source = (ROOT / "scripts/cloudbench-archived-machine-reuse.py").read_bytes()
+        with tempfile.NamedTemporaryFile(dir=ROOT / "scripts", suffix=".py") as path:
+            path.write(source)
+            path.flush()
+            old = runpy.run_path(path.name)
+        destination = f.old.root / "unknown-allocate"
+        destination.mkdir(mode=0o700)
+        current = copy.deepcopy(f.current)
+        owner = self
+        calls = []
+
+        class Adapter:
+            @contextmanager
+            def lease(inner, mid):
+                owner.add_wire(
+                    1,
+                    "POST",
+                    "/lease",
+                    {"description": "archived same-volume successor", "ttl": 180},
+                    {"data": {"nonce": "lease"}},
+                    status=201,
+                )
+                try:
+                    yield
+                finally:
+                    owner.add_wire(4, "DELETE", "/lease", None, {}, {"fly-machine-lease-nonce": "lease"})
+
+            def request(inner, method, url, body=None, timeout=20):
+                calls.append(method)
+                if method == "GET":
+                    owner.add_wire(2, "GET", "", None, current, {"fly-machine-lease-nonce": "lease"})
+                    return copy.deepcopy(current)
+                current.update(instance_id="committed-claim-V1", config=copy.deepcopy(body["config"]), state="stopped")
+                folder = owner.add_wire(3, "POST", "", body, None, {"fly-machine-lease-nonce": "lease"})
+                del f.members[owner.root + "/" + folder + "0001-wire.json"]
+                raise TimeoutError("committed native update response lost")
+
+        with mock.patch.dict(
+            old["allocate"].__globals__,
+            selected_request=lambda *_: (f.request, self.row),
+            NativeAdapter=lambda *_: Adapter(),
+            module=lambda _: {"Fly": lambda *_: None},
+        ):
+            with self.assertRaisesRegex(TimeoutError, "response lost"):
+                old["allocate"](f.request_path, "unused", 0, self.successor, destination, "no-token")
+        self.assertEqual(calls, ["GET", "POST"])
+        for path in destination.rglob("*.json"):
+            self.put(str(path.relative_to(destination)), json.loads(path.read_bytes()))
+        f.members[self.root] = None
+        for directory in ("archived-reuse-journal", "archived-reuse-wire"):
+            f.members[self.root + "/" + directory] = None
+        for number in range(1, 5):
+            folder = "archived-reuse-wire/" + f"{number:032x}"
+            f.members[self.root + "/" + folder] = None
+            self.put(folder + "/transport-start.json", {"monotonic_ns": number, "direct": False})
+            self.put(folder + "/http-start.json", {"monotonic_ns": number})
+            f.members[self.root + "/" + folder + "/stderr.private.log"] = b""
+            if number != 3:
+                raw = json.loads(f.members[self.root + "/" + folder + "/0001-wire.json"])
+                self.put(folder + "/result.json", json.loads(base64.b64decode(raw["body_b64"])))
+        f.members["source/scripts/lib/cloudbench-archived-reuse.sh"] = subprocess.check_output(
+            ["git", "show", "c9d4817832720cc2b1bc6a212383973a77baf004:scripts/lib/cloudbench-archived-reuse.sh"]
+        )
+        f.members[self.root + "/bench-e2e.started-epoch"] = b"1792280000.0\n"
+        f.members[self.root + "/bench-e2e.finished-epoch"] = b"1792281000.0\n"
+        self.put(".startup-state.json", {"seen": {"cloning": 1792280000.0}})
+        inventory = json.loads(f.inventory.read_bytes())
+        inventory[0] = current
+        OLD["write"](f.inventory, inventory)
+        return current
+
+    def set_intended_current(self, current):
+        inventory = json.loads(self.fixture.inventory.read_bytes())
+        inventory[0] = current
+        OLD["write"](self.fixture.inventory, inventory)
+
+    def test_current_allocate_lost_response_uses_same_typed_contract(self):
+        self.unknown_intended_fixture(current_source=True)
+        with mock.patch.dict(
+            M["qualify"].__globals__,
+            protocol=lambda _: "829cd14575c5e0d74ac0e969c7354719e03e311a79b97abcec8490474d53e8a1",
+        ):
+            result = self.prepare()
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertFalse(
+            result["candidates"][0]["closed_transition_proof"]["prior_effect"]["native_claim_acknowledged"]
+        )
+
+    def intended_prepare(self):
+        with mock.patch.dict(
+            M["qualify"].__globals__,
+            protocol=lambda _: "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7",
+        ):
+            return self.prepare()
+
+    def test_real_lost_claim_response_current_intended_is_new_eligibility(self):
+        current = self.unknown_intended_fixture()
+        result = self.intended_prepare()
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["source_instance_id"], current["instance_id"])
+        self.assertEqual(candidate["source_config_sha256"], H["config_sha"](current["config"]))
+        transition = candidate["closed_transition_proof"]["prior_effect"]
+        self.assertEqual(transition["stage"], "CURRENT_INTENDED_CLAIM_WITH_UNKNOWN_OLD_RESPONSE")
+        self.assertEqual(transition["old_outcome"], "UNKNOWN_RETAINED")
+        self.assertFalse(transition["native_claim_acknowledged"])
+        self.assertEqual(transition["capacity_credit"], 0)
+        self.assertFalse(
+            any(path.endswith(("claim-ack.json", "archived-reuse-proof.json", ".cid")) for path in self.fixture.members)
+        )
+        old_source = subprocess.check_output(
+            ["git", "show", "0c6ca2b073254acd33c7e2a747a5ba747f99a537:scripts/cloudbench-parked-reservations.py"]
+        )
+        with tempfile.NamedTemporaryFile(dir=ROOT / "scripts", suffix=".py") as path:
+            path.write(old_source)
+            path.flush()
+            old = runpy.run_path(path.name)
+        with mock.patch.dict(
+            old["qualify"].__globals__,
+            protocol=lambda _: "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7",
+        ):
+            previous = old["prepare"](self.fixture.outer, self.fixture.inventory)
+        self.assertEqual(previous["candidates"], [])
+        self.assertIn("prior native state changed", previous["archive"]["parked_classification"]["reason_counts"])
+
+    def test_unknown_intended_drift_publication_and_extra_wire_stay_held(self):
+        current = self.unknown_intended_fixture()
+        original = copy.deepcopy(self.fixture.members)
+        for field, value in (
+            ("instance_id", self.row["source_instance_id"]),
+            ("state", "started"),
+            ("name", "foreign"),
+            ("config", {}),
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(current)
+                changed[field] = value
+                self.set_intended_current(changed)
+                self.assertEqual(self.intended_prepare()["candidates"], [])
+        self.set_intended_current(current)
+        for artifact in (
+            ".cid",
+            "boot.json",
+            "archived-reuse-proof.json",
+            "archived-reuse-journal/claim-ack.json",
+            "archived-reuse-wire/" + "f" * 32 + "/request.json",
+        ):
+            with self.subTest(artifact=artifact):
+                self.fixture.members = copy.deepcopy(original)
+                self.put(artifact, {"foreign": True})
+                try:
+                    result = self.intended_prepare()
+                except ValueError:
+                    continue  # An invalid allocation identity is rejected before eligibility.
+                self.assertEqual(result["candidates"], [])
+        self.fixture.members = original
+        with mock.patch.dict(M["qualify"].__globals__, protocol=lambda _: "foreign-source"):
+            self.assertEqual(self.prepare()["candidates"], [])
+        self.fixture.members[self.root + "/bench-e2e.finished-epoch"] = b"nan\n"
+        self.assertEqual(self.intended_prepare()["candidates"], [])
+
+    def test_new_reservation_uses_current_V1_and_late_V0_cannot_overwrite(self):
+        current = self.unknown_intended_fixture()
+        candidate = self.intended_prepare()["candidates"][0]
+        request = copy.deepcopy(self.fixture.original)
+        request["cohort"] = "new-intended-cohort"
+        request["candidates"] = [candidate]
+        effects = H["reserve_cohort"].__globals__
+        owner = self
+        for late in (False, True):
+            calls = []
+            native = copy.deepcopy(current)
+
+            class API:
+                @contextmanager
+                def lease(inner, mid):
+                    calls.append("lease")
+                    try:
+                        yield
+                    finally:
+                        calls.append("release")
+
+                def request(inner, method, url, body=None, **kw):
+                    calls.append(method)
+                    if method == "GET":
+                        return copy.deepcopy(native)
+                    owner.assertEqual(body["current_version"], current["instance_id"])
+                    owner.assertNotEqual(body["current_version"], owner.row["source_instance_id"])
+                    if late:
+                        raise ValueError("409 current version changed")
+                    # A delayed old V0 CAS must fail after the already committed V1.
+                    old_intent = json.loads(
+                        owner.fixture.members[owner.root + "/archived-reuse-journal/claim-intent.json"]
+                    )
+                    owner.assertNotEqual(old_intent["current_version"], native["instance_id"])
+                    native.update(
+                        instance_id="new-reservation-V2", config=copy.deepcopy(body["config"]), state="stopped"
+                    )
+                    return copy.deepcopy(native)
+
+            journal = self.fixture.old.root / ("new-reserve-" + str(late))
+            with mock.patch.dict(effects, validate_request=lambda value: value):
+                if late:
+                    with self.assertRaisesRegex(ValueError, "409 current version"):
+                        H["reserve_cohort"](lambda _: API(), request, journal)
+                    self.assertFalse((journal / "reserved-request.json").exists())
+                    held = list(journal.glob("*/held-*.json"))
+                    self.assertEqual(len(held), 1)
+                    self.assertTrue(json.loads(held[0].read_bytes())["not_credited"])
+                else:
+                    reserved = H["reserve_cohort"](lambda _: API(), request, journal)
+                    self.assertEqual(len(reserved["candidates"]), 1)
+            self.assertEqual(calls.count("POST"), 1)
+            self.assertEqual(calls[-1], "release")
 
     def test_actual_allocate_proof_before_assignment_is_typed_new_eligibility(self):
         current = self.partial_proof_fixture()

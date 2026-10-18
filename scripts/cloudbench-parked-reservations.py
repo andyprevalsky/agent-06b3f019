@@ -187,6 +187,16 @@ def collect(closed, held, inputs):
                 roots[root]["published"].append(member.name)
                 if relative == ".cid":
                     continue
+            if relative in ("bench-e2e.started-epoch", "bench-e2e.finished-epoch"):
+                expected = manifest["files"][member.name]
+                raw = archive.extractfile(member).read(129)
+                need(
+                    len(raw) <= 128 and len(raw) == expected["bytes"] and U["digest"](raw) == expected["sha256"],
+                    "claim epoch bytes differ",
+                )
+                roots[root]["hashes"][member.name] = U["digest"](raw)
+                roots[root]["files"][relative] = raw.decode().strip()
+                continue
             if not member.name.endswith(".json"):
                 continue
             if relative not in (
@@ -370,6 +380,119 @@ def validate_partial_proof(group, request, proof, wire, current, stage, source_s
         )
 
 
+def current_intended_unknown(group, before, current, update, intent, wire, mid, expected, source_sha):
+    """New custody eligibility; an unknown old response never becomes an ACK."""
+    need(
+        source_sha
+        in {
+            "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7",
+            "829cd14575c5e0d74ac0e969c7354719e03e311a79b97abcec8490474d53e8a1",
+        }
+        and group.get("producer_sha256") == "20c34a26e524e6beb9c7d077aa8705b45134106ec831e2ad616b3139df3ececc",
+        "unknown intended claim producer",
+    )
+    # Validate the old version fence and history without claiming a current prior-state read.
+    T["unchanged"](before, before, update, intent, wire, mid, expected)
+    need(
+        current.get("state") == "stopped"
+        and isinstance(current.get("instance_id"), str)
+        and current["instance_id"]
+        and current["instance_id"] != before["instance_id"]
+        and current.get("config") == expected
+        and all(current.get(k) == before.get(k) for k in ("id", "name", "region", "created_at")),
+        "current native is not exact intended claim",
+    )
+    ordered = sorted(wire, key=lambda item: item[0] if type(item[0]) is int else -1)
+    url = "/machines/" + mid
+    need(
+        len(ordered) == 4
+        and all(type(t) is int for t, *_ in ordered)
+        and [t for t, *_ in ordered] == sorted(set(t for t, *_ in ordered))
+        and [(q["method"], q["path"]) for _, q, _, _ in ordered]
+        == [("POST", url + "/lease"), ("GET", url), ("POST", url), ("DELETE", url + "/lease")]
+        and [code for _, _, _, code in ordered] == [201, 200, None, 200],
+        "unknown intended claim lease is not closed",
+    )
+    nonce = ordered[0][2]["data"]["nonce"]
+    need(
+        ordered[0][1].get("body") == {"description": "archived same-volume successor", "ttl": 180}
+        and all(q.get("headers", {}).get("fly-machine-lease-nonce") == nonce for _, q, _, _ in ordered[1:])
+        and all(ordered[i][1].get("body") is None for i in (1, 3)),
+        "unknown intended claim lease/read differs",
+    )
+    folders = {
+        name.removesuffix("/request.json")
+        for name in group["namespace"]
+        if name.startswith("archived-reuse-wire/") and name.endswith("/request.json")
+    }
+    need(len(folders) == 4, "unknown intended claim wire count differs")
+    expected_wire = set(folders)
+    for folder in folders:
+        q = group["files"][folder + "/request.json"]
+        names = {"request.json", "http-start.json", "transport-start.json", "stderr.private.log"}
+        if q != update:
+            names |= {"0001-wire.json", "result.json"}
+        expected_wire.update(folder + "/" + name for name in names)
+    need(
+        {name for name in group["namespace"] if name.startswith("archived-reuse-wire/")} == expected_wire,
+        "unknown intended claim wire namespace differs",
+    )
+    allowed = {
+        "",
+        "archived-reuse-journal",
+        "archived-reuse-wire",
+        "archived-successor.json",
+        ".startup-state.json",
+        "bench-e2e.started-epoch",
+        "bench-e2e.finished-epoch",
+    }
+    allowed |= {
+        "archived-reuse-journal/" + name
+        for name in ("claim-intent.json", "original-native.json", "source-exclusion.json")
+    }
+    need(
+        all(
+            (name in allowed or name in expected_wire) and entry.get("kind") in ("file", "directory")
+            for name, entry in group["namespace"].items()
+        ),
+        "unknown intended claim has task publication or foreign artifact",
+    )
+    startup = group["files"].get(".startup-state.json")
+    need(
+        startup is None or (set(startup) == {"seen"} and set(startup["seen"]) <= {"cloning"}),
+        "unknown intended claim progressed beyond allocation",
+    )
+    epochs = [group["files"].get("bench-e2e." + name + "-epoch") for name in ("started", "finished")]
+    if epochs != [None, None]:
+        need(all(isinstance(value, str) for value in epochs), "unknown intended claim failure epochs incomplete")
+        epochs = [float(value) for value in epochs]
+        need(
+            all(0 < value < 1e12 for value in epochs) and epochs[0] <= epochs[1],
+            "unknown intended claim failure epochs differ",
+        )
+    token = group["files"]["archived-successor.json"]["owner_token"]
+    need(
+        not any(
+            name.startswith("git-common/cloudbench-fleet-" + kind + "/" + token + "/archived-reuse/")
+            for kind in ("ownership", "audits")
+            for name in group["manifest_files"]
+        )
+        and "git-common/cloudbench-archived-reuse/current/" + mid + ".json" not in group["manifest_files"],
+        "unknown intended claim already assigned",
+    )
+    return dict(
+        stage="CURRENT_INTENDED_CLAIM_WITH_UNKNOWN_OLD_RESPONSE",
+        old_outcome="UNKNOWN_RETAINED",
+        native_claim_acknowledged=False,
+        current_state_observed=True,
+        assignment_published=False,
+        source_instance_id=current["instance_id"],
+        prior_current_version=before["instance_id"],
+        fresh_lease_and_current_version_cas_required=True,
+        capacity_credit=0,
+    )
+
+
 def qualify(
     outer,
     request,
@@ -526,7 +649,13 @@ def qualify(
             "claim pre-update read missing",
         )
         if status is None or not 200 <= status < 300:
-            transition = T["unchanged"](before, current, update, intent, wire, mid, expected)
+            if current.get("instance_id") != before["instance_id"]:
+                need(status is None and not partial, "unknown intended claim requires absent old response")
+                transition = current_intended_unknown(
+                    group, before, current, update, intent, wire, mid, expected, source_sha
+                )
+            else:
+                transition = T["unchanged"](before, current, update, intent, wire, mid, expected)
             stage = transition["stage"]
         else:
             need(isinstance(ack, dict), "claim update has no decoded ACK")
