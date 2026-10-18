@@ -451,3 +451,75 @@ descendant capture is explicitly unproved. All 12 backend-emitted model dumps
 and an owned DB dump were preserved privately before stop. Raw content remains
 private. No new runtime prompt, model, schema, decoder or stopping rule was
 applied during this check. The earlier failed attempts remain intact.
+
+
+### Real-model final-response verification, October 18 — canonical task remains failed
+
+After the exact terminal instruction was presented, the user directed validation
+against the real model rather than treating a mocked answer as the outcome.
+Checkpoint 30f59a07ce259976da37e951a49b48fd1552b74c applies that snapshot: the
+ten-round work budget is followed by one closing turn. Its instruction is
+appended to the last real tool result; an atomic guard rejects new work or
+multiple user replies on that turn and records rejected calls. Previously queued
+writes retain the existing ownership, cancellation and commit checks. Models,
+schemas, catalog definitions, fixtures, retry policy and timeouts are unchanged.
+
+Problem class for this terminal change: bounded work can consume its budget
+without a final opportunity to publish the evidence already gathered. The
+next-deeper candidate, generating a model reply on every terminal exit, is not
+coherent when the model is unreachable or the run is cancelled/superseded.
+Hermes `agent/chat_completion_helpers.py:2296` requests a final summary after
+its iteration cap; Rose adapts that pattern using its actual tool-result
+channel and existing send/completion tools. No synthetic user turn is added.
+The existing handler owner fails on the old handler with zero closing calls
+(expected one), and passes on this snapshot with cancellation, queued-write
+failure and rejected-call trace coverage. This mocked owner proves control
+flow only. Current backend typecheck and all135 SMS owning tests pass.
+
+The unchanged canonical CLOSED task, run1792348761-2321589-final, still FAILED
+in53.2 task seconds/83.7 owning-stage seconds. All three supervisor model dumps
+served Qwen3.8-27b. Round0 called start_new_agent and send_user_message;
+round1 called attempt_completion. It searched zero times, started one root and
+increased authorized budget by100 cents. The unchanged no-spend evaluator
+rejected that increase. One supervisor reply and one separate lifecycle
+notification were captured. The closure judge was not reached. The cap change
+was never exercised in this run, and this evidence does not show that it
+caused the earlier round0 decision. No complete causal/model-capability
+diagnosis or successful business outcome is claimed.
+
+A separate one-call real-model continuation directly tested the closing
+instruction. The exact original last-call dump was receipt-hash verified; its
+32-message prefix was preserved, followed by the two actual native round9
+calls and their complete662-character results. The normal feedback and the
+approved terminal instruction produced35 input messages and the unchanged
+nine-tool catalog. The actual Qwen call generated a contextual closure reply
+through send_user_message, but omitted attempt_completion. No business tool
+was dispatched and no SMS was sent. This replay bypassed handler delivery,
+ownership and commit checks: it proves contextual generation on that snapshot,
+not completion acceptance or a full benchmark pass. Independent read-only
+audit verified the input, call IDs, results, provider request and qualifications.
+The earlier replay setup attempt rejected dirty benchmark-history output
+before any once intent, child or model call; that failed attempt remains in
+the ledger. The subsequent admitted request made one actual model call.
+
+Canonical cleanup verified the one original workflow TERMINATED and zero
+browser allocations. Three actual root diagnostics exited0. The terminal
+and archive outboxes were empty with one durable archive reference. After
+private dump read-back and root review, canonical stack stop exited0, the
+owned DB was absent and all147 observed process births were absent; complete
+descendant capture remains unproved. Both the passive observer and direct
+model-call child were joined. All raw content remains private. Persistent
+archive SHA2569a693c038676cbe0f51c16a8d292241a3d10791b5e13209fb70d4ef368afd412
+has full566-member read-back and all324 source copies verified, cutoff
+2026-10-18T18:59:50.499113Z. Later safe receipts and this case append are not
+claimed to exist inside that archive. Original244/c8 ancestry and the exact
+original source-snapshot subtree remain intact.
+
+Archive searches used the unauthorized-budget symptom and the CLOSED
+start_new_agent/no-web_search behavior. This remains an open recurrence
+in the existing SMS investigation. Original-plus-resumed history now contains
+428 owning attempts:341 passed/87 failed,31 original+397 resumed. Diagnostic
+request exit0 means observation completed, not a benchmark pass; nested clocks
+are not counted again. No alternate model or previously unapproved MENU/
+USE-RETRIEVED-FACTS proposal was applied. Full current deploy verification,
+exact-HEAD bounded review, merge and production lanes remain outstanding.
