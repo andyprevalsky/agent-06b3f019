@@ -4,6 +4,7 @@
 import argparse
 import base64
 import fcntl
+import gzip
 import json
 import os
 import runpy
@@ -335,22 +336,304 @@ def require_recorded_drain(binding, evidence):
         )
 
 
+def normal_state(config, config_sha256, out):
+    """Current normal owner proof; never a retrospective borrower capture."""
+    need(
+        not (out / "payload-borrow.intent.json").exists(),
+        "borrowed owner requires original finalizer capture",
+    )
+    config_path = Path(config).absolute()
+    need(sha(read(config_path)) == config_sha256, "normal config changed")
+    cfg = obj(config_path)
+    need(
+        cfg.get("schema") == "original600-controller-runner-v1"
+        and cfg.get("allowed") is True,
+        "explicit original normal runner config required",
+    )
+    need(
+        out.resolve(strict=True) == out
+        and out.is_dir()
+        and not out.stat().st_mode & 0o077,
+        "private physical normal run required",
+    )
+    need(
+        cfg["source_ref"] == "c9d4817832720cc2b1bc6a212383973a77baf004",
+        "unknown normal export workload",
+    )
+    source_root = Path(cfg["source_root"])
+    pins = B["source_identity"](source_root, cfg["source_ref"], cfg["source_files"])
+    provenance = cfg["host_operator_provenance"]
+    host_ref = "a819e410264bf95c993d551d406375a8621026d2"
+    need(
+        provenance["host_operator_source_ref"] == host_ref
+        and provenance["workload_source_ref"] == cfg["source_ref"]
+        and provenance["original_started_at_epoch"] == cfg["started_at_epoch"],
+        "normal host provenance differs",
+    )
+    host_root = Path(provenance["incomplete_admission"]["source_root"])
+    host_names = (
+        "run-original600-controller.py",
+        "cloudbench-original600-runner.py",
+        "run-cloudbench-controller-gate",
+    )
+    host_hashes = {
+        name: sha(
+            subprocess.check_output(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    str(host_root),
+                    "show",
+                    host_ref + ":scripts/" + name,
+                ]
+            )
+        )
+        for name in host_names
+    }
+    need(
+        host_hashes["cloudbench-original600-runner.py"]
+        == provenance["host_runner_sha256"]
+        and host_hashes["run-cloudbench-controller-gate"]
+        == provenance["host_gate_sha256"],
+        "normal host driver differs",
+    )
+    pins.update(B["source_identity"](host_root, host_ref, host_hashes))
+    caller = obj(out / "caller.json")
+    identity = obj(out / "controller.identity.json")
+    authority_path = out / "authority.private.json"
+    disposable = runpy.run_path(
+        str(source_root / "scripts/cloudbench-disposable-controller.py")
+    )
+    authority, authority_sha = disposable["authority"](
+        authority_path, source_root, fresh=False
+    )
+    need(
+        caller["source_ref"] == identity["source_ref"] == cfg["source_ref"]
+        and caller["epoch"] == cfg["started_at_epoch"]
+        and type(caller["epoch"]) in (int, float)
+        and 0 < caller["epoch"] <= time.time() < caller["epoch"] + 5400
+        and caller["task_ref"] == R["TASK_REF"]
+        and caller["deadline"] == caller["epoch"] + 5400
+        and caller["authority_sha256"] == identity["authority_sha256"] == authority_sha
+        and authority["cleanup_owner_pid"] == caller["pid"]
+        and authority["cleanup_owner_birth"] == caller["birth"]
+        and Path(authority["output_directory"]) == out / "export",
+        "normal authority/caller differs",
+    )
+    template_path = Path(cfg["authority_template"])
+    template = obj(template_path)
+    need(
+        authority
+        == dict(
+            template,
+            cleanup_owner_pid=caller["pid"],
+            cleanup_owner_birth=caller["birth"],
+            output_directory=str(out / "export"),
+        ),
+        "normal authority differs from original template",
+    )
+    owner = B["process_identity"](caller["pid"])
+    argv = owner["argv"]
+    script = str(host_root / "scripts/run-original600-controller.py")
+    need(
+        owner["birth"] == caller["birth"]
+        and script in argv
+        and argv[argv.index(script) + 1 : argv.index(script) + 3]
+        == ["--source-ref", host_ref]
+        and "--resume-incomplete-admission" in argv,
+        "normal live owner source differs",
+    )
+    need(
+        not (Path("/proc") / str(caller["gate_pid"])).exists(), "normal gate not reaped"
+    )
+    ownership_path = out / "export/disposable-controller.ownership.json"
+    ownership = obj(ownership_path)
+    workspace_path = out / "export/workspace-volume.ownership.json"
+    workspace = obj(workspace_path)
+    machine = ownership["machine"]
+    need(
+        ownership["authority_sha256"] == authority_sha
+        and ownership["workspace_sha256"] == sha(read(workspace_path))
+        and machine["id"] == identity["machine"]
+        and machine["instance_id"] == identity["instance"]
+        and isinstance(machine["config"], dict)
+        and machine["id"] not in authority["protected_machines"]
+        and ownership["volume"]["id"] == workspace["volume_id"]
+        and workspace["volume_id"] not in authority["protected_volumes"],
+        "normal sealed native ownership differs",
+    )
+    need(
+        ownership.get("schema") == "cloudbench-disposable-controller-ownership-v1"
+        and workspace.get("schema") == "cloudbench-controller-workspace-ownership-v1"
+        and workspace["app"] == authority["app"] == R["APP"]
+        and workspace["source_ref"] == cfg["source_ref"]
+        and workspace["size_gb"] == 256
+        and machine["region"] == authority["region"] == "iad"
+        and machine["config"]["env"]["GATE_REF"] == cfg["source_ref"]
+        and machine["config"]["guest"]
+        == {"cpu_kind": "performance", "cpus": 8, "memory_mb": 32768}
+        and len(machine["config"]["mounts"]) == 1
+        and machine["config"]["mounts"][0].get("volume") == workspace["volume_id"]
+        and machine["config"]["mounts"][0].get("path") == "/tmp/gate"
+        and "@sha256:" in machine["config"]["image"]
+        and ownership["volume"].get("attached_machine_id") == machine["id"]
+        and ownership["volume"].get("auto_backup_enabled") is False,
+        "normal fixed native/workspace profile differs",
+    )
+    envelope_path = out / "controller-launch-payload.private.json.gz"
+    envelope_raw = read(envelope_path)
+    envelope = json.loads(gzip.decompress(envelope_raw))
+    tasks_path = Path(cfg["tasks_path"])
+    tasks = obj(tasks_path)
+    need(
+        envelope["source_ref"] == cfg["source_ref"]
+        and envelope["epoch"] == caller["epoch"]
+        and envelope["tasks"] == tasks
+        and envelope["campaign_argv"] == R["campaign_argv"](tasks, caller["epoch"])
+        and envelope["supervisor_sha256"]
+        == cfg["source_files"]["cloudbench-original600-supervisor.py"]
+        and caller["identity_path"]
+        == "/tmp/gate/repo/.context/" + envelope["identity_name"],
+        "normal sealed launch semantics differ",
+    )
+    sealed = [
+        entry
+        for entry in machine["config"]["files"]
+        if entry["guest_path"] == "/tmp/controller-launch-payload.json.gz"
+    ]
+    need(
+        len(sealed) == 1
+        and base64.b64decode(sealed[0]["raw_value"], validate=True) == envelope_raw,
+        "normal native launch envelope differs",
+    )
+    for key, item in cfg.get("remote_env", {}).items():
+        need(envelope["remote_env"].get(key) == item, "normal remote env differs")
+    descriptor_path = out / "controller-sidecars.private.json"
+    descriptors = obj(descriptor_path)
+    by_sha = {row["sha256"]: row for row in descriptors}
+    need(len(by_sha) == len(descriptors), "duplicate normal sidecar descriptor")
+    sources = {row["relative_path"]: row for row in cfg["remote_files"]}
+    need(
+        len(sources) == len(cfg["remote_files"])
+        and set(sources) == {row["relative_path"] for row in envelope["remote_files"]},
+        "normal remote file membership differs",
+    )
+    inputs = {
+        str(path): sha(read(path))
+        for path in (
+            config_path,
+            out / "caller.json",
+            out / "controller.identity.json",
+            authority_path,
+            template_path,
+            ownership_path,
+            workspace_path,
+            envelope_path,
+            tasks_path,
+            descriptor_path,
+        )
+    }
+    for item in envelope["remote_files"]:
+        need(
+            item["encoding"] == "external-gzip" and item["transfer_sha256"] in by_sha,
+            "normal sidecar envelope differs",
+        )
+        descriptor = by_sha[item["transfer_sha256"]]
+        path = Path(descriptor["path"])
+        need(
+            path.parent == out
+            and path.name
+            == "controller-sidecar-" + descriptor["sha256"] + ".private.gz",
+            "normal sidecar path differs",
+        )
+        data = read(path)
+        source = sources[item["relative_path"]]
+        original = read(source["source_path"])
+        need(
+            len(data) == descriptor["bytes"] == item["transfer_bytes"]
+            and sha(data) == descriptor["sha256"]
+            and gzip.decompress(data) == original
+            and sha(original) == source["sha256"] == item["sha256"],
+            "normal sidecar source/hash differs",
+        )
+        inputs[str(path)] = sha(data)
+        inputs[source["source_path"]] = sha(original)
+    for item in authority["env_files"].values():
+        need(sha(read(item["path"])) == item["sha256"], "normal authority env changed")
+        inputs[item["path"]] = item["sha256"]
+    pins.update({path: B["fingerprint"](path) for path in inputs})
+    return F["normalized"](
+        dict(
+            schema="controller-normal-export-identities-v1",
+            config=str(config_path),
+            config_sha256=config_sha256,
+            out=str(out),
+            source_root=str(source_root),
+            source_ref=cfg["source_ref"],
+            caller=caller,
+            owner=owner,
+            authority=authority,
+            machine=machine,
+            machine_id=machine["id"],
+            epoch=caller["epoch"],
+            deadline=caller["deadline"],
+            pins=pins,
+            inputs=inputs,
+        )
+    )
+
+
+def validate_normal(state):
+    need(
+        state["schema"] == "controller-normal-export-identities-v1",
+        "unknown normal export proof",
+    )
+    need(
+        state["deadline"] == state["epoch"] + 5400
+        and 0 < state["epoch"] <= time.time() < state["deadline"],
+        "normal original clock expired or changed",
+    )
+    need(
+        B["process_identity"](state["caller"]["pid"]) == state["owner"],
+        "normal owner changed",
+    )
+    need(
+        not (Path("/proc") / str(state["caller"]["gate_pid"])).exists(),
+        "normal gate not reaped",
+    )
+    for path, expected in state["pins"].items():
+        need(
+            F["normalized"](B["fingerprint"](path)) == expected,
+            "normal export evidence/source changed",
+        )
+    for path, expected in state["inputs"].items():
+        need(sha(read(path)) == expected, "normal export input changed")
+    return True
+
+
 def check(config, config_sha256, run_directory, operator_ref):
     out = Path(run_directory).absolute()
-    state = obj(out / "payload-finalizer.identities.private.json")
-    roots = {
-        str(Path(path).parent.parent)
-        for path in state["pins"]
-        if Path(path).name == "cloudbench-controller-payload-finalization.py"
-    }
-    need(len(roots) == 1, "unique captured finalizer source required")
-    capture_root = Path(roots.pop())
-    need(
-        F["validate"](
-            state, config, config_sha256, out, state["operator_ref"], capture_root
-        ),
-        "original gate is not positively gone/reaped",
-    )
+    borrowed = (out / "payload-finalizer.identities.private.json").exists()
+    if borrowed:
+        state = obj(out / "payload-finalizer.identities.private.json")
+        roots = {
+            str(Path(path).parent.parent)
+            for path in state["pins"]
+            if Path(path).name == "cloudbench-controller-payload-finalization.py"
+        }
+        need(len(roots) == 1, "unique captured finalizer source required")
+        capture_root = Path(roots.pop())
+        need(
+            F["validate"](
+                state, config, config_sha256, out, state["operator_ref"], capture_root
+            ),
+            "original gate is not positively gone/reaped",
+        )
+    else:
+        state = normal_state(config, config_sha256, out)
+        capture_root = HERE.parent
+        validate_normal(state)
     need(
         not (out / "export/disposable-export.verified.json").exists(),
         "export already verified",
@@ -395,6 +678,13 @@ def check(config, config_sha256, run_directory, operator_ref):
         and launch["caller"]["birth"] == state["caller"]["gate_birth"],
         "original launch/caller differs",
     )
+    if not borrowed:
+        need(
+            launch["image"] == state["machine"]["config"]["image"]
+            and launch["workspace_ownership_sha256"]
+            == sha(read(out / "export/workspace-volume.ownership.json")),
+            "normal launch image/workspace differs",
+        )
     log_path = out / "gate.private.log"
     log = read(log_path)
     need(
@@ -424,7 +714,9 @@ def check(config, config_sha256, run_directory, operator_ref):
         "machine": state["machine_id"],
         "instance": state["machine"]["instance_id"],
         "config_sha256": config_sha256,
-        "capture_sha256": sha(read(out / "payload-finalizer.identities.private.json")),
+        "capture_sha256": sha(read(out / "payload-finalizer.identities.private.json"))
+        if borrowed
+        else sha(json.dumps(state, sort_keys=True, allow_nan=False).encode()),
         "launch_sha256": sha(launch_raw),
         "source_ref": state["source_ref"],
         "operator_ref": operator_ref,
@@ -432,6 +724,8 @@ def check(config, config_sha256, run_directory, operator_ref):
         "original_epoch": state["epoch"],
         "original_deadline": state["deadline"],
     }
+    if not borrowed:
+        binding["capture_kind"] = "normal-current-owner"
     binding["orphan_drain"] = local_drain_binding(out, pins)
     need(
         binding["orphan_drain"] is None
@@ -455,17 +749,20 @@ def check(config, config_sha256, run_directory, operator_ref):
 
 def unchanged(value):
     state = value["state"]
-    need(
-        F["validate"](
-            state,
-            value["config"],
-            value["config_sha256"],
-            state["out"],
-            state["operator_ref"],
-            Path(value["capture_root"]),
-        ),
-        "original gate returned/live identity changed",
-    )
+    if state.get("schema") == "controller-normal-export-identities-v1":
+        validate_normal(state)
+    else:
+        need(
+            F["validate"](
+                state,
+                value["config"],
+                value["config_sha256"],
+                state["out"],
+                state["operator_ref"],
+                Path(value["capture_root"]),
+            ),
+            "original gate returned/live identity changed",
+        )
     for path, expected in value["pins"].items():
         need(B["fingerprint"](path) == expected, "export operator/evidence changed")
     need(
@@ -726,6 +1023,8 @@ def _observe(value, fly, cancelled):
         os.fsync(fd)
     finally:
         os.close(fd)
+    if value["state"].get("schema") == "controller-normal-export-identities-v1":
+        save(journal / "normal-owner-proof.private.json", value["state"])
     save(journal / "binding.json", value["binding"])
 
     def active():
@@ -789,6 +1088,8 @@ def _execute(value, fly, cancelled):
         os.fsync(fd)
     finally:
         os.close(fd)
+    if value["state"].get("schema") == "controller-normal-export-identities-v1":
+        save(journal / "normal-owner-proof.private.json", value["state"])
     save(journal / "intent.json", value["binding"])
     fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))[
         "Fly"
