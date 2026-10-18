@@ -21,7 +21,26 @@ export interface PhoneOperation {
   errorCode: string | null;
   result: unknown;
 }
+/** Safe setup observation only. Readiness verifies Apple sign-in, not Messages or carrier SMS. */
+export interface PhoneSetupStatus {
+  required: boolean;
+  state:
+    | 'not_started'
+    | 'in_progress'
+    | 'awaiting_user'
+    | 'verifying'
+    | 'ready'
+    | 'blocked'
+    | 'deferred';
+  attemptId: string | null;
+  revision: number;
+  profileRevision: number;
+  reasonCode?: string;
+  lastVerifiedAt?: string;
+  lastRequest?: unknown;
+}
 export interface PhoneInteraction {
+  setup?: PhoneSetupStatus;
   lease: PhoneLease | null;
   cursor: number;
   lastOperation: PhoneOperation | null;

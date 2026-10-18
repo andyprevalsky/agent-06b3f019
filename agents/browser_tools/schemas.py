@@ -441,16 +441,32 @@ class PhoneBrowserTool(BaseModel):
     """Operate the account's dedicated cloud iPhone through Rose."""
     model_config = {"extra": "forbid"}
     tool: Literal["phone"]
-    mode: Literal["operation", "status", "release"]
+    mode: Literal["operation", "status", "release", "setup"]
     operation: Optional[str] = None
     args: Dict[str, Any] = Field(default_factory=dict)
+    action: Optional[Literal["defer", "block", "verify"]] = None
+    reasonCode: Optional[Literal["user_constraint", "unsupported", "configuration_unavailable", "observed_signed_out"]] = None
+    evidenceOperationIds: Optional[List[str]] = None
 
     @model_validator(mode="after")
     def validate_mode(self):
         if self.mode == "operation" and not (self.operation or "").strip():
             raise ValueError("operation mode requires an operation")
         if self.mode != "operation" and (self.operation is not None or self.args):
-            raise ValueError("status/release do not accept commands")
+            raise ValueError("Non-operation mode does not accept commands")
+        if self.mode == "setup":
+            if self.action is None:
+                raise ValueError("setup mode requires an action")
+            if self.action == "verify":
+                evidence = self.evidenceOperationIds or []
+                if self.reasonCode is not None or not 1 <= len(evidence) <= 8 or len(set(evidence)) != len(evidence) or any(not value.strip() for value in evidence):
+                    raise ValueError("verify requires 1..8 unique observation IDs and no reasonCode")
+            elif self.evidenceOperationIds is not None or (
+                self.action == "defer" and self.reasonCode != "user_constraint"
+            ) or (self.action == "block" and self.reasonCode not in {"unsupported", "configuration_unavailable", "observed_signed_out"}):
+                raise ValueError("setup action requires its matching reasonCode and no evidence")
+        elif self.action is not None or self.reasonCode is not None or self.evidenceOperationIds is not None:
+            raise ValueError("Setup fields require setup mode")
         return self
 
 

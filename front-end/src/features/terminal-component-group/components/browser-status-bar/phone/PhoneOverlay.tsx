@@ -5,6 +5,7 @@
  * [HIDDEN|RELEASED] -> revoke frame and restore the still-mounted browser beneath.
  * All visible states share a replay-blocked subtree (including image pixels);
  * separate autocapture text masking does not replace replay exclusion.
+ * Optional setup phases use the same safe label as the fullscreen header.
  * Portrait screen fits the remaining pane; controls/progress stay outside its pixels.
  */
 import { useEffect, useRef, type PointerEvent } from 'react';
@@ -12,6 +13,7 @@ import { matchesPhoneAttention } from './phoneAttentionState';
 import type { PhoneAttentionModel } from './usePhoneAttention';
 import { PhoneOverlayControls } from './PhoneOverlayControls';
 import type { PhoneOverlayModel } from './usePhoneOverlay';
+import { phoneStatus, phoneVerificationPending } from './phoneStatus';
 import { phonePoint } from './phoneOverlayState';
 
 export function PhoneOverlay({
@@ -139,11 +141,7 @@ export function PhoneOverlay({
           </>
         ) : (
           <p className="text-xs text-white/70">
-            {lease.attentionRequestId
-              ? 'Agent waiting for assistance'
-              : user
-                ? 'You have phone control'
-                : 'Agent in progress'}
+            {phoneStatus(phone, readOnly)?.label ?? 'Agent in progress'}
           </p>
         )}
       </div>
@@ -199,7 +197,11 @@ export function PhoneOverlay({
           </button>
         ) : (
           <p role="status" className="px-6 text-center text-sm text-white/70">
-            {active ? 'Connecting to the phone…' : 'Waiting for the current interaction to finish'}
+            {phoneVerificationPending(phone.snapshot?.pendingOperation)
+              ? 'Verifying phone sign-in'
+              : active
+                ? 'Connecting to the phone…'
+                : 'Waiting for the current interaction to finish'}
           </p>
         )}
       </div>

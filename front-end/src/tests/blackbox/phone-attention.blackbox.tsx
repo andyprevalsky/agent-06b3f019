@@ -1,5 +1,5 @@
 /** Native attention must resolve an exact authenticated target before private user input. */
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi, describe } from 'vitest';
 import {
   act,
   fireEvent,
@@ -39,136 +39,8 @@ vi.mock(
   '@/features/terminal-component-group/components/browser-status-bar/BrowserProxyLocationChip',
   () => ({ BrowserProxyLocationChip: () => null }),
 );
-const target = { kind: 'iphone', browserTaskId: 'task-a', leaseId: 'lease-a' };
-const meta = {
-  requestId: 'request-a',
-  target,
-  criticalReason: 'password',
-  handoffMode: 'manual_step',
-  taskId: 'task-a',
-};
-const messages = [
-  {
-    message_id: 'attention-a',
-    timestamp: 'now',
-    role: 'TOOL',
-    text: '',
-    metadata: {
-      task_id: 'task-a',
-      toolStatus: 'IN_PROGRESS',
-      action_type: 'auth_assistance',
-      requestUserAuthentication: meta,
-    },
-  },
-] as Message[];
-const props = () => ({
-  taskId: 'task-a',
-  agentId: 'agent-a',
-  browserUrl: 'https://example.com/browser',
-  messages,
-  outputSchema: undefined,
-  browserSessionMetadata: null,
-  stepProgress: null,
-  isDisconnected: false,
-  isWaitingForAuthAssistance: true,
-  isResuming: false,
-  isUserControlling: false,
-  pendingWriteLockApproval: null,
-  onClose: vi.fn(),
-  onResume: vi.fn(),
-});
-function fixture(overrides: Record<string, unknown> = {}) {
-  let completedAt: string | null = null;
-  let pending: Record<string, unknown> | null = null;
-  let unknown = false;
-  let completeLost = false;
-  const posts: Array<Record<string, unknown>> = [];
-  const calls: string[] = [];
-  let cursor = 0;
-  const request = () => ({
-    id: 'request-a',
-    agentId: 'agent-a',
-    mode: 'manual_step',
-    target,
-    criticalReason: 'password',
-    completedAt,
-    ...overrides,
-  });
-  const json = (value: unknown) =>
-    new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
-      const path = String(url);
-      calls.push(`${init?.method ?? 'GET'} ${path}`);
-      if (path.endsWith('/auth-assistance/request-a'))
-        return json({
-          request: request(),
-          handoff: { type: 'manual_step', target, criticalReason: 'password' },
-        });
-      if (path.endsWith('/auth-assistance/request-a/complete')) {
-        expect(init?.body).toBeUndefined();
-        completedAt = '2026-10-18T22:00:00Z';
-        if (completeLost) throw new TypeError('synthetic lost response');
-        return json({ success: true });
-      }
-      if (path.endsWith('/iphone/interactions/task-a'))
-        return json({
-          lease: {
-            id: 'lease-a',
-            agentId: 'agent-a',
-            browserTaskId: 'task-a',
-            status: 'ACTIVE',
-            controlOwner: 'user',
-            attentionRequestId: completedAt ? null : 'request-a',
-            revision: 1,
-          },
-          cursor,
-          lastOperation: null,
-          pendingOperation: pending,
-        });
-      if (path.endsWith('/frame'))
-        return new Response(new Uint8Array([137, 80, 78, 71]), {
-          headers: { 'Content-Type': 'image/png' },
-        });
-      if (path.endsWith('/operations') && init?.method === 'POST') {
-        const command = JSON.parse(String(init.body));
-        posts.push(command);
-        cursor++;
-        expect(command.attentionRequestId).toBe('request-a');
-        const operation = {
-          id: command.operationId,
-          cursor,
-          operation: command.operation,
-          status: 'SUCCEEDED',
-          errorCode: null,
-          result:
-            command.operation === 'screen.bounds'
-              ? { x: 0, y: 0, w: 430, h: 932 }
-              : { success: true, private: true },
-        };
-        if (unknown && command.operation === 'input.text') {
-          pending = { ...operation, status: 'UNKNOWN' };
-          throw new TypeError('synthetic lost response');
-        }
-        return json({ operation });
-      }
-      if (path.includes('/operations/')) return json({ operation: pending });
-      throw new Error(`Unexpected fixture route ${path}`);
-    }),
-  );
-  return {
-    posts,
-    calls,
-    request,
-    setUnknown: (value: boolean) => {
-      unknown = value;
-    },
-    setCompleteLost: () => {
-      completeLost = true;
-    },
-  };
-}
+import { target, meta, messages, props, fixture } from './fixtures/phone-attention.fixture';
+
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
@@ -547,5 +419,136 @@ it('shows complete unclipped native instructions and receipts in the existing st
   );
   expect(message.className).not.toMatch(
     /truncate|line-clamp|overflow-hidden|text-ellipsis|whitespace-nowrap/,
+  );
+});
+
+// Safe setup status is observed on the existing task interaction, never a new setup poller.
+describe('phone setup status', () => {
+  const setup = (state: string) => ({
+    required: true,
+    state,
+    attemptId: 'attempt-a',
+    revision: 3,
+    profileRevision: 5,
+    expectedAccountIdentifier: 'PRIVATE-ACCOUNT-CANARY',
+    reasonCode: 'PRIVATE-REASON-CANARY',
+    lastRequest: { raw: 'PRIVATE-EXTRA-CANARY' },
+  });
+  const ordinary = () => ({
+    ...props(),
+    isWaitingForAuthAssistance: false,
+    messages: [
+      { ...messages[0], metadata: { task_id: 'task-a', toolName: 'phone', action_type: 'phone' } },
+    ] as Message[],
+  });
+  it.each([
+    ['not_started', 'Setting up your phone'],
+    ['in_progress', 'Setting up your phone'],
+    ['awaiting_user', 'Phone sign-in needs your help'],
+    ['verifying', 'Verifying phone sign-in'],
+    ['blocked', 'Phone setup blocked'],
+    ['deferred', 'Phone setup deferred'],
+    ['ready', 'Phone active'],
+  ])('shows only safe authoritative %s phase status', async (state, label) => {
+    const f = fixture(
+      {},
+      { setup: setup(state) },
+      { controlOwner: 'agent', attentionRequestId: null },
+    );
+    render(<BrowserStatusBarFullscreen {...ordinary()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId('fullscreen-activity-status')).toHaveTextContent(label),
+    );
+    expect(document.body.innerHTML).not.toMatch(/PRIVATE-(ACCOUNT|REASON|EXTRA)-CANARY/);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByLabelText('Private phone password')).toBeNull();
+    expect(screen.queryByText(/Messages ready|SMS ready|iCloud ready/i)).toBeNull();
+    expect(f.posts).toEqual([]);
+  });
+  it.each([
+    [{ status: 'WAITING', controlOwner: 'agent' }, false, 'Waiting for phone'],
+    [{ controlOwner: 'agent' }, true, 'Read-only phone'],
+    [{ controlOwner: 'user' }, false, 'You have phone control'],
+  ])('keeps queue/read-only/user precedence %j', async (lease, readOnly, label) => {
+    fixture({}, { setup: setup('verifying') }, { attentionRequestId: null, ...lease });
+    render(<BrowserStatusBarFullscreen {...ordinary()} readOnly={readOnly} />);
+    await waitFor(() =>
+      expect(screen.getByTestId('fullscreen-activity-status')).toHaveTextContent(label),
+    );
+    if (readOnly) expect(screen.queryByRole('button', { name: 'Take phone control' })).toBeNull();
+  });
+  it('keeps awaiting-user native attention on the exact protected USER form', async () => {
+    fixture({}, { setup: setup('awaiting_user') });
+    render(<BrowserStatusBarFullscreen {...props()} />);
+    expect(await screen.findByLabelText('Private phone password')).toBeInTheDocument();
+    expect(screen.getByTestId('fullscreen-activity-status')).toHaveTextContent(
+      'You have phone control',
+    );
+  });
+  it('reports an initial setup-required failure without rejection copy or retrying the original input', async () => {
+    const failed = {
+      id: 'original-agent-op',
+      cursor: 1,
+      operation: 'input.tap',
+      status: 'FAILED',
+      errorCode: 'phone_setup_required',
+      result: { raw: 'PRIVATE-RESULT-CANARY' },
+    };
+    const f = fixture(
+      {},
+      { lastOperation: failed, setup: setup('in_progress') },
+      { controlOwner: 'agent', attentionRequestId: null },
+    );
+    render(<BrowserStatusBarFullscreen {...ordinary()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId('fullscreen-activity-status')).toHaveTextContent(
+        'Setting up your phone',
+      ),
+    );
+    expect(
+      screen.queryByText(/request rejected|input was not applied|PRIVATE-RESULT-CANARY/),
+    ).toBeNull();
+    expect(f.posts).toEqual([]);
+  });
+  it.each(['RUNNING', 'UNKNOWN'])(
+    'shows fenced %s verification without frame requests or connection errors',
+    async (status) => {
+      const pending = {
+        id: 'verify-a',
+        cursor: 1,
+        operation: 'setup.verify',
+        status,
+        errorCode: null,
+        result: { raw: 'PRIVATE-VERIFY-CANARY' },
+      };
+      const f = fixture(
+        {},
+        { pendingOperation: pending, setup: setup('in_progress') },
+        { controlOwner: 'agent', attentionRequestId: null },
+      );
+      render(<BrowserStatusBarFullscreen {...ordinary()} />);
+      await waitFor(() =>
+        expect(screen.getByTestId('fullscreen-activity-status')).toHaveTextContent(
+          'Verifying phone sign-in',
+        ),
+      );
+      expect(screen.queryByText(/PRIVATE-VERIFY-CANARY/)).toBeNull();
+      expect(f.posts).toEqual([]);
+      await waitFor(() =>
+        expect(f.calls.some((call) => call.endsWith('/operations/verify-a'))).toBe(true),
+      );
+      expect(f.calls.some((call) => call.endsWith('/frame'))).toBe(false);
+      expect(screen.queryByText(/Connecting to the phone|temporarily unavailable/)).toBeNull();
+      expect(screen.getAllByText('Verifying phone sign-in').length).toBeGreaterThan(1);
+      expect(screen.getByRole('button', { name: 'Take phone control' })).toBeDisabled();
+      await waitFor(
+        () =>
+          expect(
+            f.calls.filter((call) => call.endsWith('/operations/verify-a')).length,
+          ).toBeGreaterThan(1),
+        { timeout: 2500 },
+      );
+      expect(f.calls.some((call) => call.endsWith('/frame'))).toBe(false);
+    },
   );
 });

@@ -1,3 +1,6 @@
+import { profileBody, setupBody } from './routes.setup';
+import { configureSetup, submitSetup } from './service.setup';
+import type { SetupVerifier } from '../../providers/phoneSetupVerifier';
 import { Router } from 'express';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -79,6 +82,14 @@ function executePhoneOperation(
     (typeof cursor !== 'number' || !Number.isSafeInteger(cursor) || cursor < 0)
   )
     throw new IPhoneError(400, 'expectedCursor must be a nonnegative integer');
+  if (
+    (body.setupAttemptId !== undefined || body.setupRevision !== undefined) &&
+    (typeof body.setupAttemptId !== 'string' ||
+      typeof body.setupRevision !== 'number' ||
+      !Number.isSafeInteger(body.setupRevision) ||
+      body.setupRevision < 0)
+  )
+    throw new IPhoneError(400, 'Invalid setup context');
   if (JSON.stringify(args).length > 16_384) throw new IPhoneError(400, 'Phone input is too large');
   return operations.performPhoneCommand(
     userId,
@@ -87,6 +98,12 @@ function executePhoneOperation(
       operationId: text(body, 'operationId'),
       operation: text(body, 'operation'),
       args,
+      ...(body.setupAttemptId === undefined
+        ? {}
+        : {
+            setupAttemptId: text(body, 'setupAttemptId'),
+            setupRevision: body.setupRevision as number,
+          }),
       ...(typeof cursor === 'number' ? { expectedCursor: cursor } : {}),
       ...(body.attentionRequestId !== undefined
         ? { attentionRequestId: text(body, 'attentionRequestId') }
@@ -110,10 +127,63 @@ function leaseAction(action: LeaseAction, clientFactory: PhoneClientFactory): Ha
   };
 }
 
-export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory } = {}) {
+function acquirePhoneLease(
+  req: HybridAuthRequest,
+  userId: string,
+  clientFactory: PhoneClientFactory
+) {
+  if (req.isInternal !== true) throw new IPhoneError(403, 'Use the browser-task interaction route');
+  const body = bodyRecord(req.body);
+  return service.acquire(
+    userId,
+    {
+      agentId: text(body, 'agentId'),
+      requestKey: text(body, 'requestKey'),
+      ...(body.browserTaskId !== undefined ? { browserTaskId: text(body, 'browserTaskId') } : {}),
+    },
+    clientFactory
+  );
+}
+
+function ensurePhoneInteraction(
+  req: HybridAuthRequest,
+  userId: string,
+  clientFactory: PhoneClientFactory
+) {
+  return interaction(
+    userId,
+    req.params.taskId,
+    text(bodyRecord(req.body), 'requestKey'),
+    clientFactory
+  );
+}
+export function createIPhoneRouter(
+  options: { phoneClient?: PhoneClientFactory; setupVerifier?: SetupVerifier } = {}
+) {
   const router = Router();
   const clientFactory = options.phoneClient ?? operations.defaultPhoneClient;
   router.use(asyncHandler(hybridAuth));
+  router.put(
+    '/device/setup-profile',
+    handle((req, userId) => {
+      if (req.isInternal !== true) throw new IPhoneError(403, 'Internal API key required');
+      const body = profileBody(req.body);
+      return configureSetup(userId, body.revision, body.identity);
+    })
+  );
+  router.post(
+    '/interactions/:taskId/setup',
+    handle((req, userId) => {
+      if (req.isInternal !== true) throw new IPhoneError(403, 'Internal API key required');
+      return submitSetup(
+        userId,
+        req.params.taskId,
+        setupBody(req.body),
+        options.setupVerifier,
+        clientFactory
+      );
+    })
+  );
   router.get(
     '/capability',
     handle((_req, userId) => service.capability(userId))
@@ -131,32 +201,12 @@ export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory }
   );
   router.post(
     '/interactions/:taskId',
-    handle((req, userId) =>
-      interaction(
-        userId,
-        req.params.taskId,
-        text(bodyRecord(req.body), 'requestKey'),
-        clientFactory
-      )
-    )
+    handle((req, userId) => ensurePhoneInteraction(req, userId, clientFactory))
   );
   router.post(
     '/leases',
     handle((req, userId) => {
-      if (req.isInternal !== true)
-        throw new IPhoneError(403, 'Use the browser-task interaction route');
-      const body = bodyRecord(req.body);
-      return service.acquire(
-        userId,
-        {
-          agentId: text(body, 'agentId'),
-          requestKey: text(body, 'requestKey'),
-          ...(body.browserTaskId !== undefined
-            ? { browserTaskId: text(body, 'browserTaskId') }
-            : {}),
-        },
-        clientFactory
-      );
+      return acquirePhoneLease(req, userId, clientFactory);
     }, 201)
   );
   router.get(

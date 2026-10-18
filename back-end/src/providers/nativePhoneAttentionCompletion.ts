@@ -1,4 +1,5 @@
 /** Exact native completion: device -> generation -> live binding -> one completion CAS. */
+import { setupAfterAttention } from './phoneSetupState';
 import { nativeCompletionRetry } from './nativePhoneAttentionRetry';
 import type { Prisma } from '@prisma/client';
 import { getNativePhoneTarget, NativePhoneAttentionError } from './nativePhoneAttention';
@@ -73,6 +74,12 @@ export async function completeNativePhoneAttention(
     where: { id: device.id },
     data: {
       privateInputEncrypted: resumedPrivacy(device.privateInputEncrypted),
+      setupEncrypted: setupAfterAttention(
+        device.setupEncrypted,
+        lease.id,
+        lease.actionCursor,
+        clock.now
+      ),
       ...(device.setupState === 'awaiting_user' ? { setupState: 'verifying' } : {}),
     },
   });

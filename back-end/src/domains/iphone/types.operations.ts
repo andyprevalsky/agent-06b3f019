@@ -8,12 +8,16 @@ export interface PhoneCommand {
   args: Record<string, unknown>;
   expectedCursor?: number;
   attentionRequestId?: string;
+  setupAttemptId?: string;
+  setupRevision?: number;
 }
 export interface CommandPayload {
   operation: string;
   args: Record<string, unknown>;
   actor: PhoneActor;
   attentionRequestId?: string;
+  setupAttemptId?: string;
+  setupRevision?: number;
 }
 export interface CommandClaim {
   device: IPhoneDevice;
@@ -21,5 +25,7 @@ export interface CommandClaim {
   command: IPhoneOperation;
   execute: boolean;
   taskBound?: boolean;
+  /** Server-only admission snapshot; never supplied by callers or reconstructed for replay. */
+  executionGeneration?: string;
 }
 export type PhoneClientFactory = () => PhoneHarnessClient;

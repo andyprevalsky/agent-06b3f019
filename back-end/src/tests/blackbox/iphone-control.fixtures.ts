@@ -1,3 +1,5 @@
+import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
+import type { SetupVerifier } from '../../providers/phoneSetupVerifier';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
@@ -91,6 +93,9 @@ export class Harness {
   beforeStop?: () => Promise<void>;
   createUnknown = false;
   hideReceipt = false;
+  setupVerifier: SetupVerifier = async () => {
+    throw new Error('Mock setup verifier not configured');
+  };
   beforeAuthCompletion?: () => Promise<void>;
   authSignals = 0;
   authResumes = 0;
@@ -330,6 +335,7 @@ export class Harness {
     app.use(
       '/api/iphone',
       createIPhoneRouter({
+        setupVerifier: (input) => this.setupVerifier(input),
         phoneClient: () =>
           new PhoneHarnessClient({
             apiKey: this.missingCredentials ? '' : CANARY_KEY,
@@ -470,6 +476,19 @@ export class Harness {
     });
     assert.equal(bound.status, 200, 'Fixture device binding');
     const device = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { userId } });
+    await prisma.iPhoneDevice.update({
+      where: { id: device.id },
+      data: {
+        setupState: 'ready',
+        setupEncrypted: sealPhoneValue({
+          version: 1,
+          profileRevision: 1,
+          claimRevision: 0,
+          expectedAppleIdentity: 'fixture-owner@example.invalid',
+          verified: { at: new Date().toISOString(), profileRevision: 1 },
+        }),
+      },
+    });
     const agent = await this.createAgent(userId);
     const lease = await this.acquire(userId, agent.id);
     return {

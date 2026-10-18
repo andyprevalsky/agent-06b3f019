@@ -1,4 +1,7 @@
+import { createCommandJournal } from './repo.commandJournal';
 /** Per-device command slot. Provider calls happen only after this transaction commits. */
+import { executionCustody } from './repo.executionCustody';
+import { setupGate } from './repo.setupGate';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import * as leases from './repo';
 import { validateAttentionInput, taskBoundError, phoneIntent } from './repo.attention';
@@ -75,28 +78,21 @@ export async function claimCommand(
     if (inFlight !== null) return new IPhoneError(409, 'A phone request is still running');
     const privacyError = await claimPrivacy(tx, device, input, actor, observation, taskBound);
     if (privacyError !== null) return privacyError;
-    const now = await leases.databaseNow(tx);
-    const command = await tx.iPhoneOperation.create({
-      data: {
-        deviceId: device.id,
-        leaseId,
-        requestKey: input.operationId,
-        operation: input.operation,
-        actor,
-        inputHash,
-        cursor: lease.actionCursor + (observation ? 0 : 1),
-        requestEncrypted,
-        activeDeviceId: active === null ? device.id : null,
-        providerEpoch: device.providerEpoch,
-        deadlineAt: new Date(now.getTime() + 300_000),
-      },
+    const gated = observation
+      ? null
+      : await setupGate(tx, device.id, lease, input, actor, inputHash, requestEncrypted);
+    if (gated !== null) return { device, lease, command: gated, execute: false };
+    return createCommandJournal(tx, {
+      device,
+      lease,
+      input,
+      actor,
+      inputHash,
+      requestEncrypted,
+      observation,
+      taskBound,
+      ownsSlot: active === null,
     });
-    if (!observation)
-      await tx.iPhoneLease.update({
-        where: { id: leaseId },
-        data: { actionCursor: { increment: 1 }, lastOperationId: command.id },
-      });
-    return { device, lease, command, execute: true, taskBound };
   });
   if (result instanceof IPhoneError) throw result;
   return result;
@@ -116,6 +112,7 @@ export async function beginExecution(claim: CommandClaim): Promise<boolean> {
       !enabled
     )
       return false;
+    if (!(await executionCustody(tx, claim, device, lease))) return false;
     const changed = await tx.iPhoneOperation.updateMany({
       where: {
         id: claim.command.id,

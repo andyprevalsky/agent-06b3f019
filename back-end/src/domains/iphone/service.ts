@@ -79,11 +79,14 @@ export async function act(
 export function present({
   lease,
   queuePosition,
+  setup,
 }: {
   lease: IPhoneLease;
   queuePosition: number | null;
+  setup?: unknown;
 }) {
   return {
+    ...(setup === undefined ? {} : { setup }),
     lease: {
       id: lease.id,
       agentId: lease.agentId,

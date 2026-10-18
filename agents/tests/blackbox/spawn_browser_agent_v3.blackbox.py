@@ -30122,6 +30122,10 @@ async def run_all_tests():
         "browser_tool_events_declare_action_type",
         test_browser_tool_events_declare_action_type,
     )
+    await r.record_async("phone_setup_first_operation_and_seen_context", test_phone_setup_first_operation_and_seen_context)
+    await r.record_async("phone_setup_actions_recovery_and_heartbeat", test_phone_setup_actions_recovery_and_heartbeat)
+    await r.record_async("phone_setup_failclosed_and_safe_errors", test_phone_setup_failclosed_and_safe_errors)
+    await r.record_async("phone_setup_pending_receipt_and_ready_private_ref", test_phone_setup_pending_receipt_and_ready_private_ref)
     await r.record_async("phone_durable_http_contract", test_phone_durable_http_contract)
     await r.record_async("phone_denied_before_dom_and_private_binding", test_phone_denied_before_dom_and_private_binding)
     await r.record_async("phone_reattach_reacquire_and_stale_cursor", test_phone_reattach_reacquire_and_stale_cursor)
@@ -30678,3 +30682,180 @@ if __name__ == "__main__":
 
 async def test_native_phone_auth_cancellation_preserves_exact_pending_request():
     await _exercise_native_phone_auth_manager(cancel=True)
+
+
+async def test_phone_setup_first_operation_and_seen_context():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone, observe_phone
+    lease = {"id": "lease-setup", "status": "ACTIVE", "browserTaskId": "task-setup"}
+    setup = {"attemptId": "attempt-setup", "revision": 1, "state": "in_progress", "expectedAccountIdentifier": "synthetic-account@example.test"}
+    view = {"lease": None, "cursor": 0, "setup": None, "lastOperation": None}
+    calls, physical, receipts = [], [], {}
+    def backend(request):
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True, "setupState": "not_started"})
+        if "/interactions/" in request.url.path:
+            if request.method == "POST":
+                view.update(lease=lease, setup=setup)
+            return httpx.Response(200, json=view)
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={})
+        if request.url.path.endswith("/operations"):
+            oid = body["operationId"]
+            if oid not in receipts:
+                allowed = body.get("setupAttemptId") == setup["attemptId"] and body.get("setupRevision") == setup["revision"]
+                if allowed:
+                    physical.append(body)
+                receipts[oid] = {"operation": {"id": oid, "status": "SUCCEEDED" if allowed else "FAILED", "errorCode": None if allowed else "phone_setup_required", "operation": body["operation"], "cursor": 1, "result": "actual synthetic observation" if allowed else None}, "setup": setup}
+            return httpx.Response(200, json=receipts[oid])
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task-setup", client=client)
+        initial = await observe_phone(_fake_config(), "user", "task-setup", client=client)
+        command = {"mode": "operation", "operation": "apps.launch", "args": {"name": "Calculator"}}
+        first = await execute_phone(command, **common, decision_id="first", snapshot=initial)
+        assert first["operation"]["errorCode"] == "phone_setup_required" and physical == []
+        seen = await observe_phone(_fake_config(), "user", "task-setup", client=client)
+        assert seen["interaction"]["setup"] == setup, (seen, setup, calls)
+        second = await execute_phone(command, **common, decision_id="next", snapshot=seen)
+        assert second["success"] and len(physical) == 1
+        submitted = [b for method, path, b in calls if method == "POST" and path.endswith("/operations")]
+        assert "setupAttemptId" not in submitted[0] and "setupRevision" not in submitted[0], "acquisition silently adopted unseen setup"
+        assert submitted[1]["setupAttemptId"] == "attempt-setup" and submitted[1]["setupRevision"] == 1
+        again = await execute_phone(command, **common, decision_id="first", snapshot=initial)
+        assert again["operation"] == first["operation"] and len(physical) == 1
+        assert submitted[0]["operationId"] != submitted[1]["operationId"]
+        assert "expectedAccountIdentifier" not in json.dumps(submitted)
+
+
+async def test_phone_setup_actions_recovery_and_heartbeat():
+    import httpx
+    from domains.spawn_browser_agent_v3 import phone
+    lease = {"id": "lease-setup", "status": "ACTIVE", "browserTaskId": "task-setup"}
+    setup = {"required": True, "attemptId": "attempt-setup", "revision": 2, "state": "in_progress"}
+    view = {"lease": lease, "cursor": 7, "setup": setup}
+    snapshot = {"enabled": True, "interaction": copy.deepcopy(view)}
+    calls, receipts, intents = [], {}, {}
+    lost, paid = False, []
+    heartbeat = asyncio.Event()
+    usage = {"billedBy": "backend", "usageRecordId": "usage-owned", "model": "synthetic-verifier", "promptTokens": 31, "completionTokens": 9, "totalCostCents": 2}
+    original_sleep = asyncio.sleep
+    async def quick_sleep(seconds):
+        assert seconds == 30
+        await original_sleep(0)
+    async def backend(request):
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.url.path.endswith("/heartbeat"):
+            heartbeat.set()
+            return httpx.Response(200, json={})
+        if request.url.path.endswith("/setup"):
+            assert request.extensions["timeout"]["read"] == 105
+            assert body["attemptId"] == "attempt-setup" and body["expectedRevision"] == 2 and body["expectedCursor"] == 7
+            key = body["requestKey"]
+            if key in intents and intents[key] != body:
+                return httpx.Response(409, json={"error": "different_payload"})
+            intents[key] = body
+            if key not in receipts:
+                if body["action"] == "verify":
+                    paid.append(key)
+                    await heartbeat.wait()
+                operation = {"id": key, "status": "SUCCEEDED", "errorCode": None, "operation": "setup." + body["action"]}
+                receipts[key] = {"operation": operation, "setup": {**setup, "lastRequest": {"requestKey": key, "operationId": key, "action": body["action"], "status": "SUCCEEDED", "errorCode": None}}, "usage": usage}
+            if lost:
+                raise httpx.ReadError("CANARY-PRIVATE-TRANSPORT", request=request)
+            return httpx.Response(200, json=receipts[key])
+        if "/operations/" in request.url.path:
+            return httpx.Response(200, json=receipts[request.url.path.rsplit("/", 1)[1]])
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json=view)
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task-setup", snapshot=snapshot, client=client)
+        params = {"mode": "setup", "action": "verify", "evidenceOperationIds": ["read-1", "read-2"]}
+        with patch.object(phone.asyncio, "sleep", quick_sleep):
+            first = await phone.execute_phone(params, **common, decision_id="stable-decision")
+            lost = True
+            restarted = await phone.execute_phone(params, **common, decision_id="stable-decision")
+        assert first["success"] and restarted["success"]
+        assert first["operation"]["id"] == restarted["operation"]["id"] and len(paid) == 1
+        assert first["usage"] == usage, "backend billing receipt lost or rewritten"
+        assert "usage_items" not in first, "backend-paid usage must not be charged again as Python usage"
+        posts = [b for method, path, b in calls if method == "POST" and path.endswith("/setup")]
+        assert len(posts) == 2 and posts[0] == posts[1]
+        assert set(posts[0]) == {"action", "attemptId", "expectedRevision", "expectedCursor", "requestKey", "evidenceOperationIds"}
+        assert posts[0]["evidenceOperationIds"] == ["read-1", "read-2"]
+        assert not any(method == "POST" and "/interactions/" in path and not path.endswith("/setup") for method, path, _ in calls)
+        assert "CANARY" not in json.dumps(restarted)
+        changed = await phone.execute_phone({**params, "evidenceOperationIds": ["other-read"]}, **common, decision_id="stable-decision")
+        assert not changed["success"] and changed["_httpStatus"] == 409 and len(paid) == 1
+        last_body = next(b for method, path, b in reversed(calls) if method == "POST" and path.endswith("/setup"))
+        assert last_body["requestKey"] == posts[0]["requestKey"], "payload changed the public intent identity"
+        lost = False
+        for action, reason in (("defer", "user_constraint"), ("block", "unsupported")):
+            result = await phone.execute_phone({"mode": "setup", "action": action, "reasonCode": reason}, **common, decision_id="decision-" + action)
+            assert result["success"]
+            body = next(b for method, path, b in reversed(calls) if method == "POST" and path.endswith("/setup"))
+            assert body["action"] == action and body["reasonCode"] == reason
+            assert "evidenceOperationIds" not in body
+
+
+async def test_phone_setup_failclosed_and_safe_errors():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    lease = {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}
+    setup = {"attemptId": "attempt", "revision": 1, "state": "in_progress"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 4, "setup": setup}}
+    calls = []
+    status = 409
+    def backend(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        return httpx.Response(status, json={"error": "CANARY-PRIVATE-ERROR"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task", snapshot=snapshot, client=client, decision_id="decision")
+        params = {"mode": "setup", "action": "defer", "reasonCode": "user_constraint"}
+        rejected = await execute_phone(params, **common)
+        assert not rejected["success"] and rejected.get("_httpStatus") == 409
+        assert sum(method == "POST" for method, _ in calls) == 1
+        assert "CANARY" not in json.dumps(rejected)
+        status = 500
+        uncertain = await execute_phone(params, **common)
+        assert not uncertain["success"] and "CANARY" not in json.dumps(uncertain)
+        for bad in ({"enabled": False}, {"enabled": True, "interaction": {"lease": {**lease, "status": "WAITING"}, "setup": setup, "cursor": 4}}, {"enabled": True, "interaction": {"lease": lease, "cursor": 4}}, {**snapshot, "interaction": {**snapshot["interaction"], "pendingOperation": {"status": "UNKNOWN"}}}):
+            calls.clear()
+            result = await execute_phone(params, **{**common, "snapshot": bad})
+            assert not result["success"] and not any(method == "POST" for method, _ in calls)
+
+
+async def test_phone_setup_pending_receipt_and_ready_private_ref():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    lease = {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 8, "setup": {"attemptId": "attempt", "revision": 3, "state": "verifying"}}}
+    calls, key = [], None
+    def backend(request):
+        nonlocal key
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.url.path.endswith("/setup"):
+            key = json.loads(request.content)["requestKey"]
+            raise httpx.ReadTimeout("CANARY-PRIVATE-TIMEOUT", request=request)
+        if "/operations/" in request.url.path:
+            return httpx.Response(404)
+        return httpx.Response(200, json={**snapshot["interaction"], "setup": {**snapshot["interaction"]["setup"], "lastRequest": {"requestKey": key, "operationId": key, "action": "verify", "status": "RUNNING", "errorCode": None}}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        result = await execute_phone({"mode": "setup", "action": "verify", "evidenceOperationIds": ["read"]}, config=_fake_config(), user_id="user", agent_id="agent", task_id="task", decision_id="decision", snapshot=snapshot, client=client)
+    assert not result["success"] and result["operation"]["id"] == key and result["operation"]["status"] == "RUNNING"
+    assert sum(method == "POST" for method, _ in calls) == 1 and "CANARY" not in json.dumps(result)
+    ready = {**snapshot, "interaction": {**snapshot["interaction"], "setup": {"required": False, "state": "ready"}}}
+    private = await execute_action(SimpleNamespace(), SimpleNamespace(), {"action": "phone", "params": {"mode": "operation", "operation": "input.text", "args": {"s": "pwd:fixture"}}}, config=_fake_config(), user_id="user", agent_id="agent", browser_task_id="task", tool_call_id_decision="private", phone_snapshot=ready, secret_refs={"pwd:fixture": "CANARY-PRIVATE-PASSWORD"})
+    assert not private["success"] and "binding" in private["error"].lower()
+    assert "CANARY-PRIVATE-PASSWORD" not in json.dumps(private)

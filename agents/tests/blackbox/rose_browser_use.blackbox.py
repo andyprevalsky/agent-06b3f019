@@ -2555,6 +2555,8 @@ async def run_all_tests():
         test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
+    r.record("phone_setup_schema_and_forged_context", test_phone_setup_schema_and_forged_context)
+    await r.record_async("phone_setup_actual_provider_observation", test_phone_setup_actual_provider_observation)
     r.record("native_auth_typed_schema_and_normalization", test_native_auth_typed_schema_and_normalization)
     r.record("native_auth_schema_account_isolation", test_native_auth_schema_account_isolation)
     await r.record_async("native_auth_real_provider_tool_request", test_native_auth_real_provider_tool_request)
@@ -2782,6 +2784,51 @@ async def test_native_auth_real_provider_tool_request():
         assert advertised["parameters"]["properties"]["targetKind"]["enum"] == ["browser", "iphone"]
         assert "targetKind=iphone" in advertised["description"]
         assert "This authentication ladder applies to targetKind=browser" in json.dumps(captured[0]["messages"])
+    finally:
+        teardown_mock()
+
+
+def test_phone_setup_schema_and_forged_context():
+    import pytest
+    from browser_tools.schemas import validate_browser_tool_args
+    for action, extra in (("defer", {"reasonCode": "user_constraint"}), ("block", {"reasonCode": "unsupported"}), ("verify", {"evidenceOperationIds": ["observation-1"]})):
+        params = {"mode": "setup", "action": action, **extra}
+        normalized = normalize_browser_use_tool_call({"name": "phone", "arguments": json.dumps(params)})["params"]
+        assert all(normalized[key] == value for key, value in params.items())
+    for forged in ("attemptId", "expectedRevision", "setupAttemptId", "setupRevision", "expectedCursor", "requestKey", "userId", "leaseId", "expectedAccountIdentifier", "password", "ready", "verdict"):
+        with pytest.raises(ValueError):
+            validate_browser_tool_args("phone", {"mode": "setup", "action": "defer", "reasonCode": "user_constraint", forged: "CANARY"})
+    for params in ({"mode": "setup"}, {"mode": "setup", "action": "ready"},
+                   {"mode": "setup", "action": "verify", "args": {"ready": True}},
+                   {"mode": "setup", "action": "verify", "operation": "input.text"},
+                   {"mode": "operation", "operation": "screen.text", "action": "defer"},
+                   {"mode": "status", "evidenceOperationIds": ["other"]}):
+        with pytest.raises(ValueError):
+            validate_browser_tool_args("phone", params)
+    before = json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
+    assert "setup" in next(t for t in build_browser_use_tools(["phone"]) if t["name"] == "phone")["input_schema"]["properties"]["mode"]["enum"]
+    assert not any(t["name"] == "phone" for t in build_browser_use_tools(["wait"]))
+    assert before == json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
+
+
+async def test_phone_setup_actual_provider_observation():
+    params = {"mode": "setup", "action": "defer", "reasonCode": "user_constraint"}
+    setup = {"attemptId": "attempt-owned", "revision": 3, "state": "in_progress", "expectedAccountIdentifier": "synthetic-account@example.test"}
+    state = {"enabled": True, "interaction": {"cursor": 7, "setup": setup}}
+    sse = _openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "setup-decision", "type": "function", "function": {"name": "phone", "arguments": json.dumps(params)}}]}, "finish_reason": "tool_calls"}]}])
+    captured = []
+    def provider(request):
+        assert request.url.host == "openrouter.ai"
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            result = await RoseClient(openrouter_key="synthetic").complete_browser_use(task="Inspect only; do not sign in", browser_state={**_browser_state(), "phone": state}, action_history=[], available_actions=["phone"], include_screenshot=False, call_site="test-phone-setup")
+        assert result["action"]["params"]["action"] == "defer"
+        observed = [m for m in captured[0]["messages"] if "<observed_phone_state>" in str(m.get("content"))]
+        assert len(observed) == 1 and json.dumps(setup) in observed[0]["content"]
+        assert "Inspect only; do not sign in" in json.dumps(captured[0]["messages"])
     finally:
         teardown_mock()
 

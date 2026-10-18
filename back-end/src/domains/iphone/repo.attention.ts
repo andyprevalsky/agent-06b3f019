@@ -1,4 +1,5 @@
 /** Exact pending native attention fence; caller already holds device lock. */
+import { SETUP_OPERATIONS } from '../../providers/phoneSetupState';
 import { sealPhoneValue, phoneCommandHash } from '../../providers/phoneHarnessCredentials';
 import { getNativePhoneTarget, isNativePhoneAttention } from '../../providers/nativePhoneAttention';
 import { IPhoneError, type IPhoneLease, type LeaseAction, type Transaction } from './types';
@@ -21,6 +22,8 @@ export async function validateAttentionInput(
   input: PhoneCommand,
   actor: PhoneActor
 ) {
+  if (SETUP_OPERATIONS.has(input.operation))
+    return new IPhoneError(403, 'Use the task setup route');
   const attention = await pendingNativeAttention(tx, lease);
   if (attention === null) {
     if (input.attentionRequestId !== undefined)
@@ -81,15 +84,25 @@ export function phoneIntent(input: PhoneCommand, actor: PhoneActor) {
   return {
     inputHash: phoneCommandHash(
       input.operation,
-      input.attentionRequestId === undefined
+      input.attentionRequestId === undefined &&
+        input.setupAttemptId === undefined &&
+        input.setupRevision === undefined
         ? input.args
-        : { args: input.args, attentionRequestId: input.attentionRequestId },
+        : {
+            args: input.args,
+            attentionRequestId: input.attentionRequestId,
+            setupAttemptId: input.setupAttemptId,
+            setupRevision: input.setupRevision,
+          },
       actor
     ),
     requestEncrypted: sealPhoneValue({
       operation: input.operation,
       args: input.args,
       actor,
+      ...(input.setupAttemptId === undefined
+        ? {}
+        : { setupAttemptId: input.setupAttemptId, setupRevision: input.setupRevision }),
       ...(input.attentionRequestId === undefined
         ? {}
         : { attentionRequestId: input.attentionRequestId }),

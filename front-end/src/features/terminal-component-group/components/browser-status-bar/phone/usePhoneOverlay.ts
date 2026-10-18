@@ -15,6 +15,7 @@ import {
   readPhoneOperation,
 } from '@/lib/api/iphone';
 import type { PhoneAttention } from '@/lib/api/phoneAttention';
+import { phoneVerificationPending } from './phoneStatus';
 import { phoneLeaseVisible, readPointBounds } from './phoneOverlayState';
 import { emptyView, phoneScopeCanWrite, type Scope, type View } from './phoneOverlaySession';
 import { performScopedPhoneOperation, recordPhoneOutcome } from './phoneOverlayOperations';
@@ -165,7 +166,11 @@ export function usePhoneOverlay(
               scope.boundsAt = Date.now();
             }
           }
-          if (lease?.status === 'ACTIVE') {
+          if (phoneVerificationPending(scope.operation)) {
+            if (scope.frame) URL.revokeObjectURL(scope.frame);
+            scope.frame = null;
+            scope.bounds = null;
+          } else if (lease?.status === 'ACTIVE') {
             if (
               !readOnly &&
               lease.controlOwner === 'user' &&

@@ -1,5 +1,6 @@
 /** Durable admission: device FOR UPDATE -> reconcile -> mutate -> FIFO admit.
  * Every process uses this lock order. Transactions perform database I/O only. */
+import { ensureSetup } from './repo.setup';
 import { nativeControlError } from './repo.attention';
 import { resumePrivacy } from './repo.privacy';
 import { databaseNow } from './repo.clock';
@@ -255,7 +256,8 @@ export async function view(tx: Transaction, id: string) {
       : lease.status === 'ACTIVE'
         ? 0
         : null;
-  return { lease, queuePosition };
+  const setup = await ensureSetup(tx, lease.deviceId, lease);
+  return { lease, queuePosition, setup: setup.dto };
 }
 
 export async function lockedDevice(tx: Transaction, userId: string) {

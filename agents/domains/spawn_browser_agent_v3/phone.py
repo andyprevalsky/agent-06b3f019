@@ -48,6 +48,25 @@ matching criticalReason. The browser auth waterfall applies only to browser
 targets. Queue expiry, unsupported operations, ordinary navigation, terms and
 transport errors are tool outcomes, never reasons to request authentication help.
 User completion means observe and verify again, never assume sign-in succeeded.
+First-use setup is an account-owned stage of this same task. Read the actual
+interaction.setup observation. A phone_setup_required receipt means the original
+command did not execute; never replay it blindly. Navigate Apple Account sign-in
+autonomously when compatible with the user's goal. The owned active setup context
+may provide expectedAccountIdentifier: it is authorized nonsecret personal data
+and may be typed normally. Passwords remain in the protected user form only.
+Honor actual user restrictions: mode=setup, action=defer, reasonCode=user_constraint
+records a deferral for this task only, then continue permitted work. For an actual
+setup blocker use action=block with reasonCode=unsupported,
+configuration_unavailable, or observed_signed_out; these do not request attention.
+A signed-out screen normally means continue setup; block only when unable to
+proceed safely. Do not abandon the original task or claim setup succeeded.
+After fresh observations, use action=verify with evidenceOperationIds containing
+1..8 successful current broker observation IDs. The backend independently checks
+the intended Apple Account sign-in. Supply no OCR text, readiness verdict, account
+override or routing IDs. User Done only resumes verification. Ready means verified
+Apple Account sign-in, not Messages/OTP delivery or permission to use password refs.
+After setup or deferral, reassess the original goal and choose the next action;
+setup never automatically replays the interrupted input or replaces the task.
 """
 
 
@@ -66,7 +85,7 @@ async def _request(client, config, user_id, method, path, payload=None):
         f"{config.backend.api_url.rstrip('/')}/api/iphone/{path}",
         headers={"X-API-Key": config.backend.api_key or "", "X-User-Id": user_id},
         json=payload,
-        timeout=105.0 if path.endswith("/operations") else 10.0,
+        timeout=105.0 if path.endswith(("/operations", "/setup")) else 10.0,
     )
     if not response.is_success:
         # Never include response text, URL, headers, input, or exception strings.
@@ -151,6 +170,9 @@ async def execute_phone(
         return {"success": False, "error": "Invalid phone arguments"}
     view = (snapshot or {}).get("interaction") or {}
     path = f"interactions/{quote(task_id, safe='')}"
+    if params["mode"] == "setup":
+        return await _execute_setup(params, config=config, user_id=user_id, task_id=task_id,
+                                    decision_id=decision_id, snapshot=snapshot, client=client)
     operation_id = None
     lease_id = None
     try:
@@ -205,6 +227,9 @@ async def execute_phone(
                     "operation": params["operation"],
                     "args": params.get("args", {}),
                     "expectedCursor": cursor,
+                    # Only the context seen by this decision can acknowledge
+                    # setup. Never adopt setup from the acquire response.
+                    **_seen_setup_context(view, task_id),
                 },
             ),
             config,
@@ -234,6 +259,73 @@ async def execute_phone(
             except Exception:
                 pass
         return {"success": False, "status": "UNKNOWN", "error": "Phone outcome unconfirmed; observe before acting"}
+
+
+def _seen_setup_context(view: dict, task_id: str) -> dict:
+    lease = view.get("lease") or {}
+    setup = view.get("setup") or {}
+    revision = setup.get("revision")
+    attempt = setup.get("attemptId")
+    if (lease.get("status") != "ACTIVE" or lease.get("browserTaskId") != task_id
+        or not isinstance(attempt, str) or not attempt
+        or not isinstance(revision, int) or isinstance(revision, bool) or revision < 0):
+        return {}
+    return {"setupAttemptId": attempt, "setupRevision": revision}
+
+
+async def _execute_setup(params, *, config, user_id, task_id, decision_id, snapshot, client):
+    """Submit one observed setup intent; recover status without replay or rebilling."""
+    view = snapshot.get("interaction") or {}
+    context = _seen_setup_context(view, task_id)
+    lease = view.get("lease") or {}
+    cursor = view.get("cursor")
+    pending = view.get("pendingOperation") or {}
+    failure = {"success": False, "error": "Phone setup unavailable for this decision"}
+    if (not context or not isinstance(lease.get("id"), str)
+        or not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0
+        or lease.get("attentionRequestId")
+        or pending.get("status") in {"CONNECTING", "RUNNING", "UNKNOWN"}):
+        return failure
+    intent = decision_id or _identity("setup-cursor", task_id, cursor)
+    key = _identity("setup", task_id, lease["id"], context["setupAttemptId"], intent)
+    path = f"interactions/{quote(task_id, safe='')}"
+    payload = {"action": params["action"], "attemptId": context["setupAttemptId"],
+               "expectedRevision": context["setupRevision"], "expectedCursor": cursor, "requestKey": key}
+    for field in ("reasonCode", "evidenceOperationIds"):
+        if field in params:
+            payload[field] = params[field]
+
+    def present(data):
+        # Backend records verifier ToolUsage exactly once. Preserve its receipt
+        # as evidence; never turn it into Python usage_items or token totals.
+        operation = data.get("operation") or {}
+        return {**data, "success": operation.get("id") == key and operation.get("status") == "SUCCEEDED"}
+
+    try:
+        result = await with_phone_heartbeat(
+            _request(client, config, user_id, "POST", path + "/setup", payload),
+            config, user_id, snapshot, client=client,
+        )
+        if result.get("_httpStatus", 0) < 500:
+            return present(result)
+    except Exception:
+        # A paid verification may already have committed. Do not POST again.
+        pass
+    try:
+        current = await _request(client, config, user_id, "GET", path)
+        receipt = await _request(client, config, user_id, "GET",
+                                 f"leases/{quote(lease['id'], safe='')}/operations/{quote(key, safe='')}")
+        if "_httpStatus" not in receipt and (receipt.get("operation") or {}).get("id") == key:
+            if "setup" not in receipt and "_httpStatus" not in current:
+                receipt = {**receipt, "setup": current.get("setup")}
+            return present(receipt)
+        last = (current.get("setup") or {}).get("lastRequest") or {}
+        if last.get("requestKey") == key and last.get("operationId") == key and last.get("action") == params["action"]:
+            return {"success": False, "setup": current["setup"],
+                    "operation": {"id": key, "status": last.get("status"), "errorCode": last.get("errorCode")}}
+    except Exception:
+        pass
+    return {**failure, "status": "UNKNOWN", "error": "Phone setup outcome unconfirmed; observe before acting"}
 
 
 async def retain_phone_for_auth(config, user_id: str, task_id: str, request_id: str) -> None:

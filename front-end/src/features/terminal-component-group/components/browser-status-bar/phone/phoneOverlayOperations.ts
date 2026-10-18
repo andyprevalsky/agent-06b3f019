@@ -8,9 +8,11 @@ export function recordPhoneOutcome(scope: Scope, operation: PhoneOperation) {
     scope.notice = 'Typed privately. Check phone, then Done.';
   if (operation.status === 'FAILED' && operation.operation !== 'screen.bounds')
     scope.notice =
-      operation.errorCode === 'phone_connection_not_ready'
-        ? 'Phone input was not applied. No input was replayed. Wait for the phone to be ready before trying a new action.'
-        : 'Phone request rejected. Check the screen before trying a new action.';
+      operation.errorCode === 'phone_setup_required'
+        ? 'Phone setup is starting.'
+        : operation.errorCode === 'phone_connection_not_ready'
+          ? 'Phone input was not applied. No input was replayed. Wait for the phone to be ready before trying a new action.'
+          : 'Phone request rejected. Check the screen before trying a new action.';
 }
 
 export async function performScopedPhoneOperation(

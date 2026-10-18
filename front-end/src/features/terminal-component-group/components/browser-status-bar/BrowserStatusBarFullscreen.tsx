@@ -20,6 +20,7 @@
  * [READ_ONLY] -> passive iframe and task progress, no agent control actions
  *
  * PHONE STATE: owned phone activity -> WAITING|ACTIVE overlay above the mounted iframe;
+ * optional setup status changes only the shared label, below queue/read-only/user precedence;
  * native attention resolves exact authenticated binding before any mutation;
  * release -> same iframe. Phone owns controls while visible; mobile pane fits portrait
  * above always-visible progress. READ_ONLY -> frames only, no control/input.
@@ -39,6 +40,7 @@ import { resolveBrowserControlState, type BrowserControlState } from '../browser
 import type { Message } from '../../hooks';
 import { BrowserPaneBody } from './BrowserFullscreenPane';
 import { usePhoneAttention } from './phone/usePhoneAttention';
+import { phoneStatus as resolvePhoneStatus } from './phone/phoneStatus';
 import { phoneActivityKey } from './phone/phoneOverlayState';
 import { usePhoneOverlay } from './phone/usePhoneOverlay';
 import { MobileBrowserControlFooter } from './BrowserFullscreenOverlays';
@@ -173,17 +175,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
     props.readOnly ?? false,
     attention.request,
   );
-  const phoneStatus = phone.visible
-    ? {
-        label:
-          phone.snapshot.lease.status === 'WAITING'
-            ? 'Waiting for phone'
-            : phone.snapshot.lease.controlOwner === 'user'
-              ? 'You have phone control'
-              : 'Phone active',
-        active: phone.snapshot.lease.status === 'ACTIVE',
-      }
-    : undefined;
+  const phoneStatus = resolvePhoneStatus(phone, props.readOnly ?? false);
   // Confirmed user ownership outranks stale disconnect/auth-assistance signals.
   // Those signals can remain in the message stream while the user is driving.
   const controlState = props.isUserControlling ? 'active' : resolveBrowserControlState(props);
