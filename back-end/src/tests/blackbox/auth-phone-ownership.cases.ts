@@ -91,6 +91,24 @@ async function testJwtUnknownSubWithOwnedPhoneIsRejected(deps: PhoneOwnershipDep
   }
 }
 
+/** An existing account's token never copies a phone owned by another account. */
+async function testJwtExistingUserDoesNotTakeOwnedPhone(deps: PhoneOwnershipDeps): Promise<void> {
+  const ownedPhone = deps.uniqueFakePhone();
+  const ownPhone = deps.uniqueFakePhone();
+  const ownerId = randomUUID();
+  const otherId = randomUUID();
+  await prisma.user.create({ data: { userId: ownerId, phone: ownedPhone, isAnonymous: false } });
+  await prisma.user.create({ data: { userId: otherId, phone: ownPhone, isAnonymous: false } });
+  try {
+    const res = await listAgentsAs(deps, supabaseToken({ sub: otherId, phone: ownedPhone }));
+    assert(res.status === 200, `Existing user should stay signed in, got ${res.status}`);
+    const row = await prisma.user.findUnique({ where: { userId: otherId } });
+    assert(row?.phone === ownPhone, `Phone must not move onto a second account: ${row?.phone}`);
+  } finally {
+    await cleanupUsers([ownerId, otherId]);
+  }
+}
+
 /** A brand-new phone still provisions its account on first authenticated request. */
 async function testJwtUnknownSubWithNewPhoneCreatesAccount(
   deps: PhoneOwnershipDeps
@@ -169,6 +187,10 @@ export function phoneOwnershipCases(
     {
       name: 'phone ownership -- JWT for unknown sub with owned phone -> 401, no row',
       fn: () => testJwtUnknownSubWithOwnedPhoneIsRejected(deps),
+    },
+    {
+      name: 'phone ownership -- existing user token never takes an owned phone',
+      fn: () => testJwtExistingUserDoesNotTakeOwnedPhone(deps),
     },
     {
       name: 'phone ownership -- JWT for unknown sub with new phone creates account',

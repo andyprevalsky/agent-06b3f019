@@ -72,7 +72,22 @@ async function testChangedPhoneIsTheOnlyExistingUserWrite(): Promise<void> {
   const { store, calls } = fakeStore({ users: [{ phone: '+15550000001' }] });
   const created = await syncJwtUser(store, { ...INPUT, phone: '+15550000002' });
   assert.equal(created, false);
-  assert.deepEqual(calls, { finds: 1, creates: 0, phoneUpdates: ['+15550000002'] });
+  assert.deepEqual(calls, {
+    finds: 1,
+    creates: 0,
+    phoneUpdates: ['+15550000002'],
+    ownerLookups: ['+15550000002'],
+  });
+}
+
+async function testPhoneOwnedElsewhereIsNotCopiedToExistingUser(): Promise<void> {
+  const { store, calls } = fakeStore({
+    users: [{ phone: '+15550000001' }],
+    phoneOwner: 'user-oldest',
+  });
+  const created = await syncJwtUser(store, { ...INPUT, phone: '+15550000002' });
+  assert.equal(created, false, 'existing user stays signed in');
+  assert.deepEqual(calls.phoneUpdates, [], 'a phone owned by another account is never copied');
 }
 
 async function testConcurrentCreateWinnerDoesNotDuplicateNewUserEffects(): Promise<void> {
@@ -147,6 +162,7 @@ async function main(): Promise<void> {
   await testExistingUserIsReadOnly();
   await testNewUserIsCreatedOnce();
   await testChangedPhoneIsTheOnlyExistingUserWrite();
+  await testPhoneOwnedElsewhereIsNotCopiedToExistingUser();
   await testConcurrentCreateWinnerDoesNotDuplicateNewUserEffects();
   await testNonUniqueCreateErrorPropagates();
   await testNewPhoneCreatesAccount();

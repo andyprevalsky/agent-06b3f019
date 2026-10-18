@@ -15,11 +15,13 @@ export const OLDEST_ACCOUNT_FIRST: Prisma.UserOrderByWithRelationInput[] = [
 
 /**
  * The stored forms a phone number may have: `+digits` and bare `digits`.
- * Strips spaces, dashes and parentheses first. Returns null when the input has
- * no digits, so callers never match rows with an empty phone.
+ * Strips spaces, dashes and parentheses first, and treats a leading `00`
+ * international prefix as `+`. Returns null when the input has no digits, so
+ * callers never match rows with an empty phone.
  */
 export function phoneLookupVariants(phone: string): [string, string] | null {
-  const normalized = phone.replace(/[\s\-()]/g, '');
+  const stripped = phone.replace(/[\s\-()]/g, '');
+  const normalized = stripped.startsWith('00') ? `+${stripped.slice(2)}` : stripped;
   const digitsOnly = normalized.replace(/\+/g, '');
   if (digitsOnly.length === 0) {
     return null;
@@ -27,4 +29,13 @@ export function phoneLookupVariants(phone: string): [string, string] | null {
   const phoneWithPlus = normalized.startsWith('+') ? normalized : `+${normalized}`;
   const phoneWithoutPlus = normalized.startsWith('+') ? normalized.slice(1) : normalized;
   return [phoneWithPlus, phoneWithoutPlus];
+}
+
+/**
+ * Prisma filter matching every stored form of `phone`. Falls back to the exact
+ * value when it has no digits (matches nothing useful, never every row).
+ */
+export function phoneOwnerWhere(phone: string): Prisma.UserWhereInput {
+  const variants = phoneLookupVariants(phone);
+  return variants === null ? { phone } : { phone: { in: variants } };
 }

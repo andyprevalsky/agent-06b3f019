@@ -53,16 +53,14 @@ export async function markOffWaitlistByPhone(phone: string): Promise<OffWaitlist
   if (digits === '') return { flagged: false, userId: null, alreadyOffWaitlist: false };
 
   // User.phone is not unique and may be stored as '+digits' or bare 'digits'.
-  const candidates = await prisma.user.findMany({
+  // One phone maps to its oldest account — the one phone login resolves to.
+  const target = await prisma.user.findFirst({
     where: { phone: { in: ['+' + digits, digits] } },
     orderBy: OLDEST_ACCOUNT_FIRST,
     select: { userId: true, offWaitlistAt: true },
   });
-  if (candidates.length === 0) return { flagged: false, userId: null, alreadyOffWaitlist: false };
+  if (target === null) return { flagged: false, userId: null, alreadyOffWaitlist: false };
 
-  // Prefer a not-yet-flagged account so a re-send doesn't report already-off
-  // when another account for the same number is still gated.
-  const target = candidates.find((user) => user.offWaitlistAt === null) ?? candidates[0];
   if (target.offWaitlistAt !== null) {
     return { flagged: false, userId: target.userId, alreadyOffWaitlist: true };
   }

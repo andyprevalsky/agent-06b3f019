@@ -9,7 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
-import { OLDEST_ACCOUNT_FIRST } from '../../providers/phoneAccountLookup';
+import { OLDEST_ACCOUNT_FIRST, phoneOwnerWhere } from '../../providers/phoneAccountLookup';
 
 /**
  * Find-or-create a User for an inbound WhatsApp number.
@@ -20,7 +20,7 @@ import { OLDEST_ACCOUNT_FIRST } from '../../providers/phoneAccountLookup';
  */
 export async function provisionUserByPhone(phone: string) {
   const existing = await prisma.user.findFirst({
-    where: { phone },
+    where: phoneOwnerWhere(phone),
     orderBy: OLDEST_ACCOUNT_FIRST,
   });
   if (existing) return { user: existing, created: false };

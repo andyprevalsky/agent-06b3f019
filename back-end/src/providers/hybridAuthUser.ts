@@ -47,9 +47,14 @@ async function syncExistingPhone(
   input: JwtUserInput,
   existing: JwtUserSnapshot
 ): Promise<void> {
-  if (input.phone !== null && input.phone !== existing.phone) {
-    await store.updatePhone(input.userId, input.phone);
+  if (input.phone === null || input.phone === existing.phone) return;
+  // Never move a phone onto this account while another account owns it; the
+  // user stays signed in, the phone simply is not copied.
+  if (hasPhone(input.phone)) {
+    const ownerId = await store.findPhoneOwner(input.phone);
+    if (ownerId !== null && ownerId !== input.userId) return;
   }
+  await store.updatePhone(input.userId, input.phone);
 }
 
 /**
