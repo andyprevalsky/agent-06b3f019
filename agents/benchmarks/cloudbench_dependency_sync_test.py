@@ -12879,6 +12879,7 @@ def test_current_teardown_retires_name_only_clone_only_after_joined_aged_absence
     reaper = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
+            "registry_await_name_only_visibility_window() {",
             "fleet_current_disposable_registry() {",
             "fleet_with_native_reap_permit() {",
             "fleet_validate_reap_cohort() {",
@@ -12906,6 +12907,9 @@ FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 REG={shlex.quote(str(registry))}
 CALLS={shlex.quote(str(calls))}
 CLOUDBENCH_REAP_MAX_IN_FLIGHT=1
+# A record that never ages within the bounded teardown wait stays retained.
+CLOUDBENCH_PHANTOM_TEARDOWN_WAIT_SECONDS=0
+sleep() {{ :; }}
 registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
 registry_resolve_name() {{ printf 'resolve %s\\n' "$1" >> "$CALLS"; return {resolve}; }}
 registry_record_is_stale_phantom() {{ return {aged}; }}
@@ -12935,6 +12939,170 @@ printf 'rc=%s\\n' "$rc" >> "$CALLS"
         assert log[-1] != "rc=0"
         assert retired not in log
         assert phantom.read_text() == "name=cloudbench-phantom\n"
+    if scenario == "joined-young":
+        assert "stayed unresolved through its bounded visibility wait" in result.stderr
+
+
+# polar70b r001-j0068 (fleet 20261018-193944-18625): the ambiguous attempt's
+# name record was touched at 1792352414 and final teardown read it absent at
+# 1792353004, 590 s into the 900 s provider-visibility window.
+_PHANTOM_TOUCH_EPOCH = 1792352414
+_PHANTOM_TEARDOWN_EPOCH = 1792353004
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["evidence-absent", "late-visible", "unreadable", "unjoined", "future-mtime"],
+)
+def test_final_teardown_waits_out_young_name_only_clone_visibility_window(
+    tmp_path: Path, scenario: str
+) -> None:
+    """A joined final teardown must not fail a run whose phantom window is open.
+
+    The task PASSED and every guest acknowledged cleanup, but the name-only
+    record from a ``failed to launch VM: volume not found`` attempt was only
+    590 s old at final teardown, so the controller retained ownership and
+    failed the job although no Machine with that name existed. With every
+    clone producer joined, final teardown re-resolves the exact name until the
+    window measured from the attempt's return closes: it destroys a late
+    Machine, retires an authoritative aged absence, and still fails closed on
+    an unreadable list, an unjoined producer or an unbounded (future) mtime.
+    """
+    fleet = fleet_source_text()
+    reaper = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_record_is_stale_phantom() {",
+            "registry_await_name_only_visibility_window() {",
+            "fleet_current_disposable_registry() {",
+            "fleet_with_native_reap_permit() {",
+            "fleet_validate_reap_cohort() {",
+            "fleet_reap_registry_record_native() {",
+            "fleet_reap_registry_record() {",
+            "reap_registry_clones() {",
+        )
+    )
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("e" * 32)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    name = "cloudbench-0b8b827d95fd4db49f39e716"
+    phantom = clones / name
+    phantom.write_text(f"name={name}\n")
+    touch = _PHANTOM_TOUCH_EPOCH
+    if scenario == "future-mtime":
+        touch = _PHANTOM_TEARDOWN_EPOCH + 3600
+    os.utime(phantom, (touch, touch))
+    sibling = clones / "cloudbench-be2f7075f090447caf9e2969"
+    sibling.write_text(
+        "name=cloudbench-be2f7075f090447caf9e2969\nid=84eee56ae64668\n"
+        "volume_id=vol_vz8z6dojpjw7nxev\n"
+    )
+    calls = tmp_path / "calls"
+    clock = tmp_path / "clock"
+    clock.write_text(f"{_PHANTOM_TEARDOWN_EPOCH}\n")
+    joined = "0" if scenario == "unjoined" else "1"
+    late_epoch = _PHANTOM_TEARDOWN_EPOCH + 120
+
+    script = f"""set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+REG={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+CLOCK={shlex.quote(str(clock))}
+SCENARIO={shlex.quote(scenario)}
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=1
+date() {{ if [ "$*" = +%s ]; then cat "$CLOCK"; else command date "$@"; fi; }}
+sleep() {{
+  printf 'sleep %s\\n' "$1" >> "$CALLS"
+  printf '%s\\n' "$(( $(cat "$CLOCK") + $1 ))" > "$CLOCK"
+}}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_resolve_name() {{
+  now="$(cat "$CLOCK")"
+  printf 'resolve %s %s\\n' "$1" "$now" >> "$CALLS"
+  [ "$1" = {name} ] || return 2
+  case "$SCENARIO" in
+    late-visible) [ "$now" -lt {late_epoch} ] || {{ printf '%s' deadbeef000001; return 0; }} ;;
+    unreadable) [ "$now" = {_PHANTOM_TEARDOWN_EPOCH} ] || return 2 ;;
+  esac
+  return 1
+}}
+registry_machine_details() {{
+  case "$1" in
+    84eee56ae64668) printf 'started cloudbench-be2f7075f090447caf9e2969' ;;
+    deadbeef000001) printf 'started %s' {name} ;;
+    *) return 2 ;;
+  esac
+}}
+machine_volume_id() {{ [ "$1" = deadbeef000001 ] && printf '%s' vol_late; }}
+registry_record_machine_identity() {{
+  printf 'name=%s\\nid=%s\\nvolume_id=%s\\n' "$2" "$3" "$4" > "$1"
+}}
+fleet_registry_reconcile_mounted_volume() {{
+  case "$3" in
+    84eee56ae64668) printf '%s' vol_vz8z6dojpjw7nxev ;;
+    deadbeef000001) printf '%s' vol_late ;;
+    *) return 1 ;;
+  esac
+}}
+reap_machine() {{ printf 'reap_machine %s %s\\n' "$1" "$3" >> "$CALLS"; }}
+fleet_audit_update_registry_clone() {{ printf 'audit %s\\n' "$*" >> "$CALLS"; }}
+{reaper}
+rc=0
+FLEET_CLONE_PRODUCERS_JOINED={joined} reap_registry_clones "$REG" current || rc=$?
+printf 'rc=%s\\n' "$rc" >> "$CALLS"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=20
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    log = calls.read_text().splitlines()
+    assert "reap_machine 84eee56ae64668 vol_vz8z6dojpjw7nxev" in log
+    assert not sibling.exists()
+    waited = sum(int(line.split()[1]) for line in log if line.startswith("sleep "))
+    retired = f"audit {registry} {name}   not-allocated-verified"
+    if scenario == "evidence-absent":
+        assert log[-1] == "rc=0", result.stderr
+        assert retired in log
+        assert not phantom.exists()
+        # Only the window's remainder from the attempt's return is spent, and
+        # the absence that retires the name is read after the window closes.
+        assert waited == 900 - (_PHANTOM_TEARDOWN_EPOCH - _PHANTOM_TOUCH_EPOCH)
+        final_resolve = [line for line in log if line.startswith("resolve ")][-1]
+        assert int(final_resolve.split()[-1]) >= _PHANTOM_TOUCH_EPOCH + 900
+        assert "is not provider-visible yet" not in result.stderr
+        _assert_proven_sibling_reaped_before_name_lookup(log, name)
+        return
+    if scenario == "late-visible":
+        assert log[-1] == "rc=0", result.stderr
+        assert "reap_machine deadbeef000001 vol_late" in log
+        assert f"audit {registry} {name} deadbeef000001 vol_late destroyed-verified-absent" in log
+        assert retired not in log
+        assert not phantom.exists()
+        assert waited < 900 - (_PHANTOM_TEARDOWN_EPOCH - _PHANTOM_TOUCH_EPOCH)
+        _assert_proven_sibling_reaped_before_name_lookup(log, name)
+        return
+    assert log[-1] != "rc=0"
+    assert retired not in log
+    assert not any(line.startswith("reap_machine deadbeef") for line in log)
+    assert phantom.read_text() == f"name={name}\n"
+    if scenario == "unjoined":
+        assert waited == 0
+        assert "is not provider-visible yet" in result.stderr
+    elif scenario == "future-mtime":
+        # A stepped clock cannot extend the bounded wait past one window.
+        assert 0 < waited <= 900
+    else:
+        assert 0 < waited < 900 - (_PHANTOM_TEARDOWN_EPOCH - _PHANTOM_TOUCH_EPOCH)
+    _assert_proven_sibling_reaped_before_name_lookup(log, name)
+
+
+def _assert_proven_sibling_reaped_before_name_lookup(log: list[str], name: str) -> None:
+    # A visibility wait must not delay destroying already proven siblings.
+    assert log.index("reap_machine 84eee56ae64668 vol_vz8z6dojpjw7nxev") < log.index(
+        f"resolve {name} {_PHANTOM_TEARDOWN_EPOCH}"
+    )
 
 
 @pytest.mark.parametrize("inventory", ["present", "absent", "unreadable", "none-owned"])

@@ -5088,6 +5088,48 @@ registry_record_is_stale_phantom() {  # <record-file>; 0 = absent long enough to
     [ $(( now - mt )) -ge "$ttl" ]
 }
 
+registry_await_name_only_visibility_window() {  # <record> <clone-name>; 0=late id on stdout, 1=aged absence, 2=retain
+    # Only final CURRENT teardown calls this, after joining every clone
+    # producer: no request for this exact name can still be in flight, so the
+    # only remaining uncertainty is provider list lag. A short run can reach
+    # teardown before the record, touched when its ambiguous attempt returned,
+    # outlives the phantom window (polar70b r001-j0068 was 590 s into 900 s
+    # and failed although no Machine existed). Re-resolve the exact name for
+    # only the remainder of that window, then require one more absence read.
+    # A future mtime (stepped clock) waits at most one bounded allowance.
+    local record="$1" clone_name="$2" ttl max_wait poll now mt remaining deadline resolved status
+    ttl="${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}"
+    case "$ttl" in ''|*[!0-9]*) ttl=900 ;; esac
+    max_wait="${CLOUDBENCH_PHANTOM_TEARDOWN_WAIT_SECONDS:-$ttl}"
+    poll="${CLOUDBENCH_PHANTOM_TEARDOWN_POLL_SECONDS:-30}"
+    case "$max_wait" in ''|*[!0-9]*) return 2 ;; esac
+    case "$poll" in ''|*[!0-9]*|0) return 2 ;; esac
+    now="$(date +%s)"
+    mt="$(stat -c %Y "$record" 2>/dev/null || stat -f %m "$record" 2>/dev/null)" || return 2
+    case "$mt" in ''|*[!0-9]*) return 2 ;; esac
+    remaining=$((ttl - (now - mt)))
+    [ "$remaining" -le "$max_wait" ] || remaining="$max_wait"
+    deadline=$((now + remaining))
+    echo "⏳ owned clone name '$clone_name' is absent $((now - mt))s after its ambiguous attempt; re-resolving by exact name until its ${ttl}s visibility window closes" >&2
+    while ! registry_record_is_stale_phantom "$record"; do
+        now="$(date +%s)"
+        [ "$now" -lt "$deadline" ] || return 2
+        if [ $((deadline - now)) -gt "$poll" ]; then sleep "$poll"; else sleep $((deadline - now)); fi
+        resolved="$(registry_resolve_name "$clone_name")"; status=$?
+        case "$status" in
+            0) printf '%s' "$resolved"; return 0 ;;
+            1) ;;
+            *) return 2 ;;
+        esac
+    done
+    resolved="$(registry_resolve_name "$clone_name")"; status=$?
+    case "$status" in
+        0) printf '%s' "$resolved"; return 0 ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
+}
+
 registry_record_is_stale_pre_volume_id() {  # <record-file>; 0 = old enough for provider absence proof
     # Exact volume attribution was added after the first durable ownership
     # registry format shipped. A dead controller can therefore leave a record
@@ -5980,27 +6022,44 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
                     # aged, authoritatively absent phantom. CURRENT live-owner
                     # cleanup has the same proof only at final teardown after it
                     # joined every clone producer (FLEET_CLONE_PRODUCERS_JOINED=1):
-                    # no request for this name can still be in flight. Early or
-                    # unjoined current cleanup never discards its only durable
-                    # ownership proof.
-                    if { [ "$mode" = "stale" ] || [ "$mode" = "forced" ] \
-                            || { [ "$mode" = "current" ] \
-                                 && [ "${FLEET_CLONE_PRODUCERS_JOINED:-0}" = 1 ]; }; } \
-                        && registry_record_is_stale_phantom "$record"; then
-                        echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; mode=$mode, no clone request in flight)"
-                        fleet_audit_update_registry_clone "$registry" "$clone_name" "" "" \
-                            not-allocated-verified || return 1
-                        rm -f "$record"
+                    # no request for this name can still be in flight. That
+                    # teardown waits out a still-open window by exact name
+                    # instead of failing a run that merely finished early.
+                    # Early or unjoined current cleanup never discards its only
+                    # durable ownership proof.
+                    if [ "$mode" = "current" ] && [ "${FLEET_CLONE_PRODUCERS_JOINED:-0}" = 1 ] \
+                        && ! registry_record_is_stale_phantom "$record"; then
+                        resolved="$(registry_await_name_only_visibility_window "$record" "$clone_name")"
+                        case $? in
+                            0) id="$resolved" ;;
+                            1) : ;;
+                            *)
+                                echo "❌ owned clone name '$clone_name' stayed unresolved through its bounded visibility wait; retaining ownership and refusing to provision" >&2
+                                unresolved=1
+                                continue
+                                ;;
+                        esac
+                    fi
+                    if [ -z "$id" ]; then
+                        if { [ "$mode" = "stale" ] || [ "$mode" = "forced" ] \
+                                || { [ "$mode" = "current" ] \
+                                     && [ "${FLEET_CLONE_PRODUCERS_JOINED:-0}" = 1 ]; }; } \
+                            && registry_record_is_stale_phantom "$record"; then
+                            echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; mode=$mode, no clone request in flight)"
+                            fleet_audit_update_registry_clone "$registry" "$clone_name" "" "" \
+                                not-allocated-verified || return 1
+                            rm -f "$record"
+                            continue
+                        fi
+                        echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
+                        # This record must keep the overall cleanup fail-closed, but
+                        # it is independent of later records whose exact machine IDs
+                        # are already proven. Returning here leaked every known clone
+                        # sorted after one young name-only record. Retain this record,
+                        # continue reaping those known IDs, then report failure.
+                        unresolved=1
                         continue
                     fi
-                    echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
-                    # This record must keep the overall cleanup fail-closed, but
-                    # it is independent of later records whose exact machine IDs
-                    # are already proven. Returning here leaked every known clone
-                    # sorted after one young name-only record. Retain this record,
-                    # continue reaping those known IDs, then report failure.
-                    unresolved=1
-                    continue
                     ;;
                 *)
                     # Retain this exact name and keep reaping siblings whose IDs
@@ -6183,7 +6242,26 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
             return 1
         fi
     fi
+    # Current teardown dispatches records with a provider-returned ID first: a
+    # name-only record may wait out its visibility window and must not delay
+    # destroying proven siblings. Recovery modes keep their glob order.
+    local -a records
+    records=()
     for record in "$registry"/clones/*; do
+        [ -f "$record" ] || continue
+        if [ "$mode" != current ] \
+            || [ -n "$(registry_meta_value "$record" id)$(registry_meta_value "$record" volume_id)" ]; then
+            records+=("$record")
+        fi
+    done
+    if [ "$mode" = current ]; then
+        for record in "$registry"/clones/*; do
+            [ -f "$record" ] || continue
+            [ -n "$(registry_meta_value "$record" id)$(registry_meta_value "$record" volume_id)" ] \
+                || records+=("$record")
+        done
+    fi
+    for record in ${records[@]+"${records[@]}"}; do
         [ -f "$record" ] || continue
         if [ "$reap_limit" -eq 1 ]; then
             if fleet_reap_registry_record "$registry" "$mode" "$registry_version" "$legacy_batch_status" "$record"; then
