@@ -103,24 +103,20 @@ def response_model_for_protocol(
             or any(not isinstance(value, str) or not value for value in expected_call_ids)):
         return model
 
-    result_model = create_model(
-        "CandidateToolResult", __base__=ToolResult,
-        call_id=(Literal[expected_call_ids], ...),
-    )
-
     def ordered_call_ids(cls, results):
         if tuple(result.call_id for result in results) != expected_call_ids:
             raise ValueError("Native result call IDs differ from the candidate action")
         return results
 
     results_field = (
-        Annotated[list[result_model], Field(min_length=len(expected_call_ids), max_length=len(expected_call_ids))],
+        list[ToolResult],
         ...,
     )
     validators = {"ordered_call_ids": field_validator("tool_results")(ordered_call_ids)}
     if model is NativeTransition:
         return create_model("CandidateNativeTransition", __base__=model,
-                            __validators__=validators, tool_results=results_field)
+                            __validators__=validators,
+                            tool_results=(Annotated[list[ToolResult], Field(min_length=1)], ...))
     outcome = TimedOutcome if model is TimedOutcomeDistribution else Outcome
     outcome_model = create_model("Candidate" + outcome.__name__, __base__=outcome,
                                  __validators__=validators, tool_results=results_field)
