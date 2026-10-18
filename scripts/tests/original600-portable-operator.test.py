@@ -13,6 +13,7 @@ import http.server
 import json
 import os
 import random
+import re
 from pathlib import Path
 import runpy
 import signal
@@ -1811,7 +1812,7 @@ class Portable(unittest.TestCase):
             self.assertEqual(argv[argv.index('--concurrency')+1], '600')
             self.assertEqual(argv[argv.index('--timeout')+1], '1200')
             self.assertEqual(argv[argv.index('--e2e-timeout')+1], '5400')
-            self.assertEqual(argv[argv.index('--ref')+1], '570830dbf17635e13d16a6f03b4d705f6b6443b1')
+            self.assertEqual(argv[argv.index('--ref')+1], 'c9875959893737ed352b6ccd08372faa94a4745d')
             self.assertNotIn('infra_early_stop', value)
             args.infra_early_stop = 'disabled'
             disabled = directory / 'disabled'
@@ -2089,6 +2090,20 @@ class Sharded(unittest.TestCase):
                  patch.object(CLI.subprocess, 'Popen', side_effect=AssertionError('no runner may start')):
                 with self.assertRaisesRegex(ValueError, '44 free Machine slots < 45 required'):
                     CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+
+
+class TaskRefPins(unittest.TestCase):
+    def test_every_guest_task_ref_pin_matches_the_runner(self):
+        """Moving the frozen guest task source must move every validator with it."""
+        ref = runpy.run_path(str(ROOT/'scripts/cloudbench-original600-runner.py'))['TASK_REF']
+        self.assertRegex(ref, '^[0-9a-f]{40}$')
+        for name in ('cloudbench-archived-machine-reuse.py', 'cloudbench-reuse-index.py'):
+            self.assertEqual(runpy.run_path(str(ROOT/'scripts'/name))['TASK_REF'], ref, name)
+        # Embedded supervisor/guest payloads pin the same ref as literal source.
+        assignment = r"""\b(?:task_ref|taskref|ORIGINAL_TASK_REF)\s*=\s*['"]([0-9a-f]{40})['"]"""
+        for name in ('cloudbench-original600-supervisor.py', 'cloudbench-controller-orphan-drain.py', 'original600-status.py'):
+            pins = set(re.findall(assignment, (ROOT/'scripts'/name).read_text()))
+            self.assertEqual(pins, {ref}, name)
 
 
 if __name__ == '__main__':

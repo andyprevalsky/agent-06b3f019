@@ -32,7 +32,9 @@ The exact original ordered200 task manifest is committed at
 `scripts/tests/fixtures/original600-tasks.json`. Copy its exact bytes to a private
 input file, e.g. `install -m600 scripts/tests/fixtures/original600-tasks.json "$TASKS"`.
 The runner verifies the original ordered names hash and pins task source
-`570830dbf17635e13d16a6f03b4d705f6b6443b1`. No task selection, prompt, evaluator,
+`c9875959893737ed352b6ccd08372faa94a4745d` (earlier runs used
+`570830dbf17635e13d16a6f03b4d705f6b6443b1`; observe and recover a run with its
+own source checkout, whose validators carry its pin). No task selection, prompt, evaluator,
 concurrency, retry or timeout override exists in this wrapper.
 
 ## One command

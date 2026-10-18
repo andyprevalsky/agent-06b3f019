@@ -17,7 +17,7 @@ SCHEMA = "cloudbench-archived-reuse-v1"
 STORAGE = "retained-volume-fresh-generation"
 MARKER = "cloudbench_archived_reuse"
 APP = "navi-whisper-lux-bench"
-TASK_REF = "570830dbf17635e13d16a6f03b4d705f6b6443b1"
+TASK_REF = "c9875959893737ed352b6ccd08372faa94a4745d"
 
 
 def need(value, reason):

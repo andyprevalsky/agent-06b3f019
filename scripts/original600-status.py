@@ -23,7 +23,7 @@ REMOTE=r'''
 import ast,base64,hashlib,json,os,re,stat,subprocess,sys,time
 from pathlib import Path
 
-ORIGINAL_TASK_REF='570830dbf17635e13d16a6f03b4d705f6b6443b1'
+ORIGINAL_TASK_REF='c9875959893737ed352b6ccd08372faa94a4745d'
 
 def read_json(path):
     if path.parent.resolve(strict=True)!=path.parent:raise ValueError('unsafe status parent path')

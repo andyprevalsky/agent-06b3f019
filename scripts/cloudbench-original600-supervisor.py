@@ -268,7 +268,7 @@ def main():
     ref = os.environ['REVIEWED_OPERATOR_SOURCE_REF']
     if len(ref) != 40 or any(c not in '0123456789abcdef' for c in ref):
         raise ValueError('final source is not bound')
-    task_ref = '570830dbf17635e13d16a6f03b4d705f6b6443b1'
+    task_ref = 'c9875959893737ed352b6ccd08372faa94a4745d'
     task_raw = Path(os.environ['REVIEWED_OPERATOR_TASKS']).read_bytes()
     if hashlib.sha256(task_raw).hexdigest() != os.environ['REVIEWED_OPERATOR_TASKS_SHA256']:
         raise ValueError('original tasks bytes changed')

@@ -5,6 +5,7 @@ import base64
 import copy
 import json
 import os
+import re
 import runpy
 import subprocess
 import tempfile
@@ -267,6 +268,9 @@ class Parked(unittest.TestCase):
 
         with mock.patch.dict(
             old["allocate"].__globals__,
+            # The reviewed old allocator ran at its admission's own task pin,
+            # which this fixture's request and successor share.
+            TASK_REF=H["TASK_REF"],
             selected_request=lambda *_: (f.request, self.row),
             NativeAdapter=lambda *_: Adapter(),
             module=lambda _: {"Fly": lambda *_: None},
@@ -386,6 +390,9 @@ class Parked(unittest.TestCase):
 
         with mock.patch.dict(
             old["allocate"].__globals__,
+            # The reviewed old allocator ran at its admission's own task pin,
+            # which this fixture's request and successor share.
+            TASK_REF=H["TASK_REF"],
             selected_request=lambda *_: (f.request, self.row),
             NativeAdapter=lambda *_: Adapter(),
             module=lambda _: {"Fly": lambda *_: None},
@@ -680,6 +687,12 @@ class Parked(unittest.TestCase):
         )
         new += b"\nclass ClaimReadCancelled(BaseException):\n    pass\ndef claim_read_evidence():\n    return 'bound'\ndef same_claim_evidence():\n    return 'same'\ndef reconcile_claim_read():\n    return claim_read_evidence()\n"
         real_read, real_git = Path.read_bytes, M["subprocess"].check_output
+        index = ":scripts/cloudbench-reuse-index.py"
+        historical_index = real_git(["git", "--no-replace-objects", "-C", str(ROOT), "show", old_ref + index])
+        pin = rb'TASK_REF = "[0-9a-f]{40}"'
+        self.assertEqual(len(re.findall(pin, historical_index)), 1)
+        # Model the reviewed admission at this checkout's guest task pin.
+        same_pin_index = re.sub(pin, b'TASK_REF = "' + H["TASK_REF"].encode() + b'"', historical_index)
 
         def read(path):
             return new if path == target else real_read(path)
@@ -689,7 +702,18 @@ class Parked(unittest.TestCase):
         def git(command, **kwargs):
             if command[-1] == new_ref + ":scripts/cloudbench-archived-machine-reuse.py":
                 return new
+            if command[-1] == old_ref + index:
+                return same_pin_index
             return real_git(command, **kwargs)
+
+        if same_pin_index != historical_index:
+            # An admission indexed at another guest task pin never carries forward.
+            with (
+                mock.patch.object(Path, "read_bytes", read),
+                mock.patch.object(M["subprocess"], "check_output", side_effect=real_git),
+                self.assertRaisesRegex(ValueError, "archived indexed selection protocol differs"),
+            ):
+                M["protocol"](old_ref)
 
         with (
             mock.patch.object(Path, "read_bytes", read),

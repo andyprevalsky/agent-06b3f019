@@ -411,7 +411,7 @@ class ExportResume(unittest.TestCase):
             source_ref=source,
             epoch=epoch,
             deadline=epoch + 5400,
-            task_ref="570830dbf17635e13d16a6f03b4d705f6b6443b1",
+            task_ref="c9875959893737ed352b6ccd08372faa94a4745d",
         )
         authority = dict(
             source_ref=source,

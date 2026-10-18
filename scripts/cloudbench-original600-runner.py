@@ -3,7 +3,7 @@
 import argparse,base64,errno,gzip,hashlib,json,math,os,re,secrets,shlex,signal,stat,subprocess,sys,tempfile,time
 from contextlib import contextmanager
 from pathlib import Path
-TASK_REF='570830dbf17635e13d16a6f03b4d705f6b6443b1'
+TASK_REF='c9875959893737ed352b6ccd08372faa94a4745d'
 TASK_NAMES_SHA='660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bcb0a8987f1b59f5'
 APP='navi-whisper-lux-bench'
 class Deadline(BaseException):pass
