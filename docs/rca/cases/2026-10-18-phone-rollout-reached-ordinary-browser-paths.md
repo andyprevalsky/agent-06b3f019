@@ -157,3 +157,26 @@ isolation proof; no production environment was changed during this work.
 Gate optional resource discovery at its caller using trusted eligibility from
 an existing response. A downstream authorization failure cannot undo extra
 network work, altered model input, or unrelated UI layout changes.
+
+## Enabled-path live validation
+
+After the user-approved compatibility update, the original Settings task prompt
+remained byte-identical (SHA256
+`711a7f0f0e05db71042792751fbb7e1ad3c347285a943d0789a7cf93059363b8`).
+The explicit isolated `CLOUD_IPHONE_ENABLED=1` run on source
+`45343051ffa1790d864ec7e08c47340af1b49ea4` passed in 119.3 seconds:
+`phone-connectivity-20261018t2307-r4`, Hub
+`414778a7-aa50-4358-b406-9545ddbbcb7b`, root
+`76660e5a-7c40-4771-ac73-dd5e2c69826f`.
+Actual journal order was rejected `apps.launch/phone_setup_required`, successful
+`setup.defer`, successful Settings `apps.launch`, successful `screen.text`.
+The final reported heading was Paired Computers. This proves the enabled path
+can respect the task's no-sign-in constraint and continue authorized work.
+It does not establish Apple sign-in, Messages sync, or SMS capability.
+
+The controller exited zero, phone/browser cleanup completed 2/2, and the owned
+stack cleanup receipt is clean. Publication verified all 54 messages and
+terminated browser recordings in a fresh browser. Durable evidence manifest:
+`/opt/cursor/artifacts/rca_evidence/76660e5a-7c40-4771-ac73-dd5e2c69826f/manifest.json`.
+The four earlier attempts remain in the ledger with their original outcomes;
+the original 20:06:57 UTC slice clock was retained.
