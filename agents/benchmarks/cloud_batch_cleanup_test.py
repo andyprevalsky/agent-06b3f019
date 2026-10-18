@@ -2118,7 +2118,7 @@ async def _cancelled_queue_owning_case(mode="allocated"):
             'tasks':tasks,'run':run,'max_concurrency':5,'base_url':'http://offline.invalid',
             '_run_with_sandbox_payment_lock':bench._run_with_sandbox_payment_lock,'_report_ticker_task':SimpleNamespace(cancel=lambda:None),
             'stop_fly_log_collector':stop_collector,'realtime_started':False,'memory_gate_enabled':False,'owned_batch_cleanup':True,
-            '_finalize_owned_cloud_batch':finalize,'_complete_interrupt_cleanup':lambda:None,'_live_task_agent_ids':live,
+            '_finalize_owned_cloud_batch':finalize,'_complete_interrupt_cleanup':lambda:None,'_live_task_agent_ids':live,'_wmh_evidence':SimpleNamespace(finalize=lambda:None),
             '_fetch_wmh_retrieval_audit':lambda:None,'cloud_batch_cleanup':SimpleNamespace(contract=lambda:None)})
         code=ast.fix_missing_locations(ast.Module(body=[wrapper,coordinator],type_ignores=[]))
         exec(compile(code,str(bench.__file__),'exec'),namespace)
