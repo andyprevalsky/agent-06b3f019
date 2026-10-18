@@ -732,3 +732,131 @@ def test_leaving_a_blocking_child_wait_without_the_result_releases_the_hold(monk
     assert clock_calls == [('hold', {'hold_id': 'spawn-1:child'}), ('release', {'hold_id': 'spawn-1:child', 'children': []})]
     assert {a['agent_id']: a['state'] for a in clock.snapshot()['agents']}['root'] == 'running'
     assert clock.time_of('root') == DAY, 'no child result was delivered'
+
+
+@pytest.mark.parametrize('cancelled_at', ['hold', 'wait'])
+def test_cancelling_a_blocking_child_wait_releases_the_hold_and_keeps_the_cancellation(monkeypatch, cancelled_at):
+    """PR #1538 review: asyncio.CancelledError bypassed ``except Exception`` and left the parent held."""
+    import importlib
+
+    from domains.spawn_sub_agents import handler as spawn
+
+    clock = WorldClock(start_ms=0)
+    calls = []
+
+    async def activity(fn, **kw):
+        if getattr(fn, '__name__', '') != 'world_clock_activity':
+            return None  # terminal-result reconciliation finds nothing yet
+        operation, agent_id, _parent, payload = (list(kw['args']) + [None, None])[:4]
+        calls.append((operation, payload))
+        if operation == 'hold':
+            time_ms = clock.hold(agent_id, payload['hold_id'])
+            if cancelled_at == 'hold':
+                raise asyncio.CancelledError  # cancelled while the hold request was in flight
+            return {'agent_id': agent_id, 'time_ms': time_ms}
+        if operation == 'release':
+            return {'agent_id': agent_id, 'time_ms': clock.release(agent_id, payload['hold_id'], payload['children'])}
+        raise AssertionError(operation)
+
+    fake = types.SimpleNamespace(execute_activity=activity, now=lambda: NOW, logger=types.SimpleNamespace(error=lambda *a: None))
+    monkeypatch.setattr(spawn, 'workflow', fake)
+    monkeypatch.setattr(importlib.import_module('helpers.wait_on_world_clock'), 'workflow', fake)
+
+    async def cancelled(_wf):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(importlib.import_module('helpers.wait_condition_or_handoff'), 'live_handoff_queue', cancelled)
+    clock.register('root')
+    clock.register('child', parent='root')
+    clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=DAY)
+    root = _simulated_workflow('root')
+    root.__dict__.update(child_tool_ids={}, child_results={}, pending_children=set(), child_workflow_ids={},
+                         simulated_world_time_ms=DAY)
+
+    async def post_message(*_a, **_kw):
+        return None
+
+    root._post_message = post_message
+
+    async def blocking_spawn():
+        gen = spawn.SpawnSubAgentManager().finalize_child(root, {'agent_id': 'child', 'goal': 'g'}, {'goal': 'g'}, 'spawn-1', 'bus')
+        return [event async for event in gen]
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(blocking_spawn())
+    clock_calls = [call for call in calls if call[0] in ('hold', 'release')]
+    assert clock_calls == [('hold', {'hold_id': 'spawn-1:child'}), ('release', {'hold_id': 'spawn-1:child', 'children': []})]
+    assert {a['agent_id']: a['state'] for a in clock.snapshot()['agents']}['root'] == 'running', 'the hold was released'
+
+
+def test_a_wait_acknowledgment_never_moves_the_cursor_backwards(monkeypatch):
+    """PR #1538 review: an earlier failed wait advanced the cursor locally; a later, older ack must not rewind it."""
+    import importlib
+
+    from helpers.wait_on_world_clock import _wait_on_world_clock
+
+    async def older_ack(fn, **kw):
+        return {'resumed': True, 'time_ms': 5 * DAY}
+
+    fake = types.SimpleNamespace(execute_activity=older_ack, now=lambda: NOW, logger=types.SimpleNamespace(error=lambda *a: None))
+    monkeypatch.setattr(importlib.import_module('helpers.wait_on_world_clock'), 'workflow', fake)
+    wf = _simulated_workflow('root')
+    wf.simulated_world_time_ms = 6 * DAY  # advanced on the agent's own clock after a failed wait
+    assert asyncio.run(_wait_on_world_clock(wf, 'w-2', duration_ms=1)) == 6 * DAY
+    assert wf.simulated_world_time_ms == 6 * DAY
+    wf.simulated_world_time_ms = 4 * DAY
+    assert asyncio.run(_wait_on_world_clock(wf, 'w-3', duration_ms=1)) == 5 * DAY
+    assert wf.simulated_world_time_ms == 5 * DAY
+
+
+def test_unacknowledged_hold_and_release_are_reported_and_release_rereads_world_time(monkeypatch):
+    """PR #1538 review: a failed hold/release returned None and the caller resumed without an acknowledgment."""
+    import importlib
+
+    from helpers.wait_on_world_clock import hold_on_children, release_children
+
+    calls = []
+
+    async def failing(fn, **kw):
+        operation = kw['args'][0]
+        calls.append(operation)
+        if operation in ('hold', 'release'):
+            raise RuntimeError('WMH unavailable')  # every activity attempt failed
+        return {'agent_id': 'root', 'time_ms': 3 * DAY}
+
+    fake = types.SimpleNamespace(execute_activity=failing, now=lambda: NOW, logger=types.SimpleNamespace(error=lambda *a: None))
+    monkeypatch.setattr(importlib.import_module('helpers.wait_on_world_clock'), 'workflow', fake)
+    wf = _simulated_workflow('root')
+    wf.simulated_world_time_ms = DAY
+    assert asyncio.run(hold_on_children(wf, 'spawn-1:child')) is False
+    assert asyncio.run(release_children(wf, 'spawn-1:child', ['child'])) is False
+    assert calls == ['hold', 'release', 'time'], 'a failed release re-reads the world time instead of resuming blind'
+    assert wf.simulated_world_time_ms == 3 * DAY
+    real = _simulated_workflow('prod', mode='real')
+    calls.clear()
+    assert asyncio.run(hold_on_children(real, 'h')) is True and asyncio.run(release_children(real, 'h', [])) is True
+    assert calls == [], 'outside a world nothing is held and nothing is called'
+
+
+@pytest.mark.parametrize('mode', ['simulate', 'real'])
+def test_a_resumed_agent_without_a_persisted_cursor_recovers_its_world_time(monkeypatch, mode):
+    """PR #1538 review: continuation state from before the cursor existed resumed on the real date."""
+    calls = []
+
+    async def activity(fn, **kw):
+        calls.append(kw['args'][0])
+        if mode != 'simulate':
+            raise AssertionError('non-simulated agents must not touch the world clock')
+        return {'agent_id': 'resumed', 'time_ms': _ms(PINNED) + DAY}
+
+    m = _patch_workflows(monkeypatch, activity)
+    resumed = _simulated_workflow('resumed', mode=mode)
+    resumed._deployment_resume = True
+    asyncio.run(m.AgentWorkflow._recover_world_time_cursor(resumed))
+    if mode == 'simulate':
+        assert calls == ['time'] and resumed.simulated_world_time_ms == _ms(PINNED) + DAY
+        calls.clear()
+        asyncio.run(m.AgentWorkflow._recover_world_time_cursor(resumed))
+        assert calls == [], 'a persisted cursor is kept without another clock call'
+    else:
+        assert calls == [] and resumed.simulated_world_time_ms is None

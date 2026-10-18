@@ -343,8 +343,8 @@ class SpawnSubAgentManager(ToolManager):
         # Simulate mode: while blocked here the parent holds on its children on
         # the world clock; on return it receives this child's finish time.
         hold_id = f"{child_tool_id}:{child_agent_id}"
-        await hold_on_children(workflow_instance, hold_id)
         try:
+            await hold_on_children(workflow_instance, hold_id)
             while child_agent_id not in workflow_instance.child_results:
                 if await self._reconcile_terminal_child_result(workflow_instance, child_agent_id):
                     break
@@ -359,9 +359,10 @@ class SpawnSubAgentManager(ToolManager):
                     raise
                 except (asyncio.TimeoutError, TimeoutError):
                     continue
-        except Exception:  # includes GenerationHandoffRequested
+        except BaseException:  # includes cancellation and GenerationHandoffRequested
             # Leaving without the result: stop holding (a next generation that
-            # re-enters this wait holds again under the same hold id).
+            # re-enters this wait holds again under the same hold id). The
+            # original exception, including a cancellation, is re-raised.
             await release_children(workflow_instance, hold_id, [])
             raise
         await release_children(workflow_instance, hold_id, [child_agent_id])

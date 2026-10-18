@@ -19,8 +19,9 @@ async def _wait_on_world_clock(
 
     The clock resumes this agent once every other agent in the world has passed
     the deadline (or waits beyond it), so a waiting agent never overtakes one
-    that is still working. Afterwards this agent's cursor is exactly the
-    acknowledged world time.
+    that is still working. Afterwards this agent's cursor is the acknowledged
+    world time, or its later local time: the cursor never moves backwards (a
+    failed earlier wait may have advanced it on the agent's own clock).
     """
     wait: dict[str, Any] = {"wait_id": wait_id}
     if until_ms is not None:
@@ -40,7 +41,25 @@ async def _wait_on_world_clock(
         return None
     if not isinstance(result, dict) or type(result.get("time_ms")) is not int:
         return None
-    set_world_time_cursor(workflow_instance, result["time_ms"], now=workflow.now())
+    latest = max(world_time_cursor_ms(workflow_instance) or result["time_ms"], result["time_ms"])
+    set_world_time_cursor(workflow_instance, latest, now=workflow.now())
+    return latest
+
+
+async def _read_world_time_ms(workflow_instance: Any) -> int | None:
+    """Simulate mode: this agent's time on its world clock, or None when it cannot be read."""
+    try:
+        result = await workflow.execute_activity(
+            world_clock_activity,
+            args=["time", workflow_instance.agent_id],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+    except Exception as exc:
+        workflow.logger.error(f"[world_clock] Cursor read failed; keeping the last world time: {exc}")
+        return None
+    if not isinstance(result, dict) or type(result.get("time_ms")) is not int:
+        return None
     return result["time_ms"]
 
 
@@ -56,19 +75,10 @@ async def _refresh_world_time_cursor(workflow_instance: Any) -> int | None:
     cursor = world_time_cursor_ms(workflow_instance)
     if cursor is None or not getattr(workflow_instance, "agent_id", None):
         return None
-    try:
-        result = await workflow.execute_activity(
-            world_clock_activity,
-            args=["time", workflow_instance.agent_id],
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(maximum_attempts=3),
-        )
-    except Exception as exc:
-        workflow.logger.error(f"[world_clock] Cursor read failed; keeping the last world time: {exc}")
+    time_ms = await _read_world_time_ms(workflow_instance)
+    if time_ms is None:
         return None
-    if not isinstance(result, dict) or type(result.get("time_ms")) is not int:
-        return None
-    latest = max(world_time_cursor_ms(workflow_instance) or cursor, result["time_ms"])
+    latest = max(world_time_cursor_ms(workflow_instance) or cursor, time_ms)
     set_world_time_cursor(workflow_instance, latest, now=workflow.now())
     return latest
 
@@ -91,24 +101,40 @@ async def _world_clock_children_call(workflow_instance: Any, operation: str, pay
     return result["time_ms"]
 
 
-async def hold_on_children(workflow_instance: Any, hold_id: str) -> None:
+async def hold_on_children(workflow_instance: Any, hold_id: str) -> bool:
     """Simulate mode: this agent is now blocked awaiting child results, so it holds on its children.
 
     A held agent is excluded from shared time even if it acted before, so its
     children (and their waits) can move world time past it without deadlock.
+    Returns whether the world acknowledged the hold (True outside a world:
+    there is nothing to hold). The activity already retried the same hold_id.
     """
-    await _world_clock_children_call(workflow_instance, "hold", {"hold_id": hold_id})
+    if world_time_cursor_ms(workflow_instance) is None:
+        return True
+    acknowledged = await _world_clock_children_call(workflow_instance, "hold", {"hold_id": hold_id}) is not None
+    if not acknowledged:
+        workflow.logger.error(f"[world_clock] Hold {hold_id} was not acknowledged; children may wait on this agent")
+    return acknowledged
 
 
-async def release_children(workflow_instance: Any, hold_id: str, children: list[str]) -> None:
+async def release_children(workflow_instance: Any, hold_id: str, children: list[str]) -> bool:
     """Simulate mode: the awaiting call returned with these children's results.
 
     The agent receives their finish times (its cursor moves to them) and
-    resumes acting on the world clock.
+    resumes acting on the world clock. Returns whether the world acknowledged
+    the release (True outside a world). The activity already retried the same
+    hold_id; when every attempt failed, the cursor is re-read from the world
+    clock so the agent does not resume on an unacknowledged time.
     """
+    if world_time_cursor_ms(workflow_instance) is None:
+        return True
     time_ms = await _world_clock_children_call(
         workflow_instance, "release", {"hold_id": hold_id, "children": list(children)}
     )
-    if time_ms is not None:
-        latest = max(world_time_cursor_ms(workflow_instance) or time_ms, time_ms)
-        set_world_time_cursor(workflow_instance, latest, now=workflow.now())
+    if time_ms is None:
+        workflow.logger.error(f"[world_clock] Release {hold_id} was not acknowledged; re-reading this agent's world time")
+        await _refresh_world_time_cursor(workflow_instance)
+        return False
+    latest = max(world_time_cursor_ms(workflow_instance) or time_ms, time_ms)
+    set_world_time_cursor(workflow_instance, latest, now=workflow.now())
+    return True

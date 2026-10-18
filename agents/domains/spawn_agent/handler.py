@@ -590,8 +590,8 @@ async def _recover_oai_demo_for_each_timeout(
         return results.get(child_agent_id)
     # Simulate mode: blocked awaiting this child, the parent holds on its children.
     hold_id = f"for_each_recovery:{child_agent_id}"
-    await hold_on_children(workflow_instance, hold_id)
     try:
+        await hold_on_children(workflow_instance, hold_id)
         while child_agent_id not in workflow_instance.child_results:
             if await _reconcile_for_each_child_result(workflow_instance, child_agent_id):
                 break
@@ -606,7 +606,7 @@ async def _recover_oai_demo_for_each_timeout(
                 raise
             except (asyncio.TimeoutError, TimeoutError):
                 continue
-    except Exception:  # includes GenerationHandoffRequested
+    except BaseException:  # includes cancellation and GenerationHandoffRequested
         await release_children(workflow_instance, hold_id, [])
         raise
     await release_children(workflow_instance, hold_id, [child_agent_id])

@@ -79,7 +79,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
-    from helpers.wait_on_world_clock import _refresh_world_time_cursor
+    from helpers.wait_on_world_clock import _read_world_time_ms, _refresh_world_time_cursor
     from helpers.world_model_runtime import world_clock_activity
     from loop.dag_executor import (
         TaskDAG,
@@ -1953,6 +1953,8 @@ class AgentWorkflow:
         if not self._deployment_resume:
             await self._register_on_world_clock()
             await self._advance_cloud_agent_lifecycle(PREPARING_CLOUD_AGENT_TITLE, "IN_PROGRESS")
+        else:
+            await self._recover_world_time_cursor()
 
         # Post an early heartbeat so external monitors (FE tree, benchmark
         # stall detector) see the agent is alive while init activities run.
@@ -5452,6 +5454,22 @@ class AgentWorkflow:
             await self._world_clock_event("register")
             if self.world_model_mode != "simulate" or "register" in self._world_clock_events:
                 return
+
+    async def _recover_world_time_cursor(self) -> None:
+        """Simulate mode: a resumed agent whose continuation state lacks a cursor re-reads its world time.
+
+        State persisted before the cursor existed has none, and without it the
+        resumed agent would plan on the real date. Outside simulate mode, or
+        with a persisted cursor, nothing runs.
+        """
+        if self.world_model_mode != "simulate" or type(self.simulated_world_time_ms) is int:
+            return
+        time_ms = await _read_world_time_ms(self)
+        if time_ms is None:
+            workflow.logger.error(f"[world_clock] Resumed agent {self.agent_id} could not recover its world time")
+            return
+        self.simulated_world_time_ms = time_ms
+        self.simulated_clock_offset_seconds = time_ms // 1000 - int(workflow.now().timestamp())
 
     def _world_clock_missing(self) -> bool:
         """True when a simulated agent has no acknowledged world time to start from."""
