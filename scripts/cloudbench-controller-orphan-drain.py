@@ -320,9 +320,15 @@ def agent_capture_proof(c,v,uid=None):
  return dict(pid=a['pid'],birth=a['birth'],uid=uid,role='closed-fleet-default-agent',owner_token=token,run_id=run,owner_pid=int(run.rsplit('-',1)[1]),binary_sha256=c['binary']['sha256'],launch_sha256=v['launch_sha256'],listener_inode=inode,capture_sha256=digest(json.dumps(c,sort_keys=True).encode()))
 
 
+def agent_cleanup_deadline(v):
+ if 'cleanup_deadline_epoch'not in v:return v['deadline']
+ cutoff=v['cleanup_deadline_epoch']
+ need(v['epoch']==1792279176.5459259 and v['deadline']==v['epoch']+5400 and v.get('cleanup_hold_id')=='w986k6vhvhm3sftz2y0a0tambs8ghw4d' and type(cutoff)in(int,float)and 1792285350.425<=time.time()<cutoff<=1792286550.425,'cleanup-only window differs')
+ return cutoff
+
 def agent_closed_writer(v):
  import contextlib,io
- need(os.environ.get('FLY_MACHINE_ID')==v['machine']and os.environ.get('GATE_REF')==v['source_ref']and time.time()<v['deadline'],'normal agent source/clock differs')
+ need(os.environ.get('FLY_MACHINE_ID')==v['machine']and os.environ.get('GATE_REF')==v['source_ref']and time.time()<agent_cleanup_deadline(v),'normal agent source/clock differs')
  identity_path=Path(v['identity_path']);need(identity_path.parent==Path('/tmp/gate/repo/.context')and identity_path.name.startswith('original600-supervisor.'),'normal supervisor path differs')
  raw=read(identity_path);identity=json.loads(raw);terminal=obj(identity_path.with_suffix('.terminal.json'))
  need(identity==v['joined']['identity']and digest(raw)==v['joined']['identity_sha256']and terminal==v['joined']['terminal']and terminal['supervisor_joined']is True and terminal['parent_joined']is True,'normal joined supervisor differs')
@@ -345,6 +351,7 @@ def agent_closed_writer(v):
 
 def agent_execute(v,custody=Path('/tmp/gate/controller-host-custody')):
  os.chdir('/tmp/gate/repo');journal=custody/'registered-orphan-drain';action=v['action'];identity=v['identity_sha256']
+ need('cleanup_deadline_epoch'not in v or action in('signal','observe'),'cleanup cannot create a new plan')
  if action=='observe':
   intent=obj(journal/'intent.json');need(intent['identity_sha256']==identity and intent['role']=='normal-agent','foreign normal agent invocation')
   return dict(status='OBSERVED',no_signal=True,results=[obj(p)for p in journal.glob('result-*.json')],no_exit_credit_from_receipts=True)
@@ -368,11 +375,11 @@ def agent_execute(v,custody=Path('/tmp/gate/controller-host-custody')):
   save(journal/('term-'+str(proof['pid'])+'.json'),dict(identity_sha256=identity,owner=proof,signal='SIGTERM',role='normal-agent'))
   latest=unix_dump();before={int(k):value for k,value in capture['unix_after'].items()};inode=proof['listener_inode']
   current_sockets,_=process_socket_fds(Path('/proc')/str(proof['pid']))
-  need(time.time()<v['deadline']and not(Path('/proc')/str(proof['owner_pid'])).exists()and latest.get(inode)==before[inode]and {ino for ino,_ in current_sockets if ino in latest}=={inode}and all(row.get('peer')!=inode and inode not in row.get('icons',[])for row in latest.values()),'normal agent client/clock changed before TERM')
+  need(time.time()<agent_cleanup_deadline(v)and not(Path('/proc')/str(proof['owner_pid'])).exists()and latest.get(inode)==before[inode]and {ino for ino,_ in current_sockets if ino in latest}=={inode}and all(row.get('peer')!=inode and inode not in row.get('icons',[])for row in latest.values()),'normal agent client/clock changed before TERM')
   executor=os.geteuid()
   try:
    if executor!=proof['uid']:os.seteuid(proof['uid'])
-   need(os.geteuid()==proof['uid']and time.time()<v['deadline'],'normal agent signal UID/clock differs');signal.pidfd_send_signal(fd,signal.SIGTERM)
+   need(os.geteuid()==proof['uid']and time.time()<agent_cleanup_deadline(v),'normal agent signal UID/clock differs');signal.pidfd_send_signal(fd,signal.SIGTERM)
   finally:
    if os.geteuid()!=executor:os.seteuid(executor)
   exited=bool(select.select([fd],[],[],2)[0]);result=dict(pid=proof['pid'],birth=proof['birth'],state='EXIT_OBSERVED'if exited else'TERM_SENT_NOT_JOINED',role='normal-agent',no_release_claim=True)
@@ -391,9 +398,7 @@ GUEST += AGENT
 
 
 def command(payload):
-    package = base64.b64encode(
-        gzip.compress(json.dumps([GUEST, payload]).encode(), mtime=0)
-    ).decode()
+    package = base64.b64encode(gzip.compress(json.dumps([GUEST, payload]).encode(), mtime=0)).decode()
     loader = "import base64,gzip,json,sys;s,v=json.loads(gzip.decompress(base64.b64decode(sys.argv[1])));exec(s);print(json.dumps(execute(v),sort_keys=True))"
     body = {
         "cmd": shlex.join(["python3", "-S", "-c", loader, package]),
@@ -441,9 +446,7 @@ def successful_agent_response(response, payload, action):
 def saved_positive_plan(args, export):
     root = args.run_directory.absolute() / "registered-orphan-drain"
     names = {"intent.json"} | {
-        "wire-00000" + str(i) + suffix
-        for i in (1, 2)
-        for suffix in (".request.json", ".raw.json", ".decoded.json")
+        "wire-00000" + str(i) + suffix for i in (1, 2) for suffix in (".request.json", ".raw.json", ".decoded.json")
     }
     adopted = root / "result-adopted-plan.json"
     need(
@@ -458,30 +461,22 @@ def saved_positive_plan(args, export):
         payload["identity_sha256"]
         == sha(
             json.dumps(
-                {
-                    key: value
-                    for key, value in payload.items()
-                    if key != "identity_sha256"
-                },
+                {key: value for key, value in payload.items() if key != "identity_sha256"},
                 sort_keys=True,
             ).encode()
         ),
         "saved plan identity differs",
     )
     need(
-        payload["operator_ref"] == old_ref
-        and payload["role"] == operator["role"] == "normal-agent",
+        payload["operator_ref"] == old_ref and payload["role"] == operator["role"] == "normal-agent",
         "unknown saved plan producer",
     )
     source_paths = [
-        Path(path)
-        for path in operator["source_pins"]
-        if Path(path).name == "cloudbench-controller-orphan-drain.py"
+        Path(path) for path in operator["source_pins"] if Path(path).name == "cloudbench-controller-orphan-drain.py"
     ]
     need(
         len(source_paths) == 1
-        and sha(read(source_paths[0]))
-        == "0690d2b29756e8ddcf81887f338d805296871b723fad4553cc3e138e38ed5263",
+        and sha(read(source_paths[0])) == "0690d2b29756e8ddcf81887f338d805296871b723fad4553cc3e138e38ed5263",
         "saved plan source differs",
     )
     for path, expected in operator["source_pins"].items():
@@ -523,8 +518,7 @@ def saved_positive_plan(args, export):
     def recorded(i):
         stem = root / ("wire-00000" + str(i))
         request, wire, decoded = (
-            F["obj"](Path(str(stem) + suffix))
-            for suffix in (".request.json", ".raw.json", ".decoded.json")
+            F["obj"](Path(str(stem) + suffix)) for suffix in (".request.json", ".raw.json", ".decoded.json")
         )
         raw = base64.b64decode(wire["body_b64"], validate=True)
         need(
@@ -541,8 +535,7 @@ def saved_positive_plan(args, export):
     first, native = recorded(1)
     second, response = recorded(2)
     need(
-        first
-        == {"method": "GET", "path": "/machines/" + payload["machine"], "body": None}
+        first == {"method": "GET", "path": "/machines/" + payload["machine"], "body": None}
         and second
         == {
             "method": "POST",
@@ -553,31 +546,31 @@ def saved_positive_plan(args, export):
     )
     plan = successful_agent_response(response, payload, "plan")
     need(
-        response.get("stderr")
-        and plan["status"] == "PLANNED"
-        and plan["targets"] == 1
-        and plan["held"] == 0,
+        response.get("stderr") and plan["status"] == "PLANNED" and plan["targets"] == 1 and plan["held"] == 0,
         "not a known diagnostic plan refusal",
     )
     state = export["normal_state"](
-        args.config, args.config_sha256, args.run_directory.absolute()
+        args.config,
+        args.config_sha256,
+        args.run_directory.absolute(),
+        **(
+            {"cleanup_deadline_epoch": args.cleanup_deadline_epoch}
+            if getattr(args, "cleanup_deadline_epoch", None) is not None
+            else {}
+        ),
     )
     need(
         payload["machine"] == state["machine_id"]
         and payload["source_ref"] == state["source_ref"]
         and payload["epoch"] == state["epoch"]
         and payload["deadline"] == state["deadline"]
-        and all(
-            native.get(k) == state["machine"].get(k)
-            for k in ("id", "instance_id", "config", "name", "region")
-        ),
+        and all(native.get(k) == state["machine"].get(k) for k in ("id", "instance_id", "config", "name", "region")),
         "saved plan native binding differs",
     )
     record = F["obj"](args.run_directory / "export/launch.json")
     need(
         record == payload["export_probe"]["record"]
-        and sha(read(args.run_directory / "export/launch.json"))
-        == payload["launch_sha256"]
+        and sha(read(args.run_directory / "export/launch.json")) == payload["launch_sha256"]
         and record["caller"]["pid"] == state["caller"]["gate_pid"]
         and record["caller"]["birth"] == state["caller"]["gate_birth"],
         "saved plan launch differs",
@@ -607,16 +600,24 @@ def saved_positive_plan(args, export):
 
 
 def normal_agent_state(args):
-    export = runpy.run_path(str(HERE / "cloudbench-resume-controller-export.py"))
-    saved = (
-        saved_positive_plan(args, export)
-        if getattr(args, "resume_planned", False)
-        else None
+    need(
+        getattr(args, "cleanup_deadline_epoch", None) is None or getattr(args, "resume_planned", False),
+        "cleanup window requires saved normal plan",
     )
+    export = runpy.run_path(str(HERE / "cloudbench-resume-controller-export.py"))
+    saved = saved_positive_plan(args, export) if getattr(args, "resume_planned", False) else None
     value = saved["value"] if saved else getattr(args, "_normal_export_value", None)
     if value is None:
         value = export["check"](
-            args.config, args.config_sha256, args.run_directory, args.operator_ref
+            args.config,
+            args.config_sha256,
+            args.run_directory,
+            args.operator_ref,
+            **(
+                {"cleanup_deadline_epoch": args.cleanup_deadline_epoch}
+                if getattr(args, "cleanup_deadline_epoch", None) is not None
+                else {}
+            ),
         )
     else:
         export["unchanged"](value)
@@ -636,9 +637,7 @@ def normal_agent_state(args):
     )
     agent = captured["agent"]
     need(
-        agent == captured["agent_after"]
-        and type(agent["pid"]) is int
-        and agent["pid"] > 1,
+        agent == captured["agent_after"] and type(agent["pid"]) is int and agent["pid"] > 1,
         "captured agent identity differs",
     )
     out = Path(state["out"])
@@ -652,8 +651,7 @@ def normal_agent_state(args):
         and identity.get("machine") == state["machine_id"]
         and identity.get("source_ref") == state["source_ref"]
         and identity.get("epoch") == state["epoch"]
-        and joined["identity_sha256"]
-        == sha((json.dumps(identity, sort_keys=True) + "\n").encode())
+        and joined["identity_sha256"] == sha((json.dumps(identity, sort_keys=True) + "\n").encode())
         and all(terminal.get(key) == item for key, item in identity.items())
         and terminal.get("parent_joined") is True
         and terminal.get("supervisor_joined") is True,
@@ -669,9 +667,7 @@ def normal_agent_state(args):
     )
     hashes = {name: sha((HERE / name).read_bytes()) for name in names}
     pins = B["source_identity"](HERE.parent, args.operator_ref, hashes)
-    pins.update(
-        {str(path): B["fingerprint"](path) for path in (capture_path, probe_path)}
-    )
+    pins.update({str(path): B["fingerprint"](path) for path in (capture_path, probe_path)})
     probe = {
         "machine": state["machine_id"],
         "source_ref": state["source_ref"],
@@ -719,9 +715,7 @@ def normal_agent_state(args):
         for node in ast.parse(GUEST).body
         if isinstance(node, ast.FunctionDef) and node.name == "agent_capture_proof"
     )
-    compiled = compile(
-        ast.Module(body=[function], type_ignores=[]), "source-bound-agent-proof", "exec"
-    )
+    compiled = compile(ast.Module(body=[function], type_ignores=[]), "source-bound-agent-proof", "exec")
     code = next(item for item in compiled.co_consts if isinstance(item, types.CodeType))
     namespace = dict(
         need=need,
@@ -739,8 +733,15 @@ def normal_agent_state(args):
         argdefs=(value["record"]["root_anchors"]["/tmp/gate/repo"]["uid"],),
     )
     validate(captured, payload)
-    command(dict(payload, action="plan"))
-    command(dict(payload, action="signal", batch=0, plan_sha256="0" * 64))
+    execution = {}
+    if "cleanup_deadline_epoch" in state:
+        execution = dict(
+            cleanup_deadline_epoch=state["cleanup_deadline_epoch"],
+            cleanup_hold_id=state["cleanup_hold_id"],
+            execution_operator_ref=args.operator_ref,
+        )
+    command(dict(payload, action="plan", **execution))
+    command(dict(payload, action="signal", batch=0, plan_sha256="0" * 64, **execution))
     return state
 
 
@@ -817,8 +818,7 @@ def local_state(args):
     pending_raw = read(args.pending)
     pending = json.loads(pending_raw)
     need(
-        pending["status"] == "pending"
-        and pending["reason"] == "live controller writers",
+        pending["status"] == "pending" and pending["reason"] == "live controller writers",
         "pending writers proof required",
     )
     state["_drain"] = {
@@ -868,9 +868,7 @@ def _run(args, state):
         args._normal_export_value = state["_normal_export_value"]
         args._normal_joined_path = state["_normal_joined_path"]
     out = Path(state["out"]) / (
-        "registered-orphan-drain-plan-continuation"
-        if state.get("_saved_plan")
-        else "registered-orphan-drain"
+        "registered-orphan-drain-plan-continuation" if state.get("_saved_plan") else "registered-orphan-drain"
     )
     payload = payload_for(args, state)
     if args.observe:
@@ -888,6 +886,15 @@ def _run(args, state):
                 "operator": state["_drain"],
                 **(
                     {
+                        "cleanup_deadline_epoch": state["cleanup_deadline_epoch"],
+                        "cleanup_hold_id": state["cleanup_hold_id"],
+                        "cleanup_only": True,
+                    }
+                    if "cleanup_deadline_epoch" in state
+                    else {}
+                ),
+                **(
+                    {
                         "continuation_operator_ref": args.operator_ref,
                         "prior_inputs": state["_saved_plan"]["inputs"],
                     }
@@ -903,10 +910,7 @@ def _run(args, state):
                 dict(
                     old["plan"],
                     adopted_from_raw_sha256=old["inputs"][
-                        str(
-                            Path(state["out"])
-                            / "registered-orphan-drain/wire-000002.raw.json"
-                        )
+                        str(Path(state["out"]) / "registered-orphan-drain/wire-000002.raw.json")
                     ],
                     observed_under_operator_ref=args.operator_ref,
                     prior_plan_operator_ref=payload["operator_ref"],
@@ -919,14 +923,17 @@ def _run(args, state):
         checked = local_state(args)
         need(checked["_drain"] == state["_drain"], "drain local evidence changed")
         value = dict(payload, action=action, **extra)
+        if "cleanup_deadline_epoch" in state:
+            value.update(
+                cleanup_deadline_epoch=state["cleanup_deadline_epoch"],
+                cleanup_hold_id=state["cleanup_hold_id"],
+                execution_operator_ref=args.operator_ref,
+            )
         body = command(value)
         base = "/machines/" + state["machine_id"]
         current = api.request("GET", base, timeout=18)
         need(
-            all(
-                current.get(k) == state["machine"].get(k)
-                for k in ("id", "instance_id", "config", "name", "region")
-            ),
+            all(current.get(k) == state["machine"].get(k) for k in ("id", "instance_id", "config", "name", "region")),
             "native controller changed",
         )
         need(not state.get("_cancelled"), "normal agent operation cancelled")
@@ -962,9 +969,7 @@ def run(args, state):
     state["_cancelled"] = cancelled
     try:
         for sig in (signal.SIGINT, signal.SIGTERM):
-            handlers[sig] = signal.signal(
-                sig, lambda sig, _frame: cancelled.append(sig)
-            )
+            handlers[sig] = signal.signal(sig, lambda sig, _frame: cancelled.append(sig))
         result = _run(args, state)
         need(not cancelled, "normal agent operation cancelled")
         return result
@@ -985,6 +990,7 @@ def main():
     p.add_argument("--operator-ref", required=True)
     p.add_argument("--normal-agent", action="store_true")
     p.add_argument("--resume-planned", action="store_true")
+    p.add_argument("--cleanup-deadline-epoch", type=float)
     p.add_argument("--agent-custody", type=Path)
     p.add_argument("--joined-journal", type=Path)
     p.add_argument("--pending", type=Path)
@@ -1005,9 +1011,7 @@ def main():
     )
     os.umask(0o077)
     state = local_state(args)
-    result = (
-        {"status": "CHECKED", "provider_calls": 0} if args.check else run(args, state)
-    )
+    result = {"status": "CHECKED", "provider_calls": 0} if args.check else run(args, state)
     print(json.dumps(result, sort_keys=True))
 
 

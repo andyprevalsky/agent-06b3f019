@@ -6,6 +6,7 @@ import base64
 import fcntl
 import gzip
 import json
+import math
 import os
 import runpy
 import shlex
@@ -178,9 +179,7 @@ def relay_intent_path(original, pins):
     if not pointer_path.exists():
         return original
     names = {"intent.json"} | {
-        f"wire-{index:06d}.{suffix}.json"
-        for index in (1, 2)
-        for suffix in ("request", "raw", "decoded")
+        f"wire-{index:06d}.{suffix}.json" for index in (1, 2) for suffix in ("request", "raw", "decoded")
     }
     directory = original.parent
     need(
@@ -192,11 +191,7 @@ def relay_intent_path(original, pins):
         "prior relay journal membership differs",
     )
     files = {name: sha(read(directory / name)) for name in sorted(names)}
-    digest = sha(
-        json.dumps(
-            files, sort_keys=True, separators=(",", ":"), allow_nan=False
-        ).encode()
-    )
+    digest = sha(json.dumps(files, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
     pointer = obj(pointer_path)
     need(
         set(pointer)
@@ -225,10 +220,7 @@ def relay_intent_path(original, pins):
     intent = json.loads(raw)
     payload = intent["payload"]
     need(
-        all(
-            payload[key] == pointer[key]
-            for key in ("identity_sha256", "operator_ref", "launch_sha256")
-        ),
+        all(payload[key] == pointer[key] for key in ("identity_sha256", "operator_ref", "launch_sha256")),
         "relay successor identity differs",
     )
     prior = obj(original)
@@ -246,9 +238,7 @@ def relay_intent_path(original, pins):
         and payload["relay_directory"] == obj(original)["payload"]["relay_directory"],
         "relay successor target differs",
     )
-    for path in [directory, pointer_path, target, selected] + [
-        directory / name for name in names
-    ]:
+    for path in [directory, pointer_path, target, selected] + [directory / name for name in names]:
         pins[str(path)] = B["fingerprint"](path)
     return selected
 
@@ -315,9 +305,7 @@ def require_recorded_drain(binding, evidence):
         decoded[name] = json.loads(raw)
     intent, plan = decoded["intent.json"], decoded["plan.json"]
     need(
-        intent["identity_sha256"]
-        == plan["identity_sha256"]
-        == binding["identity_sha256"]
+        intent["identity_sha256"] == plan["identity_sha256"] == binding["identity_sha256"]
         and intent["operator_ref"] == binding["operator_ref"]
         and plan["launch_sha256"] == binding["launch_sha256"]
         and files["plan.json"]["sha256"] == binding["plan_sha256"],
@@ -327,16 +315,37 @@ def require_recorded_drain(binding, evidence):
         expected = binding["relay"]
         relay = decoded["relay-bootstrap/intent.json"]
         need(
-            all(
-                relay[key] == expected[key]
-                for key in ("identity_sha256", "operator_ref", "launch_sha256")
-            )
+            all(relay[key] == expected[key] for key in ("identity_sha256", "operator_ref", "launch_sha256"))
             and relay["owner"]["relay_directory"] == expected["relay_directory"],
             "downloaded relay intent differs from recorded invocation",
         )
 
 
-def normal_state(config, config_sha256, out):
+CLEANUP_HOLD_ID = "w986k6vhvhm3sftz2y0a0tambs8ghw4d"
+CLEANUP_HOLD_CREATED = 1792285350.425
+CLEANUP_HOLD_DEADLINE = 1792286550.425
+CLEANUP_ORIGINAL_EPOCH = 1792279176.5459259
+
+
+def normal_clock(epoch, deadline, cleanup_deadline_epoch=None):
+    need(
+        type(epoch) in (int, float) and math.isfinite(epoch) and deadline == epoch + 5400 and 0 < epoch <= time.time(),
+        "normal original clock changed",
+    )
+    if cleanup_deadline_epoch is None:
+        need(time.time() < deadline, "normal original clock expired or changed")
+        return deadline
+    need(
+        epoch == CLEANUP_ORIGINAL_EPOCH
+        and type(cleanup_deadline_epoch) in (int, float)
+        and math.isfinite(cleanup_deadline_epoch)
+        and CLEANUP_HOLD_CREATED <= time.time() < cleanup_deadline_epoch <= CLEANUP_HOLD_DEADLINE,
+        "cleanup-only hold expired or differs",
+    )
+    return cleanup_deadline_epoch
+
+
+def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
     """Current normal owner proof; never a retrospective borrower capture."""
     need(
         not (out / "payload-borrow.intent.json").exists(),
@@ -346,14 +355,11 @@ def normal_state(config, config_sha256, out):
     need(sha(read(config_path)) == config_sha256, "normal config changed")
     cfg = obj(config_path)
     need(
-        cfg.get("schema") == "original600-controller-runner-v1"
-        and cfg.get("allowed") is True,
+        cfg.get("schema") == "original600-controller-runner-v1" and cfg.get("allowed") is True,
         "explicit original normal runner config required",
     )
     need(
-        out.resolve(strict=True) == out
-        and out.is_dir()
-        and not out.stat().st_mode & 0o077,
+        out.resolve(strict=True) == out and out.is_dir() and not out.stat().st_mode & 0o077,
         "private physical normal run required",
     )
     need(
@@ -392,27 +398,21 @@ def normal_state(config, config_sha256, out):
         for name in host_names
     }
     need(
-        host_hashes["cloudbench-original600-runner.py"]
-        == provenance["host_runner_sha256"]
-        and host_hashes["run-cloudbench-controller-gate"]
-        == provenance["host_gate_sha256"],
+        host_hashes["cloudbench-original600-runner.py"] == provenance["host_runner_sha256"]
+        and host_hashes["run-cloudbench-controller-gate"] == provenance["host_gate_sha256"],
         "normal host driver differs",
     )
     pins.update(B["source_identity"](host_root, host_ref, host_hashes))
     caller = obj(out / "caller.json")
     identity = obj(out / "controller.identity.json")
     authority_path = out / "authority.private.json"
-    disposable = runpy.run_path(
-        str(source_root / "scripts/cloudbench-disposable-controller.py")
-    )
-    authority, authority_sha = disposable["authority"](
-        authority_path, source_root, fresh=False
-    )
+    disposable = runpy.run_path(str(source_root / "scripts/cloudbench-disposable-controller.py"))
+    authority, authority_sha = disposable["authority"](authority_path, source_root, fresh=False)
     need(
         caller["source_ref"] == identity["source_ref"] == cfg["source_ref"]
         and caller["epoch"] == cfg["started_at_epoch"]
         and type(caller["epoch"]) in (int, float)
-        and 0 < caller["epoch"] <= time.time() < caller["epoch"] + 5400
+        and 0 < caller["epoch"] <= time.time()
         and caller["task_ref"] == R["TASK_REF"]
         and caller["deadline"] == caller["epoch"] + 5400
         and caller["authority_sha256"] == identity["authority_sha256"] == authority_sha
@@ -421,6 +421,7 @@ def normal_state(config, config_sha256, out):
         and Path(authority["output_directory"]) == out / "export",
         "normal authority/caller differs",
     )
+    normal_clock(caller["epoch"], caller["deadline"], cleanup_deadline_epoch)
     template_path = Path(cfg["authority_template"])
     template = obj(template_path)
     need(
@@ -439,14 +440,11 @@ def normal_state(config, config_sha256, out):
     need(
         owner["birth"] == caller["birth"]
         and script in argv
-        and argv[argv.index(script) + 1 : argv.index(script) + 3]
-        == ["--source-ref", host_ref]
+        and argv[argv.index(script) + 1 : argv.index(script) + 3] == ["--source-ref", host_ref]
         and "--resume-incomplete-admission" in argv,
         "normal live owner source differs",
     )
-    need(
-        not (Path("/proc") / str(caller["gate_pid"])).exists(), "normal gate not reaped"
-    )
+    need(not (Path("/proc") / str(caller["gate_pid"])).exists(), "normal gate not reaped")
     ownership_path = out / "export/disposable-controller.ownership.json"
     ownership = obj(ownership_path)
     workspace_path = out / "export/workspace-volume.ownership.json"
@@ -471,8 +469,7 @@ def normal_state(config, config_sha256, out):
         and workspace["size_gb"] == 256
         and machine["region"] == authority["region"] == "iad"
         and machine["config"]["env"]["GATE_REF"] == cfg["source_ref"]
-        and machine["config"]["guest"]
-        == {"cpu_kind": "performance", "cpus": 8, "memory_mb": 32768}
+        and machine["config"]["guest"] == {"cpu_kind": "performance", "cpus": 8, "memory_mb": 32768}
         and len(machine["config"]["mounts"]) == 1
         and machine["config"]["mounts"][0].get("volume") == workspace["volume_id"]
         and machine["config"]["mounts"][0].get("path") == "/tmp/gate"
@@ -491,20 +488,15 @@ def normal_state(config, config_sha256, out):
         and envelope["epoch"] == caller["epoch"]
         and envelope["tasks"] == tasks
         and envelope["campaign_argv"] == R["campaign_argv"](tasks, caller["epoch"])
-        and envelope["supervisor_sha256"]
-        == cfg["source_files"]["cloudbench-original600-supervisor.py"]
-        and caller["identity_path"]
-        == "/tmp/gate/repo/.context/" + envelope["identity_name"],
+        and envelope["supervisor_sha256"] == cfg["source_files"]["cloudbench-original600-supervisor.py"]
+        and caller["identity_path"] == "/tmp/gate/repo/.context/" + envelope["identity_name"],
         "normal sealed launch semantics differ",
     )
     sealed = [
-        entry
-        for entry in machine["config"]["files"]
-        if entry["guest_path"] == "/tmp/controller-launch-payload.json.gz"
+        entry for entry in machine["config"]["files"] if entry["guest_path"] == "/tmp/controller-launch-payload.json.gz"
     ]
     need(
-        len(sealed) == 1
-        and base64.b64decode(sealed[0]["raw_value"], validate=True) == envelope_raw,
+        len(sealed) == 1 and base64.b64decode(sealed[0]["raw_value"], validate=True) == envelope_raw,
         "normal native launch envelope differs",
     )
     for key, item in cfg.get("remote_env", {}).items():
@@ -542,9 +534,7 @@ def normal_state(config, config_sha256, out):
         descriptor = by_sha[item["transfer_sha256"]]
         path = Path(descriptor["path"])
         need(
-            path.parent == out
-            and path.name
-            == "controller-sidecar-" + descriptor["sha256"] + ".private.gz",
+            path.parent == out and path.name == "controller-sidecar-" + descriptor["sha256"] + ".private.gz",
             "normal sidecar path differs",
         )
         data = read(path)
@@ -563,25 +553,26 @@ def normal_state(config, config_sha256, out):
         need(sha(read(item["path"])) == item["sha256"], "normal authority env changed")
         inputs[item["path"]] = item["sha256"]
     pins.update({path: B["fingerprint"](path) for path in inputs})
-    return F["normalized"](
-        dict(
-            schema="controller-normal-export-identities-v1",
-            config=str(config_path),
-            config_sha256=config_sha256,
-            out=str(out),
-            source_root=str(source_root),
-            source_ref=cfg["source_ref"],
-            caller=caller,
-            owner=owner,
-            authority=authority,
-            machine=machine,
-            machine_id=machine["id"],
-            epoch=caller["epoch"],
-            deadline=caller["deadline"],
-            pins=pins,
-            inputs=inputs,
-        )
+    state = dict(
+        schema="controller-normal-export-identities-v1",
+        config=str(config_path),
+        config_sha256=config_sha256,
+        out=str(out),
+        source_root=str(source_root),
+        source_ref=cfg["source_ref"],
+        caller=caller,
+        owner=owner,
+        authority=authority,
+        machine=machine,
+        machine_id=machine["id"],
+        epoch=caller["epoch"],
+        deadline=caller["deadline"],
+        pins=pins,
+        inputs=inputs,
     )
+    if cleanup_deadline_epoch is not None:
+        state.update(cleanup_deadline_epoch=cleanup_deadline_epoch, cleanup_hold_id=CLEANUP_HOLD_ID, cleanup_only=True)
+    return F["normalized"](state)
 
 
 def validate_normal(state):
@@ -589,11 +580,12 @@ def validate_normal(state):
         state["schema"] == "controller-normal-export-identities-v1",
         "unknown normal export proof",
     )
-    need(
-        state["deadline"] == state["epoch"] + 5400
-        and 0 < state["epoch"] <= time.time() < state["deadline"],
-        "normal original clock expired or changed",
-    )
+    normal_clock(state["epoch"], state["deadline"], state.get("cleanup_deadline_epoch"))
+    if "cleanup_deadline_epoch" in state:
+        need(
+            state.get("cleanup_hold_id") == CLEANUP_HOLD_ID and state.get("cleanup_only") is True,
+            "normal cleanup authority differs",
+        )
     need(
         B["process_identity"](state["caller"]["pid"]) == state["owner"],
         "normal owner changed",
@@ -612,10 +604,11 @@ def validate_normal(state):
     return True
 
 
-def check(config, config_sha256, run_directory, operator_ref):
+def check(config, config_sha256, run_directory, operator_ref, *, cleanup_deadline_epoch=None):
     out = Path(run_directory).absolute()
     borrowed = (out / "payload-finalizer.identities.private.json").exists()
     if borrowed:
+        need(cleanup_deadline_epoch is None, "cleanup-only window requires normal owner")
         state = obj(out / "payload-finalizer.identities.private.json")
         roots = {
             str(Path(path).parent.parent)
@@ -625,13 +618,11 @@ def check(config, config_sha256, run_directory, operator_ref):
         need(len(roots) == 1, "unique captured finalizer source required")
         capture_root = Path(roots.pop())
         need(
-            F["validate"](
-                state, config, config_sha256, out, state["operator_ref"], capture_root
-            ),
+            F["validate"](state, config, config_sha256, out, state["operator_ref"], capture_root),
             "original gate is not positively gone/reaped",
         )
     else:
-        state = normal_state(config, config_sha256, out)
+        state = normal_state(config, config_sha256, out, cleanup_deadline_epoch=cleanup_deadline_epoch)
         capture_root = HERE.parent
         validate_normal(state)
     need(
@@ -681,35 +672,23 @@ def check(config, config_sha256, run_directory, operator_ref):
     if not borrowed:
         need(
             launch["image"] == state["machine"]["config"]["image"]
-            and launch["workspace_ownership_sha256"]
-            == sha(read(out / "export/workspace-volume.ownership.json")),
+            and launch["workspace_ownership_sha256"] == sha(read(out / "export/workspace-volume.ownership.json")),
             "normal launch image/workspace differs",
         )
     log_path = out / "gate.private.log"
     log = read(log_path)
     need(
-        ("GATE_EXPORT_PENDING machine=" + state["machine_id"]).encode() in log
-        and b"GATE_RESULT exit=" in log,
+        ("GATE_EXPORT_PENDING machine=" + state["machine_id"]).encode() in log and b"GATE_RESULT exit=" in log,
         "old gate did not positively return export pending",
     )
-    drivers = [
-        entry
-        for entry in state["machine"]["config"]["files"]
-        if entry["guest_path"] == "/tmp/gate.sh"
-    ]
+    drivers = [entry for entry in state["machine"]["config"]["files"] if entry["guest_path"] == "/tmp/gate.sh"]
     need(len(drivers) == 1, "exact sealed native driver required")
     driver = base64.b64decode(drivers[0]["raw_value"], validate=True)
     need(
-        b"while :; do sleep 60; done" in driver
-        and b"bound_controller_export export" in driver,
+        b"while :; do sleep 60; done" in driver and b"bound_controller_export export" in driver,
         "original idle-after-export driver contract required",
     )
-    pins.update(
-        {
-            str(path): B["fingerprint"](path)
-            for path in (collector_path, launch_path, log_path)
-        }
-    )
+    pins.update({str(path): B["fingerprint"](path) for path in (collector_path, launch_path, log_path)})
     binding = {
         "machine": state["machine_id"],
         "instance": state["machine"]["instance_id"],
@@ -726,10 +705,13 @@ def check(config, config_sha256, run_directory, operator_ref):
     }
     if not borrowed:
         binding["capture_kind"] = "normal-current-owner"
+    if cleanup_deadline_epoch is not None:
+        binding.update(
+            cleanup_deadline_epoch=cleanup_deadline_epoch, cleanup_hold_id=CLEANUP_HOLD_ID, cleanup_only=True
+        )
     binding["orphan_drain"] = local_drain_binding(out, pins)
     need(
-        binding["orphan_drain"] is None
-        or binding["orphan_drain"]["launch_sha256"] == binding["launch_sha256"],
+        binding["orphan_drain"] is None or binding["orphan_drain"]["launch_sha256"] == binding["launch_sha256"],
         "recorded orphan drain belongs to another controller launch",
     )
     return {
@@ -765,9 +747,7 @@ def unchanged(value):
         )
     for path, expected in value["pins"].items():
         need(B["fingerprint"](path) == expected, "export operator/evidence changed")
-    need(
-        sha(read(value["config"])) == value["config_sha256"], "original config changed"
-    )
+    need(sha(read(value["config"])) == value["config_sha256"], "original config changed")
 
 
 def native(fly, value, journal, label):
@@ -785,23 +765,16 @@ def native(fly, value, journal, label):
             },
         )
 
-    current = fly.api(
-        "GET", "/machines/" + state["machine_id"], timeout=20, observer=observer
-    )
+    current = fly.api("GET", "/machines/" + state["machine_id"], timeout=20, observer=observer)
     need(
-        all(
-            current.get(key) == state["machine"].get(key)
-            for key in ("id", "instance_id", "config", "name", "region")
-        )
+        all(current.get(key) == state["machine"].get(key) for key in ("id", "instance_id", "config", "name", "region"))
         and current["state"] == "started",
         "native controller incarnation changed",
     )
 
 
 def remote(fly, value, journal, action, *, allow_pending=False):
-    binding_sha = sha(
-        json.dumps(value["binding"], sort_keys=True, allow_nan=False).encode()
-    )
+    binding_sha = sha(json.dumps(value["binding"], sort_keys=True, allow_nan=False).encode())
     payload = {
         "action": action,
         "machine": value["state"]["machine_id"],
@@ -846,10 +819,7 @@ def remote(fly, value, journal, action, *, allow_pending=False):
             "local_transport_joined": True,
         },
     )
-    pending_exit = rc == 75 or (
-        rc == 1
-        and stderr.rstrip().endswith("Error: ssh shell: Process exited with status 75")
-    )
+    pending_exit = rc == 75 or (rc == 1 and stderr.rstrip().endswith("Error: ssh shell: Process exited with status 75"))
     if allow_pending and action == "check" and pending_exit:
         pending = json.loads(stdout)
         need(
@@ -889,10 +859,7 @@ def verify_stage(value, stage):
         read(value["collector_path"]) == raw,
         "collector changed during verification setup",
     )
-    expected = {
-        name: file_sha(stage / name)
-        for name in ("launch.json", "manifest.json", "originals.tar.gz")
-    }
+    expected = {name: file_sha(stage / name) for name in ("launch.json", "manifest.json", "originals.tar.gz")}
     namespace["verify"](
         SimpleNamespace(
             archive=stage / "originals.tar.gz",
@@ -934,9 +901,7 @@ def preserve_drain(journal, evidence):
     root = journal / "registered-orphan-drain"
     root.mkdir(mode=0o700)
     total = 0
-    for relative in sorted(
-        evidence["directories"], key=lambda name: (len(Path(name).parts), name)
-    ):
+    for relative in sorted(evidence["directories"], key=lambda name: (len(Path(name).parts), name)):
         path = Path(relative)
         need(
             not path.is_absolute() and path.parts and ".." not in path.parts,
@@ -952,9 +917,7 @@ def preserve_drain(journal, evidence):
         raw = base64.b64decode(item["body_b64"], validate=True)
         total += len(raw)
         need(
-            total <= 16777216
-            and len(raw) == item["bytes"]
-            and sha(raw) == item["sha256"],
+            total <= 16777216 and len(raw) == item["bytes"] and sha(raw) == item["sha256"],
             "drain evidence bytes differ",
         )
         target = root / path
@@ -962,9 +925,7 @@ def preserve_drain(journal, evidence):
             target.parent.resolve(strict=True).is_relative_to(root),
             "drain parent alias",
         )
-        fd = os.open(
-            target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-        )
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as stream:
             stream.write(raw)
             stream.flush()
@@ -994,8 +955,7 @@ class ExportCancelled(BaseException):
 def owned_operation(operation, value, fly):
     cancelled = []
     handlers = {
-        sig: signal.signal(sig, lambda sig, _: cancelled.append(sig))
-        for sig in (signal.SIGINT, signal.SIGTERM)
+        sig: signal.signal(sig, lambda sig, _: cancelled.append(sig)) for sig in (signal.SIGINT, signal.SIGTERM)
     }
     try:
         return operation(value, fly, cancelled)
@@ -1036,9 +996,9 @@ def _observe(value, fly, cancelled):
             raise ExportCancelled("cancelled after read-only transport joined")
 
     active()
-    fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))[
-        "Fly"
-    ](R["APP"], F["selected_token"](value["state"]))
+    fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))["Fly"](
+        R["APP"], F["selected_token"](value["state"])
+    )
     active()
     native(fly, value, journal, "before")
     active()
@@ -1047,9 +1007,7 @@ def _observe(value, fly, cancelled):
     unchanged(value)
     ready = not result["non_hub_writers"]
     if ready:
-        require_recorded_drain(
-            value["binding"].get("orphan_drain"), result["drain_evidence"]
-        )
+        require_recorded_drain(value["binding"].get("orphan_drain"), result["drain_evidence"])
     receipt = {
         "status": "EXPORT_READINESS_READY" if ready else "EXPORT_READINESS_PENDING",
         "journal": str(journal),
@@ -1091,32 +1049,26 @@ def _execute(value, fly, cancelled):
     if value["state"].get("schema") == "controller-normal-export-identities-v1":
         save(journal / "normal-owner-proof.private.json", value["state"])
     save(journal / "intent.json", value["binding"])
-    fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))[
-        "Fly"
-    ](R["APP"], F["selected_token"](value["state"]))
+    fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))["Fly"](
+        R["APP"], F["selected_token"](value["state"])
+    )
     active()
     native(fly, value, journal, "before")
     active()
     checked = remote(fly, value, journal, "check")
-    require_recorded_drain(
-        value["binding"].get("orphan_drain"), checked["drain_evidence"]
-    )
+    require_recorded_drain(value["binding"].get("orphan_drain"), checked["drain_evidence"])
     active()
     unchanged(value)
     native(fly, value, journal, "pre-export")
     active()
     exported = remote(fly, value, journal, "export")
-    require_recorded_drain(
-        value["binding"].get("orphan_drain"), exported["drain_evidence"]
-    )
+    require_recorded_drain(value["binding"].get("orphan_drain"), exported["drain_evidence"])
     preserve_drain(journal, exported["drain_evidence"])
     active()
     remote_stage = exported["remote_stage"]
     expected_stage = (
         "/tmp/gate/controller-host-custody/export-resume-"
-        + sha(json.dumps(value["binding"], sort_keys=True, allow_nan=False).encode())[
-            :24
-        ]
+        + sha(json.dumps(value["binding"], sort_keys=True, allow_nan=False).encode())[:24]
     )
     need(
         remote_stage == expected_stage and exported["canonical_export_exit"] == 0,
@@ -1135,11 +1087,7 @@ def _execute(value, fly, cancelled):
             R["APP"],
             "--machine",
             value["state"]["machine_id"],
-            (
-                "/tmp/gate/controller-host-custody/launch.json"
-                if name == "launch.json"
-                else remote_stage + "/" + name
-            ),
+            ("/tmp/gate/controller-host-custody/launch.json" if name == "launch.json" else remote_stage + "/" + name),
             str(stage / name),
         )
         save(
@@ -1169,9 +1117,7 @@ def _execute(value, fly, cancelled):
             )
         else:
             os.link(stage / name, target)
-            (
-                stage / name
-            ).unlink()  # transfer ownership; canonical file remains single-linked
+            (stage / name).unlink()  # transfer ownership; canonical file remains single-linked
             fd = os.open(export, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(fd)
@@ -1181,10 +1127,7 @@ def _execute(value, fly, cancelled):
     ready = [
         sys.executable,
         "-S",
-        str(
-            Path(value["state"]["source_root"])
-            / "scripts/cloudbench-disposable-controller.py"
-        ),
+        str(Path(value["state"]["source_root"]) / "scripts/cloudbench-disposable-controller.py"),
         "export-ready",
         "--authority",
         str(out / "authority.private.json"),
@@ -1202,9 +1145,7 @@ def _execute(value, fly, cancelled):
         {"argv": ready, "all_remote_helpers_joined": True, "hashes": hashes},
     )
     active()
-    result = subprocess.run(
-        ready, cwd="/", capture_output=True, timeout=180, check=False
-    )
+    result = subprocess.run(ready, cwd="/", capture_output=True, timeout=180, check=False)
     save(
         journal / "export-ready.response.json",
         {
@@ -1239,6 +1180,7 @@ def main(argv=None):
     parser.add_argument("--config-sha256", required=True)
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument("--operator-ref", required=True)
+    parser.add_argument("--cleanup-deadline-epoch", type=float)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--run", action="store_true")
@@ -1249,7 +1191,11 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     value = check(
-        args.config, args.config_sha256, args.run_directory, args.operator_ref
+        args.config,
+        args.config_sha256,
+        args.run_directory,
+        args.operator_ref,
+        **({"cleanup_deadline_epoch": args.cleanup_deadline_epoch} if args.cleanup_deadline_epoch is not None else {}),
     )
     if args.check:
         print(
@@ -1277,9 +1223,7 @@ def main(argv=None):
             "private exclusive export lock required",
         )
         # A readiness reader cannot overlap marker publication by another CLI.
-        fcntl.flock(
-            lock, (fcntl.LOCK_SH if args.observe else fcntl.LOCK_EX) | fcntl.LOCK_NB
-        )
+        fcntl.flock(lock, (fcntl.LOCK_SH if args.observe else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         if args.observe:
             result = observe(value)
             print(json.dumps(result))

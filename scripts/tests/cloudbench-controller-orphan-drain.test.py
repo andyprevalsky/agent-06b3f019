@@ -33,18 +33,13 @@ class Drain(unittest.TestCase):
         for path in (self.repo / "scripts", self.common, self.custody):
             path.mkdir(parents=True, exist_ok=True)
         self.script = self.repo / "scripts/run-bench-fleet"
-        self.script.write_text(
-            "trap 'exit 0' TERM\nwhile :; do read -r -t .1 ignored || true; done\n"
-        )
+        self.script.write_text("trap 'exit 0' TERM\nwhile :; do read -r -t .1 ignored || true; done\n")
         self.token = "a" * 32
         self.registry = self.common / "cloudbench-fleet-ownership" / self.token
         self.registry.mkdir(parents=True)
         self.audit = self.common / "cloudbench-fleet-audits" / self.token
         self.audit.mkdir(parents=True)
-        self.seed = (
-            self.repo
-            / ".context/benchmarks/campaigns/exact/startup-cohorts/c001/seed-proof.private.json"
-        )
+        self.seed = self.repo / ".context/benchmarks/campaigns/exact/startup-cohorts/c001/seed-proof.private.json"
         self.seed.parent.mkdir(parents=True)
         self.ref = "b" * 40
         self.taskref = "570830dbf17635e13d16a6f03b4d705f6b6443b1"
@@ -101,13 +96,8 @@ class Drain(unittest.TestCase):
         path = self.repo / ".context/fleet/runs" / self.run / self.task
         path.mkdir(parents=True)
         (path / "archived-successor.json").write_text(json.dumps(successor))
-        jobs = {
-            "r001-j" + str(i).zfill(4): self.child.pid if i == 1 else 100000 + i
-            for i in range(1, 601)
-        }
-        (self.seed.parent / "manifest.json").write_text(
-            json.dumps({"cohort_id": "c001", "jobs": jobs})
-        )
+        jobs = {"r001-j" + str(i).zfill(4): self.child.pid if i == 1 else 100000 + i for i in range(1, 601)}
+        (self.seed.parent / "manifest.json").write_text(json.dumps({"cohort_id": "c001", "jobs": jobs}))
         self.meta = {
             "version": "2",
             "app": "navi-whisper-lux-bench",
@@ -132,9 +122,7 @@ class Drain(unittest.TestCase):
             FLEET_SHA=hashlib.sha256(self.script.read_bytes()).hexdigest(),
             EXPECTED_FLEET_SHA=hashlib.sha256(self.script.read_bytes()).hexdigest(),
         )
-        self.pending = {
-            "writers": [{"pid": self.child.pid, "birth": self.process["birth"]}]
-        }
+        self.pending = {"writers": [{"pid": self.child.pid, "birth": self.process["birth"]}]}
         self.ns["prerequisites"] = lambda value: (
             self.repo,
             self.common,
@@ -149,9 +137,7 @@ class Drain(unittest.TestCase):
         }
 
     def write_meta(self):
-        (self.registry / "meta").write_text(
-            "".join(k + "=" + v + "\n" for k, v in self.meta.items())
-        )
+        (self.registry / "meta").write_text("".join(k + "=" + v + "\n" for k, v in self.meta.items()))
 
     def tearDown(self):
         if self.child.poll() is None:
@@ -188,9 +174,7 @@ class Drain(unittest.TestCase):
                 plan_sha256=planned["plan_sha256"],
             )
         )
-        self.assertEqual(
-            repeat["results"][0]["state"], "INTENT_EXISTS_UNKNOWN_NO_REPLAY"
-        )
+        self.assertEqual(repeat["results"][0]["state"], "INTENT_EXISTS_UNKNOWN_NO_REPLAY")
         observed = self.ns["execute"](dict(self.payload, action="observe"))
         self.assertTrue(observed["no_signal"])
         self.assertEqual(len(observed["intents"]), 1)
@@ -204,9 +188,7 @@ class Drain(unittest.TestCase):
         self.assertEqual(planned["targets"], 0)
         self.assertEqual(planned["held"], 1)
         self.assertIsNone(self.child.poll())
-        self.assertEqual(
-            list((self.custody / "registered-orphan-drain").glob("term-*")), []
-        )
+        self.assertEqual(list((self.custody / "registered-orphan-drain").glob("term-*")), [])
 
     def test_identity_change_between_plan_and_effect_denies_signal(self):
         planned = self.ns["execute"](dict(self.payload, action="plan"))
@@ -222,9 +204,7 @@ class Drain(unittest.TestCase):
         )
         self.assertEqual(result["results"][0]["state"], "HELD")
         self.assertIsNone(self.child.poll())
-        self.assertEqual(
-            list((self.custody / "registered-orphan-drain").glob("term-*")), []
-        )
+        self.assertEqual(list((self.custody / "registered-orphan-drain").glob("term-*")), [])
 
     def test_process_uid_must_match_before_pidfd_intent(self):
         with self.assertRaisesRegex(ValueError, "UID"):
@@ -253,12 +233,8 @@ class Drain(unittest.TestCase):
             child.stdout.close()
 
     def test_expired_joined_driver_and_pending_proofs_before_any_intent(self):
-        actual = runpy.run_path(str(self.root / "orphan-guest.py"))[
-            "execute"
-        ].__globals__
-        actual["pwd"] = SimpleNamespace(
-            getpwnam=lambda name: SimpleNamespace(pw_uid=os.geteuid())
-        )
+        actual = runpy.run_path(str(self.root / "orphan-guest.py"))["execute"].__globals__
+        actual["pwd"] = SimpleNamespace(getpwnam=lambda name: SimpleNamespace(pw_uid=os.geteuid()))
         launch = {
             "source_ref": self.ref,
             "machine_id": "84ed412b11d168",
@@ -311,13 +287,9 @@ class Drain(unittest.TestCase):
         os.environ["GATE_REF"] = self.ref
         cwd = Path.cwd()
         try:
-            self.assertEqual(
-                actual["prerequisites"](payload, self.repo, self.custody)[0], self.repo
-            )
+            self.assertEqual(actual["prerequisites"](payload, self.repo, self.custody)[0], self.repo)
             with self.assertRaisesRegex(ValueError, "clock"):
-                actual["prerequisites"](
-                    dict(payload, deadline=time.time() + 60), self.repo, self.custody
-                )
+                actual["prerequisites"](dict(payload, deadline=time.time() + 60), self.repo, self.custody)
             joined_path.unlink()
             with self.assertRaises(FileNotFoundError):
                 actual["prerequisites"](payload, self.repo, self.custody)
@@ -410,12 +382,8 @@ class NormalAgent(unittest.TestCase):
                 uid=self.uid,
             )
 
-        launch = dict(
-            common_git="/tmp/gate/repo/.git", machine_id=self.mid, source_ref=self.ref
-        )
-        evidence(
-            "/tmp/gate/controller-host-custody/launch.json", json.dumps(launch).encode()
-        )
+        launch = dict(common_git="/tmp/gate/repo/.git", machine_id=self.mid, source_ref=self.ref)
+        evidence("/tmp/gate/controller-host-custody/launch.json", json.dumps(launch).encode())
         audit = "/tmp/gate/repo/.git/cloudbench-fleet-audits/" + self.token
         evidence(
             audit + "/meta",
@@ -450,14 +418,10 @@ class NormalAgent(unittest.TestCase):
             epoch=self.epoch,
             deadline=self.epoch + 5400,
             operator_ref="e" * 40,
-            launch_sha256=self.c["files"][
-                "/tmp/gate/controller-host-custody/launch.json"
-            ]["sha256"],
+            launch_sha256=self.c["files"]["/tmp/gate/controller-host-custody/launch.json"]["sha256"],
             identity_sha256="f" * 64,
         )
-        patch = mock.patch.object(
-            self.g["pwd"], "getpwnam", return_value=SimpleNamespace(pw_uid=self.uid)
-        )
+        patch = mock.patch.object(self.g["pwd"], "getpwnam", return_value=SimpleNamespace(pw_uid=self.uid))
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -465,9 +429,7 @@ class NormalAgent(unittest.TestCase):
         endpoint, peer = socket.socketpair()
         self.addCleanup(peer.close)
         with endpoint:
-            sockets, count = self.g["process_socket_fds"](
-                Path("/proc") / str(os.getpid())
-            )
+            sockets, count = self.g["process_socket_fds"](Path("/proc") / str(os.getpid()))
             inode = int(os.readlink("/proc/self/fd/" + str(endpoint.fileno()))[8:-1])
             self.assertIn(inode, {item[0] for item in sockets})
             self.assertGreater(count, 0)
@@ -517,12 +479,8 @@ class NormalAgent(unittest.TestCase):
         joined = dict(
             state="JOINED",
             identity=identity,
-            identity_sha256=hashlib.sha256(
-                (json.dumps(identity, sort_keys=True) + "\n").encode()
-            ).hexdigest(),
-            terminal=dict(
-                identity, parent_joined=True, supervisor_joined=True, parent_pid=112
-            ),
+            identity_sha256=hashlib.sha256((json.dumps(identity, sort_keys=True) + "\n").encode()).hexdigest(),
+            terminal=dict(identity, parent_joined=True, supervisor_joined=True, parent_pid=112),
         )
         probe = out / "supervisor-probe-000001.json"
         probe.write_text(json.dumps(joined))
@@ -533,9 +491,7 @@ class NormalAgent(unittest.TestCase):
             machine_id=self.mid,
             source_ref=self.ref,
             source_root=str(ROOT),
-            caller={
-                "identity_path": "/tmp/gate/repo/.context/original600-supervisor.fixture.json"
-            },
+            caller={"identity_path": "/tmp/gate/repo/.context/original600-supervisor.fixture.json"},
             epoch=self.epoch,
             deadline=self.epoch + 5400,
             machine={
@@ -570,11 +526,7 @@ class NormalAgent(unittest.TestCase):
         real_runpy = M["runpy"].run_path
 
         def load(path, *a, **k):
-            return (
-                export
-                if str(path).endswith("cloudbench-resume-controller-export.py")
-                else real_runpy(path, *a, **k)
-            )
+            return export if str(path).endswith("cloudbench-resume-controller-export.py") else real_runpy(path, *a, **k)
 
         args = SimpleNamespace(
             normal_agent=True,
@@ -598,9 +550,7 @@ class NormalAgent(unittest.TestCase):
                     result = state["machine"]
                 else:
                     cmd = shlex.split(body["cmd"])
-                    source, payload = json.loads(
-                        gzip.decompress(base64.b64decode(cmd[-1]))
-                    )
+                    source, payload = json.loads(gzip.decompress(base64.b64decode(cmd[-1])))
                     remote_file = self.root / "real-remote-top-level.py"
                     remote_file.write_text(E["REMOTE"])
                     diagnostic = io.StringIO()
@@ -620,9 +570,7 @@ class NormalAgent(unittest.TestCase):
         with (
             mock.patch.object(M["runpy"], "run_path", side_effect=load),
             mock.patch.dict(M["B"], source_identity=lambda *_a: {}),
-            mock.patch.object(
-                M["subprocess"], "check_output", return_value=b"bound-fleet"
-            ),
+            mock.patch.object(M["subprocess"], "check_output", return_value=b"bound-fleet"),
             mock.patch.dict(M["F"], api_for=lambda _s: API()),
             mock.patch.object(self.g["os"], "chdir", lambda _p: None),
             mock.patch.dict(
@@ -635,9 +583,7 @@ class NormalAgent(unittest.TestCase):
             ),
             mock.patch.object(self.g["os"], "pidfd_open", return_value=123),
             mock.patch.object(self.g["os"], "close", lambda _fd: None),
-            mock.patch.object(
-                self.g["select"], "select", side_effect=[([], [], []), ([123], [], [])]
-            ),
+            mock.patch.object(self.g["select"], "select", side_effect=[([], [], []), ([123], [], [])]),
             mock.patch.object(
                 self.g["signal"],
                 "pidfd_send_signal",
@@ -649,9 +595,7 @@ class NormalAgent(unittest.TestCase):
             self.assertEqual(result["status"], "REGISTERED_AGENT_TERM_REQUESTED")
             self.assertEqual(len(checks), 1)
             self.assertEqual(sent, [True])
-            payload = json.loads(
-                (out / "registered-orphan-drain/intent.json").read_bytes()
-            )["payload"]
+            payload = json.loads((out / "registered-orphan-drain/intent.json").read_bytes())["payload"]
             (custody / "registered-orphan-drain" / "result-321.json").unlink()
             replay = execute(
                 dict(
@@ -683,29 +627,21 @@ class NormalAgent(unittest.TestCase):
             exit_code=0,
             exit_signal=0,
             stderr="EXPORT_PHASE REMOTE_ENTERED 123\n",
-            stdout=json.dumps(
-                dict(status="PLANNED", targets=1, held=0, plan_sha256="a" * 64)
-            ),
+            stdout=json.dumps(dict(status="PLANNED", targets=1, held=0, plan_sha256="a" * 64)),
         )
-        self.assertEqual(
-            M["successful_agent_response"](response, payload, "plan")["targets"], 1
-        )
+        self.assertEqual(M["successful_agent_response"](response, payload, "plan")["targets"], 1)
         for text in (
             "foreign\n",
             "EXPORT_PHASE REMOTE_ENTERED 123\nextra\n",
             "EXPORT_PHASE REMOTE_ENTERED 123\nEXPORT_PHASE REMOTE_ENTERED 124\n",
         ):
             with self.assertRaises(ValueError):
-                M["successful_agent_response"](
-                    dict(response, stderr=text), payload, "plan"
-                )
+                M["successful_agent_response"](dict(response, stderr=text), payload, "plan")
         with self.assertRaises(ValueError):
             M["successful_agent_response"](
                 dict(
                     response,
-                    stdout=json.dumps(
-                        dict(status="PLANNED", targets=2, held=0, plan_sha256="a" * 64)
-                    ),
+                    stdout=json.dumps(dict(status="PLANNED", targets=2, held=0, plan_sha256="a" * 64)),
                 ),
                 payload,
                 "plan",
@@ -730,6 +666,9 @@ class NormalAgent(unittest.TestCase):
                 "name": "fixture",
                 "region": "iad",
             },
+            cleanup_deadline_epoch=1792286550.425,
+            cleanup_hold_id="w986k6vhvhm3sftz2y0a0tambs8ghw4d",
+            cleanup_only=True,
             _drain={},
             _saved_plan={
                 "payload": payload,
@@ -745,18 +684,16 @@ class NormalAgent(unittest.TestCase):
                 if method == "GET":
                     result = state["machine"]
                 else:
-                    _, value = json.loads(
-                        gzip.decompress(base64.b64decode(shlex.split(body["cmd"])[-1]))
-                    )
+                    _, value = json.loads(gzip.decompress(base64.b64decode(shlex.split(body["cmd"])[-1])))
                     actions.append(value["action"])
                     self.assertEqual(value["operator_ref"], "1" * 40)
+                    self.assertEqual(value["cleanup_deadline_epoch"], state["cleanup_deadline_epoch"])
+                    self.assertEqual(value["execution_operator_ref"], args.operator_ref)
                     result = dict(
                         exit_code=0,
                         exit_signal=0,
                         stderr="EXPORT_PHASE REMOTE_ENTERED 123\n",
-                        stdout=json.dumps(
-                            dict(status="BATCH_FINISHED", results=[{"pid": 321}])
-                        ),
+                        stdout=json.dumps(dict(status="BATCH_FINISHED", results=[{"pid": 321}])),
                     )
                 raw = json.dumps(result).encode()
                 if observer:
@@ -769,6 +706,9 @@ class NormalAgent(unittest.TestCase):
         ):
             M["_run"](args, state)
         self.assertEqual(actions, ["signal"])
+        continuation = json.loads((out / "registered-orphan-drain-plan-continuation/intent.json").read_bytes())
+        self.assertEqual(continuation["payload"], payload)
+        self.assertEqual(continuation["cleanup_deadline_epoch"], state["cleanup_deadline_epoch"])
         self.assertEqual((old / "intent.json").read_bytes(), original)
         adopted = json.loads((old / "result-adopted-plan.json").read_bytes())
         self.assertEqual(adopted["observed_under_operator_ref"], "2" * 40)
@@ -831,17 +771,13 @@ class NormalAgent(unittest.TestCase):
         )
         payload["launch_sha256"] = hashlib.sha256(launch.read_bytes()).hexdigest()
         payload.pop("identity_sha256")
-        payload["identity_sha256"] = hashlib.sha256(
-            json.dumps(payload, sort_keys=True).encode()
-        ).hexdigest()
+        payload["identity_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         intent = {
             "payload": payload,
             "operator": {
                 "role": "normal-agent",
                 "source_hashes": old_hashes,
-                "source_pins": {
-                    str(old_path): M["F"]["normalized"](M["B"]["fingerprint"](old_path))
-                },
+                "source_pins": {str(old_path): M["F"]["normalized"](M["B"]["fingerprint"](old_path))},
             },
         }
 
@@ -861,9 +797,7 @@ class NormalAgent(unittest.TestCase):
             "exit_code": 0,
             "exit_signal": 0,
             "stderr": "EXPORT_PHASE REMOTE_ENTERED 123\n",
-            "stdout": json.dumps(
-                dict(status="PLANNED", targets=1, held=0, plan_sha256="a" * 64)
-            ),
+            "stdout": json.dumps(dict(status="PLANNED", targets=1, held=0, plan_sha256="a" * 64)),
         }
         for i, (request, decoded) in enumerate(
             (
@@ -932,6 +866,29 @@ class NormalAgent(unittest.TestCase):
         old_path.write_bytes(old_source + b"\n# changed old source\n")
         with self.assertRaises(ValueError):
             M["saved_positive_plan"](args, export)
+
+
+class CleanupExecution(unittest.TestCase):
+    def test_guest_cutoff_is_separate_from_saved_plan_identity(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "guest.py"
+            p.write_text(M["GUEST"])
+            guest = runpy.run_path(str(p))
+        clock = guest["agent_cleanup_deadline"]
+        payload = dict(epoch=1792279176.5459259, deadline=1792284576.5459259)
+        self.assertEqual(clock(payload), payload["deadline"])
+        execution = dict(
+            payload, cleanup_deadline_epoch=1792286550.425, cleanup_hold_id="w986k6vhvhm3sftz2y0a0tambs8ghw4d"
+        )
+        with mock.patch.dict(clock.__globals__, time=SimpleNamespace(time=lambda: 1792285351)):
+            self.assertEqual(clock(execution), execution["cleanup_deadline_epoch"])
+            self.assertNotIn("cleanup_deadline_epoch", payload)
+            for delta in [dict(epoch=1), dict(cleanup_deadline_epoch=1792286551), dict(cleanup_hold_id="foreign")]:
+                with self.assertRaises(Exception):
+                    clock(dict(execution, **delta))
+        with mock.patch.dict(clock.__globals__, time=SimpleNamespace(time=lambda: 1792286550.425)):
+            with self.assertRaises(Exception):
+                clock(execution)
 
 
 if __name__ == "__main__":

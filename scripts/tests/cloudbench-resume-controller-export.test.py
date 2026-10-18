@@ -14,6 +14,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,9 +48,7 @@ class ExportResume(unittest.TestCase):
         journal.mkdir()
         result = M["remote"](API(), self.value, journal, "check", allow_pending=True)
         self.assertEqual(result, pending)
-        self.assertEqual(
-            json.loads((journal / "check.response.json").read_bytes())["exit_code"], 1
-        )
+        self.assertEqual(json.loads((journal / "check.response.json").read_bytes())["exit_code"], 1)
         for index, (action, allowed, error, wrong_launch) in enumerate(
             [
                 ("check", False, stderr, False),
@@ -65,9 +64,7 @@ class ExportResume(unittest.TestCase):
                 if wrong_launch:
                     pending["launch_sha256"] = "0" * 64
                 with self.assertRaises(ValueError):
-                    M["remote"](
-                        API(), self.value, directory, action, allow_pending=allowed
-                    )
+                    M["remote"](API(), self.value, directory, action, allow_pending=allowed)
 
     def test_remote_command_is_an_executable_without_an_implicit_shell(self):
         journal = self.out / "remote-command"
@@ -98,12 +95,8 @@ class ExportResume(unittest.TestCase):
     def test_phase_stderr_survives_owned_child_timeout_without_payload(self):
         journal = self.out / "phase-timeout"
         journal.mkdir()
-        capture = runpy.run_path(
-            str(ROOT / "scripts/cloudbench-original-volume-capture.py")
-        )
-        prefix = M["REMOTE"].split(
-            "import ast,base64,copy,hashlib,json,os,subprocess", 1
-        )[0]
+        capture = runpy.run_path(str(ROOT / "scripts/cloudbench-original-volume-capture.py"))
+        prefix = M["REMOTE"].split("import ast,base64,copy,hashlib,json,os,subprocess", 1)[0]
         calls = []
         test = self
 
@@ -113,14 +106,10 @@ class ExportResume(unittest.TestCase):
                 calls.append(argv)
                 command = shlex.split(argv[-1])
                 test.assertEqual(command[:3], ["python3", "-S", "-c"])
-                rc, stdout, stderr = capture["run_bounded"](
-                    command, 0.25, dict(os.environ)
-                )
+                rc, stdout, stderr = capture["run_bounded"](command, 0.25, dict(os.environ))
                 return rc, stdout.decode(), stderr.decode()
 
-        with mock.patch.dict(
-            M["remote"].__globals__, REMOTE=prefix + "time.sleep(10)\n"
-        ):
+        with mock.patch.dict(M["remote"].__globals__, REMOTE=prefix + "time.sleep(10)\n"):
             with self.assertRaises(ValueError):
                 M["remote"](API(), self.value, journal, "check")
         response = json.loads((journal / "check.response.json").read_text())
@@ -221,19 +210,14 @@ class ExportResume(unittest.TestCase):
             launch_sha256=launch,
             relay_directory="/tmp/cb-relay-12345678",
         )
-        relay_path = write(
-            directory / "relay-bootstrap/intent.json", {"payload": relay}
-        )
+        relay_path = write(directory / "relay-bootstrap/intent.json", {"payload": relay})
         pins = {}
         binding = M["local_drain_binding"](self.out, pins)
         self.assertIn(str(relay_path), pins)
         evidence = dict(present=True, files=files)
         with self.assertRaisesRegex(ValueError, "relay intent missing"):
             M["require_recorded_drain"](binding, evidence)
-        actual = {
-            key: relay[key]
-            for key in ("identity_sha256", "operator_ref", "launch_sha256")
-        }
+        actual = {key: relay[key] for key in ("identity_sha256", "operator_ref", "launch_sha256")}
         actual["owner"] = dict(relay_directory=relay["relay_directory"])
         encode("relay-bootstrap/intent.json", actual)
         M["require_recorded_drain"](binding, evidence)
@@ -270,14 +254,8 @@ class ExportResume(unittest.TestCase):
                     original.parent / f"wire-{index:06d}.{suffix}.json",
                     {"fixture": suffix},
                 )
-        files = {
-            path.name: M["sha"](path.read_bytes()) for path in original.parent.iterdir()
-        }
-        digest = M["sha"](
-            json.dumps(
-                files, sort_keys=True, separators=(",", ":"), allow_nan=False
-            ).encode()
-        )
+        files = {path.name: M["sha"](path.read_bytes()) for path in original.parent.iterdir()}
+        digest = M["sha"](json.dumps(files, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
         target = original.parent.parent / ("relay-bootstrap-pre-signal-" + digest)
         payload = dict(old_payload, identity_sha256="d" * 64, operator_ref="e" * 40)
         selected = write(
@@ -299,10 +277,7 @@ class ExportResume(unittest.TestCase):
             prior_journal_sha256=digest,
             new_journal=str(target),
             intent_sha256=M["sha"](selected.read_bytes()),
-            **{
-                key: payload[key]
-                for key in ("identity_sha256", "operator_ref", "launch_sha256")
-            },
+            **{key: payload[key] for key in ("identity_sha256", "operator_ref", "launch_sha256")},
         )
         pointer_path = write(original.parent / "pre-signal-successor.json", pointer)
         self.assertEqual(M["relay_intent_path"](original, pins), selected)
@@ -393,9 +368,7 @@ class ExportResume(unittest.TestCase):
                     collector["controller_active_writers"](repo, [], {710}),
                     [dict(pid=9999, birth="child-birth")],
                 )
-            self.assertEqual(
-                scope["writers"]([], {710}), [dict(pid=9999, birth="child-birth")]
-            )
+            self.assertEqual(scope["writers"]([], {710}), [dict(pid=9999, birth="child-birth")])
             self.assertEqual(len(observations), 2)
             original = scope["writers"]
 
@@ -516,30 +489,21 @@ class ExportResume(unittest.TestCase):
                 },
             ),
         )
-        runner_hash = M["sha"](
-            (ROOT / "scripts/cloudbench-original600-runner.py").read_bytes()
-        )
-        gate_hash = M["sha"](
-            (ROOT / "scripts/run-cloudbench-controller-gate").read_bytes()
-        )
+        runner_hash = M["sha"]((ROOT / "scripts/cloudbench-original600-runner.py").read_bytes())
+        gate_hash = M["sha"]((ROOT / "scripts/run-cloudbench-controller-gate").read_bytes())
         template = write(
             self.root / "authority-template.json",
             {
                 key: value
                 for key, value in authority.items()
-                if key
-                not in {"cleanup_owner_pid", "cleanup_owner_birth", "output_directory"}
+                if key not in {"cleanup_owner_pid", "cleanup_owner_birth", "output_directory"}
             },
         )
         tasks_path = write(
             self.root / "tasks.json",
-            json.loads(
-                (ROOT / "scripts/tests/fixtures/original600-tasks.json").read_bytes()
-            ),
+            json.loads((ROOT / "scripts/tests/fixtures/original600-tasks.json").read_bytes()),
         )
-        supervisor_sha = M["sha"](
-            (ROOT / "scripts/cloudbench-original600-supervisor.py").read_bytes()
-        )
+        supervisor_sha = M["sha"]((ROOT / "scripts/cloudbench-original600-supervisor.py").read_bytes())
         config = write(
             self.root / "normal.config.json",
             dict(
@@ -563,26 +527,20 @@ class ExportResume(unittest.TestCase):
                 ),
             ),
         )
-        caller["identity_path"] = (
-            "/tmp/gate/repo/.context/original600-supervisor.fixture.json"
-        )
+        caller["identity_path"] = "/tmp/gate/repo/.context/original600-supervisor.fixture.json"
         write(self.out / "caller.json", caller)
         envelope = dict(
             source_ref=source,
             epoch=epoch,
             tasks=json.loads(tasks_path.read_bytes()),
-            campaign_argv=M["R"]["campaign_argv"](
-                json.loads(tasks_path.read_bytes()), epoch
-            ),
+            campaign_argv=M["R"]["campaign_argv"](json.loads(tasks_path.read_bytes()), epoch),
             supervisor_sha256=supervisor_sha,
             identity_name="original600-supervisor.fixture.json",
             remote_files=[],
             remote_env={},
         )
         envelope_raw = gzip.compress(json.dumps(envelope).encode(), mtime=0)
-        (self.out / "controller-launch-payload.private.json.gz").write_bytes(
-            envelope_raw
-        )
+        (self.out / "controller-launch-payload.private.json.gz").write_bytes(envelope_raw)
         (self.out / "controller-launch-payload.private.json.gz").chmod(0o600)
         write(self.out / "controller-sidecars.private.json", [])
         machine["config"]["files"].append(
@@ -591,9 +549,7 @@ class ExportResume(unittest.TestCase):
                 "raw_value": base64.b64encode(envelope_raw).decode(),
             }
         )
-        ownership = json.loads(
-            (self.export / "disposable-controller.ownership.json").read_bytes()
-        )
+        ownership = json.loads((self.export / "disposable-controller.ownership.json").read_bytes())
         ownership["machine"] = machine
         write(self.export / "disposable-controller.ownership.json", ownership)
         owner = dict(
@@ -650,9 +606,7 @@ class ExportResume(unittest.TestCase):
             digest = M["sha"](config.read_bytes())
             value = M["check"](config, digest, self.out, "f" * 40)
             self.assertEqual(value["binding"]["capture_kind"], "normal-current-owner")
-            self.assertFalse(
-                (self.out / "payload-finalizer.identities.private.json").exists()
-            )
+            self.assertFalse((self.out / "payload-finalizer.identities.private.json").exists())
             M["unchanged"](value)
             with mock.patch.object(M["time"], "time", return_value=caller["deadline"]):
                 with self.assertRaisesRegex(ValueError, "clock expired"):
@@ -781,11 +735,7 @@ class ExportResume(unittest.TestCase):
                     payload = json.loads(base64.b64decode(argv[-1]))
                     test.assertEqual(payload["record"], test.record)
                     test.assertEqual(argv[:3], ["python3", "-S", "-c"])
-                    test.assertTrue(
-                        argv[3].startswith(
-                            "import sys,time;print('EXPORT_PHASE BOOTSTRAP_ENTERED '"
-                        )
-                    )
+                    test.assertTrue(argv[3].startswith("import sys,time;print('EXPORT_PHASE BOOTSTRAP_ENTERED '"))
                     test.assertIn("import os;os.chdir('/')\n", argv[3])
                     result = {
                         "machine": test.mid,
@@ -805,9 +755,7 @@ class ExportResume(unittest.TestCase):
                                 dict(
                                     result,
                                     status="PENDING_WRITERS",
-                                    non_hub_writers=[
-                                        {"pid": 123, "birth": "exact-writer"}
-                                    ],
+                                    non_hub_writers=[{"pid": 123, "birth": "exact-writer"}],
                                 )
                             ),
                             "",
@@ -859,27 +807,17 @@ class ExportResume(unittest.TestCase):
             self.assertEqual(argv[3], "export-ready")
             self.assertEqual(kwargs["cwd"], "/")
             self.assertEqual(
-                (
-                    self.out
-                    / "controller-export-recovery/registered-orphan-drain/per-pid/intent.json"
-                ).read_bytes(),
+                (self.out / "controller-export-recovery/registered-orphan-drain/per-pid/intent.json").read_bytes(),
                 b"actual immutable TERM intent fixture\n",
             )
-            self.assertEqual(
-                len([call for call in api.calls if call[:2] == ("ssh", "sftp")]), 3
-            )
-            self.assertTrue(
-                all((self.export / name).stat().st_nlink == 1 for name in self.payloads)
-            )
+            self.assertEqual(len([call for call in api.calls if call[:2] == ("ssh", "sftp")]), 3)
+            self.assertTrue(all((self.export / name).stat().st_nlink == 1 for name in self.payloads))
             write(
                 self.export / "disposable-export.verified.json",
                 {
                     "authority_sha256": M["sha"](self.auth.read_bytes()),
                     "machine_id": self.mid,
-                    "files": {
-                        name: M["file_sha"](self.export / name)
-                        for name in (*self.payloads, "caller.json")
-                    },
+                    "files": {name: M["file_sha"](self.export / name) for name in (*self.payloads, "caller.json")},
                 },
             )
             api.marker = True
@@ -893,10 +831,7 @@ class ExportResume(unittest.TestCase):
             self.assertEqual(result["status"], "EXPORT_VERIFIED")
             self.assertTrue(api.marker)
             self.assertEqual(
-                (
-                    self.out
-                    / "controller-export-recovery/registered-orphan-drain/per-pid/intent.json"
-                ).read_bytes(),
+                (self.out / "controller-export-recovery/registered-orphan-drain/per-pid/intent.json").read_bytes(),
                 b"actual immutable TERM intent fixture\n",
             )
             count = len(api.calls)
@@ -904,9 +839,7 @@ class ExportResume(unittest.TestCase):
                 M["execute"](self.value, api)
             self.assertEqual(len(api.calls), count)
         self.assertTrue((self.export / "originals.tar.gz").exists())
-        self.assertFalse(
-            (self.out / "controller-export-recovery/download/originals.tar.gz").exists()
-        )
+        self.assertFalse((self.out / "controller-export-recovery/download/originals.tar.gz").exists())
 
     def test_wrong_incarnation_and_unknown_download_never_publish_or_repeat(self):
         api = self.api(wrong=True)
@@ -941,9 +874,7 @@ class ExportResume(unittest.TestCase):
             side_effect=AssertionError("no signal in read-only validator"),
         ):
             self.assertEqual(
-                remote["readonly_hubs"](
-                    scope, self.collector.read_bytes(), repo, self.root
-                ),
+                remote["readonly_hubs"](scope, self.collector.read_bytes(), repo, self.root),
                 [],
             )
         hub = repo / ".context/fleet/runs/_hub"
@@ -967,15 +898,11 @@ class ExportResume(unittest.TestCase):
         owner.chmod(0o400)
         real_close = os.close
         with (
-            mock.patch.object(
-                signal, "pidfd_send_signal", side_effect=AssertionError("no signal")
-            ),
+            mock.patch.object(signal, "pidfd_send_signal", side_effect=AssertionError("no signal")),
             mock.patch.object(os, "close", wraps=real_close) as closed,
         ):
             with self.assertRaisesRegex(ValueError, "command changed"):
-                remote["readonly_hubs"](
-                    scope, self.collector.read_bytes(), repo, self.root
-                )
+                remote["readonly_hubs"](scope, self.collector.read_bytes(), repo, self.root)
             self.assertEqual(closed.call_count, 1)
 
     def test_cancellation_during_owned_flyctl_joins_before_refusing_next_effect(self):
@@ -999,14 +926,10 @@ class ExportResume(unittest.TestCase):
         self.assertEqual(joined, [True])
         self.assertEqual(len(api.calls), 2)  # one GET and the joined readonly SSH
         self.assertEqual(signal.getsignal(signal.SIGTERM), old_handler)
-        receipt = json.loads(
-            (self.out / "controller-export-recovery/cancelled.json").read_bytes()
-        )
+        receipt = json.loads((self.out / "controller-export-recovery/cancelled.json").read_bytes())
         self.assertTrue(receipt["owned_transport_joined"])
         self.assertFalse((self.export / "disposable-export.verified.json").exists())
-        self.assertTrue(
-            (self.out / "controller-export-recovery/check.response.json").exists()
-        )
+        self.assertTrue((self.out / "controller-export-recovery/check.response.json").exists())
 
     def test_readonly_observation_retains_pending_without_spending_export_intent(self):
         api = self.api(writers=True)
@@ -1049,6 +972,24 @@ class ExportResume(unittest.TestCase):
                 0,
             )
         self.assertEqual(json.loads(output.getvalue())["provider_calls"], 0)
+
+
+class CleanupClock(unittest.TestCase):
+    def test_separate_cleanup_window_preserves_expired_original_clock(self):
+        clock = M["normal_clock"]
+        epoch = M["CLEANUP_ORIGINAL_EPOCH"]
+        old = epoch + 5400
+        cutoff = M["CLEANUP_HOLD_DEADLINE"]
+        with mock.patch.dict(clock.__globals__, time=SimpleNamespace(time=lambda: M["CLEANUP_HOLD_CREATED"] + 1)):
+            with self.assertRaises(Exception):
+                clock(epoch, old)
+            self.assertEqual(clock(epoch, old, cutoff), cutoff)
+            for e, d, c in [(epoch + 1, old + 1, cutoff), (epoch, old, cutoff + 1), (epoch, old, float("nan"))]:
+                with self.assertRaises(Exception):
+                    clock(e, d, c)
+        with mock.patch.dict(clock.__globals__, time=SimpleNamespace(time=lambda: cutoff)):
+            with self.assertRaises(Exception):
+                clock(epoch, old, cutoff)
 
 
 if __name__ == "__main__":

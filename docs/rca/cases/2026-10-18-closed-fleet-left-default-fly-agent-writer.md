@@ -46,11 +46,15 @@ Extend the existing orphan retirement command with a distinct normal-controller 
 
 Keep generic writer checks, archive verification and the original external caller's cleanup ownership. Preserve the actual retirement journal through the existing export evidence path. This mechanism must never signal PID1, a process group, an unregistered agent or an agent with active clients.
 
+After the original experiment deadline expired, the user requested ten experiments and delegated the cutoff choice after the bounded alternatives were explained. Finishing the existing resource cleanup remains necessary before that batch. A separate, explicit cleanup hold ends at `2026-10-18T01:22:30.425Z`. The retirement and export commands accept that cleanup-only cutoff for this exact original epoch and hold. They keep the original task deadline, failed result, old plan identity and old operator unchanged. The new execution context records the cleanup authority separately and checks it again immediately before TERM. It grants no task, launch or retry authority.
+
 ## Verification and limits
 
 Nine owning controls pass, including the normal command through recorded native request handling, one signal, duplicate-intent observation, existing export custody verification, real self-descriptor enumeration, and rejected incomplete captures, clients, queued connections and changed ownership. Actual retirement, export and resource release remain pending until their original receipts are obtained. Original77 remains a failed run with all attempts and clocks preserved.
 
 The scoped continuation adds three controls, bringing the owning file to twelve passing tests. They cover the exact known diagnostic, a signal-only continuation preserving the original plan identity, and the saved raw plan parser with changed-source, raw-hash and foreign-file denials. A separate reproduction executes the actual export checker's module load: the old empty-stderr predicate rejects its phase line, while the new strict handler accepts the same successful plan response. The continuation keeps the original deadline; passing these controls does not authorize execution after it expires.
+
+The separately authorized cleanup window adds one retirement and one export control: thirteen retirement and sixteen export controls pass. They cover an expired original task clock with the valid distinct cleanup window, unchanged original identity and deadline, and refusal of a foreign epoch, hold or cutoff. Root repeats the affected owning files successfully. Actual old-plan transport frames remain below the existing 16,384-byte limit, including the cleanup execution context. Actual retirement, export and release still require the executor's receipts.
 
 ## Human feedback
 
