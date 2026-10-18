@@ -90,7 +90,10 @@ async function main(): Promise<void> {
         providerProfileSource: 'session_bound',
         providerProfilePersist: true,
       });
-      assert.deepStrictEqual((args as { data: unknown }).data, { status: 'PAUSED', closedAt: null });
+      assert.deepStrictEqual((args as { data: unknown }).data, {
+        status: 'PAUSED',
+        closedAt: null,
+      });
       assert.strictEqual(released, false, 'provider release must follow durable resumable custody');
       return { count: 1 };
     }) as typeof originalUpdate;
@@ -193,10 +196,7 @@ async function main(): Promise<void> {
               ? /changed before Steel profile handoff/
               : /offline terminal sentinel/
         );
-        assert.strictEqual(
-          releases,
-          mode === 'release-failure' ? 1 : 0
-        );
+        assert.strictEqual(releases, mode === 'release-failure' ? 1 : 0);
         assert.strictEqual(
           creates,
           mode === 'release-failure' || mode === 'changed-source' ? 0 : 1
