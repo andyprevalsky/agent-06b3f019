@@ -2412,3 +2412,31 @@ done
   : > "$dir/main/agents/.env.benchmark-temporal"
   [ "$(cloudbench_guest_temporal_override_file "$dir/linked/agents/.env")" = "$(cd "$dir/main" && pwd -P)/agents/.env.benchmark-temporal" ]
 ) || fail "a linked Git worktree must resolve the main checkout's guest Temporal override"
+# A launcher-bound guest namespace (original600 operator → controller fleet →
+# boot env) must fail a guest whose decoded bench-app secrets still carry the
+# controller/production namespace, before any Temporal worker starts. No bound
+# namespace keeps the historical behavior; guest/fleet wiring stays explicit.
+(
+  dir="$TMP_ROOT/guest-temporal-require"
+  mkdir -p "$dir"
+  printf 'TEMPORAL_NAMESPACE=rose-labs-bench.acct\nTEMPORAL_API_KEY=bench-secret\n' > "$dir/agents.env"
+  printf 'DATABASE_URL=x\nTEMPORAL_NAMESPACE="rose-labs-bench.acct"\n' > "$dir/backend.env"
+  printf 'TEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret\n' > "$dir/stale-agents.env"
+  : > "$dir/unset.env"
+  cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/backend.env" rose-labs-bench.acct
+  cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" ""
+  ! cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" rose-labs-bench.acct 2> "$dir/stale.err"
+  grep -q 'TEMPORAL_NAMESPACE=prod-ns.acct differs' "$dir/stale.err"
+  ! grep -q -e prod-secret -e bench-secret "$dir/stale.err"
+  ! cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/unset.env" rose-labs-bench.acct 2>/dev/null
+  python3 - "$ROOT_DIR/scripts/cloudbench-run.sh" "$ROOT_DIR/scripts/run-bench-cloud" <<'PYWIRE'
+import sys
+from pathlib import Path
+run, cloud = (Path(path).read_text() for path in sys.argv[1:])
+check = 'cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"'
+verify = 'cloudbench_verify_env_file "$REPO_DIR/back-end/.env"'
+assert run.count(check) == 1 and run.index(verify) < run.index(check) < run.index('step stack_launch'), 'guest check after digest verify, before stack'
+assert '--env "CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}"' in cloud
+assert 'echo "export CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=$(printf \'%q\' "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}")"' in cloud
+PYWIRE
+) || fail "a launcher-bound guest Temporal namespace must reject stale bench-app secrets"

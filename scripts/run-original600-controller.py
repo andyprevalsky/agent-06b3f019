@@ -129,6 +129,47 @@ def github_token(root, backend_env, agents_env):
     return token
 
 
+def guest_temporal_env(root, agents_env, backend_env):
+    """The guest env copies this launch expects, rendered by the canonical helper.
+
+    Guests never receive the controller's env files: every primary and worker
+    decodes the shared bench-app AGENTS_ENV_B64/BACKEND_ENV_B64 secrets, staged
+    only by run-bench-cloud --refresh-secrets/--setup/image-activate, which apply
+    the private guest Temporal override (.env.benchmark-temporal beside the
+    selected agents env). Render the same copies here, from the same selected
+    inputs and override lookup, to bind and report the guest namespace; the
+    selected files themselves are only read. Returns digests and the namespace,
+    never a credential. Without an override the copies are the input bytes.
+    """
+    import shutil
+    import tempfile
+    scratch = Path(tempfile.mkdtemp(prefix='original600-guest-env.'))
+    try:
+        result = subprocess.run(['bash', '-c',
+            'source "$1"; override="$(cloudbench_guest_temporal_override_file "$2")" || exit 1; '
+            '[ -n "$override" ] || exit 0; '
+            'cloudbench_write_guest_temporal_env_files "$2" "$3" "$override" "$4"',
+            'guest-temporal-env', str(root/'scripts/lib/cloudbench-env.sh'), str(agents_env),
+            str(backend_env), str(scratch)], cwd=root, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            raise ValueError('guest Temporal override unusable: '
+                             + result.stderr.decode(errors='replace').strip()[-300:])
+        namespace = result.stdout.decode().strip() or None
+        rendered = {p.name for p in scratch.iterdir()}
+        if namespace is None:
+            if rendered:
+                raise ValueError('guest Temporal override rendered copies without a namespace')
+            sources = dict(agents=Path(agents_env), backend=Path(backend_env))
+        else:
+            if rendered != {'agents.env', 'backend.env'} or not re.fullmatch(r'[A-Za-z0-9._-]+', namespace):
+                raise ValueError('guest Temporal override rendered an unexpected result')
+            sources = dict(agents=scratch/'agents.env', backend=scratch/'backend.env')
+        return dict(temporal_namespace=namespace, override=namespace is not None, delivery='bench-app-secrets',
+                    **{key + '_env_sha256': digest(path.read_bytes()) for key, path in sources.items()})
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def facts_from(raw):
     facts = json.loads(raw)
     if (facts.get('app') != 'navi-whisper-lux-bench'
@@ -687,7 +728,7 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
 
 
 def prepare(args, root, pins, runner, directory, cap, started_at=None, host_operator_provenance=None,
-            shard=None, runtime_env=None, sibling_controller_slots=0, scheduled_total=600):
+            shard=None, runtime_env=None, sibling_controller_slots=0, scheduled_total=600, guest_env=None):
     policy = getattr(args, 'infra_early_stop', 'enabled')
     if policy not in ('enabled', 'disabled'):
         raise ValueError('invalid infrastructure early-stop policy')
@@ -713,6 +754,12 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
         raise ValueError('explicit protected resource cohort required')
     for key, path in [('agents', args.agents_env), ('backend', args.backend_env)]:
         auth['env_files'][key] = dict(path=str(path), sha256=digest(read(path)))
+    # The controller keeps the selected env bytes above; guests get the bench
+    # app secrets. Bind the guest namespace those secrets must carry.
+    if guest_env is None:
+        guest_env = guest_temporal_env(root, args.agents_env, args.backend_env)
+    guest_namespace_env = ({'CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE': guest_env['temporal_namespace']}
+                           if guest_env['temporal_namespace'] else {})
     save(directory/'authority-template.private.json', auth)
     files = []
     for path, relative in [(args.snapshot_inventory, '.git/cloudbench-warm-snapshot-inventory.cloudbench-warm-t10-ord-85a7e2c.json'),
@@ -741,21 +788,25 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
     config = dict(schema='original600-controller-runner-v1', allowed=True, source_root=str(root),
                   source_ref=args.source_ref, source_files=pins, tasks_path=str(args.tasks),
                   started_at_epoch=stamp, authority_template=str(directory/'authority-template.private.json'),
-                  remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env, **(runtime_env or {})),
+                  remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env, **(runtime_env or {}),
+                                  **guest_namespace_env),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
                                 CLOUDBENCH_GATE_TIMEOUT_S='7200', PYTHONDONTWRITEBYTECODE='1'))
     if host_operator_provenance is not None:
         config['host_operator_provenance']=host_operator_provenance
+    if guest_env['override']:
+        config['guest_env'] = guest_env
     if policy != 'enabled':
         config['infra_early_stop'] = policy
     if shard is not None:
         config['shard'] = shard
     save(directory/'config.private.json', config)
+    start_guest = dict(guest_temporal_namespace=guest_env['temporal_namespace']) if guest_env['override'] else {}
     save(directory/'attempt-start.safe.json', dict(scope='original200x3REAL' if shard is None else 'original600-shard',
          scheduled_total=scheduled_total if shard is None else len(shard['tasks']) * shard['runs'],
          source_ref=args.source_ref, task_ref=runner['TASK_REF'], started_at_epoch=stamp,
          original_deadline_epoch=stamp+5400, config_sha256=digest(read(directory/'config.private.json')),
-         status='BOUND_NOT_LAUNCHED'))
+         status='BOUND_NOT_LAUNCHED', **start_guest))
     return directory/'config.private.json'
 
 
@@ -851,8 +902,10 @@ def hub_interpreter(args):
     return hub_python
 
 
-def sharded_run(args, root, pins, runner, github, plan):
+def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     """One fresh admission, K shard configs, then the global-barrier coordinator over K runners."""
+    if guest_env is None:  # one rendering binds every shard and retry; refused before provider reads
+        guest_env = guest_temporal_env(root, args.agents_env, args.backend_env)
     coordinator = runpy.run_path(str(root / 'scripts/cloudbench-shard-coordinator.py'))
     os.environ['RUN_BENCH_HUB_PYTHON'] = hub_interpreter(args)
     selected = [task for shard in plan['shards'] for task in shard['tasks']]
@@ -900,7 +953,8 @@ def sharded_run(args, root, pins, runner, github, plan):
         shard = dict(item, tasks_sha256=digest(('\n'.join(item['tasks']) + '\n').encode()), group_run_id=group_id,
                      group_total=copies, group_started_at=started_at)
         config = prepare(args, root, pins, runner, shard_dir, cap, started_at=started_at, shard=shard,
-                         runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies)
+                         runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
+                         guest_env=guest_env)
         shard_objects[item['index']] = shard
         shards.append(dict(index=item['index'], out=shard_dir / 'run', config=str(config),
                            config_sha256=digest(runner['read'](config))))
@@ -944,7 +998,8 @@ def sharded_run(args, root, pins, runner, github, plan):
         runner['save'](attempt_dir / 'capacity-proof.private.json', fresh)
         fresh['proof_path'] = str(attempt_dir / 'capacity-proof.private.json')
         config = prepare(args, root, pins, runner, attempt_dir, fresh, started_at=started_at, shard=bound,
-                         runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies)
+                         runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
+                         guest_env=guest_env)
         replacement = dict(index=index, out=attempt_dir / 'run', config=str(config),
                            config_sha256=digest(runner['read'](config)))
         print(json.dumps(dict(status='SHARD_RETRY', shard=index, directory=str(attempt_dir))), flush=True)
@@ -1860,6 +1915,7 @@ def main():
     facts_from(runner['read'](args.facts))
     token_from_agents(runner['read'](args.agents_env))
     github = github_token(root, args.backend_env, args.agents_env)
+    guest_env = guest_temporal_env(root, args.agents_env, args.backend_env)  # unusable override refuses before provider reads
     if args.extra_destroying_count < 1:
         raise ValueError('conservative unlisted/destroying allowance must be at least one')
     subprocess.run([sys.executable, '-I', '-B', str(root/'scripts/cloudbench-operator-preflight.py'), '--require-flyctl'], check=True)
@@ -1886,7 +1942,8 @@ def main():
                                    facts_from(runner['read'](args.facts))['protected_machines'], time.time() + 5400)
     if not args.run:
         check = dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=warm.pop('provider_calls'),
-                     warm_snapshot=warm, infra_early_stop=args.infra_early_stop)
+                     warm_snapshot=warm, infra_early_stop=args.infra_early_stop,
+                     guest_temporal_namespace=guest_env['temporal_namespace'], guest_env_delivery=guest_env['delivery'])
         plan = None if (args.archive_run or args.resume_admission) else shard_selection(args, runner)
         if plan is not None:
             check.update(controllers=plan['controllers'], copies=plan['copies'],
@@ -1903,7 +1960,7 @@ def main():
         return prepare_admission_request(args, root, runner)
     plan = None if (args.archive_run or args.resume_admission) else shard_selection(args, runner)
     if plan is not None:
-        return sharded_run(args, root, pins, runner, github, plan)
+        return sharded_run(args, root, pins, runner, github, plan, guest_env=guest_env)
     if args.task_count is not None or args.repetitions != 3 or args.controllers not in ('auto', '1'):
         raise ValueError('archived reuse and continuations run the original single-controller 200x3 shape only')
     parent = args.state_dir.absolute()
@@ -1934,7 +1991,7 @@ def main():
             runner['save'](launch_directory/'archived-reuse-request.private.json',json.loads(runner['read'](directory/'archived-reuse-request.private.json')))
         else:
             launch_directory=directory
-        config = prepare(args, root, pins, runner, launch_directory, cap,started_at=started_at)
+        config = prepare(args, root, pins, runner, launch_directory, cap,started_at=started_at,guest_env=guest_env)
     except BaseException as error:
         print(json.dumps(dict(directory=str(directory),status='ADMISSION_PENDING',controller_started=False,
                              action=('Keep this state and use the same command with --resume-admission; never discard native reservation intents.'

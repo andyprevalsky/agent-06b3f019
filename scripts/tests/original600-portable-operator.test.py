@@ -1711,6 +1711,7 @@ class Portable(unittest.TestCase):
             result = subprocess.run(args, cwd='/', env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             check = json.loads(result.stdout)
+            self.assertEqual((check['guest_temporal_namespace'], check['guest_env_delivery']), (None, 'bench-app-secrets'))
             self.assertEqual(check['status'], 'CHECKED_NOT_LAUNCHED')
             self.assertEqual(check['infra_early_stop'], 'enabled')
             self.assertEqual(check['provider_calls'], 2)
@@ -1729,6 +1730,24 @@ class Portable(unittest.TestCase):
             self.assertNotIn('CHECKED_NOT_LAUNCHED', expired.stdout)
             self.assertEqual([r[0] for r in requests], ['GET', 'GET'])
             fixture.update(warm_fixture(now))
+            requests.clear()
+            self.assertEqual((json.loads(result.stdout)['guest_temporal_namespace'], json.loads(result.stdout)['guest_env_delivery']),
+                             (None, 'bench-app-secrets'))
+            env.pop('CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE', None)
+            override = private(inputs/'.env.benchmark-temporal', 'CLOUDBENCH_GUEST_TEMPORAL_ADDRESS=bench.example:7233\n'
+                               'CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE=rose-labs-bench.acct\nCLOUDBENCH_GUEST_TEMPORAL_API_KEY=bench-key-fixture\n')
+            guest = subprocess.run(args, cwd='/', env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(guest.returncode, 0, guest.stderr)
+            self.assertEqual(json.loads(guest.stdout)['guest_temporal_namespace'], 'rose-labs-bench.acct')
+            self.assertEqual(json.loads(guest.stdout)['provider_calls'], 2)
+            self.assertNotIn('bench-key-fixture', guest.stdout + guest.stderr)
+            override.chmod(0o644)
+            loose = subprocess.run(args, cwd='/', env=env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(loose.returncode, 0)
+            self.assertIn('guest Temporal override unusable', loose.stderr)
+            override.unlink()
+            # The guest run read twice; an unusable override refuses before any read.
+            self.assertEqual(len(requests), 2)
             requests.clear()
             disabled = subprocess.run(args + ['--infra-early-stop', 'disabled'], cwd='/', env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(disabled.returncode, 0, disabled.stderr)
@@ -2023,6 +2042,82 @@ class Sharded(unittest.TestCase):
             for key in set(legacy) - {'started_at_epoch', 'authority_template', 'remote_env', 'shard'}:
                 self.assertEqual(value[key], legacy[key], key)
 
+    def test_guest_env_binds_override_namespace_without_changing_controller_env(self):
+        """Guests decode the bench-app secrets; the operator binds the namespace they must carry."""
+        agents_raw = 'FLY_API_TOKEN=fixture\nTEMPORAL_ADDRESS=prod.example:7233\nTEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-key-fixture\nOTHER=keep\n'
+        backend_raw = 'COMPLETE=fixture\nTEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-key-fixture\n'
+        bench_key = 'bench-key-fixture-0123456789'
+        with tempfile.TemporaryDirectory() as name, patch.dict(os.environ), patch.object(tempfile, 'tempdir', None):
+            os.environ.pop('CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE', None)
+            directory = Path(name)
+            scratch_root = directory/'tmp'
+            scratch_root.mkdir(mode=0o700)
+            tempfile.tempdir = str(scratch_root)
+            args = self.args(directory, agents_env=private(directory/'guest-agents.env', agents_raw),
+                             backend_env=private(directory/'guest-backend.env', backend_raw))
+            pins, cap = {n: 'b'*64 for n in CLI.PINS}, self.capacity(directory)
+
+            def bound(label):
+                out = directory/label
+                out.mkdir(mode=0o700)
+                config_raw = CLI.prepare(args, ROOT, pins, RUNNER, out, cap).read_bytes()
+                return (json.loads(config_raw), config_raw + (out/'attempt-start.safe.json').read_bytes()
+                        + (out/'authority-template.private.json').read_bytes(), out)
+
+            plain, plain_raw, plain_out = bound('plain')
+            self.assertNotIn('guest_env', plain)
+            self.assertNotIn('CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE', plain['remote_env'])
+            self.assertNotIn('guest_temporal_namespace', json.loads((plain_out/'attempt-start.safe.json').read_bytes()))
+            unbound = CLI.guest_temporal_env(ROOT, args.agents_env, args.backend_env)
+            self.assertEqual((unbound['temporal_namespace'], unbound['agents_env_sha256'], unbound['backend_env_sha256']),
+                             (None, CLI.digest(agents_raw.encode()), CLI.digest(backend_raw.encode())))
+
+            override = private(directory/'.env.benchmark-temporal',
+                               'CLOUDBENCH_GUEST_TEMPORAL_ADDRESS=bench.example:7233\n'
+                               'CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE=rose-labs-bench.acct\n'
+                               'CLOUDBENCH_GUEST_TEMPORAL_API_KEY=' + bench_key + '\n')
+            value, raw, out = bound('override')
+            guest = value['guest_env']
+            self.assertEqual((guest['temporal_namespace'], guest['delivery']), ('rose-labs-bench.acct', 'bench-app-secrets'))
+            self.assertEqual(value['remote_env']['CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE'], 'rose-labs-bench.acct')
+            self.assertEqual(json.loads((out/'attempt-start.safe.json').read_bytes())['guest_temporal_namespace'], 'rose-labs-bench.acct')
+            # The controller keeps the selected bytes: authority custody and the files are unchanged.
+            authority = json.loads((out/'authority-template.private.json').read_bytes())
+            self.assertEqual({k: v['sha256'] for k, v in authority['env_files'].items()},
+                             dict(agents=CLI.digest(agents_raw.encode()), backend=CLI.digest(backend_raw.encode())))
+            self.assertEqual((args.agents_env.read_text(), args.backend_env.read_text()), (agents_raw, backend_raw))
+            self.assertEqual({k: v for k, v in value['remote_env'].items() if k != 'CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE'},
+                             plain['remote_env'])
+            self.assertEqual({k: v for k, v in value.items() if k not in ('guest_env', 'remote_env', 'started_at_epoch', 'authority_template')},
+                             {k: v for k, v in plain.items() if k not in ('remote_env', 'started_at_epoch', 'authority_template')})
+            # The bound digests are the canonical helper's guest copies: three keys replaced, all else kept.
+            rendered = directory/'rendered'
+            rendered.mkdir(mode=0o700)
+            subprocess.run(['bash', '-c', 'source "$1"; cloudbench_write_guest_temporal_env_files "$2" "$3" "$4" "$5" >/dev/null', 'x',
+                            str(ROOT/'scripts/lib/cloudbench-env.sh'), str(args.agents_env), str(args.backend_env), str(override),
+                            str(rendered)], check=True)
+            self.assertEqual((CLI.digest((rendered/'agents.env').read_bytes()), CLI.digest((rendered/'backend.env').read_bytes())),
+                             (guest['agents_env_sha256'], guest['backend_env_sha256']))
+            self.assertEqual((rendered/'agents.env').read_text(), 'FLY_API_TOKEN=fixture\nTEMPORAL_ADDRESS=bench.example:7233\n'
+                             'TEMPORAL_NAMESPACE=rose-labs-bench.acct\nTEMPORAL_API_KEY=' + bench_key + '\nOTHER=keep\n')
+            self.assertEqual((rendered/'backend.env').read_text(), 'COMPLETE=fixture\nTEMPORAL_NAMESPACE=rose-labs-bench.acct\n'
+                             'TEMPORAL_API_KEY=' + bench_key + '\nTEMPORAL_ADDRESS=bench.example:7233\n')
+            for blob in (raw, plain_raw):
+                self.assertNotIn(bench_key.encode(), blob)
+            self.assertEqual(list(scratch_root.iterdir()), [])  # no private guest copy left behind
+            # Disabled or unusable overrides: historical bytes, or refusal before any config.
+            os.environ['CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE'] = 'off'
+            self.assertNotIn('guest_env', bound('off')[0])
+            os.environ.pop('CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE')
+            override.chmod(0o644)
+            (directory/'loose').mkdir(mode=0o700)
+            with self.assertRaises(ValueError) as refused:
+                CLI.prepare(args, ROOT, pins, RUNNER, directory/'loose', cap)
+            self.assertIn('mode 0600', str(refused.exception))
+            self.assertNotIn(bench_key, str(refused.exception))
+            self.assertFalse((directory/'loose/config.private.json').exists())
+            self.assertEqual(list(scratch_root.iterdir()), [])
+
     def test_shared_cpu_plan_reads_the_task_revision_catalog(self):
         tasks = json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())[:5]
         baseline = [dict(id='a', state='started', config=dict(guest=dict(cpus=2, cpu_kind='shared'))),
@@ -2088,13 +2183,14 @@ class Sharded(unittest.TestCase):
                 published.append(dict(group_id=group_id, members=sum(len(s['tasks']) * s['runs'] for s in shards),
                                       outcomes=outcomes, finished=finished))
                 return True
+            guest_env = CLI.guest_temporal_env(ROOT, args.agents_env, args.backend_env)  # rendered before the fake runner Popen
             with patch.object(CLI, 'capacity_snapshot', snapshot), \
                  patch.object(CLI, 'shared_cpu_plan', lambda *a: (36, 0)), \
                  patch.object(CLI, 'publish_shard_group', publish), \
                  patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
                  patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
                  patch.object(CLI.subprocess, 'Popen', Runner):
-                code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+                code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
             self.assertEqual([p['outcomes'] is None for p in published], [True, False])
             self.assertEqual({p['group_id'] for p in published}, {launched[0].config['shard']['group_run_id']})
             self.assertEqual(published[0]['members'], 36)
@@ -2192,13 +2288,14 @@ class Sharded(unittest.TestCase):
                 private(target/'navi-whisper-lux-bench.private.json', [])
                 cap = self.capacity(directory, free=700); cap.pop('proof_path')
                 return cap
+            guest_env = CLI.guest_temporal_env(ROOT, args.agents_env, args.backend_env)  # rendered before the fake runner Popen
             with patch.object(CLI, 'capacity_snapshot', snapshot), \
                  patch.object(CLI, 'shared_cpu_plan', lambda *a: (36, 0)), \
                  patch.object(CLI, 'publish_shard_group', lambda *a, **k: True), \
                  patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
                  patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
                  patch.object(CLI.subprocess, 'Popen', Runner):
-                code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+                code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
             self.assertEqual(code, 0)
             self.assertEqual(len(launched), 4)
             self.assertEqual(len(snapshots), 2)
@@ -2220,12 +2317,13 @@ class Sharded(unittest.TestCase):
             def snapshot(api, token, org, target, extra):
                 private(target/'navi-whisper-lux-bench.private.json', [])
                 return dict(cap)
+            guest_env = CLI.guest_temporal_env(ROOT, args.agents_env, args.backend_env)  # rendered before the fake runner Popen
             with patch.object(CLI, 'capacity_snapshot', snapshot), \
                  patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
                  patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
                  patch.object(CLI.subprocess, 'Popen', side_effect=AssertionError('no runner may start')):
                 with self.assertRaisesRegex(ValueError, '44 free Machine slots < 45 required'):
-                    CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+                    CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
 
 
 class TaskRefPins(unittest.TestCase):

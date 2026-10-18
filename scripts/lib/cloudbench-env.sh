@@ -467,6 +467,24 @@ print(replacements["TEMPORAL_NAMESPACE"])
 PY
 }
 
+# cloudbench_require_guest_temporal_namespace <agents-env> <backend-env> <expected>
+# A guest decodes the shared bench-app AGENTS_ENV_B64/BACKEND_ENV_B64 secrets,
+# which only a maintenance op (--refresh-secrets/--setup/image-activate) stages.
+# A launcher that bound a guest-only namespace (the original600 operator) passes
+# it here so stale secrets fail before any Temporal worker, instead of silently
+# running every guest on the controller/production namespace. Empty = no check.
+cloudbench_require_guest_temporal_namespace() {
+  local agents_env="$1" backend_env="$2" expected="${3:-}" path actual
+  [ -n "$expected" ] || return 0
+  for path in "$agents_env" "$backend_env"; do
+    actual="$(cloudbench_env_value "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || actual=""
+    if [ "$actual" != "$expected" ]; then
+      echo "FATAL: guest $(basename "$path") TEMPORAL_NAMESPACE=${actual:-<unset>} differs from the launcher's guest namespace $expected; the bench app secrets predate the guest override. Restage them: bash scripts/run-bench-cloud --refresh-secrets" >&2
+      return 1
+    fi
+  done
+}
+
 cloudbench_verify_env_file() {
   local path="$1" expected="$2" label="$3" actual
   [ -n "$expected" ] || {
