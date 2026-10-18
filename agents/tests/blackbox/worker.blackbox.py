@@ -1390,6 +1390,164 @@ async def test_worker_metrics_stop_prevents_later_peer_and_provider_requests():
         )
 
 
+def _queue_metrics_fixture(worker, *, rate_limited_counts: int):
+    """Patch everything except the Temporal visibility calls under test."""
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from temporalio.service import RPCError, RPCStatusCode
+
+    calls = []
+
+    async def count_workflow_executions(request, **kwargs):
+        calls.append("count")
+        if len([call for call in calls if call == "count"]) <= rate_limited_counts:
+            raise RPCError("namespace rate limit exceeded", RPCStatusCode.RESOURCE_EXHAUSTED, b"")
+        return SimpleNamespace(count=0)
+
+    async def describe_task_queue(request, **kwargs):
+        calls.append("describe")
+        return SimpleNamespace(task_queue_status=None)
+
+    async def sdk_metrics(http):
+        return {}
+
+    async def fleet_memory(http, local, stop_event):
+        return local
+
+    async def admission_unavailable(http, **kwargs):
+        return 0
+
+    client = SimpleNamespace(
+        workflow_service=SimpleNamespace(
+            count_workflow_executions=count_workflow_executions,
+            describe_task_queue=describe_task_queue,
+        )
+    )
+    stack = ExitStack()
+    for name, value in (
+        ("_get_sdk_worker_metrics", sdk_metrics),
+        ("_get_fleet_memory_used_percent", fleet_memory),
+        ("_get_fleet_activity_admission_unavailable_count", admission_unavailable),
+        ("_get_machine_memory_used_percent", lambda: 10.0),
+        ("_count_fly_peers", lambda: 1),
+        ("_am_i_leader", lambda: False),
+        ("set_queue_metrics", lambda *args, **kwargs: None),
+    ):
+        stack.enter_context(patch.object(worker, name, value))
+    # Deterministic full jitter: always take the upper edge of each window.
+    stack.enter_context(
+        patch.object(worker, "_AUTOSCALER_RANDOM", SimpleNamespace(uniform=lambda low, high: high), create=True)
+    )
+    admission = SimpleNamespace(
+        snapshot=lambda: {
+            "activity_admission_open": True,
+            "activity_admission_memory_percent": 10.0,
+            "activity_admission_close_memory_percent": 80.0,
+            "activity_admission_open_memory_percent": 75.0,
+        }
+    )
+    return client, admission, calls, stack
+
+
+async def _run_queue_metrics_until_waits(worker, client, admission, wait_count: int) -> list[float]:
+    """Drive poll_queue_metrics, recording each requested wait without sleeping."""
+    from unittest.mock import patch
+
+    stop = asyncio.Event()
+    waits: list[float] = []
+    original_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout=None):
+        if getattr(awaitable, "cr_code", None) is not stop.wait.__func__.__code__:
+            return await original_wait_for(awaitable, timeout)
+        awaitable.close()
+        waits.append(timeout)
+        if len(waits) >= wait_count:
+            stop.set()
+        raise asyncio.TimeoutError
+
+    with patch.object(worker.asyncio, "wait_for", recording_wait_for):
+        await original_wait_for(
+            worker.poll_queue_metrics(client, "fixture-ns", "fixture-queue", admission, 10, stop),
+            timeout=10,
+        )
+    return waits
+
+
+async def test_autoscaler_backs_off_on_namespace_rate_limit_and_recovers():
+    """ResourceExhausted must back off exponentially, then return to the base cadence.
+
+    run600c: 600 guests plus 25 prod workers retried CountWorkflowExecutions every
+    second against the shared Visibility API budget; ~90% of cycles were rejected
+    for 35 minutes because each rejection was retried at full cadence.
+    """
+    import worker
+
+    client, admission, calls, stack = _queue_metrics_fixture(worker, rate_limited_counts=4)
+    with stack, patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=None, AUTOSCALER_QUEUE_METRICS=None):
+        waits = await _run_queue_metrics_until_waits(worker, client, admission, 6)
+    assert waits == [2.0, 4.0, 8.0, 16.0, 1.0, 1.0], waits
+    # A rejected count ends the cycle; it must not also spend two describe calls.
+    assert calls == ["count"] * 5 + ["describe", "describe", "count", "describe", "describe"], calls
+    assert all(delay <= worker.AUTOSCALER_RATE_LIMIT_BACKOFF_MAX_SECS for delay in waits)
+
+
+async def test_autoscaler_queue_observation_honors_budgeted_cadence_and_opt_out():
+    """Benchmark guests poll at the controller budget; unread clones never poll."""
+    import worker
+
+    client, admission, calls, stack = _queue_metrics_fixture(worker, rate_limited_counts=0)
+    with stack, patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS="90", AUTOSCALER_QUEUE_METRICS=None):
+        waits = await _run_queue_metrics_until_waits(worker, client, admission, 3)
+    # One random start phase within the interval, then the budgeted interval.
+    assert waits == [90.0, 90.0, 90.0], waits
+    assert calls.count("count") == 2, calls
+
+    for invalid in ("0", "-5", "abc", "inf", "nan"):
+        with patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=invalid):
+            assert worker._autoscaler_poll_interval_seconds() == 1.0, invalid
+    with patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=None):
+        assert worker._autoscaler_poll_interval_seconds() == 1.0
+
+    client, admission, calls, stack = _queue_metrics_fixture(worker, rate_limited_counts=0)
+    stop = asyncio.Event()
+    with stack, patch_env(AUTOSCALER_QUEUE_METRICS="0"):
+        task = asyncio.create_task(
+            worker.poll_queue_metrics(client, "fixture-ns", "fixture-queue", admission, 10, stop)
+        )
+        await asyncio.sleep(0.05)
+        assert not task.done(), "an opted-out worker must still own its metrics task until shutdown"
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
+    assert calls == [], f"an opted-out worker spent namespace visibility calls: {calls}"
+
+
+def patch_env(**values):
+    """patch.dict for os.environ where None removes the variable."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def manager():
+        saved = {key: os.environ.get(key) for key in values}
+        try:
+            for key, value in values.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            yield
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    return manager()
+
+
 async def test_autoscaler_scale_down_never_stops_machines_with_in_flight_activities():
     """Scale-down must only stop idle peers.
 
@@ -1513,6 +1671,14 @@ async def run_all_tests():
         "worker_startup_bound_ports", test_worker_startup_publishes_bound_ports_before_temporal_connect
     )
     await r.record_async("worker_health_bind_failure", test_worker_health_bind_failure_stops_before_temporal_connect)
+    await r.record_async(
+        "autoscaler_backs_off_on_namespace_rate_limit",
+        test_autoscaler_backs_off_on_namespace_rate_limit_and_recovers,
+    )
+    await r.record_async(
+        "autoscaler_budgeted_cadence_and_opt_out",
+        test_autoscaler_queue_observation_honors_budgeted_cadence_and_opt_out,
+    )
     await r.record_async(
         "autoscaler_scale_down_never_stops_machines_with_in_flight_activities",
         test_autoscaler_scale_down_never_stops_machines_with_in_flight_activities,

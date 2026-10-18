@@ -1110,6 +1110,12 @@ fi
 if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${TASK_WORKER_ENV[@]}")
 fi
+case "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}" in
+    ''|*[!0-9]*|0) ;;
+    # Controller-budgeted queue observation: N guests share the Temporal
+    # namespace's Visibility API budget with production workers.
+    *) STACK_ENV+=("AUTOSCALER_POLL_INTERVAL_SECONDS=$CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS") ;;
+esac
 if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
     # The probe executes no benchmark task. One Temporal worker proves stack
     # readiness without starting eight idle Python processes on a 4 GB guest

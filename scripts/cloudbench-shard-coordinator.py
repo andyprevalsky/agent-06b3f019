@@ -41,6 +41,10 @@ BASE_SNAPSHOT_POLL_SECONDS = 15
 HUB_GLOBAL_LIVE_UPLOADS_PER_SECOND = 2.0
 HUB_GLOBAL_TERMINAL_IN_FLIGHT = 20
 HUB_TERMINAL_PUBLICATION_SECONDS = 1200
+# Benchmark guests share the production Temporal Cloud namespace's Visibility API
+# budget (CountWorkflowExecutions/DescribeTaskQueue). Prod's own 1 Hz autoscaler
+# already spends ~75 calls/s at 25 workers; all shards together stay within this.
+TEMPORAL_GLOBAL_VISIBILITY_CALLS_PER_SECOND = 20.0
 CONTROLLER_PROFILES = {'performance-8x': dict(vcpus=8, memory_mib=32768)}
 RELEASED_STATES = ('ready', 'released')
 # Runner terminals that prove the shard created nothing, or verifiably released
@@ -110,7 +114,11 @@ def shard_runtime_env(*, machine_limit, other_app_objects, extra_destroying, pla
                 # Each shard host owns 1/K of the global Hub budget, never K times it.
                 BENCHMARK_HUB_LIVE_UPLOADS_PER_SECOND=repr(HUB_GLOBAL_LIVE_UPLOADS_PER_SECOND / max(1, controllers)),
                 BENCHMARK_HUB_TERMINAL_CONCURRENCY=str(max(1, HUB_GLOBAL_TERMINAL_IN_FLIGHT // max(1, controllers))),
-                BENCHMARK_HUB_TERMINAL_PUBLICATION_SECONDS=str(HUB_TERMINAL_PUBLICATION_SECONDS))
+                BENCHMARK_HUB_TERMINAL_PUBLICATION_SECONDS=str(HUB_TERMINAL_PUBLICATION_SECONDS),
+                # Guests share the production Temporal namespace's Visibility API
+                # budget; each shard host paces its guests within 1/K of it.
+                CLOUDBENCH_TEMPORAL_VISIBILITY_CALLS_PER_SECOND=repr(
+                    TEMPORAL_GLOBAL_VISIBILITY_CALLS_PER_SECOND / max(1, controllers)))
 
 
 def write_once(path, value):

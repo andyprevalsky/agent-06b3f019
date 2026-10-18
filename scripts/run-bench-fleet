@@ -16277,6 +16277,14 @@ print_code_provenance
 # (Fly 6PN) — the same shape as prod's pool, isolated per bench. Workers are torn
 # down on scale-down and at fleet exit.
 BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001)+2
+# The guest worker's queue observation spends the shared Temporal namespace's
+# Visibility API budget (prod uses it too). Pace every concurrent guest on this
+# host so their sum stays within CLOUDBENCH_TEMPORAL_VISIBILITY_CALLS_PER_SECOND;
+# a campaign child counts the campaign's concurrent guests, not just itself.
+CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS="$(cloudbench_guest_autoscaler_poll_seconds \
+    "${CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS:-${#BENCHES[@]}}" "" "$AUTOSCALE_POLL")" || exit 1
+export CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS
+echo "🛰️  guest autoscaler observation every ${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS}s (Temporal visibility budget ${CLOUDBENCH_TEMPORAL_VISIBILITY_CALLS_PER_SECOND:-20}/s)"
 BOX_BACKEND_PORT="3001"
 BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 

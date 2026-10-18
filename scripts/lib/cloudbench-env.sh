@@ -990,6 +990,24 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
   return "$status"
 }
 
+cloudbench_guest_autoscaler_poll_seconds() {  # <concurrent-guests> [calls-per-second] [floor-seconds]
+  # Every guest worker's queue observation spends three Temporal Cloud Visibility
+  # API calls (CountWorkflowExecutions + two DescribeTaskQueue). Production shares
+  # that namespace budget, so this host's concurrent guests together spend at most
+  # the configured calls/s. Never poll faster than the controller reads the
+  # result; a malformed input falls back to the conservative production-safe value.
+  local guests="$1" budget="${2:-${CLOUDBENCH_TEMPORAL_VISIBILITY_CALLS_PER_SECOND:-20}}" floor="${3:-10}"
+  awk -v guests="$guests" -v budget="$budget" -v floor="$floor" 'BEGIN {
+    if (guests !~ /^[0-9]+$/ || guests < 1) guests = 1
+    if (floor !~ /^[0-9]+$/ || floor < 1) floor = 10
+    if (budget !~ /^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$/ || budget <= 0) budget = 20
+    seconds = 3 * guests / budget
+    whole = int(seconds); if (whole < seconds) whole++
+    if (whole < floor) whole = floor
+    print whole
+  }'
+}
+
 cloudbench_fleet_workspace_name() {  # <bench-name> <controller-id> <ordinal>
   # Temporal task queues inherit this workspace name and cap it at 48 chars.
   # Truncate only the human-readable bench segment: the controller + ordinal

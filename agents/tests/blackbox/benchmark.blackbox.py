@@ -22060,6 +22060,63 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
         assert result.logs["cloud_cleanup_evidence"]["warnings"] == []
 
 
+async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
+    """Guest stale cleanup must not multiply visibility load on a throttled namespace.
+
+    run600c: 27 of 30 sampled guests issued six CountWorkflowExecutions calls
+    each (SDK count_workflows: one call + five quick retries) against the
+    production namespace's spent Visibility API budget at startup.
+    """
+    from types import SimpleNamespace
+
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from benchmarks.run_benchmark import STALE_WORKFLOW_COUNT_ATTEMPTS, _count_stale_workflows
+
+    def client_failing(times: int, status=RPCStatusCode.RESOURCE_EXHAUSTED):
+        calls = []
+
+        async def count_workflow_executions(request, *, retry, timeout):
+            calls.append((request.namespace, request.query, retry))
+            if len(calls) <= times:
+                raise RPCError("namespace rate limit exceeded", status, b"")
+            return SimpleNamespace(count=7)
+
+        service = SimpleNamespace(count_workflow_executions=count_workflow_executions)
+        return SimpleNamespace(workflow_service=service), calls
+
+    sleeps = []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    client, calls = client_failing(2)
+    assert await _count_stale_workflows(client, "ns", "q", sleep=sleep) == 7
+    assert calls == [("ns", "q", False)] * 3, calls
+    assert len(sleeps) == 2 and 1.0 <= sleeps[0] <= 2.0 and 1.0 <= sleeps[1] <= 4.0, sleeps
+
+    sleeps.clear()
+    client, calls = client_failing(99)
+    try:
+        await _count_stale_workflows(client, "ns", "q", sleep=sleep)
+    except RPCError as error:
+        assert error.status == RPCStatusCode.RESOURCE_EXHAUSTED
+    else:
+        raise AssertionError("a namespace that stays throttled must surface its error")
+    assert len(calls) == STALE_WORKFLOW_COUNT_ATTEMPTS == 3, calls
+    assert len(sleeps) == 2, sleeps
+
+    sleeps.clear()
+    client, calls = client_failing(1, status=RPCStatusCode.UNAVAILABLE)
+    try:
+        await _count_stale_workflows(client, "ns", "q", sleep=sleep)
+    except RPCError as error:
+        assert error.status == RPCStatusCode.UNAVAILABLE
+    else:
+        raise AssertionError("non-throttling errors keep their original single-attempt failure")
+    assert len(calls) == 1 and sleeps == [], (calls, sleeps)
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
@@ -23716,6 +23773,10 @@ async def run_all_tests():
     r.record("keep_agents_env_preserves_successes_and_failures", test_keep_agents_env_preserves_successes_and_failures)
     r.record("local_services_manifest_reports_anon_capability", test_local_services_manifest_reports_anon_capability)
     r.record("cache_coverage_uses_root_scoped_tool_counts", test_cache_coverage_uses_root_scoped_tool_counts)
+    await r.record_async(
+        "stale_workflow_count_backs_off_on_namespace_rate_limit",
+        test_stale_workflow_count_backs_off_on_namespace_rate_limit,
+    )
     await r.record_async(
         "user_data_prod_grep_final_answer_semantic_judge",
         test_user_data_prod_grep_final_answer_semantic_judge,

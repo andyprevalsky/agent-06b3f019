@@ -114,6 +114,9 @@ class Planning(unittest.TestCase):
                                C['HUB_GLOBAL_LIVE_UPLOADS_PER_SECOND'])
         self.assertLessEqual(20 * int(env['BENCHMARK_HUB_TERMINAL_CONCURRENCY']), C['HUB_GLOBAL_TERMINAL_IN_FLIGHT'])
         self.assertEqual(env['BENCHMARK_HUB_TERMINAL_PUBLICATION_SECONDS'], '1200')
+        # 20 shard hosts share the production namespace's Temporal visibility budget.
+        self.assertAlmostEqual(20 * float(env['CLOUDBENCH_TEMPORAL_VISIBILITY_CALLS_PER_SECOND']),
+                               C['TEMPORAL_GLOBAL_VISIBILITY_CALLS_PER_SECOND'])
         self.assertEqual(C['shard_runtime_env'](machine_limit=1000, other_app_objects=37, extra_destroying=1,
                          planned_shared_cpus=10, baseline_shared_cpus=0, controllers=1)['CLOUDBENCH_SNAPSHOT_POLL_SECONDS'], '15')
 

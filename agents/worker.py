@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import random
 import re
 import signal
 import sys
@@ -14,6 +15,7 @@ import structlog
 from dotenv import load_dotenv
 from temporalio.client import Client
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import (
     FixedSizeSlotSupplier,
     Worker,
@@ -259,7 +261,17 @@ SCALE_UP_COOLDOWN_SECS = 20  # Seconds to wait after a scale-up before allowing 
 WORKFLOW_SATURATION_SCALE_UP = float(os.getenv("WORKFLOW_SATURATION_SCALE_UP", "0.75"))
 WORKFLOW_SLOT_TARGET_OCCUPANCY = float(os.getenv("WORKFLOW_SLOT_TARGET_OCCUPANCY", "0.6"))
 ADMISSION_PRESSURE_SCALE_UP_SECS = 60
-POLL_INTERVAL_SECS = 1  # 3 Temporal API calls/s — well within 1000 req/s limit
+# Each cycle issues CountWorkflowExecutions + two DescribeTaskQueue calls. Temporal
+# Cloud meters all three against the namespace's shared Visibility API budget, so
+# every worker on the namespace (prod and benchmark guests alike) spends 3 calls/s
+# at the 1 s default. Production keeps 1 s; isolated benchmark guests receive a
+# fleet-budgeted AUTOSCALER_POLL_INTERVAL_SECONDS from their controller.
+POLL_INTERVAL_SECS = 1
+# A ResourceExhausted answer means the namespace budget is spent. Retrying at the
+# base cadence only adds rejected load, so back off exponentially with jitter up
+# to this ceiling and return to the base cadence after the next success.
+AUTOSCALER_RATE_LIMIT_BACKOFF_MAX_SECS = 60.0
+_AUTOSCALER_RANDOM = random.Random()
 METRICS_RPC_TIMEOUT = timedelta(seconds=5)
 LOG_INTERVAL_SECS = 30  # Periodic summary log (avoid 86k lines/day at 1s polls)
 SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
@@ -701,6 +713,33 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
         logger.warning("Autoscaler: fleet list failed", error=str(e))
 
 
+def _autoscaler_poll_interval_seconds() -> float:
+    """Base observation cadence; invalid or non-positive values keep the 1 s default."""
+    try:
+        value = float(os.getenv("AUTOSCALER_POLL_INTERVAL_SECONDS", str(POLL_INTERVAL_SECS)))
+    except ValueError:
+        return float(POLL_INTERVAL_SECS)
+    return value if value > 0 and math.isfinite(value) else float(POLL_INTERVAL_SECS)
+
+
+def _autoscaler_queue_metrics_enabled() -> bool:
+    """Workers whose desired count nobody consumes (benchmark worker clones) opt out."""
+    return os.getenv("AUTOSCALER_QUEUE_METRICS", "1") != "0"
+
+
+def _is_rate_limited(error: BaseException) -> bool:
+    return isinstance(error, RPCError) and error.status == RPCStatusCode.RESOURCE_EXHAUSTED
+
+
+def _autoscaler_retry_delay(base_seconds: float, consecutive_rate_limits: int) -> float:
+    """Full-jitter exponential delay after consecutive ResourceExhausted cycles."""
+    if consecutive_rate_limits <= 0:
+        return base_seconds
+    ceiling = max(base_seconds, AUTOSCALER_RATE_LIMIT_BACKOFF_MAX_SECS)
+    upper = min(ceiling, base_seconds * (2 ** min(consecutive_rate_limits, 16)))
+    return _AUTOSCALER_RANDOM.uniform(base_seconds, upper)
+
+
 async def poll_queue_metrics(
     client: Client,
     namespace: str,
@@ -750,8 +789,25 @@ async def poll_queue_metrics(
     from temporalio.api.taskqueue.v1 import TaskQueue as TaskQueueProto
     from temporalio.api.workflowservice.v1 import CountWorkflowExecutionsRequest, DescribeTaskQueueRequest
 
+    if not _autoscaler_queue_metrics_enabled():
+        # Nobody reads this worker's desired count; spending the namespace's
+        # shared Visibility API budget on it only throttles workers that do.
+        logger.info("Autoscaler queue observation disabled for this worker", task_queue=task_queue)
+        await stop_event.wait()
+        return
+
+    poll_interval = _autoscaler_poll_interval_seconds()
+    consecutive_rate_limits = 0
+    if poll_interval > POLL_INTERVAL_SECS:
+        # Budgeted guests start together behind one release barrier. A random
+        # phase spreads their first observations across one interval instead
+        # of aligning every guest's calls on the same second.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=_AUTOSCALER_RANDOM.uniform(0, poll_interval))
+
     async with httpx.AsyncClient(timeout=10.0) as http:
         while not stop_event.is_set():
+            next_delay = poll_interval
             try:
                 # ── Observe current state ─────────────────────────────────
                 # This loop owns retries. The high-level count_workflows call
@@ -770,6 +826,7 @@ async def poll_queue_metrics(
                 workflow_count = count_result.count
 
                 backlog = 0
+                describe_rate_limited = False
                 for task_type in [TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW]:
                     try:
                         resp = await client.workflow_service.describe_task_queue(
@@ -784,6 +841,7 @@ async def poll_queue_metrics(
                         if resp.task_queue_status:
                             backlog += resp.task_queue_status.backlog_count_hint
                     except Exception as e:
+                        describe_rate_limited = describe_rate_limited or _is_rate_limited(e)
                         logger.warning("Failed to describe task queue", error=str(e), task_queue_type=str(task_type))
                     if stop_event.is_set():
                         return
@@ -957,12 +1015,27 @@ async def poll_queue_metrics(
                     )
                     _last_log_time = now_mono
                 _prev_desired = _desired_machines
+                if describe_rate_limited:
+                    consecutive_rate_limits += 1
+                    next_delay = _autoscaler_retry_delay(poll_interval, consecutive_rate_limits)
+                else:
+                    consecutive_rate_limits = 0
 
             except Exception as e:
-                logger.warning("Failed to poll queue metrics", error=str(e))
+                if _is_rate_limited(e):
+                    consecutive_rate_limits += 1
+                    next_delay = _autoscaler_retry_delay(poll_interval, consecutive_rate_limits)
+                    logger.warning(
+                        "Failed to poll queue metrics",
+                        error=str(e),
+                        consecutive_rate_limits=consecutive_rate_limits,
+                        retry_in_seconds=round(next_delay, 3),
+                    )
+                else:
+                    logger.warning("Failed to poll queue metrics", error=str(e))
 
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=POLL_INTERVAL_SECS)
+                await asyncio.wait_for(stop_event.wait(), timeout=next_delay)
             except asyncio.TimeoutError:
                 pass
 

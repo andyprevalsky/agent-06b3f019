@@ -4459,6 +4459,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "BENCHMARK_PEAK_FLY_MACHINES=$OBSERVED_PEAK_FLY_MACHINES"
         --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
         --env "CLOUDBENCH_INFRA_PROBE=${CLOUDBENCH_INFRA_PROBE:-0}"
+        --env "CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}"
     )
     _boot_command="bash /cloudbench-boot.sh"
     if [ -n "$CLOUDBENCH_ARCHIVED_PROOF_B64" ]; then
@@ -4934,6 +4935,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export BENCHMARK_PEAK_FLY_MACHINES=$(printf '%q' "$OBSERVED_PEAK_FLY_MACHINES")"
     echo "export BENCHMARK_VM_USD_PER_HOUR=$(printf '%q' "$VM_USD_PER_HOUR")"
     echo "export CLOUDBENCH_INFRA_PROBE=$(printf '%q' "${CLOUDBENCH_INFRA_PROBE:-0}")"
+    echo "export CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=$(printf '%q' "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}")"
     echo "unset BENCHMARK_FRONTEND_URL"
     if [ "$DASHBOARD" = "1" ]; then
         # Persistent FE deep links for report cards / RCA evidence. The local

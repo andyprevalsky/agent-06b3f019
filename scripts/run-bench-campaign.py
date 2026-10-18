@@ -1845,6 +1845,9 @@ def main() -> int:
                             shard["group_total"] or len(jobs)
                         ),
                         "RUN_BENCH_CAMPAIGN_CHILD": "1",
+                        # Fleets pace guest Temporal visibility calls across
+                        # every concurrently admitted campaign controller.
+                        "CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS": str(args.concurrency),
                         "RUN_BENCH_CAMPAIGN_JOB_ID": str(job["job_id"]),
                         "RUN_BENCH_CAMPAIGN_RUN": str(job["run"]),
                         "RUN_BENCH_CAMPAIGN_TASK": str(job["task"]),
