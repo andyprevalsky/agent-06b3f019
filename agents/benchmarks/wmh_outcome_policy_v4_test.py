@@ -106,7 +106,7 @@ def test_earlier_policy_and_protocol_bytes_are_unchanged():
         "rose-outcome-distribution-v1": "650945bf68ee4ba66a6c9f9dca1c3d66be85dd50360f287cb5c924edb2c8ad70",
         "rose-outcome-distribution-v2": "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0",
         "rose-outcome-distribution-v3": "3ace77b6b1a3a33ca94e69541cd1e671a4c3a7694d3612b9ddc68f1ccdf6da8a",
-        "rose-outcome-distribution-v4": "adcb1e5348cd56cb07322bf47b84b144143b3c28045213be92a786abb304c877",
+        "rose-outcome-distribution-v4": "79e7487d872cc94efe1073e169d7331464e34891ae40c2f5bd926fd2f709fce1",
     }
     for name, digest in pinned.items():
         assert _sha(policies.execution_policy(name).text) == digest, name
@@ -115,7 +115,7 @@ def test_earlier_policy_and_protocol_bytes_are_unchanged():
     )
     v4 = policies.execution_policy("rose-outcome-distribution-v4")
     assert v4.version == "4" and v4.response_protocol == OUTCOME_V4_PROTOCOL
-    assert v4.effective_system_sha256 == "d59a56b6fa5ace5e31cdb4144efb76eabbb28fefe516a30c9d533047ffa4c4e8"
+    assert v4.effective_system_sha256 == "44ef95aee966cce6c7de8da9d2fb0610c5794784a94b3943f207cde68d35fc24"
     # The v3 timed protocol is unchanged: no v4 fields and no v4 checks.
     legacy = {
         "schema": "rose.wmh_timed_outcome_distribution.v1",
@@ -381,3 +381,130 @@ def test_warm_metrics_are_computed_from_native_state_with_historical_and_new_lea
     }
     assert metrics["new"] == {"warm_leads": 1, "warm_leads_followed_up": 1}
     assert metrics["outreach_steps"] == 3 and metrics["committed_steps"] == 4
+
+
+# --- Structured applicability: a matching send must declare its base rate ---------------
+
+
+def _canonical_world(events=()):
+    from benchmarks.wmh_context_insertion import load_canonical_base_rates
+
+    state = world(events)
+    state["structured"]["base_rates"] = load_canonical_base_rates()
+    return state
+
+
+def _call(name="message_transport_send", category="message", **arguments):
+    # Shapes verified against native Run13-18 retirement receipts.
+    if name == "message_transport_send" and not arguments:
+        arguments = {"channel": "email", "to_email": "dana@example.vc", "from_email": "tamara@roselabs.ai",
+                     "subject": "Rose Labs", "message": "Hi Dana"}
+    return {"schema": "rose.canonical_action.v1", "category": category, "name": name, "arguments": arguments}
+
+
+def _undeclared_send():
+    return {"schema": OUTCOME_V4_SCHEMA, "base_rates": [], "outcomes": [outcome("delivered", 1.0)]}
+
+
+def _parse_call(payload, state, action):
+    return parse_distribution(
+        json.dumps(payload),
+        base_state=state,
+        expected_call_ids=("call-1",),
+        protocol=OUTCOME_V4_PROTOCOL,
+        at_ms=START,
+        action_arguments=action,
+    )
+
+
+def test_send_matching_applies_to_without_a_declaration_is_rejected():
+    with pytest.raises(ValueError, match="must be declared"):
+        _parse_call(_undeclared_send(), _canonical_world(), _call())
+    # Declaring either member of the first_response group satisfies it; the base-rate mass check still applies.
+    _parse_call(send_distribution(), _canonical_world(), _call())
+    warm = send_distribution(0.35)
+    warm["base_rates"][0]["key"] = "warm_reply"
+    for item in warm["outcomes"]:
+        item["base_rate_results"] = {"warm_reply": item["base_rate_results"]["cold_reply"]}
+    warm["outcomes"][0]["state_patch"][0]["value"]["base_rate_key"] = "warm_reply"
+    _parse_call(warm, _canonical_world(), _call())
+
+
+def test_reads_and_unmatched_calls_are_not_forced_to_declare_send_rates():
+    state = _canonical_world()
+    for action in (
+        _call("spawn_browser_agent", "browser", goal="Read the Gmail inbox for replies", type="browser"),
+        _call("spawn_explore_agent", "explore", goal="Find warm investor contacts", type="explore"),
+        _call("notify_sms_event", "message", event_type="progress", payload={}),
+        _call("message_transport_send", "message", channel="email", to_email="  "),
+    ):
+        _parse_call(_undeclared_send(), state, action)
+    # An inbox check delivers a due reply instead (already enforced by v4).
+    due = dict(reply_event(at=START), **{"from": "Dana Lee <dana@example.vc>"})
+    inbox = _call("spawn_browser_agent", "browser", goal="Check Gmail", type="browser")
+    delivered = {"schema": OUTCOME_V4_SCHEMA, "base_rates": [],
+                 "outcomes": [outcome("inbox", 1.0, delivered=["evt-reply-1"], content="1 new email from Dana Lee")]}
+    _parse_call(delivered, _canonical_world([due]), inbox)
+
+
+def test_given_conditioned_rate_is_required_only_when_its_state_precondition_holds():
+    replied = dict(reply_event("evt-old", at=START - HOUR), **{"from": "Dana Lee <Dana@Example.vc>",
+                                                             "delivered_at_ms": START - HOUR + 5})
+    undelivered = dict(replied)
+    undelivered.pop("delivered_at_ms")
+
+    def meeting_distribution():
+        proposal = dict(reply_event("evt-meeting"), kind="meeting_proposal", base_rate_key="meeting_accepted")
+        return {
+            "schema": OUTCOME_V4_SCHEMA,
+            "base_rates": [{"key": "meeting_accepted", "given": None, "deviation_reason": None}],
+            "outcomes": [
+                outcome("accepts", 0.45, results={"meeting_accepted": True},
+                        patch=[{"op": "add", "path": "/structured/scheduled_events/-", "value": proposal}]),
+                outcome("no_meeting", 0.55, results={"meeting_accepted": False}),
+            ],
+        }
+
+    # Dana already replied (delivered): a follow-up send must declare meeting acceptance, not a first reply.
+    with pytest.raises(ValueError, match="must be declared"):
+        _parse_call(send_distribution(), _canonical_world([replied]), _call())
+    _parse_call(meeting_distribution(), _canonical_world([replied]), _call())
+    # Without a delivered reply from this counterparty the precondition does not hold.
+    with pytest.raises(ValueError, match="must be declared"):
+        _parse_call(meeting_distribution(), _canonical_world([undelivered]), _call())
+    other = _call(channel="email", to_email="sam@other.vc", message="Hi Sam")
+    with pytest.raises(ValueError, match="must be declared"):
+        _parse_call(meeting_distribution(), _canonical_world([replied]), other)
+    _parse_call(send_distribution(), _canonical_world([replied]), other)
+
+
+def test_provider_boundary_rejects_an_undeclared_send_for_protocol_repair():
+    from benchmarks.wmh_rose_provider import _require_wmh_prediction
+
+    state = _canonical_world()
+    evidence = {"candidate_response": {"tool_calls": [{"call_id": "call-1", "arguments": dict(_call(), timestamp_ms=START)}]},
+                "environment_state": state}
+    request = {"messages": [{"role": "user", "content": json.dumps(evidence)}]}
+    kwargs = dict(protocol=OUTCOME_V4_PROTOCOL, expected_call_ids=("call-1",), base_state=state, request=request)
+    with pytest.raises(Exception, match="must be declared"):
+        _require_wmh_prediction(json.dumps(_undeclared_send()), {}, "m", **kwargs)
+    _require_wmh_prediction(json.dumps(send_distribution()), {}, "m", **kwargs)
+
+
+def test_canonical_fixture_applicability_is_structured_and_validated():
+    from benchmarks.wmh_context_insertion import load_canonical_base_rates, validated_base_rates
+
+    rates = {rate["key"]: rate for rate in load_canonical_base_rates()}
+    send = [{"category": "message", "tool": "message_transport_send", "argument": "to_email"}]
+    assert {k for k, r in rates.items() if "applies_to" in r} == {"cold_reply", "warm_reply", "meeting_accepted"}
+    assert all(rates[k]["applies_to"] == send for k in ("cold_reply", "warm_reply", "meeting_accepted"))
+    assert rates["cold_reply"]["group"] == rates["warm_reply"]["group"] == "first_response"
+    assert rates["meeting_accepted"]["precondition"]["present"] is True
+    bad = deepcopy(list(rates.values()))
+    bad[0]["precondition"]["delivered_base_rate_keys"] = ["unlisted"]
+    with pytest.raises(ValueError, match="unlisted"):
+        validated_base_rates(bad)
+    bad = deepcopy(list(rates.values()))
+    bad[0].pop("applies_to")
+    with pytest.raises(ValueError, match="precondition"):
+        validated_base_rates(bad)

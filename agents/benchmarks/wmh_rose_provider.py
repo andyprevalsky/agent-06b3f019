@@ -471,6 +471,7 @@ def _require_wmh_prediction(
                 protocol=protocol,
                 at_ms=candidate.get("timestamp_ms") if candidate else None,
                 action_category=candidate.get("category") if candidate else None,
+                action_arguments=candidate,
             )
         except (ValueError, TypeError, KeyError) as exc:
             reason = str(exc)

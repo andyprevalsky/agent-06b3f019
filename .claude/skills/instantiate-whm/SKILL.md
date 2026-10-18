@@ -27,7 +27,11 @@ October 2026.
    values) is inserted by default as `structured.base_rates`. Under policy
    `rose-outcome-distribution-v4` a distribution that declares a matching key
    must branch on that result at the listed rate (within 0.03) or state a
-   concrete deviation reason. Researched distributions remain optional reference
+   concrete deviation reason. A rate with structured `applies_to` (exact canonical
+   category, tool and send argument, e.g. `message.message_transport_send` with
+   `to_email`) and a satisfied `precondition` must be declared by that call;
+   browser-agent sends have no structured send field and stay model-declared.
+   Researched distributions remain optional reference
    examples (`--examples`); the 12-entry
    `assets/fundraiser-examples-researched.json` is not the user's set (runs
    13-18 used it by mistake). Do not force outcomes in the runner.

@@ -47,6 +47,10 @@ BASE_RATES_TEXT = (
     "a concrete reason otherwise."
 )
 _BASE_RATE_KEYS = {"key", "probability", "event", "applies_when"}
+# Optional structured applicability: the exact candidate tools whose calls must declare the rate.
+_BASE_RATE_OPTIONAL_KEYS = {"applies_to", "group", "precondition"}
+_APPLIES_TO_KEYS = {"category", "tool", "argument"}
+_PRECONDITION_KEYS = {"counterparty_argument", "delivered_base_rate_keys", "present"}
 _RATE_KEY_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_")
 
 WARMTH_KEY = "derived_warmth"
@@ -133,8 +137,8 @@ def validated_base_rates(rates: Any) -> list[dict[str, Any]]:
         raise ValueError("Base rates must be a nonempty list")
     validated, keys = [], set()
     for rate in rates:
-        if not isinstance(rate, dict) or set(rate) != _BASE_RATE_KEYS:
-            raise ValueError("Each base rate needs exactly key, probability, event and applies_when")
+        if not isinstance(rate, dict) or not _BASE_RATE_KEYS <= set(rate) <= _BASE_RATE_KEYS | _BASE_RATE_OPTIONAL_KEYS:
+            raise ValueError("Each base rate needs key, probability, event and applies_when (plus optional applicability)")
         key = _text(rate["key"], "Base rate key")
         if not set(key) <= _RATE_KEY_CHARS or key in keys:
             raise ValueError(f"{key}: base rate keys must be unique snake_case")
@@ -142,15 +146,49 @@ def validated_base_rates(rates: Any) -> list[dict[str, Any]]:
         probability = rate["probability"]
         if isinstance(probability, bool) or not isinstance(probability, (int, float)) or not 0 < probability < 1:
             raise ValueError(f"{key}: base rate probability must be strictly between 0 and 1")
-        validated.append(
-            {
-                "key": key,
-                "probability": float(probability),
-                "event": _text(rate["event"], f"{key}: event"),
-                "applies_when": _text(rate["applies_when"], f"{key}: applies_when"),
-            }
-        )
+        entry = {
+            "key": key,
+            "probability": float(probability),
+            "event": _text(rate["event"], f"{key}: event"),
+            "applies_when": _text(rate["applies_when"], f"{key}: applies_when"),
+        }
+        entry.update(_validated_applicability(rate, key))
+        validated.append(entry)
+    for entry in validated:
+        listed = (entry.get("precondition") or {}).get("delivered_base_rate_keys", ())
+        if not set(listed) <= keys:
+            raise ValueError(f"{entry['key']}: precondition names an unlisted base rate")
     return validated
+
+
+def _validated_applicability(rate: dict[str, Any], key: str) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    if "applies_to" in rate:
+        targets = rate["applies_to"]
+        if not isinstance(targets, list) or not targets:
+            raise ValueError(f"{key}: applies_to must be a nonempty list")
+        for target in targets:
+            if not isinstance(target, dict) or set(target) != _APPLIES_TO_KEYS:
+                raise ValueError(f"{key}: applies_to entries need exactly category, tool and argument")
+            for field in _APPLIES_TO_KEYS:
+                _text(target[field], f"{key}: applies_to {field}")
+        result["applies_to"] = deepcopy(targets)
+    if "group" in rate:
+        result["group"] = _text(rate["group"], f"{key}: group")
+    if "precondition" in rate:
+        condition = rate["precondition"]
+        if (
+            "applies_to" not in rate
+            or not isinstance(condition, dict)
+            or set(condition) != _PRECONDITION_KEYS
+            or not isinstance(condition["present"], bool)
+            or not isinstance(condition["delivered_base_rate_keys"], list)
+            or not condition["delivered_base_rate_keys"]
+        ):
+            raise ValueError(f"{key}: precondition needs applies_to plus counterparty_argument, keys and present")
+        _text(condition["counterparty_argument"], f"{key}: precondition counterparty_argument")
+        result["precondition"] = deepcopy(condition)
+    return result
 
 
 def load_canonical_base_rates(path: Path = CANONICAL_BASE_RATES_PATH) -> list[dict[str, Any]]:

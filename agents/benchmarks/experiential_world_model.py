@@ -617,6 +617,7 @@ class ParallelWorldModel:
                                 protocol=self.execution_policy.response_protocol,
                                 at_ms=world_started,
                                 action_category=call.arguments.get("category"),
+                                action_arguments=call.arguments,
                                 reserved_event_ids=frozenset(
                                     e["id"] for e in hidden if isinstance(e, dict) and isinstance(e.get("id"), str)
                                 ),

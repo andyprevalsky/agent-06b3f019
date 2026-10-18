@@ -70,7 +70,7 @@ Keep two things apart.
 1. Do not make up history. Never fabricate pre-existing records that this action did not cause: earlier correspondence, introductions, applications, investor interest, commitments, signed documents, deposits, private documents, citations or record IDs, or company legal, product, traction, ownership or financial facts that the state and history do not establish. Retrieved demonstrations come from other worlds; their private facts are not facts of this world. When the action needs an unknown fact, such as a form field asking for unestablished traction figures, report that specific blocker. A request to submit or send without the content it needs yields that missing-information result, not a success.
 2. Do simulate the result of the intended action. Research, lookups and inbox checks return realistic findings consistent with the fixture, including candidates inferred from its derived signals (for example warm contacts inferred from message counts, contact frequency and investor-like email domains), labeled as inferred. Public pages, forms and contact routes are instantiated plausibly. Sends and submissions are delivered, bounce or fail. Counterparties reply, pass, propose and hold meetings, commit, sign and wire at realistic rates. Missing prior evidence never rules out a result that this action itself can cause.
 
-Base rates: structured.base_rates lists keyed base rates for this world. They are the default probability distribution for the matching result. When one matches a result this action can cause, declare it in base_rates and give every outcome a base_rate_results entry stating whether that event happens in the outcome. The probability of the outcomes in which it happens must equal the listed probability within 0.03 unless the state gives a concrete reason otherwise; state that reason in deviation_reason. Set "given" to an earlier declared key when the rate is conditional on that event (for example meeting acceptance given a reply); such a key appears in base_rate_results only for outcomes in which the given event happens. When no base rate matches, use an empty base_rates list and empty base_rate_results objects.
+Base rates: structured.base_rates lists keyed base rates for this world. They are the default probability distribution for the matching result. When one matches a result this action can cause, declare it in base_rates and give every outcome a base_rate_results entry stating whether that event happens in the outcome. The probability of the outcomes in which it happens must equal the listed probability within 0.03 unless the state gives a concrete reason otherwise; state that reason in deviation_reason. Set "given" to an earlier declared key when the rate is conditional on that event (for example meeting acceptance given a reply); such a key appears in base_rate_results only for outcomes in which the given event happens. A listed rate that names an applies_to tool must be declared whenever the candidate call matches it (same category, tool name and a nonempty named argument) and its precondition holds in the state; when several such rates share a group, declare the one that fits. When no base rate matches, use an empty base_rates list and empty base_rate_results objects.
 
 state_patch is an ordered JSON Patch array against the supplied environment_state. Use only {"op":"add","path":"/key","value":...}, {"op":"replace","path":"/existing/key","value":...}, or {"op":"remove","path":"/existing/key"}. Paths are JSON pointers: escape ~ as ~0 and / as ~1; array indices are zero-based, and /array/- appends only for add. Parent paths must already exist, replace/remove targets must exist, and the empty root path is forbidden. An empty patch retains the state unchanged. Preserve all unrelated state and prior facts, including existing lists; append new entries rather than replacing their history. Each patch belongs solely to its own outcome and must contain only effects of that result, with matching receipts for completed effects."""
 
@@ -128,6 +128,60 @@ def world_base_rates(state: dict) -> dict:
     return result
 
 
+def _applies_to_call(entry: dict, action: dict) -> bool:
+    arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+    for target in entry.get("applies_to") or ():
+        if (
+            isinstance(target, dict)
+            and target.get("category") == action.get("category")
+            and target.get("tool") == action.get("name")
+            and isinstance(arguments.get(target.get("argument")), str)
+            and arguments[target["argument"]].strip()
+        ):
+            return True
+    return False
+
+
+def _precondition_holds(entry: dict, action: dict, state: dict) -> bool:
+    """Structured state precondition: whether this counterparty already has a delivered
+    event realizing one of the listed rates (exact address match, not content reading)."""
+    condition = entry.get("precondition")
+    if condition is None:
+        return True
+    arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+    counterparty = arguments.get(condition.get("counterparty_argument"))
+    counterparty = counterparty.strip().lower() if isinstance(counterparty, str) else ""
+    keys = set(condition.get("delivered_base_rate_keys") or ())
+    present = bool(counterparty) and any(
+        isinstance(event, dict)
+        and DELIVERED_AT_KEY in event
+        and event.get("base_rate_key") in keys
+        and isinstance(event.get("from"), str)
+        and counterparty in event["from"].lower()
+        for event in _events(state)
+    )
+    return present is condition.get("present")
+
+
+def required_base_rate_groups(state: dict, action: dict | None) -> dict:
+    """``{group: {keys}}`` of listed rates that this exact candidate call must declare."""
+    structured = state.get("structured") if isinstance(state, dict) else None
+    entries = structured.get(BASE_RATES_KEY) if isinstance(structured, dict) else None
+    if not isinstance(action, dict) or not isinstance(entries, list):
+        return {}
+    listed = world_base_rates(state)
+    groups: dict = {}
+    for entry in entries:
+        if (
+            isinstance(entry, dict)
+            and entry.get("key") in listed
+            and _applies_to_call(entry, action)
+            and _precondition_holds(entry, action, state)
+        ):
+            groups.setdefault(entry.get("group") or entry["key"], set()).add(entry["key"])
+    return groups
+
+
 def _events(state: dict) -> list:
     structured = state.get("structured") if isinstance(state, dict) else None
     events = structured.get(SCHEDULED_EVENTS_KEY) if isinstance(structured, dict) else None
@@ -167,6 +221,13 @@ def _validate_v4_declarations(distribution: dict, state: dict) -> list:
             raise ValueError("deviation_reason must be null or a stated reason")
         declared.append(declaration)
     return declared
+
+
+def _require_applicable_declarations(declared, state, action):
+    keys = {declaration["key"] for declaration in declared}
+    for group in required_base_rate_groups(state, action).values():
+        if not keys & group:
+            raise ValueError("A base rate that applies to this candidate tool call must be declared")
 
 
 def _validate_v4_outcome(outcome, declared, base_events, state, *, at_ms, due_ids, required_ids, reserved_ids):
@@ -330,14 +391,18 @@ def parse_distribution(
     at_ms: int | None = None,
     action_category: str | None = None,
     reserved_event_ids: frozenset = frozenset(),
+    action_arguments: dict | None = None,
 ) -> dict:
     """Validate every branch. ``protocol`` selects version 4, which also needs the
-    action's world time and category; ``reserved_event_ids`` are hidden future events."""
+    action's world time and category; ``reserved_event_ids`` are hidden future events.
+    ``action_arguments`` (the canonical candidate call) enforces applicable base rates."""
     if not isinstance(content, str) or not isinstance(base_state, dict) or not expected_call_ids:
         raise ValueError("Outcome distribution requires native state and candidate call identities")
     v4 = protocol == OUTCOME_V4_PROTOCOL
     if v4:
         timed = True
+        if action_category is None and isinstance(action_arguments, dict):
+            action_category = action_arguments.get("category")
         if type(at_ms) is not int or not isinstance(action_category, str):
             raise ValueError("Version 4 distributions require the action's world time and category")
     raw = content.strip()
@@ -356,6 +421,7 @@ def parse_distribution(
         raise ValueError("Invalid outcome distribution envelope")
     if v4:
         declared = _validate_v4_declarations(distribution, base_state)
+        _require_applicable_declarations(declared, base_state, action_arguments)
         base_events = _events(base_state)
         due = due_undelivered_events(base_state, at_ms=at_ms)
         due_ids = {event["id"] for event in due}
