@@ -45,8 +45,8 @@ Absent `shard` = legacy single run, unchanged argv/env/checks.
   "index": 0, "count": 20,
   "tasks": ["task-a", "task-b"],
   "tasks_sha256": "<sha256 of '\\n'.join(tasks)+'\\n'>",
+  "task_indexes": [0, 20],
   "runs": 3,
-  "job_prefix": "s00-",
   "group_run_id": "<shared group id>",
   "group_total": 600,
   "group_started_at": 1792287011.18
@@ -54,14 +54,14 @@ Absent `shard` = legacy single run, unchanged argv/env/checks.
 ```
 
 `tasks` must be an ordered subset of the pinned original 200-name manifest
-(`tasks_path`, TASK_NAMES_SHA unchanged). Shard concurrency = len(tasks) × runs.
+(`tasks_path`, TASK_NAMES_SHA unchanged); `task_indexes[k]` is the manifest index of `tasks[k]`. Shard concurrency = len(tasks) × runs.
 
 ### Campaign environment (run-bench-campaign.py)
 
 | Variable | Meaning |
 | --- | --- |
 | `RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER=<abs dir>` | Strict single-cohort campaigns only. Cohort readiness is published to `<dir>/ready.json`; release waits for `<dir>/release.json`; `<dir>/abort.json` aborts the cohort. |
-| `RUN_BENCH_CAMPAIGN_JOB_PREFIX=sNN-` | Job IDs become `{prefix}r{run:03d}-j{index:04d}`. Validated `^s[0-9]{2,3}-$`. |
+| `RUN_BENCH_CAMPAIGN_TASK_INDEXES=i0,i1,...` | Global manifest index per `--task`; job IDs become `r{run:03d}-j{global_index:04d}`, identical to a single-controller run, so existing job-ID validators are unchanged and IDs are unique across shards. |
 | `RUN_BENCH_CAMPAIGN_GROUP_TOTAL=<N>` | Children publish `group_total=N` instead of the shard's job count. |
 | `BENCHMARK_HUB_GROUP_RUN_ID=<id>` | Existing: preset group; the shard does not publish its own group record. |
 | `RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT=<epoch>` | Group timestamp shared by all shards. |

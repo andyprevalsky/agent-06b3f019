@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Owning regression for sharded benchmark controllers: planning, global barrier, merge."""
+from pathlib import Path
+import json, os, runpy, signal, tempfile, unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+C = runpy.run_path(str(ROOT / 'scripts/cloudbench-shard-coordinator.py'))
+TASKS = [f'task-{i:03d}' for i in range(200)]
+
+
+class FakeRunner:
+    """Popen-like runner whose shard status is scripted per world tick."""
+
+    def __init__(self, out, script):
+        self.out, self.script, self.pid, self.code, self.signals = Path(out), script, 1000 + len(script), None, []
+
+    def tick(self, n):
+        for step, (status, infra, exit_code) in sorted(self.script.items()):
+            if step <= n:
+                current = (status, infra, exit_code)
+        if 'current' not in locals():
+            return
+        status, infra, exit_code = current
+        row = dict(schema='original600-shard-status-v1', state='LIVE', observed_at=n,
+                   barrier=None if status is None else dict(status=status), infra=dict(infra_true=infra))
+        (self.out / 'shard-status.json').write_text(json.dumps(row))
+        if exit_code is not None and self.code is None:
+            self.code = exit_code
+        if self.signals and self.code is None:
+            self.code = 143  # runner joined its own supervisor after TERM
+
+    def poll(self):
+        return self.code
+
+    def wait(self):
+        return self.code
+
+    def send_signal(self, number):
+        self.signals.append(number)
+
+
+class World:
+    def __init__(self, root, scripts, max_ticks=200):
+        self.root, self.n, self.max = Path(root), 0, max_ticks
+        self.shards, self.runners = [], {}
+        for i, script in enumerate(scripts):
+            out = self.root / f'shard-{i:02d}'
+            out.mkdir()
+            self.shards.append(dict(index=i, out=out))
+            self.runners[i] = FakeRunner(out, script)
+        self.release_seen_at = {}
+
+    def spawn(self, shard):
+        return self.runners[shard['index']]
+
+    def sleep(self, seconds):
+        self.n += 1
+        if self.n > self.max:
+            raise AssertionError('coordinator did not finish')
+        for i, shard in enumerate(self.shards):
+            if (shard['out'] / 'global-release.json').exists() and i not in self.release_seen_at:
+                self.release_seen_at[i] = self.n
+            self.runners[i].tick(self.n)
+
+    def run(self, **kwargs):
+        for i in self.runners:
+            self.runners[i].tick(0)
+        return C['coordinate'](self.shards, self.spawn, self.root / 'coordination.json', sleep=self.sleep,
+                               clock=lambda: float(self.n), poll_seconds=0, **kwargs)
+
+
+class Planning(unittest.TestCase):
+    def test_original_600_on_performance_8x_uses_twenty_controllers_of_thirty_copies(self):
+        plan = C['plan_shards'](TASKS, 3)
+        self.assertEqual((plan['copies_per_controller_bound'], plan['controllers'], plan['copies']), (32, 20, 600))
+        self.assertEqual({len(s['tasks']) for s in plan['shards']}, {10})
+        self.assertEqual(sorted(t for s in plan['shards'] for t in s['tasks']), TASKS)
+        for shard in plan['shards']:  # each shard is an ordered subset of the manifest
+            self.assertEqual(shard['tasks'], sorted(shard['tasks'], key=TASKS.index))
+        indexes = sorted(i for s in plan['shards'] for i in s['task_indexes'])
+        self.assertEqual(indexes, list(range(200)))
+        for shard in plan['shards']:
+            self.assertEqual([TASKS[i] for i in shard['task_indexes']], shard['tasks'])
+
+    def test_small_campaign_keeps_one_controller(self):
+        plan = C['plan_shards'](TASKS[:10], 3)
+        self.assertEqual(plan['controllers'], 1)
+        self.assertEqual(plan['shards'][0]['tasks'], TASKS[:10])
+
+    def test_uneven_split_is_balanced_within_one_task(self):
+        plan = C['plan_shards'](TASKS[:34], 3)
+        sizes = [len(s['tasks']) for s in plan['shards']]
+        self.assertEqual(plan['controllers'], 4)
+        self.assertLessEqual(max(sizes) - min(sizes), 1)
+
+    def test_explicit_controllers_and_override(self):
+        self.assertEqual(C['plan_shards'](TASKS, 3, controllers=25)['controllers'], 25)
+        with self.assertRaisesRegex(ValueError, 'exceed'):
+            C['plan_shards'](TASKS, 3, controllers=4)
+        plan = C['plan_shards'](TASKS, 3, tasks_per_controller=50)
+        self.assertEqual(plan['controllers'], 4)
+        with self.assertRaisesRegex(ValueError, 'conflicts'):
+            C['plan_shards'](TASKS, 3, controllers=5, tasks_per_controller=50)
+
+    def test_capacity_and_runtime_budget(self):
+        self.assertEqual(C['capacity_demand'](600, 20), 660)
+        env = C['shard_runtime_env'](machine_limit=1000, other_app_objects=37, extra_destroying=1,
+                                     planned_shared_cpus=2400, baseline_shared_cpus=8, controllers=20)
+        self.assertEqual(env['CLOUDBENCH_APP_MACHINE_CEILING'], '962')
+        self.assertEqual(env['CLOUDBENCH_SHARED_CPU_GOVERNOR'], '2428')
+        self.assertEqual(env['CLOUDBENCH_SNAPSHOT_POLL_SECONDS'], '60')
+        self.assertEqual(C['shard_runtime_env'](machine_limit=1000, other_app_objects=37, extra_destroying=1,
+                         planned_shared_cpus=10, baseline_shared_cpus=0, controllers=1)['CLOUDBENCH_SNAPSHOT_POLL_SECONDS'], '15')
+
+
+class Coordination(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_release_only_after_every_shard_is_ready(self):
+        scripts = [{0: ('waiting', 0, None), 2: ('ready', 0, None), 20: ('released', 0, 0)},
+                   {0: ('waiting', 0, None), 5: ('ready', 0, None), 20: ('released', 0, 0)},
+                   {0: (None, 0, None), 9: ('ready', 0, None), 20: ('released', 0, 0)}]
+        world = World(self.tmp.name, scripts)
+        record = world.run(scheduled_total=9)
+        self.assertEqual(set(world.release_seen_at), {0, 1, 2})
+        self.assertEqual(min(world.release_seen_at.values()), 10)  # first poll after the last shard is ready
+        self.assertIsNone(record['aborted_at'])
+        self.assertEqual(record['exit_codes'], {'0': 0, '1': 0, '2': 0})
+        ids = {json.loads((s['out'] / 'global-release.json').read_text())['release_id'] for s in world.shards}
+        self.assertEqual(ids, {record['release_id']})
+
+    def test_one_shard_failing_before_release_aborts_all(self):
+        scripts = [{0: ('ready', 0, None), 12: ('aborted', 0, 1)},
+                   {0: ('waiting', 0, None), 3: ('failed', 0, None), 6: ('failed', 0, 1)},
+                   {0: ('waiting', 0, None), 12: ('aborted', 0, 1)}]
+        world = World(self.tmp.name, scripts)
+        record = world.run(scheduled_total=9)
+        self.assertEqual(world.release_seen_at, {})
+        self.assertIn('[1]', record['abort_reason'])
+        for shard in world.shards:
+            self.assertTrue((shard['out'] / 'global-abort.json').exists())
+
+    def test_runner_exit_before_release_aborts(self):
+        scripts = [{0: ('ready', 0, None), 10: ('aborted', 0, 1)}, {0: (None, 0, None), 2: (None, 0, 1)}]
+        world = World(self.tmp.name, scripts)
+        record = world.run(scheduled_total=6)
+        self.assertEqual(world.release_seen_at, {})
+        self.assertIsNotNone(record['aborted_at'])
+
+    def test_infra_threshold_terminates_every_runner_when_enabled(self):
+        scripts = [{0: ('released', 10, None)}, {0: ('released', 19, None), 4: ('released', 20, None)}]
+        world = World(self.tmp.name, scripts)
+        record = world.run(scheduled_total=600)
+        self.assertIn('30/600', record['terminate_reason'])
+        self.assertTrue(all(r.signals == [signal.SIGTERM] for r in world.runners.values()))
+
+    def test_infra_threshold_is_report_only_when_disabled(self):
+        scripts = [{0: ('released', 10, None), 6: ('released', 10, 0)},
+                   {0: ('released', 25, None), 6: ('released', 25, 0)}]
+        world = World(self.tmp.name, scripts)
+        record = world.run(scheduled_total=600, infra_early_stop='disabled')
+        self.assertIsNone(record['terminated_at'])
+        self.assertEqual(record['infra_true'], 35)
+        self.assertTrue(all(r.signals == [] for r in world.runners.values()))
+
+    def test_operator_signal_aborts_and_terminates_then_joins_all(self):
+        scripts = [{0: ('waiting', 0, None)}, {0: ('waiting', 0, None)}]
+        world = World(self.tmp.name, scripts)
+        original = world.sleep
+
+        def sleep_then_signal(seconds):
+            if world.n == 3:
+                os.kill(os.getpid(), signal.SIGTERM)
+            original(seconds)
+
+        world.sleep = sleep_then_signal
+        record = world.run(scheduled_total=6)
+        self.assertEqual(record['abort_reason'], 'operator SIGTERM')
+        self.assertTrue(all(r.signals == [signal.SIGTERM] for r in world.runners.values()))
+        self.assertEqual(set(record['exit_codes'].values()), {143})
+        self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+    def test_decision_files_are_never_replaced(self):
+        path = Path(self.tmp.name) / 'global-release.json'
+        C['write_once'](path, dict(release_id='first'))
+        C['write_once'](path, dict(release_id='second'))
+        self.assertEqual(json.loads(path.read_text())['release_id'], 'first')
+        self.assertEqual(sorted(p.name for p in Path(self.tmp.name).iterdir()), ['global-release.json'])
+
+
+class Merge(unittest.TestCase):
+    def test_combines_shards_without_inventing_missing_jobs(self):
+        a = dict(jobs=[dict(job_id='r001-j0000', status='passed', task_status='PASSED', terminal_task=True,
+                            lifecycle_verified=True, resources_released=True, infra_failure=False)])
+        b = dict(jobs=[dict(job_id='r001-j0001', status='failed', task_status='INFRA_ERROR', terminal_task=False,
+                            lifecycle_verified=False, resources_released=True, infra_failure=True)])
+        merged = C['merge']([a, b], scheduled_total=3)
+        self.assertEqual((merged['observed_jobs'], merged['missing_jobs'], merged['infra_failures']), (2, 1, 1))
+        self.assertEqual(merged['task_status'], {'INFRA_ERROR': 1, 'PASSED': 1})
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            C['merge']([a, a], scheduled_total=2)
+
+
+if __name__ == '__main__':
+    unittest.main()

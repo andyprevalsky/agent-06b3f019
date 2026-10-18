@@ -1817,5 +1817,155 @@ class Portable(unittest.TestCase):
                 CLI.prepare(args, ROOT, {}, RUNNER, directory, cap)
 
 
+
+class Sharded(unittest.TestCase):
+    """Fresh runs split across controllers sized to what one controller handles easily."""
+
+    def args(self, directory, **overrides):
+        facts = dict(app='navi-whisper-lux-bench', image_ref='registry.fly.io/fixture@sha256:'+'a'*64,
+                     protected_machines=['m1', 'm2', 'm3', 'm4'], protected_volumes=['v1'])
+        values = dict(source_ref='a'*40, facts=private(directory/'facts', facts),
+                      agents_env=private(directory/'agents.env', 'FLY_API_TOKEN=fixture\n'),
+                      backend_env=private(directory/'backend.env', 'COMPLETE=fixture\n'),
+                      tasks=private(directory/'tasks', json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())),
+                      snapshot_inventory=private(directory/'snapshot', {}), warm_deps=private(directory/'warm', 'fixture'),
+                      task_count=None, repetitions=3, controllers='auto', tasks_per_controller=None,
+                      worker_headroom=0, infra_early_stop='enabled', org='personal', extra_destroying_count=1,
+                      archive_run=[], reuse_exclude_machine=[], state_dir=directory/'state')
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def capacity(self, directory, free=1000):
+        return dict(started_epoch=time.time(), ended_epoch=time.time(), machine_limit=1000, billing_status='fixture',
+                    total_active_inventory_objects=1000-free-1, conservative_extra_destroying_bench_objects=1, apps=[],
+                    available_slots_conservative=free, new_controller_slots=1, requested_original_primary_slots=600,
+                    proof_path=str(private(directory/'capacity-proof.private.json', {})))
+
+    def test_selection_defaults_to_controllers_sized_by_copies(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            plan = CLI.shard_selection(self.args(directory), RUNNER)
+            self.assertEqual((plan['controllers'], plan['copies']), (20, 600))
+            self.assertIsNone(CLI.shard_selection(self.args(directory, controllers='1'), RUNNER))
+            ladder = CLI.shard_selection(self.args(directory, task_count=100, repetitions=1), RUNNER)
+            self.assertEqual((ladder['controllers'], ladder['copies']), (4, 100))
+            one = CLI.shard_selection(self.args(directory, task_count=10, repetitions=3), RUNNER)
+            self.assertEqual(one['controllers'], 1)  # a subset is still a shard config, not the legacy 200x3
+            with self.assertRaisesRegex(ValueError, 'task-count'):
+                CLI.shard_selection(self.args(directory, task_count=201), RUNNER)
+
+    def test_shard_prepare_binds_tasks_budget_and_sibling_controllers_only_when_sharded(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            args = self.args(directory)
+            legacy_dir, shard_dir = directory/'legacy', directory/'shard'
+            legacy_dir.mkdir(mode=0o700); shard_dir.mkdir(mode=0o700)
+            cap = self.capacity(directory)
+            legacy = json.loads(CLI.prepare(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, legacy_dir, cap).read_bytes())
+            self.assertNotIn('shard', legacy)
+            self.assertNotIn('sibling_controller_slots', json.loads((legacy_dir/'authority-template.private.json').read_bytes()))
+            self.assertEqual(json.loads((legacy_dir/'attempt-start.safe.json').read_bytes())['scheduled_total'], 600)
+            tasks = json.loads(args.tasks.read_text())[0::20]
+            shard = dict(index=0, count=20, tasks=tasks, task_indexes=list(range(0, 200, 20)), runs=3, group_run_id='g', group_total=600,
+                         group_started_at=1.0, tasks_sha256=CLI.digest(('\n'.join(tasks)+'\n').encode()))
+            env = dict(CLOUDBENCH_APP_MACHINE_CEILING='962', CLOUDBENCH_SHARED_CPU_GOVERNOR='2428')
+            value = json.loads(CLI.prepare(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, shard_dir, cap, shard=shard,
+                                           runtime_env=env, sibling_controller_slots=19, scheduled_total=600).read_bytes())
+            self.assertEqual(value['shard'], shard)
+            self.assertEqual(value['remote_env']['CLOUDBENCH_APP_MACHINE_CEILING'], '962')
+            self.assertEqual(json.loads((shard_dir/'authority-template.private.json').read_bytes())['sibling_controller_slots'], 19)
+            self.assertEqual(json.loads((shard_dir/'attempt-start.safe.json').read_bytes())['scheduled_total'], 30)
+            for key in set(legacy) - {'started_at_epoch', 'authority_template', 'remote_env', 'shard'}:
+                self.assertEqual(value[key], legacy[key], key)
+
+    def test_shared_cpu_plan_reads_the_task_revision_catalog(self):
+        tasks = json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())[:5]
+        baseline = [dict(id='a', state='started', config=dict(guest=dict(cpus=2, cpu_kind='shared'))),
+                    dict(id='b', state='stopped', config=dict(guest=dict(cpus=4, cpu_kind='shared'))),
+                    dict(id='c', state='started', config=dict(guest=dict(cpus=8, cpu_kind='performance')))]
+        planned, current = CLI.shared_cpu_plan(ROOT, RUNNER, tasks, 3, baseline)
+        self.assertEqual(current, 2)
+        self.assertGreater(planned, 0)
+        self.assertEqual(planned % 3, 0)  # every copy of each task is admitted simultaneously
+
+    def test_sharded_run_admits_once_launches_k_runners_and_merges(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            args = self.args(directory, task_count=12, repetitions=3, tasks_per_controller=4)
+            plan = CLI.shard_selection(args, RUNNER)
+            self.assertEqual(plan['controllers'], 3)
+            launched = []
+
+            class Runner:
+                def __init__(self, argv, **kwargs):
+                    self.out = Path(argv[argv.index('--output')+1])
+                    self.config = json.loads(Path(argv[argv.index('--config')+1]).read_bytes())
+                    self.env, self.pid, self.code, self.polls = kwargs['env'], 4242 + len(launched), None, 0
+                    self.out.mkdir(mode=0o700)
+                    launched.append(self)
+
+                def status(self, barrier):
+                    (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status=barrier), infra=dict(infra_true=0))))
+
+                def poll(self):
+                    self.polls += 1
+                    if (self.out/'global-release.json').exists() and self.code is None:
+                        shard = self.config['shard']
+                        jobs = [dict(job_id=f"r{r:03d}-j{i:04d}", status='passed', task_status='PASSED',
+                                     terminal_task=True, lifecycle_verified=True, resources_released=True, infra_failure=False)
+                                for r in range(1, shard['runs']+1) for i in shard['task_indexes']]
+                        export = self.out/'export'; export.mkdir(mode=0o700)
+                        (export/'disposable-export.verified.json').write_text('{}')
+                        raw = json.dumps(dict(jobs=jobs)).encode()
+                        import tarfile
+                        with tarfile.open(export/'originals.tar.gz', 'w:gz') as tar:
+                            info = tarfile.TarInfo('originals/repo/.context/benchmarks/campaigns/campaign-x/summary.json')
+                            info.size = len(raw); tar.addfile(info, io.BytesIO(raw))
+                        self.code = 0
+                    elif self.polls == 1:
+                        self.status('ready')
+                    return self.code
+
+                def wait(self):
+                    return self.code
+
+                def send_signal(self, number):
+                    raise AssertionError('no runner should be signalled')
+
+            cap = self.capacity(directory, free=700)
+            def snapshot(api, token, org, target, extra):
+                private(target/'navi-whisper-lux-bench.private.json', [])
+                return dict(cap)
+            with patch.object(CLI, 'capacity_snapshot', snapshot), \
+                 patch.object(CLI, 'shared_cpu_plan', lambda *a: (36, 0)), \
+                 patch.object(CLI.subprocess, 'Popen', Runner):
+                code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+            self.assertEqual(code, 0)
+            self.assertEqual(len(launched), 3)
+            self.assertEqual(sorted(r.env['CLOUDBENCH_GATE_NAME_SUFFIX'] for r in launched), ['s00', 's01', 's02'])
+            self.assertTrue(all(r.env['GITHUB_TOKEN'] == 'ghs_fixture' for r in launched))
+            self.assertEqual({r.config['shard']['group_run_id'] for r in launched}.__len__(), 1)
+            admission = next((directory/'state').iterdir())
+            result = json.loads((admission/'result.json').read_bytes())
+            self.assertEqual((result['observed_jobs'], result['missing_jobs'], result['infra_failures']), (36, 0, 0))
+            self.assertEqual(json.loads((admission/'capacity-proof.private.json').read_bytes())['new_machine_demand'], 45)
+
+    def test_sharded_run_refuses_before_any_runner_when_capacity_is_short(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            args = self.args(directory, task_count=12, repetitions=3, tasks_per_controller=4)
+            plan = CLI.shard_selection(args, RUNNER)
+            cap = self.capacity(directory, free=44)
+            def snapshot(api, token, org, target, extra):
+                private(target/'navi-whisper-lux-bench.private.json', [])
+                return dict(cap)
+            with patch.object(CLI, 'capacity_snapshot', snapshot), \
+                 patch.object(CLI.subprocess, 'Popen', side_effect=AssertionError('no runner may start')):
+                with self.assertRaisesRegex(ValueError, '44 free Machine slots < 45 required'):
+                    CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+
+
 if __name__ == '__main__':
     unittest.main()

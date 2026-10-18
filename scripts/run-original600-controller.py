@@ -44,6 +44,7 @@ PINS = [
     'cloudbench-reuse-index.py',
     'cloudbench-isolated-generation.py', 'cloudbench-fetch-ref.sh',
     'lib/cloudbench-archived-reuse.sh', 'run-bench-fleet', 'run-bench-cloud',
+    'cloudbench-shard-coordinator.py',
 ]
 
 
@@ -622,7 +623,8 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
     return dict(final,proof_path=str(proof_path))
 
 
-def prepare(args, root, pins, runner, directory, cap, started_at=None, host_operator_provenance=None):
+def prepare(args, root, pins, runner, directory, cap, started_at=None, host_operator_provenance=None,
+            shard=None, runtime_env=None, sibling_controller_slots=0, scheduled_total=600):
     policy = getattr(args, 'infra_early_stop', 'enabled')
     if policy not in ('enabled', 'disabled'):
         raise ValueError('invalid infrastructure early-stop policy')
@@ -642,6 +644,8 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
                 verified_epoch=cap['ended_epoch'], capacity_proof=dict(path=cap.get('proof_path',str(directory/'capacity-proof.private.json')), sha256=digest(read(cap.get('proof_path',directory/'capacity-proof.private.json')))),
                 protected_machines=facts['protected_machines'], protected_volumes=facts['protected_volumes'],
                 source_ref=args.source_ref, output_directory=str(directory/'run/export'), env_files={})
+    if sibling_controller_slots:
+        auth['sibling_controller_slots'] = sibling_controller_slots
     if len(auth['protected_machines']) < 4 or not isinstance(auth['protected_volumes'], list):
         raise ValueError('explicit protected resource cohort required')
     for key, path in [('agents', args.agents_env), ('backend', args.backend_env)]:
@@ -674,20 +678,143 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
     config = dict(schema='original600-controller-runner-v1', allowed=True, source_root=str(root),
                   source_ref=args.source_ref, source_files=pins, tasks_path=str(args.tasks),
                   started_at_epoch=stamp, authority_template=str(directory/'authority-template.private.json'),
-                  remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env),
+                  remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env, **(runtime_env or {})),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
                                 CLOUDBENCH_GATE_TIMEOUT_S='7200', PYTHONDONTWRITEBYTECODE='1'))
     if host_operator_provenance is not None:
         config['host_operator_provenance']=host_operator_provenance
     if policy != 'enabled':
         config['infra_early_stop'] = policy
+    if shard is not None:
+        config['shard'] = shard
     save(directory/'config.private.json', config)
-    save(directory/'attempt-start.safe.json', dict(scope='original200x3REAL', scheduled_total=600,
+    save(directory/'attempt-start.safe.json', dict(scope='original200x3REAL' if shard is None else 'original600-shard',
+         scheduled_total=scheduled_total if shard is None else len(shard['tasks']) * shard['runs'],
          source_ref=args.source_ref, task_ref=runner['TASK_REF'], started_at_epoch=stamp,
          original_deadline_epoch=stamp+5400, config_sha256=digest(read(directory/'config.private.json')),
          status='BOUND_NOT_LAUNCHED'))
     return directory/'config.private.json'
 
+
+
+def shard_selection(args, runner):
+    """Ordered task selection and shard plan for a fresh run (None = legacy single controller)."""
+    manifest = json.loads(runner['read'](args.tasks))
+    count = len(manifest) if args.task_count is None else args.task_count
+    if not 1 <= count <= len(manifest) or not 1 <= args.repetitions <= 10:
+        raise ValueError('--task-count must select 1..%d manifest tasks and --repetitions 1..10' % len(manifest))
+    if args.controllers == '1' and count == len(manifest) and args.repetitions == 3:
+        return None  # explicit single controller: the original 200x3 shape
+    coordinator = runpy.run_path(str(Path(__file__).with_name('cloudbench-shard-coordinator.py')))
+    controllers = args.controllers if args.controllers == 'auto' else int(args.controllers)
+    plan = coordinator['plan_shards'](manifest[:count], args.repetitions, controllers, args.tasks_per_controller)
+    legacy = plan['controllers'] == 1 and count == len(manifest) and args.repetitions == 3
+    return None if legacy else plan
+
+
+def shared_cpu_plan(root, runner, tasks, runs, bench_rows):
+    """Planned and baseline shared CPU units, from the task revision's catalog and the native baseline."""
+    import tempfile
+    campaign = runpy.run_path(str(root / 'scripts/run-bench-campaign.py'))
+    catalog = runpy.run_path(str(root / 'scripts/cloudbench_catalog.py'))
+    with tempfile.TemporaryDirectory(prefix='shard-catalog-') as scratch:
+        for name in ('tasks.json', 'polar_tasks.json'):
+            raw = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                           runner['TASK_REF'] + ':agents/benchmarks/' + name])
+            Path(scratch, name).write_bytes(raw)
+        rows = catalog['get_task_metadata'](Path(scratch, 'tasks.json'), tasks)
+    plan = campaign['stress_default_requirements'](root, rows, peak=len(tasks) * runs, baseline=bench_rows,
+                                                   repetitions=runs)
+    baseline = sum(m['config']['guest']['cpus'] for m in bench_rows
+                   if m.get('state') not in ('stopped', 'destroyed') and m['config']['guest'].get('cpu_kind') == 'shared')
+    return plan['planned_shared_cpu_units'], baseline
+
+
+def summary_from_export(export):
+    """The shard campaign summary from a verified controller export, or None."""
+    import tarfile
+    archive = Path(export) / 'originals.tar.gz'
+    if not (Path(export) / 'disposable-export.verified.json').exists() or not archive.exists():
+        return None
+    with tarfile.open(archive, 'r:gz') as stream:
+        for member in stream:
+            if member.isfile() and re.search(r'/\.context/benchmarks/campaigns/[^/]+/summary\.json$', member.name):
+                return json.loads(stream.extractfile(member).read())
+    return None
+
+
+def sharded_run(args, root, pins, runner, github, plan):
+    """One fresh admission, K shard configs, then the global-barrier coordinator over K runners."""
+    coordinator = runpy.run_path(str(root / 'scripts/cloudbench-shard-coordinator.py'))
+    parent = args.state_dir.absolute()
+    if parent.resolve(strict=True) != parent or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
+        raise ValueError('private physical current-owner state directory required')
+    binding = admission_binding(args, runner)
+    binding['shards'] = dict(controllers=plan['controllers'], copies=plan['copies'],
+                             tasks=[s['tasks'] for s in plan['shards']], runs=plan['shards'][0]['runs'])
+    directory, started_at = open_admission(parent, None, binding, runner, False)
+    token = token_from_agents(runner['read'](args.agents_env))
+    os.environ['FLY_API_TOKEN'] = token
+    capture = runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))
+    controllers, copies = plan['controllers'], plan['copies']
+    demand = coordinator['capacity_demand'](copies, controllers, args.worker_headroom)
+    print(json.dumps(dict(directory=str(directory), status='SHARDED_ADMISSION_STARTED', controllers=controllers,
+                          copies=copies, copies_per_controller_bound=plan['copies_per_controller_bound'],
+                          native_slots_required=demand)), flush=True)
+    with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
+        cap = capacity_snapshot(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
+    cap.update(qualified_reuse_count=0, new_machine_demand=demand, qualified_ids=[], new_controller_slots=controllers,
+               requested_original_primary_slots=copies, worker_headroom=args.worker_headroom)
+    if cap['available_slots_conservative'] < demand:
+        raise ValueError('insufficient measured capacity: %d free Machine slots < %d required (%d copies + %d controllers + %d canary)'
+                         % (cap['available_slots_conservative'], demand, copies, controllers,
+                            coordinator['CANARY_MACHINES_PER_CONTROLLER'] * controllers))
+    runner['save'](directory / 'capacity-proof.private.json', cap)
+    bench_rows = json.loads(read_inventory(directory / 'navi-whisper-lux-bench.private.json'))
+    tasks = [task for shard in plan['shards'] for task in shard['tasks']]
+    planned, baseline = shared_cpu_plan(root, runner, tasks, plan['shards'][0]['runs'], bench_rows)
+    env = coordinator['shard_runtime_env'](
+        machine_limit=cap['machine_limit'], other_app_objects=cap['total_active_inventory_objects'] - len(bench_rows),
+        extra_destroying=cap['conservative_extra_destroying_bench_objects'], planned_shared_cpus=planned,
+        baseline_shared_cpus=baseline, controllers=controllers)
+    group_id = 'original600-' + str(time.time_ns())
+    shards = []
+    for item in plan['shards']:
+        shard_dir = directory / ('shard-%02d' % item['index'])
+        shard_dir.mkdir(mode=0o700)
+        shard = dict(item, tasks_sha256=digest(('\n'.join(item['tasks']) + '\n').encode()), group_run_id=group_id,
+                     group_total=copies, group_started_at=started_at)
+        config = prepare(args, root, pins, runner, shard_dir, cap, started_at=started_at, shard=shard,
+                         runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies)
+        shards.append(dict(index=item['index'], out=shard_dir / 'run', config=str(config),
+                           config_sha256=digest(runner['read'](config))))
+    runner['save'](directory / 'shards.private.json', dict(plan=plan, runtime_env=env, group_run_id=group_id,
+                   shards=[dict(s, out=str(s['out'])) for s in shards]))
+    runner['save'](directory / 'controller-launch.intent.json', dict(sharded=True, controllers=controllers,
+                   shards=[dict(config_path=s['config'], config_sha256=s['config_sha256'], run_directory=str(s['out']))
+                           for s in shards]))
+    print(json.dumps(dict(directory=str(directory), status='LAUNCHING_SHARDS', controllers=controllers,
+                          source_ref=args.source_ref)), flush=True)
+    runner_path = root / 'scripts/cloudbench-original600-runner.py'
+
+    def spawn(shard):
+        env_vars = dict(os.environ, GITHUB_TOKEN=github, CLOUDBENCH_GATE_NAME_SUFFIX='s%02d' % shard['index'])
+        with open(Path(shard['out']).parent / 'runner.private.log', 'xb') as log:
+            return subprocess.Popen([sys.executable, str(runner_path), '--config', shard['config'], '--config-sha256',
+                                     shard['config_sha256'], '--output', str(shard['out'])],
+                                    cwd=root, env=env_vars, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+    record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=copies,
+                                       infra_early_stop=args.infra_early_stop)
+    summaries = [summary_from_export(Path(s['out']) / 'export') for s in shards]
+    merged = coordinator['merge']([v for v in summaries if v is not None], copies)
+    merged.update(shards_without_summary=[s['index'] for s, v in zip(shards, summaries) if v is None],
+                  coordination=record)
+    runner['save'](directory / 'result.json', merged)
+    print(json.dumps(dict(directory=str(directory), status='SHARDS_JOINED', result=str(directory / 'result.json'),
+                          observed_jobs=merged['observed_jobs'], missing_jobs=merged['missing_jobs'],
+                          infra_failures=merged['infra_failures'])), flush=True)
+    return 0 if all(code == 0 for code in record['exit_codes'].values()) and not merged['missing_jobs'] else 1
 
 
 def payload_guard_failure(runner, output, evidence, original_config, original_sha, raw, receipt):
@@ -1540,7 +1667,14 @@ def main():
     parser.add_argument('--pre-reservation-failure', type=Path, help='Positive joined pre-reservation failure receipt')
     parser.add_argument('--org', choices=['personal'], default='personal')
     parser.add_argument('--extra-destroying-count', type=int, default=1)
+    parser.add_argument('--controllers', default='auto', help="'auto' (copies one controller handles easily) or an explicit controller count; 1 = single controller")
+    parser.add_argument('--tasks-per-controller', type=int, help='explicit tasks per controller (all repetitions of a task share one controller)')
+    parser.add_argument('--task-count', type=int, help='run only the first N manifest tasks (diagnostic ladder)')
+    parser.add_argument('--repetitions', type=int, default=3, help='copies per task (default 3)')
+    parser.add_argument('--worker-headroom', type=int, default=0, help='extra native Machine slots to require for autoscaled workers')
     args = parser.parse_args()
+    if args.controllers != 'auto' and not re.fullmatch('[1-9][0-9]{0,2}', args.controllers):
+        raise ValueError("--controllers must be 'auto' or a positive integer")
     os.umask(0o077)
     root = Path(__file__).resolve().parents[1]
     pins = source(root, args.source_ref)
@@ -1587,7 +1721,14 @@ def main():
         preparation_plan(args, runner)
     bound = bound_launch_plan(args, runner) if args.resume_bound_launch else None
     if not args.run:
-        print(json.dumps(dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=0, infra_early_stop=args.infra_early_stop)))
+        check = dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=0, infra_early_stop=args.infra_early_stop)
+        plan = None if (args.archive_run or args.resume_admission) else shard_selection(args, runner)
+        if plan is not None:
+            check.update(controllers=plan['controllers'], copies=plan['copies'],
+                         copies_per_controller_bound=plan['copies_per_controller_bound'],
+                         native_slots_required=runpy.run_path(str(root/'scripts/cloudbench-shard-coordinator.py'))['capacity_demand'](
+                             plan['copies'], plan['controllers'], args.worker_headroom))
+        print(json.dumps(check))
         return 0
     if bound is not None:
         return resume_bound_launch(args, root, runner, bound, github)
@@ -1595,6 +1736,11 @@ def main():
         return resume_incomplete_admission(args,root,runner,github)
     if args.prepare_admission_request:
         return prepare_admission_request(args, root, runner)
+    plan = None if (args.archive_run or args.resume_admission) else shard_selection(args, runner)
+    if plan is not None:
+        return sharded_run(args, root, pins, runner, github, plan)
+    if args.task_count is not None or args.repetitions != 3 or args.controllers not in ('auto', '1'):
+        raise ValueError('archived reuse and continuations run the original single-controller 200x3 shape only')
     parent = args.state_dir.absolute()
     if parent.resolve(strict=True) != parent or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
         raise ValueError('private physical current-owner state directory required')
