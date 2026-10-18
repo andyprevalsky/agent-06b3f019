@@ -71,6 +71,44 @@ controller_machine_creation_admission() {
   echo "Controller capacity gap: reuse an existing retained controller; new Machine creation requires measured admission, which this entrypoint does not provide." >&2
   return 78
 }
+# The typed no-effect receipt lets an external cleanup owner end without a
+# provider audit. It is provable only before the first custody directory,
+# workspace-volume or Machine intent; that section clears this flag for good.
+GATE_NO_EFFECT_PROVABLE=1
+gate_no_effect_receipt() {
+  [ -n "${CLOUDBENCH_GATE_NO_EFFECT_RECEIPT:-}" ] || return 0
+  [ "$GATE_NO_EFFECT_PROVABLE" = 1 ] || { echo "no-effect receipt refused: allocation intents may exist" >&2; return 1; }
+  python3 -I -B - "$CLOUDBENCH_GATE_NO_EFFECT_RECEIPT" "$1" "$2" "$$" "${CLOUDBENCH_GATE_EXPORT_DIR:-}" <<'PY_NO_EFFECT'
+import json, os
+from pathlib import Path
+import sys
+path=Path(sys.argv[1]).absolute();reason=sys.argv[2]
+assert reason in ('github-token-missing','controller-admission-refused')
+assert path.parent.resolve(strict=True)==path.parent
+info=path.parent.stat()
+assert info.st_uid==os.getuid() and not info.st_mode&0o077
+# Intents live in the export directory; once it exists no-effect is unprovable.
+assert not sys.argv[5] or not os.path.lexists(sys.argv[5])
+value=dict(schema='original600-gate-preallocation-failure-v1',
+           reason=reason,source_ref=sys.argv[3],gate_pid=int(sys.argv[4]),
+           allocation_attempted=False)
+fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+try:os.fsync(fd)
+finally:os.close(fd)
+PY_NO_EFFECT
+}
+# Admission only reads the provider and writes local reservation markers, so a
+# refusal at these early sites is a typed pre-provider failure.
+early_controller_admission() {
+  local status=0
+  controller_machine_creation_admission || status=$?
+  [ "$status" = 0 ] && return 0
+  gate_no_effect_receipt controller-admission-refused "${CLOUDBENCH_GATE_REF:-$(git rev-parse HEAD)}" || true
+  exit "$status"
+}
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0
 fi
@@ -92,7 +130,7 @@ with os.fdopen(os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as f:
 PY_LAUNCH_PAYLOAD
   GATE_PAYLOAD_FILES=(--file-local "/tmp/controller-launch-payload.json.gz=$CLOUDBENCH_GATE_PAYLOAD_FILE")
 fi
-controller_machine_creation_admission || exit $?
+early_controller_admission
 # Bash reads a script incrementally. A fix landing in this file while a gate is
 # running (2026-10-06) made the running controller resume at a shifted offset
 # and die with a syntax error after GATE_RESULT, before it could fetch the
@@ -186,7 +224,7 @@ fi
 
 # This public route always allocates a controller. Existing-controller reuse
 # requires the separately verified retained-host caller, never an implicit run.
-controller_machine_creation_admission || exit $?
+early_controller_admission
 
 if [ -z "${FLY_API_TOKEN:-}" ]; then
   FLY_API_TOKEN="$(grep -E '^FLY_API_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
@@ -215,28 +253,7 @@ if [ -z "$GITHUB_TOKEN_VALUE" ]; then
 fi
 if [ -z "$GITHUB_TOKEN_VALUE" ]; then
   echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)" >&2
-  if [ -n "${CLOUDBENCH_GATE_NO_EFFECT_RECEIPT:-}" ]; then
-    # This explicit failure precedes workspace/create intents and every
-    # provider allocation. Unknown later failures never get this receipt.
-    python3 -I -B - "$CLOUDBENCH_GATE_NO_EFFECT_RECEIPT" "$GATE_REF" "$$" <<'PY_NO_EFFECT'
-import json, os
-from pathlib import Path
-import sys
-path=Path(sys.argv[1]).absolute()
-assert path.parent.resolve(strict=True)==path.parent
-info=path.parent.stat()
-assert info.st_uid==os.getuid() and not info.st_mode&0o077
-value=dict(schema='original600-gate-preallocation-failure-v1',
-           reason='github-token-missing',source_ref=sys.argv[2],gate_pid=int(sys.argv[3]),
-           allocation_attempted=False)
-fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-with os.fdopen(fd,'w') as stream:
-    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
-fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
-try:os.fsync(fd)
-finally:os.close(fd)
-PY_NO_EFFECT
-  fi
+  gate_no_effect_receipt github-token-missing "$GATE_REF" || true
   exit 1
 fi
 
@@ -303,6 +320,8 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Custody, workspace-volume and Machine intents may exist from here on.
+GATE_NO_EFFECT_PROVABLE=0
 if [ "$EXPORT_HOST" = 1 ]; then
   case "$IMAGE_REF" in *@sha256:*) ;; *) echo "controller export requires a pinned image digest" >&2; exit 2 ;; esac
   GATE_EXPORT_HELPER="$(mktemp -t cloudbench-export-helper.XXXXXX)"

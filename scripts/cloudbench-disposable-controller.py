@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One explicitly admitted disposable controller; root caller retains teardown ownership."""
-import argparse,base64,hashlib,json,os,re,signal,stat,subprocess,time
+import argparse,base64,hashlib,json,os,random,re,signal,stat,subprocess,time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -8,6 +8,33 @@ class Deadline(Exception):pass
 
 class VolumeNotFound(Exception):
     pass
+
+# A received rate-limit/transient refusal of a GET had no provider effect, so the
+# read alone is repeated. Writes, transport loss and every other status stay terminal.
+TRANSIENT_READ_STATUSES=frozenset({429,500,502,503,504})
+READ_ATTEMPTS=6
+
+def read_retry_delay(failures,status,limit):
+    """Jittered 2->20 s backoff, only while the delay and one bounded read fit ``limit``."""
+    if status not in TRANSIENT_READ_STATUSES or failures>=READ_ATTEMPTS:return None
+    delay=random.uniform(.5,1)*min(20,2**failures)
+    return delay if delay+20<limit else None
+
+def action_budget(limit,reserve=25):
+    """Seconds left for GET-only waiting inside the active whole-action deadline."""
+    remaining=signal.getitimer(signal.ITIMER_REAL)[0]
+    return min(limit,remaining-reserve)if remaining else limit
+
+def released_volume(api,volume_id,end):
+    """After an accepted DELETE, re-read only until Fly reports deletion or ``end``.
+
+    Fly answers DELETE and then reports ``waiting_for_detach`` until the host
+    detach completes; one immediate read is not a deletion decision."""
+    while True:
+        native=api('GET','/volumes/'+volume_id)
+        need(native is None or native.get('id')==volume_id,'workspace identity changed during deletion')
+        if native is None or native.get('state')in('pending_destroy','destroyed') or time.monotonic()+2>=end:return native
+        time.sleep(2)
 
 def need(value,message):
     if not value:raise ValueError(message)
@@ -87,8 +114,9 @@ def env_files(a,directory):
         target=directory/('current-'+key+'.private.env')
         with os.fdopen(os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb')as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
 
-def admit(a,api):
+def admit(a,api,fresh=True):
     rows=api('GET','/machines');need(isinstance(rows,list),'full current inventory required')
+    need(not fresh or time.time()-a['verified_epoch']<=300,'stale creation authority')
     ids=[r['id']for r in rows];need(len(ids)==len(set(ids)),'duplicate Machine inventory')
     # K controllers admitted from one measured snapshot: each reserves room for
     # its K-1 siblings, and later siblings may observe the earlier ones.
@@ -176,11 +204,9 @@ def cleanup(a,auth_sha,path,directory,api):
         except Deadline as error:
             if not getattr(error,'reconcile_timeout',False):raise
         except Exception:pass
-    for unused in range(40):
-        native=api('GET','/volumes/'+vid)
-        if native is None or native.get('state')in('pending_destroy','destroyed'):
-            save(directory/'disposable-controller.release.json',dict(machine_id=mid,volume_id=vid,volume_disposition='ABSENT'if native is None else native['state'],machine_deleted=True));return
-        time.sleep(1)
+    native=released_volume(api,vid,time.monotonic()+action_budget(180))
+    if native is None or native.get('state')in('pending_destroy','destroyed'):
+        save(directory/'disposable-controller.release.json',dict(machine_id=mid,volume_id=vid,volume_disposition='ABSENT'if native is None else native['state'],machine_deleted=True));return
     raise ValueError('workspace deletion pending; no repeat')
 
 def cleanup_workspace(a,auth_sha,path,directory,api):
@@ -208,7 +234,7 @@ def cleanup_workspace(a,auth_sha,path,directory,api):
         except Deadline as error:
             if not getattr(error,'reconcile_timeout',False):raise
         except Exception:pass
-    after=api('GET','/volumes/'+v['volume_id'])
+    after=released_volume(api,v['volume_id'],time.monotonic()+action_budget(180))
     need(after is None or after.get('state')in('pending_destroy','destroyed'),'workspace deletion pending; GET-only reconciliation required')
     save(directory/'disposable-controller.release.json',dict(machine_id=None,volume_id=v['volume_id'],volume_disposition='ABSENT'if after is None else after['state'],no_live_machine_observed=True,command_history_verified=False))
 
@@ -236,18 +262,37 @@ def main():
             observations=args.directory/('native-'+args.action+'-'+str(time.monotonic_ns()))
             observations.mkdir(mode=0o700)
         sequence=0
+        def read_limit():
+            # Remaining whole-action time; a creation admission also stays
+            # inside its measured authority's 300 s freshness window.
+            limit=signal.getitimer(signal.ITIMER_REAL)[0]or float('inf')
+            if args.action=='admit':limit=min(limit,a['verified_epoch']+300-time.time())
+            return limit
         def api(method,path,body=None):
+            failures=0
+            while True:
+                status=[]
+                try:return attempt(method,path,body,status)
+                except Exception as error:
+                    delay=None
+                    if method=='GET' and status and status[-1]in TRANSIENT_READ_STATUSES and isinstance(error,scope['CaptureFailure']):
+                        failures+=1;delay=read_retry_delay(failures,status[-1],read_limit())
+                    if delay is None:raise
+                time.sleep(delay)
+        def attempt(method,path,body,status):
             nonlocal sequence
             sequence+=1
             prefix=observations/('observation-%06d'%sequence)if observations is not None else None
             if prefix is not None:
                 save(prefix.with_suffix('.request.json'),dict(method=method,path=path,body=body))
-            def observed(observed_method,observed_path,status,payload):
+            def observed(observed_method,observed_path,code,payload):
                 need(observed_method==method and observed_path==path,'native observation request changed')
-                save(prefix.with_suffix('.raw.json'),dict(method=method,path=path,status=status,body_base64=base64.b64encode(payload).decode(),body_sha256=hashlib.sha256(payload).hexdigest()))
+                status.append(code)
+                if prefix is not None:
+                    save(prefix.with_suffix('.raw.json'),dict(method=method,path=path,status=code,body_base64=base64.b64encode(payload).decode(),body_sha256=hashlib.sha256(payload).hexdigest()))
             with bounded(20,reconcile_timeout=True):
                 try:
-                    value=client.api(method,path,body,timeout=20,observer=observed if prefix is not None else None)
+                    value=client.api(method,path,body,timeout=20,observer=observed)
                     if method=='GET' and path.startswith('/volumes/'):
                         need(isinstance(value,dict),'native response must be an object')
                     return value
@@ -260,7 +305,7 @@ def main():
         elif args.action=='continue-allocation':
             reserve(args.authority,a,digest,args.driver_pid,allow_new=False)
             unused,native=volume(a,args.workspace,api);need(native.get('attached_machine_id')is None and native.get('auto_backup_enabled')is False,'allocation not ready for one controller')
-            admit(a,api)
+            admit(a,api,fresh=False)
         elif args.action=='backup-off':backup_off(a,args.workspace,args.directory,api)
         elif args.action=='cleanup-workspace':cleanup_workspace(a,digest,args.workspace,args.directory,api)
         elif args.action=='seal':seal(a,digest,args.workspace,args.directory,args.machine,args.name,args.image,api)

@@ -1517,6 +1517,10 @@ class Portable(unittest.TestCase):
         else:
             start=source.rfind('if [ -z "$GITHUB_TOKEN_VALUE" ]; then',0,message)
             block=source[start:source.index('\nfi\n',message)+3]
+        if 'gate_no_effect_receipt() {' in source:
+            # The shared typed writer (and its provability flag) precede every refusal site.
+            writer=source.index('GATE_NO_EFFECT_PROVABLE=1\n')
+            block=source[writer:source.index('\nPY_NO_EFFECT\n}\n',writer)+len('\nPY_NO_EFFECT\n}\n')]+block
         with tempfile.TemporaryDirectory() as name:
             out=Path(name);out.chmod(0o700);receipt=out/'early.json';export=out/'export';ref='a'*40
             env=dict(os.environ,CLOUDBENCH_GATE_NO_EFFECT_RECEIPT=str(receipt),GATE_REF=ref)

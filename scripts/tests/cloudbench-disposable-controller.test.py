@@ -40,14 +40,25 @@ class FakeAPI:
                            auto_backup_enabled=True)
         self.delete_raises = False
         self.ignore_backup_put = False
+        # Received HTTP refusals, consumed per request: {(method, path): [status, ...]}.
+        self.refusals = {}
+        # GET reads that still report Fly's accepted-deletion state before it settles.
+        self.detach_reads = None
 
     def __call__(self, method, path, body=None):
         self.calls.append((method, path, copy.deepcopy(body)))
+        pending = self.refusals.get((method, path))
+        if pending:
+            raise sys.modules['disposable_controller_test_boundary'].Refused(pending.pop(0))
         if method == 'GET' and path == '/machines':
             return copy.deepcopy(self.machines)
         if method == 'GET' and path == '/machines/' + MID:
             return copy.deepcopy(self.machine)
         if method == 'GET' and path == '/volumes/' + VID:
+            if self.volume['state'] == 'waiting_for_detach':
+                if self.detach_reads <= 0:
+                    self.volume['state'] = 'destroyed'
+                self.detach_reads -= 1
             return copy.deepcopy(self.volume)
         if method == 'PUT' and path == '/volumes/' + VID:
             if not self.ignore_backup_put:
@@ -60,14 +71,88 @@ class FakeAPI:
                 raise TimeoutError('ambiguous response after actual fake deletion')
             return None
         if method == 'DELETE' and path == '/volumes/' + VID:
-            self.volume['state'] = 'pending_destroy'
+            self.volume['state'] = 'pending_destroy' if self.detach_reads is None else 'waiting_for_detach'
             if self.delete_raises:
                 raise TimeoutError('ambiguous volume response')
             return None
         raise UnexpectedBoundary('unexpected boundary: ' + repr((method, path, body)))
 
 
-class DisposableController(unittest.TestCase):
+# Same fixture boundary in-process (stateful FakeAPI) and inside an actual gate
+# subprocess (one private scripted-response file); every refusal is a received status.
+TRANSPORT = '''import json, os
+from pathlib import Path
+class CaptureFailure(Exception): pass
+try:
+ import disposable_controller_test_boundary as boundary
+except ImportError:
+ boundary = None
+if boundary is not None:
+ API, NotFound, Refused = boundary.API, boundary.NotFound, boundary.Refused
+else:
+ class NotFound(Exception): pass
+ class Refused(Exception):
+  def __init__(self, status): self.status = status
+ def API(method, path, body=None):
+  state_path = Path(os.environ["FIXTURE_FLY_STATE"])
+  state = json.loads(state_path.read_text())
+  state["calls"].append([method, path])
+  plan = state["plan"].get(method + " " + path, [])
+  outcome = plan.pop(0) if plan else 200
+  state_path.write_text(json.dumps(state))
+  if outcome != 200: raise Refused(outcome)
+  if method == "GET" and path == "/machines": return state["machines"]
+  raise AssertionError("unexpected subprocess boundary: " + method + " " + path)
+class Fly:
+ def __init__(self, app, token): assert app == "navi-whisper-lux-bench" and token == "fixture-token"
+ def api(self, method, path, body=None, timeout=None, observer=None):
+  assert timeout == 20
+  try: value=API(method, path, body)
+  except NotFound:
+   if observer is not None: observer(method,path,404,b"not found")
+   raise
+  except Refused as error:
+   if observer is not None: observer(method,path,error.status,b"refused")
+   raise CaptureFailure("Machines API %s %s returned HTTP %s" % (method, path, error.status)) from None
+  if observer is not None: observer(method,path,200,json.dumps(value).encode())
+  return value
+def resolve_token(request): raise AssertionError("no credential fallback in fixture")
+'''
+EXPORTER = '''def verify(args):
+ assert args.archive.read_bytes() == b"archive-original"
+ assert args.manifest.read_bytes() == b"manifest-original"
+ assert args.record.read_bytes() == b"launch-original"
+ assert args.caller.read_bytes() == b"caller-original"
+if __name__ == "__main__":
+ import json, os, sys
+ assert sys.argv[1] == "caller"
+ fd = os.open(sys.argv[sys.argv.index("--record") + 1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+ with os.fdopen(fd, "w") as out: json.dump(dict(fixture="caller", driver_pid=int(sys.argv[sys.argv.index("--driver-pid") + 1])), out)
+'''
+PREFLIGHT = (Path(__file__).resolve().parents[1] / 'cloudbench-operator-preflight.py').read_text()
+
+
+class FakeClock:
+    """Monotonic time advanced only by the controller's own sleeps."""
+    def __init__(self):
+        self.real = time.monotonic
+        self.offset = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.real() + self.offset
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.offset += seconds
+
+    def patched(self):
+        return patch.multiple(S['main'].__globals__['time'], monotonic=self.monotonic, sleep=self.sleep)
+
+
+class ControllerFixture(unittest.TestCase):
+    GATE_SOURCE = '# fixture gate\n'
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -79,34 +164,15 @@ class DisposableController(unittest.TestCase):
         boundary = types.ModuleType('disposable_controller_test_boundary')
         boundary.API = self.api
         boundary.NotFound = type("NotFound", (Exception,), {})
+        boundary.Refused = type("Refused", (Exception,), {'__init__': lambda self, status: setattr(self, 'status', status)})
         self.modules = patch.dict(sys.modules, disposable_controller_test_boundary=boundary)
         self.modules.start()
         self.addCleanup(self.modules.stop)
-        transport = '''from disposable_controller_test_boundary import API
-NotFound=__import__("disposable_controller_test_boundary").NotFound
-class Fly:
- def __init__(self, app, token): assert app == "navi-whisper-lux-bench" and token == "fixture-token"
- def api(self, method, path, body=None, timeout=None, observer=None):
-  assert timeout == 20
-  import json
-  try: value=API(method, path, body)
-  except NotFound:
-   if observer is not None: observer(method,path,404,b"not found")
-   raise
-  if observer is not None: observer(method,path,200,json.dumps(value).encode())
-  return value
-def resolve_token(request): raise AssertionError("no credential fallback in fixture")
-'''
-        exporter = '''def verify(args):
- assert args.archive.read_bytes() == b"archive-original"
- assert args.manifest.read_bytes() == b"manifest-original"
- assert args.record.read_bytes() == b"launch-original"
- assert args.caller.read_bytes() == b"caller-original"
-'''
         for name, data in {'cloudbench-disposable-controller.py': SOURCE.read_text(),
-                           'run-cloudbench-controller-gate': '# fixture gate\n',
-                           'cloudbench-controller-export.py': exporter,
-                           'cloudbench-original-volume-capture.py': transport}.items():
+                           'run-cloudbench-controller-gate': self.GATE_SOURCE,
+                           'cloudbench-controller-export.py': EXPORTER,
+                           'cloudbench-original-volume-capture.py': TRANSPORT,
+                           'cloudbench-operator-preflight.py': PREFLIGHT}.items():
             (self.root / 'scripts' / name).write_text(data)
         self.env = patch.dict(os.environ, {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}, clear=True)
         self.env.start()
@@ -174,6 +240,8 @@ def resolve_token(request): raise AssertionError("no credential fallback in fixt
                          'caller.json': b'caller-original'}[name])
         self.entry('export-ready', '--machine', MID, '--image', IMAGE)
 
+
+class DisposableController(ControllerFixture):
     def test_actual_entry_requires_profile_authority_and_current_capacity(self):
         self.entry('admit')
         for field, bad in [('allowed', False), ('vm_size', 'shared-cpu-4x'),
@@ -500,6 +568,157 @@ def resolve_token(request): raise AssertionError("no credential fallback in fixt
                 self.entry('admit')
             self.assertEqual(len(self.api.calls), calls)
         self.assertFalse(any(c[0] != 'GET' for c in self.api.calls))
+
+    def test_admission_inventory_rate_limit_retries_read_then_admits(self):
+        # 20 sibling controllers admitted within ~2 s drew Fly HTTP 429 on the
+        # full-app read; a refused GET has no effect and is re-read with jitter.
+        self.api.refusals[('GET', '/machines')] = [429, 503]
+        clock = FakeClock()
+        with clock.patched():
+            self.entry('admit')
+        self.assertEqual([c[:2] for c in self.api.calls], [('GET', '/machines')] * 3)
+        self.assertEqual(len(clock.sleeps), 2)
+        self.assertTrue(1 <= clock.sleeps[0] <= 2 and 2 <= clock.sleeps[1] <= 4, clock.sleeps)
+        raws = sorted(self.out.glob('native-admit-*/*.raw.json'))
+        self.assertEqual([json.loads(p.read_bytes())['status'] for p in raws], [429, 503, 200])
+
+    def test_admission_read_retry_is_bounded_and_other_refusals_stay_terminal(self):
+        self.api.refusals[('GET', '/machines')] = [429] * 10
+        clock = FakeClock()
+        with clock.patched(), self.assertRaisesRegex(Exception, 'HTTP 429'):
+            self.entry('admit')
+        self.assertEqual(len(self.api.calls), 6)
+        self.assertTrue(all(1 <= x <= 20 for x in clock.sleeps) and len(clock.sleeps) == 5, clock.sleeps)
+        for status in (400, 401, 403, 409):
+            self.api.calls.clear()
+            self.api.refusals[('GET', '/machines')] = [status]
+            with self.subTest(status=status), clock.patched(), self.assertRaisesRegex(Exception, 'HTTP %d' % status):
+                self.entry('admit')
+            self.assertEqual(len(self.api.calls), 1)
+        # A refused write is never replayed by the read retry.
+        self.api.calls.clear()
+        self.api.refusals[('PUT', '/volumes/' + VID)] = [429]
+        with clock.patched(), self.assertRaisesRegex(Exception, 'HTTP 429'):
+            self.entry('backup-off')
+        self.assertEqual(sum(c[0] == 'PUT' for c in self.api.calls), 1)
+
+    def test_admission_read_retry_stays_inside_creation_authority_window(self):
+        self.auth['verified_epoch'] = time.time() - 285
+        self.write_auth()
+        self.api.refusals[('GET', '/machines')] = [429, 429]
+        clock = FakeClock()
+        with clock.patched(), self.assertRaisesRegex(Exception, 'HTTP 429'):
+            self.entry('admit')
+        self.assertEqual(len(self.api.calls), 1, 'no retry may outlive the 300 s creation authority')
+        self.assertEqual(clock.sleeps, [])
+
+    def test_workspace_delete_waiting_for_detach_settles_within_bound_and_releases(self):
+        # Fly answered DELETE 200 then reported waiting_for_detach 0.26 s later.
+        self.api.detach_reads = 3
+        clock = FakeClock()
+        with clock.patched():
+            self.entry('cleanup-workspace')
+        release = json.loads((self.out / 'disposable-controller.release.json').read_text())
+        self.assertEqual(release['volume_disposition'], 'destroyed')
+        self.assertEqual([c[1] for c in self.api.calls if c[0] == 'DELETE'], ['/volumes/' + VID])
+        self.assertEqual(sum(c == ('GET', '/volumes/' + VID, None) for c in self.api.calls), 1 + 4)
+
+    def test_workspace_delete_persistent_waiting_for_detach_still_retains(self):
+        self.api.detach_reads = float('inf')
+        clock = FakeClock()
+        with clock.patched(), self.assertRaisesRegex(ValueError, 'workspace deletion pending'):
+            self.entry('cleanup-workspace')
+        self.assertFalse((self.out / 'disposable-controller.release.json').exists())
+        self.assertEqual([c[1] for c in self.api.calls if c[0] == 'DELETE'], ['/volumes/' + VID])
+        self.assertTrue(all(c[0] == 'GET' for c in self.api.calls[self.api.calls.index(('DELETE', '/volumes/' + VID, None)) + 1:]))
+        self.assertLessEqual(clock.offset, 180)
+        # A later GET-only reconciliation never replays the original DELETE.
+        self.api.detach_reads = 0
+        with clock.patched():
+            self.entry('cleanup-workspace')
+        self.assertEqual(json.loads((self.out / 'disposable-controller.release.json').read_text())['volume_disposition'], 'destroyed')
+        self.assertEqual([c[1] for c in self.api.calls if c[0] == 'DELETE'], ['/volumes/' + VID])
+
+    def test_sealed_cleanup_waits_for_volume_detach_after_host_delete(self):
+        self.seal()
+        self.export()
+        self.api.detach_reads = 45
+        clock = FakeClock()
+        with clock.patched():
+            self.entry('cleanup')
+        release = json.loads((self.out / 'disposable-controller.release.json').read_text())
+        self.assertEqual((release['volume_disposition'], release['machine_deleted']), ('destroyed', True))
+        self.assertEqual(len([c for c in self.api.calls if c[0] == 'DELETE']), 2)
+
+
+class ControllerGateAdmission(ControllerFixture):
+    """The actual gate: only refusals before any allocation intent write the no-effect receipt."""
+    GATE_SOURCE = (Path(__file__).resolve().parents[1] / 'run-cloudbench-controller-gate').read_text()
+    RUNNER = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'cloudbench-original600-runner.py'))
+
+    def gate(self, plan):
+        run = self.root / ('run-%d' % len(list(self.root.glob('run-*'))))
+        run.mkdir(mode=0o700)
+        export = run / 'export'
+        self.auth['output_directory'] = str(export)
+        self.write_auth()
+        bin_dir = self.root / 'fixture-bin'
+        if not bin_dir.exists():
+            bin_dir.mkdir()
+            (bin_dir / 'python3').symlink_to(sys.executable)
+            (bin_dir / 'flyctl').write_text('#!/bin/sh\necho "$@" >> "$FIXTURE_FLYCTL_LOG"\nexit 97\n')
+            (bin_dir / 'flyctl').chmod(0o700)
+        state = run / 'fly-state.json'
+        self.write_json(state, dict(calls=[], machines=self.api.machines, plan=plan))
+        tmp = run / 'tmp'
+        tmp.mkdir(mode=0o700)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('CLOUDBENCH_', 'GIT_'))}
+        env.update(PATH=str(bin_dir) + ':/usr/bin:/bin', TMPDIR=str(tmp), FIXTURE_FLY_STATE=str(state),
+                   FIXTURE_FLYCTL_LOG=str(run / 'flyctl.log'), CLOUDBENCH_GATE_ROOT_DIR=str(self.root),
+                   CLOUDBENCH_GATE_REF=self.ref, CLOUDBENCH_GATE_EXPORT_DIR=str(export),
+                   CLOUDBENCH_GATE_NO_EFFECT_RECEIPT=str(run / 'gate.preallocation-failure.json'),
+                   CLOUDBENCH_GATE_REPO_URL='https://example.invalid/fixture.git', GITHUB_TOKEN='fixture-github',
+                   WARM_IMAGE_REF=IMAGE, CLOUDBENCH_GATE_NODE_VERSION='v24.0.0', FLY_API_TOKEN='fixture-token')
+        child = subprocess.Popen(['bash', str(self.root / 'scripts/run-cloudbench-controller-gate'),
+                                  '--disposable-controller', str(self.authpath), '--', 'echo', 'fixture'],
+                                 cwd=self.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout, stderr = child.communicate(timeout=60)
+        calls = json.loads(state.read_text())['calls']
+        return child, stderr, run, export, calls
+
+    def test_early_admission_refusal_writes_receipt_and_runner_fails_before_dispatch(self):
+        # The private self-copy re-runs the first admission, then the second
+        # call site follows; the live 429s hit these. None has any intent yet.
+        for name, plan in [('before self-copy', {'GET /machines': [403]}),
+                           ('self-copy first site', {'GET /machines': [200, 403]}),
+                           ('self-copy second site', {'GET /machines': [200, 200, 403]})]:
+            with self.subTest(site=name):
+                child, stderr, run, export, calls = self.gate(plan)
+                self.assertEqual(child.returncode, 1, stderr)
+                self.assertFalse(os.path.lexists(export))
+                self.assertFalse((run / 'flyctl.log').exists(), 'no provider CLI effect')
+                self.assertTrue(all(c[0] == 'GET' for c in calls), calls)
+                receipt = run / 'gate.preallocation-failure.json'
+                self.assertEqual(json.loads(receipt.read_text()), dict(
+                    schema='original600-gate-preallocation-failure-v1', reason='controller-admission-refused',
+                    source_ref=self.ref, gate_pid=child.pid, allocation_attempted=False))
+                terminal = self.RUNNER['preallocation_terminal'](True, 1, child.pid, self.ref, export, receipt)
+                self.assertIsNotNone(terminal, stderr)
+                self.assertEqual((terminal['status'], terminal['reason'], terminal['allocation_attempted']),
+                                 ('FAILED_BEFORE_PROVIDER_DISPATCH', 'controller-admission-refused', False))
+                self.assertIsNone(self.RUNNER['preallocation_terminal'](True, 1, child.pid + 1, self.ref, export, receipt))
+
+    def test_admission_refusal_after_workspace_intent_never_writes_receipt(self):
+        child, stderr, run, export, calls = self.gate({'GET /machines': [200, 200, 200, 403]})
+        self.assertEqual(child.returncode, 1, stderr)
+        self.assertEqual(len(calls), 4, calls)
+        self.assertTrue((export / 'workspace-volume.intent.json').is_file(), stderr)
+        self.assertIn('GATE_WORKSPACE_VOLUME_RETAINED', stderr)
+        self.assertFalse((run / 'flyctl.log').exists())
+        receipt = run / 'gate.preallocation-failure.json'
+        self.assertFalse(receipt.exists(), 'no no-effect receipt once an allocation intent exists')
+        self.assertIsNone(self.RUNNER['preallocation_terminal'](True, 1, child.pid, self.ref, export, receipt))
+
 
 
 class ControllerGateName(unittest.TestCase):

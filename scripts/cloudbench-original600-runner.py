@@ -353,13 +353,15 @@ def reconciled_release(out,export,authority,mid,action,gate_joined,probe):
   need(action=='cleanup-workspace' and r['machine_id']is None and r['no_live_machine_observed']is True and r['command_history_verified']is False,'wrong partial external release')
  return r
 
+# The gate writes these only before any custody, workspace-volume or Machine intent.
+PREALLOCATION_REASONS=frozenset({'github-token-missing','controller-admission-refused'})
 def preallocation_terminal(joined,gate_code,gate_pid,ref,export,receipt):
  # Directory/intent absence alone NEVER proves no allocation was attempted.
  # Only the exact gate's explicit early-failure receipt can end this owner.
  if not joined or gate_code!=1 or os.path.lexists(export) or not Path(receipt).exists():return None
  try:
   value=json.loads(read(receipt))
-  need(value==dict(schema='original600-gate-preallocation-failure-v1',reason='github-token-missing',
+  need(isinstance(value,dict) and value.get('reason')in PREALLOCATION_REASONS and value==dict(schema='original600-gate-preallocation-failure-v1',reason=value['reason'],
        source_ref=ref,gate_pid=gate_pid,allocation_attempted=False),'unbound early gate failure')
  except (OSError,ValueError,KeyError):return None
  return dict(status='FAILED_BEFORE_PROVIDER_DISPATCH',reason=value['reason'],gate_exit_code=gate_code,
@@ -712,6 +714,17 @@ def self_test():
   def test_active_writer_blocks_cleanup(self):self.assertFalse(cleanup_ready(True,{'state':'LIVE'},True))
   def test_partial_workspace_cleanup_waits_gate_join(self):
    self.assertIsNone(cleanup_mode(False,False,True,{},False));self.assertEqual(cleanup_mode(True,False,True,{},False),'cleanup-workspace');self.assertIsNone(cleanup_mode(True,True,True,{'state':'LIVE'},False))
+  def test_preallocation_receipt_accepts_only_typed_no_effect_reasons(self):
+   with tempfile.TemporaryDirectory()as d:
+    out=Path(d);receipt=out/'gate.preallocation-failure.json';export=out/'export';ref='a'*40
+    for reason,accepted in [('github-token-missing',True),('controller-admission-refused',True),('workspace-volume-create-failed',False),('',False)]:
+     receipt.unlink(missing_ok=True);save(receipt,dict(schema='original600-gate-preallocation-failure-v1',reason=reason,source_ref=ref,gate_pid=4242,allocation_attempted=False))
+     value=preallocation_terminal(True,1,4242,ref,export,receipt)
+     with self.subTest(reason=reason):
+      if accepted:self.assertEqual((value['status'],value['reason'],value['allocation_attempted']),('FAILED_BEFORE_PROVIDER_DISPATCH',reason,False))
+      else:self.assertIsNone(value)
+    receipt.unlink();save(receipt,dict(schema='original600-gate-preallocation-failure-v1',reason='controller-admission-refused',source_ref=ref,gate_pid=4242,allocation_attempted=True))
+    self.assertIsNone(preallocation_terminal(True,1,4242,ref,export,receipt))
   def test_export_and_join_required(self):
    self.assertFalse(cleanup_ready(False,{'state':'JOINED'},True));self.assertFalse(cleanup_ready(True,{'state':'JOINED'},False));self.assertTrue(cleanup_ready(True,{'state':'JOINED'},True))
   def test_real_exact_supervisor_term_and_join(self):
