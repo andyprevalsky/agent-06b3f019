@@ -165,11 +165,21 @@ class WorldModelLaunch(unittest.TestCase):
                 with self.subTest(ref=ref, pool=pool):
                     outcome = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": ref, "WMH_ROSE_POOL": pool})
                     self.assertEqual(outcome.returncode, code, outcome.stderr)
-            # A ref this controller has not fetched is left to the guest's own check.
+            # Only a commit this controller has not fetched skips the check.
             missing = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": "0" * 40,
                                   "WMH_ROSE_POOL": "ref-only-pool"})
             self.assertEqual(missing.returncode, 0, missing.stderr)
-            self.assertIn("the guest validates", missing.stderr)
+            self.assertIn("is not available locally", missing.stderr)
+            for ref in ("--output=/dev/null", "HEAD:agents"):
+                with self.subTest(unsafe_ref=ref):
+                    self.assertEqual(run(check, {"ROOT_DIR": str(repo), "BENCH_REF": ref,
+                                                 "WMH_ROSE_POOL": "ref-only-pool"}).returncode, 0)
+            # A present commit without the registry fails closed.
+            registry.unlink()
+            git("add", "-A")
+            git("commit", "-qm", "drop registry")
+            self.assertEqual(run(check, {"ROOT_DIR": str(repo), "BENCH_REF": "HEAD",
+                                         "WMH_ROSE_POOL": "checkout-only-pool"}).returncode, 2)
 
     def test_execution_policy_allowlist_admits_every_registered_policy(self):
         # The cloud launch must accept each immutable registered policy and

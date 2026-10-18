@@ -189,11 +189,15 @@ fi
 # The guest runs BENCH_REF, so its pool registry decides; this checkout may differ.
 validate_wmh_rose_pool_at_ref() {  # validate_wmh_rose_pool_at_ref <ref> <pool>
     local ref="$1" pool="$2" registry status
-    registry="$(mktemp "${TMPDIR:-/tmp}/rose-pools.XXXXXX")" || return 2
-    if [ -z "$ref" ] || ! git -C "$ROOT_DIR" show "$ref:agents/providers/rose/pools.py" > "$registry" 2>/dev/null; then
-        rm -f "$registry"
-        echo "⚠️  Rose pool registry is not available locally at ${ref:-<no ref>}; the guest validates WMH_ROSE_POOL=$pool" >&2
+    if [ -z "$ref" ] || ! git -C "$ROOT_DIR" rev-parse --quiet --verify --end-of-options "$ref^{commit}" >/dev/null 2>&1; then
+        echo "⚠️  Benchmark ref ${ref:-<none>} is not available locally; WMH_ROSE_POOL=$pool is not validated before launch" >&2
         return 0
+    fi
+    registry="$(mktemp "${TMPDIR:-/tmp}/rose-pools.XXXXXX")" || return 2
+    if ! git -C "$ROOT_DIR" show "$ref:agents/providers/rose/pools.py" > "$registry" 2>/dev/null; then
+        rm -f "$registry"
+        echo "Invalid WMH_ROSE_POOL: the Rose pool registry is missing at $ref" >&2
+        return 2
     fi
     python3 - "$registry" "$pool" <<'PY_WMH_POOL'
 import runpy
