@@ -30096,7 +30096,175 @@ async def run_all_tests():
         "browser_tool_events_declare_action_type",
         test_browser_tool_events_declare_action_type,
     )
+    await r.record_async("phone_durable_http_contract", test_phone_durable_http_contract)
+    await r.record_async("phone_denied_before_dom_and_private_binding", test_phone_denied_before_dom_and_private_binding)
+    await r.record_async("phone_reattach_reacquire_and_stale_cursor", test_phone_reattach_reacquire_and_stale_cursor)
+    await r.record_async("phone_model_observation_and_account_isolation", test_phone_model_observation_and_account_isolation)
+    await r.record_async("phone_revocation_and_safe_timeout", test_phone_revocation_and_safe_timeout)
     return r.all_passed
+
+
+
+
+async def test_phone_durable_http_contract():
+    from domains.spawn_browser_agent_v3.phone import execute_phone, observe_phone
+    calls = []
+    view = {'lease': None, 'cursor': 0, 'lastOperation': None}
+    def backend(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        if request.url.path.endswith('/capability'):
+            return httpx.Response(200, json={'enabled': True})
+        if '/interactions/' in request.url.path:
+            if request.method == 'POST':
+                view['lease'] = {'id': 'lease', 'status': 'ACTIVE'}
+            return httpx.Response(200, json=view)
+        if request.url.path.endswith('/heartbeat'):
+            return httpx.Response(200, json={})
+        if request.url.path.endswith('/operations'):
+            body = json.loads(request.content)
+            assert body['expectedCursor'] == 0
+            view['cursor'] = 1
+            view['lastOperation'] = {'id': body['operationId'], 'status': 'UNKNOWN', 'operation': body['operation'], 'cursor': 1}
+            raise httpx.ReadTimeout('synthetic')
+        if '/operations/' in request.url.path:
+            return httpx.Response(200, json={'operation': view['lastOperation']})
+        raise AssertionError(request.url.path)
+    import httpx
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        snapshot = await observe_phone(config, 'user', 'task', client=client)
+        kwargs = dict(config=config, user_id='user', agent_id='agent', task_id='task', decision_id='call', snapshot=snapshot, client=client)
+        result = await execute_phone({'mode': 'operation', 'operation': 'input.tap', 'args': {'x': 1, 'y': 2}}, **kwargs)
+        assert result['operation']['status'] == 'UNKNOWN'
+        recovered = await observe_phone(config, 'user', 'task', client=client)
+        assert recovered['interaction']['lastOperation']['status'] == 'UNKNOWN'
+        assert sum(path.endswith('/operations') for _, path, _ in calls) == 1
+        acquire = next(body for method, path, body in calls if method == 'POST' and '/interactions/' in path)
+        assert acquire['requestKey']
+        assert 'agentId' not in acquire
+
+
+async def test_phone_denied_before_dom_and_private_binding():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.phone import observe_phone
+    import httpx
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(503))) as client:
+        assert (await observe_phone(config, 'u', 't', client=client))['enabled'] is False
+    result = await execute_action(SimpleNamespace(), SimpleNamespace(), {'action': 'phone', 'params': {'mode': 'operation', 'operation': 'input.text', 'args': {'text': 'secret_ref:password'}}}, config=config, user_id='u', agent_id='a', browser_task_id='t', tool_call_id_decision='c', phone_snapshot={'enabled': True}, secret_refs={'secret_ref:password': 'CANARY-PASSWORD'})
+    assert not result['success']
+    assert 'binding' in result['error'].lower()
+    assert 'CANARY-PASSWORD' not in json.dumps(result)
+
+
+async def test_phone_reattach_reacquire_and_stale_cursor():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    acquired, submitted = [], []
+    lease = {'id': 'old', 'status': 'ACTIVE'}
+    def backend(request):
+        body = json.loads(request.content) if request.content else {}
+        if request.url.path.endswith('/capability'):
+            return httpx.Response(200, json={'enabled': True})
+        if '/interactions/' in request.url.path:
+            if request.method == 'POST':
+                acquired.append(body['requestKey'])
+            return httpx.Response(200, json={'lease': lease, 'cursor': 7})
+        if request.url.path.endswith('/release'):
+            return httpx.Response(200, json={'lease': {**lease, 'status': 'RELEASED'}})
+        if request.url.path.endswith('/operations'):
+            submitted.append(body)
+            return httpx.Response(409, json={'error': 'stale_cursor'})
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        kwargs = dict(config=config,user_id='u',agent_id='a',task_id='t',decision_id='same',client=client,
+                      snapshot={'enabled': True,'interaction': {'lease': lease.copy(),'cursor': 3}})
+        command = {'mode': 'operation','operation': 'input.tap','args': {'x': 2,'y': 1}}
+        first = await execute_phone(command, **kwargs)
+        second = await execute_phone({**command, 'args': {'y': 1,'x': 2}}, **kwargs)
+        assert first['_httpStatus'] == second['_httpStatus'] == 409
+        assert submitted[0] == submitted[1]
+        assert submitted[0]['expectedCursor'] == 3, 'must not replace deciding cursor with current 7'
+        assert acquired[0] == acquired[1]
+        await execute_phone({**command, 'args': {'x': 999, 'y': 1}}, **kwargs)
+        assert submitted[-1]['operationId'] == submitted[0]['operationId'], 'same intent changed payload must conflict under same ID'
+        kwargs['decision_id'] = ''
+        await execute_phone({'mode':'operation','operation':'input.text','args':{'s':'000123'}}, **kwargs)
+        fallback_id = submitted[-1]['operationId']
+        fallback_acquire = acquired[-1]
+        await execute_phone({'mode':'operation','operation':'input.text','args':{'s':'999999'}}, **kwargs)
+        assert submitted[-1]['operationId'] == fallback_id
+        assert acquired[-1] == fallback_acquire
+        kwargs['decision_id'] = 'same'
+        assert (await execute_phone({'mode':'release'}, **kwargs))['success']
+        lease.update(id='new')
+        kwargs.update(decision_id='next', snapshot={'enabled':True,'interaction':{'lease':{'id':'old','status':'RELEASED'},'cursor':3}})
+        await execute_phone(command, **kwargs)
+        assert acquired[-1] != acquired[0]
+        assert submitted[-1]['expectedCursor'] == 0
+        assert submitted[-1]['operationId'] != submitted[0]['operationId']
+        before = len(acquired)
+        kwargs['snapshot']['interaction']['lease'] = lease.copy()
+        await execute_phone({'mode':'status'}, **kwargs)
+        assert len(acquired) == before, 'status must not allocate'
+
+
+async def test_phone_model_observation_and_account_isolation():
+    import httpx
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    original = list(AVAILABLE_ACTIONS)
+    real_client = httpx.AsyncClient
+    last = {'id': 'persisted-op', 'status':'UNKNOWN','cursor':9,'operation':'input.text','result':None}
+    def backend(request):
+        enabled = request.headers['x-user-id'] == 'enabled'
+        if request.url.path.endswith('/capability'):
+            return httpx.Response(200,json={'enabled':enabled})
+        return httpx.Response(200,json={'lease':{'id':'owned','status':'ACTIVE'},'cursor':10,'lastOperation':{'id':'read','cursor':10,'status':'SUCCEEDED','operation':'screen.text'},'pendingOperation':last})
+    def transport_client(*args, **kwargs):
+        return real_client(transport=httpx.MockTransport(backend))
+    clients = [_FakeRoseClient([{'tool_call_id':'streamed'}]), _FakeRoseClient([{}])]
+    async def call(index, user_id):
+        return await _call_browser_use_with_rotation(rose_client=clients[index],task='task',dynamic_system_context='',turn_messages=[],browser_state={},action_entries=[],config=_fake_config(),user_id=user_id,agent_id='trusted',iteration=1,token_state=ClaudeTokenState(),gpt_token=None,gpt_account_id=None,gpt_token_source=None,gpt_token_pool_id=None,browser_use_mode=None,browser_task_id='task')
+    with patch.object(httpx, 'AsyncClient', transport_client):
+        enabled, disabled = await asyncio.gather(call(0,'enabled'),call(1,'disabled'))
+    assert AVAILABLE_ACTIONS == original
+    assert 'phone' in clients[0].calls[0]['available_actions']
+    assert 'phone' not in clients[1].calls[0]['available_actions']
+    assert clients[0].calls[0]['browser_state']['phone']['interaction']['pendingOperation'] == last
+    assert enabled['_phone_snapshot']['interaction']['cursor'] == 10
+    assert '_phone_snapshot' not in disabled
+    assert 'Phone Harness 0.3.2' in clients[0].calls[0]['dynamic_system_context']
+    # The cloud tool takes raw provider operations, not the upstream CLI's
+    # Python helpers; the decision must receive usable argument vocabulary.
+    guidance = clients[0].calls[0]['dynamic_system_context']
+    assert 'apps.launch' in guidance and '"name": "Settings"' in guidance
+    assert 'input.tap' in guidance and 'screen.bounds' in guidance
+    assert 'input.text' in guidance and '"s"' in guidance
+    assert 'Phone Harness' not in clients[1].calls[0]['dynamic_system_context']
+
+
+async def test_phone_revocation_and_safe_timeout():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    paths=[]
+    def backend(request):
+        paths.append(request.url.path)
+        return httpx.Response(200, json={'enabled':False})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        result=await execute_phone({'mode':'operation','operation':'input.tap'},config=config,user_id='u',agent_id='a',task_id='t',decision_id='call',snapshot={'enabled':True},client=client)
+    assert not result['success']
+    assert paths == ['/api/iphone/capability']
+    # Phone exception stays a tool outcome and cannot escape as a CDP timeout.
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    with patch('domains.spawn_browser_agent_v3.phone.execute_phone', side_effect=asyncio.TimeoutError('CANARY-PASSWORD')):
+        result = await execute_action(SimpleNamespace(), SimpleNamespace(), {'action':'phone','params':{'mode':'status'}},config=config,user_id='u',agent_id='a',browser_task_id='t',tool_call_id_decision='c',phone_snapshot={'enabled':True})
+    assert not result['success']
+    assert 'CANARY' not in json.dumps(result)
+
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())

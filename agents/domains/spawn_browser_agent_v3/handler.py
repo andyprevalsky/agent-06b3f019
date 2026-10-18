@@ -2937,6 +2937,7 @@ async def _call_browser_use_with_rotation(
     pool: str = BROWSER_USE_PRICING_POOL,
     dump_extra: Optional[Dict[str, Any]] = None,
     dom_service: Any = None,
+    phone_observation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
 
@@ -2946,7 +2947,13 @@ async def _call_browser_use_with_rotation(
     replacement, and retry up to MAX_CLAUDE_TOKEN_ROTATIONS. If all rotations
     exhaust (or there's no token to start), fall through to the waterfall.
     """
+    from .phone import PHONE_GUIDANCE, observe_phone, phone_actions
+    phone_snapshot = phone_observation if phone_observation is not None else await observe_phone(config, user_id, browser_task_id or "")
     browser_state_for_llm = dict(browser_state)
+    browser_state_for_llm["phone"] = phone_snapshot
+    available_actions = phone_actions(AVAILABLE_ACTIONS, phone_snapshot)
+    if phone_snapshot.get("enabled"):
+        dynamic_system_context = dynamic_system_context + "\n\n" + PHONE_GUIDANCE
     if extra_user_messages:
         browser_state_for_llm["_extra_user_messages"] = extra_user_messages
 
@@ -2955,7 +2962,7 @@ async def _call_browser_use_with_rotation(
         task=task,
         browser_state=browser_state_for_llm,
         action_history=action_entries,
-        available_actions=AVAILABLE_ACTIONS,
+        available_actions=available_actions,
         dynamic_system_context=dynamic_system_context,
         turn_messages=turn_messages,
         agent_id=agent_id,
@@ -3029,10 +3036,14 @@ async def _call_browser_use_with_rotation(
         else None
     )
 
-    llm_result = await rose_client.complete_browser_use(claude_auth=claude_auth, gpt_auth=gpt_auth, **rose_kwargs)
+    from .phone import with_phone_heartbeat
+    llm_result = await with_phone_heartbeat(
+        rose_client.complete_browser_use(claude_auth=claude_auth, gpt_auth=gpt_auth, **rose_kwargs),
+        config, user_id, phone_snapshot,
+    )
 
     if not use_claude:
-        return llm_result
+        return {**llm_result, "_phone_snapshot": phone_snapshot} if phone_snapshot.get("enabled") else llm_result
 
     rotations = 0
     while (
@@ -3093,9 +3104,12 @@ async def _call_browser_use_with_rotation(
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,
         )
-        llm_result = await rose_client.complete_browser_use(claude_auth=rotated_auth, **rose_kwargs)
+        llm_result = await with_phone_heartbeat(
+            rose_client.complete_browser_use(claude_auth=rotated_auth, **rose_kwargs),
+            config, user_id, phone_snapshot,
+        )
 
-    return llm_result
+    return {**llm_result, "_phone_snapshot": phone_snapshot} if phone_snapshot.get("enabled") else llm_result
 
 
 def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
@@ -3143,6 +3157,11 @@ def _append_browser_turn_messages(
     action_name = unified_action.get("action") or "unknown"
     thinking = unified_action.get("thinking") or ""
     args = _browser_tool_arguments(unified_action)
+    if action_name == "phone":
+        from browser_tools.secret_refs import redact_current_secret_values
+        args = redact_current_secret_values(args)
+        thinking = redact_current_secret_values(thinking)
+        result = redact_current_secret_values(result)
     # The provider normalizes click_coordinates to an internal click + coordinates.
     # Reconstruct the advertised tool name here so the next LLM turn does not see
     # a successful but invalid-looking click({}) and try to correct a valid action.
@@ -8961,6 +8980,8 @@ async def _spawn_browser_agent_activity_v3_real(
                 if not observe_needs_dom:
                     state_prefetch.start(dom_service)
 
+                from .phone import observe_phone
+                phone_before_decision = await observe_phone(config, user_id, task_id)
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
                 # action — only the LLM "what next" decision is cached.
@@ -9003,6 +9024,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         ),
                         pool=browser_pool,
                         dom_service=dom_service_snapshot,
+                        phone_observation=phone_before_decision,
                     )
                     return _attach_browser_replay_target(live_result, dom_service_snapshot)
 
@@ -9022,7 +9044,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     fm_write_through = write_through_enabled_for_user(user_id)
                     llm_result = await asyncio.wait_for(
                         cached_browser_decision(
-                            enabled=bool(fast_mode_cache_enabled),
+                            enabled=bool(fast_mode_cache_enabled) and not phone_before_decision.get("enabled"),
                             goal=goal,
                             request={
                                 "task": task_prompt,
@@ -9042,7 +9064,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             },
                             call_llm=_live_browser_decision,
                             write_enabled=bool(
-                                fast_mode_cache_enabled or fm_write_through
+                                (fast_mode_cache_enabled or fm_write_through) and not phone_before_decision.get("enabled")
                             ),
                             agent_id=agent_id,
                         ),
@@ -9459,6 +9481,9 @@ async def _spawn_browser_agent_activity_v3_real(
                     or (request_info.get("request") or {}).get("id")
                 )
 
+                if request_id:
+                    from .phone import retain_phone_for_auth
+                    await retain_phone_for_auth(config, user_id, task_id, request_id)
                 success_result = {"success": True, "request_id": request_id}
                 if dom_service is not None:
                     await action_history.record_action(
@@ -10501,32 +10526,42 @@ Based on this feedback, I need to continue working on the task and address the i
             step_timer.annotate(action=action_name)
             browser_activity_checkpoint(f"Step {iteration} - executing {action_name}")
             try:
-                result = await asyncio.wait_for(
-                    _execute_action(
-                        dom_service,
-                        action_history,
-                        unified_action,
-                        available_file_paths,
-                        session_id=session_id,
-                        config=config,
-                        humanizer=humanizer,
-                        secret_refs=secret_refs,
-                        password_origins=password_origins,
-                        credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                        user_id=user_id,
-                        current_url=current_url,
-                        trusted_page_urls=visited_urls,
-                        write_lock_enabled=write_lock_enabled,
-                        write_lock_approvals=write_lock_approvals,
-                        system_name=system_name,
-                        browser_network_recorder=browser_network_recorder,
-                        current_auth_realm=auth_realm,
-                        prepare_credentials_for_url=_prepare_credentials_for_url,
-                        prefetched_browser_state=prefetched_browser_state,
-                        auth_context_for_url=_auth_context_for_url,
-                    ),
-                    timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                action_work = _execute_action(
+                    dom_service,
+                    action_history,
+                    unified_action,
+                    available_file_paths,
+                    session_id=session_id,
+                    config=config,
+                    humanizer=humanizer,
+                    secret_refs=secret_refs,
+                    password_origins=password_origins,
+                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    browser_task_id=task_id,
+                    tool_call_id_decision=str(llm_result.get("tool_call_id") or ""),
+                    phone_snapshot=llm_result.get("_phone_snapshot"),
+                    current_url=current_url,
+                    trusted_page_urls=visited_urls,
+                    write_lock_enabled=write_lock_enabled,
+                    write_lock_approvals=write_lock_approvals,
+                    system_name=system_name,
+                    browser_network_recorder=browser_network_recorder,
+                    current_auth_realm=auth_realm,
+                    prepare_credentials_for_url=_prepare_credentials_for_url,
+                    prefetched_browser_state=prefetched_browser_state,
+                    auth_context_for_url=_auth_context_for_url,
                 )
+                if action_name == "phone":
+                    # Phone HTTP calls own their bounded deadlines and receipt
+                    # recovery. They must never trigger CDP stall recovery.
+                    result = await action_work
+                else:
+                    result = await asyncio.wait_for(
+                        action_work,
+                        timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                    )
             except asyncio.TimeoutError:
                 # Any action can hang on a frozen renderer (Momence Konva waiver:
                 # evaluate OR click). Classify via browser-process CDP before soft

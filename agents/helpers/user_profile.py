@@ -2,6 +2,13 @@
 
 from typing import Any, Dict, List
 
+PHONE_PROFILE_GUIDANCE = """## Dedicated cloud iPhone
+A dedicated cloud iPhone is available through the browser agent's phone tool.
+Consider it for authorized authentication, OTP, messages, and other app tasks.
+Availability and ownership are checked live by the server; use the cloud tool.
+Private password entry awaits verified app/account binding.
+"""
+
 
 def build_user_profile_sections(user_settings: Dict[str, Any]) -> List[str]:
     """Render personal identity and delivery details as separate sections."""
@@ -40,4 +47,6 @@ def build_user_profile_sections(user_settings: Dict[str, Any]) -> List[str]:
     if address_lines:
         sections.append("## Delivery Address\n" + "\n".join(address_lines))
 
+    if (user_settings.get("iphoneCapability") or {}).get("enabled") is True:
+        sections.append(PHONE_PROFILE_GUIDANCE)
     return sections

@@ -2670,7 +2670,52 @@ async def run_all_tests():
         "normalize_request_payment_card_parses_tool_string_arguments",
         test_normalize_request_payment_card_parses_tool_string_arguments,
     )
+    r.record("phone_schema_and_per_invocation_capability_gate", test_phone_schema_and_per_invocation_capability_gate)
+    r.record("phone_profile_guidance_is_conditional", test_phone_profile_guidance_is_conditional)
+    r.record("phone_native_call_normalizes_and_observation_is_visible", test_phone_native_call_normalizes_and_observation_is_visible)
     return r.summary()
+
+
+
+
+
+def test_phone_schema_and_per_invocation_capability_gate():
+    from browser_tools.schemas import AVAILABLE_ACTIONS, validate_browser_tool_args, BrowserToolArgsValidationError
+    from domains.spawn_browser_agent_v3.phone import phone_actions
+    original = list(AVAILABLE_ACTIONS)
+    assert 'phone' in phone_actions(original, {'enabled': True})
+    assert 'phone' not in phone_actions(original, {'enabled': False})
+    assert AVAILABLE_ACTIONS == original
+    assert validate_browser_tool_args('phone', {'mode': 'status'}) == {'mode': 'status', 'args': {}}
+    for key in ('user_id', 'agentId', 'browserTaskId', 'leaseId', 'cursor', 'operationId'):
+        try:
+            validate_browser_tool_args('phone', {'mode': 'status', key: 'forged'})
+        except BrowserToolArgsValidationError:
+            pass
+        else:
+            raise AssertionError(f'accepted routing field {key}')
+    assert any(t['name'] == 'phone' for t in build_browser_use_tools(['phone']))
+
+
+def test_phone_profile_guidance_is_conditional():
+    from helpers.user_profile import build_user_profile_sections
+    assert 'cloud iPhone' not in '\n'.join(build_user_profile_sections({}))
+    assert 'cloud iPhone' in '\n'.join(build_user_profile_sections({'iphoneCapability': {'enabled': True}}))
+
+
+
+
+
+def test_phone_native_call_normalizes_and_observation_is_visible():
+    normalized = normalize_browser_use_tool_call({'id':'streamed','name':'phone','arguments':{'mode':'status'}})
+    assert normalized['action'] == 'phone'
+    assert normalized['params']['mode'] == 'status'
+    state={'enabled':True,'interaction':{'cursor':4,'pendingOperation':{'status':'UNKNOWN','id':'input-old'},'lastOperation':{'status':'SUCCEEDED','id':'read-new'}}}
+    messages=build_browser_use_messages(task='task',browser_state={'phone':state},action_history=[],available_actions=['phone'],turn_messages=[])
+    content=json.dumps(messages)
+    assert 'observed_phone_state' in content and 'input-old' in content and 'read-new' in content
+    hidden=build_browser_use_messages(task='task',browser_state={'phone':state},action_history=[],available_actions=['wait'],turn_messages=[])
+    assert 'observed_phone_state' not in json.dumps(hidden)
 
 
 if __name__ == "__main__":

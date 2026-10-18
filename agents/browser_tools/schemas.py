@@ -437,6 +437,23 @@ class AttemptCompletionBrowserTool(BaseModel):
     tool: Literal["attempt_completion"]
 
 
+class PhoneBrowserTool(BaseModel):
+    """Operate the account's dedicated cloud iPhone through Rose."""
+    model_config = {"extra": "forbid"}
+    tool: Literal["phone"]
+    mode: Literal["operation", "status", "release"]
+    operation: Optional[str] = None
+    args: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_mode(self):
+        if self.mode == "operation" and not (self.operation or "").strip():
+            raise ValueError("operation mode requires an operation")
+        if self.mode != "operation" and (self.operation is not None or self.args):
+            raise ValueError("status/release do not accept commands")
+        return self
+
+
 class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
     """Ask the user to sign in after all automated auth paths are exhausted."""
 
@@ -902,6 +919,7 @@ class GenerateWriteLockNotificationTool(BaseModel):
 # Map browser tool names to their Pydantic models
 # Uses browser-use action model naming conventions
 BROWSER_TOOL_MODELS = {
+    "phone": PhoneBrowserTool,
     # Observation
     "read_browser_state": ReadBrowserStateTool,
     "screenshot": ScreenshotTool,

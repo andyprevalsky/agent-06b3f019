@@ -52,6 +52,7 @@ def recover_from_challenge_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
+    "phone": {"description": "Use the dedicated cloud iPhone through Rose. mode=operation ensures/reuses a lease, status observes without allocating, release relinquishes it. Observe screen.text, act once, verify. UNKNOWN input must never be replayed. Private password refs require verified app/account binding."},
     "read_browser_state": {
         "description": (
             "Read the current browser page state (URL, viewport, scroll, tabs, page stats, indexed DOM tree). "
@@ -1061,6 +1062,11 @@ def build_browser_use_messages(
             user_content = user_content + history_suffix
         messages.append({"role": "user", "content": user_content})
 
+    # Actual server observation, not a fabricated recovery tool/user instruction.
+    phone_state = browser_state.get("phone")
+    if isinstance(phone_state, dict) and phone_state.get("enabled") is True and "phone" in available_actions:
+        messages.append({"role": "user", "content": "<observed_phone_state>" + json.dumps(phone_state, ensure_ascii=True) + "</observed_phone_state>"})
+
     state_extra_user_messages = (
         browser_state.get("_extra_user_messages") or browser_state.get("extra_user_messages") or []
     )
@@ -1270,6 +1276,7 @@ _ACTION_NAME_MAP: Dict[str, str] = {
 
 _VALID_ACTIONS = frozenset(
     {
+        "phone",
         "click",
         "click_coordinates",
         "drag",
@@ -1422,6 +1429,9 @@ def _normalize_action_params(
     first_action: Dict[str, Any],
     index: Any,
 ) -> Dict[str, Any]:
+    if normalized_action == "phone":
+        from browser_tools.schemas import validate_browser_tool_args
+        return validate_browser_tool_args("phone", params)
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
 
