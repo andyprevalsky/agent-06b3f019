@@ -294,8 +294,7 @@ def excluded_cleanup_reserves(manifest, config):
             and stat.S_ISREG(metadata["mode"])
             and not metadata["mode"] & 0o077
             and metadata["nlink"] == 1
-            and metadata["uid"] == anchor.get("uid")
-            and metadata["gid"] == anchor.get("gid"),
+            and metadata["uid"] == anchor.get("uid"),
             "unsafe cleanup reserve metadata",
         )
         need(

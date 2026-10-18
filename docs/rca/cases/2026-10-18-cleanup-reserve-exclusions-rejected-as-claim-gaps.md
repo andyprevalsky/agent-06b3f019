@@ -105,6 +105,30 @@ sealed root anchor. The actual 42-entry metadata calibration also passed. The
 full actual preparation and successful 600-task execution remain separate,
 unmeasured outcomes; this case stays open until those results are recorded.
 
+### Actual-input follow-up: canonical root anchor has no GID
+
+The next real preparation on 87ef40 stopped before effects at `unsafe cleanup
+reserve metadata`. The archived launch anchor contains exactly `device`,
+`inode`, `mode` and `uid`; it has no `gid`. All 42 reserve metadata records
+otherwise passed the new predicate. The reader's additional comparison of a
+file's integer GID to `anchor.get("gid")` therefore compared 1001 with `None`.
+The first fixture had used the collector's full nine-field `file_state` result
+as a launch anchor instead of the four-field projection in `collector.launch`.
+Its partial metadata calibration inherited that assumption and missed the real
+launch schema. This was a consumer/fixture error, not a provider failure.
+
+Remove only the unsupported GID-to-anchor comparison, retain the UID, private
+single-link and all other checks, and construct the permanent full preparation
+fixture with the canonical four-field anchor. The identical fixture fails on
+87ef40 and passes after the correction; the author passed all 22 owners in
+4.458 seconds. Root independently replayed the complete actual manifest with
+SHA `4784c4389cf096e71c05364c7fc3aab4f6d7655164c244ce20216145963bd1ca`:
+the old predicate rejects it and the corrected predicate validates exactly all
+42 exclusions with zero capacity credit and no provider calls. Full actual
+saved-inventory preparation remains the executor's next outcome check before
+another live admission. Both failed preparations remain in the original batch
+wall and monotonic total and do not count as completed experiments.
+
 ## Human feedback
 
 The user reduced the timing request from ten runs to three full experiments,

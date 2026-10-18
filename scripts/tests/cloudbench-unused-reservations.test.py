@@ -223,7 +223,9 @@ class Unused(unittest.TestCase):
             host=record["host"],
             repo=str(physical),
             common_git=str(common),
-            root_anchors={str(common): collector["file_state"](common)},
+            root_anchors={
+                str(common): {key: collector["file_state"](common)[key] for key in ("device", "inode", "mode", "uid")}
+            },
             temp_state_roots=[],
             collector_sha256=H["sha"](producer_bytes),
         )
@@ -276,7 +278,7 @@ class Unused(unittest.TestCase):
         self.assertEqual(proof["excluded"][name]["stat"]["bytes"], 0)
         path = self.closed / "export/manifest.json"
         original = json.loads(path.read_bytes())
-        for mutation in ("reason", "escape", "claim", "mode", "alias", "source", "tamper"):
+        for mutation in ("reason", "escape", "claim", "mode", "alias", "source", "uid", "tamper"):
             manifest = copy.deepcopy(original)
             entry = manifest["excluded"][name]
             if mutation == "reason":
@@ -293,6 +295,8 @@ class Unused(unittest.TestCase):
                 manifest["files"][str(Path(name).parent)] = dict(kind="symlink", target="foreign")
             elif mutation == "source":
                 manifest["record"]["collector_sha256"] = "0" * 64
+            elif mutation == "uid":
+                entry["stat"]["uid"] += 1
             else:
                 entry["stat"]["nlink"] = 2
             write(path, manifest)
