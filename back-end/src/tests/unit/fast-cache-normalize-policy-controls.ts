@@ -124,7 +124,7 @@ export function testRegisteredWmhExecutionPolicy(): void {
     process.env.WMH_EXECUTION_POLICY = 'rose-outcome-distribution-v4';
     assert.strictEqual(
       worldModelCacheScope(),
-      'sim.rose-archive-v2.policy.rose-outcome-distribution-v4.4.79e7487d872cc94e:'
+      'sim.rose-archive-v2.policy.rose-outcome-distribution-v4.4.dc3c757c601515ff:'
     );
     for (const policy of ['unregistered', 'rose-virtual-public-affordances-v3', '__proto__']) {
       process.env.WMH_EXECUTION_POLICY = policy;

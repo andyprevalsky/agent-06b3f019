@@ -30,7 +30,10 @@ October 2026.
    concrete deviation reason. A rate with structured `applies_to` (exact canonical
    category, tool and send argument, e.g. `message.message_transport_send` with
    `to_email`) and a satisfied `precondition` must be declared by that call;
-   browser-agent sends have no structured send field and stay model-declared.
+   browser-agent sends are covered by effect: v4 outcomes append each send or form
+   submission to `structured.outreach` (`id`, `counterparty`, `channel`, `kind`,
+   `warm`), and a record to a counterparty without a delivered reply must
+   declare the rate whose `applies_to_outreach.warm` matches.
    Researched distributions remain optional reference
    examples (`--examples`); the 12-entry
    `assets/fundraiser-examples-researched.json` is not the user's set (runs

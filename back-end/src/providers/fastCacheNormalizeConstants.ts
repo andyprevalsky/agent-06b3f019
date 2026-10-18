@@ -29,7 +29,7 @@ const WMH_EXECUTION_POLICIES = new Map([
   ],
   [
     'rose-outcome-distribution-v4',
-    { version: '4', sha256: '79e7487d872cc94efe1073e169d7331464e34891ae40c2f5bd926fd2f709fce1' },
+    { version: '4', sha256: 'dc3c757c601515ffcb7df37f444d8f5f23366ce55127adf1170ad39153074ac3' },
   ],
 ]);
 

@@ -48,7 +48,7 @@ BASE_RATES_TEXT = (
 )
 _BASE_RATE_KEYS = {"key", "probability", "event", "applies_when"}
 # Optional structured applicability: the exact candidate tools whose calls must declare the rate.
-_BASE_RATE_OPTIONAL_KEYS = {"applies_to", "group", "precondition"}
+_BASE_RATE_OPTIONAL_KEYS = {"applies_to", "applies_to_outreach", "group", "precondition"}
 _APPLIES_TO_KEYS = {"category", "tool", "argument"}
 _PRECONDITION_KEYS = {"counterparty_argument", "delivered_base_rate_keys", "present"}
 _RATE_KEY_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_")
@@ -173,19 +173,24 @@ def _validated_applicability(rate: dict[str, Any], key: str) -> dict[str, Any]:
             for field in _APPLIES_TO_KEYS:
                 _text(target[field], f"{key}: applies_to {field}")
         result["applies_to"] = deepcopy(targets)
+    if "applies_to_outreach" in rate:
+        target = rate["applies_to_outreach"]
+        if not isinstance(target, dict) or set(target) != {"warm"} or not isinstance(target["warm"], bool):
+            raise ValueError(f"{key}: applies_to_outreach must be exactly {{warm: bool}}")
+        result["applies_to_outreach"] = dict(target)
     if "group" in rate:
         result["group"] = _text(rate["group"], f"{key}: group")
     if "precondition" in rate:
         condition = rate["precondition"]
         if (
-            "applies_to" not in rate
+            not {"applies_to", "applies_to_outreach"} & set(rate)
             or not isinstance(condition, dict)
             or set(condition) != _PRECONDITION_KEYS
             or not isinstance(condition["present"], bool)
             or not isinstance(condition["delivered_base_rate_keys"], list)
             or not condition["delivered_base_rate_keys"]
         ):
-            raise ValueError(f"{key}: precondition needs applies_to plus counterparty_argument, keys and present")
+            raise ValueError(f"{key}: precondition needs applies_to(_outreach) plus counterparty_argument, keys and present")
         _text(condition["counterparty_argument"], f"{key}: precondition counterparty_argument")
         result["precondition"] = deepcopy(condition)
     return result

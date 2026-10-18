@@ -70,7 +70,7 @@ Keep two things apart.
 1. Do not make up history. Never fabricate pre-existing records that this action did not cause: earlier correspondence, introductions, applications, investor interest, commitments, signed documents, deposits, private documents, citations or record IDs, or company legal, product, traction, ownership or financial facts that the state and history do not establish. Retrieved demonstrations come from other worlds; their private facts are not facts of this world. When the action needs an unknown fact, such as a form field asking for unestablished traction figures, report that specific blocker. A request to submit or send without the content it needs yields that missing-information result, not a success.
 2. Do simulate the result of the intended action. Research, lookups and inbox checks return realistic findings consistent with the fixture, including candidates inferred from its derived signals (for example warm contacts inferred from message counts, contact frequency and investor-like email domains), labeled as inferred. Public pages, forms and contact routes are instantiated plausibly. Sends and submissions are delivered, bounce or fail. Counterparties reply, pass, propose and hold meetings, commit, sign and wire at realistic rates. Missing prior evidence never rules out a result that this action itself can cause.
 
-Base rates: structured.base_rates lists keyed base rates for this world. They are the default probability distribution for the matching result. When one matches a result this action can cause, declare it in base_rates and give every outcome a base_rate_results entry stating whether that event happens in the outcome. The probability of the outcomes in which it happens must equal the listed probability within 0.03 unless the state gives a concrete reason otherwise; state that reason in deviation_reason. Set "given" to an earlier declared key when the rate is conditional on that event (for example meeting acceptance given a reply); such a key appears in base_rate_results only for outcomes in which the given event happens. A listed rate that names an applies_to tool must be declared whenever the candidate call matches it (same category, tool name and a nonempty named argument) and its precondition holds in the state; when several such rates share a group, declare the one that fits. When no base rate matches, use an empty base_rates list and empty base_rate_results objects.
+Base rates: structured.base_rates lists keyed base rates for this world. They are the default probability distribution for the matching result. When one matches a result this action can cause, declare it in base_rates and give every outcome a base_rate_results entry stating whether that event happens in the outcome. The probability of the outcomes in which it happens must equal the listed probability within 0.03 unless the state gives a concrete reason otherwise; state that reason in deviation_reason. Set "given" to an earlier declared key when the rate is conditional on that event (for example meeting acceptance given a reply); such a key appears in base_rate_results only for outcomes in which the given event happens. Record every outreach effect of an outcome, a completed send or form submission to a counterparty, by appending {"id":"unique record id","counterparty":"the recipient email address, or the organization's web domain for a form","channel":"email|form|sms|linkedin|other","kind":"send|form_submission","warm":true or false} to /structured/outreach (add the list when absent); warm is true only for a warm introduction or referral. Outreach to a counterparty with no delivered reply must declare the listed rate whose applies_to_outreach matches its warm value, without "given". A listed rate that names an applies_to tool must be declared whenever the candidate call matches it (same category, tool name and a nonempty named argument) and its precondition holds in the state; when several such rates share a group, declare the one that fits. When no base rate matches, use an empty base_rates list and empty base_rate_results objects.
 
 state_patch is an ordered JSON Patch array against the supplied environment_state. Use only {"op":"add","path":"/key","value":...}, {"op":"replace","path":"/existing/key","value":...}, or {"op":"remove","path":"/existing/key"}. Paths are JSON pointers: escape ~ as ~0 and / as ~1; array indices are zero-based, and /array/- appends only for add. Parent paths must already exist, replace/remove targets must exist, and the empty root path is forbidden. An empty patch retains the state unchanged. Preserve all unrelated state and prior facts, including existing lists; append new entries rather than replacing their history. Each patch belongs solely to its own outcome and must contain only effects of that result, with matching receipts for completed effects."""
 
@@ -142,17 +142,11 @@ def _applies_to_call(entry: dict, action: dict) -> bool:
     return False
 
 
-def _precondition_holds(entry: dict, action: dict, state: dict) -> bool:
-    """Structured state precondition: whether this counterparty already has a delivered
-    event realizing one of the listed rates (exact address match, not content reading)."""
-    condition = entry.get("precondition")
-    if condition is None:
-        return True
-    arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
-    counterparty = arguments.get(condition.get("counterparty_argument"))
+def _replied(counterparty: str, keys: set, state: dict) -> bool:
+    """Whether a delivered event realizing one of ``keys`` came from this counterparty
+    (exact case-insensitive address or domain containment in its ``from``, not content reading)."""
     counterparty = counterparty.strip().lower() if isinstance(counterparty, str) else ""
-    keys = set(condition.get("delivered_base_rate_keys") or ())
-    present = bool(counterparty) and any(
+    return bool(counterparty) and any(
         isinstance(event, dict)
         and DELIVERED_AT_KEY in event
         and event.get("base_rate_key") in keys
@@ -160,6 +154,18 @@ def _precondition_holds(entry: dict, action: dict, state: dict) -> bool:
         and counterparty in event["from"].lower()
         for event in _events(state)
     )
+
+
+def _precondition_holds(entry: dict, action: dict, state: dict, *, counterparty: str | None = None) -> bool:
+    """Structured state precondition on the counterparty taken from the call argument
+    (or from an outreach record when ``counterparty`` is given)."""
+    condition = entry.get("precondition")
+    if condition is None:
+        return True
+    if counterparty is None:
+        arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+        counterparty = arguments.get(condition.get("counterparty_argument"))
+    present = _replied(counterparty, set(condition.get("delivered_base_rate_keys") or ()), state)
     return present is condition.get("present")
 
 
@@ -228,6 +234,63 @@ def _require_applicable_declarations(declared, state, action):
     for group in required_base_rate_groups(state, action).values():
         if not keys & group:
             raise ValueError("A base rate that applies to this candidate tool call must be declared")
+
+
+OUTREACH_KEY = "outreach"
+OUTREACH_KINDS = frozenset({"send", "form_submission"})
+_OUTREACH_FIELDS = frozenset({"id", "counterparty", "channel", "kind", "warm"})
+
+
+def _outreach(state: dict) -> list:
+    structured = state.get("structured") if isinstance(state, dict) else None
+    records = structured.get(OUTREACH_KEY) if isinstance(structured, dict) else None
+    return records if isinstance(records, list) else []
+
+
+def _validate_outreach(base_state: dict, state: dict) -> list:
+    """The new outreach records of one outcome: append-only, exact structured fields."""
+    base, records = _outreach(base_state), _outreach(state)
+    structured = state.get("structured") if isinstance(state, dict) else None
+    if isinstance(structured, dict) and OUTREACH_KEY in structured and not isinstance(structured[OUTREACH_KEY], list):
+        raise ValueError("structured.outreach must be a list")
+    if records[: len(base)] != base:
+        raise ValueError("The outreach ledger is append-only; existing records cannot change")
+    seen = {r.get("id") for r in base if isinstance(r, dict)}
+    added = records[len(base) :]
+    for record in added:
+        if not isinstance(record, dict) or set(record) != _OUTREACH_FIELDS:
+            raise ValueError("An outreach record needs exactly id, counterparty, channel, kind and warm")
+        if not isinstance(record["id"], str) or not record["id"].strip() or record["id"] in seen:
+            raise ValueError("Outreach record IDs must be nonempty and unique")
+        seen.add(record["id"])
+        for field in ("counterparty", "channel"):
+            if not isinstance(record[field], str) or not record[field].strip():
+                raise ValueError("An outreach record needs a concrete counterparty and channel")
+        if record["kind"] not in OUTREACH_KINDS or type(record["warm"]) is not bool:
+            raise ValueError("Outreach kind must be send or form_submission and warm a boolean")
+    return added
+
+
+def _require_outreach_declarations(added: list, declared: list, base_state: dict) -> None:
+    """Effect rule: recorded outreach to a counterparty without a delivered reply must
+    declare the listed first-response rate whose applies_to_outreach matches its warmth."""
+    if not added:
+        return
+    structured = base_state.get("structured") if isinstance(base_state, dict) else None
+    entries = structured.get(BASE_RATES_KEY) if isinstance(structured, dict) else None
+    listed = world_base_rates(base_state)
+    keys = {declaration["key"] for declaration in declared if declaration["given"] is None}
+    for record in added:
+        for entry in entries if isinstance(entries, list) else ():
+            target = entry.get("applies_to_outreach") if isinstance(entry, dict) else None
+            if (
+                isinstance(target, dict)
+                and entry.get("key") in listed
+                and target.get("warm") is record["warm"]
+                and _precondition_holds(entry, {}, base_state, counterparty=record["counterparty"])
+                and entry["key"] not in keys
+            ):
+                raise ValueError("Recorded outreach must declare its matching first-response base rate")
 
 
 def _validate_v4_outcome(outcome, declared, base_events, state, *, at_ms, due_ids, required_ids, reserved_ids):
@@ -478,6 +541,7 @@ def parse_distribution(
                 raise ValueError("Invalid outcome tool observation or call identity")
         state = apply_state_patch(base_state, outcome["state_patch"])
         if v4:
+            _require_outreach_declarations(_validate_outreach(base_state, state), declared, base_state)
             _validate_v4_outcome(
                 outcome,
                 declared,

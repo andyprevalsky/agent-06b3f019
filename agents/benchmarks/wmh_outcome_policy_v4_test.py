@@ -106,7 +106,7 @@ def test_earlier_policy_and_protocol_bytes_are_unchanged():
         "rose-outcome-distribution-v1": "650945bf68ee4ba66a6c9f9dca1c3d66be85dd50360f287cb5c924edb2c8ad70",
         "rose-outcome-distribution-v2": "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0",
         "rose-outcome-distribution-v3": "3ace77b6b1a3a33ca94e69541cd1e671a4c3a7694d3612b9ddc68f1ccdf6da8a",
-        "rose-outcome-distribution-v4": "79e7487d872cc94efe1073e169d7331464e34891ae40c2f5bd926fd2f709fce1",
+        "rose-outcome-distribution-v4": "dc3c757c601515ffcb7df37f444d8f5f23366ce55127adf1170ad39153074ac3",
     }
     for name, digest in pinned.items():
         assert _sha(policies.execution_policy(name).text) == digest, name
@@ -115,7 +115,7 @@ def test_earlier_policy_and_protocol_bytes_are_unchanged():
     )
     v4 = policies.execution_policy("rose-outcome-distribution-v4")
     assert v4.version == "4" and v4.response_protocol == OUTCOME_V4_PROTOCOL
-    assert v4.effective_system_sha256 == "44ef95aee966cce6c7de8da9d2fb0610c5794784a94b3943f207cde68d35fc24"
+    assert v4.effective_system_sha256 == "0f459f7d6363d708fe50d33c1c99b3be9d98436d1b5cc636b82e9ee23aab733a"
     # The v3 timed protocol is unchanged: no v4 fields and no v4 checks.
     legacy = {
         "schema": "rose.wmh_timed_outcome_distribution.v1",
@@ -500,11 +500,103 @@ def test_canonical_fixture_applicability_is_structured_and_validated():
     assert all(rates[k]["applies_to"] == send for k in ("cold_reply", "warm_reply", "meeting_accepted"))
     assert rates["cold_reply"]["group"] == rates["warm_reply"]["group"] == "first_response"
     assert rates["meeting_accepted"]["precondition"]["present"] is True
+    assert rates["cold_reply"]["applies_to_outreach"] == {"warm": False}
+    assert rates["warm_reply"]["applies_to_outreach"] == {"warm": True}
     bad = deepcopy(list(rates.values()))
     bad[0]["precondition"]["delivered_base_rate_keys"] = ["unlisted"]
     with pytest.raises(ValueError, match="unlisted"):
         validated_base_rates(bad)
     bad = deepcopy(list(rates.values()))
     bad[0].pop("applies_to")
+    bad[0].pop("applies_to_outreach")
     with pytest.raises(ValueError, match="precondition"):
         validated_base_rates(bad)
+
+
+# --- Effect rule: recorded outreach (browser sends/forms included) declares its rate ----------
+
+
+def _record(warm=False, counterparty="craftventures.com", record_id="out-1", kind="form_submission"):
+    return {"id": record_id, "counterparty": counterparty, "channel": "form", "kind": kind, "warm": warm}
+
+
+def _browser_form(declare=None, probability=0.07, *, warm=False, counterparty="craftventures.com"):
+    add = [{"op": "add", "path": "/structured/outreach", "value": [_record(warm, counterparty)]}]
+    reply = dict(reply_event(), **{"from": f"Partner <partner@{counterparty}>", "base_rate_key": declare})
+    if declare is None:
+        return {"schema": OUTCOME_V4_SCHEMA, "base_rates": [],
+                "outcomes": [outcome("submitted", 1.0, patch=add, content="Form submitted: Thank you")]}
+    return {
+        "schema": OUTCOME_V4_SCHEMA,
+        "base_rates": [{"key": declare, "given": None, "deviation_reason": None}],
+        "outcomes": [
+            outcome("submitted_reply", probability, results={declare: True}, content="Form submitted: Thank you",
+                    patch=add + [{"op": "add", "path": "/structured/scheduled_events/-", "value": reply}]),
+            outcome("submitted_silent", round(1 - probability, 10), results={declare: False}, patch=add,
+                    content="Form submitted: Thank you"),
+        ],
+    }
+
+
+BROWSER = _call("spawn_browser_agent", "browser", goal="Submit the Craft Ventures contact form", type="browser")
+
+
+def test_browser_outcome_recording_a_submission_without_a_declaration_is_rejected():
+    with pytest.raises(ValueError, match="first-response base rate"):
+        _parse_call(_browser_form(), _canonical_world(), BROWSER)
+    # Warmth is structural: a warm record needs warm_reply, not cold_reply.
+    with pytest.raises(ValueError, match="first-response base rate"):
+        _parse_call(_browser_form("cold_reply", warm=True), _canonical_world(), BROWSER)
+
+
+def test_browser_outcome_recording_a_submission_with_both_branches_passes():
+    parsed = _parse_call(_browser_form("cold_reply"), _canonical_world(), BROWSER)
+    assert [o["probability"] for o in parsed["outcomes"]] == [0.07, 0.93]
+    assert parsed["outcomes"][1]["transition"]["state"]["structured"]["outreach"] == [_record()]
+    _parse_call(_browser_form("warm_reply", 0.35, warm=True), _canonical_world(), BROWSER)
+    # Both branches remain mandatory: certainty is still rejected.
+    certain = _browser_form("cold_reply")
+    certain["outcomes"] = [dict(certain["outcomes"][1], probability=1.0)]
+    with pytest.raises(ValueError, match="both outcomes"):
+        _parse_call(certain, _canonical_world(), BROWSER)
+
+
+def test_outcomes_without_outreach_effects_or_after_a_delivered_reply_are_not_forced():
+    read = {"schema": OUTCOME_V4_SCHEMA, "base_rates": [],
+            "outcomes": [outcome("read", 1.0, content="Contact page lists a form")]}
+    _parse_call(read, _canonical_world(), BROWSER)
+    replied = dict(reply_event("evt-old", at=START - HOUR), **{"from": "Partner <partner@craftventures.com>",
+                                                             "delivered_at_ms": START - HOUR + 5})
+    _parse_call(_browser_form(), _canonical_world([replied]), BROWSER)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"id": "out-1", "counterparty": "craftventures.com", "channel": "form", "kind": "form_submission"},
+        dict(_record(), kind="visit"),
+        dict(_record(), warm="no"),
+        dict(_record(), counterparty=" "),
+        dict(_record(), note="extra"),
+    ],
+)
+def test_outreach_records_need_the_exact_structured_fields(record):
+    payload = _browser_form("cold_reply")
+    for item in payload["outcomes"]:
+        item["state_patch"][0]["value"] = [record]
+    with pytest.raises(ValueError, match="outreach|Outreach"):
+        _parse_call(payload, _canonical_world(), BROWSER)
+
+
+def test_outreach_ledger_is_append_only():
+    state = _canonical_world()
+    state["structured"]["outreach"] = [_record(record_id="out-0", counterparty="old.vc")]
+    rewrite = {"schema": OUTCOME_V4_SCHEMA, "base_rates": [], "outcomes": [
+        outcome("rewrite", 1.0, patch=[{"op": "replace", "path": "/structured/outreach/0/warm", "value": True}])]}
+    with pytest.raises(ValueError, match="append-only"):
+        _parse_call(rewrite, state, BROWSER)
+    duplicate = _browser_form("cold_reply")
+    for item in duplicate["outcomes"]:
+        item["state_patch"][0] = {"op": "add", "path": "/structured/outreach/-", "value": _record(record_id="out-0")}
+    with pytest.raises(ValueError, match="unique"):
+        _parse_call(duplicate, state, BROWSER)
