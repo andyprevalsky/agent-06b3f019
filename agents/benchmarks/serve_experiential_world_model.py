@@ -187,6 +187,13 @@ def create_app(name, model, usage=None, close_provider=None, *, identity=None):
     def clock_finish(model_name: str, scope: str, agent_id: str, payload: dict):
         return clock_call(model_name, scope, lambda session_id: model.clock_finish(session_id, agent_id))
 
+    @app.post("/world_models/{model_name}/scopes/{scope}/clock/agents/{agent_id}/receive")
+    def clock_receive(model_name: str, scope: str, agent_id: str, payload: dict):
+        children = payload.get("children")
+        if not isinstance(children, list) or not all(isinstance(child, str) and child for child in children):
+            raise HTTPException(422, "children must be a list of agent ids")
+        return clock_call(model_name, scope, lambda session_id: model.clock_receive(session_id, agent_id, children))
+
     @app.post("/world_models/{model_name}/scopes/{scope}/clock/agents/{agent_id}/wait")
     async def clock_wait(model_name: str, scope: str, agent_id: str, payload: dict):
         # Long-poll: returns resumed=false after the poll so callers re-poll

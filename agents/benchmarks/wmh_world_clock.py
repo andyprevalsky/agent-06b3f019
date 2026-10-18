@@ -5,8 +5,10 @@
     shared time = min(running agents' times ∪ waiting agents' deadlines)
 
 A parent idle on live children (it has not acted since spawning them) is
-excluded from shared time; each finished child moves its parent to at least
-that child's finish, so the parent resumes at the latest child's finish; a parent
+excluded from shared time; each finished child moves it to at least that
+child's finish, so it resumes at the latest child's finish. A parent acting
+beside its children moves to a child's finish only when it receives that
+child's result (receive); a parent
 that keeps acting beside its children holds shared time like any agent. When every included agent waits, shared
 time is the earliest deadline, so the earliest waiter always wakes (no
 deadlock). Model thinking takes no world time. Updates are heap-backed:
@@ -149,11 +151,24 @@ class WorldClock:
             parent = self._agents[agent.parent]
             parent.live_children.discard(agent_id)
             parent.children_finish_ms = max(parent.children_finish_ms, agent.time_ms)
-            # The parent receives this child's result at the child's finish
-            # time, so it can never act on that result earlier in the world.
-            parent.time_ms = max(parent.time_ms, parent.children_finish_ms)
+            if not parent.acting:
+                # A parent idle on its children resumes at their finish. An
+                # acting parent keeps its own time until it receives the result.
+                parent.time_ms = max(parent.time_ms, parent.children_finish_ms)
             self._touch(agent.parent)
         self._release()
+
+    def receive(self, agent_id: str, children) -> int:
+        """The agent receives finished children's results: it moves to their finish."""
+        self.register(agent_id)
+        agent = self._agents[agent_id]
+        for child_id in children:
+            child = self._agents.get(child_id)
+            if child is not None and child.done and child.parent == agent_id:
+                agent.time_ms = max(agent.time_ms, child.time_ms)
+        self._touch(agent_id)
+        self._release()
+        return agent.time_ms
 
     async def wait(
         self,

@@ -5282,6 +5282,55 @@ async def test_simulated_planner_date_is_the_agents_world_time_cursor():
     assert systems and f"Current UTC date: {cursor_date}." in systems[0]
 
 
+async def test_simulated_planner_keeps_its_last_world_time_when_the_clock_reads_nothing():
+    """Mid-run, a world clock read of None keeps the agent's cursor date; without a cursor prod is unchanged."""
+    import httpx
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_planner_llm_activity
+
+    plan_json = json.dumps(
+        {"title": "Plan", "tasks": [{"task_idx": "0", "goal": "g", "tool_name": "spawn_explore_agent", "depends_on": []}],
+         "join": "all"}
+    )
+    body = _anthropic_sse_body(text=plan_json, input_tokens=10, output_tokens=5)
+    systems = []
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            systems.append("\n".join(block["text"] for block in json.loads(req.content.decode())["system"]))
+            return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    cursor = int(datetime(2026, 10, 3, 5, tzinfo=timezone.utc).timestamp() * 1000)
+    warnings = []
+    for world_cursor in (cursor, None):
+        kwargs = {} if world_cursor is None else {"world_time_cursor_ms": world_cursor}
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.world_model_runtime.world_time_ms", AsyncMock(return_value=None)),
+            patch("helpers.llm.logger.warning", side_effect=lambda *a, **kw: warnings.append(a)),
+        ):
+            await call_planner_llm_activity(
+                messages=[{"role": "user", "content": "raise money"}],
+                model="rose",
+                tools_description="web_search: search the web",
+                user_context="",
+                claude_max_token="ct-planner-123",
+                agent_id="agent-simulated",
+                claude_token_user_id="planner-user",
+                **kwargs,
+            )
+    assert len(systems) == 2
+    assert "Current UTC date: 2026-10-03." in systems[0], "a simulated planner must not fall back to the real date"
+    assert any("world-time cursor" in str(args[0]) for args in warnings)
+    today = datetime.now(timezone.utc).date().isoformat()
+    assert f"Current UTC date: {today}." in systems[1], "without a cursor (prod) the real date is unchanged"
+
+
 async def test_planner_world_clock_failure_stops_liveness_and_never_uses_wall_clock():
     """An unreadable or unrepresentable world clock fails the planner and stops its heartbeat."""
     import httpx
@@ -9791,6 +9840,9 @@ async def run_all_tests():
     )
     await r.record_async(
         "simulated_planner_date_is_world_time_cursor", test_simulated_planner_date_is_the_agents_world_time_cursor
+    )
+    await r.record_async(
+        "simulated_planner_keeps_last_world_time", test_simulated_planner_keeps_its_last_world_time_when_the_clock_reads_nothing
     )
     await r.record_async(
         "planner_world_clock_failure_stops_liveness",

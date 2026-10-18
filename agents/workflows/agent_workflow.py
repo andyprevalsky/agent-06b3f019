@@ -79,7 +79,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
-    from helpers.wait_on_world_clock import _refresh_world_time_cursor
+    from helpers.wait_on_world_clock import _receive_child_results_on_world_clock, _refresh_world_time_cursor
     from helpers.world_model_runtime import world_clock_activity
     from loop.dag_executor import (
         TaskDAG,
@@ -3799,11 +3799,12 @@ class AgentWorkflow:
         """Execute a tool, then (simulate mode) re-read this agent's world-time cursor.
 
         A simulated action advances the agent on its world clock by the WMH's
-        predicted duration, and a finished child moves its parent to the
-        child's finish, so the next "now" this agent sees is the world's.
+        predicted duration, and a call that delivers a child's result moves
+        this agent to that child's finish, so the next "now" it sees is the world's.
         Outside a WMH world no cursor exists and nothing extra runs.
         """
         result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        await _receive_child_results_on_world_clock(self, tool_call_id)
         await _refresh_world_time_cursor(self)
         return result
 

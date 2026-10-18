@@ -71,3 +71,40 @@ async def _refresh_world_time_cursor(workflow_instance: Any) -> int | None:
     latest = max(world_time_cursor_ms(workflow_instance) or cursor, result["time_ms"])
     set_world_time_cursor(workflow_instance, latest, now=workflow.now())
     return latest
+
+
+async def _receive_child_results_on_world_clock(workflow_instance: Any, tool_call_id: str) -> None:
+    """Simulate mode: this tool call delivered child results, so the agent moves to their finish.
+
+    An agent acting beside its children keeps its own world time until the call
+    that hands it a child's result completes; only then does it reach that
+    child's finish time. Each child is received once.
+    """
+    if world_time_cursor_ms(workflow_instance) is None or not getattr(workflow_instance, "agent_id", None):
+        return
+    received = getattr(workflow_instance, "_world_clock_received_children", None)
+    if received is None:
+        received = workflow_instance._world_clock_received_children = set()
+    results = getattr(workflow_instance, "child_results", None) or {}
+    children = sorted(
+        child_id
+        for child_id, child_tool_id in (getattr(workflow_instance, "child_tool_ids", None) or {}).items()
+        if child_id in results
+        and child_id not in received
+        and isinstance(child_tool_id, str)
+        and (child_tool_id == tool_call_id or child_tool_id.startswith(f"{tool_call_id}:"))
+    )
+    if not children:
+        return
+    try:
+        result = await workflow.execute_activity(
+            world_clock_activity,
+            args=["receive", workflow_instance.agent_id, None, {"children": children}],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+    except Exception as exc:
+        workflow.logger.error(f"[world_clock] Child result receipt failed; keeping this agent's time: {exc}")
+        return
+    if isinstance(result, dict) and type(result.get("time_ms")) is int:
+        received.update(children)

@@ -536,4 +536,61 @@ def test_each_child_result_reaches_the_parent_at_that_childs_finish():
     assert clock.time_of("root") == 2 * DAY
     assert clock.action_time("root") == 2 * DAY
     clock.finish("slow")
-    assert clock.time_of("root") == 6 * DAY
+    # Now acting, the parent reaches the slow child's finish only on receipt.
+    assert clock.time_of("root") == 2 * DAY
+    assert clock.receive("root", ["slow"]) == 6 * DAY
+
+
+def test_an_acting_parent_reaches_a_childs_finish_only_when_it_receives_the_result():
+    clock = WorldClock(start_ms=0)
+    clock.register("root")
+    clock.register("child", parent="root")
+    clock.commit("root", started_ms=clock.action_time("root"), elapsed_ms=1 * DAY)  # acting beside its child
+    clock.commit("child", started_ms=0, elapsed_ms=5 * DAY)
+    clock.finish("child")
+    assert clock.time_of("root") == 1 * DAY, "a child's finish must not pull an acting parent forward"
+    started = clock.action_time("root")
+    assert started == 1 * DAY
+    clock.commit("root", started_ms=started, elapsed_ms=3 * 3_600_000)
+    assert clock.time_of("root") == 1 * DAY + 3 * 3_600_000
+    assert clock.receive("root", ["child"]) == 5 * DAY
+    assert clock.receive("root", ["child", "stranger"]) == 5 * DAY  # idempotent; unknown ids ignored
+
+
+def test_the_result_delivering_tool_call_moves_an_acting_parents_cursor(monkeypatch):
+    clock = WorldClock(start_ms=_ms(PINNED))
+    calls = []
+    base = _clock_activity(clock, calls)
+
+    async def activity(fn, **kw):
+        if kw['args'][0] == 'receive':
+            calls.append('receive')
+            return {'agent_id': kw['args'][1], 'time_ms': clock.receive(kw['args'][1], kw['args'][3]['children'])}
+        return await base(fn, **kw)
+
+    m = _patch_workflows(monkeypatch, activity)
+    root, child = _simulated_workflow('root'), _simulated_workflow('child', 'root')
+    root.child_tool_ids, root.child_results = {}, {}
+    asyncio.run(m.AgentWorkflow._register_on_world_clock(root))
+    asyncio.run(m.AgentWorkflow._register_on_world_clock(child))
+    root.child_tool_ids['child'] = 'spawn-1:0'
+
+    async def tool(self, name, args, call_id):
+        if name == 'web_search':  # the parent keeps acting while its child runs
+            clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=DAY)
+        if name == 'spawn_agent':  # this call hands the parent its child's result
+            self.child_results['child'] = {'status': 'completed'}
+        return {'success': True}
+
+    monkeypatch.setattr(m.AgentWorkflow, '_execute_tool_once', tool, raising=False)
+    asyncio.run(m.AgentWorkflow._execute_tool(root, 'web_search', {}, 'search-1'))
+    clock.commit('child', started_ms=clock.action_time('child'), elapsed_ms=5 * DAY)
+    asyncio.run(m.AgentWorkflow._world_clock_event(child, 'finish'))
+    asyncio.run(m.AgentWorkflow._execute_tool(root, 'web_search', {}, 'search-2'))
+    assert root.simulated_world_time_ms == _ms(PINNED) + 2 * DAY, 'the finish alone must not move the acting parent'
+    assert 'receive' not in calls
+    asyncio.run(m.AgentWorkflow._execute_tool(root, 'spawn_agent', {}, 'spawn-1'))
+    assert calls.count('receive') == 1
+    assert root.simulated_world_time_ms == _ms(PINNED) + 5 * DAY
+    asyncio.run(m.AgentWorkflow._execute_tool(root, 'spawn_agent', {}, 'spawn-1'))
+    assert calls.count('receive') == 1, 'each child result is received once'
