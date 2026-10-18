@@ -9912,5 +9912,49 @@
         }
       ]
     }
+  },
+  {
+    "name": "browser-cloud-iphone-settings",
+    "title": "Live cloud iPhone Settings connectivity",
+    "prompt": "Use exactly one browser agent and the enabled account dedicated cloud iPhone through the phone tool. This is a connectivity check: call apps.launch with name Settings, then screen.text, and report the actual visible screen heading verbatim as a final report line: Visible heading: <exact OCR heading>. Settings may reopen a persisted subpage such as Paired Computers; report what is actually visible rather than claiming the heading is Settings. You may use nav.home only before apps.launch to dismiss the initial lock screen without entering a passcode. Do not sign in, install apps, send messages, or change any setting. Do not request authentication assistance. Use only real cloud phone observations; no CLI, local phone, demo cache, or fabricated results. Release the phone when finished.",
+    "timeout_seconds": 300,
+    "min_steps": {"browser": 3},
+    "price_limit_cents": 100,
+    "is_chat_mode": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "expected_tools": [
+      "spawn_browser_agent"
+    ],
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "incomplete",
+    "fast_cache": "off",
+    "tags": [
+      "LIVE",
+      "phone"
+    ],
+    "description": "Explicit-only development gate: actual persisted apps.launch Settings and subsequent screen.text receipts grounded in the exact reported OCR heading; no attention. Not daily or predeploy.",
+    "environment": {
+      "mode": "live",
+      "live_fixtures": ["live"],
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "phone-harness-cloud-iphone"
+      ],
+      "secrets": [
+        "PHONE_HARNESS_DEVICE_ID",
+        "PHONE_HARNESS_API_KEY"
+      ],
+      "live_targets": [
+        "dedicated Andy cloud iPhone"
+      ],
+      "context_notes": "Only isolated local benchmark backend and trusted Andy scope. Parent supplies provider key to backend only, device ID to fixture. Checker needs existing backend envelope decryption environment and local DB. No Apple Account secret needed."
+    }
   }
 ]

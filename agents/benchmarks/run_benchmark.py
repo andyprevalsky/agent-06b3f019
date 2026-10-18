@@ -6480,6 +6480,18 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             by_id[aid] = result
             stage_logs[aid] = logs if isinstance(logs, dict) else {}
         primary_ids.add(root_ids[-1])
+    phone_roots = set(live_ids.get("browser-cloud-iphone-settings", []))
+    phone_roots.update(r.agent_id for r in results if r.name == "browser-cloud-iphone-settings" and r.agent_id)
+    for phone_root in phone_roots:
+        from benchmarks.phone_connectivity import ANDY, cleanup_phone
+        identity = _owned_cleanup_user_id.set(ANDY)
+        try:
+            if not await pause_agent(base_url, phone_root):
+                from benchmarks.phone_connectivity import PhoneCleanupBlocked
+                raise PhoneCleanupBlocked("Phone batch cleanup cannot quiesce exact root")
+            await cleanup_phone(base_url, ANDY, phone_root, _local_victoria_database_url(), API_KEY)
+        finally:
+            _owned_cleanup_user_id.reset(identity)
     owned = {aid for ids in live_ids.values() for aid in ids} | set(by_id)
     # The SMS supervisor is an in-backend tool loop, not a Temporal agent.
     # Its runner returns only after its own seeded-session cleanup completed.
@@ -8917,7 +8929,7 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
     tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
     ctx = LiveFixtureContext(
         base_url=base_url,
-        user_id=USER_ID,
+        user_id=_current_benchmark_user_id() if task.name == "browser-cloud-iphone-settings" else USER_ID,
         auth_realm=auth_realm,
         cookie_domains=cookie_domains,
         required_injectable_cookie_domains=required_cookie_domains,
@@ -13764,6 +13776,15 @@ async def _run_single_task_as_run_user(
             f"{len(fixture['password_ids'])} bad password row(s)"
         )
 
+    if task.name == "browser-cloud-iphone-settings":
+        from benchmarks.phone_connectivity import guard, device_id
+        guard(base_url, _current_benchmark_user_id())
+        device_id()
+        if _interrupt_cleanup_contract() is None:
+            raise RuntimeError("Live phone benchmark requires owned --local cleanup retention contract")
+        if _is_simulate_mode() or task.fast_cache != "off":
+            raise RuntimeError("Live iPhone benchmark forbids simulation/demo cache")
+
     grep_fixture_manifest: Optional[dict] = None
     plaid_transactions_manifest: Optional[dict] = None
     plaid_transactions_fixture_action: Optional[str] = None
@@ -13898,6 +13919,31 @@ async def _run_single_task_as_run_user(
     interrupt_cleanup_ready = False
     evaluated_failure_reason: Optional[str] = None
 
+    phone_cleanup_complete = False
+    phone_cleanup_deadline = None
+    phone_cleanup_receipt_started = _begin_interrupt_cleanup() if task.name == "browser-cloud-iphone-settings" else False
+
+    async def ensure_phone_cleanup() -> None:
+        nonlocal phone_cleanup_complete, phone_cleanup_deadline
+        if task.name != "browser-cloud-iphone-settings" or phone_cleanup_complete:
+            return
+        if agent_id:
+            from benchmarks.phone_connectivity import cleanup_phone
+            if phone_cleanup_deadline is None:
+                phone_cleanup_deadline = time.monotonic() + 90
+            if not await pause_agent(base_url, agent_id):
+                from benchmarks.phone_connectivity import PhoneCleanupBlocked
+                raise PhoneCleanupBlocked("Phone cleanup cannot quiesce exact root; retain isolated database")
+            await cleanup_phone(base_url, _current_benchmark_user_id(), agent_id,
+                                _local_victoria_database_url(), API_KEY, deadline=phone_cleanup_deadline)
+        phone_cleanup_complete = True
+        if phone_cleanup_receipt_started:
+            _complete_interrupt_cleanup()
+
+    async def delete_task_agent() -> None:
+        await ensure_phone_cleanup()
+        await delete_agent(base_url, agent_id)
+
     temp_csv_paths: list = []  # track temp files for cleanup
 
     async def start_realtime_capture() -> None:
@@ -13967,6 +14013,12 @@ async def _run_single_task_as_run_user(
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = await _apply_live_fixtures(task, base_url)
+        if task.name == "browser-cloud-iphone-settings":
+            from benchmarks.phone_connectivity import apply_fixture
+            if _is_simulate_mode() or task.fast_cache != "off":
+                raise RuntimeError("Live iPhone benchmark forbids simulation/demo cache")
+            await apply_fixture(base_url, _current_benchmark_user_id(), API_KEY)
+
         memory_fixture_manifests = await _apply_memory_fixtures(task, base_url)
         if memory_fixture_manifests:
             live_fixture_manifests.append({"kind": "memory", "fixtures": memory_fixture_manifests})
@@ -14189,6 +14241,16 @@ async def _run_single_task_as_run_user(
             if not grep_passed:
                 passed = False
                 failure_reason = grep_reason
+        if task.name == "browser-cloud-iphone-settings":
+            from benchmarks.phone_connectivity import evaluate_persisted, reported_heading
+            phone_ok, phone_reason, phone_proof = await asyncio.to_thread(
+                evaluate_persisted, base_url, _current_benchmark_user_id(), agent_id,
+                _local_victoria_database_url(), reported_heading(data),
+            )
+            if not phone_ok:
+                passed, failure_reason = False, phone_reason
+            data["_phone_connectivity_proof"] = phone_proof
+
         if phone_callee is not None and passed:
             phone_passed, phone_reason = await _evaluate_phone_call_task(
                 task,
@@ -14531,6 +14593,10 @@ async def _run_single_task_as_run_user(
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
         )
 
+        # Confirm the physical allocation is reclaimed before publishing PASS
+        # or deleting this task's exact root.
+        await ensure_phone_cleanup()
+
         # Evaluation is complete. Publish its outcome before releasing agent
         # resources or entering the phone/fixture cleanup in finally.
         if on_task_evaluated is not None:
@@ -14563,7 +14629,7 @@ async def _run_single_task_as_run_user(
         # the caller explicitly wants failed agents kept alive for diagnostics.
         if _should_delete_agent_after_run(passed, keep_failed_agents):
             try:
-                await delete_agent(base_url, agent_id)
+                await delete_task_agent()
                 print(f"    🗑  Deleted agent {agent_id[:12]}")
             except Exception:
                 print(f"    ⚠ Failed to delete agent {agent_id[:12]}")
@@ -14616,13 +14682,13 @@ async def _run_single_task_as_run_user(
             if interrupt_cleanup_started:
                 if not _should_delete_cancelled_agent(keep_failed_agents):
                     raise RuntimeError("owner-requested benchmark teardown cannot retain the cancelled agent")
-                await delete_agent(base_url, agent_id)
+                await delete_task_agent()
                 cancelled_agent_deleted = True
                 print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
             else:
                 try:
                     if _should_delete_cancelled_agent(keep_failed_agents):
-                        await delete_agent(base_url, agent_id)
+                        await delete_task_agent()
                         cancelled_agent_deleted = True
                         print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
                     else:
@@ -14731,7 +14797,7 @@ async def _run_single_task_as_run_user(
                 logs["failure_evidence"]["errors"].append(f"cleanup: {type(cleanup_error).__name__}: {cleanup_error}")
             try:
                 if not keep_failed_agents and cloud_batch_cleanup.contract() is None:
-                    await delete_agent(base_url, agent_id)
+                    await delete_task_agent()
                     print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
                 else:
                     print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
@@ -14744,6 +14810,9 @@ async def _run_single_task_as_run_user(
         return result
 
     finally:
+        # Failure/cancellation/kept-agent paths also retain the DB on unconfirmed
+        # phone cleanup through the existing owner receipt counters.
+        await ensure_phone_cleanup()
         realtime_tree_error = None
         if realtime_tree_task:
             try:

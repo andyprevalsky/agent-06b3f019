@@ -22649,6 +22649,13 @@ async def run_all_tests():
         "phone_call_parked_on_hold_static_check",
         test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card,
     )
+    # The explicit-only live-phone task's offline fixture/proof contracts recur
+    # with the existing benchmark suite; pytest owns parameter expansion.
+    from benchmarks import phone_connectivity_test
+    for name in sorted(dir(phone_connectivity_test)):
+        if name.startswith("test_"):
+            r.record("phone_connectivity_" + name[5:], _with_pytest_fixtures(getattr(phone_connectivity_test, name)))
+
     from benchmarks import phone_callee_test, phone_hold_line_test
 
     for module, prefix in ((phone_hold_line_test, "phone_hold_line_"), (phone_callee_test, "phone_callee_")):
