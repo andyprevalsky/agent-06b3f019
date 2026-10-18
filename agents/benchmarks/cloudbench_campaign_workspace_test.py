@@ -35,10 +35,15 @@ def bound_campaign(tmp_path):
                  'cloudbench-campaign-barrier.py', 'cloudbench-script-snapshot.py',
                  'cloudbench_execution_provenance.py', 'cloudbench-campaign-stop.py',
                  'cloudbench-shard-coordinator.py', 'cloudbench-provider-capacity.py',
-                 'cloudbench-provider-limits.json'):
+                 'cloudbench-provider-limits.json', 'cloudbench-cleanup-tickets.py',
+                 'cloudbench-infra-canary-preflight.py'):
         override = {'run-bench-campaign.py':'CLOUDBENCH_CAMPAIGN_UNDER_TEST','cloudbench-campaign-stop.py':'CLOUDBENCH_CAMPAIGN_STOP_UNDER_TEST'}.get(name)
         supplied = Path(os.environ[override]) if override and os.environ.get(override) else ROOT / 'scripts' / name
         shutil.copyfile(supplied, scripts / name)
+    # The strict cohort's parent N2 preflight runs the committed canary entry;
+    # this offline fixture has no provider, so its canary reports success.
+    (scripts / 'run-fleet-infra-canary').write_text('#!/usr/bin/env bash\nexit 0\n')
+    (scripts / 'run-fleet-infra-canary').chmod(0o755)
     # The old consumer entry must not be used as executable control code.
     (scripts / 'run-bench-fleet').write_text('#!/bin/bash\nexit 93\n')
     git(source, 'init', '-q')
@@ -157,7 +162,16 @@ def test_campaign_workspace_normal_cli_preserves_original600_shape(tmp_path):
     assert len(tasks)==len(set(tasks))==200
     captured=tmp_path/'argv.json'
     (scripts/'run-bench-campaign.py').write_text("import os,sys,json;json.dump(sys.argv[1:],open(os.environ['FIXTURE_CAPTURE'],'w'))\n")
-    result=subprocess.run(['bash',str(scripts/'run-bench'),'--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at','1791410000','--reuse-pool-only','--cold-primary-bootstrap','--ref','5'*40,*tasks],env={**os.environ,'FIXTURE_CAPTURE':str(captured)},capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
+    argv=['bash',str(scripts/'run-bench'),'--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at','1791410000','--reuse-pool-only','--cold-primary-bootstrap','--ref','5'*40,*tasks]
+    # By default 600 simultaneous copies route to the sharded operator, which
+    # derives its own limits and refuses these legacy flags before any launch.
+    routed=subprocess.run(argv,env={**os.environ,'FIXTURE_CAPTURE':str(captured)},capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert routed.returncode==2,routed.stdout+routed.stderr
+    assert "600 simultaneous copies exceed one controller's" in routed.stdout+routed.stderr
+    assert '--demo-cache/--stress-defaults are not sharded operator options' in routed.stderr
+    assert not captured.exists()
+    # The explicit ordinary campaign route keeps the original600 argv shape.
+    result=subprocess.run(argv,env={**os.environ,'FIXTURE_CAPTURE':str(captured),'RUN_BENCH_SHARDED_ROUTE':'never'},capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
     assert result.returncode==0,result.stdout+result.stderr
     args=json.loads(captured.read_text())
     assert [v.removeprefix('--task=') for v in args if v.startswith('--task=')]==tasks
