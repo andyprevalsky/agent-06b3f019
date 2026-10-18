@@ -6685,3 +6685,4 @@
 {"task": "browser-auth-saved-password-retry", "duration_seconds": 116.3, "cost_cents": 1.0, "timestamp": "2026-10-18T00:13:18.400938+00:00", "agent_id": "5a4b1b51-bdde-4a1e-ad27-451d6e1ee8e4"}
 {"task": "browser-auth-guest-purchase", "duration_seconds": 125.1, "cost_cents": 0.0, "timestamp": "2026-10-18T00:13:18.400938+00:00", "agent_id": "c94fee40-86d1-4121-84e5-c164039708a8"}
 {"task": "agent-payment-new-user-journey", "duration_seconds": 124.6, "cost_cents": 0.0, "timestamp": "2026-10-18T00:13:18.400938+00:00", "agent_id": "b89d96c7-d397-40f3-9192-002dd208a52f"}
+{"task": "sms-supervisor-fill-form-searches-then-delegates", "duration_seconds": 63.6, "cost_cents": 0.0, "timestamp": "2026-10-18T20:36:58.358089+00:00", "agent_id": ""}

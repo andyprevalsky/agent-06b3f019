@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "snapshot_at_utc": "2026-10-18T20:30:11.628799+00:00",
+  "snapshot_at_utc": "2026-10-18T20:41:14.596598+00:00",
   "original_started_at_utc": "2026-10-12T18:39:09+00:00",
   "original_timing_run": "20261012-183909-2547634",
   "resumed_timing_run": "20261012-234924-2614623",
   "original_attempts": 31,
-  "resumed_attempts": 415,
-  "all_attempt_count": 446,
+  "resumed_attempts": 416,
+  "all_attempt_count": 447,
   "attempt_statuses": {
     "failed": 93,
-    "passed": 353
+    "passed": 354
   },
   "all_attempts_retained": true,
   "all_attempts": [
@@ -5810,12 +5810,25 @@
       "status": "failed",
       "exit_code": 1,
       "log": "logs/sms-fill-defaults-initial-user-rerun-20261018-202743-3348089.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-fill-tamy-account-user-rerun",
+      "started_at": "2026-10-18T20:36:34Z",
+      "finished_at": "2026-10-18T20:40:11Z",
+      "started_epoch": 1792355794.1813178,
+      "finished_epoch": 1792356011.4733565,
+      "duration_seconds": 217.3,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sms-fill-tamy-account-user-rerun-20261018-203634-3445525.log"
     }
   ],
-  "elapsed_wall_seconds": 525062.6287989616,
-  "recorded_stage_union_seconds_not_continuous_CPU": 45887.15859460831,
-  "outside_recorded_stage_intervals_seconds_not_human_idle": 479175.47020435333,
-  "summed_attempt_seconds_overlaps_not_wall": 67336.6,
+  "elapsed_wall_seconds": 525725.5965979099,
+  "recorded_stage_union_seconds_not_continuous_CPU": 46104.45063328743,
+  "outside_recorded_stage_intervals_seconds_not_human_idle": 479621.1459646225,
+  "summed_attempt_seconds_overlaps_not_wall": 67553.9,
   "nested_task_replay_and_outer_monitor_clocks_not_added_as_extra_attempts": true,
   "previous_detailed_wall_interval_accounting": {
     "path": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-time-scorecard.json",
