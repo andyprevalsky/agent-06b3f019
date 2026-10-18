@@ -2,11 +2,15 @@
 """Signal only expired, registered fleet owners; canonical export remains authoritative."""
 
 import argparse
+import ast
 import base64
 import gzip
 import json
 import os
 import runpy
+import re
+import stat
+import types
 import shlex
 import subprocess
 import time
@@ -158,6 +162,234 @@ def execute(v):
 """
 
 
+AGENT = r"""
+import base64,struct
+
+def unix_dump():
+ sock=socket.socket(socket.AF_NETLINK,socket.SOCK_RAW,4);sock.settimeout(3)
+ request=struct.pack('=BBHIIIII',socket.AF_UNIX,0,0,0xffffffff,0,93,0xffffffff,0xffffffff)
+ sock.send(struct.pack('=IHHII',16+len(request),20,0x301,77,0)+request)
+ rows={};total=0
+ try:
+  while True:
+   packet,ancillary,msgflags,sender=sock.recvmsg(1048576);need(sender[0]==0 and not msgflags&(socket.MSG_TRUNC|socket.MSG_CTRUNC),'truncated/nonkernel unix diagnostic');total+=len(packet);need(total<=8388608,'unix diagnostic bound')
+   offset=0
+   while offset+16<=len(packet):
+    size,kind,flags,seq,pid=struct.unpack_from('=IHHII',packet,offset);need(seq==77 and not flags&0x10 and size>=16 and offset+size<=len(packet),'interrupted/mismatched/truncated unix diagnostic')
+    body=packet[offset+16:offset+size];offset+=(size+3)&~3
+    if kind==3:
+     need(offset==len(packet) and len(body)>=4 and struct.unpack_from('=i',body)[0]==0,'incomplete unix diagnostic completion');return rows
+    if kind==2:need(struct.unpack_from('=i',body)[0]==0,'unix diagnostic kernel error');continue
+    family,typ,state,pad,inode,c1,c2=struct.unpack_from('=BBBBIII',body)
+    need(family==socket.AF_UNIX and inode not in rows,'duplicate unix diagnostic')
+    row={'inode':inode,'type':typ,'state':state};at=16
+    while at+4<=len(body):
+     length,key=struct.unpack_from('=HH',body,at);need(length>=4 and at+length<=len(body),'truncated unix attribute')
+     raw=body[at+4:at+length];at+=(length+3)&~3;key&=0x3fff
+     if key==0:row['name']=os.fsdecode(raw.rstrip(b'\0'))
+     elif key in (2,7):row['peer' if key==2 else 'uid']=struct.unpack('=I',raw)[0]
+     elif key==3:row['icons']=list(struct.unpack('='+str(len(raw)//4)+'I',raw))
+     elif key==4:row['queues']=list(struct.unpack('=II',raw))
+    need(at==len(body),'trailing unix diagnostic attributes');rows[inode]=row
+   need(offset==len(packet),'trailing unix diagnostic datagram')
+ finally:sock.close()
+
+def process_socket_fds(path):
+ sockets=[];count=0
+ with os.scandir(path/'fd')as stream:
+  for entry in stream:
+   count+=1;link=os.readlink(entry.path);match=re.fullmatch(r'socket:\[([0-9]+)\]',link)
+   if match:sockets.append((int(match.group(1)),entry.name))
+ return sockets,count
+
+def agent_capture(v,repo=Path('/tmp/gate/repo'),custody=Path('/tmp/gate/controller-host-custody'),proc=Path('/proc')):
+ result={'schema':'normal-agent-custody-capture-v1','files':{},'missing':[],'errors':[],'machine':os.environ.get('FLY_MACHINE_ID'),'source_ref':os.environ.get('GATE_REF'),'collector_pid':os.getpid()};total=0
+ def attempt(label,operation):
+  try:return operation()
+  except Exception as error:result['errors'].append({'phase':label,'error':type(error).__name__,'detail':str(error)[:500]});return None
+ def artifact(path):
+  nonlocal total
+  path=Path(path)
+  try:
+   s=path.lstat()
+   if stat.S_ISREG(s.st_mode):
+    raw=read(path);total+=len(raw);need(total<=16777216,'agent custody bytes bound')
+    result['files'][str(path)]={'sha256':digest(raw),'body_b64':base64.b64encode(raw).decode(),'uid':s.st_uid,'mode':s.st_mode,'nlink':s.st_nlink,'dev':s.st_dev,'ino':s.st_ino};return raw
+   result['files'][str(path)]={'mode':s.st_mode,'uid':s.st_uid,'dev':s.st_dev,'ino':s.st_ino}
+  except FileNotFoundError:result['missing'].append(str(path))
+  except Exception as error:result['errors'].append({'phase':str(path),'error':type(error).__name__,'detail':str(error)[:500]})
+  return None
+ def identity(pid,environment=False):
+  path=proc/str(pid);s=(path/'stat').read_text().rsplit(') ',1)[1].split();birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+s[19]
+  status=dict(line.split(':',1) for line in(path/'status').read_text().splitlines() if ':'in line)
+  row={'pid':pid,'birth':birth,'ppid':int(s[1]),'state':s[0],'uid':[int(x)for x in status['Uid'].split()],'argv':[os.fsdecode(x)for x in(path/'cmdline').read_bytes().rstrip(b'\0').split(b'\0')],'cwd':str((path/'cwd').resolve(strict=True)),'exe':os.readlink(path/'exe'),'children':(path/'task'/str(pid)/'children').read_text().split()}
+  if environment:
+   env=dict(x.split(b'=',1)for x in(path/'environ').read_bytes().split(b'\0')if b'='in x)
+   row['environment']={os.fsdecode(k):os.fsdecode(env[k])for k in env if k in (b'CLOUDBENCH_FLEET_OWNER_TOKEN',b'REVIEWED_OPERATOR_SOURCE_REF',b'REVIEWED_OPERATOR_ROOT',b'CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY',b'CLOUDBENCH_CAMPAIGN_SEED_PROOF')}
+   row['fds']={p.name:os.readlink(p)for p in(path/'fd').iterdir()}
+  need((path/'stat').read_text().rsplit(') ',1)[1].split()[19]==s[19],'process changed during census');return row
+ launch_raw=artifact(custody/'launch.json');launch=json.loads(launch_raw)if launch_raw else None
+ artifact(custody/'pending.json');artifact(custody.parent/'controller-command.json');artifact(custody.parent/'controller-command.joined.json')
+ target=attempt('agent identity',lambda:identity(v['agent_pid'],True));result['agent']=target
+ result['unix_before']=attempt('unix before',unix_dump)
+ owners={};count=0;pids=sorted(p for p in proc.iterdir()if p.name.isdigit())
+ if len(pids)>8192:result['errors'].append({'phase':'process census','error':'process bound exceeded'});return result
+ for path in pids:
+  try:
+   sockets,scanned=process_socket_fds(path);count+=scanned
+   if count>65536:result['errors'].append({'phase':'fd census','error':'fd bound exceeded'});break
+   if sockets:
+    rawstat=(path/'stat').read_text().rsplit(') ',1)[1].split();status=dict(line.split(':',1)for line in(path/'status').read_text().splitlines()if ':'in line)
+    row={'pid':int(path.name),'birth':'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+rawstat[19],'state':rawstat[0],'uid':[int(x)for x in status['Uid'].split()],'socket_fds':[{'inode':ino,'fd':fd}for ino,fd in sockets]}
+    try:row.update(identity(int(path.name)))
+    except FileNotFoundError:row['optional_identity']='process cwd/exe disappeared after complete fd snapshot'
+    owners[path.name]=row
+  except FileNotFoundError:
+   if path.exists():
+    try:
+     fields=(path/'stat').read_text().rsplit(') ',1)[1].split();closed=fields[0]in('Z','X')and not list((path/'fd').iterdir())
+    except FileNotFoundError:closed=not path.exists()
+    if not closed:result['errors'].append({'phase':'fd census','pid':path.name,'error':'live process fd/identity race'})
+  except Exception as error:result['errors'].append({'phase':'fd census','pid':path.name,'error':type(error).__name__,'detail':str(error)[:500]})
+ result['socket_owners']=owners;result['fd_count']=count;result['pid_count']=len(pids)
+ result['unix_after']=attempt('unix after',unix_dump);result['agent_after']=attempt('agent after',lambda:identity(v['agent_pid'],True))
+ if target:
+  token=target['environment'].get('CLOUDBENCH_FLEET_OWNER_TOKEN','')
+  if re.fullmatch('[0-9a-f]{32}',token)and launch:
+   common=Path(launch['common_git']);registry=common/'cloudbench-fleet-ownership'/token;audit=common/'cloudbench-fleet-audits'/token
+   for base in(registry,audit):
+    for name in('meta','source-manifest.json','owned-clones.ids','owned-clones.names','provider-teardown-verified.epoch'):artifact(base/name)
+   for base in(registry,audit):
+    raw=result['files'].get(str(base/'meta'),{}).get('body_b64')
+    if raw:
+     fields=dict(line.split('=',1)for line in base64.b64decode(raw).decode().splitlines()if '='in line)
+     run=fields.get('run_id','')
+     if re.fullmatch('[0-9]{8}-[0-9]{6}-[0-9]+',run):
+      runroot=repo/'.context/fleet/runs'/run
+      for name in('source-manifest.json','run.json','teardown-ownership.json','parent-preflight.receipt.json'):artifact(runroot/name)
+      result.setdefault('fleet_runs',[]).append({'run':run,'owner_pid':int(run.rsplit('-',1)[1]),'owner_current':attempt('fleet owner',lambda:identity(int(run.rsplit('-',1)[1])))if(proc/run.rsplit('-',1)[1]).exists()else None})
+  artifact('/home/rose/.fly/flyctl.agent.lock');artifact('/home/rose/.fly/fly-agent.sock')
+  for fd,path in target['fds'].items():
+   if path.startswith('/home/rose/.fly/agent-logs/')and not path.endswith('(deleted)'):artifact(path)
+  def binary():
+   path=proc/str(v['agent_pid'])/'exe';before=path.stat();h=hashlib.sha256()
+   with path.open('rb')as stream:
+    for block in iter(lambda:stream.read(1048576),b''):h.update(block)
+   after=path.stat();need((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns),'agent executable changed')
+   return dict(sha256=h.hexdigest(),dev=before.st_dev,ino=before.st_ino,size=before.st_size,uid=before.st_uid,mode=before.st_mode)
+  result['binary']=attempt('binary',binary)
+ result['complete']=not result['errors'];return result
+
+def agent_capture_proof(c,v,uid=None):
+ need(c.get('complete')is True and not c['errors'],'incomplete agent custody capture')
+ need(c['machine']==v['machine']and c['source_ref']==v['source_ref'],'agent capture source differs')
+ a=c['agent'];need(a==c['agent_after'],'agent changed during custody capture')
+ uid=pwd.getpwnam('rose').pw_uid if uid is None else uid
+ need(a['pid']==v['agent_pid']and a['birth']==v['agent_birth']and a['ppid']==1 and a['uid']==[uid]*4 and a['cwd']=='/tmp/gate/repo'and not a['children'],'agent identity differs')
+ log=a['argv'][3]if len(a['argv'])==4 else''
+ need(a['argv'][:3]==['/tmp/gate/bin/flyctl','agent','run']and re.fullmatch('/home/rose/.fly/agent-logs/[0-9]+[.]log',log)and a['exe']=='/tmp/gate/bin/flyctl','agent invocation differs')
+ env=a['environment'];token=env.get('CLOUDBENCH_FLEET_OWNER_TOKEN','')
+ need(re.fullmatch('[0-9a-f]{32}',token)and env.get('REVIEWED_OPERATOR_SOURCE_REF')==v['source_ref']and env.get('REVIEWED_OPERATOR_ROOT')=='/tmp/gate/repo','agent inherited owner differs')
+ need(c['binary']['sha256']==v['binary_sha256'],'agent binary differs')
+ before={int(k):row for k,row in c['unix_before'].items()};after={int(k):row for k,row in c['unix_after'].items()};need(before==after,'unix graph changed during custody capture')
+ agent_inodes={int(m.group(1))for target in a['fds'].values()if(m:=re.fullmatch(r'socket:\[([0-9]+)\]',target))and int(m.group(1))in before}
+ need(len(agent_inodes)==1,'agent has connected unix endpoints')
+ inode=next(iter(agent_inodes));listener=before[inode]
+ need(listener.get('name')=='/home/rose/.fly/fly-agent.sock'and listener['state']==10 and listener['type']==1 and listener.get('uid')==uid and listener.get('icons')==[]and listener.get('queues',[None])[0]==0,'agent listener has clients or unknown queue')
+ need(all(not row.get('peer')in agent_inodes and not agent_inodes.intersection(row.get('icons',[]))for row in before.values()),'external unix peer remains')
+ owners={int(pid)for pid,row in c['socket_owners'].items()if any(fd['inode']==inode for fd in row['socket_fds'])}
+ need(owners=={a['pid']},'agent listener ownership incomplete')
+ def evidence(path):
+  f=c['files'][str(path)];raw=base64.b64decode(f['body_b64'],validate=True);need(digest(raw)==f['sha256']and f['nlink']==1 and not f['mode']&0o022,'agent evidence differs');return raw
+ launch_raw=evidence(Path('/tmp/gate/controller-host-custody/launch.json'));launch=json.loads(launch_raw)
+ need(digest(launch_raw)==v['launch_sha256']and launch['machine_id']==v['machine']and launch['source_ref']==v['source_ref'],'agent launch differs')
+ common=Path(launch['common_git']);audit=common/'cloudbench-fleet-audits'/token
+ need(all(c['files'][str(audit/name)]['uid']==uid for name in('meta','owned-clones.ids','owned-clones.names','provider-teardown-verified.epoch')),'foreign agent audit owner')
+ meta_raw=evidence(audit/'meta');meta={}
+ for line in meta_raw.decode().splitlines():
+  key,sep,value=line.partition('=');need(sep and key not in meta,'duplicate agent audit metadata');meta[key]=value
+ run=meta.get('run_id','')
+ need(meta.get('version')=='1'and meta.get('fleet_owner_token')==token and meta.get('status')=='provider-teardown-verified'and meta.get('app')=='navi-whisper-lux-bench'and meta.get('workspace_root')=='/tmp/gate/repo'and re.fullmatch('[0-9]{8}-[0-9]{6}-[0-9]+',run),'agent fleet audit not closed')
+ rows=[r for r in c.get('fleet_runs',[])if r['run']==run];need(rows and all(r['owner_current']is None for r in rows),'agent fleet owner remains live')
+ sealed=int(evidence(audit/'provider-teardown-verified.epoch').decode().strip());need(v['epoch']<=sealed<=time.time(),'agent audit clock differs')
+ for path in(audit/'owned-clones.ids',audit/'owned-clones.names'):evidence(path)
+ if meta.get('source_manifest_sha256'):need(digest(evidence(audit/'source-manifest.json'))==meta['source_manifest_sha256'],'agent base source differs')
+ for path in(Path(log),Path('/home/rose/.fly/flyctl.agent.lock')):
+  raw=evidence(path);need(c['files'][str(path)]['uid']==uid and str(path)in a['fds'].values(),'agent log/lock custody differs')
+ socket_file=c['files']['/home/rose/.fly/fly-agent.sock'];need(stat.S_ISSOCK(socket_file['mode'])and socket_file['uid']==uid,'agent socket custody differs')
+ return dict(pid=a['pid'],birth=a['birth'],uid=uid,role='closed-fleet-default-agent',owner_token=token,run_id=run,owner_pid=int(run.rsplit('-',1)[1]),binary_sha256=c['binary']['sha256'],launch_sha256=v['launch_sha256'],listener_inode=inode,capture_sha256=digest(json.dumps(c,sort_keys=True).encode()))
+
+
+def agent_closed_writer(v):
+ import contextlib,io
+ need(os.environ.get('FLY_MACHINE_ID')==v['machine']and os.environ.get('GATE_REF')==v['source_ref']and time.time()<v['deadline'],'normal agent source/clock differs')
+ identity_path=Path(v['identity_path']);need(identity_path.parent==Path('/tmp/gate/repo/.context')and identity_path.name.startswith('original600-supervisor.'),'normal supervisor path differs')
+ raw=read(identity_path);identity=json.loads(raw);terminal=obj(identity_path.with_suffix('.terminal.json'))
+ need(identity==v['joined']['identity']and digest(raw)==v['joined']['identity_sha256']and terminal==v['joined']['terminal']and terminal['supervisor_joined']is True and terminal['parent_joined']is True,'normal joined supervisor differs')
+ for pid in(identity['pid'],terminal['parent_pid']):
+  path=Path('/proc')/str(pid)
+  if path.exists():need((path/'stat').read_text().rsplit(') ',1)[1].split()[0]=='Z','normal producer remains live')
+ import ast
+ source=subprocess.check_output(['git','-c','safe.directory=/tmp/gate/repo','--no-replace-objects','-C','/tmp/gate/repo','show',v['source_ref']+':scripts/cloudbench-resume-controller-export.py'])
+ remote=next(ast.literal_eval(n.value)for n in ast.parse(source).body if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=='REMOTE'for t in n.targets));need(digest(remote.encode())==v['export_probe_sha256'],'normal writer probe source differs')
+ scope={'__name__':'normal_agent_export_readonly'};exec(compile(remote,'bound-normal-export-readonly','exec'),scope)
+ stdout,stderr=io.StringIO(),io.StringIO();os.chdir('/')
+ try:
+  with contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr):
+   try:scope['main'](dict(v['export_probe'],action='check'))
+   except SystemExit as error:need(error.code==75,'normal writer probe failed')
+ finally:os.chdir('/tmp/gate/repo')
+ result=json.loads(stdout.getvalue());writers=result.get('non_hub_writers')
+ need(result['machine']==v['machine']and result['launch_sha256']==v['launch_sha256']and isinstance(writers,list)and len(writers)==1 and writers[0]['pid']==v['agent_pid']and writers[0]['birth']==v['agent_birth'],'normal agent is not sole canonical writer')
+ return dict(result=result,stderr=stderr.getvalue())
+
+def agent_execute(v,custody=Path('/tmp/gate/controller-host-custody')):
+ os.chdir('/tmp/gate/repo');journal=custody/'registered-orphan-drain';action=v['action'];identity=v['identity_sha256']
+ if action=='observe':
+  intent=obj(journal/'intent.json');need(intent['identity_sha256']==identity and intent['role']=='normal-agent','foreign normal agent invocation')
+  return dict(status='OBSERVED',no_signal=True,results=[obj(p)for p in journal.glob('result-*.json')],no_exit_credit_from_receipts=True)
+ need(action in('plan','signal'),'unknown normal agent action')
+ if action=='plan':need(not journal.exists(),'normal agent invocation already consumed; observe only')
+ else:
+  need(v.get('batch')==0,'only one normal agent target')
+  plan=obj(journal/'plan.json');need(plan['identity_sha256']==identity and digest(read(journal/'plan.json'))==v['plan_sha256'],'normal agent plan differs')
+  if(journal/('term-'+str(v['agent_pid'])+'.json')).exists():return dict(status='INTENT_EXISTS_UNKNOWN_NO_REPLAY',no_signal=True)
+ closed=agent_closed_writer(v);capture=agent_capture(v);proof=agent_capture_proof(capture,v)
+ if action=='plan':
+  journal.mkdir(mode=0o700);save(journal/'capture.private.json',capture);save(journal/'writer-check.private.json',closed)
+  save(journal/'intent.json',dict(identity_sha256=identity,operator_ref=v['operator_ref'],launch_sha256=v['launch_sha256'],role='normal-agent',guest_pid=os.getpid()))
+  save(journal/'plan.json',dict(identity_sha256=identity,launch_sha256=v['launch_sha256'],role='normal-agent',targets=[proof],held=[]))
+  return dict(status='PLANNED',targets=1,held=0,plan_sha256=digest(read(journal/'plan.json')))
+ expected=plan['targets'][0];need(all(proof.get(k)==value for k,value in expected.items()if k!='capture_sha256'),'normal agent changed since plan')
+ fd=os.pidfd_open(proof['pid'])
+ try:
+  current=process(proof['pid'],proof['uid']);need(current['birth']==proof['birth']and current['cwd']=='/tmp/gate/repo'and not select.select([fd],[],[],0)[0],'normal agent process changed')
+  save(journal/'pre-signal-capture.private.json',capture);save(journal/'pre-signal-writer-check.private.json',closed)
+  save(journal/('term-'+str(proof['pid'])+'.json'),dict(identity_sha256=identity,owner=proof,signal='SIGTERM',role='normal-agent'))
+  latest=unix_dump();before={int(k):value for k,value in capture['unix_after'].items()};inode=proof['listener_inode']
+  current_sockets,_=process_socket_fds(Path('/proc')/str(proof['pid']))
+  need(time.time()<v['deadline']and not(Path('/proc')/str(proof['owner_pid'])).exists()and latest.get(inode)==before[inode]and {ino for ino,_ in current_sockets if ino in latest}=={inode}and all(row.get('peer')!=inode and inode not in row.get('icons',[])for row in latest.values()),'normal agent client/clock changed before TERM')
+  executor=os.geteuid()
+  try:
+   if executor!=proof['uid']:os.seteuid(proof['uid'])
+   need(os.geteuid()==proof['uid']and time.time()<v['deadline'],'normal agent signal UID/clock differs');signal.pidfd_send_signal(fd,signal.SIGTERM)
+  finally:
+   if os.geteuid()!=executor:os.seteuid(executor)
+  exited=bool(select.select([fd],[],[],2)[0]);result=dict(pid=proof['pid'],birth=proof['birth'],state='EXIT_OBSERVED'if exited else'TERM_SENT_NOT_JOINED',role='normal-agent',no_release_claim=True)
+  save(journal/('result-'+str(proof['pid'])+'.json'),result);return dict(status='BATCH_FINISHED',results=[result],no_export_or_cleanup_claim=True)
+ finally:os.close(fd)
+
+
+old_execute=execute
+def execute(v):
+ if v.get('role')=='normal-agent':
+  if v['action']=='capture':return agent_capture(v)
+  return agent_execute(v)
+ return old_execute(v)
+"""
+GUEST += AGENT
+
+
 def command(payload):
     package = base64.b64encode(
         gzip.compress(json.dumps([GUEST, payload]).encode(), mtime=0)
@@ -172,7 +404,141 @@ def command(payload):
     return body
 
 
+def normal_agent_state(args):
+    export = runpy.run_path(str(HERE / "cloudbench-resume-controller-export.py"))
+    value = getattr(args, "_normal_export_value", None)
+    if value is None:
+        value = export["check"](
+            args.config, args.config_sha256, args.run_directory, args.operator_ref
+        )
+    else:
+        export["unchanged"](value)
+    state = dict(value["state"])
+    need(
+        state["schema"] == "controller-normal-export-identities-v1",
+        "normal agent requires normal owner proof",
+    )
+    capture_path = args.agent_custody.absolute()
+    captured = F["obj"](capture_path)
+    need(
+        captured.get("complete") is True
+        and not captured["errors"]
+        and captured["machine"] == state["machine_id"]
+        and captured["source_ref"] == state["source_ref"],
+        "complete normal agent custody required",
+    )
+    agent = captured["agent"]
+    need(
+        agent == captured["agent_after"]
+        and type(agent["pid"]) is int
+        and agent["pid"] > 1,
+        "captured agent identity differs",
+    )
+    out = Path(state["out"])
+    probes = sorted(out.glob("supervisor-probe-[0-9][0-9][0-9][0-9][0-9][0-9].json"))
+    need(probes, "normal supervisor observation missing")
+    probe_path = getattr(args, "_normal_joined_path", probes[-1])
+    joined = F["obj"](probe_path)
+    identity, terminal = joined.get("identity", {}), joined.get("terminal", {})
+    need(
+        joined.get("state") == "JOINED"
+        and identity.get("machine") == state["machine_id"]
+        and identity.get("source_ref") == state["source_ref"]
+        and identity.get("epoch") == state["epoch"]
+        and joined["identity_sha256"]
+        == sha((json.dumps(identity, sort_keys=True) + "\n").encode())
+        and all(terminal.get(key) == item for key, item in identity.items())
+        and terminal.get("parent_joined") is True
+        and terminal.get("supervisor_joined") is True,
+        "normal source-bound JOINED proof differs",
+    )
+    names = (
+        "cloudbench-controller-orphan-drain.py",
+        "cloudbench-resume-controller-export.py",
+        "cloudbench-controller-payload-finalization.py",
+        "cloudbench-original600-runner.py",
+        "cloudbench-resume-controller-payload.py",
+        "cloudbench-original-volume-capture.py",
+    )
+    hashes = {name: sha((HERE / name).read_bytes()) for name in names}
+    pins = B["source_identity"](HERE.parent, args.operator_ref, hashes)
+    pins.update(
+        {str(path): B["fingerprint"](path) for path in (capture_path, probe_path)}
+    )
+    probe = {
+        "machine": state["machine_id"],
+        "source_ref": state["source_ref"],
+        "launch_sha256": value["binding"]["launch_sha256"],
+        "collector_sha256": value["record"]["collector_sha256"],
+        "record": value["record"],
+        "driver_sha256": value["driver_sha256"],
+        "binding_sha256": sha(
+            json.dumps(
+                dict(
+                    config_sha256=args.config_sha256,
+                    launch_sha256=value["binding"]["launch_sha256"],
+                ),
+                sort_keys=True,
+            ).encode()
+        ),
+    }
+    state["_normal_export_value"] = value
+    state["_normal_joined_path"] = probe_path
+    state["_agent_payload"] = dict(
+        role="normal-agent",
+        agent_pid=agent["pid"],
+        agent_birth=agent["birth"],
+        binary_sha256=captured["binary"]["sha256"],
+        identity_path=state["caller"]["identity_path"],
+        export_probe=probe,
+        export_probe_sha256=sha(export["REMOTE"].encode()),
+    )
+    state["_drain"] = dict(
+        joined=joined,
+        launch_sha256=value["binding"]["launch_sha256"],
+        source_hashes=hashes,
+        source_pins=pins,
+        joined_files={str(probe_path): sha(read(probe_path))},
+        joined_journal=str(out),
+        initial_capture_path=str(capture_path),
+        initial_capture_sha256=sha(read(capture_path)),
+        role="normal-agent",
+    )
+    payload = payload_for(args, state)
+    function = next(
+        node
+        for node in ast.parse(GUEST).body
+        if isinstance(node, ast.FunctionDef) and node.name == "agent_capture_proof"
+    )
+    compiled = compile(
+        ast.Module(body=[function], type_ignores=[]), "source-bound-agent-proof", "exec"
+    )
+    code = next(item for item in compiled.co_consts if isinstance(item, types.CodeType))
+    namespace = dict(
+        need=need,
+        digest=sha,
+        base64=base64,
+        stat=stat,
+        re=re,
+        time=time,
+        Path=Path,
+        json=json,
+    )
+    validate = types.FunctionType(
+        code,
+        namespace,
+        argdefs=(value["record"]["root_anchors"]["/tmp/gate/repo"]["uid"],),
+    )
+    validate(captured, payload)
+    command(dict(payload, action="plan"))
+    command(dict(payload, action="signal", batch=0, plan_sha256="0" * 64))
+    return state
+
+
 def local_state(args):
+    if getattr(args, "normal_agent", False):
+        return normal_agent_state(args)
+
     out = args.run_directory.absolute()
     state = F["obj"](out / "payload-finalizer.identities.private.json")
     roots = {
@@ -259,8 +625,7 @@ def local_state(args):
     return state
 
 
-def run(args, state):
-    out = Path(state["out"]) / "registered-orphan-drain"
+def payload_for(args, state):
     payload = {
         "machine": state["machine_id"],
         "source_ref": state["source_ref"],
@@ -282,7 +647,17 @@ def run(args, state):
             ]
         )
     )
+    payload.update(state.get("_agent_payload", {}))
     payload["identity_sha256"] = sha(json.dumps(payload, sort_keys=True).encode())
+    return payload
+
+
+def _run(args, state):
+    if getattr(args, "normal_agent", False):
+        args._normal_export_value = state["_normal_export_value"]
+        args._normal_joined_path = state["_normal_joined_path"]
+    out = Path(state["out"]) / "registered-orphan-drain"
+    payload = payload_for(args, state)
     if args.observe:
         need(out.is_dir(), "no existing drain invocation")
         original = F["obj"](out / "intent.json")
@@ -295,6 +670,7 @@ def run(args, state):
     api = F["RecordedAPI"](F["api_for"](state), state, out)
 
     def call(action, **extra):
+        need(not state.get("_cancelled"), "normal agent operation cancelled")
         checked = local_state(args)
         need(checked["_drain"] == state["_drain"], "drain local evidence changed")
         value = dict(payload, action=action, **extra)
@@ -308,7 +684,12 @@ def run(args, state):
             ),
             "native controller changed",
         )
+        need(not state.get("_cancelled"), "normal agent operation cancelled")
         response = api.request("POST", base + "/exec", body, timeout=18)
+        need(
+            not state.get("_cancelled"),
+            "normal agent operation cancelled after owned transport",
+        )
         need(
             response.get("exit_code") == 0
             and response.get("exit_signal", 0) == 0
@@ -325,10 +706,32 @@ def run(args, state):
     for batch in range((plan["targets"] + 15) // 16):
         call("signal", batch=batch, plan_sha256=plan["plan_sha256"])
     return {
-        "status": "REGISTERED_OWNER_TERMS_REQUESTED",
+        "status": "REGISTERED_AGENT_TERM_REQUESTED"
+        if state.get("_agent_payload")
+        else "REGISTERED_OWNER_TERMS_REQUESTED",
         "targets": plan["targets"],
         "no_release_claim": True,
     }
+
+
+def run(args, state):
+    if not getattr(args, "normal_agent", False):
+        return _run(args, state)
+    import signal
+
+    cancelled, handlers = [], {}
+    state["_cancelled"] = cancelled
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            handlers[sig] = signal.signal(
+                sig, lambda sig, _frame: cancelled.append(sig)
+            )
+        result = _run(args, state)
+        need(not cancelled, "normal agent operation cancelled")
+        return result
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
 
 
 def main():
@@ -341,9 +744,21 @@ def main():
     p.add_argument("--config-sha256", required=True)
     p.add_argument("--run-directory", type=Path, required=True)
     p.add_argument("--operator-ref", required=True)
-    p.add_argument("--joined-journal", type=Path, required=True)
-    p.add_argument("--pending", type=Path, required=True)
+    p.add_argument("--normal-agent", action="store_true")
+    p.add_argument("--agent-custody", type=Path)
+    p.add_argument("--joined-journal", type=Path)
+    p.add_argument("--pending", type=Path)
     args = p.parse_args()
+    need(
+        (args.normal_agent and args.agent_custody is not None)
+        or (
+            not args.normal_agent
+            and args.agent_custody is None
+            and args.joined_journal is not None
+            and args.pending is not None
+        ),
+        "exact normal agent or legacy drain arguments required",
+    )
     os.umask(0o077)
     state = local_state(args)
     result = (

@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -334,6 +335,340 @@ class Drain(unittest.TestCase):
         self.assertEqual(source, M["GUEST"])
         self.assertEqual(value, dict(self.payload, action="observe"))
         self.assertEqual(body["timeout"], 18)
+
+
+class NormalAgent(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        guest = self.root / "guest.py"
+        guest.write_text(M["GUEST"])
+        self.g = runpy.run_path(str(guest))
+        self.uid = os.geteuid()
+        self.mid, self.ref, self.token = "a" * 14, "b" * 40, "c" * 32
+        self.epoch = time.time() - 100
+        agent = dict(
+            pid=321,
+            birth="agent-birth",
+            ppid=1,
+            uid=[self.uid] * 4,
+            cwd="/tmp/gate/repo",
+            children=[],
+            exe="/tmp/gate/bin/flyctl",
+            argv=[
+                "/tmp/gate/bin/flyctl",
+                "agent",
+                "run",
+                "/home/rose/.fly/agent-logs/123.log",
+            ],
+            environment={
+                "CLOUDBENCH_FLEET_OWNER_TOKEN": self.token,
+                "REVIEWED_OPERATOR_SOURCE_REF": self.ref,
+                "REVIEWED_OPERATOR_ROOT": "/tmp/gate/repo",
+            },
+            fds={
+                "8": "/home/rose/.fly/agent-logs/123.log",
+                "9": "/home/rose/.fly/flyctl.agent.lock",
+                "10": "socket:[77]",
+            },
+        )
+        listener = {
+            "77": dict(
+                inode=77,
+                type=1,
+                state=10,
+                name="/home/rose/.fly/fly-agent.sock",
+                uid=self.uid,
+                icons=[],
+                queues=[0, 4096],
+            )
+        }
+        self.c = dict(
+            complete=True,
+            errors=[],
+            machine=self.mid,
+            source_ref=self.ref,
+            agent=agent,
+            agent_after=json.loads(json.dumps(agent)),
+            unix_before=listener,
+            unix_after=json.loads(json.dumps(listener)),
+            socket_owners={"321": {"socket_fds": [{"inode": 77, "fd": "10"}]}},
+            binary={"sha256": "d" * 64},
+            files={},
+            fleet_runs=[dict(run="20261017-234329-9999999", owner_current=None)],
+        )
+
+        def evidence(path, raw):
+            self.c["files"][path] = dict(
+                body_b64=base64.b64encode(raw).decode(),
+                sha256=hashlib.sha256(raw).hexdigest(),
+                nlink=1,
+                mode=0o100600,
+                uid=self.uid,
+            )
+
+        launch = dict(
+            common_git="/tmp/gate/repo/.git", machine_id=self.mid, source_ref=self.ref
+        )
+        evidence(
+            "/tmp/gate/controller-host-custody/launch.json", json.dumps(launch).encode()
+        )
+        audit = "/tmp/gate/repo/.git/cloudbench-fleet-audits/" + self.token
+        evidence(
+            audit + "/meta",
+            (
+                "version=1\nfleet_owner_token="
+                + self.token
+                + "\nrun_id=20261017-234329-9999999\napp=navi-whisper-lux-bench\nworkspace_root=/tmp/gate/repo\nstatus=provider-teardown-verified\n"
+            ).encode(),
+        )
+        evidence(
+            audit + "/provider-teardown-verified.epoch",
+            str(int(time.time() - 10)).encode(),
+        )
+        for name in ("owned-clones.ids", "owned-clones.names"):
+            evidence(audit + "/" + name, b"")
+        for name in (
+            "/home/rose/.fly/agent-logs/123.log",
+            "/home/rose/.fly/flyctl.agent.lock",
+        ):
+            evidence(name, b"retained")
+        self.c["files"]["/home/rose/.fly/fly-agent.sock"] = {
+            "mode": 0o140600,
+            "uid": self.uid,
+        }
+        self.v = dict(
+            role="normal-agent",
+            agent_pid=321,
+            agent_birth="agent-birth",
+            binary_sha256="d" * 64,
+            machine=self.mid,
+            source_ref=self.ref,
+            epoch=self.epoch,
+            deadline=self.epoch + 5400,
+            operator_ref="e" * 40,
+            launch_sha256=self.c["files"][
+                "/tmp/gate/controller-host-custody/launch.json"
+            ]["sha256"],
+            identity_sha256="f" * 64,
+        )
+        patch = mock.patch.object(
+            self.g["pwd"], "getpwnam", return_value=SimpleNamespace(pw_uid=self.uid)
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_real_self_fd_census_and_agent_custody_negatives(self):
+        endpoint, peer = socket.socketpair()
+        self.addCleanup(peer.close)
+        with endpoint:
+            sockets, count = self.g["process_socket_fds"](
+                Path("/proc") / str(os.getpid())
+            )
+            inode = int(os.readlink("/proc/self/fd/" + str(endpoint.fileno()))[8:-1])
+            self.assertIn(inode, {item[0] for item in sockets})
+            self.assertGreater(count, 0)
+        self.assertEqual(
+            self.g["agent_capture_proof"](self.c, self.v)["role"],
+            "closed-fleet-default-agent",
+        )
+        for mutation in (
+            "incomplete",
+            "external",
+            "queued",
+            "changed",
+            "owner",
+            "binary",
+        ):
+            c = json.loads(json.dumps(self.c))
+            if mutation == "incomplete":
+                c["complete"] = False
+            elif mutation == "external":
+                c["socket_owners"]["999"] = {"socket_fds": [{"inode": 77, "fd": "3"}]}
+            elif mutation == "queued":
+                c["unix_before"]["77"]["icons"] = [88]
+                c["unix_after"]["77"]["icons"] = [88]
+            elif mutation == "changed":
+                c["agent_after"]["birth"] = "foreign"
+            elif mutation == "owner":
+                c["fleet_runs"][0]["owner_current"] = {"pid": 9999999}
+            else:
+                c["binary"]["sha256"] = "0" * 64
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.g["agent_capture_proof"](c, self.v)
+
+    def test_normal_public_check_plan_signal_once_and_export_custody(self):
+        out = self.root / "run"
+        out.mkdir(mode=0o700)
+        capture = out / "capture.json"
+        capture.write_text(json.dumps(self.c))
+        capture.chmod(0o600)
+        identity = dict(
+            schema="original600-supervisor-identity-v1",
+            pid=111,
+            birth="supervisor",
+            machine=self.mid,
+            source_ref=self.ref,
+            epoch=self.epoch,
+        )
+        joined = dict(
+            state="JOINED",
+            identity=identity,
+            identity_sha256=hashlib.sha256(
+                (json.dumps(identity, sort_keys=True) + "\n").encode()
+            ).hexdigest(),
+            terminal=dict(
+                identity, parent_joined=True, supervisor_joined=True, parent_pid=112
+            ),
+        )
+        probe = out / "supervisor-probe-000001.json"
+        probe.write_text(json.dumps(joined))
+        probe.chmod(0o600)
+        state = dict(
+            schema="controller-normal-export-identities-v1",
+            out=str(out),
+            machine_id=self.mid,
+            source_ref=self.ref,
+            source_root=str(ROOT),
+            caller={
+                "identity_path": "/tmp/gate/repo/.context/original600-supervisor.fixture.json"
+            },
+            epoch=self.epoch,
+            deadline=self.epoch + 5400,
+            machine={
+                "id": self.mid,
+                "instance_id": "native",
+                "config": {},
+                "name": "fixture",
+                "region": "iad",
+            },
+        )
+        value = dict(
+            state=state,
+            binding={"launch_sha256": self.v["launch_sha256"]},
+            record={
+                "collector_sha256": "a" * 64,
+                "root_anchors": {"/tmp/gate/repo": {"uid": self.uid}},
+            },
+            driver_sha256="d" * 64,
+        )
+        E = runpy.run_path(str(ROOT / "scripts/cloudbench-resume-controller-export.py"))
+        checks = []
+
+        def check(*_args):
+            self.assertFalse(
+                (out / "registered-orphan-drain").exists(),
+                "partial own intent must not cause a second E.check",
+            )
+            checks.append(True)
+            return value
+
+        export = dict(check=check, unchanged=lambda _value: None, REMOTE=E["REMOTE"])
+        real_runpy = M["runpy"].run_path
+
+        def load(path, *a, **k):
+            return (
+                export
+                if str(path).endswith("cloudbench-resume-controller-export.py")
+                else real_runpy(path, *a, **k)
+            )
+
+        args = SimpleNamespace(
+            normal_agent=True,
+            agent_custody=capture,
+            config=self.root / "config",
+            config_sha256="a" * 64,
+            run_directory=out,
+            operator_ref="e" * 40,
+            observe=False,
+        )
+        custody = self.root / "guest-custody"
+        custody.mkdir()
+        sent = []
+
+        def execute(payload):
+            return self.g["agent_execute"](payload, custody)
+
+        class API:
+            def api(inner, method, path, body=None, timeout=20, observer=None):
+                if method == "GET":
+                    result = state["machine"]
+                else:
+                    cmd = shlex.split(body["cmd"])
+                    source, payload = json.loads(
+                        gzip.decompress(base64.b64decode(cmd[-1]))
+                    )
+                    result = {
+                        "exit_code": 0,
+                        "exit_signal": 0,
+                        "stderr": "",
+                        "stdout": json.dumps(execute(payload)),
+                    }
+                raw = json.dumps(result).encode()
+                if observer:
+                    observer(method, path, 200, raw)
+                return result
+
+        with (
+            mock.patch.object(M["runpy"], "run_path", side_effect=load),
+            mock.patch.dict(M["B"], source_identity=lambda *_a: {}),
+            mock.patch.object(
+                M["subprocess"], "check_output", return_value=b"bound-fleet"
+            ),
+            mock.patch.dict(M["F"], api_for=lambda _s: API()),
+            mock.patch.object(self.g["os"], "chdir", lambda _p: None),
+            mock.patch.dict(
+                self.g["agent_execute"].__globals__,
+                agent_capture=lambda _v: json.loads(json.dumps(self.c)),
+                agent_closed_writer=lambda _v: {"sole": True},
+                unix_dump=lambda: {int(k): v for k, v in self.c["unix_after"].items()},
+                process_socket_fds=lambda _p: ([(77, "10")], 1),
+                process=lambda *_a: {"birth": "agent-birth", "cwd": "/tmp/gate/repo"},
+            ),
+            mock.patch.object(self.g["os"], "pidfd_open", return_value=123),
+            mock.patch.object(self.g["os"], "close", lambda _fd: None),
+            mock.patch.object(
+                self.g["select"], "select", side_effect=[([], [], []), ([123], [], [])]
+            ),
+            mock.patch.object(
+                self.g["signal"],
+                "pidfd_send_signal",
+                side_effect=lambda *_a: sent.append(True),
+            ),
+        ):
+            checked = M["local_state"](args)
+            result = M["run"](args, checked)
+            self.assertEqual(result["status"], "REGISTERED_AGENT_TERM_REQUESTED")
+            self.assertEqual(len(checks), 1)
+            self.assertEqual(sent, [True])
+            payload = json.loads(
+                (out / "registered-orphan-drain/intent.json").read_bytes()
+            )["payload"]
+            (custody / "registered-orphan-drain" / "result-321.json").unlink()
+            replay = execute(
+                dict(
+                    payload,
+                    action="signal",
+                    batch=0,
+                    plan_sha256=hashlib.sha256(
+                        (custody / "registered-orphan-drain/plan.json").read_bytes()
+                    ).hexdigest(),
+                )
+            )
+            self.assertEqual(replay["status"], "INTENT_EXISTS_UNKNOWN_NO_REPLAY")
+            self.assertEqual(sent, [True])
+        binding = E["local_drain_binding"](out, {})
+        guestfiles = {
+            str(p.relative_to(custody / "registered-orphan-drain")): {
+                "bytes": p.stat().st_size,
+                "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+                "body_b64": base64.b64encode(p.read_bytes()).decode(),
+            }
+            for p in (custody / "registered-orphan-drain").rglob("*")
+            if p.is_file()
+        }
+        E["require_recorded_drain"](binding, {"present": True, "files": guestfiles})
 
 
 if __name__ == "__main__":
