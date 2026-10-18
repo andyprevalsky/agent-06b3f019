@@ -70,7 +70,7 @@ PORT_CLAIM_DIR=""
 # from its private sandbox, and the fake provider's guests and proxies. Only
 # this run's unique TMP_ROOT is matched, never another session's processes.
 fixture_process_pids() {
-    # The suite-lifetime fake Machines API is owned by PIDS, not by a case.
+    # The suite-lifetime fake Machines API is owned by cleanup(), not by a case.
     python3 - "$TMP_ROOT/" "$$" "${FAKE_MACHINES_API_PID:-}" <<'PY'
 import os
 import sys
@@ -162,6 +162,10 @@ cleanup() {
     for pid in "${PIDS[@]:-}"; do
         kill "$pid" 2>/dev/null || true
     done
+    if [ -n "${FAKE_MACHINES_API_PID:-}" ] && [ "$BASHPID" = "$$" ]; then
+        kill "$FAKE_MACHINES_API_PID" 2>/dev/null || true
+        wait "$FAKE_MACHINES_API_PID" 2>/dev/null || true
+    fi
     # Controllers in their own sessions and the fake guests they started are
     # not descendants of PIDS; a failed case must not leave them running.
     reap_fixture_processes
@@ -893,6 +897,7 @@ reset_fake_state() {
 }
 JSON
 }
+
 reset_fake_state
 
 cat > "$FAKE_DIR/flyctl.py" <<'PY'
@@ -1657,6 +1662,15 @@ def serve_machines_api(port_file):
         do_DELETE = route
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MachinesApi)
+    owner = int(os.environ["CLOUDBENCH_FAKE_MACHINES_API_OWNER"])
+
+    def retire_with_owner():
+        # Scenarios reset PIDS; never outlive the suite shell that started us.
+        while os.getppid() == owner:
+            time.sleep(0.5)
+        server.shutdown()
+
+    threading.Thread(target=retire_with_owner, daemon=True).start()
     with open(port_file + ".tmp", "w") as fh:
         fh.write(str(server.server_port))
     os.replace(port_file + ".tmp", port_file)
@@ -2479,10 +2493,10 @@ chmod +x "$FAKE_BIN/flyctl"
 FAKE_FLY_TOKEN="fake-offline-fleet-token"
 rm -f "$FAKE_DIR/machines-api.port"
 CLOUDBENCH_FAKE_DIR="$FAKE_DIR" CLOUDBENCH_FAKE_MACHINES_API_TOKEN="$FAKE_FLY_TOKEN" \
+    CLOUDBENCH_FAKE_MACHINES_API_OWNER="$$" \
     python3 "$FAKE_DIR/flyctl.py" __machines_api__ "$FAKE_DIR/machines-api.port" \
     >"$FAKE_DIR/machines-api.stderr" 2>&1 &
 FAKE_MACHINES_API_PID=$!
-PIDS+=("$FAKE_MACHINES_API_PID")
 for _ in $(seq 1 100); do
     [ -s "$FAKE_DIR/machines-api.port" ] && break
     kill -0 "$FAKE_MACHINES_API_PID" 2>/dev/null || break
