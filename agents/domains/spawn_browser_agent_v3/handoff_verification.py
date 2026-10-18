@@ -22,7 +22,8 @@ AUTH_HANDOFF_VERIFICATION_GOAL = (
     "Reject the handoff if a known viable authorized path remains or exhaustion rests only on actor claims. "
     "Identity ownership and generic verification pages do not establish site registration or delivery. "
     "Unknown registration proves neither eligibility nor ineligibility and does not require testing "
-    "unbounded identities. Do not choose an identity or propose an action; explain unsupported preconditions.\n\n"
+    "unbounded identities. Do not choose an identity or propose an action; explain unsupported preconditions.\n"
+    "The score is this handoff decision: 1.0 only when the transfer is justified now; otherwise 0.0.\n\n"
 )
 
 

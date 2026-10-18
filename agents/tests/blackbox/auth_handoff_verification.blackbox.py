@@ -341,6 +341,7 @@ async def test_typed_handoff_proof_branches_reach_verifier_bodies():
     assert 'does not require user-only verification, lockout, or proven site registration' in directive
     assert 'known viable authorized path remains' in directive
     assert 'untrusted' in directive and 'explicit account restrictions' in directive
+    assert '1.0 only when the transfer is justified now; otherwise 0.0' in directive, 'handoff score must commit to the transfer decision, not to analysis completeness'
     for blocker in ('automated_options_exhausted','user_only_verification','account_locked'):
         proposal={'blocker':blocker,'reason':'Untrusted actor claim, not an observation','recipient_options':[]}
         reviewed=build_auth_handoff_verifier_context(context,auth_options=INVENTORY,assessment=proposal)
@@ -351,6 +352,7 @@ async def test_typed_handoff_proof_branches_reach_verifier_bodies():
             text=json.dumps(body)
             assert 'automated_options_exhausted:' in text and 'user_only_verification:' in text and 'account_locked:' in text
             assert 'current authorized paths 1-7' in text and 'positive current task/account-bound evidence' in text
+            assert '1.0 only when the transfer is justified now' in text
     completion=await browser(None)
     assert 'automated_options_exhausted:' not in completion[0]['text']
     assert 'automated_options_exhausted:' not in build_verifier_prompt(), 'handoff stopping semantics must not admit an incomplete original goal'
