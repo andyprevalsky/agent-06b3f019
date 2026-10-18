@@ -410,7 +410,7 @@ export async function handleSmsSupervisorMessage(config: {
       const lastToolResult = [...messages].reverse().find((message) => message.role === 'tool');
       if (!lastToolResult || typeof lastToolResult.content !== 'string') break;
       lastToolResult.content +=
-        '\n\nYou have reached the maximum number of tool-calling rounds. Use the results already available to send one final response with send_user_message, then call attempt_completion. Do not call any other tools.';
+        '\n\nYou have reached the maximum number of tool-calling rounds. Use the results already available to send one final message with send_user_message and call argument-free attempt_completion. Include both tool calls in this response, in that order. Do not call any other tools.';
     }
 
     log.info('[SmsSupervisor] LLM call round', {
