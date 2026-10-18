@@ -203,5 +203,14 @@
     "source_bytes_changed_during_capture": false,
     "raw_evidence_private": true,
     "receipt_created_after_archive_cutoff": true
+  },
+  "explicit_user_prompt_approval": {
+    "recorded_at_utc": "2026-10-18T19:28:04.804883+00:00",
+    "approved": true,
+    "approval_id": "TAMY-FINAL-PAIR-2",
+    "scope": "The existing cap closing instruction requiring send_user_message plus argument-free attempt_completion in the same response, in that order",
+    "patch_sha256": "951a45acb53769c9c8490a99a32369124dd0882139c6477d823bedcca1387d4f",
+    "request_this_diff_approval_again": false,
+    "unrelated_future_prompt_model_schema_or_fixture_changes_covered": false
   }
 }
