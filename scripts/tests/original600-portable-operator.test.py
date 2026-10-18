@@ -1937,10 +1937,21 @@ class Sharded(unittest.TestCase):
             def snapshot(api, token, org, target, extra):
                 private(target/'navi-whisper-lux-bench.private.json', [])
                 return dict(cap)
+            published = []
+            def publish(root, admission, args_, runner_, group_id, started_at, shards, outcomes=None, finished=None):
+                published.append(dict(group_id=group_id, members=sum(len(s['tasks']) * s['runs'] for s in shards),
+                                      outcomes=outcomes, finished=finished))
+                return True
             with patch.object(CLI, 'capacity_snapshot', snapshot), \
                  patch.object(CLI, 'shared_cpu_plan', lambda *a: (36, 0)), \
+                 patch.object(CLI, 'publish_shard_group', publish), \
                  patch.object(CLI.subprocess, 'Popen', Runner):
                 code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+            self.assertEqual([p['outcomes'] is None for p in published], [True, False])
+            self.assertEqual({p['group_id'] for p in published}, {launched[0].config['shard']['group_run_id']})
+            self.assertEqual(published[0]['members'], 36)
+            self.assertEqual(len(published[1]['outcomes']), 36)
+            self.assertEqual(published[1]['finished']['status'], 'completed')
             self.assertEqual(code, 0)
             self.assertEqual(len(launched), 3)
             self.assertEqual(sorted(r.env['CLOUDBENCH_GATE_NAME_SUFFIX'] for r in launched), ['s00', 's01', 's02'])

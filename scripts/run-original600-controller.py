@@ -743,6 +743,24 @@ def summary_from_export(export):
     return None
 
 
+def publish_shard_group(root, directory, args, runner, group_id, started_at, shards, outcomes=None, finished=None):
+    """One Hub group for all shards: schedule first, final outcomes after every runner joined."""
+    campaign = runpy.run_path(str(root / 'scripts/run-bench-campaign.py'))
+    members = campaign['sharded_campaign_jobs'](shards, sum(len(s['tasks']) for s in shards))
+    if outcomes is not None:
+        for job in members:
+            job.update(outcomes.get(job['job_id'], {}))
+    group_dir = directory / 'hub-group'
+    group_dir.mkdir(mode=0o700, exist_ok=True)
+    state = campaign['campaign_group_state'](group_id, started_at, members, **(finished or {}))
+    if 'BACKEND_API_KEY' not in os.environ and 'BENCHMARK_HUB_API_KEY' not in os.environ:
+        keys = [line.split('=', 1)[1].strip().strip('"\'') for line in runner['read'](args.backend_env).decode().splitlines()
+                if line.startswith('BACKEND_API_KEY=')]
+        if len(keys) == 1 and keys[0]:
+            os.environ['BACKEND_API_KEY'] = keys[0]
+    return campaign['publish_campaign_group'](root, group_dir, state, live=outcomes is None, stop_requested=lambda: False)
+
+
 def sharded_run(args, root, pins, runner, github, plan):
     """One fresh admission, K shard configs, then the global-barrier coordinator over K runners."""
     coordinator = runpy.run_path(str(root / 'scripts/cloudbench-shard-coordinator.py'))
@@ -793,8 +811,14 @@ def sharded_run(args, root, pins, runner, github, plan):
     runner['save'](directory / 'controller-launch.intent.json', dict(sharded=True, controllers=controllers,
                    shards=[dict(config_path=s['config'], config_sha256=s['config_sha256'], run_directory=str(s['out']))
                            for s in shards]))
+    shard_objects = [dict(tasks=s['tasks'], task_indexes=s['task_indexes'], runs=s['runs']) for s in plan['shards']]
+    try:
+        group_registered = publish_shard_group(root, directory, args, runner, group_id, started_at, shard_objects)
+    except Exception as error:  # Hub visibility is reported, never a reason to skip release or cleanup
+        group_registered = False
+        print(json.dumps(dict(status='HUB_GROUP_REGISTRATION_WARNING', error=type(error).__name__)), flush=True)
     print(json.dumps(dict(directory=str(directory), status='LAUNCHING_SHARDS', controllers=controllers,
-                          source_ref=args.source_ref)), flush=True)
+                          source_ref=args.source_ref, hub_group=group_id, hub_group_registered=group_registered)), flush=True)
     runner_path = root / 'scripts/cloudbench-original600-runner.py'
 
     def spawn(shard):
@@ -809,7 +833,18 @@ def sharded_run(args, root, pins, runner, github, plan):
     summaries = [summary_from_export(Path(s['out']) / 'export') for s in shards]
     merged = coordinator['merge']([v for v in summaries if v is not None], copies)
     merged.update(shards_without_summary=[s['index'] for s, v in zip(shards, summaries) if v is None],
-                  coordination=record)
+                  coordination=record, hub_group=group_id)
+    outcomes = {job['job_id']: dict(status=job.get('status'), controller_exit_code=job.get('controller_exit_code'))
+                for summary in summaries if summary for job in summary.get('jobs') or []}
+    try:
+        merged['hub_group_final_published'] = publish_shard_group(
+            root, directory, args, runner, group_id, started_at, shard_objects, outcomes,
+            dict(status='completed' if not merged['missing_jobs'] else 'failed',
+                 finished_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                 wall_clock_seconds=round(time.time() - started_at, 3)))
+    except Exception as error:
+        merged['hub_group_final_published'] = False
+        merged['hub_group_final_error'] = type(error).__name__
     runner['save'](directory / 'result.json', merged)
     print(json.dumps(dict(directory=str(directory), status='SHARDS_JOINED', result=str(directory / 'result.json'),
                           observed_jobs=merged['observed_jobs'], missing_jobs=merged['missing_jobs'],
