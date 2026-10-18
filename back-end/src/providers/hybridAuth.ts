@@ -15,8 +15,9 @@ import type { Request, Response, NextFunction } from 'express';
 import type jwt from 'jsonwebtoken';
 import { prisma } from './database';
 import { createInitialCredit } from './credits';
-import { syncJwtUser, type JwtUserStore } from './hybridAuthUser';
+import { PhoneAccountExistsError, syncJwtUser, type JwtUserStore } from './hybridAuthUser';
 import { createLogger } from './logger';
+import { OLDEST_ACCOUNT_FIRST, phoneLookupVariants } from './phoneAccountLookup';
 import { impersonatorFromPayload, verifySupabaseAccessToken } from './supabaseJwt';
 
 const log = createLogger('HybridAuth');
@@ -42,6 +43,16 @@ const jwtUserStore: JwtUserStore = {
       where: { userId },
       data: { phone },
     });
+  },
+  async findPhoneOwner(phone) {
+    const variants = phoneLookupVariants(phone);
+    if (variants === null) return null;
+    const owner = await prisma.user.findFirst({
+      where: { phone: { in: variants } },
+      orderBy: OLDEST_ACCOUNT_FIRST,
+      select: { userId: true },
+    });
+    return owner?.userId ?? null;
   },
   isUniqueViolation(error) {
     return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
@@ -192,11 +203,19 @@ async function handleJwtAuth(
   req.isRoseApiKey = false;
   req.isAnonymous = isAnonymous;
 
-  const isNewUser = await syncJwtUser(jwtUserStore, {
-    userId,
-    isAnonymous,
-    phone: typeof payload.phone === 'string' ? payload.phone : null,
-  });
+  let isNewUser: boolean;
+  try {
+    isNewUser = await syncJwtUser(jwtUserStore, {
+      userId,
+      isAnonymous,
+      phone: typeof payload.phone === 'string' ? payload.phone : null,
+    });
+  } catch (error) {
+    if (!(error instanceof PhoneAccountExistsError)) throw error;
+    log.warn('Rejected token for a phone owned by another account', { userId });
+    res.status(401).json({ error: error.message, code: error.code });
+    return;
+  }
 
   if (isNewUser) {
     log.info('Created user record', { userId, isAnonymous });

@@ -7,11 +7,13 @@
 
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
+import { OLDEST_ACCOUNT_FIRST } from '../../providers/phoneAccountLookup';
 
 /** Look up a user by phone number */
 export async function findUserByPhone(phone: string) {
   return prisma.user.findFirst({
     where: { phone },
+    orderBy: OLDEST_ACCOUNT_FIRST,
   });
 }
 
@@ -29,7 +31,10 @@ export async function findUserByPhone(phone: string) {
  * unique index on phone to make it airtight).
  */
 export async function provisionUserByPhone(phone: string) {
-  const existing = await prisma.user.findFirst({ where: { phone } });
+  const existing = await prisma.user.findFirst({
+    where: { phone },
+    orderBy: OLDEST_ACCOUNT_FIRST,
+  });
   if (existing) return { user: existing, created: false };
   const user = await prisma.user.create({
     data: { userId: randomUUID(), phone, isAnonymous: false },

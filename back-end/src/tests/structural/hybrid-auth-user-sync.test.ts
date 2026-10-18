@@ -1,5 +1,7 @@
 import assert from 'assert';
 import {
+  PHONE_ACCOUNT_EXISTS_CODE,
+  PhoneAccountExistsError,
   syncJwtUser,
   type JwtUserInput,
   type JwtUserSnapshot,
@@ -16,9 +18,14 @@ interface StoreCalls {
   finds: number;
   creates: number;
   phoneUpdates: string[];
+  ownerLookups?: string[];
 }
 
-function fakeStore(options?: { users?: Array<JwtUserSnapshot | null>; createError?: unknown }): {
+function fakeStore(options?: {
+  users?: Array<JwtUserSnapshot | null>;
+  createError?: unknown;
+  phoneOwner?: string | null;
+}): {
   store: JwtUserStore;
   calls: StoreCalls;
 } {
@@ -35,6 +42,10 @@ function fakeStore(options?: { users?: Array<JwtUserSnapshot | null>; createErro
     },
     async updatePhone(_userId, phone) {
       calls.phoneUpdates.push(phone);
+    },
+    async findPhoneOwner(phone) {
+      calls.ownerLookups = [...(calls.ownerLookups ?? []), phone];
+      return options?.phoneOwner ?? null;
     },
     isUniqueViolation(error) {
       return error === options?.createError;
@@ -82,12 +93,67 @@ async function testNonUniqueCreateErrorPropagates(): Promise<void> {
   await assert.rejects(() => syncJwtUser(store, INPUT), createError);
 }
 
+const PHONE_INPUT: JwtUserInput = { userId: 'user-new', isAnonymous: false, phone: '19729777432' };
+
+async function testNewPhoneCreatesAccount(): Promise<void> {
+  const { store, calls } = fakeStore({ users: [null], phoneOwner: null });
+  const created = await syncJwtUser(store, PHONE_INPUT);
+  assert.equal(created, true);
+  assert.deepEqual(calls, {
+    finds: 1,
+    creates: 1,
+    phoneUpdates: [],
+    ownerLookups: ['19729777432'],
+  });
+}
+
+async function testOwnedPhoneRejectsNewAccountWithoutCreating(): Promise<void> {
+  const { store, calls } = fakeStore({ users: [null], phoneOwner: 'user-oldest' });
+  await assert.rejects(
+    () => syncJwtUser(store, PHONE_INPUT),
+    (error: unknown) =>
+      error instanceof PhoneAccountExistsError && error.code === PHONE_ACCOUNT_EXISTS_CODE
+  );
+  assert.equal(calls.creates, 0, 'an owned phone must never create a second account');
+}
+
+async function testOwnPhoneOwnershipDoesNotReject(): Promise<void> {
+  const { store, calls } = fakeStore({ users: [null], phoneOwner: PHONE_INPUT.userId });
+  const created = await syncJwtUser(store, PHONE_INPUT);
+  assert.equal(created, true);
+  assert.equal(calls.creates, 1);
+}
+
+async function testExistingUserSkipsPhoneOwnerLookup(): Promise<void> {
+  const { store, calls } = fakeStore({
+    users: [{ phone: '+19729777432' }],
+    phoneOwner: 'user-oldest',
+  });
+  const created = await syncJwtUser(store, { ...PHONE_INPUT, phone: '+19729777432' });
+  assert.equal(created, false);
+  assert.equal(calls.ownerLookups, undefined, 'existing users stay a single read');
+}
+
+async function testPhonelessTokensSkipOwnerLookup(): Promise<void> {
+  for (const phone of [null, '', '   ']) {
+    const { store, calls } = fakeStore({ users: [null], phoneOwner: 'user-oldest' });
+    const created = await syncJwtUser(store, { ...INPUT, phone });
+    assert.equal(created, true, `anonymous token with phone=${JSON.stringify(phone)} creates`);
+    assert.equal(calls.ownerLookups, undefined);
+  }
+}
+
 async function main(): Promise<void> {
   await testExistingUserIsReadOnly();
   await testNewUserIsCreatedOnce();
   await testChangedPhoneIsTheOnlyExistingUserWrite();
   await testConcurrentCreateWinnerDoesNotDuplicateNewUserEffects();
   await testNonUniqueCreateErrorPropagates();
+  await testNewPhoneCreatesAccount();
+  await testOwnedPhoneRejectsNewAccountWithoutCreating();
+  await testOwnPhoneOwnershipDoesNotReject();
+  await testExistingUserSkipsPhoneOwnerLookup();
+  await testPhonelessTokensSkipOwnerLookup();
   process.stdout.write('hybrid auth user sync tests passed\n');
 }
 

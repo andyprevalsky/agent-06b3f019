@@ -8,6 +8,7 @@
 
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { OLDEST_ACCOUNT_FIRST } from './phoneAccountLookup';
 import { normalizeWaitlistEmail } from './waitlistIdentity';
 
 const log = createLogger('InviteGate');
@@ -54,6 +55,7 @@ export async function markOffWaitlistByPhone(phone: string): Promise<OffWaitlist
   // User.phone is not unique and may be stored as '+digits' or bare 'digits'.
   const candidates = await prisma.user.findMany({
     where: { phone: { in: ['+' + digits, digits] } },
+    orderBy: OLDEST_ACCOUNT_FIRST,
     select: { userId: true, offWaitlistAt: true },
   });
   if (candidates.length === 0) return { flagged: false, userId: null, alreadyOffWaitlist: false };

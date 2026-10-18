@@ -9,6 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
+import { OLDEST_ACCOUNT_FIRST } from '../../providers/phoneAccountLookup';
 
 /**
  * Find-or-create a User for an inbound WhatsApp number.
@@ -18,7 +19,10 @@ import { prisma } from '../../providers/database';
  * a generated `userId` — no OTP, no signup wall — exactly like the SMS path.
  */
 export async function provisionUserByPhone(phone: string) {
-  const existing = await prisma.user.findFirst({ where: { phone } });
+  const existing = await prisma.user.findFirst({
+    where: { phone },
+    orderBy: OLDEST_ACCOUNT_FIRST,
+  });
   if (existing) return { user: existing, created: false };
   const user = await prisma.user.create({
     data: { userId: randomUUID(), phone, isAnonymous: false },
