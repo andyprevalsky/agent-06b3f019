@@ -9956,5 +9956,54 @@
       ],
       "context_notes": "Only isolated local benchmark backend and trusted Andy scope. Parent supplies provider key to backend only, device ID to fixture. Checker needs existing backend envelope decryption environment and local DB. No Apple Account secret needed."
     }
-  }
+  },
+{
+  "name": "browser-cloud-iphone-critical-attention",
+  "title": "Live iPhone critical authentication attention boundary",
+  "prompt": "Use exactly one browser agent and my dedicated cloud iPhone to begin or continue Apple Account setup using the account identifier configured by the server. Observe the actual current state first. If the intended account is already signed in, do not sign out, switch accounts, or disturb it; report that the critical-attention boundary was not exercised and release the phone. Otherwise navigate autonomously until a password, user-only verification code, device passcode, or user-presence authentication genuinely blocks progress. At that screen request native iPhone authentication assistance with the matching criticalReason and wait. Do not type credentials or other secrets, complete sign-in, accept new terms, change payment settings, install apps, send messages, or use a CLI/local phone. Ordinary navigation, queue/configuration/unsupported/transport errors are not authentication-attention reasons. If assistance is declined, stop and release the phone. Do not claim signed-in or ready from requesting assistance.",
+  "timeout_seconds": 300,
+  "min_steps": {
+    "browser": 3
+  },
+  "price_limit_cents": 100,
+  "is_chat_mode": false,
+  "attachment": null,
+  "approval_handling": "ignore",
+  "start_phase": "execute",
+  "expected_tools": [
+    "spawn_browser_agent"
+  ],
+  "requires_browser_agent": true,
+  "requires_claude_code": false,
+  "status": "incomplete",
+  "runner": "agent",
+  "bench": "pipeline-e2e",
+  "group": "incomplete",
+  "fast_cache": "off",
+  "tags": [
+    "LIVE",
+    "phone"
+  ],
+  "description": "Explicit-only development test: observe a real critical authentication screen and exact native iPhone attention binding, then reject and clean up without entering credentials. Requires private first-party screen review; protocol evidence alone is not a semantic PASS.",
+  "environment": {
+    "mode": "live",
+    "live_fixtures": [
+      "live"
+    ],
+    "db_fixtures": [],
+    "base_images": [],
+    "services": [
+      "phone-harness-cloud-iphone"
+    ],
+    "secrets": [
+      "PHONE_HARNESS_DEVICE_ID",
+      "PHONE_HARNESS_API_KEY"
+    ],
+    "live_targets": [
+      "dedicated Andy cloud iPhone"
+    ],
+    "context_notes": "Only isolated local backend and trusted Andy scope. Provider key stays backend-only. Configure the expected account identifier through the existing private profile API; no password or verification code is supplied. Preserve an already signed-in account. No sign-in completion or new ready transition is permitted."
+  },
+  "expected_attention_kind": "auth_assistance"
+}
 ]

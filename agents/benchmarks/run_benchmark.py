@@ -106,6 +106,7 @@ from benchmarks.phone_callee import (
     phone_search_text,
     resolve_callee_prompt,
 )
+from benchmarks.phone_critical_attention import PHONE_BENCH_TASK_NAMES
 from benchmarks.plan_assertions import evaluate_plan_assertions, find_accepted_plan
 from benchmarks.polar_catalog import (
     is_polar_bench_task,
@@ -6480,8 +6481,8 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             by_id[aid] = result
             stage_logs[aid] = logs if isinstance(logs, dict) else {}
         primary_ids.add(root_ids[-1])
-    phone_roots = set(live_ids.get("browser-cloud-iphone-settings", []))
-    phone_roots.update(r.agent_id for r in results if r.name == "browser-cloud-iphone-settings" and r.agent_id)
+    phone_roots = {root for name in PHONE_BENCH_TASK_NAMES for root in live_ids.get(name, [])}
+    phone_roots.update(r.agent_id for r in results if r.name in PHONE_BENCH_TASK_NAMES and r.agent_id)
     for phone_root in phone_roots:
         from benchmarks.phone_connectivity import ANDY, cleanup_phone
         identity = _owned_cleanup_user_id.set(ANDY)
@@ -6490,6 +6491,10 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 from benchmarks.phone_connectivity import PhoneCleanupBlocked
                 raise PhoneCleanupBlocked("Phone batch cleanup cannot quiesce exact root")
             await cleanup_phone(base_url, ANDY, phone_root, _local_victoria_database_url(), API_KEY)
+            critical_roots = set(live_ids.get("browser-cloud-iphone-critical-attention", [])) | {r.agent_id for r in results if r.name == "browser-cloud-iphone-critical-attention" and r.agent_id}
+            if phone_root in critical_roots:
+                from benchmarks.phone_critical_attention import cleanup_owner_transport
+                await asyncio.to_thread(cleanup_owner_transport, base_url, ANDY, phone_root, _local_victoria_database_url())
         finally:
             _owned_cleanup_user_id.reset(identity)
     owned = {aid for ids in live_ids.values() for aid in ids} | set(by_id)
@@ -8929,7 +8934,7 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
     tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
     ctx = LiveFixtureContext(
         base_url=base_url,
-        user_id=_current_benchmark_user_id() if task.name == "browser-cloud-iphone-settings" else USER_ID,
+        user_id=_current_benchmark_user_id() if task.name in PHONE_BENCH_TASK_NAMES else USER_ID,
         auth_realm=auth_realm,
         cookie_domains=cookie_domains,
         required_injectable_cookie_domains=required_cookie_domains,
@@ -13776,7 +13781,7 @@ async def _run_single_task_as_run_user(
             f"{len(fixture['password_ids'])} bad password row(s)"
         )
 
-    if task.name == "browser-cloud-iphone-settings":
+    if task.name in PHONE_BENCH_TASK_NAMES:
         from benchmarks.phone_connectivity import device_id, guard
         guard(base_url, _current_benchmark_user_id())
         device_id()
@@ -13921,12 +13926,13 @@ async def _run_single_task_as_run_user(
     result: Optional[TaskResult] = None
 
     phone_cleanup_complete = False
+    phone_critical_custody = None
     phone_cleanup_deadline = None
-    phone_cleanup_receipt_started = _begin_interrupt_cleanup() if task.name == "browser-cloud-iphone-settings" else False
+    phone_cleanup_receipt_started = _begin_interrupt_cleanup() if task.name in PHONE_BENCH_TASK_NAMES else False
 
     async def ensure_phone_cleanup() -> None:
         nonlocal phone_cleanup_complete, phone_cleanup_deadline
-        if task.name != "browser-cloud-iphone-settings" or phone_cleanup_complete:
+        if task.name not in PHONE_BENCH_TASK_NAMES or phone_cleanup_complete:
             return
         if agent_id:
             from benchmarks.phone_connectivity import cleanup_phone
@@ -13937,6 +13943,15 @@ async def _run_single_task_as_run_user(
                 raise PhoneCleanupBlocked("Phone cleanup cannot quiesce exact root; retain isolated database")
             await cleanup_phone(base_url, _current_benchmark_user_id(), agent_id,
                                 _local_victoria_database_url(), API_KEY, deadline=phone_cleanup_deadline)
+            if task.name == "browser-cloud-iphone-critical-attention":
+                from benchmarks.phone_critical_attention import cleanup_owner_transport, probe
+                await asyncio.to_thread(cleanup_owner_transport, base_url, _current_benchmark_user_id(), agent_id, _local_victoria_database_url())
+                if phone_critical_custody is not None:
+                    final_proof = await asyncio.to_thread(probe, base_url, _current_benchmark_user_id(), agent_id,
+                        _local_victoria_database_url(), mode="rejected", custody=phone_critical_custody)
+                    if not final_proof.get("valid"):
+                        from benchmarks.phone_connectivity import PhoneCleanupBlocked
+                        raise PhoneCleanupBlocked("PH-6D post-cleanup no-input proof invalid; retain isolated database")
         phone_cleanup_complete = True
         if phone_cleanup_receipt_started:
             _complete_interrupt_cleanup()
@@ -14014,11 +14029,14 @@ async def _run_single_task_as_run_user(
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = await _apply_live_fixtures(task, base_url)
-        if task.name == "browser-cloud-iphone-settings":
+        if task.name in PHONE_BENCH_TASK_NAMES:
             from benchmarks.phone_connectivity import apply_fixture
             if _is_simulate_mode() or task.fast_cache != "off":
                 raise RuntimeError("Live iPhone benchmark forbids simulation/demo cache")
             await apply_fixture(base_url, _current_benchmark_user_id(), API_KEY)
+            if task.name == "browser-cloud-iphone-critical-attention":
+                from benchmarks.phone_critical_attention import configure_profile
+                await configure_profile(base_url, _current_benchmark_user_id(), API_KEY, _local_victoria_database_url())
 
         memory_fixture_manifests = await _apply_memory_fixtures(task, base_url)
         if memory_fixture_manifests:
@@ -14251,6 +14269,15 @@ async def _run_single_task_as_run_user(
             if not phone_ok:
                 passed, failure_reason = False, phone_reason
             data["_phone_connectivity_proof"] = phone_proof
+
+        if task.name == "browser-cloud-iphone-critical-attention":
+            from benchmarks.phone_critical_attention import evaluate_critical_attention
+            phone_ok, phone_reason, phone_proof = await evaluate_critical_attention(
+                base_url, _current_benchmark_user_id(), agent_id, _local_victoria_database_url())
+            phone_critical_custody = phone_proof.pop("_custody", None)
+            data["_phone_critical_attention_proof"] = phone_proof
+            if not phone_ok:
+                passed, failure_reason = False, phone_reason
 
         if phone_callee is not None and passed:
             phone_passed, phone_reason = await _evaluate_phone_call_task(

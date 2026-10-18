@@ -690,3 +690,158 @@ def test_captured_canonical_finished_card_reads_typed_visible_heading():
     assert (
         phone.reported_heading({"messages": [{"role": "ASSISTANT", "text": "Visible heading: Paired Computers"}]}) == ""
     )
+
+
+
+def test_critical_attention_catalog_and_explicit_registration():
+    from benchmarks import phone_critical_attention as critical
+    from benchmarks.benchmark_tasks import get_task_by_name
+    task = get_task_by_name(critical.TASK_NAME)
+    assert task.approval_handling == "ignore" and task.expected_attention_kind == "auth_assistance"
+    assert task.timeout_seconds == 300 and task.price_limit_cents == 100 and task.fast_cache == "off"
+    assert task.status == "incomplete"
+    import inspect
+
+    from benchmarks import run_benchmark as runner
+    source = inspect.getsource(runner)
+    assert "PHONE_BENCH_TASK_NAMES" in source
+    assert "evaluate_critical_attention" in source and "configure_profile" in source
+
+
+def test_critical_attention_private_frame_before_checked_rejection(monkeypatch, tmp_path):
+    from benchmarks import phone_critical_attention as critical
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
+    events = []
+    state = {"source": "persisted-native-attention-v1", "protocolOnly": True, "valid": True, "requestId": "request", "leaseId": "lease", "reason": "password", "rejected": False}
+    monkeypatch.setattr(critical, "probe", lambda *a, **kw: dict(state))
+    monkeypatch.setattr(critical, "key_fixture", lambda *a, **kw: events.append(kw.get("action")))
+    monkeypatch.setattr(critical, "private_directory", lambda: tmp_path)
+    def transport(request):
+        assert request.headers.get("x-api-key", "").startswith("rose-ph6d-")
+        if request.url.path.endswith("/frame"):
+            events.append("frame")
+            return httpx.Response(200, content=b"\x89PNG\r\n\x1a\nsynthetic", headers={"content-type": "image/png"})
+        assert request.url.path == "/api/attention-requests/request/reject"
+        assert json.loads(request.content) == {}
+        events.append("reject")
+        state["rejected"] = True
+        return httpx.Response(200, json={"success": True})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            return await critical.evaluate_critical_attention("http://localhost:3001", phone.ANDY, "root", "postgresql://localhost/victoria_test", client=client)
+    ok, reason, proof = asyncio.run(run())
+    assert ok and proof["protocolOnly"] and proof["rejected"]
+    assert events.index("frame") < events.index("reject") and events[0] == "create" and events[-1] == "delete"
+    images = list(tmp_path.glob("*.png"))
+    assert len(images) == 1 and images[0].stat().st_mode & 0o777 == 0o600
+    assert "rose-ph6d-" not in json.dumps(proof) and "synthetic" not in json.dumps(proof)
+
+
+@pytest.mark.parametrize("failure", ["invalid", "frame", "reject", "persisted"])
+def test_critical_attention_denials_never_claim_protocol_pass(monkeypatch, tmp_path, failure):
+    from benchmarks import phone_critical_attention as critical
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
+    state = {"source": "persisted-native-attention-v1", "protocolOnly": True, "valid": failure != "invalid", "requestId": "request", "leaseId": "lease", "reason": "password", "rejected": False}
+    monkeypatch.setattr(critical, "probe", lambda *a, **kw: dict(state))
+    monkeypatch.setattr(critical, "key_fixture", lambda *a, **kw: None)
+    monkeypatch.setattr(critical, "private_directory", lambda: tmp_path)
+    events = []
+    def transport(request):
+        events.append(request.url.path)
+        if request.url.path.endswith("/frame"):
+            return httpx.Response(403 if failure == "frame" else 200, content=b"\x89PNG\r\n\x1a\nsynthetic", headers={"content-type": "image/png"})
+        state["rejected"] = failure != "persisted"
+        return httpx.Response(409 if failure == "reject" else 200, json={})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            return await critical.evaluate_critical_attention("http://localhost:3001", phone.ANDY, "root", "postgresql://localhost/victoria_test", client=client)
+    ok, reason, proof = asyncio.run(run())
+    assert not ok and reason
+    if failure in ("invalid", "frame"):
+        assert not any(path.endswith("/reject") for path in events)
+
+
+def test_critical_attention_actual_typescript_checker_boundaries():
+    import subprocess
+    script = r'''
+const {checkCritical} = require('./phone_critical_attention_receipts.ts');
+const userId='c49b4ce3-3489-499d-bfbd-846d04ba6275';
+const target={leaseId:'lease',browserTaskId:'task',kind:'iphone'};
+const context={target,criticalReason:'password',requestId:'attention',expectedCursor:3};
+const s={userId,deviceId:'device',agentIds:['root','agent'],agent:{id:'agent',temporalWorkflowId:'generation'},
+ task:{id:'task',agentId:'agent',context:{userId}},device:{id:'dbdevice',userId,providerDeviceId:'device',providerEpoch:2,setupState:'awaiting_user',providerState:'READY'},
+ lease:{id:'lease',deviceId:'dbdevice',userId,agentId:'agent',browserTaskId:'task',status:'ACTIVE',activeDeviceId:'dbdevice',releaseRequestedAt:null,controlOwner:'user',attentionRequestId:'attention',actionCursor:3},
+ setup:{profileRevision:1,expectedAppleIdentity:'synthetic@example.invalid',attempt:{id:'attempt',revision:1,agentId:'agent',leaseId:'lease',taskId:'task',workflowId:'generation',floorCursor:0,floorAt:new Date(0).toISOString()}},
+ privacy:{active:true,values:[]},attentions:[{id:'attention',userId,agentId:'agent',workflowId:'generation',createdAt:5,userResponse:null,
+ metadata:{attentionKind:'auth_assistance',target,criticalReason:'password',authAssistance:context,requestUserAuthentication:context},authAssistance:{id:'attention',userId,agentId:'agent',authRealm:'iphone',mode:'manual_step',browserSessionId:null,steelSessionId:'',completedAt:null}}],
+ messages:[{agentId:'agent',workflowGeneration:'generation',metadata:{authAssistance:context,requestUserAuthentication:context}}],
+ operations:[{id:'text',leaseId:'lease',actor:'agent',operation:'input.text',state:'SUCCEEDED',cursor:1,providerEpoch:2,request:{args:{s:'synthetic@example.invalid'},setupAttemptId:'attempt',setupRevision:1}},
+ {id:'read',leaseId:'lease',actor:'agent',operation:'screen.text',state:'SUCCEEDED',cursor:2,completedAt:4,providerEpoch:2,request:{setupAttemptId:'attempt',setupRevision:1},result:[{text:'Enter password',source:'pixels',confidence:0.9,x:1,y:1,w:10,h:10}]}]};
+const assert=require('node:assert/strict');assert.equal(checkCritical(s).valid,true);
+const mutations=[x=>x.operations[0].operation='apps.install',x=>x.operations[0].operation='messages.send',x=>x.lease.activeDeviceId=null,x=>x.lease.releaseRequestedAt=1,x=>x.device.providerState='CLOSING',x=>x.attentions[0].metadata.attentionKind='other',x=>x.attentions[0].authAssistance.browserSessionId='browser',x=>x.userId='foreign',x=>x.device.providerDeviceId='foreign',x=>x.task.agentId='foreign',x=>x.lease.id='foreign',x=>x.agent.temporalWorkflowId='old',x=>x.device.providerEpoch++,x=>x.setup.attempt.id='foreign',x=>x.setup.profileRevision=0,x=>delete x.setup.expectedAppleIdentity,x=>x.messages=[],x=>x.attentions.push(x.attentions[0]),x=>x.attentions[0].authAssistance.completedAt=5,x=>x.device.setupState='ready',x=>x.operations[0].actor='user',x=>x.operations[0].request.args.s='PASSWORD-CANARY',x=>x.operations[0].state='UNKNOWN',x=>x.operations[1].result={},x=>x.operations[1].result=[],x=>x.operations[1].result={error:'Enter password'},x=>x.operations[1].request.setupRevision=0,x=>x.operations[0].cursor=3,x=>x.setup.attempt.floorCursor=2,x=>x.attentions[0].metadata.authAssistance.expectedCursor=1];
+for(const change of mutations){const x=structuredClone(s);change(x);assert.equal(checkCritical(x).valid,false,change.toString());}
+const done=structuredClone(s);done.attentions[0].userResponse='__REJECTED__';done.lease.status='RELEASED';assert.equal(checkCritical(done,true).valid,true);
+process.stdout.write('24 checker boundary assertions passed');
+'''
+    result = subprocess.run(["node", "--import", "tsx", "-e", script], cwd=phone.ROOT / "agents" / "benchmarks", capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_critical_attention_profile_cas_uses_private_synthetic_identity(monkeypatch, tmp_path):
+    from benchmarks import phone_critical_attention as critical
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
+    monkeypatch.setenv("PHONE_HARNESS_DEVICE_ID", "synthetic-device")
+    monkeypatch.setenv("PHONE_HARNESS_API_KEY", "CANARY-PROVIDER-KEY")
+    monkeypatch.setattr(critical, "load_env_var", lambda *a: "synthetic-envelope")
+    source = tmp_path / "identity.json"
+    source.write_text(json.dumps({"apple_account_email": "synthetic@example.invalid"}))
+    monkeypatch.setenv("PHONE_BENCH_APPLE_IDENTITY_FILE", str(source))
+    matched = False
+    calls = []
+    def child(file, env, payload=None):
+        assert "PHONE_HARNESS_API_KEY" not in env
+        assert payload == {"identity": "synthetic@example.invalid"}
+        return {"matches": matched, "profileRevision": 2}
+    monkeypatch.setattr(critical, "_run", child)
+    def transport(request):
+        assert request.url.path == "/api/iphone/device/setup-profile"
+        assert json.loads(request.content) == {"expectedProfileRevision": 2, "expectedAppleIdentity": "synthetic@example.invalid"}
+        calls.append(request)
+        return httpx.Response(200, json={"setup": {}})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            return await critical.configure_profile("http://localhost:3001", phone.ANDY, "synthetic-internal", "postgresql://localhost/victoria_test", client=client)
+    assert asyncio.run(run()) == {"configured": True}
+    matched = True
+    assert asyncio.run(run()) == {"configured": True}
+    assert len(calls) == 1, "matching ready profile must never be reset"
+
+
+def test_critical_attention_settings_evaluator_remains_exclusive():
+    import ast
+    import inspect
+
+    from benchmarks import run_benchmark as runner
+    tree = ast.parse(inspect.getsource(runner))
+    conditions = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and any(isinstance(child, ast.ImportFrom) and child.module == "benchmarks.phone_connectivity" and any(alias.name == "evaluate_persisted" for alias in child.names) for child in node.body):
+            conditions.append(ast.unparse(node.test))
+    assert conditions == ["task.name == 'browser-cloud-iphone-settings'"]
+
+
+def test_critical_attention_cli_entry_without_pythonpath(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, str(phone.ROOT / "agents/benchmarks/run_benchmark.py"), "--help"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": ""},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
