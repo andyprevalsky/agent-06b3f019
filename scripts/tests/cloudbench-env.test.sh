@@ -127,11 +127,49 @@ class WorldModelLaunch(unittest.TestCase):
                      {"WMH_ENGINE": "", "WMH_ROSE_POOL": "", "WMH_CONTEXT_TOKENS": ""})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["legacy", "rose-1-ultra", ""])
-        for key, value in (("WMH_ENGINE", "unknown"), ("WMH_ROSE_POOL", "unknown-pool"),
+        for key, value in (("WMH_ENGINE", "unknown"),
                            ("WMH_ROSE_POOL", "pool;invalid"), ("WMH_CONTEXT_TOKENS", "0"),
                            ("WMH_CONTEXT_TOKENS", "-1"), ("WMH_CONTEXT_TOKENS", "1.5")):
             with self.subTest(key=key, value=value):
                 self.assertEqual(run(":", {key: value}).returncode, 2)
+
+    def test_rose_pool_is_validated_against_the_benchmark_ref(self):
+        # A pool that exists only at the requested ref must pass, and one that
+        # exists only in this checkout must not.
+        check = 'validate_wmh_rose_pool_at_ref "$BENCH_REF" "$WMH_ROSE_POOL"'
+        result = run(check, {"BENCH_REF": "HEAD", "WMH_ROSE_POOL": "rose-1-ultra"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(run(check, {"BENCH_REF": "HEAD", "WMH_ROSE_POOL": "unknown-pool"}).returncode, 2)
+        with tempfile.TemporaryDirectory(prefix="wmh-pool-ref-") as temporary:
+            repo = Path(temporary)
+            registry = repo / "agents/providers/rose/pools.py"
+            registry.parent.mkdir(parents=True)
+            git = lambda *args: subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                               capture_output=True, text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            def commit(pool):
+                registry.write_text(
+                    "def get_pool(name):\n"
+                    f"    if name != {pool!r}:\n"
+                    "        raise KeyError(name)\n"
+                )
+                git("add", "-A")
+                git("commit", "-qm", pool)
+                return git("rev-parse", "HEAD")
+            older = commit("ref-only-pool")
+            commit("checkout-only-pool")
+            for ref, pool, code in ((older, "ref-only-pool", 0), (older, "checkout-only-pool", 2),
+                                    ("HEAD", "checkout-only-pool", 0)):
+                with self.subTest(ref=ref, pool=pool):
+                    outcome = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": ref, "WMH_ROSE_POOL": pool})
+                    self.assertEqual(outcome.returncode, code, outcome.stderr)
+            # A ref this controller has not fetched is left to the guest's own check.
+            missing = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": "0" * 40,
+                                  "WMH_ROSE_POOL": "ref-only-pool"})
+            self.assertEqual(missing.returncode, 0, missing.stderr)
+            self.assertIn("the guest validates", missing.stderr)
 
     def test_execution_policy_allowlist_admits_every_registered_policy(self):
         # The cloud launch must accept each immutable registered policy and

@@ -6,6 +6,7 @@ Prediction -> known outer envelope -> canonical observation -> original tool rec
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 JsonObject = dict[str, Any]
@@ -15,6 +16,9 @@ def _coerce_non_negative_int(value: Any) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, (int, float)):
+        # NaN/Infinity decode from open WMH JSON; int() would raise on them.
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
         if value < 0:
             return None
         return int(value)
@@ -26,7 +30,7 @@ def _coerce_non_negative_int(value: Any) -> int | None:
             parsed = float(stripped)
         except ValueError:
             return None
-        if parsed < 0:
+        if not math.isfinite(parsed) or parsed < 0:
             return None
         return int(parsed)
     return None

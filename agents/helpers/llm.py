@@ -7340,97 +7340,99 @@ async def call_planner_llm_activity(
 
     liveness_task = asyncio.create_task(_planner_liveness_heartbeat())
 
-    # Fast Mode: set the cache context so the planner's Rose call (via
-    # call_llm_structured_streaming → cached_complete) records/replays by canonical
-    # request fingerprint. call_site "planner" keeps it distinct.
-    write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
-    if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
-        from providers.fast_cache.client import resolve_soft_complete_root_goal
-
-        root_goal = await resolve_soft_complete_root_goal(agent_id, fast_mode_goal)
-        set_fast_cache_context(
-            FastCacheContext(
-                enabled=fast_mode_cache_enabled,
-                goal=fast_mode_goal,
-                base_step=fast_mode_step,
-                write_enabled=fast_mode_cache_enabled or write_through_enabled,
-                root_goal=root_goal,
-            )
-        )
-
-    # Build system prompt for planner
-    prompt_start = time.perf_counter()
-    system_prompt = build_planner_system_prompt(tools_description, user_context, response_schema=response_schema)
-    # Seeded or imported communications can be months old. Give the planner an
-    # explicit clock so "current" goals cannot inherit a message timestamp. A
-    # simulated agent lives on its world's clock, which starts at the pinned
-    # scenario date; outside a WMH world this is the real date.
-    from helpers.world_model_runtime import world_time_ms
-
-    world_ms = await world_time_ms(agent_id)
-    current = datetime.fromtimestamp(world_ms / 1000, timezone.utc) if world_ms is not None else datetime.now(timezone.utc)
-    system_prompt += f"\n\nCurrent UTC date: {current.date().isoformat()}."
-    prompt_elapsed = time.perf_counter() - prompt_start
-    logger.info(f"[TIMING] Planner system prompt build: {prompt_elapsed * 1000:.1f}ms")
-
-    # Prepend system message
-    full_messages = [{"role": "system", "content": system_prompt}] + messages
-    planner_user_id = claude_token_user_id or gpt_token_user_id
-    # Resolve context pointers and retrieve planner memories concurrently. The
-    # memories arrive as a forked get_memories tool call + tool result appended
-    # at the END of the context (before any validation-retry tail), so the
-    # cached prefix (tools + static system prompt + conversation) is untouched.
-    planner_goal = _planner_goal_from_messages(messages, fallback=fast_mode_goal)
-    full_messages, planner_memory = await asyncio.gather(
-        resolve_pointers_in_messages(full_messages, user_id=planner_user_id),
-        _retrieve_planner_memories(
-            goal=planner_goal,
-            user_id=planner_user_id,
-            agent_id=agent_id,
-            memory_enabled=memory_enabled,
-        ),
-    )
-    memory_fork = None
-    if planner_memory is not None and planner_memory.hits:
-        memory_fork = build_memory_fork(planner_goal, planner_memory.hits, k=PLANNER_MEMORY_CONFIG.k)
-        full_messages = insert_memory_fork(full_messages, memory_fork)
-    if planner_memory is not None:
-        logger.info(
-            f"[TIMING] Planner memory retrieval: {planner_memory.timing_ms.get('total', 0.0):.1f}ms "
-            f"(search={planner_memory.timing_ms.get('search', 0.0):.1f}ms, "
-            f"compress={planner_memory.timing_ms.get('compress', 0.0):.1f}ms, hits={len(planner_memory.hits)}, "
-            f"candidates={planner_memory.candidates}, compressed_now={planner_memory.compressed}, "
-            f"injected_chars={len(memory_fork.tool_message['content']) if memory_fork else 0})"
-        )
-
-    total_chars = sum(len(m.get("content", "")) for m in full_messages)
-    logger.info(f"[TIMING] Planner input: {len(full_messages)} messages, {total_chars} chars total")
-
-    # Stream plan char count to frontend via PLAN_STREAM events
-    # Use tool_call_id as stream_id so Temporal retries update the same chip (not create duplicates)
-    plan_stream_id = tool_call_id or str(uuid.uuid4())
-    last_broadcast_len = [0]
-
-    async def on_plan_heartbeat(text: str, count: int):
-        _safe_heartbeat(f"Planner thinking... {len(text)} chars")
-
-    llm_started_at_ms = [None]
-
-    async def on_plan_progress(total_bytes: int):
-        """Called every 5 chunks with total accumulated bytes (reasoning + json)."""
-        # Only broadcast when 50+ new bytes since last broadcast
-        if agent_id and tool_call_id and total_bytes - last_broadcast_len[0] >= 50:
-            last_broadcast_len[0] = total_bytes
-            await stream_plan_event(
-                agent_id=agent_id,
-                stream_id=plan_stream_id,
-                tool_call_id=tool_call_id,
-                title="Generating Plan",
-                char_count=total_bytes,
-                llm_started_at_ms=llm_started_at_ms[0],
-            )
-
+    # Every exit after the heartbeat starts, including prompt preparation and
+    # world-clock failures, must stop it in the finally below.
     try:
+        # Fast Mode: set the cache context so the planner's Rose call (via
+        # call_llm_structured_streaming → cached_complete) records/replays by canonical
+        # request fingerprint. call_site "planner" keeps it distinct.
+        write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
+        if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
+            from providers.fast_cache.client import resolve_soft_complete_root_goal
+
+            root_goal = await resolve_soft_complete_root_goal(agent_id, fast_mode_goal)
+            set_fast_cache_context(
+                FastCacheContext(
+                    enabled=fast_mode_cache_enabled,
+                    goal=fast_mode_goal,
+                    base_step=fast_mode_step,
+                    write_enabled=fast_mode_cache_enabled or write_through_enabled,
+                    root_goal=root_goal,
+                )
+            )
+
+        # Build system prompt for planner
+        prompt_start = time.perf_counter()
+        system_prompt = build_planner_system_prompt(tools_description, user_context, response_schema=response_schema)
+        # Seeded or imported communications can be months old. Give the planner an
+        # explicit clock so "current" goals cannot inherit a message timestamp. A
+        # simulated agent lives on its world's clock, which starts at the pinned
+        # scenario date; outside a WMH world this is the real date.
+        from helpers.world_model_runtime import world_time_ms
+
+        world_ms = await world_time_ms(agent_id)
+        current = datetime.fromtimestamp(world_ms / 1000, timezone.utc) if world_ms is not None else datetime.now(timezone.utc)
+        system_prompt += f"\n\nCurrent UTC date: {current.date().isoformat()}."
+        prompt_elapsed = time.perf_counter() - prompt_start
+        logger.info(f"[TIMING] Planner system prompt build: {prompt_elapsed * 1000:.1f}ms")
+
+        # Prepend system message
+        full_messages = [{"role": "system", "content": system_prompt}] + messages
+        planner_user_id = claude_token_user_id or gpt_token_user_id
+        # Resolve context pointers and retrieve planner memories concurrently. The
+        # memories arrive as a forked get_memories tool call + tool result appended
+        # at the END of the context (before any validation-retry tail), so the
+        # cached prefix (tools + static system prompt + conversation) is untouched.
+        planner_goal = _planner_goal_from_messages(messages, fallback=fast_mode_goal)
+        full_messages, planner_memory = await asyncio.gather(
+            resolve_pointers_in_messages(full_messages, user_id=planner_user_id),
+            _retrieve_planner_memories(
+                goal=planner_goal,
+                user_id=planner_user_id,
+                agent_id=agent_id,
+                memory_enabled=memory_enabled,
+            ),
+        )
+        memory_fork = None
+        if planner_memory is not None and planner_memory.hits:
+            memory_fork = build_memory_fork(planner_goal, planner_memory.hits, k=PLANNER_MEMORY_CONFIG.k)
+            full_messages = insert_memory_fork(full_messages, memory_fork)
+        if planner_memory is not None:
+            logger.info(
+                f"[TIMING] Planner memory retrieval: {planner_memory.timing_ms.get('total', 0.0):.1f}ms "
+                f"(search={planner_memory.timing_ms.get('search', 0.0):.1f}ms, "
+                f"compress={planner_memory.timing_ms.get('compress', 0.0):.1f}ms, hits={len(planner_memory.hits)}, "
+                f"candidates={planner_memory.candidates}, compressed_now={planner_memory.compressed}, "
+                f"injected_chars={len(memory_fork.tool_message['content']) if memory_fork else 0})"
+            )
+
+        total_chars = sum(len(m.get("content", "")) for m in full_messages)
+        logger.info(f"[TIMING] Planner input: {len(full_messages)} messages, {total_chars} chars total")
+
+        # Stream plan char count to frontend via PLAN_STREAM events
+        # Use tool_call_id as stream_id so Temporal retries update the same chip (not create duplicates)
+        plan_stream_id = tool_call_id or str(uuid.uuid4())
+        last_broadcast_len = [0]
+
+        async def on_plan_heartbeat(text: str, count: int):
+            _safe_heartbeat(f"Planner thinking... {len(text)} chars")
+
+        llm_started_at_ms = [None]
+
+        async def on_plan_progress(total_bytes: int):
+            """Called every 5 chunks with total accumulated bytes (reasoning + json)."""
+            # Only broadcast when 50+ new bytes since last broadcast
+            if agent_id and tool_call_id and total_bytes - last_broadcast_len[0] >= 50:
+                last_broadcast_len[0] = total_bytes
+                await stream_plan_event(
+                    agent_id=agent_id,
+                    stream_id=plan_stream_id,
+                    tool_call_id=tool_call_id,
+                    title="Generating Plan",
+                    char_count=total_bytes,
+                    llm_started_at_ms=llm_started_at_ms[0],
+                )
+
         llm_start = time.perf_counter()
         llm_started_at_ms[0] = int(time.time() * 1000)
         if agent_id and tool_call_id:

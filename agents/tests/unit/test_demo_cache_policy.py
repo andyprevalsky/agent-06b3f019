@@ -160,3 +160,25 @@ def test_is_demo_cache_task_reads_restored_fast_cache_goal(monkeypatch):
     assert resumed.compute_token_fast_cache_affinity_key == (
         "fast-cache-agent-provider:" + hashlib.sha256(material.encode()).hexdigest()
     )
+
+
+def test_simulation_writes_demo_goals_only_to_its_scoped_namespace(monkeypatch):
+    """A cold WHM simulation miss seeds its scoped keys; real DEMO recordings stay frozen."""
+    from providers.fast_cache import client
+    from providers.fast_cache.normalize import build_key, goal_hash
+
+    tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
+    tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
+    demo_goal = next(t for t in tasks if t.get("name") == "test-mass-agent-run-0")["prompt"]
+    demo_hash = goal_hash(demo_goal)
+    assert demo_hash in demo_cache_goal_hashes()
+    monkeypatch.delenv("FAST_MODE_CACHE_RECORD_DEMO", raising=False)
+
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "real")
+    real_key = build_key("llm", demo_goal, "detail")
+    assert client.cache_write_allowed(demo_hash, goal=demo_goal) is False
+
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    simulated_key = build_key("llm", demo_goal, "detail")
+    assert simulated_key != real_key and ":sim." in simulated_key
+    assert client.cache_write_allowed(demo_hash, goal=demo_goal) is True

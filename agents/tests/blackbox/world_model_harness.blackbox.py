@@ -3175,9 +3175,15 @@ async def test_runtime_world_time_nonobject_clock_is_unavailable():
             patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
             patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
         ):
-            for value in [[], None, 0, -3, 1.5, True, "clock"]:
+            # A world that answers with an unusable clock is unavailable, not "no world":
+            # the planner must not fall back to the real date.
+            for value in [[], None, 0, -3, 1.5, True, "clock", {"agents": []}, {"start_ms": "x"}]:
                 payload = value
-                assert await runtime.world_time_ms("child-1") is None, repr(value)
+                try:
+                    await runtime.world_time_ms("child-1")
+                    raise AssertionError(f"unusable clock {value!r} must raise")
+                except runtime.WorldClockUnavailable:
+                    pass
             for value in [-1_000, 0, 7_000]:
                 payload = {"agents": [{"agent_id": "child-1", "time_ms": value}], "shared_time_ms": 5_000}
                 assert await runtime.world_time_ms("child-1") == value
@@ -3190,6 +3196,55 @@ async def test_runtime_world_time_nonobject_clock_is_unavailable():
             assert await runtime.world_time_ms("child-1") == 0
             assert all(p == "/world_models/rose-archive/scopes/root-1/clock" for p in requests)
             assert resolve.await_count == len(requests)
+    finally:
+        teardown_mock()
+
+
+async def test_runtime_world_time_retries_then_fails_instead_of_wall_clock():
+    import helpers.world_model_runtime as runtime
+
+    responses: list = []
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        outcome = responses.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    setup_mock_fn(handler)
+    resolve = AsyncMock(return_value=(False, None, False, "root-1", None, False))
+    try:
+        with (
+            patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
+            patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
+            patch.object(runtime, "_WORLD_TIME_RETRY_DELAY_S", 0),
+        ):
+            # Transient transport and server errors retry the same clock read.
+            responses[:] = [
+                httpx.ConnectError("offline clock blip"),
+                httpx.Response(503, json={"detail": "busy"}),
+                httpx.Response(200, json={"agents": [], "shared_time_ms": 9_000}),
+            ]
+            assert await runtime.world_time_ms("child-1") == 9_000
+            assert len(requests) == 3
+            # A clock that stays unavailable raises rather than reporting no world.
+            responses[:] = [httpx.Response(503, json={"detail": "busy"})] * 3
+            try:
+                await runtime.world_time_ms("child-1")
+                raise AssertionError("an unavailable world clock must raise")
+            except runtime.WorldClockUnavailable as exc:
+                assert "HTTP 503" in str(exc)
+            assert len(requests) == 6
+            # A failed root lookup cannot fall back to the agent's own scope.
+            resolve.return_value = (False, None, False, None, None, False)
+            try:
+                await runtime.world_time_ms("child-1")
+                raise AssertionError("an unresolved root must raise")
+            except runtime.WorldClockUnavailable:
+                pass
+            assert len(requests) == 6
     finally:
         teardown_mock()
 
@@ -3513,6 +3568,16 @@ def test_world_model_observation_ignores_non_object_metadata():
         decoded = normalize_world_model_observation(canonical, canonical=True)
         assert decoded["content"] == "ok"
         assert decoded["metadata"] == {"step": 1}
+
+
+def test_world_model_observation_ignores_non_finite_latency():
+    from utils.world_model_observation import predicted_latency_ms_from_observation
+
+    for value in (float("nan"), float("inf"), float("-inf"), "inf", "NaN", "Infinity"):
+        assert predicted_latency_ms_from_observation({"latency_ms": value}) is None, repr(value)
+        assert predicted_latency_ms_from_observation({"metadata": {"duration_ms": value}}) is None, repr(value)
+    decoded = json.loads('{"latency_ms": NaN, "metadata": {"elapsed_ms": 250}}')
+    assert predicted_latency_ms_from_observation(decoded) == 250
 
 
 def test_world_model_observation_latency_normalization_matches_runtime_helper():
@@ -6207,6 +6272,10 @@ async def run_all_tests():
         test_world_model_observation_ignores_non_object_metadata,
     )
     r.record(
+        "world_model_observation_ignores_non_finite_latency",
+        test_world_model_observation_ignores_non_finite_latency,
+    )
+    r.record(
         "world_model_observation_passes_through_activity_tool_result",
         test_world_model_observation_passes_through_activity_tool_result,
     )
@@ -6368,6 +6437,10 @@ async def run_all_tests():
     await r.record_async(
         "runtime_world_time_nonobject_clock_is_unavailable",
         test_runtime_world_time_nonobject_clock_is_unavailable,
+    )
+    await r.record_async(
+        "runtime_world_time_retries_then_fails_instead_of_wall_clock",
+        test_runtime_world_time_retries_then_fails_instead_of_wall_clock,
     )
     teardown_mock()
     return r.all_passed

@@ -5210,6 +5210,56 @@ async def test_simulated_planner_sees_its_world_date_not_the_wall_clock():
     assert systems and "Current UTC date: 2026-09-28." in systems[0]
 
 
+async def test_planner_world_clock_failure_stops_liveness_and_never_uses_wall_clock():
+    """An unreadable or unrepresentable world clock fails the planner and stops its heartbeat."""
+    import httpx
+
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_planner_llm_activity
+    from helpers.world_model_runtime import WorldClockUnavailable
+
+    llm_requests = []
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            llm_requests.append(req)
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+
+    def liveness_tasks():
+        return [
+            task
+            for task in asyncio.all_tasks()
+            if getattr(task.get_coro(), "__qualname__", "").endswith("_planner_liveness_heartbeat")
+        ]
+
+    for clock, expected in (
+        (AsyncMock(side_effect=WorldClockUnavailable("World clock unavailable")), WorldClockUnavailable),
+        (AsyncMock(return_value=10**20), (OverflowError, ValueError, OSError)),
+    ):
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.world_model_runtime.world_time_ms", clock),
+        ):
+            try:
+                await call_planner_llm_activity(
+                    messages=[{"role": "user", "content": "raise money"}],
+                    model="rose",
+                    tools_description="web_search: search the web",
+                    user_context="",
+                    claude_max_token="ct-planner-123",
+                    agent_id="agent-simulated",
+                    claude_token_user_id="planner-user",
+                )
+                raise AssertionError("a failed world clock must fail the planner")
+            except expected:
+                pass
+        await asyncio.sleep(0)
+        assert not [task for task in liveness_tasks() if not task.done()], "planner heartbeat outlived the activity"
+    assert llm_requests == [], "the planner must not prompt with the wall-clock date"
+
+
 async def test_call_planner_llm_activity_happy_path():
     """call_planner_llm_activity builds system prompt, streams a plan, returns result+usage."""
     import httpx
@@ -9666,6 +9716,10 @@ async def run_all_tests():
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     await r.record_async(
         "simulated_planner_sees_world_date", test_simulated_planner_sees_its_world_date_not_the_wall_clock
+    )
+    await r.record_async(
+        "planner_world_clock_failure_stops_liveness",
+        test_planner_world_clock_failure_stops_liveness_and_never_uses_wall_clock,
     )
     # Additional llm coverage
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)

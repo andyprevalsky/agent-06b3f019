@@ -186,16 +186,28 @@ if ! [[ "$WMH_ROSE_POOL" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
     echo "Invalid WMH_ROSE_POOL" >&2
     exit 2
 fi
-if ! python3 - "$ROOT_DIR/agents/providers/rose/pools.py" "$WMH_ROSE_POOL" <<'PY_WMH_POOL'
+# The guest runs BENCH_REF, so its pool registry decides; this checkout may differ.
+validate_wmh_rose_pool_at_ref() {  # validate_wmh_rose_pool_at_ref <ref> <pool>
+    local ref="$1" pool="$2" registry status
+    registry="$(mktemp "${TMPDIR:-/tmp}/rose-pools.XXXXXX")" || return 2
+    if [ -z "$ref" ] || ! git -C "$ROOT_DIR" show "$ref:agents/providers/rose/pools.py" > "$registry" 2>/dev/null; then
+        rm -f "$registry"
+        echo "⚠️  Rose pool registry is not available locally at ${ref:-<no ref>}; the guest validates WMH_ROSE_POOL=$pool" >&2
+        return 0
+    fi
+    python3 - "$registry" "$pool" <<'PY_WMH_POOL'
 import runpy
 import sys
 
 runpy.run_path(sys.argv[1])["get_pool"](sys.argv[2])
 PY_WMH_POOL
-then
-    echo "Invalid WMH_ROSE_POOL: expected a registered Rose pool" >&2
-    exit 2
-fi
+    status=$?
+    rm -f "$registry"
+    if [ "$status" -ne 0 ]; then
+        echo "Invalid WMH_ROSE_POOL: expected a Rose pool registered at $ref" >&2
+        return 2
+    fi
+}
 WMH_CONTEXT_TOKENS="${WMH_CONTEXT_TOKENS:-}"
 if [ -n "$WMH_CONTEXT_TOKENS" ] && ! [[ "$WMH_CONTEXT_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
     echo "Invalid WMH_CONTEXT_TOKENS: expected a positive integer or unset" >&2
@@ -363,6 +375,7 @@ mkdir -p "$OUT_DIR" 2>/dev/null || true
 if [ -z "$BENCH_REF" ]; then
     BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
 fi
+validate_wmh_rose_pool_at_ref "$BENCH_REF" "$WMH_ROSE_POOL" || exit 2
 
 # ── Fly auth token ───────────────────────────────────────────────────────────
 # Operating the bench app requires a USER/org-scoped token. Prefer, in order:

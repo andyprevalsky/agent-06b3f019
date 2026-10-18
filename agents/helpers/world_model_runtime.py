@@ -675,32 +675,66 @@ async def world_model_step_activity(
     return await WMHHttpClient(resolved_base_url).step(world_model_name, session_id, action)
 
 
+class WorldClockUnavailable(RuntimeError):
+    """A WMH is configured but this agent's world clock could not be read."""
+
+
+_WORLD_TIME_ATTEMPTS = 3
+_WORLD_TIME_RETRY_DELAY_S = 1.0
+
+
 async def world_time_ms(agent_id: str | None) -> int | None:
-    """This agent's time on its world's shared clock, or None outside a simulated world."""
+    """This agent's time on its world's shared clock, or None outside a simulated world.
+
+    None means no world: no WMH is configured, or the WMH has no world for this
+    agent's root. Any other failure raises WorldClockUnavailable so a simulated
+    planner never falls back to the real date; transient reads retry first.
+    """
     base_url = os.environ.get("WMH_BASE_URL") or os.environ.get("WORLD_MODEL_HARNESS_URL")
     model = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
     if not base_url or not model or not agent_id:
         return None
     from providers.fast_cache.client import resolve_agent_fast_mode
 
-    scope = (await resolve_agent_fast_mode(agent_id))[3] or agent_id
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(f"{base_url.rstrip('/')}/world_models/{model}/scopes/{scope}/clock")
-        if response.status_code != 200:
+    scope = (await resolve_agent_fast_mode(agent_id))[3]
+    if not scope:
+        raise WorldClockUnavailable("World clock could not resolve its durable root agent")
+    url = f"{base_url.rstrip('/')}/world_models/{model}/scopes/{scope}/clock"
+    failure = "no response"
+    for attempt in range(_WORLD_TIME_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(attempt * _WORLD_TIME_RETRY_DELAY_S)
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(url)
+        except httpx.HTTPError as exc:
+            failure = type(exc).__name__
+            continue
+        if response.status_code == 404:
             return None
-        snapshot = response.json()
-    except (httpx.HTTPError, ValueError):
-        return None
+        if response.status_code != 200:
+            failure = f"HTTP {response.status_code}"
+            continue
+        try:
+            snapshot = response.json()
+        except ValueError as exc:
+            raise WorldClockUnavailable("World clock returned invalid JSON") from exc
+        return _snapshot_time_ms(snapshot, agent_id)
+    raise WorldClockUnavailable(f"World clock unavailable after {_WORLD_TIME_ATTEMPTS} attempts: {failure}")
+
+
+def _snapshot_time_ms(snapshot: Any, agent_id: str) -> int:
     if not isinstance(snapshot, dict):
-        return None
+        raise WorldClockUnavailable("World clock returned a non-object snapshot")
     for agent in snapshot.get("agents") or []:
         if isinstance(agent, dict) and agent.get("agent_id") == agent_id and type(agent.get("time_ms")) is int:
             return agent["time_ms"]
     fallback = snapshot.get("shared_time_ms")
     if fallback is None:
         fallback = snapshot.get("start_ms")
-    return fallback if type(fallback) is int else None
+    if type(fallback) is not int:
+        raise WorldClockUnavailable("World clock snapshot has no integer time")
+    return fallback
 
 
 @activity.defn

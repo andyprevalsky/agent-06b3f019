@@ -183,6 +183,49 @@ describe('WMH terminal output survives later lifecycle messages', () => {
     expect(result.current.simulatedOutput).toBe('**Status**: ✅ SUCCESS\nRecorded result');
   });
 
+  it('trusts the terminal status and success flag over failure words in the output', () => {
+    const quoted =
+      'Summary of the incident report:\nTask Failed was logged once. FAILED retries: 0.';
+    messages.current = [
+      makeMsg({
+        text: quoted,
+        metadata: {
+          taskId: 'legacy-quoted',
+          toolCallId: 'legacy-quoted-call',
+          toolName: 'spawn_agent',
+          world_model_boundary: 'spawn_claude_code_agent',
+          world_model_simulated: true,
+          toolStatus: 'FINISHED',
+        },
+      }),
+      makeMsg({
+        text: quoted,
+        metadata: {
+          task_id: 'flagged-success',
+          action_type: 'task_complete',
+          title: '✓ Task Completed',
+          toolStatus: 'FINISHED',
+          success: true,
+        },
+      }),
+      makeMsg({
+        text: 'All files written.',
+        metadata: {
+          task_id: 'flagged-failure',
+          action_type: 'task_complete',
+          title: '✓ Task Completed',
+          toolStatus: 'FINISHED',
+          success: false,
+        },
+      }),
+    ];
+    const state = (taskId: string) =>
+      renderHook(() => useClaudeCodeChipState(taskId)).result.current;
+    expect(state('legacy-quoted')).toMatchObject({ isComplete: true, isSuccess: true });
+    expect(state('flagged-success')).toMatchObject({ isComplete: true, isSuccess: true });
+    expect(state('flagged-failure')).toMatchObject({ isComplete: true, isSuccess: false });
+  });
+
   it('continues fetching saved output for an ordinary real completed session', async () => {
     messages.current = [
       makeMsg({

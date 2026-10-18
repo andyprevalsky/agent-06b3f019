@@ -13,9 +13,10 @@ export function normalizeWMHCodeMessage(message: Message): Message {
   }
 
   const terminal = metadata.toolStatus === 'FINISHED' || metadata.toolStatus === 'ERROR';
+  // The producer reports failure as an ERROR status or an explicit success flag;
+  // a successful task's output may quote failure words.
   const success =
-    metadata.toolStatus !== 'ERROR' &&
-    !/\b(?:FAILED|Task Failed|Task Incomplete)\b/i.test(message.text);
+    typeof metadata.success === 'boolean' ? metadata.success : metadata.toolStatus === 'FINISHED';
   return {
     ...message,
     metadata: {

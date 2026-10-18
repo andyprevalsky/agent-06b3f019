@@ -87,6 +87,8 @@ function isTaskCompletionSuccess(message: Message | undefined): boolean {
   const combined = `${title}\n${body}`;
 
   if (metadata.error === true || metadata.toolStatus === 'ERROR') return false;
+  // An explicit producer flag is authoritative; output text can quote failure words.
+  if (typeof metadata.success === 'boolean') return metadata.success;
   if (/\b(?:FAILED|Task Failed|Task Incomplete)\b/i.test(combined) || combined.includes('❌')) {
     return false;
   }
@@ -97,6 +99,31 @@ function isTaskCompletionSuccess(message: Message | undefined): boolean {
   return false;
 }
 
+/**
+ * Messages for one code task. Handler cancel can omit metadata.task_id while
+ * sharing toolCallId with the started/complete siblings, so bare
+ * session_cancelled rows are included and the chip leaves spinning_up even when
+ * the session fetch fails.
+ */
+function relatedTaskMessages(normalizedMessages: Message[], taskId: string): Message[] {
+  const taskMessages = normalizedMessages.filter((m) => m.metadata?.task_id === taskId);
+  const toolCallIds = new Set(
+    taskMessages
+      .map((m) => m.metadata?.toolCallId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0),
+  );
+  if (toolCallIds.size === 0) return taskMessages;
+  return [
+    ...taskMessages,
+    ...normalizedMessages.filter((m) => {
+      if (m.metadata?.task_id === taskId) return false;
+      if (m.metadata?.action_type !== 'session_cancelled') return false;
+      const tc = m.metadata?.toolCallId;
+      return typeof tc === 'string' && toolCallIds.has(tc);
+    }),
+  ];
+}
+
 /** Derive chip-visible state from agent messages matching a taskId. */
 export function useClaudeCodeChipState(
   taskId: string,
@@ -105,28 +132,7 @@ export function useClaudeCodeChipState(
   const { messages } = useAgentContext();
 
   return useMemo<ChipDerived>(() => {
-    const normalizedMessages = messages.map(normalizeWMHCodeMessage);
-    const taskMessages = normalizedMessages.filter((m) => m.metadata?.task_id === taskId);
-    // Handler cancel can omit metadata.task_id while sharing toolCallId with the
-    // started/complete siblings. Include those bare session_cancelled rows so
-    // the chip leaves spinning_up even when the session fetch fails.
-    const toolCallIds = new Set(
-      taskMessages
-        .map((m) => m.metadata?.toolCallId)
-        .filter((id): id is string => typeof id === 'string' && id.length > 0),
-    );
-    const relatedMessages =
-      toolCallIds.size === 0
-        ? taskMessages
-        : [
-            ...taskMessages,
-            ...normalizedMessages.filter((m) => {
-              if (m.metadata?.task_id === taskId) return false;
-              if (m.metadata?.action_type !== 'session_cancelled') return false;
-              const tc = m.metadata?.toolCallId;
-              return typeof tc === 'string' && toolCallIds.has(tc);
-            }),
-          ];
+    const relatedMessages = relatedTaskMessages(messages.map(normalizeWMHCodeMessage), taskId);
 
     const lastMessage = relatedMessages[relatedMessages.length - 1];
     const provider =
