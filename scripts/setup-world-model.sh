@@ -43,7 +43,7 @@ esac
 # Non-interactive shells often lack the user's uv install dir on PATH.
 uv() {
     local candidate
-    for candidate in "$(type -P uv || true)" "$repo_root/agents/venv/bin/uv" "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+    for candidate in "$(type -P uv || true)" "$repo_root/agents/venv/bin/uv" "${HOME:+$HOME/.local/bin/uv}" "${HOME:+$HOME/.cargo/bin/uv}"; do
         if [ -n "$candidate" ] && [ -x "$candidate" ]; then
             "$candidate" "$@"
             return
