@@ -2209,9 +2209,13 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
 
 reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
     local id="$1" diagnostic_log="${2:-}" vol="${3:-}" i details="" detail_status=2
-    local state="" command_rc=0 once_status=0
+    local state="" command_rc=0 once_status=0 fenced_retry=0
     [ -n "$id" ] || return 0
     [ "$id" != 820224f7e069e8 ] || { echo "❌ protected WHM Machine" >&2; return 1; }
+    # Bench-app destroys run through the fenced native effect, which never
+    # replays an unknown outcome and re-admits only a definitive provider
+    # refusal; a bounded disposable retry therefore cannot duplicate an effect.
+    [ "$APP" != navi-whisper-lux-bench ] || fenced_retry=1
     if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         echo "❌ reuse-only retains Machine and Volume identity; refusing destroy of $id" >&2
         return 1
@@ -2242,8 +2246,9 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
         [ "$once_status" = 0 ] || [ "$once_status" = 2 ] || return 1
     fi
     for i in 1 2 3 4 5; do
-        if [ "${DISPOSABLE_REAP:-0}" = 1 ] && { [ "$i" -gt 1 ] || [ "$once_status" = 2 ]; }; then
-            : # an ambiguous DELETE is reconciled by GET only
+        if [ "${DISPOSABLE_REAP:-0}" = 1 ] && [ "$fenced_retry" != 1 ] \
+            && { [ "$i" -gt 1 ] || [ "$once_status" = 2 ]; }; then
+            : # an unfenced ambiguous DELETE is reconciled by GET only
         elif [ -n "$diagnostic_log" ]; then
             printf '[%s] destroy attempt %s/5\n' \
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$i" \
@@ -9220,6 +9225,7 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
     request_pids=()
     undelivered_indices=()
     FLEET_GUEST_DELIVERY_STATE=()
+    FLEET_GUEST_DRAIN_UNACKNOWLEDGED=0
     [ "${1:-}" != "--native-stop-undelivered" ] || native_stop=1
     [ "${#CHILD_OUT[@]}" -gt 0 ] || return 0
     deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30}))
@@ -9348,6 +9354,7 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
                 ''|*[!0-9]*)
                     if [ "${FLEET_GUEST_DELIVERY_STATE[$j]:-}" = delivered ]; then
                         echo "❌ [${CHILD_BENCH[$j]:-unknown}] the delivered guest's status proxy is retired; it is still draining, so provider ownership is retained without a native stop" >&2
+                        FLEET_GUEST_DRAIN_UNACKNOWLEDGED=1
                         failed=1
                         continue
                     fi
@@ -9391,6 +9398,7 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
             # so nothing can acknowledge this delivered guest any more.
             if [ "${FLEET_GUEST_DELIVERY_STATE[$j]:-}" = delivered ] && [ "$curl_status" = 7 ]; then
                 echo "❌ [${CHILD_BENCH[$j]:-unknown}] the delivered guest's status proxy is retired; it is still draining, so provider ownership is retained without a native stop" >&2
+                FLEET_GUEST_DRAIN_UNACKNOWLEDGED=1
                 failed=1
                 continue
             fi
@@ -9419,6 +9427,8 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
     fi
     if [ "${#pending_indices[@]}" -gt 0 ]; then
         echo "❌ ${#pending_indices[@]} guest(s) did not acknowledge browser/session cleanup; retaining provider ownership" >&2
+        # Each remaining guest accepted its stop and is still draining.
+        FLEET_GUEST_DRAIN_UNACKNOWLEDGED=1
         failed=1
     fi
     if [ "$failed" = "0" ]; then
@@ -14798,7 +14808,14 @@ cleanup() {
         guest_shutdown_failed=1
     fi
     if [ "$guest_shutdown_failed" = "1" ]; then
-        fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || KEEP_CLONES=1
+        # Disposable retirement must never destroy a guest whose delivered
+        # stop is still draining browser/session cleanup and evidence sealing.
+        if [ "${FLEET_GUEST_DRAIN_UNACKNOWLEDGED:-0}" = 1 ]; then
+            echo "❌ a delivered guest is still draining; retaining its exact owner, Machine, volume and evidence instead of disposable retirement" >&2
+            KEEP_CLONES=1
+        else
+            fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || KEEP_CLONES=1
+        fi
         ec=1
         teardown_failed=1
         if ! fleet_registry_retain_unconfirmed_guest; then
@@ -14847,7 +14864,7 @@ cleanup() {
     # historical worker captures are verified, including workers scaled down
     # before the benchmark finished.
     if ! cloudbench_collect_remaining_runtime_evidence; then
-        if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR"; then
+        if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" && [ "${KEEP_CLONES:-0}" != 1 ]; then
             echo "❌ runtime evidence is incomplete; failed result retained while disposable resources are retired" >&2
         else
             echo "❌ runtime evidence is incomplete; retaining original fleet volumes" >&2
@@ -15422,6 +15439,12 @@ echo "🏭 warm source machine: $WARM_ID (region $REGION)"
 # The volume snapshot does not depend on guest shape, so park the donor at 1x
 # between maintenance transactions; run-bench-cloud expands it only while
 # rebuilding/snapshotting and parks it again on every exit path.
+# A legacy pool request has no measured new-Machine admission (043659fa8).
+# Refuse it before any donor park, pool ledger/.deps publication or clone so a
+# refused request leaves provider and workspace pool state untouched.
+if [ -n "$PROVISION_POOL" ]; then
+    machine_creation_admission "$FLEET_DIR/pool-provision-1.ids" || exit 1
+fi
 warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
     echo "❌ could not read warm source shape" >&2; exit 1;
 }
@@ -17071,6 +17094,17 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         echo "❌ worker $cleanup_wid runtime evidence was not preserved" >&2
         runtime_missing=1
         [ "$DISPOSABLE_REAP" = 1 ] || rc=1
+        # Every cleanup path (cancelled provisioner, scale-down or controller)
+        # publishes the same stable run-failure reason for the final verdict.
+        local failure_reason="worker $cleanup_wid runtime evidence was not preserved"
+        [ ! -e "$cleanup_out/worker-$cleanup_wid.launch-attempted" ] \
+            || [ -e "$cleanup_out/worker-$cleanup_wid.ready" ] \
+            || failure_reason="worker $cleanup_wid could not be staged and launched; see worker-$cleanup_wid.stage.log"
+        if [ ! -e "$cleanup_out/worker-$cleanup_wid.cleanup-failed" ]; then
+            printf '%s\n' "$failure_reason" > "$cleanup_out/worker-$cleanup_wid.cleanup-failed.tmp.$$" \
+                && mv "$cleanup_out/worker-$cleanup_wid.cleanup-failed.tmp.$$" "$cleanup_out/worker-$cleanup_wid.cleanup-failed" \
+                || echo "❌ worker $cleanup_wid could not persist its cleanup failure" >&2
+        fi
     fi
     if [ "$borrowed_worker" = 0 ] && [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         # A failed evidence copy still retains its error and all ownership.
@@ -17439,7 +17473,11 @@ PY
           if [ "$cleanup_status" -ne 0 ]; then
               # Intentional cancellation cannot forgive failed preservation or
               # retirement. Keep pending/ownership and publish the joined result.
-              printf '%s\n' "worker $wid cancellation cleanup failed; exact ownership retained" \
+              # An attempted launch that never succeeded keeps its actual cause.
+              local failure_reason="worker $wid cancellation cleanup failed; exact ownership retained"
+              [ "${launched:-0}" = 1 ] || [ ! -e "$out/worker-$wid.launch-attempted" ] \
+                  || failure_reason="worker $wid could not be staged and launched; see worker-$wid.stage.log"
+              printf '%s\n' "$failure_reason" \
                   > "$failure_tmp" && mv "$failure_tmp" "$out/worker-$wid.cleanup-failed" \
                   || echo "❌ worker $wid could not persist cancellation cleanup failure" >&2
           fi
@@ -18829,6 +18867,12 @@ for j in "${!AUTOSCALER_PIDS[@]}"; do
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler did not persist desired worker capacity" >&2
         AUTOSCALER_FAILURE=1
     elif ! mandatory_worker_health_acceptable "${CHILD_OUT[$j]}" "${CHILD_BENCH[$j]}"; then
+        AUTOSCALER_FAILURE=1
+    elif worker_cleanup_failure="$(find "${CHILD_OUT[$j]}" -maxdepth 1 -name 'worker-*.cleanup-failed' -type f -print -quit 2>/dev/null)" \
+        && [ -n "$worker_cleanup_failure" ]; then
+        # A launched worker whose runtime evidence or retirement failed is a
+        # run failure even when the task finished before needing its capacity.
+        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler $(head -1 "$worker_cleanup_failure" 2>/dev/null)" >&2
         AUTOSCALER_FAILURE=1
     elif [ "$tracked_workers" != "$ready_workers" ] \
         || find "${CHILD_OUT[$j]}" -maxdepth 1 -name 'worker-*.pending' -print -quit 2>/dev/null | grep -q .; then
