@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 import sys
 import shutil
 
@@ -472,11 +473,36 @@ def export(args):
         if not command.get('already_joined') and birth(command['pid']) == command['birth']:
             raise ValueError('disposable command remains live')
         retire_disposable_hubs(repo, args.record.parent)
-    active = controller_active_writers(common, roots, permitted)
-    if active:
-        sync_json(args.pending, {"status":"pending", "reason":"live controller writers", "writers":active,
-                                 "record_sha256":hashlib.sha256(args.record.read_bytes()).hexdigest()})
-        return 75
+    record_sha256 = hashlib.sha256(args.record.read_bytes()).hexdigest()
+    attempts = []
+    for attempt in range(1, EXPORT_SNAPSHOT_ATTEMPTS + 1):
+        active = controller_active_writers(common, roots, permitted)
+        if active:
+            sync_json(args.pending, {"status":"pending", "reason":"live controller writers", "writers":active,
+                                     "record_sha256":record_sha256, **({"snapshot_attempts":attempts} if attempts else {})})
+            return 75
+        # Complete delayed allocation first: ext4 writeback of the campaign's last
+        # appends can add an extent block (st_blocks) without touching mtime/ctime.
+        os.sync()
+        changed = export_snapshot(args, record, repo, common, roots, permitted, capture_tool)
+        if changed is None:
+            return 0
+        attempts.append(changed)
+        if attempt < EXPORT_SNAPSHOT_ATTEMPTS:
+            time.sleep(EXPORT_SETTLE_SECONDS)
+    # Every attempt still observed a change: fail closed with the exact evidence.
+    sync_json(args.pending, {"status":"pending", "reason":"controller originals changed during export",
+                             "record_sha256":record_sha256, "snapshot_attempts":attempts,
+                             "resource_release_verified":False})
+    return 75
+
+
+EXPORT_SNAPSHOT_ATTEMPTS = 3
+EXPORT_SETTLE_SECONDS = 10
+
+
+def export_snapshot(args, record, repo, common, roots, permitted, capture_tool):
+    """One complete strict snapshot; returns None when published, else what changed."""
     files, excluded, observed = {}, {}, {}
     fd, temporary = tempfile.mkstemp(prefix=".controller-export-", dir=args.archive.parent)
     try:
@@ -505,7 +531,7 @@ def export(args):
                                     data = self.source.read(size); digest.update(data); return data
                             with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as source:
                                 if file_state(path) != before or os.fstat(source.fileno()).st_ino != before["inode"]:
-                                    raise ValueError("original changed before export")
+                                    return {"writers":[], "changed_count":1, "changed":[{"path":str(path), "fields":["changed-before-read"]}]}
                                 archive.addfile(info, Reader(source))
                             files[name] = {"kind":"file", "bytes":before["bytes"], "sha256":digest.hexdigest()}
                         elif stat.S_ISFIFO(before["mode"]):
@@ -523,8 +549,15 @@ def export(args):
                             archive.addfile(info); files[name] = {"kind":"symlink", "target":os.readlink(path)}
                         else: raise ValueError("unsupported original file type; retain host")
             out.flush(); os.fsync(out.fileno())
-        if writers(roots, permitted) or any(file_state(path) != before for path,before in observed.items()):
-            raise ValueError("controller originals changed during export")
+        late = writers(roots, permitted)
+        drift = []
+        for path, before in observed.items():
+            try: after = file_state(path)
+            except FileNotFoundError: after = None
+            if after != before:
+                drift.append({"path":str(path), "fields":sorted(k for k in before if after is None or after[k] != before[k]) if after is not None else ["missing"]})
+        if late or drift:
+            return {"writers":late, "changed_count":len(drift), "changed":drift[:32]}
         if args.archive.exists() or args.manifest.exists(): raise ValueError("export output already exists")
         os.link(temporary, args.archive)
         archive_sha = hashlib.sha256()
@@ -532,7 +565,7 @@ def export(args):
             for chunk in iter(lambda:source.read(1048576), b""): archive_sha.update(chunk)
         sync_json(args.manifest, {"version":1, "record":record, "files":files, "excluded":excluded,
                                  "archive_sha256":archive_sha.hexdigest(), "resource_release_verified":False, **({"capture_tool":capture_tool} if capture_tool else {})})
-        return 0
+        return None
     finally:
         Path(temporary).unlink(missing_ok=True)
 

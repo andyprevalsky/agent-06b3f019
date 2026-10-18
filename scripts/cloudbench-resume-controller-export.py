@@ -8,6 +8,7 @@ import gzip
 import json
 import math
 import os
+import re
 import runpy
 import shlex
 import signal
@@ -31,6 +32,7 @@ def phase(name):
 
 phase('REMOTE_ENTERED')
 import ast,base64,copy,hashlib,json,os,subprocess
+QUIESCENCE_RACES=('controller originals changed during export','original changed before export')
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -120,7 +122,9 @@ def main(v):
  assert command['machine_id']==v['machine']and command['source_ref']==v['source_ref']
  assert command.get('already_joined')or scope['birth'](command['pid'])!=command['birth']
  _,pending_raw=scope['sealed_bytes'](custody/'pending.json',1048576);pending=json.loads(pending_raw)
- assert pending['status']=='pending'and pending.get('record_sha256')==record_sha
+ # Writer-shaped pending binds this launch; the collector's exception-shaped pending
+ # (main()) records only a snapshot race and grants nothing.
+ assert pending['status']=='pending'and(pending.get('record_sha256')==record_sha or(set(pending)=={'status','reason','resource_release_verified'}and pending['reason']in QUIESCENCE_RACES and pending['resource_release_verified']is False))
  roots=[repo,Path(record['common_git']),*[Path(p)for p in record['temp_state_roots']if Path(p).exists()]]
  idle_observations=scoped_idle_writers(scope,record,repo)
  phase('LAUNCH_DONE')
@@ -153,13 +157,20 @@ def main(v):
  finally:os.close(fd)
  args=SimpleNamespace(record=record_path,archive=stage/'originals.tar.gz',manifest=stage/'manifest.json',pending=stage/'pending.json',capture_tool_ref=None,finalize_disposable_hubs=True)
  phase('EXPORT_START')
- code=scope['export'](args)
+ races=[]
+ for attempt in range(3):
+  os.sync() # complete delayed allocation before the run's own strict snapshot
+  try:code=scope['export'](args);break
+  except ValueError as error:
+   # A refused snapshot published nothing; only the bounded settling race repeats.
+   if str(error)not in QUIESCENCE_RACES or attempt==2 or args.archive.exists()or args.manifest.exists():raise
+   races.append(str(error));time.sleep(10)
  assert code==0,'canonical export still pending'
  phase('EXPORT_DONE')
  phase('VERIFY_START')
  scope['verify'](SimpleNamespace(record=record_path,archive=args.archive,manifest=args.manifest,caller=Path('/tmp/controller-host-caller.json'),ref=v['source_ref'],machine=v['machine'],app=record['app'],image=record['image'],repo=repo))
  phase('VERIFY_DONE')
- encoded=json.dumps(dict(result,remote_stage=str(stage),canonical_export_exit=code,drain_evidence=drain_evidence(scope)));phase('RESPONSE_READY');print(encoded)
+ encoded=json.dumps(dict(result,remote_stage=str(stage),canonical_export_exit=code,quiescence_retries=races,drain_evidence=drain_evidence(scope)));phase('RESPONSE_READY');print(encoded)
 
 if __name__=='__main__':main(json.loads(base64.b64decode(sys.argv[1])))
 """
@@ -345,6 +356,16 @@ def normal_clock(epoch, deadline, cleanup_deadline_epoch=None):
     return cleanup_deadline_epoch
 
 
+def transfer_budget(state, now=None):
+    """One owned download may use the active authorized window, never past it."""
+    end = state.get("cleanup_deadline_epoch") or state.get("deadline")
+    if end is None:
+        return 600
+    remaining = end - (time.time() if now is None else now) - 60
+    need(remaining >= 60, "authorized window too short for an owned download")
+    return int(min(3600, remaining))
+
+
 def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
     """Current normal owner proof; never a retrospective borrower capture."""
     need(
@@ -362,16 +383,16 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
         out.resolve(strict=True) == out and out.is_dir() and not out.stat().st_mode & 0o077,
         "private physical normal run required",
     )
-    need(
-        cfg["source_ref"] == "c9d4817832720cc2b1bc6a212383973a77baf004",
-        "unknown normal export workload",
-    )
+    # Bind to this run's OWN recorded workload source, never to a remembered commit.
+    need(re.fullmatch("[0-9a-f]{40}", cfg.get("source_ref") or ""), "exact normal workload source required")
     source_root = Path(cfg["source_root"])
     pins = B["source_identity"](source_root, cfg["source_ref"], cfg["source_files"])
+    if "host_operator_provenance" not in cfg:
+        return runner_owner_state(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch)
     provenance = cfg["host_operator_provenance"]
-    host_ref = "a819e410264bf95c993d551d406375a8621026d2"
+    host_ref = provenance["host_operator_source_ref"]
     need(
-        provenance["host_operator_source_ref"] == host_ref
+        re.fullmatch("[0-9a-f]{40}", host_ref or "")
         and provenance["workload_source_ref"] == cfg["source_ref"]
         and provenance["original_started_at_epoch"] == cfg["started_at_epoch"],
         "normal host provenance differs",
@@ -403,6 +424,44 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
         "normal host driver differs",
     )
     pins.update(B["source_identity"](host_root, host_ref, host_hashes))
+    script = str(host_root / "scripts/run-original600-controller.py")
+
+    def owner_ok(argv):
+        return (
+            script in argv
+            and argv[argv.index(script) + 1 : argv.index(script) + 3] == ["--source-ref", host_ref]
+            and "--resume-incomplete-admission" in argv
+        )
+
+    return normal_tail(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, R, owner_ok)
+
+
+def runner_owner_state(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch):
+    """The run's own live original600 runner is the cleanup owner (sharded launches)."""
+    script = source_root / "scripts/cloudbench-original600-runner.py"
+    runner = runpy.run_path(str(script))
+    need(sha(script.read_bytes()) == cfg["source_files"]["cloudbench-original600-runner.py"], "normal runner source differs")
+    pending = obj(out / "gate.pending.json")
+    need(
+        pending.get("status") == "PENDING_EXTERNAL_OWNER_LIVE"
+        and pending.get("export_verified") is False
+        and pending.get("no_host_destroy") is True,
+        "runner did not positively retain an unverified export",
+    )
+
+    def owner_ok(argv):
+        return (
+            len(argv) == 8
+            and Path(argv[0]).name.startswith("python")
+            and argv[1:]
+            == [str(script), "--config", str(config_path), "--config-sha256", config_sha256, "--output", str(out)]
+        )
+
+    return normal_tail(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok)
+
+
+def normal_tail(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok):
+    shard = [cfg["shard"]] if "shard" in cfg else []
     caller = obj(out / "caller.json")
     identity = obj(out / "controller.identity.json")
     authority_path = out / "authority.private.json"
@@ -413,7 +472,7 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
         and caller["epoch"] == cfg["started_at_epoch"]
         and type(caller["epoch"]) in (int, float)
         and 0 < caller["epoch"] <= time.time()
-        and caller["task_ref"] == R["TASK_REF"]
+        and caller["task_ref"] == runner["TASK_REF"]
         and caller["deadline"] == caller["epoch"] + 5400
         and caller["authority_sha256"] == identity["authority_sha256"] == authority_sha
         and authority["cleanup_owner_pid"] == caller["pid"]
@@ -435,13 +494,8 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
         "normal authority differs from original template",
     )
     owner = B["process_identity"](caller["pid"])
-    argv = owner["argv"]
-    script = str(host_root / "scripts/run-original600-controller.py")
     need(
-        owner["birth"] == caller["birth"]
-        and script in argv
-        and argv[argv.index(script) + 1 : argv.index(script) + 3] == ["--source-ref", host_ref]
-        and "--resume-incomplete-admission" in argv,
+        owner["birth"] == caller["birth"] and owner_ok(owner["argv"]),
         "normal live owner source differs",
     )
     need(not (Path("/proc") / str(caller["gate_pid"])).exists(), "normal gate not reaped")
@@ -487,7 +541,8 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
         envelope["source_ref"] == cfg["source_ref"]
         and envelope["epoch"] == caller["epoch"]
         and envelope["tasks"] == tasks
-        and envelope["campaign_argv"] == R["campaign_argv"](tasks, caller["epoch"])
+        and envelope["campaign_argv"] == runner["campaign_argv"](tasks, caller["epoch"], *shard)
+        and envelope.get("shard") == cfg.get("shard")
         and envelope["supervisor_sha256"] == cfg["source_files"]["cloudbench-original600-supervisor.py"]
         and caller["identity_path"] == "/tmp/gate/repo/.context/" + envelope["identity_name"],
         "normal sealed launch semantics differ",
@@ -502,7 +557,8 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
     for key, item in cfg.get("remote_env", {}).items():
         need(envelope["remote_env"].get(key) == item, "normal remote env differs")
     descriptor_path = out / "controller-sidecars.private.json"
-    descriptors = obj(descriptor_path)
+    # Small launches carry their bound metadata inline; large ones use sidecars.
+    descriptors = obj(descriptor_path) if descriptor_path.exists() else []
     by_sha = {row["sha256"]: row for row in descriptors}
     need(len(by_sha) == len(descriptors), "duplicate normal sidecar descriptor")
     sources = {row["relative_path"]: row for row in cfg["remote_files"]}
@@ -523,10 +579,21 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
             workspace_path,
             envelope_path,
             tasks_path,
-            descriptor_path,
+            *([descriptor_path] if descriptor_path.exists() else []),
         )
     }
     for item in envelope["remote_files"]:
+        if not descriptor_path.exists():
+            source = sources[item["relative_path"]]
+            original = read(source["source_path"])
+            need(
+                item["encoding"] == "gzip-base64"
+                and gzip.decompress(base64.b64decode(item["data"], validate=True)) == original
+                and sha(original) == source["sha256"] == item["sha256"],
+                "normal inline remote file differs",
+            )
+            inputs[source["source_path"]] = sha(original)
+            continue
         need(
             item["encoding"] == "external-gzip" and item["transfer_sha256"] in by_sha,
             "normal sidecar envelope differs",
@@ -1079,7 +1146,7 @@ def _execute(value, fly, cancelled):
     for name in ("launch.json", "manifest.json", "originals.tar.gz"):
         active()
         rc, stdout, stderr = fly.flyctl(
-            600,
+            transfer_budget(value["state"]),
             "ssh",
             "sftp",
             "get",
