@@ -6,14 +6,17 @@ from pathlib import Path
 TASK_REF='1387ae608e7cfb8e3f0a876daae92093f503b465'
 TASK_NAMES_SHA='660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bcb0a8987f1b59f5'
 APP='navi-whisper-lux-bench'
-# One pinned warm donor dependency snapshot. Fly keeps volume snapshots for
-# their retention_days only: the operator preflight proves this exact ID still
-# exists, is complete, is the donor's recorded dependency proof and outlives the
-# whole run before any allocation. Rebind it only from a normal --refresh-deps.
+# The warm donor. Its dependency snapshot is never pinned here: each run binds
+# the snapshot named by the producer's `run-bench-cloud --refresh-deps` proof
+# (<git-common>/cloudbench-warm-deps.<donor>.fp), staged with the config's
+# sha-bound remote files. The operator preflight proves that snapshot exists,
+# is complete, is the donor's recorded dependency proof and outlives the run.
 WARM_MACHINE_NAME='cloudbench-warm-t10-ord-85a7e2c'
 WARM_MACHINE_ID='8ed16dc75ee958'
 WARM_VOLUME_NAME='cloudbench_t10_ord_85a7e2c'
-WARM_SNAPSHOT_ID='vs_Q89eV90n82yS7LOVbwYOV2n'
+WARM_REGION='ord'
+WARM_DEPS_RELATIVE='.git/cloudbench-warm-deps.'+WARM_MACHINE_NAME+'.fp'
+WARM_INVENTORY_RELATIVE='.git/cloudbench-warm-snapshot-inventory.'+WARM_MACHINE_NAME+'.json'
 class Deadline(BaseException):pass
 
 def need(v,m):
@@ -49,7 +52,7 @@ def bounded(seconds):
 SHARD_FIELDS={'index','count','tasks','tasks_sha256','task_indexes','runs','group_run_id','group_total','group_started_at'}
 # Optional bound shard fields. Absent means the original600 values, so an
 # original-manifest shard with default timeouts keeps its exact historical bytes.
-SHARD_OPTIONAL={'infra_threshold','manifest_sha256','task_timeout','e2e_timeout'}
+SHARD_OPTIONAL={'infra_threshold','manifest_sha256','task_timeout','e2e_timeout','task_ref'}
 DEFAULT_TASK_TIMEOUT=1200
 # Every operator receipt, transfer and TERM fence is bound to epoch+RUN_DEADLINE;
 # a campaign --e2e-timeout must fit inside it.
@@ -58,6 +61,24 @@ RUN_DEADLINE=5400
 # (Eval Suite stage targets 720+900+480) outside the per-task execution window.
 STARTUP_ALLOWANCE=2100
 def manifest_sha(tasks):return sha(('\n'.join(tasks)+'\n').encode())
+def warm_deps_proof(raw):
+ """The producer's one-line dependency proof: node/python fingerprints, epoch and snapshot."""
+ fields=raw.decode('ascii','replace').split() if isinstance(raw,bytes) else []
+ need(len(fields)==4 and all(re.fullmatch('[0-9a-f]{64}',value) for value in fields[:2]) and re.fullmatch('[1-9][0-9]*',fields[2]) and re.fullmatch('vs_[A-Za-z0-9]+',fields[3]),
+      'warm dependency proof is not one producer proof line')
+ return dict(node=fields[0],python=fields[1],epoch=int(fields[2]),snapshot=fields[3])
+def pin_warm_snapshot(remote_env,staged):
+ """Pin the snapshot the staged, operator-preflighted producer proof names; never a constant."""
+ need(WARM_DEPS_RELATIVE in staged,'authentic staged warm dependency proof required')
+ snapshot=warm_deps_proof(staged[WARM_DEPS_RELATIVE])['snapshot']
+ need(remote_env.get('CLOUDBENCH_SNAPSHOT_ID',snapshot)==snapshot,'original warm/launch option changed: CLOUDBENCH_SNAPSHOT_ID')
+ remote_env['CLOUDBENCH_SNAPSHOT_ID']=snapshot
+ return snapshot
+def shard_task_ref(shard):
+ """The guest task source: the shard's bound pushed task_ref, or the historical pin when absent."""
+ if shard is None or 'task_ref' not in shard:return TASK_REF
+ ref=shard['task_ref'];need(isinstance(ref,str) and re.fullmatch('[0-9a-f]{40}',ref) and ref!=TASK_REF,'invalid bound task ref (the historical pin is encoded by absence)')
+ return ref
 def campaign_timeouts(task_timeout=DEFAULT_TASK_TIMEOUT,e2e_timeout=RUN_DEADLINE):
  """The bound per-task execution window and whole-campaign budget, in seconds."""
  need(type(task_timeout)is int and 60<=task_timeout<=RUN_DEADLINE-STARTUP_ALLOWANCE,'--task-timeout must be 60..%d seconds'%(RUN_DEADLINE-STARTUP_ALLOWANCE))
@@ -88,7 +109,7 @@ def shard_shape(shard):
  need(all(i<shard['group_total']//runs for i in indexes),'task index outside the group width')
  started=shard['group_started_at'];need(type(started)in(int,float) and math.isfinite(started) and started>0,'invalid shared group start')
  threshold=shard.get('infra_threshold',30);need(type(threshold)is int and threshold>=1,'invalid infrastructure threshold')
- shard_timeouts(shard)
+ shard_timeouts(shard);shard_task_ref(shard)
  return len(names)*runs
 def validate_shard(shard,manifest):
  """A shard is an ordered subset of its bound manifest (the pinned original when unbound)."""
@@ -104,7 +125,7 @@ def campaign_argv(tasks,epoch,shard=None):
  # --stress-defaults admits only the complete 200-task k3 profile; a shard
  # instead carries the operator's global limits in shard_env.
  jobs=validate_shard(shard,tasks);task_timeout,e2e_timeout=shard_timeouts(shard)
- return ['bash','scripts/run-bench','--strict-barrier','--concurrency',str(jobs),'-k',str(shard['runs']),'--retry-infra','1','--timeout',str(task_timeout),'--e2e-timeout',str(e2e_timeout),'--e2e-started-at',str(epoch),'--ref',TASK_REF,*shard['tasks']]
+ return ['bash','scripts/run-bench','--strict-barrier','--concurrency',str(jobs),'-k',str(shard['runs']),'--retry-infra','1','--timeout',str(task_timeout),'--e2e-timeout',str(e2e_timeout),'--e2e-started-at',str(epoch),'--ref',shard_task_ref(shard),*shard['tasks']]
 def shard_env(remote_env,shard,identity_name):
  """Legacy (no shard) returns remote_env unchanged; a shard adds only its bound campaign controls."""
  if shard is None:return remote_env
@@ -606,17 +627,19 @@ def run(config_path,config_sha,out,*,github_token=None):
  out=Path(out).absolute();out.mkdir(mode=0o700);need(out.resolve()==out,'physical new output')
  if v.get('host_operator_provenance'):save(out/'host-operator-provenance.json',v['host_operator_provenance'])
  auth=dict(authority_template,cleanup_owner_pid=os.getpid(),cleanup_owner_birth=birth(os.getpid()),output_directory=str(out/'export'));authority=out/'authority.private.json';save(authority,auth)
- fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME=WARM_MACHINE_NAME,CLOUDBENCH_WARM_VOLUME_NAME=WARM_VOLUME_NAME,CLOUDBENCH_REGION='ord',CLOUDBENCH_FRESH_TARGET_REGION='iad',CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE='false',CLOUDBENCH_SNAPSHOT_ID=WARM_SNAPSHOT_ID,CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
+ fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME=WARM_MACHINE_NAME,CLOUDBENCH_WARM_VOLUME_NAME=WARM_VOLUME_NAME,CLOUDBENCH_REGION='ord',CLOUDBENCH_FRESH_TARGET_REGION='iad',CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE='false',CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
  remote_env=dict(v.get('remote_env',{}))
  need(remote_env.get('CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP',policy)==policy,'infrastructure early-stop policy differs')
  remote_env['CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP']=policy
  for key,value in fixed_env.items():need(remote_env.get(key,value)==value,'original warm/launch option changed: '+key);remote_env[key]=value
- files=[]
+ files=[];staged={}
  for item in v['remote_files']:
   need(re.fullmatch(r'\.git/cloudbench-[A-Za-z0-9_.-]+',item['relative_path']),'only bound benchmark Git metadata may be staged')
   data=read(item['source_path']);need(sha(data)==item['sha256'],'remote metadata source changed')
+  staged[item['relative_path']]=data
   files.append(encode_remote_file(item,data))
- snapshot_name='.git/cloudbench-warm-snapshot-inventory.'+WARM_MACHINE_NAME+'.json'
+ pin_warm_snapshot(remote_env,staged)
+ snapshot_name=WARM_INVENTORY_RELATIVE
  snapshot=next((i for i in files if i['relative_path']==snapshot_name),None);need(snapshot is not None,'authentic selected warm snapshot inventory required')
  remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']
  identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote_env=shard_env(remote_env,shard,identity_name)
@@ -651,7 +674,7 @@ def run(config_path,config_sha,out,*,github_token=None):
   raise
  mid=None;probe={};attempt=0;cleanup=None;cleanup_action=None;last_error=None;next_probe=0;delivery={}
  try:
-  save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=TASK_REF,epoch=epoch,deadline=epoch+5400,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))
+  save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=shard_task_ref(shard),epoch=epoch,deadline=epoch+5400,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))
   while True:
    joined=gate.poll()is not None
    if joined:

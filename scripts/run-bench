@@ -268,6 +268,19 @@ Campaign options:
 The ordinary no-flag path runs the resolved slice as one fully parallel,
 per-bench-isolated cloud fleet. Use --local first to opt into local execution.
 
+Wide runs (sharded controllers):
+  When more simultaneous copies run than one controller's copy bound (32),
+  the CLI routes the same command to the sharded controller operator: an
+  ordered manifest, K repetitions, auto-sized disposable controllers behind one
+  global strict barrier, provider-cap and native-capacity checks. Guests run
+  the clean pushed HEAD. Launch facts, the warm dependency proof and snapshot
+  inventory are discovered; a snapshot not produced for this exact HEAD (or
+  expiring before the deadline) is refreshed first via the normal producer.
+  Supported options: -k K, --timeout S (default 1200), --ref <HEAD>,
+  --e2e-timeout S. Every routed launch runs --check first.
+  --check             Dry run: local checks plus read-only provider preflight,
+                      reporting the warm snapshot reuse/refresh decision.
+
 Startup reuse:
   Completed dependency snapshots are reused automatically, including from a
   fresh checkout. Source-only changes synchronize code after boot.
@@ -318,6 +331,8 @@ CAMPAIGN_REQUESTED=0
 STRESS_DEFAULTS=0
 INTERNAL_OPERATION=0
 DEMO_CACHE_PROBE=0
+RETRY_INFRA_EXPLICIT=0
+SHARDED_CHECK=0
 SELECTORS=()
 FLEET_ARGS=()
 while [ "$#" -gt 0 ]; do
@@ -338,10 +353,13 @@ while [ "$#" -gt 0 ]; do
             ;;
         --retry-infra)
             [ "$#" -ge 2 ] || { echo "❌ --retry-infra requires a nonnegative integer" >&2; exit 2; }
-            RETRY_INFRA="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            RETRY_INFRA="$2"; RETRY_INFRA_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift 2
             ;;
         --retry-infra=*)
-            RETRY_INFRA="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            RETRY_INFRA="${1#*=}"; RETRY_INFRA_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --check)
+            SHARDED_CHECK=1; shift
             ;;
         --e2e-timeout|--e2e-started-at)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
@@ -479,6 +497,140 @@ fi
 # Every task-launch route below receives the same parent instructions once.
 # Keep list/help/monitor/maintenance output unchanged for their consumers.
 benchmark_agent_instructions
+
+# ── Wide cloud runs: the sharded controller operator ───────────────────────
+# One local fleet controller owns at most the operator's per-controller copy
+# bound (32 on performance-8x). Wider simultaneous runs go through the same
+# sharded operator path as the original600/polar70 campaigns: an ordered
+# manifest, K repetitions, K/bound disposable controllers behind one global
+# strict barrier, the provider-cap and capacity checks, and inputs discovered
+# from their normal producers. Narrower runs keep the existing fleet path.
+SHARDED_ROUTE_REASON=""
+if [ "$SHARDED_CHECK" -eq 1 ] || [ "${RUN_BENCH_SHARDED_ROUTE:-auto}" != never ]; then
+    if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
+        sharded_copies=$(( ${#RESOLVED_TASKS[@]} * RUNS ))
+        sharded_active="$CONCURRENCY"
+        if [ "$CONCURRENCY_EXPLICIT" -eq 0 ] && { [ "$RETRY_INFRA" -gt 0 ] || [ "${#E2E_ARGS[@]}" -gt 0 ] || [ "$STRESS_DEFAULTS" -eq 1 ]; }; then
+            sharded_active="$sharded_copies"
+        fi
+        [ "$sharded_active" -le "$sharded_copies" ] || sharded_active="$sharded_copies"
+    else
+        sharded_copies="${#RESOLVED_TASKS[@]}"
+        sharded_active="$sharded_copies"
+    fi
+    SHARDED_BOUND="$("$PY" -c 'import runpy,sys
+c=runpy.run_path(sys.argv[1]);p=c["CONTROLLER_PROFILES"]["performance-8x"]
+print(c["copy_bound"](p["vcpus"],p["memory_mib"]))' "$ROOT_DIR/scripts/cloudbench-shard-coordinator.py")" || {
+        echo "❌ could not read the sharded controller copy bound" >&2
+        exit 2
+    }
+    if [ "$sharded_active" -gt "$SHARDED_BOUND" ]; then
+        SHARDED_ROUTE_REASON="$sharded_active simultaneous copies exceed one controller's $SHARDED_BOUND-copy bound"
+    elif [ "$SHARDED_CHECK" -eq 1 ]; then
+        echo "❌ --check is the sharded operator's dry run; $sharded_active simultaneous copies fit one controller ($SHARDED_BOUND) and use the ordinary fleet path" >&2
+        exit 2
+    fi
+fi
+if [ -n "$SHARDED_ROUTE_REASON" ]; then
+    echo "🧩 sharded controller operator: $SHARDED_ROUTE_REASON"
+    [ "$DEMO_CACHE_PROBE" -eq 0 ] && [ "$STRESS_DEFAULTS" -eq 0 ] || {
+        echo "❌ --demo-cache/--stress-defaults are not sharded operator options; the operator derives its limits" >&2
+        exit 2
+    }
+    if [ "$RETRY_INFRA_EXPLICIT" -eq 1 ] && [ "$RETRY_INFRA" != 1 ]; then
+        echo "❌ the sharded operator retries each infrastructure failure exactly once; omit --retry-infra or pass 1" >&2
+        exit 2
+    fi
+    if [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ]; then
+        echo "❌ the sharded operator admits all $sharded_copies copies behind one barrier; omit --concurrency or pass $sharded_copies" >&2
+        exit 2
+    fi
+    SHARDED_TIMEOUT=""
+    SHARDED_REF=""
+    set -- "${FLEET_ARGS[@]}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --timeout) SHARDED_TIMEOUT="$2"; shift 2 ;;
+            --ref) SHARDED_REF="$2"; shift 2 ;;
+            --strict-barrier|--wait|--foreground) shift ;;  # the operator always waits behind one global barrier
+            *) echo "❌ $1 is not a sharded operator option (supported: -k, --timeout, --ref, --e2e-timeout, --check)" >&2; exit 2 ;;
+        esac
+    done
+    SHARDED_E2E=""
+    for arg in "${E2E_ARGS[@]}"; do
+        case "$arg" in
+            --e2e-timeout=*) SHARDED_E2E="${arg#*=}" ;;
+            *) echo "❌ the sharded operator owns its admission clock; omit ${arg%%=*}" >&2; exit 2 ;;
+        esac
+    done
+    PRODUCTION_STATUS=0
+    "$PY" -u "$ROOT_DIR/scripts/cloudbench-production-only-tasks.py" "${RESOLVED_TASKS[@]}" >/dev/null || PRODUCTION_STATUS=$?
+    [ "$PRODUCTION_STATUS" -ne 0 ] || { echo "❌ production-only tasks never allocate Fly guests; run them without sharding" >&2; exit 2; }
+    [ "$PRODUCTION_STATUS" -ne 2 ] || { echo "❌ production-only classifier failed" >&2; exit 2; }
+    # The guest and every controller execute exactly the pushed, clean HEAD.
+    SHARDED_ROOT="$(cd "$ROOT_DIR" && pwd -P)"
+    SHARDED_HEAD="$(git -C "$SHARDED_ROOT" rev-parse HEAD)"
+    if [ -n "$SHARDED_REF" ]; then
+        requested_ref="$(git -C "$SHARDED_ROOT" rev-parse --verify "${SHARDED_REF}^{commit}" 2>/dev/null)" || requested_ref=""
+        [ "$requested_ref" = "$SHARDED_HEAD" ] || {
+            echo "❌ sharded runs execute the pushed checkout HEAD; check out $SHARDED_REF instead of passing --ref" >&2
+            exit 2
+        }
+    fi
+    [ -z "$(git -C "$SHARDED_ROOT" status --porcelain --untracked-files=no)" ] || {
+        echo "❌ tracked changes refused: commit and push them; sharded guests run the exact pushed HEAD" >&2
+        exit 2
+    }
+    # shellcheck source=lib/cloudbench-env.sh
+    source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+    pushed_ref="$(cloudbench_fetchable_ref "$SHARDED_ROOT" "$SHARDED_HEAD" 0)" && [ "$pushed_ref" = "$SHARDED_HEAD" ] || {
+        echo "❌ HEAD $SHARDED_HEAD is not pushed to origin; push it first (guests fetch only pushed commits)" >&2
+        exit 2
+    }
+    SHARDED_STATE_DIR="${RUN_BENCH_SHARDED_STATE_DIR:-$SHARDED_ROOT/.context/sharded-runs}"
+    mkdir -p -m 700 "$SHARDED_STATE_DIR" && chmod 700 "$SHARDED_STATE_DIR"
+    SHARDED_STATE_DIR="$(cd "$SHARDED_STATE_DIR" && pwd -P)"
+    SHARDED_MANIFEST="$SHARDED_STATE_DIR/manifest-$(date -u +%Y%m%dT%H%M%SZ)-$$.private.json"
+    (umask 077 && "$PY" -c 'import json,sys
+with open(sys.argv[1],"x") as f: json.dump(sys.argv[2:],f)' "$SHARDED_MANIFEST" "${RESOLVED_TASKS[@]}") || {
+        echo "❌ could not write the ordered task manifest" >&2
+        exit 2
+    }
+    for env_file in agents/.env back-end/.env; do
+        [ -f "$ROOT_DIR/$env_file" ] || { echo "❌ $env_file is required (the complete authoritative env file)" >&2; exit 2; }
+    done
+    if [ "${#SELECTORS[@]}" -eq 1 ]; then SHARDED_LABEL="${SELECTORS[0]}"; else SHARDED_LABEL="${#RESOLVED_TASKS[@]}-tasks"; fi
+    SHARDED_HUB_PY="$ROOT_DIR/agents/venv/bin/python"
+    [ -x "$SHARDED_HUB_PY" ] || SHARDED_HUB_PY="$(command -v python3)"
+    SHARDED_ARGS=(
+        --source-ref "$SHARDED_HEAD" --task-ref "$SHARDED_HEAD"
+        --state-dir "$SHARDED_STATE_DIR" --tasks "$SHARDED_MANIFEST"
+        --agents-env "$(realpath "$ROOT_DIR/agents/.env")" --backend-env "$(realpath "$ROOT_DIR/back-end/.env")"
+        --hub-python "$SHARDED_HUB_PY" --repetitions "$RUNS"
+        --goal "${RUN_BENCH_GOAL:-$SHARDED_LABEL}" --label "$SHARDED_LABEL"
+    )
+    [ -z "$SHARDED_TIMEOUT" ] || SHARDED_ARGS+=(--task-timeout "$SHARDED_TIMEOUT")
+    [ -z "$SHARDED_E2E" ] || SHARDED_ARGS+=(--e2e-timeout "$SHARDED_E2E")
+    # Same Fly CLI discovery as run-bench-cloud/run-bench-fleet; the operator pins its version.
+    if ! command -v flyctl >/dev/null 2>&1 && [ -x "$HOME/.fly/bin/flyctl" ]; then
+        export PATH="$HOME/.fly/bin:$PATH"
+    fi
+    SHARDED_OPERATOR=("${RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST:-python3}" "$SHARDED_ROOT/scripts/run-original600-controller.py")
+    echo "🧾 manifest: $SHARDED_MANIFEST (${#RESOLVED_TASKS[@]} tasks x $RUNS)"
+    echo "═══ sharded operator --check (local checks + read-only provider preflight) ═══"
+    "${SHARDED_OPERATOR[@]}" "${SHARDED_ARGS[@]}" || {
+        echo "❌ sharded operator check refused the run; nothing was launched" >&2
+        exit 2
+    }
+    if [ "$SHARDED_CHECK" -eq 1 ]; then
+        echo "✅ dry run only (--check): no controller, Machine or snapshot was created"
+        exit 0
+    fi
+    echo "═══ sharded operator --run (foreground owner through joined cleanup) ═══"
+    echo "   The admission directory printed below is the scorecard handle:"
+    echo "   scripts/run-bench scorecard <admission-dir> --html <admission-dir>/scorecard.html"
+    exec "${SHARDED_OPERATOR[@]}" "${SHARDED_ARGS[@]}" --run
+fi
 
 if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
     if [ "$CONCURRENCY_EXPLICIT" -eq 0 ] && { [ "$RETRY_INFRA" -gt 0 ] || [ "${#E2E_ARGS[@]}" -gt 0 ] || [ "$STRESS_DEFAULTS" -eq 1 ]; }; then

@@ -3017,6 +3017,15 @@ for m in json.load(sys.stdin) or []:
     # via the git-common dir (same pattern as pool claims).
     printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP" \
         > "$WARM_DEPS_STATE_FILE"
+    # Beside the four-field proof (its format is shared with older readers),
+    # record the exact verified source ref this snapshot was produced from.
+    # Sharded runs reuse a snapshot only for their own exact ref; a patched
+    # workspace is not that ref, so it leaves no receipt.
+    rm -f "$WARM_DEPS_STATE_FILE.ref"
+    if [ -z "$REFRESH_PATCH_FILE" ]; then
+        printf '%s %s\n' "$EXPECTED_REF" "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE.ref.$$" \
+            && mv -f "$WARM_DEPS_STATE_FILE.ref.$$" "$WARM_DEPS_STATE_FILE.ref"
+    fi
     if ! cloudbench_publish_warm_deps_state "$APP" "$maintenance_mid" "$VOL_ID" \
         "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP"; then
         echo "⚠️  shared dependency proof publication failed; this checkout retains its verified snapshot" >&2
