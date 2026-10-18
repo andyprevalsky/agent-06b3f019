@@ -30,6 +30,7 @@ export type UpdateUserBody = z.infer<typeof updateUserSchema>;
 
 /** Shape returned by GET / PUT / PATCH endpoints. */
 export interface UserSettingsResponse {
+  iphoneCapability?: { enabled: true };
   name: string | null;
   email: string | null;
   phone?: string | null;

@@ -35,6 +35,8 @@ export async function findUserSettings(userId: string) {
   return prisma.user.findUnique({
     where: { userId },
     select: {
+      userId: true,
+      isAnonymous: true,
       name: true,
       email: true,
       phone: true,

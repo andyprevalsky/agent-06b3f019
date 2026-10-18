@@ -1074,6 +1074,7 @@ async def run_all_tests():
     r.record("is_false_positive_cookie", test_is_false_positive_cookie)
     r.record("is_auth_cookie", test_is_auth_cookie)
     teardown_mock()
+    await r.record_async("phone_off_profile_makes_no_phone_requests", test_phone_off_profile_makes_no_phone_requests)
     await r.record_async("phone_profile_capability_is_fresh_and_fail_closed", test_phone_profile_capability_is_fresh_and_fail_closed)
     await r.record_async("phone_full_context_refresh_never_caches_entitlement", test_phone_full_context_refresh_never_caches_entitlement)
     return r.all_passed
@@ -1089,10 +1090,8 @@ async def test_phone_profile_capability_is_fresh_and_fail_closed():
     enabled = True
     def backend(request):
         if request.url.path.endswith('/user-settings'):
-            return httpx.Response(200,json={'name':'fixture','iphoneCapability':{'enabled':True}})
-        if enabled:
-            return httpx.Response(200,json={'enabled':True,'configured':False,'setupState':'not_started'})
-        return httpx.Response(503,json={'error':'down'})
+            return httpx.Response(200,json={'name':'fixture', **({'iphoneCapability':{'enabled':True}} if enabled else {})})
+        raise AssertionError('profile must not discover phone capability')
     config=SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test',api_key='synthetic'))
     async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
         first, ok=await _fetch_user_settings_with_status(client,config,'u')
@@ -1111,12 +1110,12 @@ async def test_phone_full_context_refresh_never_caches_entitlement():
     _clear_user_context_cache()
     phase = 'enabled'
     def backend(request):
-        if '/api/iphone/capability' in str(request.url):
-            if phase == 'error':
-                return httpx.Response(503, json={'error':'outage'})
-            return httpx.Response(200, json={'enabled': phase == 'enabled'})
-        if '/api/user-settings' in str(request.url) and phase == 'stale-profile':
-            return httpx.Response(503, json={'error':'settings outage'})
+        assert '/api/iphone' not in str(request.url), 'profile made a phone request'
+        if '/api/user-settings' in str(request.url):
+            if phase in ('error', 'stale-profile'):
+                return httpx.Response(503, json={'error':'settings outage'})
+            response = _mock_handler(request)
+            return httpx.Response(200, json={**response.json(), **({'iphoneCapability': {'enabled': True}} if phase == 'enabled' else {})})
         return _mock_handler(request)
     setup_mock_fn(backend)
     with patch('temporalio.activity.heartbeat'):
@@ -1133,6 +1132,22 @@ async def test_phone_full_context_refresh_never_caches_entitlement():
         assert 'cloud iPhone' not in result
         assert 'Alice Test' in result and 'Connected Integrations' in result
     assert 'cloud iPhone' in _format_user_context([], {'name':'fixture','iphoneCapability':{'enabled':True}}, [], [])
+
+
+async def test_phone_off_profile_makes_no_phone_requests():
+    from types import SimpleNamespace
+    from helpers.get_user_context import _fetch_user_settings_with_status, _render_profile_context
+    calls = []
+    def backend(request):
+        calls.append(request.url.path)
+        assert request.url.path == "/api/user-settings", "off profile made extra phone request"
+        return httpx.Response(200, json={"name": "Ordinary", "systemName": "Rose"})
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        data, ok = await _fetch_user_settings_with_status(client, config, "ordinary")
+    assert ok and data == {"name": "Ordinary", "systemName": "Rose"}
+    assert calls == ["/api/user-settings"]
+    assert _render_profile_context(data) == "## Personal Information\nFull Name: Ordinary"
 
 
 if __name__ == "__main__":

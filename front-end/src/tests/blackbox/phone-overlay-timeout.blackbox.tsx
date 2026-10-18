@@ -1,6 +1,7 @@
 /** [slow POST] -> abort only request -> UNKNOWN stable ID -> status-only recovery -> fresh bounds. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
+import { usePhoneAttention } from '@/features/terminal-component-group/components/browser-status-bar/phone/usePhoneAttention';
 import { usePhoneOverlay } from '@/features/terminal-component-group/components/browser-status-bar/phone/usePhoneOverlay';
 
 vi.mock('@/lib/api/client', () => ({
@@ -340,5 +341,52 @@ it('uses a new phone event to wake a terminal task scope without polling while d
   });
   expect(reads).toBe(2);
   expect(hook.result.current.visible).toBe(true);
+  hook.unmount();
+});
+
+it('keeps dormant phone hooks free of requests, visibility listeners and timers', async () => {
+  const fetcher = vi.fn();
+  vi.stubGlobal('fetch', fetcher);
+  const listen = vi.spyOn(document, 'addEventListener');
+  const hook = renderHook(() => usePhoneOverlay('ordinary-browser', '', false));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(20000);
+  });
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(listen.mock.calls.filter(([name]) => name === 'visibilitychange')).toEqual([]);
+  expect(vi.getTimerCount()).toBe(0);
+  expect(hook.result.current.visible).toBe(false);
+  hook.unmount();
+});
+
+it('keeps absent native attention free of requests, visibility listeners and timers', async () => {
+  const fetcher = vi.fn();
+  vi.stubGlobal('fetch', fetcher);
+  const listen = vi.spyOn(document, 'addEventListener');
+  const hook = renderHook(() => usePhoneAttention('ordinary-browser', 'agent-a', [], false));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(20000);
+  });
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(listen.mock.calls.filter(([name]) => name === 'visibilitychange')).toEqual([]);
+  expect(vi.getTimerCount()).toBe(0);
+  expect(hook.result.current.id).toBe('');
+  hook.unmount();
+});
+
+it('does not start a phone read when a dormant tab becomes hidden before activation', async () => {
+  const fetcher = vi.fn();
+  vi.stubGlobal('fetch', fetcher);
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const hook = renderHook(({ trigger }) => usePhoneOverlay('task-a', trigger, false), {
+    initialProps: { trigger: '' },
+  });
+  visibility.mockReturnValue('hidden');
+  hook.rerender({ trigger: 'phone-event' });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(20000);
+  });
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
   hook.unmount();
 });

@@ -161,19 +161,18 @@ afterEach(() => {
 });
 
 describe('native phone overlay above the owned browser', () => {
-  it('does not read a phone for another task or an ordinary browser', async () => {
+  it.each([false, true])('keeps the browser phone-idle (foreign=%s)', async (foreign) => {
     const f = fixture();
-    const view = render(
-      <BrowserStatusBarFullscreen
-        {...props({
-          messages: [{ ...phoneMessage, metadata: { task_id: 'foreign', toolName: 'phone' } }],
-        })}
-      />,
-    );
+    const messages = foreign
+      ? [{ ...phoneMessage, metadata: { task_id: 'foreign', toolName: 'phone' } }]
+      : [];
+    const view = render(<BrowserStatusBarFullscreen {...props({ messages })} />);
     await act(async () => {
       await Promise.resolve();
     });
-    expect(f.reads).toEqual([]);
+    expect([f.reads, f.writes, f.controls, f.frames]).toEqual([[], [], [], 0]);
+    expect(screen.queryByTestId('fullscreen-global-controls-slot')).toBeNull();
+    expect(screen.queryByText(/phone control|Phone active|Setting up/)).toBeNull();
     expect(screen.queryByRole('region', { name: 'Cloud iPhone' })).not.toBeInTheDocument();
     view.unmount();
   });

@@ -2555,6 +2555,8 @@ async def run_all_tests():
         test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
+    r.record("phone_off_matches_prephone_bytes", test_phone_off_matches_prephone_bytes)
+    await r.record_async("phone_off_actual_rose_request", test_phone_off_actual_rose_request)
     r.record("phone_setup_schema_and_forged_context", test_phone_setup_schema_and_forged_context)
     await r.record_async("phone_setup_actual_provider_observation", test_phone_setup_actual_provider_observation)
     r.record("native_auth_typed_schema_and_normalization", test_native_auth_typed_schema_and_normalization)
@@ -2829,6 +2831,51 @@ async def test_phone_setup_actual_provider_observation():
         observed = [m for m in captured[0]["messages"] if "<observed_phone_state>" in str(m.get("content"))]
         assert len(observed) == 1 and json.dumps(setup) in observed[0]["content"]
         assert "Inspect only; do not sign in" in json.dumps(captured[0]["messages"])
+    finally:
+        teardown_mock()
+
+
+def test_phone_off_matches_prephone_bytes():
+    """Golden SHA256s generated from e62c44b75, not the current implementation."""
+    import hashlib
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    expected = {
+        "0": ("bfd0ab9e801c28b2292d46fd2c3955d5752f598b9e674e0ba827d6a66a45f929", "3d33ddfc5f0ef0a29c8f0f4a52ab4f9f5cbb97dfffe37edd76e0902448fff27b", "2f7793efec46d3164063efd783ef0db37ae28690958bf62d8c94d93563fd4146"),
+        "1": ("bfce5951fa8b2c5d3335d41eebd4f716f4dbceea714ceff756692598e2e657a9", "7901736480107e01a7dd44519160214deb01e7b651f88a5880befda85e550752", "3ee42e331028621c89c9a0a81a55755e09c81ac1aa41785ec0feb1ab963d0e04"),
+    }
+    actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
+    for flag, hashes in expected.items():
+        with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
+            values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
+        actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from prephone e62c44b75"
+
+
+async def test_phone_off_actual_rose_request():
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3 import handler as h, phone
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    captured = []
+    def provider(request):
+        assert request.url.host == "openrouter.ai", "off trajectory performed extra discovery HTTP"
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=_openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "ordinary-decision", "type": "function", "function": {"name": "wait", "arguments": '{"time_ms":1}'}}]}, "finish_reason": "tool_calls"}]}]), headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        client = RoseClient(openrouter_key="synthetic")
+        state = {**_browser_state(), "timestamp": "2026-10-01T00:00:00Z"}
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}), patch.object(phone, "observe_phone", AsyncMock(side_effect=AssertionError("off discovery"))) as observe, patch.object(client, "complete_browser_use", wraps=client.complete_browser_use) as actual:
+            result = await h._call_browser_use_with_rotation(rose_client=client, task="Original task", dynamic_system_context="Original context", turn_messages=[], browser_state=state, action_entries=[], config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="ordinary", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task")
+        observe.assert_not_awaited()
+        assert "_phone_snapshot" not in result and actual.call_args.kwargs["browser_state"] == state
+        assert actual.call_args.kwargs["dynamic_system_context"] == "Original context"
+        assert len(captured) == 1
+        wire = captured[0]
+        assert all(t["function"]["name"] != "phone" for t in wire["tools"])
+        auth = next(t["function"] for t in wire["tools"] if t["function"]["name"] == "request_user_assistance_for_authentication")
+        assert auth["parameters"] == {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        assert "iphone" not in json.dumps(wire).lower() and "phone_snapshot" not in json.dumps(wire)
+        assert "Original task" in json.dumps(wire["messages"])
     finally:
         teardown_mock()
 

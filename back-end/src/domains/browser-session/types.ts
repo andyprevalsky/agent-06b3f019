@@ -180,6 +180,7 @@ export interface SerializedPasskey {
 }
 
 export interface UserSettings {
+  iphoneCapability?: { enabled: true };
   name: string | null;
   email: string | null;
   phone: string | null;

@@ -139,6 +139,8 @@ it('recovers a lost exact completion response by read, with no secret body or se
   f.setCompleteLost();
   const parent = props();
   render(<BrowserStatusBarFullscreen {...parent} />);
+  const browser = screen.getByTitle('Browser');
+  browser.setAttribute('data-qa-retained', 'same-frame');
   const complete = await screen.findByRole('button', { name: 'Authentication complete' });
   await waitFor(() => expect(complete).toBeEnabled());
   fireEvent.click(complete);
@@ -146,6 +148,8 @@ it('recovers a lost exact completion response by read, with no secret body or se
   expect(await screen.findByText(/Agent will verify/)).toBeInTheDocument();
   expect(f.calls.filter((c) => c.startsWith('POST') && c.endsWith('/complete'))).toHaveLength(1);
   expect(parent.onResume).not.toHaveBeenCalled();
+  expect(screen.getByTitle('Browser')).toBe(browser);
+  expect(browser).toHaveAttribute('data-qa-retained', 'same-frame');
 });
 
 it('routes an exact native inbox request without a live URL and prevents generic keyboard completion', async () => {

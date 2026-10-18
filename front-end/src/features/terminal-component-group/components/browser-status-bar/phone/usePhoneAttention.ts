@@ -1,6 +1,7 @@
 /**
  * [CANDIDATE] -> authenticated exact lookup -> [PENDING|STALE|UNAVAILABLE].
  * [COMPLETE ONCE] -> read until acknowledged; lost response never replays a mutation.
+ * [NO CANDIDATE] -> no phone visibility subscription or requests.
  * Hide aborts observations; backend owns the reservation. Completion means verify, not setup-ready.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -30,11 +31,14 @@ export function usePhoneAttention(
   const id = phoneAttentionCandidate(taskId, agentId, messages);
   const key = `${agentId ?? ''}:${taskId}:${id}:${readOnly}`;
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
+  const enabled = !!id;
   useEffect(() => {
+    if (!enabled) return;
     const changed = () => setVisible(document.visibilityState !== 'hidden');
+    changed();
     document.addEventListener('visibilitychange', changed);
     return () => document.removeEventListener('visibilitychange', changed);
-  }, []);
+  }, [enabled]);
   const [state, setState] = useState<State>({ key, request: null, error: '', completing: false });
   const scope = useRef<{
     key: string;

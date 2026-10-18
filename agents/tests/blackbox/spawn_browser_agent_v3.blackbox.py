@@ -21197,7 +21197,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -21218,6 +21218,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         "credential_ref": {"kind": "steel_session", "id": "steel-auth-1"},
         "same_session_available": True,
     }
+    if native_auth:
+        session_info["user_settings"] = {"iphoneCapability": {"enabled": True}}
     close_mock = AsyncMock()
     propagation_mock = AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})
     create_auth_mock = AsyncMock()
@@ -21268,12 +21270,17 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         {"action": {"action": "request_user_assistance_for_authentication", "thinking": "", "params": {}}, "usage": {}, "mode": "waterfall"},
         {"action": {"action": "attempt_completion", "thinking": "The signed-in page confirms completion.", "params": {"reasoning": "confirmed"}}, "usage": {}, "mode": "waterfall"},
     ]
+    if browser_auth_pause:
+        actor_responses[1] = copy.deepcopy(actor_responses[0])
+        create_auth_mock.return_value = {"id": "browser-attention"}
     native_request = AsyncMock(return_value={"success": True, "request_info": _native_phone_auth_fixture()[1]})
     if native_auth:
         actor_responses[0] = {
             "action": {"action": "request_user_assistance_for_authentication", "params": {"targetKind": "iphone", "criticalReason": "password"}},
             "tool_call_id": "native-decision", "_phone_snapshot": _native_phone_auth_fixture()[2], "usage": {},
         }
+    if off_phone_action:
+        actor_responses[0] = {"action": {"action": "phone", "params": {"mode": "status"}}, "tool_call_id": "stale-phone", "_phone_snapshot": {"enabled": True}, "usage": {}}
     captured_turns = []
     captured_system_context = []
     decision_order = []
@@ -21392,6 +21399,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     ]
 
     with ExitStack() as stack:
+        if native_auth:
+            stack.enter_context(patch("domains.spawn_browser_agent_v3.phone.observe_phone", AsyncMock(return_value=_native_phone_auth_fixture()[2])))
         for patch_target in patch_targets:
             stack.enter_context(patch_target)
         result = await spawn_browser_agent_activity_v3(
@@ -21417,6 +21426,17 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         from domains.spawn_browser_agent_v3.handler import drain_background_browser_cleanups
         await drain_background_browser_cleanups(timeout=1)
 
+    if browser_auth_pause:
+        assert result["status"] == "awaiting_auth_assistance"
+        assert result["request_id"] == "browser-attention"
+        assert auth_boundary_calls == ["restart", "create_assistance"]
+        return result
+    if off_phone_action:
+        assert result["status"] == "completed" and result["success"]
+        restart_mock.assert_not_awaited()
+        create_auth_mock.assert_not_awaited()
+        assert "Phone unavailable for this decision" in str(actor_call.captured_turns)
+        return result
     if native_auth:
         assert result["status"] == "awaiting_auth_assistance"
         assert result["auth_target"] == _native_phone_auth_fixture()[0]
@@ -30122,6 +30142,11 @@ async def run_all_tests():
         "browser_tool_events_declare_action_type",
         test_browser_tool_events_declare_action_type,
     )
+    await r.record_async("phone_off_rotation_has_no_discovery_or_input_change", test_phone_off_rotation_has_no_discovery_or_input_change)
+    await r.record_async("phone_off_actual_activity_never_observes_phone", test_phone_off_actual_activity_never_observes_phone)
+    await r.record_async("phone_off_stale_model_action_cannot_dispatch", test_phone_off_stale_model_action_cannot_dispatch)
+    await r.record_async("phone_off_browser_auth_pause_does_not_retain_phone", test_phone_off_browser_auth_pause_does_not_retain_phone)
+    await r.record_async("phone_auth_retain_uses_only_seen_owned_lease", test_phone_auth_retain_uses_only_seen_owned_lease)
     await r.record_async("phone_setup_first_operation_and_seen_context", test_phone_setup_first_operation_and_seen_context)
     await r.record_async("phone_setup_actions_recovery_and_heartbeat", test_phone_setup_actions_recovery_and_heartbeat)
     await r.record_async("phone_setup_failclosed_and_safe_errors", test_phone_setup_failclosed_and_safe_errors)
@@ -30253,6 +30278,7 @@ async def test_phone_model_observation_and_account_isolation():
     import httpx
     from browser_tools.schemas import AVAILABLE_ACTIONS
     from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
+    from domains.spawn_browser_agent_v3.phone import observe_phone
     from domains.spawn_browser_agent_v3.types import ClaudeTokenState
     original = list(AVAILABLE_ACTIONS)
     real_client = httpx.AsyncClient
@@ -30266,7 +30292,7 @@ async def test_phone_model_observation_and_account_isolation():
         return real_client(transport=httpx.MockTransport(backend))
     clients = [_FakeRoseClient([{'tool_call_id':'streamed'}]), _FakeRoseClient([{}])]
     async def call(index, user_id):
-        return await _call_browser_use_with_rotation(rose_client=clients[index],task='task',dynamic_system_context='',turn_messages=[],browser_state={},action_entries=[],config=_fake_config(),user_id=user_id,agent_id='trusted',iteration=1,token_state=ClaudeTokenState(),gpt_token=None,gpt_account_id=None,gpt_token_source=None,gpt_token_pool_id=None,browser_use_mode=None,browser_task_id='task')
+        return await _call_browser_use_with_rotation(rose_client=clients[index],task='task',dynamic_system_context='',turn_messages=[],browser_state={},action_entries=[],config=_fake_config(),user_id=user_id,agent_id='trusted',iteration=1,token_state=ClaudeTokenState(),gpt_token=None,gpt_account_id=None,gpt_token_source=None,gpt_token_pool_id=None,browser_use_mode=None,browser_task_id='task', phone_observation=(await observe_phone(_fake_config(), user_id, 'task')) if user_id == 'enabled' else None)
     with patch.object(httpx, 'AsyncClient', transport_client):
         enabled, disabled = await asyncio.gather(call(0,'enabled'),call(1,'disabled'))
     assert AVAILABLE_ACTIONS == original
@@ -30859,3 +30885,71 @@ async def test_phone_setup_pending_receipt_and_ready_private_ref():
     private = await execute_action(SimpleNamespace(), SimpleNamespace(), {"action": "phone", "params": {"mode": "operation", "operation": "input.text", "args": {"s": "pwd:fixture"}}}, config=_fake_config(), user_id="user", agent_id="agent", browser_task_id="task", tool_call_id_decision="private", phone_snapshot=ready, secret_refs={"pwd:fixture": "CANARY-PRIVATE-PASSWORD"})
     assert not private["success"] and "binding" in private["error"].lower()
     assert "CANARY-PRIVATE-PASSWORD" not in json.dumps(private)
+
+
+async def test_phone_off_rotation_has_no_discovery_or_input_change():
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    state = {"url": "https://example.test", "title": "Page"}
+    client = _FakeRoseClient([{"tool_call_id": "old-decision"}])
+    from domains.spawn_browser_agent_v3 import phone
+    with patch.object(phone, "observe_phone", AsyncMock(return_value={"enabled": False})) as observe, patch.object(phone, "with_phone_heartbeat", AsyncMock(wraps=phone.with_phone_heartbeat)) as heartbeat:
+        result = await h._call_browser_use_with_rotation(rose_client=client, task="Original task", dynamic_system_context="Original context", turn_messages=[], browser_state=state, action_entries=[], config=_fake_config(), user_id="ordinary", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task")
+    observe.assert_not_awaited()
+    heartbeat.assert_not_awaited()
+    assert result == {"tool_call_id": "old-decision"}
+    kwargs = client.calls[0]
+    assert kwargs["browser_state"] == state and kwargs["dynamic_system_context"] == "Original context"
+    assert kwargs["available_actions"] == [name for name in AVAILABLE_ACTIONS if name != "phone"]
+    assert kwargs["cache_namespace"] == "browser-task:task:browser_use"
+
+
+@_in_browser_activity_context
+async def test_phone_off_actual_activity_never_observes_phone():
+    from domains.spawn_browser_agent_v3 import phone, handler
+    with patch.object(phone, "observe_phone", AsyncMock(side_effect=AssertionError("off activity observed phone"))) as observe, patch.object(phone, "with_phone_heartbeat", AsyncMock(side_effect=AssertionError("off activity heartbeat"))) as heartbeat, patch.object(handler, "cached_browser_decision", wraps=handler.cached_browser_decision) as cache:
+        await _exercise_browser_resume_user_input()
+    observe.assert_not_awaited()
+    heartbeat.assert_not_awaited()
+    assert cache.call_count
+    for call in cache.call_args_list:
+        request = call.kwargs["request"]
+        assert set(request) == {"task", "dynamic_system_context", "turn_messages", "browser_state", "action_entries", "config"}
+        assert "iphoneCapability" not in json.dumps(request) and "Dedicated cloud iPhone" not in json.dumps(request)
+        assert "phone" not in request["browser_state"]
+
+
+@_in_browser_activity_context
+async def test_phone_off_stale_model_action_cannot_dispatch():
+    with patch("domains.spawn_browser_agent_v3.phone.execute_phone", AsyncMock(side_effect=AssertionError("off action dispatched"))) as execute:
+        await _exercise_browser_resume_user_input(off_phone_action=True)
+    execute.assert_not_awaited()
+
+
+@_in_browser_activity_context
+async def test_phone_off_browser_auth_pause_does_not_retain_phone():
+    from domains.spawn_browser_agent_v3 import phone
+    with patch.object(phone, "observe_phone", AsyncMock(return_value={"enabled": False})) as observe, patch.object(phone, "retain_phone_for_auth", wraps=phone.retain_phone_for_auth) as retain:
+        await _exercise_browser_resume_user_input(browser_auth_pause=True)
+    retain.assert_not_awaited()
+    observe.assert_not_awaited()
+
+
+async def test_phone_auth_retain_uses_only_seen_owned_lease():
+    import httpx
+    from domains.spawn_browser_agent_v3 import phone
+    calls = []
+    def backend(request):
+        calls.append((request.method, request.url.path, json.loads(request.content)))
+        assert request.headers["x-user-id"] == "user"
+        return httpx.Response(403, json={"error": "revoked"})
+    real_client = httpx.AsyncClient
+    def client(*args, **kwargs):
+        return real_client(transport=httpx.MockTransport(backend))
+    with patch.object(httpx, "AsyncClient", client), patch.object(phone, "observe_phone", AsyncMock(side_effect=AssertionError("retain discovered phone"))) as observe:
+        await phone.retain_phone_for_auth(_fake_config(), "user", "task", "attention")
+        assert calls == []
+        await phone.retain_phone_for_auth(_fake_config(), "user", "task", "attention", snapshot={"enabled": True, "interaction": {"lease": {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}}})
+    observe.assert_not_awaited()
+    assert calls == [("POST", "/api/iphone/leases/lease/awaiting-auth", {"attentionRequestId": "attention"})]

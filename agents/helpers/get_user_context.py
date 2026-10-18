@@ -359,10 +359,9 @@ async def _fetch_user_settings_with_status(client: httpx.AsyncClient, config, us
             timeout=30.0,
         )
         response.raise_for_status()
-        data = response.json()
-        from domains.spawn_browser_agent_v3.phone import fetch_phone_capability
-        data["iphoneCapability"] = await fetch_phone_capability(config, user_id, client=client)
-        return data, True
+        # Eligibility piggybacks on this existing server-owned profile read.
+        # Off/noneligible profiles omit the marker; never discover phone here.
+        return response.json(), True
     except Exception as e:
         logger.warning("Failed to fetch user settings", user_id=user_id, error=str(e))
         return {}, False

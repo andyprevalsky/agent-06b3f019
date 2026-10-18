@@ -4,6 +4,7 @@
  * [ACTIVE_AGENT] --confirmed control(user) + fresh bounds--> [ACTIVE_USER]
  * [ACTIVE_USER] --command(UUID,cursor)--> [PENDING] --status reads only--> [USER|UNKNOWN]
  * UNKNOWN blocks writes, never replays input. Handback confirms control(agent).
+ * [DORMANT] owns no visibility listener, timer or request.
  * hide/task change -> abort scope + revoke private frame; show -> fresh scope/read/bounds.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -106,13 +107,15 @@ export function usePhoneOverlay(
     [operation, publish],
   );
   useEffect(() => {
+    if (!enabled) return;
     const changed = () => setVisible(document.visibilityState !== 'hidden');
+    changed();
     document.addEventListener('visibilitychange', changed);
     return () => document.removeEventListener('visibilitychange', changed);
-  }, []);
+  }, [enabled]);
   useEffect(() => {
     setView(emptyView(taskId));
-    if (!enabled || !visible) return;
+    if (!enabled || !visible || document.visibilityState === 'hidden') return;
     const scope: Scope = {
       taskId,
       attention: attentionRef.current,

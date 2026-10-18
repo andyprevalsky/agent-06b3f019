@@ -13,7 +13,8 @@ export const TERMINAL_AGENT_STATUSES = [
 export function permitted(
   user: { userId: string; phone: string | null; isAnonymous: boolean } | null
 ): boolean {
-  if (user === null) return false;
+  if (!['true', '1'].includes(process.env.CLOUD_IPHONE_ENABLED ?? '') || user === null)
+    return false;
   if (ALLOWED_ACCOUNT_IDS.some((id) => id === user.userId)) return true;
   return !user.isAnonymous && user.phone !== null && ALLOWED_VERIFIED_PHONES.includes(user.phone);
 }
@@ -21,4 +22,11 @@ export const AUTH_REJECTED_RESPONSE = '__REJECTED__';
 
 export function deadlineElapsed(deadline: Date | null, now: Date): boolean {
   return deadline === null || deadline.getTime() <= now.getTime();
+}
+
+/** Eligibility only, derived from an existing persisted account read. No device IO. */
+export function iphoneCapability(
+  user: Parameters<typeof permitted>[0]
+): { iphoneCapability: { enabled: true } } | Record<string, never> {
+  return permitted(user) ? { iphoneCapability: { enabled: true } } : {};
 }

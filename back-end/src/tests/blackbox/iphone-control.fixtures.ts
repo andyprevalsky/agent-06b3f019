@@ -1,3 +1,4 @@
+import userSettingsRouter from '../../domains/user-settings/routes';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { SetupVerifier } from '../../providers/phoneSetupVerifier';
 import assert from 'node:assert/strict';
@@ -83,6 +84,7 @@ async function closeServer(server: Server | undefined): Promise<void> {
 export class Harness {
   private readonly transportPrefix = `/phone-fixture-${randomUUID()}`;
   readonly calls: ProviderCall[] = [];
+  clientCreations = 0;
   readonly fixtureErrors: string[] = [];
   readonly physicalOperations: Array<{ op: string; kw: Record<string, unknown> }> = [];
   sessionState: 'ready' | 'provisioning' = 'ready';
@@ -332,16 +334,19 @@ export class Harness {
     };
     const app = express();
     app.use(express.json());
+    app.use('/api/user-settings', userSettingsRouter);
     app.use(
       '/api/iphone',
       createIPhoneRouter({
         setupVerifier: (input) => this.setupVerifier(input),
-        phoneClient: () =>
-          new PhoneHarnessClient({
+        phoneClient: () => {
+          this.clientCreations++;
+          return new PhoneHarnessClient({
             apiKey: this.missingCredentials ? '' : CANARY_KEY,
             apiUrl: 'https://api.phone-harness.com',
             fetchImpl,
-          }),
+          });
+        },
       })
     );
     app.use(

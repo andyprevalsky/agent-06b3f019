@@ -2,7 +2,7 @@
  * [BROWSER_ACTIVE|WAITING|DISCONNECTED|USER] -> existing browser status.
  * [PHONE_WAITING] -> yellow Waiting for phone; [PHONE_AGENT] -> Phone active;
  * [PHONE_USER] -> You have phone control; release restores browser status.
- * [GLOBAL CONTROLS] -> reserved header row, never over device pixels.
+ * [GLOBAL CONTROLS] -> reserved row only while phone is visible; ordinary browser stays body-fixed.
  * Desktop/mobile share this status authority and accessible close control.
  */
 import type { MouseEvent } from 'react';
@@ -83,7 +83,7 @@ export function DesktopFrameHeader({
           </button>
         </div>
       </div>
-      <GlobalControlsSlot />
+      {phoneStatus && <GlobalControlsSlot />}
     </div>
   );
 }
@@ -116,7 +116,7 @@ export function MobileFrameHeader({
           <X className="h-5 w-5 text-muted-foreground" />
         </button>
       </div>
-      <GlobalControlsSlot />
+      {phoneStatus && <GlobalControlsSlot />}
     </div>
   );
 }

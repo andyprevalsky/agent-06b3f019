@@ -70,6 +70,12 @@ setup never automatically replays the interrupted input or replaces the task.
 """
 
 
+def phone_profile_enabled(profile: dict) -> bool:
+    """Pure eligibility marker from existing server-owned init/profile responses."""
+    marker = profile.get("iphoneCapability") if isinstance(profile, dict) else None
+    return isinstance(marker, dict) and marker.get("enabled") is True
+
+
 def phone_actions(actions: list[str], capability: dict) -> list[str]:
     return [name for name in actions if name != "phone" or capability.get("enabled") is True]
 
@@ -328,23 +334,20 @@ async def _execute_setup(params, *, config, user_id, task_id, decision_id, snaps
     return {**failure, "status": "UNKNOWN", "error": "Phone setup outcome unconfirmed; observe before acting"}
 
 
-async def retain_phone_for_auth(config, user_id: str, task_id: str, request_id: str) -> None:
-    """Backend validates the pending attention's exact agent/account ownership."""
+async def retain_phone_for_auth(config, user_id: str, task_id: str, request_id: str, *, snapshot: dict | None = None) -> None:
+    """Retain only an observed claim; never discover a phone for browser auth."""
+    lease = ((snapshot or {}).get("interaction") or {}).get("lease") or {}
+    if ((snapshot or {}).get("enabled") is not True or lease.get("status") != "ACTIVE"
+        or lease.get("browserTaskId") != task_id or not isinstance(lease.get("id"), str)):
+        return
     async with httpx.AsyncClient() as client:
-        state = await observe_phone(config, user_id, task_id, client=client)
-        lease = (state.get("interaction") or {}).get("lease") or {}
-        if lease.get("status") == "ACTIVE":
-            try:
-                await _request(
-                    client,
-                    config,
-                    user_id,
-                    "POST",
-                    f"leases/{quote(lease['id'], safe='')}/awaiting-auth",
-                    {"attentionRequestId": request_id},
-                )
-            except Exception:
-                pass
+        try:
+            # Server rechecks feature access, exact ownership and pending auth.
+            await _request(client, config, user_id, "POST",
+                           f"leases/{quote(lease['id'], safe='')}/awaiting-auth",
+                           {"attentionRequestId": request_id})
+        except Exception:
+            pass
 
 
 async def with_phone_heartbeat(work, config, user_id: str, snapshot: dict, *, client=None):

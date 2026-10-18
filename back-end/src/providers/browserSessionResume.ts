@@ -1,3 +1,4 @@
+import { iphoneCapability } from './phoneAccountPolicy';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
 import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
@@ -68,6 +69,7 @@ export interface SerializedPassword {
 }
 
 export interface UserSettings {
+  iphoneCapability?: { enabled: true };
   name: string | null;
   email: string | null;
   phone: string | null;
@@ -131,14 +133,19 @@ function serializePasskeys(
   }));
 }
 
-function toUserSettings(user: UserSettings | null): UserSettings | null {
-  return user;
+type SettingsAccount = UserSettings & { userId: string; isAnonymous: boolean };
+function toUserSettings(user: SettingsAccount | null): UserSettings | null {
+  if (user === null) return null;
+  const { userId, isAnonymous, ...settings } = user;
+  return { ...settings, ...iphoneCapability({ userId, isAnonymous, phone: user.phone }) };
 }
 
-async function findUserSettings(userId: string): Promise<UserSettings | null> {
+async function findUserSettings(userId: string): Promise<SettingsAccount | null> {
   return prisma.user.findUnique({
     where: { userId },
     select: {
+      userId: true,
+      isAnonymous: true,
       name: true,
       email: true,
       phone: true,
