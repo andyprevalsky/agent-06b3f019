@@ -6,6 +6,7 @@ import * as service from './service';
 import { IPhoneError, type ActionInput, type LeaseAction } from './types';
 import * as operations from './service.operations';
 import type { PhoneClientFactory } from './types.operations';
+import { interaction } from './service.interactions';
 
 const log = createLogger('IPhone');
 
@@ -65,6 +66,34 @@ function handle(handler: Handler, status = 200) {
     }
   });
 }
+function executePhoneOperation(
+  req: HybridAuthRequest,
+  userId: string,
+  clientFactory: PhoneClientFactory
+) {
+  const body = bodyRecord(req.body);
+  const args = body.args === undefined ? {} : bodyRecord(body.args);
+  const cursor = body.expectedCursor;
+  if (
+    cursor !== undefined &&
+    (typeof cursor !== 'number' || !Number.isSafeInteger(cursor) || cursor < 0)
+  )
+    throw new IPhoneError(400, 'expectedCursor must be a nonnegative integer');
+  if (JSON.stringify(args).length > 16_384) throw new IPhoneError(400, 'Phone input is too large');
+  return operations.performPhoneCommand(
+    userId,
+    req.params.id,
+    {
+      operationId: text(body, 'operationId'),
+      operation: text(body, 'operation'),
+      args,
+      ...(typeof cursor === 'number' ? { expectedCursor: cursor } : {}),
+    },
+    req.isInternal === true ? 'agent' : 'user',
+    clientFactory
+  );
+}
+
 export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory } = {}) {
   const router = Router();
   const clientFactory = options.phoneClient ?? operations.defaultPhoneClient;
@@ -79,6 +108,21 @@ export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory }
       if (req.isInternal !== true) throw new IPhoneError(403, 'Internal API key required');
       return service.bind(userId, text(bodyRecord(req.body), 'providerDeviceId'));
     })
+  );
+  router.get(
+    '/interactions/:taskId',
+    handle((req, userId) => interaction(userId, req.params.taskId, undefined, clientFactory))
+  );
+  router.post(
+    '/interactions/:taskId',
+    handle((req, userId) =>
+      interaction(
+        userId,
+        req.params.taskId,
+        text(bodyRecord(req.body), 'requestKey'),
+        clientFactory
+      )
+    )
   );
   router.post(
     '/leases',
@@ -111,23 +155,7 @@ export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory }
   }
   router.post(
     '/leases/:id/operations',
-    handle((req, userId) => {
-      const body = bodyRecord(req.body);
-      const args = body.args === undefined ? {} : bodyRecord(body.args);
-      if (JSON.stringify(args).length > 16_384)
-        throw new IPhoneError(400, 'Phone input is too large');
-      return operations.performPhoneCommand(
-        userId,
-        req.params.id,
-        {
-          operationId: text(body, 'operationId'),
-          operation: text(body, 'operation'),
-          args,
-        },
-        req.isInternal === true ? 'agent' : 'user',
-        clientFactory
-      );
-    })
+    handle((req, userId) => executePhoneOperation(req, userId, clientFactory))
   );
   router.get(
     '/leases/:id/operations/:operationId',

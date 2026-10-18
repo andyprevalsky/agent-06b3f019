@@ -75,7 +75,13 @@ export async function act(
   return { ...present(result), ...(phone === null ? {} : { phone }) };
 }
 
-function present({ lease, queuePosition }: { lease: IPhoneLease; queuePosition: number | null }) {
+export function present({
+  lease,
+  queuePosition,
+}: {
+  lease: IPhoneLease;
+  queuePosition: number | null;
+}) {
   return {
     lease: {
       id: lease.id,

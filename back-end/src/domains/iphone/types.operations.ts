@@ -6,6 +6,7 @@ export interface PhoneCommand {
   operationId: string;
   operation: string;
   args: Record<string, unknown>;
+  expectedCursor?: number;
 }
 export interface CommandPayload {
   operation: string;

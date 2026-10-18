@@ -49,6 +49,11 @@ export async function claimCommand(
         return new IPhoneError(409, 'Operation identity cannot be reused with different input');
       return { device, lease, command: existing, execute: existing.state === 'CONNECTING' };
     }
+    if (input.expectedCursor !== undefined && input.expectedCursor !== lease.actionCursor)
+      return new IPhoneError(
+        409,
+        'Phone state changed; read the current interaction before acting'
+      );
     const active = await tx.iPhoneOperation.findUnique({ where: { activeDeviceId: device.id } });
     if (active !== null && !isPhoneRead(input.operation))
       return new IPhoneError(409, 'A previous phone command is still running or unconfirmed');
@@ -61,11 +66,16 @@ export async function claimCommand(
         operation: input.operation,
         actor,
         inputHash,
+        cursor: lease.actionCursor + 1,
         requestEncrypted: sealPhoneValue({ operation: input.operation, args: input.args, actor }),
         activeDeviceId: active === null ? device.id : null,
         providerEpoch: device.providerEpoch,
         deadlineAt: new Date(now.getTime() + 300_000),
       },
+    });
+    await tx.iPhoneLease.update({
+      where: { id: leaseId },
+      data: { actionCursor: { increment: 1 }, lastOperationId: command.id },
     });
     return { device, lease, command, execute: true };
   });

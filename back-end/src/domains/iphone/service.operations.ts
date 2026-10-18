@@ -18,9 +18,11 @@ import { cleanupPhone, ensurePhoneSession, PhoneConnectionPending } from './serv
 
 export const defaultPhoneClient: PhoneClientFactory = () => new PhoneHarnessClient();
 
-function publicOperation(command: IPhoneOperation) {
+export function publicOperation(command: IPhoneOperation) {
   return {
     id: command.requestKey,
+    cursor: command.cursor,
+    operation: command.operation,
     status: command.state,
     errorCode: command.errorCode,
     result:

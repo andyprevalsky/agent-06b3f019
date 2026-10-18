@@ -1711,51 +1711,56 @@ model PlannerMemoryEmbedding {
 
 // Account-owned persistent device; binding never transfers between accounts.
 model IPhoneDevice {
-  id                       String            @id @default(uuid())
-  userId                   String            @unique
-  providerDeviceId         String            @unique
-  enabled                  Boolean           @default(false)
-  setupState               String            @default("not_started")
-  providerState            String            @default("IDLE")
-  providerEpoch            Int               @default(0)
+  id                       String                @id @default(uuid())
+  userId                   String                @unique
+  providerDeviceId         String                @unique
+  enabled                  Boolean               @default(false)
+  setupState               String                @default("not_started")
+  providerState            String                @default("IDLE")
+  providerEpoch            Int                   @default(0)
   providerStartKey         String?
   providerSessionId        String?
   providerSessionEncrypted String?
-  createdAt                DateTime          @default(now())
-  updatedAt                DateTime          @updatedAt
-  user                     User              @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+  user                     User                  @relation(fields: [userId], references: [userId], onDelete: Cascade)
   leases                   IPhoneLease[]
   operations               IPhoneOperation[]
+  acquireIntents           IPhoneAcquireIntent[]
 }
 
 // device row lock -> reconcile -> mutate -> admit smallest ticket, all in one transaction.
 model IPhoneLease {
-  id                 String            @id @default(uuid())
+  id                 String                @id @default(uuid())
   deviceId           String
   userId             String
   agentId            String
   requestKey         String
   browserTaskId      String?
-  status             String            @default("WAITING")
-  ticket             BigInt            @unique @default(autoincrement())
+  status             String                @default("WAITING")
+  ticket             BigInt                @unique @default(autoincrement())
   // A nullable unique slot also enforces one ACTIVE holder during db-push tests.
-  activeDeviceId     String?           @unique
+  activeDeviceId     String?               @unique
   queueDeadlineAt    DateTime
   leaseExpiresAt     DateTime?
-  controlOwner       String            @default("agent")
+  controlOwner       String                @default("agent")
   attentionRequestId String?
+  actionCursor       Int                   @default(0)
+  lastOperationId    String?
   releaseRequestedAt DateTime?
   releaseStatus      String?
-  revision           Int               @default(1)
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
-  device             IPhoneDevice      @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  user               User              @relation(fields: [userId], references: [userId], onDelete: Cascade)
-  agent              Agent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  revision           Int                   @default(1)
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  device             IPhoneDevice          @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  user               User                  @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  agent              Agent                 @relation(fields: [agentId], references: [id], onDelete: Cascade)
   operations         IPhoneOperation[]
+  acquireIntents     IPhoneAcquireIntent[]
 
   @@unique([deviceId, agentId, requestKey])
   @@index([deviceId, status, ticket])
+  @@index([deviceId, browserTaskId, ticket])
   @@index([deviceId, status, queueDeadlineAt])
   @@index([deviceId, status, leaseExpiresAt])
   @@index([userId])
@@ -1770,6 +1775,7 @@ model IPhoneOperation {
   requestKey       String
   operation        String
   actor            String
+  cursor           Int          @default(0)
   inputHash        String
   requestEncrypted String
   state            String       @default("CONNECTING")
@@ -1787,4 +1793,19 @@ model IPhoneOperation {
   @@unique([leaseId, requestKey])
   @@index([deviceId, state, deadlineAt])
   @@index([leaseId, createdAt])
+}
+
+// Every accepted acquisition intent retains its original lease, including reuse aliases.
+model IPhoneAcquireIntent {
+  id            String       @id @default(uuid())
+  deviceId      String
+  browserTaskId String
+  requestKey    String
+  leaseId       String
+  createdAt     DateTime     @default(now())
+  device        IPhoneDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  lease         IPhoneLease  @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, browserTaskId, requestKey])
+  @@index([leaseId])
 }
