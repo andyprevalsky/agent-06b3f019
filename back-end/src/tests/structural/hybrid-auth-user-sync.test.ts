@@ -7,6 +7,7 @@ import {
   type JwtUserSnapshot,
   type JwtUserStore,
 } from '../../providers/hybridAuthUser';
+import { phoneLookupVariants } from '../../providers/phoneAccountLookup';
 
 const INPUT: JwtUserInput = {
   userId: 'user-1',
@@ -158,7 +159,18 @@ async function testPhonelessTokensSkipOwnerLookup(): Promise<void> {
   }
 }
 
+function testPhoneVariantsCoverEveryStoredForm(): void {
+  const expected = ['+19729777432', '19729777432'];
+  for (const input of ['+19729777432', '19729777432', '0019729777432', '+0019729777432']) {
+    assert.deepEqual(phoneLookupVariants(input), expected, `variants for ${input}`);
+  }
+  assert.deepEqual(phoneLookupVariants('+1 (972) 977-7432'), expected);
+  assert.equal(phoneLookupVariants(''), null);
+  assert.equal(phoneLookupVariants('()'), null);
+}
+
 async function main(): Promise<void> {
+  testPhoneVariantsCoverEveryStoredForm();
   await testExistingUserIsReadOnly();
   await testNewUserIsCreatedOnce();
   await testChangedPhoneIsTheOnlyExistingUserWrite();

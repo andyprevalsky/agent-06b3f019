@@ -15,13 +15,13 @@ export const OLDEST_ACCOUNT_FIRST: Prisma.UserOrderByWithRelationInput[] = [
 
 /**
  * The stored forms a phone number may have: `+digits` and bare `digits`.
- * Strips spaces, dashes and parentheses first, and treats a leading `00`
- * international prefix as `+`. Returns null when the input has no digits, so
+ * Strips spaces, dashes and parentheses first, and treats a leading `00` or
+ * `+00` international prefix as `+`. Returns null when the input has no digits, so
  * callers never match rows with an empty phone.
  */
 export function phoneLookupVariants(phone: string): [string, string] | null {
   const stripped = phone.replace(/[\s\-()]/g, '');
-  const normalized = stripped.startsWith('00') ? `+${stripped.slice(2)}` : stripped;
+  const normalized = stripped.replace(/^\+?00/, '+');
   const digitsOnly = normalized.replace(/\+/g, '');
   if (digitsOnly.length === 0) {
     return null;

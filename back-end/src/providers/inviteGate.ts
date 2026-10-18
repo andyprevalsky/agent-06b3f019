@@ -8,7 +8,7 @@
 
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { OLDEST_ACCOUNT_FIRST } from './phoneAccountLookup';
+import { OLDEST_ACCOUNT_FIRST, phoneOwnerWhere } from './phoneAccountLookup';
 import { normalizeWaitlistEmail } from './waitlistIdentity';
 
 const log = createLogger('InviteGate');
@@ -55,7 +55,7 @@ export async function markOffWaitlistByPhone(phone: string): Promise<OffWaitlist
   // User.phone is not unique and may be stored as '+digits' or bare 'digits'.
   // One phone maps to its oldest account — the one phone login resolves to.
   const target = await prisma.user.findFirst({
-    where: { phone: { in: ['+' + digits, digits] } },
+    where: phoneOwnerWhere(phone),
     orderBy: OLDEST_ACCOUNT_FIRST,
     select: { userId: true, offWaitlistAt: true },
   });
