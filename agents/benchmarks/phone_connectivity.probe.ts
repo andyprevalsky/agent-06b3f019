@@ -87,6 +87,9 @@ async function main() {
         leaseId: row.leaseId,
         actor: row.actor,
         state: row.state,
+        errorCode: row.errorCode,
+        activeDeviceId: row.activeDeviceId,
+        requestKey: row.requestKey,
         operation: row.operation,
         userId: row.lease.userId,
         agentId: row.lease.agentId,
@@ -94,7 +97,9 @@ async function main() {
         createdAt: row.createdAt.getTime(),
         completedAt: row.completedAt?.getTime() ?? null,
         request:
-          row.operation === "apps.launch"
+          (row.operation === "apps.launch" ||
+            row.operation === "setup.defer" ||
+            row.errorCode === "phone_setup_required")
             ? openPhoneValue(row.requestEncrypted)
             : null,
         result: row.resultEncrypted

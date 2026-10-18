@@ -250,6 +250,42 @@ def test_documented_private_receipts_and_ocr_shapes():
     assert check([home, launch, read])["heading"] == "Paired Computers"
     assert not check([launch, {**read, "operation": "input.text"}])["allCommandsAllowed"]
 
+    # Trusted setup bookkeeping never substitutes for successful physical proof.
+    preflight = {
+        **common, "id": "preflight", "requestKey": "preflight", "cursor": 1,
+        "operation": "apps.launch", "state": "FAILED", "errorCode": "phone_setup_required",
+        "activeDeviceId": None, "request": launch["request"],
+        "result": {"success": False, "outcome": "rejected"}, "createdAt": 0, "completedAt": 0.25,
+    }
+    deferred = {
+        **common, "id": "deferred", "requestKey": "deferred", "cursor": 2,
+        "operation": "setup.defer", "activeDeviceId": None,
+        "request": {"input": {"action": "defer", "reasonCode": "user_constraint",
+                               "requestKey": "deferred", "expectedCursor": 1}},
+        "result": {"success": True}, "createdAt": 0.3, "completedAt": 0.5,
+    }
+    executed_launch, observed_read = {**launch, "cursor": 3}, {**read, "cursor": 4}
+    physical = [executed_launch, observed_read]
+    assert check([preflight, deferred, *physical])["heading"] == "Paired Computers"
+    assert not check([preflight, deferred])["ordered"], "Setup cannot replace physical observations"
+    for change in (
+        {"operation": "input.tap", "request": {"actor": "agent", "operation": "input.tap"}},
+        {"errorCode": "phone_setup_stale"}, {"state": "UNKNOWN"}, {"completedAt": None},
+        {"activeDeviceId": "occupied"}, {"result": {"success": True, "outcome": "rejected"}},
+        {"result": {"success": False, "outcome": "unknown"}}, {"actor": "user"},
+        {"userId": "foreign"}, {"request": {"actor": "agent", "operation": "input.text"}},
+    ):
+        assert not check([{**preflight, **change}, *physical])["allCommandsAllowed"], change
+    for change in (
+        {"operation": "setup.verify"}, {"operation": "setup.block"}, {"state": "UNKNOWN"},
+        {"activeDeviceId": "occupied"}, {"result": {"success": False}}, {"userId": "foreign"},
+        {"requestKey": "foreign"}, {"cursor": 9},
+        {"request": {"input": {**deferred["request"]["input"], "reasonCode": "unsupported"}}},
+    ):
+        assert not check([{**deferred, **change}, *physical])["allCommandsAllowed"], change
+    late_home = {**preflight, "operation": "nav.home", "request": {"actor": "agent", "operation": "nav.home"}}
+    assert not check([executed_launch, late_home, observed_read])["allCommandsAllowed"]
+
 
 def test_final_report_matches_actual_ocr_heading_without_settings_assumption(monkeypatch):
     import inspect

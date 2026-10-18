@@ -216,6 +216,7 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
 
     namespace = {
         "asyncio": asyncio,
+        "sys": bench.sys,
         "BenchmarkTask": bench.BenchmarkTask,
         "TaskResult": bench.TaskResult,
         "base_url": "http://fixture.invalid",
@@ -232,7 +233,6 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "tasks": [task],
         "run": run,
         "_run_with_sandbox_payment_lock": admitted_call,
-        "_report_ticker_task": SimpleNamespace(cancel=lambda: None),
         "stop_fly_log_collector": stop_collector,
         "realtime_started": False,
         "memory_gate_enabled": False,
@@ -246,13 +246,38 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
     }
     module = ast.fix_missing_locations(ast.Module(body=[wrapper, coordinator], type_ignores=[]))
     exec(compile(module, str(bench.__file__), "exec"), namespace)
+
+    async def run_coordinator():
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def report_ticker():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        ticker = asyncio.create_task(report_ticker())
+        namespace["_report_ticker_task"] = ticker
+        await started.wait()
+        try:
+            return await namespace["_owning_coordinator"]()
+        finally:
+            coordinator_retired_ticker = ticker.done()
+            if not coordinator_retired_ticker:
+                ticker.cancel()
+                await asyncio.gather(ticker, return_exceptions=True)
+            assert coordinator_retired_ticker, "coordinator returned before retiring its ticker"
+            assert ticker.cancelled() and stopped.is_set()
+
     if path in ("cancelled", "raised"):
         with pytest.raises(asyncio.CancelledError if path == "cancelled" else RuntimeError):
-            asyncio.run(namespace["_owning_coordinator"]())
+            asyncio.run(run_coordinator())
         assert events == ["batch-finalize", "batch-closed"] and not evaluated and not signatures
         assert not list(tmp_path.glob("*.pending.json"))
     else:
-        asyncio.run(namespace["_owning_coordinator"]())
+        asyncio.run(run_coordinator())
         assert run.task_results[0] is returned
         expected = ["evaluated-card", "publication-observed", "delegate-complete"]
         if path != "already-evaluated":

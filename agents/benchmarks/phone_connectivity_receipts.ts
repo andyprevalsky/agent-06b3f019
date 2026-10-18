@@ -24,9 +24,43 @@ export function checkReceipts(
       !scope.agentIds.includes(row.agentId) ||
       row.deviceId !== scope.deviceId ||
       row.actor !== "agent" ||
-      row.state !== "SUCCEEDED" ||
       !row.completedAt
     ) {
+      allCommandsAllowed = false;
+      continue;
+    }
+    // Setup admission can reject an allowed request before any provider input.
+    // Keep that receipt visible without treating it as physical execution.
+    if (
+      row.state === "FAILED" &&
+      row.errorCode === "phone_setup_required" &&
+      row.activeDeviceId === null &&
+      row.result?.success === false &&
+      row.result?.outcome === "rejected" &&
+      row.request?.actor === "agent" &&
+      row.request?.operation === row.operation
+    ) {
+      const allowed =
+        reads.has(row.operation) ||
+        (row.operation === "nav.home" && !launch) ||
+        (row.operation === "apps.launch" &&
+          ["Settings", "com.apple.Preferences"].includes(row.request?.args?.name));
+      if (!allowed) allCommandsAllowed = false;
+      continue;
+    }
+    // This is an authenticated nonphysical report of this task's restriction.
+    // Verification, account changes and every other setup action stay forbidden.
+    if (
+      row.operation === "setup.defer" &&
+      row.state === "SUCCEEDED" &&
+      row.activeDeviceId === null &&
+      row.result?.success === true &&
+      row.request?.input?.action === "defer" &&
+      row.request?.input?.reasonCode === "user_constraint" &&
+      row.request?.input?.requestKey === row.requestKey &&
+      row.request?.input?.expectedCursor + 1 === row.cursor
+    ) continue;
+    if (row.state !== "SUCCEEDED") {
       allCommandsAllowed = false;
       continue;
     }

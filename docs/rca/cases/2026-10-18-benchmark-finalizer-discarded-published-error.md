@@ -223,3 +223,34 @@ actual publication path. Freedom and AGENTS remain untouched.
 ## Reusable lesson
 
 Transfer terminal occurrence evidence before clearing reporting overlays and retire independent owned collectors even when physical resource cleanup fails.
+
+## Registered fixture follow-up: awaited report ticker
+
+The full registered benchmark gate run
+`20261018-225941-657459-737733b8` exposed a stale companion fixture while
+validating the later phone rollout. Six variants of
+`test_evaluated_wrapper_completion_publishes_once_before_owner_release` failed
+before their publication assertions: the extracted real coordinator now awaits
+its cancelled ticker, but this fixture supplied a cancel-only `SimpleNamespace`.
+The actual runtime ticker is an asyncio task. No production finalizer failure
+was inferred from the incomplete fixture.
+
+The identical targeted command was run before and after fixture correction:
+`cd agents && source venv/bin/activate && python -m pytest benchmarks/cloud_batch_cleanup_test.py -k test_evaluated_wrapper_completion_publishes_once_before_owner_release -q`.
+It failed all six variants with `TypeError: unhashable type: types.SimpleNamespace`
+in 6.57 seconds. The correction creates and starts a real task in the same event
+loop, passes it to the unchanged coordinator, and requires the coordinator to
+cancel, await and finalize that task. It preserves all existing publication,
+owner release, exception, skipped and digest assertions. A subsequent missing
+`sys` fixture binding was also corrected by supplying the real `bench.sys`.
+There is no product, task, prompt, timeout or criteria change in this repair.
+
+All six variants then passed the same command in 1.92 seconds. Logs are
+`.context/phone-harness/ticker-fixture-red.log`, `ticker-fixture-green.log`
+(the retained intermediate missing-global failure), and
+`ticker-fixture-green2.log` (final pass). Ruff and diff checks pass. The parent
+owns the full registered benchmark-domain rerun; its final result is recorded
+with the rollout verification rather than substituting this focused pass.
+The full registered `python scripts/run_blackbox_tests.py benchmark` rerun is
+GREEN in 217.6 seconds, including this exact six-case wrapper regression.
+Log: `.context/phone-harness/isolation-checker-normal-green.log`.
