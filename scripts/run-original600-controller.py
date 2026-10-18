@@ -788,6 +788,7 @@ def sharded_run(args, root, pins, runner, github, plan):
                          % (cap['available_slots_conservative'], demand, copies, controllers,
                             coordinator['CANARY_MACHINES_PER_CONTROLLER'] * controllers))
     runner['save'](directory / 'capacity-proof.private.json', cap)
+    cap['proof_path'] = str(directory / 'capacity-proof.private.json')  # every shard binds the one admission proof
     bench_rows = json.loads(read_inventory(directory / 'navi-whisper-lux-bench.private.json'))
     tasks = [task for shard in plan['shards'] for task in shard['tasks']]
     planned, baseline = shared_cpu_plan(root, runner, tasks, plan['shards'][0]['runs'], bench_rows)

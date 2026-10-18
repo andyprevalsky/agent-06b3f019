@@ -1934,6 +1934,7 @@ class Sharded(unittest.TestCase):
                     raise AssertionError('no runner should be signalled')
 
             cap = self.capacity(directory, free=700)
+            cap.pop('proof_path')  # the real native snapshot carries no proof path
             def snapshot(api, token, org, target, extra):
                 private(target/'navi-whisper-lux-bench.private.json', [])
                 return dict(cap)
