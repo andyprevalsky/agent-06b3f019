@@ -11,6 +11,7 @@ import inspect
 import json
 import math
 import os
+import re
 import runpy
 import secrets
 import shlex
@@ -21,7 +22,7 @@ import sys
 import time
 import tempfile
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -49,16 +50,264 @@ def write_json_atomic(path: Path, value: dict[str, object]) -> None:
     temporary.replace(path)
 
 
-def publish_campaign_group(
-    root: Path,
-    campaign_dir: Path,
-    state: dict[str, object],
+# Sharded campaigns: an operator runs K campaigns that form one Hub group and
+# one externally released startup cohort. Unset variables keep the original
+# single-campaign behaviour; children and nested canaries never inherit them.
+CAMPAIGN_SHARD_VARIABLES = (
+    "RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER",
+    "RUN_BENCH_CAMPAIGN_TASK_INDEXES",
+    "RUN_BENCH_CAMPAIGN_GROUP_TOTAL",
+    "RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT",
+)
+EXTERNAL_BARRIER_READY_SCHEMA = "campaign-external-barrier-ready-v1"
+EXTERNAL_BARRIER_RELEASE_SCHEMA = "campaign-external-barrier-release-v1"
+EXTERNAL_BARRIER_ABORT_SCHEMA = "campaign-external-barrier-abort-v1"
+HUB_GROUP_MAX_MEMBERS = 100000  # The Hub's own schedule/member bound.
+
+
+def campaign_jobs(
+    tasks: list[str],
+    runs: int,
+    task_indexes: list[int] | None = None,
+    task_total: int | None = None,
+) -> list[dict[str, object]]:
+    """The exact ordered schedule a campaign admits: every task, run by run.
+
+    With task_indexes (each task's 0-based position in the full manifest of
+    task_total names), job IDs are the ones a single controller would assign
+    to those tasks for the whole manifest, so shards never collide.
+    """
+    if type(runs) is not int or runs < 1:
+        raise ValueError("campaign runs must be a positive integer")
+    if (
+        not isinstance(tasks, (list, tuple))
+        or not tasks
+        or any(not isinstance(task, str) for task in tasks)
+    ):
+        raise ValueError("campaign tasks must be a nonempty list of names")
+    if task_indexes is None:
+        if task_total is not None:
+            raise ValueError("campaign task total requires task indexes")
+        positions, width = list(range(len(tasks))), len(tasks)
+    else:
+        if type(task_total) is not int or task_total < 1:
+            raise ValueError("campaign task indexes require the manifest task total")
+        positions, width = list(task_indexes), task_total
+        if (
+            len(positions) != len(tasks)
+            or any(type(value) is not int or not 0 <= value < width for value in positions)
+            or len(set(positions)) != len(positions)
+        ):
+            raise ValueError(
+                "campaign task indexes must be distinct manifest positions, one per task"
+            )
+    jobs: list[dict[str, object]] = []
+    for run_number in range(1, runs + 1):
+        for task, position in zip(tasks, positions):
+            index = (run_number - 1) * width + position + 1
+            jobs.append(
+                {
+                    "index": index,
+                    "job_id": f"r{run_number:03d}-j{index:04d}",
+                    "task": task,
+                    "run": run_number,
+                }
+            )
+    return jobs
+
+
+def sharded_campaign_jobs(
+    shards: list[dict[str, object]], task_total: int
+) -> list[dict[str, object]]:
+    """All shard schedules as one group, in single-controller job order."""
+    combined: list[dict[str, object]] = []
+    for shard in shards:
+        combined.extend(
+            campaign_jobs(shard["tasks"], shard["runs"], shard["task_indexes"], task_total)
+        )
+    identifiers = [job["job_id"] for job in combined]
+    if not combined or len(identifiers) > HUB_GROUP_MAX_MEMBERS:
+        raise ValueError("sharded campaign member count is outside the Hub bound")
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("sharded campaign job IDs are not unique")
+    return sorted(combined, key=lambda job: job["index"])
+
+
+def campaign_group_timestamp(epoch: object) -> str:
+    """The one Hub group timestamp derived from the operator's shared epoch."""
+    if (
+        isinstance(epoch, bool)
+        or not isinstance(epoch, (int, float))
+        or not math.isfinite(epoch)
+        or epoch <= 0
+    ):
+        raise ValueError("campaign group start must be a positive finite epoch")
+    return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
+
+
+def campaign_group_state(
+    group_run_id: str,
+    group_started_at: float,
+    jobs: list[dict[str, object]],
     *,
-    live: bool,
-    stop_requested: Callable[[], bool],
-) -> bool:
-    """The schedule is a real Hub resource; task results remain child-owned."""
-    record = {
+    status: str = "running",
+    finished_at: str | None = None,
+    wall_clock_seconds: float | None = None,
+) -> dict[str, object]:
+    """State accepted by publish_campaign_group for an operator-owned group."""
+    if not isinstance(group_run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9._-]+", group_run_id
+    ):
+        raise ValueError("invalid campaign group identity")
+    identifiers = [job["job_id"] for job in jobs]
+    if not jobs or len(set(identifiers)) != len(identifiers):
+        raise ValueError("campaign group members must be nonempty and unique")
+    return {
+        "campaign_id": group_run_id,
+        "started_at": campaign_group_timestamp(group_started_at),
+        "status": status,
+        "finished_at": finished_at,
+        "wall_clock_seconds": wall_clock_seconds,
+        "jobs": [
+            {
+                "job_id": job["job_id"],
+                "task": job["task"],
+                "run": job["run"],
+                "status": job.get("status", "queued"),
+                "controller_exit_code": job.get("controller_exit_code"),
+            }
+            for job in jobs
+        ],
+    }
+
+
+def campaign_shard_settings(
+    environment: Mapping[str, str],
+    *,
+    tasks: list[str],
+    runs: int,
+    concurrency: int,
+    strict: bool,
+) -> dict[str, object]:
+    """Validate the shard environment before any campaign artifact exists."""
+    job_count = len(tasks) * runs
+    settings: dict[str, object] = {
+        "external_barrier": None,
+        "task_indexes": None,
+        "task_total": None,
+        "group_total": None,
+        "group_started_at": None,
+    }
+    raw_barrier = environment.get("RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER")
+    if raw_barrier is not None:
+        directory = Path(raw_barrier)
+        if not directory.is_absolute() or directory.is_symlink() or not directory.is_dir():
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER must be an existing absolute directory"
+            )
+        if not strict or job_count > concurrency:
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER requires --strict-barrier with exactly one startup cohort"
+            )
+        settings["external_barrier"] = directory
+    raw_total = environment.get("RUN_BENCH_CAMPAIGN_GROUP_TOTAL")
+    raw_started = environment.get("RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT")
+    if (raw_total is not None or raw_started is not None) and not environment.get(
+        "BENCHMARK_HUB_GROUP_RUN_ID"
+    ):
+        # Without a preset group this campaign would publish its own schedule,
+        # which can never match a total or timestamp shared with other shards.
+        raise ValueError(
+            "RUN_BENCH_CAMPAIGN_GROUP_TOTAL/STARTED_AT require a preset BENCHMARK_HUB_GROUP_RUN_ID"
+        )
+    if raw_total is not None:
+        if not re.fullmatch(r"[1-9][0-9]{0,5}", raw_total) or not (
+            job_count <= int(raw_total) <= HUB_GROUP_MAX_MEMBERS
+        ):
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_GROUP_TOTAL must be an integer group size covering this shard"
+            )
+        settings["group_total"] = int(raw_total)
+    if raw_started is not None:
+        try:
+            settings["group_started_at"] = campaign_group_timestamp(float(raw_started))
+        except ValueError:
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT must be a positive finite epoch"
+            ) from None
+    raw_indexes = environment.get("RUN_BENCH_CAMPAIGN_TASK_INDEXES")
+    if raw_indexes is not None:
+        total = settings["group_total"]
+        if total is None or total % runs:
+            # Single-controller IDs need the whole manifest width: total / runs.
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_TASK_INDEXES requires RUN_BENCH_CAMPAIGN_GROUP_TOTAL as a multiple of --runs"
+            )
+        fields = raw_indexes.split(",")
+        if any(not re.fullmatch(r"0|[1-9][0-9]{0,5}", field) for field in fields):
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_TASK_INDEXES must be comma-separated non-negative integers"
+            )
+        indexes = [int(field) for field in fields]
+        try:
+            campaign_jobs(tasks, runs, indexes, total // runs)
+        except ValueError:
+            raise ValueError(
+                "RUN_BENCH_CAMPAIGN_TASK_INDEXES must be distinct manifest positions, one per --task"
+            ) from None
+        settings["task_indexes"] = indexes
+        settings["task_total"] = total // runs
+    return settings
+
+
+def external_barrier_release_id(directory: Path) -> str | None:
+    """A valid coordinator release; an incompletely written file is not yet one."""
+    path = directory / "release.json"
+    if path.is_symlink():
+        raise ValueError("external barrier release is not a regular file")
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        receipt = json.loads(raw)
+    except ValueError:
+        return None
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema") != EXTERNAL_BARRIER_RELEASE_SCHEMA
+        or not isinstance(receipt.get("release_id"), str)
+        or not re.fullmatch(r"[0-9a-f]{8,128}", receipt["release_id"])
+    ):
+        raise ValueError("external barrier release is invalid")
+    return receipt["release_id"]
+
+
+def external_barrier_abort(directory: Path) -> dict[str, object] | None:
+    """Any abort request before release aborts; its contents are evidence only."""
+    path = directory / "abort.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        request = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {"reason": "unreadable external abort request", "release_id": None}
+    if (
+        not isinstance(request, dict)
+        or request.get("schema") != EXTERNAL_BARRIER_ABORT_SCHEMA
+        or not isinstance(request.get("reason"), str)
+    ):
+        return {"reason": "invalid external abort request", "release_id": None}
+    release_id = request.get("release_id")
+    return {
+        "reason": request["reason"] or "external abort requested",
+        "release_id": release_id if isinstance(release_id, str) else None,
+    }
+
+
+def campaign_group_record(state: dict[str, object]) -> dict[str, object]:
+    """The Hub schedule record; members carry no task results."""
+    return {
         "run_id": state["campaign_id"],
         "timestamp": state["started_at"],
         "source": "benchmark-campaign",
@@ -70,8 +319,8 @@ def publish_campaign_group(
             "wall_clock_seconds": state.get("wall_clock_seconds"),
             "outcomes": {
                 str(job["job_id"]): {
-                    "status": job["status"],
-                    "controller_exit_code": job["controller_exit_code"],
+                    "status": job.get("status", "queued"),
+                    "controller_exit_code": job.get("controller_exit_code"),
                 }
                 for job in state["jobs"]
             },
@@ -85,6 +334,18 @@ def publish_campaign_group(
             ],
         },
     }
+
+
+def publish_campaign_group(
+    root: Path,
+    campaign_dir: Path,
+    state: dict[str, object],
+    *,
+    live: bool,
+    stop_requested: Callable[[], bool],
+) -> bool:
+    """The schedule is a real Hub resource; task results remain child-owned."""
+    record = campaign_group_record(state)
     target = campaign_dir / "hub-group.json"
     write_json_atomic(target, record)
     if stop_requested():
@@ -813,6 +1074,21 @@ def main() -> int:
         raise SystemExit("--e2e-started-at must be the original past epoch")
     if args.e2e_started_at is not None and args.e2e_timeout is None:
         raise SystemExit("--e2e-started-at requires --e2e-timeout")
+    strict_start = (
+        "--strict-barrier" in args.forward_arg
+        or os.environ.get("CLOUDBENCH_STRICT_BARRIER") == "1"
+    )
+    try:
+        shard = campaign_shard_settings(
+            os.environ,
+            tasks=args.task,
+            runs=args.runs,
+            concurrency=args.concurrency,
+            strict=strict_start,
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    external_barrier = shard["external_barrier"]
     e2e_started_at = args.e2e_started_at if args.e2e_started_at is not None else time.time()
     e2e_deadline = time.monotonic() + args.e2e_timeout - (time.time() - e2e_started_at) if args.e2e_timeout is not None else None
 
@@ -880,30 +1156,27 @@ def main() -> int:
     lock_prefix = hashlib.sha256(safe_id.encode()).hexdigest()[:12]
 
     jobs: list[dict[str, object]] = []
-    index = 0
-    for run_number in range(1, args.runs + 1):
-        for task in args.task:
-            index += 1
-            job_id = f"r{run_number:03d}-j{index:04d}"
-            jobs.append(
-                {
-                    "index": index,
-                    "job_id": job_id,
-                    "task": task,
-                    "run": run_number,
-                    "status": "queued",
-                    "controller_exit_code": None,
-                    "started_at": None,
-                    "finished_at": None,
-                    "wall_clock_seconds": None,
-                    "controller_lock": (
-                        f"cloudbench-controller-campaign-{lock_prefix}-{index}.lock"
-                    ),
-                    "log": str(campaign_dir / f"{job_id}.log"),
-                    "attempt": 1,
-                    "attempts": [],
-                }
-            )
+    for scheduled in campaign_jobs(
+        args.task, args.runs, shard["task_indexes"], shard["task_total"]
+    ):
+        index = scheduled["index"]
+        job_id = scheduled["job_id"]
+        jobs.append(
+            {
+                **scheduled,
+                "status": "queued",
+                "controller_exit_code": None,
+                "started_at": None,
+                "finished_at": None,
+                "wall_clock_seconds": None,
+                "controller_lock": (
+                    f"cloudbench-controller-campaign-{lock_prefix}-{index}.lock"
+                ),
+                "log": str(campaign_dir / f"{job_id}.log"),
+                "attempt": 1,
+                "attempts": [],
+            }
+        )
 
     state: dict[str, object] = {
         "campaign_id": safe_id,
@@ -922,10 +1195,17 @@ def main() -> int:
         "e2e_timeout_seconds": args.e2e_timeout,
         "e2e_timeout_exceeded": False,
     }
-    strict_start = (
-        "--strict-barrier" in args.forward_arg
-        or os.environ.get("CLOUDBENCH_STRICT_BARRIER") == "1"
-    )
+    for key in ("task_indexes", "group_total", "group_started_at"):
+        if shard[key] is not None:
+            state[key] = shard[key]
+    if external_barrier is not None:
+        state["external_barrier"] = {
+            "directory": str(external_barrier),
+            "status": None,
+            "status_history": [],
+            "release_id": None,
+            "abort": None,
+        }
     cleanup_identity_module = cleanup_ticket_module(root) if strict_start else None
     cleanup_parent_birth = cleanup_identity_module.birth(os.getpid()) if strict_start else ""
     cohorts: list[dict[str, object]] = []
@@ -998,6 +1278,12 @@ def main() -> int:
     print(
         "   controller status/exit is separate from monitor.task_outcomes; retain genuine task FAIL."
     )
+    if external_barrier is not None:
+        print(
+            f"   external barrier: cohort readiness -> {external_barrier / 'ready.json'}; "
+            "release waits for release.json there, abort.json aborts before release; "
+            "each fleet keeps its own startup deadline."
+        )
     if args.retry_infra:
         print(f"   INFRA-only retry: at most {args.retry_infra} fresh attempt(s) per task, after original full release and terminal publication; healthy peers continue.")
         print("   attempts keep separate logs/evidence within the original Hub group; genuine task FAIL is not retried and the E2E clock never resets.")
@@ -1044,7 +1330,64 @@ def main() -> int:
     barrier_failure = False
     current_cohort: dict[str, object] | None = None
 
-    def abort_startup_cohort(cohort: dict[str, object], reason: str) -> None:
+    def publish_external_barrier(cohort: dict[str, object], status: str) -> None:
+        """Atomic coordinator projection, rewritten only on change; terminal is sticky."""
+        if external_barrier is None or cohort.get("_external_terminal"):
+            return
+        value = {
+            "schema": EXTERNAL_BARRIER_READY_SCHEMA,
+            "cohort_id": cohort["cohort_id"],
+            "status": status,
+            "ready_count": cohort["ready_count"],
+            "failed_count": cohort["failed_count"],
+            "expected_count": cohort["expected_count"],
+            "survivor_count": cohort["expected_count"] - cohort["failed_count"],
+        }
+        if cohort.get("_external_published") == value:
+            return
+        cohort["_external_published"] = value
+        cohort["_external_terminal"] = status in ("failed", "aborted", "released")
+        write_json_atomic(external_barrier / "ready.json", {**value, "updated_at": utc_now()})
+        record = state["external_barrier"]
+        if record["status"] != status:
+            record["status"] = status
+            record["status_history"].append({"status": status, "at": utc_now()})
+            write_json_atomic(summary_path, state)
+
+    def external_abort_pending() -> bool:
+        return external_barrier is not None and (
+            (external_barrier / "abort.json").exists()
+            or (external_barrier / "abort.json").is_symlink()
+        )
+
+    def observe_external_abort() -> bool:
+        """Abort the single cohort before release; later requests are ignored."""
+        nonlocal barrier_failure, first_failure
+        if external_barrier is None:
+            return False
+        cohort = cohorts[0]
+        if state["external_barrier"]["abort"] is not None:
+            return True
+        if cohort["status"] not in ("queued", "waiting"):
+            return False
+        request = external_barrier_abort(external_barrier)
+        if request is None:
+            return False
+        state["external_barrier"]["abort"] = {**request, "observed_at": utc_now()}
+        barrier_failure = True
+        first_failure = first_failure or 1
+        abort_startup_cohort(
+            cohort, "external barrier abort: " + str(request["reason"]), status="aborted"
+        )
+        print(
+            f"🛑 campaign startup {cohort['cohort_id']}: external barrier aborted before release"
+        )
+        write_json_atomic(summary_path, state)
+        return True
+
+    def abort_startup_cohort(
+        cohort: dict[str, object], reason: str, status: str = "failed"
+    ) -> None:
         if cohort["status"] == "released":
             return
         cohort["status"] = "aborted"
@@ -1063,9 +1406,13 @@ def main() -> int:
         for job in cohort["_jobs"]:
             if "_process" in job:
                 job["_aborted_by_campaign"] = True
+        publish_external_barrier(cohort, status)
 
     def release_ready_cohort(cohort: dict[str, object]) -> None:
+        nonlocal barrier_failure, first_failure
         if cohort["status"] != "waiting":
+            return
+        if observe_external_abort():
             return
         ready_count = 0
         failed_count = 0
@@ -1104,10 +1451,29 @@ def main() -> int:
             write_json_atomic(summary_path, state)
         if not survivors:
             cohort["status"] = "failed"
+            publish_external_barrier(cohort, "failed")
             write_json_atomic(summary_path, state)
             return
         if ready_count != len(survivors):
+            publish_external_barrier(cohort, "waiting")
             return
+        if external_barrier is not None:
+            # Every survivor is ready; only the coordinator's global release
+            # remains. Each fleet still fails strictly at its own deadline.
+            publish_external_barrier(cohort, "ready")
+            try:
+                release_id = external_barrier_release_id(external_barrier)
+            except (OSError, ValueError):
+                barrier_failure = True
+                first_failure = first_failure or 1
+                state["external_barrier"]["release_error"] = "invalid release request"
+                abort_startup_cohort(cohort, "external barrier release request is invalid")
+                write_json_atomic(summary_path, state)
+                return
+            if release_id is None:
+                return
+            state["external_barrier"]["release_id"] = release_id
+            state["external_barrier"]["released_at"] = utc_now()
         cohort["released_at"] = utc_now()
         cohort["released_count"] = ready_count
         write_json_atomic(
@@ -1119,6 +1485,7 @@ def main() -> int:
             },
         )
         cohort["status"] = "released"
+        publish_external_barrier(cohort, "released")
         print(
             f"🚦 campaign startup {cohort['cohort_id']}: releasing all {ready_count} ready copies"
         )
@@ -1189,6 +1556,8 @@ def main() -> int:
                 state["e2e_timeout_exceeded"] = True
                 request_stop(signal.SIGTERM, None)
                 print("Whole-experiment limit reached; no new attempt admitted, exact controllers continue through owned cleanup.")
+            if external_barrier is not None:
+                observe_external_abort()
             if inventory_process is not None and inventory_process.poll() is not None:
                 barrier_failure = True
                 first_failure = first_failure or 1
@@ -1259,6 +1628,7 @@ def main() -> int:
                             "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
                         current_cohort["_cleanup_tickets_prepared"] = True
                     current_cohort["status"] = "waiting"
+                    publish_external_barrier(current_cohort, "waiting")
                     if inventory_directory is not None:
                         try:
                             log = (
@@ -1295,6 +1665,7 @@ def main() -> int:
                                             stop_signal
                                             or deadline_expired()
                                             or inventory_process.poll() is not None
+                                            or external_abort_pending()
                                         ):
                                             result.terminate()
                                             interrupted = True
@@ -1314,13 +1685,14 @@ def main() -> int:
                         except (OSError, ValueError):
                             first_failure = first_failure or 1
                             barrier_failure = True
-                            abort_startup_cohort(
-                                current_cohort,
-                                "canonical fixture full GET failed before child admission",
-                            )
-                            print(
-                                "Campaign canonical fixture preflight failed; no cohort controller admitted"
-                            )
+                            if not observe_external_abort():
+                                abort_startup_cohort(
+                                    current_cohort,
+                                    "canonical fixture full GET failed before child admission",
+                                )
+                                print(
+                                    "Campaign canonical fixture preflight failed; no cohort controller admitted"
+                                )
                         write_json_atomic(summary_path, state)
                     if not barrier_failure and not current_cohort.get("_canary_proof"):
                         try:
@@ -1332,6 +1704,7 @@ def main() -> int:
                             for key in (
                                 "CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT",
                                 "CLOUDBENCH_COHORT_PREFLIGHT_SHA256",
+                                *CAMPAIGN_SHARD_VARIABLES,
                             ):
                                 policy.pop(key, None)
                             ref = subprocess.check_output(
@@ -1414,6 +1787,7 @@ def main() -> int:
                                             or deadline_expired()
                                             or inventory_process is not None
                                             and inventory_process.poll() is not None
+                                            or external_abort_pending()
                                         ):
                                             child.terminate()
                                             terminated = True
@@ -1425,7 +1799,7 @@ def main() -> int:
                                     if child.poll() is None:
                                         child.terminate()
                                         child.wait()
-                            if child.returncode or stop_signal or deadline_expired():
+                            if child.returncode or stop_signal or deadline_expired() or external_abort_pending():
                                 raise ValueError("parent infrastructure canary did not pass")
                             receipt = current_cohort["_directory"] / "infra-canary-preflight.pass.json"
                             current_cohort["_canary_proof"] = {
@@ -1435,9 +1809,10 @@ def main() -> int:
                         except (OSError, ValueError, subprocess.SubprocessError):
                             first_failure = first_failure or 1
                             barrier_failure = True
-                            abort_startup_cohort(
-                                current_cohort, "canonical parent N2 failed before worker admission"
-                            )
+                            if not observe_external_abort():
+                                abort_startup_cohort(
+                                    current_cohort, "canonical parent N2 failed before worker admission"
+                                )
                             write_json_atomic(summary_path, state)
             launched_this_round = False
             while (
@@ -1451,7 +1826,7 @@ def main() -> int:
                 job = pending.popleft()
                 launched_this_round = True
                 environment = dict(stress_environment) if stress_environment is not None else os.environ.copy()
-                for key in ("CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT", "CLOUDBENCH_COHORT_PREFLIGHT_SHA256", "CLOUDBENCH_CAMPAIGN_PARENT_PREFLIGHT"):
+                for key in ("CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT", "CLOUDBENCH_COHORT_PREFLIGHT_SHA256", "CLOUDBENCH_CAMPAIGN_PARENT_PREFLIGHT", *CAMPAIGN_SHARD_VARIABLES):
                     environment.pop(key, None)
                 # Group membership is distinct from publication ownership. Each
                 # child still registers, publishes and acknowledges its own run;
@@ -1462,8 +1837,13 @@ def main() -> int:
                             "BENCHMARK_HUB_GROUP_RUN_ID"
                         )
                         or safe_id,
-                        "RUN_BENCH_CAMPAIGN_STARTED_AT": str(state["started_at"]),
-                        "RUN_BENCH_CAMPAIGN_TOTAL_JOBS": str(len(jobs)),
+                        # A shard publishes the operator's shared group clock and size.
+                        "RUN_BENCH_CAMPAIGN_STARTED_AT": str(
+                            shard["group_started_at"] or state["started_at"]
+                        ),
+                        "RUN_BENCH_CAMPAIGN_TOTAL_JOBS": str(
+                            shard["group_total"] or len(jobs)
+                        ),
                         "RUN_BENCH_CAMPAIGN_CHILD": "1",
                         "RUN_BENCH_CAMPAIGN_JOB_ID": str(job["job_id"]),
                         "RUN_BENCH_CAMPAIGN_RUN": str(job["run"]),
@@ -1669,6 +2049,10 @@ def main() -> int:
             if current_cohort:
                 abort_startup_cohort(current_cohort, "campaign parent is exiting")
             terminate_owned_children(active)
+        if external_barrier is not None:
+            # A coordinator must never wait on a campaign that can no longer
+            # release; released and aborted projections are already terminal.
+            publish_external_barrier(cohorts[0], "failed")
         for job in active.values():
             process = job.get("_process")
             if isinstance(process, subprocess.Popen):
