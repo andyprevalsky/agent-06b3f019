@@ -12694,6 +12694,301 @@ grep -Fxq "$REG {clone_name}   not-allocated-verified" "$AUDIT_CALLS" || exit 25
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+def test_ambiguous_408_clone_absent_at_lookup_is_reaped_at_teardown(
+    tmp_path: Path,
+) -> None:
+    """run600c: a 408 launch created a Machine the short name lookup missed.
+
+    Fly returned ``failed to launch VM: ... 408`` after it had already created
+    the Machine; the borrowed inventory wait timed out and one native list
+    within the lookup window did not include the name. The controller then
+    recorded ``not-allocated-verified``, released the name and retried, so the
+    started guest outlived teardown. The exact name-only ownership must instead
+    survive provisioning, and final teardown must resolve the now-visible
+    Machine by name and destroy exactly it.
+    """
+    fleet = fleet_source_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "volume_inventory_contains_id() {",
+            "reap_volume() {",
+            "registry_meta_value() {",
+            "fleet_registry_record_name() {",
+            "fleet_registry_record_volume() {",
+            "fleet_registry_release_name() {",
+            "clone_failure_definitively_unallocated() {",
+            "clone_failure_owned_volume_id() {",
+            "fleet_clone_with_queue_admission() {",
+            "clone_machine_target() {",
+            "registry_record_machine_identity() {",
+            "fleet_current_disposable_registry() {",
+            "fleet_with_native_reap_permit() {",
+            "fleet_validate_reap_cohort() {",
+            "fleet_reap_registry_record_native() {",
+            "fleet_reap_registry_record() {",
+            "reap_registry_clones() {",
+        )
+    ) + "\n" + _disposable_volume_backup_function(fleet)
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("a" * 32)
+    (registry / "clones").mkdir(parents=True)
+    (registry / "meta").write_text("version=1\n")
+    ledger = tmp_path / "primary.ids"
+    calls = tmp_path / "calls"
+    audit = tmp_path / "audit"
+    materialized = tmp_path / "materialized"
+    clone_count = tmp_path / "clone-count"
+    uuid_count = tmp_path / "uuid-count"
+    for path in (calls, audit):
+        path.write_text("")
+    for path in (clone_count, uuid_count):
+        path.write_text("0\n")
+    late = "cloudbench-111111111111111111111111"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=8ed16dc75ee958
+WARM_VOLUME_ID=vol_warm
+SNAP_ID=vs_xA6B3617AO9TaeovZ3OKN42
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+LEDGER={shlex.quote(str(ledger))}
+CALLS={shlex.quote(str(calls))}
+AUDIT={shlex.quote(str(audit))}
+MATERIALIZED={shlex.quote(str(materialized))}
+CLONE_COUNT={shlex.quote(str(clone_count))}
+UUID_COUNT={shlex.quote(str(uuid_count))}
+inventory_machine_field() {{ printf '1'; }}
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+CLOUDBENCH_CLONE_RETRY_SECONDS=0
+CLOUDBENCH_CLONE_RETRY_MAX_SECONDS=0
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=1
+sleep() {{ :; }}
+fly_with_timeout() {{ shift; FLY "$@"; }}
+python3() {{
+  case "$*" in
+    *uuid.uuid4*)
+      count="$(cat "$UUID_COUNT")"; count=$((count + 1))
+      printf '%s\\n' "$count" > "$UUID_COUNT"
+      if [ "$count" = 1 ]; then
+        printf '%s\\n' 111111111111111111111111
+      else
+        printf '%s\\n' 222222222222222222222222
+      fi ;;
+    *) command python3 "$@" ;;
+  esac
+}}
+FLY() {{
+  printf '%s\\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "machine clone")
+      count="$(cat "$CLONE_COUNT")"; count=$((count + 1))
+      printf '%s\\n' "$count" > "$CLONE_COUNT"
+      if [ "$count" = 1 ]; then
+        printf '%s\\n' \\
+          'Cloning Machine 8ed16dc75ee958 into region iad' \\
+          "Volume 'cloudbench_t10_ord_85a7e2c' will start empty" \\
+          'Error: failed to launch VM: request returned non-2xx status: 408:  (Request ID: 01M579R79FT9V2THFJ0HP885ZM-iad)' >&2
+        return 1
+      fi
+      printf '%s\\n' 'Machine feedface000002 has been created...'
+      return 0 ;;
+  esac
+  return 97
+}}
+fleet_audit_record_fresh_clone() {{ printf 'record %s\\n' "$*" >> "$AUDIT"; }}
+fleet_audit_update_fresh_clone() {{ printf 'update %s\\n' "$*" >> "$AUDIT"; }}
+fleet_audit_update_registry_clone() {{ printf 'registry-update %s\\n' "$*" >> "$AUDIT"; }}
+fleet_registry_record_id() {{
+  printf 'name=%s\\nid=%s\\nvolume_id=%s\\n' "$1" "$2" "$3" > "$FLEET_REGISTRY_DIR/clones/$1"
+}}
+# The borrowed parent generation wait timed out, then the exact native list
+# omitted the name although the provider had created the Machine.
+machine_id_for_clone_name() {{ return 1; }}
+registry_resolve_name() {{
+  printf 'resolve %s\\n' "$1" >> "$CALLS"
+  if [ -e "$MATERIALIZED" ] && [ "$1" = {late} ]; then
+    printf '%s' deadbeef000001
+    return 0
+  fi
+  return 1
+}}
+registry_machine_details() {{
+  case "$1" in
+    feedface000002) printf 'started cloudbench-222222222222222222222222' ;;
+    deadbeef000001) [ -e "$MATERIALIZED" ] || return 1; printf 'started %s' {late} ;;
+    *) return 2 ;;
+  esac
+}}
+machine_volume_id() {{
+  case "$1" in
+    feedface000002) printf '%s' vol_success ;;
+    deadbeef000001) printf '%s' vol_late ;;
+  esac
+}}
+reap_machine() {{ printf 'reap_machine %s %s\\n' "$1" "$3" >> "$CALLS"; }}
+registry_record_is_stale_phantom() {{ return 1; }}
+machine_storage_ready() {{ return 0; }}
+machine_storage_failed() {{ return 1; }}
+worker_ledger_lock_acquire() {{ return 0; }}
+worker_ledger_lock_release() {{ return 0; }}
+{functions}
+target="$(clone_machine_target "$LEDGER")" || exit 90
+[ "$target" = feedface000002 ] || exit 91
+late_record="$FLEET_REGISTRY_DIR/clones/{late}"
+# (a) An unresolved name keeps its exact durable ownership.
+[ -f "$late_record" ] || exit 92
+[ -z "$(registry_meta_value "$late_record" id)" ] || exit 93
+if grep -F 'update {late}' "$AUDIT" | grep -Fq not-allocated-verified; then exit 94; fi
+if grep -Fxq {late} "${{LEDGER%.ids}}.names"; then exit 95; fi
+grep -Fq 'clone name={late} absent after ambiguous failure; exact name ownership retained for teardown' "${{LEDGER%.ids}}.log" || exit 96
+# The provider list catches up before final teardown.
+touch "$MATERIALIZED"
+FLEET_CLONE_PRODUCERS_JOINED=1 reap_registry_clones "$FLEET_REGISTRY_DIR" current || exit 97
+# (b) Teardown resolves the exact name and destroys only that Machine.
+grep -Fxq 'reap_machine deadbeef000001 vol_late' "$CALLS" || exit 98
+[ ! -e "$late_record" ] || exit 99
+grep -Fq 'registry-update {registry} {late} deadbeef000001 vol_late destroyed-verified-absent' "$AUDIT" || exit 100
+"""
+    result = subprocess.run(
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    call_log = calls.read_text().splitlines()
+    assert sum(call.startswith("machine clone ") for call in call_log) == 2
+    assert "reap_machine feedface000002 vol_success" in call_log
+    assert sum(call.startswith("reap_machine ") for call in call_log) == 2
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["joined-aged", "unjoined-aged", "joined-young", "unsafe-read"],
+)
+def test_current_teardown_retires_name_only_clone_only_after_joined_aged_absence(
+    tmp_path: Path, scenario: str
+) -> None:
+    """A live owner retires an absent name only with the dead-owner proof."""
+    fleet = fleet_source_text()
+    reaper = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "fleet_current_disposable_registry() {",
+            "fleet_with_native_reap_permit() {",
+            "fleet_validate_reap_cohort() {",
+            "fleet_reap_registry_record_native() {",
+            "fleet_reap_registry_record() {",
+            "reap_registry_clones() {",
+        )
+    )
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("d" * 32)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    phantom = clones / "cloudbench-phantom"
+    phantom.write_text("name=cloudbench-phantom\n")
+    sibling = clones / "cloudbench-sibling"
+    sibling.write_text("name=cloudbench-sibling\nid=abc123\nvolume_id=vol_sibling\n")
+    calls = tmp_path / "calls"
+    joined = "0" if scenario == "unjoined-aged" else "1"
+    aged = "1" if scenario == "joined-young" else "0"
+    resolve = "2" if scenario == "unsafe-read" else "1"
+
+    script = f"""set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+REG={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+CLOUDBENCH_REAP_MAX_IN_FLIGHT=1
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_resolve_name() {{ printf 'resolve %s\\n' "$1" >> "$CALLS"; return {resolve}; }}
+registry_record_is_stale_phantom() {{ return {aged}; }}
+registry_machine_details() {{ printf 'started cloudbench-sibling'; }}
+fleet_registry_reconcile_mounted_volume() {{ printf '%s' vol_sibling; }}
+reap_machine() {{ printf 'reap_machine %s %s\\n' "$1" "$3" >> "$CALLS"; }}
+fleet_audit_update_registry_clone() {{ printf 'audit %s\\n' "$*" >> "$CALLS"; }}
+{reaper}
+rc=0
+FLEET_CLONE_PRODUCERS_JOINED={joined} reap_registry_clones "$REG" current || rc=$?
+printf 'rc=%s\\n' "$rc" >> "$CALLS"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=20
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    log = calls.read_text().splitlines()
+    # Known exact siblings are reaped regardless of the name-only outcome.
+    assert "reap_machine abc123 vol_sibling" in log
+    assert not sibling.exists()
+    retired = f"audit {registry} cloudbench-phantom   not-allocated-verified"
+    if scenario == "joined-aged":
+        assert log[-1] == "rc=0"
+        assert retired in log
+        assert not phantom.exists()
+    else:
+        assert log[-1] != "rc=0"
+        assert retired not in log
+        assert phantom.read_text() == "name=cloudbench-phantom\n"
+
+
+@pytest.mark.parametrize("inventory", ["present", "absent", "unreadable", "none-owned"])
+def test_final_audit_fails_closed_when_unallocated_owned_name_exists(
+    tmp_path: Path, inventory: str
+) -> None:
+    """not-allocated-verified must be natively true before the audit seals."""
+    fleet = fleet_source_text()
+    function = _extract_fleet_function(fleet, "fleet_audit_verify_unallocated_names_absent() {")
+    audit = tmp_path / "audit"
+    (audit / "fresh").mkdir(parents=True)
+    name = "cloudbench-7965914459fc4c859374ba4a"
+    disposition = "destroyed-verified-absent" if inventory == "none-owned" else "not-allocated-verified"
+    machine = "185d747b64e248" if inventory == "none-owned" else ""
+    (audit / "fresh" / name).write_text(
+        f"version=1\nclone_name={name}\nmachine_id={machine}\nvolume_id=\n"
+        f"disposition={disposition}\n"
+    )
+    calls = tmp_path / "calls"
+    listing = {
+        "present": f'[{{"id":"8744531f65d768","name":"{name}","state":"started"}},'
+        '{"id":"185d747b64e248","name":"cloudbench-other","state":"destroyed"}]',
+        "absent": f'[{{"id":"8744531f65d768","name":"{name}","state":"destroyed"}}]',
+        "unreadable": "",
+        "none-owned": "[]",
+    }[inventory]
+    script = f"""set -uo pipefail
+APP=navi-whisper-lux-bench
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+CALLS={shlex.quote(str(calls))}
+CLOUDBENCH_UNALLOCATED_NAME_AUDIT_SECONDS=0
+sleep() {{ :; }}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+FLY() {{ printf '%s\\n' "$*" >> "$CALLS"; printf '%s' {shlex.quote(listing)}; [ -n {shlex.quote(listing)} ]; }}
+{function}
+fleet_audit_verify_unallocated_names_absent
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=20
+    )
+    provider_calls = calls.read_text().splitlines() if calls.exists() else []
+    if inventory == "none-owned":
+        assert result.returncode == 0, result.stderr
+        assert provider_calls == []
+        return
+    assert provider_calls == ["machines list -a navi-whisper-lux-bench --json"]
+    if inventory == "absent":
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+    if inventory == "present":
+        assert f"'{name}' recorded not-allocated-verified exists natively as Machine 8744531f65d768 (state=started)" in result.stderr
+
+
 @pytest.mark.parametrize("preferred", ["", "0", "positive", "invalid", "1023"])
 def test_exact_recovery_consumes_runtime_receipt_proxy_ports(
     tmp_path: Path, preferred: str
@@ -27090,6 +27385,7 @@ def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(
             "fleet_audit_update_registry_clone() {",
             "fleet_registry_remove_if_empty() {",
             "fleet_audit_finalize_provider_teardown() {",
+            "fleet_audit_verify_unallocated_names_absent() {",
             "fleet_finalize_released_projection() {",
             "reap_machine() {",
             "reap_volume() {",
@@ -27810,6 +28106,7 @@ def _private_source_identity_command(registry: Path, audit: Path, body: str):
             "registry_record_machine_identity() {",
             "fleet_registry_record_id() {",
             "fleet_audit_finalize_provider_teardown() {",
+            "fleet_audit_verify_unallocated_names_absent() {",
         )
     )
     workspace = registry.parent.parent / "workspace"
@@ -27976,8 +28273,18 @@ def test_private_fleet_source_terminal_audit_preserves_digest(
         if successor_source == "unset"
         else f"PRIVATE_SOURCE_SHA256={'e' * 64}\nPRIVATE_SOURCE_FILE=/does-not-exist"
     )
-    result = _private_source_identity_command(registry, audit, setup + "\nfleet_audit_finalize_provider_teardown\n")
+    # The final audit proves this not-allocated-verified name natively absent
+    # with exactly one complete inventory read; no other provider call occurs.
+    provider_calls = tmp_path / "provider-calls"
+    inventory = (
+        f'FLY() {{ printf "%s\\n" "$*" >> {shlex.quote(str(provider_calls))}; '
+        '[ "$1 $2" = "machines list" ] || return 99; printf "[]"; }'
+    )
+    result = _private_source_identity_command(
+        registry, audit, setup + "\n" + inventory + "\nfleet_audit_finalize_provider_teardown\n"
+    )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert provider_calls.read_text() == "machines list -a navi-whisper-lux-bench --json\n"
     published = tmp_path / "workspace/.context/fleet/runs/fixture-run/teardown-ownership"
     assert "status=provider-teardown-verified\n" in (audit / "meta").read_text()
     assert (published / "meta").read_bytes() == (audit / "meta").read_bytes()
@@ -32536,6 +32843,7 @@ def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release_after
             "recover_exact_stale_fleet_owner() {",
             "fleet_registry_remove_if_empty() {",
             "fleet_audit_finalize_provider_teardown() {",
+            "fleet_audit_verify_unallocated_names_absent() {",
             "fleet_audit_finalize_recovered_registry() {",
             "fleet_finalize_released_projection() {",
             "fleet_publish_recovered_terminal_projection() {",

@@ -3581,6 +3581,7 @@ fleet_audit_finalize_provider_teardown() {
     local shared_only="${FLEET_AUDIT_SHARED_ONLY:-0}"
     local shared_only_reason="${FLEET_AUDIT_SHARED_ONLY_REASON:-}"
     local tmp="$FLEET_TEARDOWN_OWNERSHIP_DIR/meta.tmp.$$"
+    fleet_audit_verify_unallocated_names_absent || return 1
     if [ -e "$FLEET_TEARDOWN_OWNERSHIP_DIR/volume-migrations" ] \
         || [ -L "$FLEET_TEARDOWN_OWNERSHIP_DIR/volume-migrations" ]; then
         python3 "$VOLUME_MIGRATION_HELPER" verify \
@@ -4028,6 +4029,63 @@ finally:
     if stage.exists():
         shutil.rmtree(stage)
 PY
+}
+
+fleet_audit_verify_unallocated_names_absent() {
+    # not-allocated-verified is the only fresh-clone terminal without an exact
+    # Machine-ID destroy receipt. Before sealing, prove with one complete native
+    # read that none of those exact owned names exists. A present Machine means
+    # an earlier allocation decision was wrong (run600c leaked three started
+    # guests this way): fail closed and retain the owner. Runs without such names
+    # issue no provider call.
+    local -a names=()
+    local record output status=0 deadline
+    for record in "$FLEET_TEARDOWN_OWNERSHIP_DIR"/fresh/*; do
+        [ -f "$record" ] && [ ! -L "$record" ] || continue
+        [ "$(registry_meta_value "$record" disposition)" = not-allocated-verified ] || continue
+        [ -z "$(registry_meta_value "$record" machine_id)" ] || return 1
+        names+=("$(registry_meta_value "$record" clone_name)")
+    done
+    [ "${#names[@]}" -gt 0 ] || return 0
+    deadline=$((SECONDS + ${CLOUDBENCH_UNALLOCATED_NAME_AUDIT_SECONDS:-60}))
+    while :; do
+        status=0
+        output="$(FLY machines list -a "$APP" --json 2>/dev/null \
+            | python3 -c '
+import json, re, sys
+names = set(sys.argv[1:])
+if any(not re.fullmatch(r"cloudbench-[A-Za-z0-9._-]+", name) for name in names):
+    raise SystemExit(4)
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+present = [
+    (str(machine.get("id", "")), str(machine.get("name")), str(machine.get("state", "")))
+    for machine in machines
+    if machine.get("name") in names and machine.get("state") != "destroyed"
+]
+for machine_id, name, state in present:
+    print(f"{machine_id} {name} {state}")
+raise SystemExit(3 if present else 0)
+' "${names[@]}")" || status=$?
+        case "$status" in
+            0) return 0 ;;
+            3)
+                printf '%s\n' "$output" | while read -r machine_id name state; do
+                    echo "❌ owned clone name '$name' recorded not-allocated-verified exists natively as Machine $machine_id (state=$state); retaining owner" >&2
+                done
+                return 1 ;;
+            4) return 1 ;;
+            *) [ "$SECONDS" -lt "$deadline" ] || {
+                   echo "❌ native Machine inventory unreadable while verifying unallocated owned clone names; retaining owner" >&2
+                   return 1
+               }
+               sleep 2 ;;
+        esac
+    done
 }
 
 fleet_audit_finalize_recovered_registry() {  # <v2-registry>
@@ -5881,12 +5939,17 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
                     # For STALE auto-recovery and FORCED exact recovery the owner
                     # is already proven dead. Retain young name-only records while
                     # a clone may still cross provider visibility, then retire an
-                    # aged, authoritatively absent phantom. Restrict this to the
-                    # two dead-owner modes: CURRENT live-owner cleanup must never
-                    # discard its only durable ownership proof.
-                    if { [ "$mode" = "stale" ] || [ "$mode" = "forced" ]; } \
+                    # aged, authoritatively absent phantom. CURRENT live-owner
+                    # cleanup has the same proof only at final teardown after it
+                    # joined every clone producer (FLEET_CLONE_PRODUCERS_JOINED=1):
+                    # no request for this name can still be in flight. Early or
+                    # unjoined current cleanup never discards its only durable
+                    # ownership proof.
+                    if { [ "$mode" = "stale" ] || [ "$mode" = "forced" ] \
+                            || { [ "$mode" = "current" ] \
+                                 && [ "${FLEET_CLONE_PRODUCERS_JOINED:-0}" = 1 ]; }; } \
                         && registry_record_is_stale_phantom "$record"; then
-                        echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; owner proven dead)"
+                        echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; mode=$mode, no clone request in flight)"
                         fleet_audit_update_registry_clone "$registry" "$clone_name" "" "" \
                             not-allocated-verified || return 1
                         rm -f "$record"
@@ -5901,7 +5964,13 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
                     unresolved=1
                     continue
                     ;;
-                *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
+                *)
+                    # Retain this exact name and keep reaping siblings whose IDs
+                    # are already proven; the overall cleanup still fails closed.
+                    echo "❌ ambiguous/unreadable owned clone name '$clone_name'; retaining ownership and refusing to provision" >&2
+                    unresolved=1
+                    continue
+                    ;;
             esac
         fi
         case "$id" in ''|*[!0-9a-f]*) echo "❌ malformed fleet machine ownership record: $record" >&2; return 1 ;; esac
@@ -12728,16 +12797,20 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
             mv "$names_ledger.tmp" "$names_ledger"
         fi
-        # Fix-from-the-start for the name-only orphan: an AMBIGUOUS clone failure
-        # (non-zero/timed-out, but not a recognized "definitively unallocated"
-        # error) that yields no id would otherwise retain its name record forever.
-        # That id-less orphan later aborts teardown/reconciliation on a single
-        # transient Fly-list read (the `*) return 1` reap arm) and leaks every
-        # already-id'd sibling. So resolve the reserved name AUTHORITATIVELY before
-        # retrying with a fresh name: bind the id if a machine did materialize, and
-        # RELEASE the reservation only on a definite "absent" (Fly list succeeded,
-        # zero matches). An unsafe/ambiguous read (resolve==2) stays fail-closed so
-        # a genuinely late-appearing clone is never orphaned.
+        # An AMBIGUOUS clone failure (non-zero/timed-out, but not a recognized
+        # "definitively unallocated" error) that yields no id is resolved by
+        # exact name before retrying with a fresh name: bind the id if a Machine
+        # is already list-visible. A list without the name is NOT proof of
+        # non-allocation here. In run600c Fly returned
+        # `failed to launch VM: ... 408` for launches that had already created
+        # (and later started) the Machine; it stayed absent from this short
+        # lookup window, so releasing the name leaked three running guests
+        # while their audits claimed not-allocated-verified. Keep the exact
+        # durable name-only ownership instead. Teardown resolves it by name
+        # after the provider visibility window, destroys a late Machine, and
+        # retires only an aged authoritative absence once every clone producer
+        # has been joined. An unsafe read (resolve==2) also keeps the local
+        # names-ledger entry, so a finished worker task fails closed.
         #
         # Skip the absent→not-allocated-verified transition when this attempt
         # already terminalized via the owned-volume path (insufficient-resources
@@ -12747,7 +12820,7 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
         # the retry loop after attempt 1 and surface as "unresolved clone name"
         # / "provisioning failed (no machine)" under capacity pressure.
         if [ -z "$target_id" ] && [ -z "$target_volume" ]; then
-            local reconciled_id reconcile_status already_cleaned=0
+            local reconciled_id reconcile_status reconcile_record already_cleaned=0
             if ! grep -Fxq "$target_name" "$names_ledger" 2>/dev/null; then
                 already_cleaned=1
             fi
@@ -12755,11 +12828,20 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
                 reconciled_id="$(registry_resolve_name "$target_name")"; reconcile_status=$?
                 case "$reconcile_status" in
                     0) target_id="$reconciled_id" ;;
-                    1) fleet_audit_update_fresh_clone "$target_name" "" "" \
-                           not-allocated-verified || return 1
-                       fleet_registry_release_name "$target_name" || return 1
-                       grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
-                       mv "$names_ledger.tmp" "$names_ledger" ;;
+                    1)
+                        # Restart the phantom TTL from this attempt's return:
+                        # the provider may still commit the create afterwards.
+                        reconcile_record="${FLEET_REGISTRY_DIR:-}/clones/$target_name"
+                        [ ! -f "$reconcile_record" ] || touch "$reconcile_record" || return 1
+                        printf 'clone name=%s absent after ambiguous failure; exact name ownership retained for teardown\n' \
+                            "$target_name" >> "$diagnostic_log"
+                        echo "⚠️  ambiguous clone '$target_name' is not provider-visible; retaining exact name ownership for teardown reconciliation" >&2
+                        # The durable registry record and ownership-pending audit
+                        # remain authoritative for teardown. A complete read
+                        # showed no Machine yet, so drop only this local scaling
+                        # entry: a finished worker task may cancel cleanly.
+                        grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+                        mv "$names_ledger.tmp" "$names_ledger" ;;
                     *) : ;;
                 esac
             fi
@@ -14995,7 +15077,8 @@ cleanup() {
                     break
                 fi
             done
-        elif ! reap_registry_clones "$FLEET_REGISTRY_DIR" current; then
+        elif ! FLEET_CLONE_PRODUCERS_JOINED="$billing_owned_joins" \
+            reap_registry_clones "$FLEET_REGISTRY_DIR" current; then
             echo "⚠️  FAILED to destroy all fleet-owned machines; durable ownership remains at $FLEET_REGISTRY_DIR" >&2
             ec=1
             teardown_failed=1
