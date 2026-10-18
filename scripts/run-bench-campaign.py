@@ -874,7 +874,13 @@ def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                                     CLOUDBENCH_SHARED_RELAY_PID=str(ready['pid']),
                                     CLOUDBENCH_SHARED_RELAY_BIRTH=ready['birth'],
                                     CLOUDBENCH_SHARED_RELAY_AGENT_PID=str(ready['agent']['pid']),
-                                    CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH=ready['agent']['birth'])
+                                    CLOUDBENCH_SHARED_RELAY_AGENT_BIRTH=ready['agent']['birth'],
+                                    # Every agent in this HOME loads the same single
+                                    # WireGuard peer. A child ssh/sftp call that
+                                    # starts the default agent opens a second session
+                                    # on it and stalls this relay's CONNECTs; so
+                                    # children reuse this one agent and tunnel.
+                                    FLY_AGENT_SOCKET_PATH=str(agent_socket))
         return value
     except BaseException:
         # No task child has been dispatched yet; these exact local children
@@ -974,6 +980,8 @@ def bind_shared_relay(environment, relay):
     ):
         environment.pop(key, None)
     if relay is not None:
+        # The campaign agent is the only agent; isolated mode would start another.
+        environment.pop("FLY_AGENT_ISOLATED", None)
         environment.update(relay["environment"])
 
 

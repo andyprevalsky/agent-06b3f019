@@ -566,4 +566,142 @@ finally:
                     if not value[name].closed:value[name].close()
 
 
+    def test_campaign_child_wireguard_flyctl_reuses_the_relay_agent(self):
+        """Children's ssh/sftp must share the campaign agent, never start another.
+
+        flyctl v0.4.115 clients use FLY_AGENT_SOCKET_PATH, else ~/.fly/fly-agent.sock,
+        and start a background agent where no agent answers PING (FLY_AGENT_ISOLATED
+        starts a private one). Every agent in HOME loads the same single
+        wire_guard_state peer. In the 100-copy sharded diagnostic, autoscaler worker
+        staging started a default agent on each controller, and its tunnel traffic on
+        that peer made relay CONNECTs retransmit until guest collection timed out.
+        """
+        import runpy,shutil
+        from unittest.mock import patch
+        f=RelayFixture(self,start_broker=False)
+        repo=f.root/'controller';(repo/'scripts/lib').mkdir(parents=True)
+        for relative,source in [('scripts/cloudbench-shared-relay.py',BROKER),('scripts/cloudbench-cleanup-tickets.py',ROOT/'scripts/cloudbench-cleanup-tickets.py'),('scripts/lib/cloudbench-inventory.sh',ROOT/'scripts/lib/cloudbench-inventory.sh'),('scripts/run-bench-cloud',ROOT/'scripts/run-bench-cloud'),('scripts/run-bench-fleet',ROOT/'scripts/run-bench-fleet')]:
+            shutil.copyfile(source,repo/relative)
+        def git(*args):
+            return subprocess.run(['git','-C',str(repo),*args],capture_output=True,text=True,check=True)
+        git('init','-q');git('add','scripts');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','exact local source fixture')
+        bin_path=f.root/'bin';bin_path.mkdir();home=f.root/'home';home.mkdir(mode=0o700)
+        fake=bin_path/'flyctl'
+        fake.write_text("""#!/usr/bin/env python3
+import json,os,signal,socket,struct,subprocess,sys,time
+from pathlib import Path
+root=Path(os.environ['PARENT_RELAY_CASE'])
+args=sys.argv[1:]
+agent_code="import importlib.machinery,importlib.util,os,sys,time;from pathlib import Path;l=importlib.machinery.SourceFileLoader('relay_fixture',os.environ['PARENT_RELAY_TEST']);s=importlib.util.spec_from_loader(l.name,l);m=importlib.util.module_from_spec(s);l.exec_module(m);p=Path(sys.argv[1]);a=m.FakeUnixAgent(p.parent,path=p);mode=sys.argv[2]\\nif mode=='bootstrap':sys.stdin.read();a.close();Path(os.environ['PARENT_RELAY_CASE'],'agent-eof-joined').write_text('true')\\nelse:\\n while True:time.sleep(1)"
+if args==['status','-a','fixture','--json']:
+ print(json.dumps(dict(Name='fixture',Organization=dict(Slug='fixture-org'),Network='default')));raise SystemExit()
+if args[:1]==['proxy']:
+ assert args==['proxy','0:1','::1','-a','fixture','--bind-addr','127.0.0.1','-q'],args
+ assert os.environ['FLY_AGENT_ISOLATED']=='1'
+ agent=subprocess.Popen([sys.executable,'-u','-c',agent_code,os.environ['FLY_AGENT_SOCKET_PATH'],'bootstrap'],stdin=subprocess.PIPE)
+ signal.signal(signal.SIGTERM,lambda *args:sys.exit(0))
+ try:
+  deadline=time.monotonic()+5
+  while not Path(os.environ['FLY_AGENT_SOCKET_PATH']).is_socket():
+   assert agent.poll()is None and time.monotonic()<deadline
+   time.sleep(.01)
+  print('Proxying localhost:fixture -> remote:1',flush=True)
+  while True:time.sleep(.05)
+ finally:
+  agent.stdin.close();agent.wait(timeout=3)
+assert args[:2] in (['ssh','console'],['ssh','sftp']),args
+def ask(path,payload):
+ stream=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);stream.settimeout(3);stream.connect(path)
+ stream.sendall(struct.pack('<H',len(payload))+payload)
+ def exact(count):
+  data=b''
+  while len(data)<count:
+   block=stream.recv(count-len(data));assert block,'short agent frame';data+=block
+  return data
+ reply=exact(struct.unpack('<H',exact(2))[0]);stream.close();return reply
+# Pinned client agent resolution: isolated private agent, explicit socket,
+# else the HOME default; a background agent starts where PING finds nobody.
+isolated=os.environ.get('FLY_AGENT_ISOLATED')=='1'
+path=os.environ.get('FLY_AGENT_SOCKET_PATH') or str(Path(os.environ['HOME'],'.fly','fly-agent.sock'))
+started=False
+try:
+ assert not isolated
+ reply=ask(path,b'ping')
+except (OSError,AssertionError):
+ started=True
+ if isolated:path=str(root/('isolated-%d.sock'%os.getpid()))
+ Path(path).parent.mkdir(parents=True,exist_ok=True)
+ daemon=subprocess.Popen([sys.executable,'-c',agent_code,path,'daemon'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+ with (root/'started-agent.pids').open('a')as stream:stream.write(str(daemon.pid)+'\\n')
+ deadline=time.monotonic()+5
+ while not Path(path).is_socket():
+  assert daemon.poll()is None and time.monotonic()<deadline
+  time.sleep(.01)
+ reply=ask(path,b'ping')
+assert reply.startswith(b'ok '),reply
+assert ask(path,b'connect fixture-org [fd00::1234]:22 10000 ')==b'ok'
+with (root/'wireguard-calls').open('a')as stream:
+ stream.write(json.dumps(dict(args=args,agent_socket=path,agent_pid=json.loads(reply[3:])['PID'],started_agent=started))+'\\n')
+""")
+        fake.chmod(0o700)
+        campaign=f.root/'campaign';campaign.mkdir()
+        module=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
+        environment=dict(os.environ,PATH=str(bin_path)+os.pathsep+os.environ['PATH'],HOME=str(home),FLY_BENCH_API_TOKEN='fixture-bench-token-over-twenty-characters',PARENT_RELAY_CASE=str(f.root),PARENT_RELAY_TEST=str(Path(__file__).resolve()))
+        for key in ('FLY_AGENT_SOCKET_PATH','FLY_AGENT_ISOLATED'):environment.pop(key,None)
+        value=None
+        def retire_started_agents():
+            # Fixture-owned exact PIDs only; never a pattern or process group.
+            for line in ((f.root/'started-agent.pids').read_text().split()if(f.root/'started-agent.pids').exists()else[]):
+                try:os.kill(int(line),signal.SIGKILL)
+                except ProcessLookupError:pass
+        self.addCleanup(retire_started_agents)
+        try:
+            with patch.dict(os.environ,environment,clear=True):
+                value=module['start_shared_relay'](repo,campaign,repo,f.feed,time.monotonic()+15)
+                relay_socket=json.loads(Path(value['authority']).read_text())['agent_socket']
+                # A campaign child inherits the parent environment through its one binding.
+                child=dict(os.environ)
+                module['bind_shared_relay'](child,value)
+                fleet=(ROOT/'scripts/run-bench-fleet').read_text()
+                functions=[]
+                for header in ('private_source_allows_provider_call() {','FLY() {','worker_operational() {'):
+                    begin=fleet.index('\n'+header)+1;functions.append(fleet[begin:fleet.index('\n}\n',begin)+3])
+                script='\n'.join([
+                    'set -eo pipefail',
+                    'source "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh"',
+                    'source "$ROOT_DIR/scripts/lib/cloudbench-archived-reuse.sh"',
+                    *functions,
+                    'APP=fixture;FLEET_WORKER_HEALTH_PORT=3103',
+                    '# The autoscaler health probe and staging upload use the production wrapper.',
+                    'worker_operational "$WORKER_ID" "$CASE"',
+                    'fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$WORKER_ID" -q -m 0755 "$CASE/payload" /data/payload',
+                ])
+                (f.root/'payload').write_text('fixture payload\n')
+                child.update(ROOT_DIR=str(ROOT),CASE=str(f.root),WORKER_ID=f.mid,FLEET_DIR=str(f.root/'fleet'))
+                result=subprocess.run(['bash','-c',script],cwd=repo,env=child,capture_output=True,text=True,timeout=60)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                calls=[json.loads(line)for line in (f.root/'wireguard-calls').read_text().splitlines()]
+                self.assertEqual([call['args'][:2]for call in calls],[['ssh','console'],['ssh','sftp']],calls)
+                for call in calls:
+                    self.assertFalse(call['started_agent'],'a campaign child started a second Fly agent: %r'%call)
+                    self.assertEqual(call['agent_socket'],relay_socket,call)
+                    self.assertEqual(call['agent_pid'],value['agent']['pid'],call)
+                self.assertFalse((f.root/'started-agent.pids').exists())
+                self.assertFalse((home/'.fly/fly-agent.sock').exists(),'default HOME agent socket was created')
+                # Stale inherited agent selection never outranks the campaign's agent.
+                child=dict(os.environ,FLY_AGENT_ISOLATED='1',FLY_AGENT_SOCKET_PATH=str(f.root/'stale-agent.sock'))
+                module['bind_shared_relay'](child,value)
+                self.assertEqual(child.get('FLY_AGENT_SOCKET_PATH'),relay_socket)
+                self.assertNotIn('FLY_AGENT_ISOLATED',child)
+                self.assertTrue(module['stop_shared_relay'](value))
+                self.assertTrue((f.root/'agent-eof-joined').exists())
+        finally:
+            if value:
+                for name in ('process','bootstrap'):
+                    process=value[name]
+                    if process.poll()is None:process.terminate();process.wait(timeout=4)
+                for name in ('log','bootstrap_log'):
+                    if not value[name].closed:value[name].close()
+
+
 if __name__=='__main__':unittest.main()

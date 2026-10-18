@@ -6,7 +6,6 @@ import math
 import os
 from pathlib import Path
 import re
-import shutil
 import signal
 import stat
 import subprocess
@@ -213,23 +212,6 @@ def fence(repo, parent, expected_birth, ref, campaign):
     if not owned or birth(parent.pid) != expected_birth:
         raise ValueError('parent lock owner mismatch')
 
-def start_fly_agent_outside_workspace(env):
-    """Start the default Fly agent from / before any campaign flyctl call.
-
-    flyctl starts one background `flyctl agent run` per HOME on first use and it
-    inherits that caller's working directory. Started from inside the repository
-    it outlives the campaign as a workspace writer and keeps the controller
-    export pending. Best effort: without it flyctl starts the agent as before.
-    """
-    binary = shutil.which('flyctl', path=env.get('PATH'))
-    if binary is None:
-        return None
-    try:
-        return subprocess.run([binary, 'agent', 'start'], cwd='/', env=env, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60).returncode
-    except (OSError, subprocess.SubprocessError):
-        return None
-
 @contextmanager
 def owned_parent(args, repo, env, destination, ref, epoch):
     """Keep this supervisor alive through exact parent cleanup after local failure."""
@@ -249,7 +231,6 @@ def owned_parent(args, repo, env, destination, ref, epoch):
     for sig in previous:
         signal.signal(sig, stop)
     try:
-        start_fly_agent_outside_workspace(env)
         parent = subprocess.Popen(args, cwd=repo, env=env)
         expected_birth = birth(parent.pid)
         if stop_requested:
