@@ -70,12 +70,13 @@ PORT_CLAIM_DIR=""
 # from its private sandbox, and the fake provider's guests and proxies. Only
 # this run's unique TMP_ROOT is matched, never another session's processes.
 fixture_process_pids() {
-    python3 - "$TMP_ROOT/" "$$" <<'PY'
+    # The suite-lifetime fake Machines API is owned by PIDS, not by a case.
+    python3 - "$TMP_ROOT/" "$$" "${FAKE_MACHINES_API_PID:-}" <<'PY'
 import os
 import sys
 
-root, shell = sys.argv[1], sys.argv[2]
-own = {shell, str(os.getpid()), str(os.getppid())}
+root, shell, api = sys.argv[1], sys.argv[2], sys.argv[3]
+own = {shell, str(os.getpid()), str(os.getppid()), api}
 for name in os.listdir("/proc"):
     if not name.isdigit() or name in own:
         continue
@@ -212,8 +213,9 @@ fail() {
     # terminal markers live in the per-bench run dir and explain intermittent
     # finalization failures. Dump the three newest so they outlive TMP_ROOT.
     local autoscaler_logs
+    # -r: with no autoscaler log, a bare `ls -t` would list (and dump) the cwd.
     autoscaler_logs="$(find "$TMP_ROOT" -name autoscaler.log -type f -print 2>/dev/null |
-        xargs ls -t 2>/dev/null | head -3)"
+        xargs -r ls -t 2>/dev/null | head -3)"
     for log in "$TMP_ROOT"/controller-*.log $autoscaler_logs; do
         [ -f "$log" ] || continue
         if [ "$(basename "$log")" = "autoscaler.log" ]; then
@@ -1481,6 +1483,189 @@ def release_worker_after_child(mdir, worker_id):
         time.sleep(0.1)
 
 
+def machines_listing():
+    with locked_state() as state:
+        machines = json.loads(json.dumps(state["machines"]))
+    if os.path.exists(os.path.join(FAKE_DIR, "stale-started-inventory")):
+        for machine in machines:
+            if machine.get("name") != "cloudbench-warm" and machine.get("state") == "stopped":
+                machine["state"] = "started"
+    return machines
+
+
+def native_stop(machine_id):
+    """One provider stop request, shared by flyctl and the Machines API: error or None."""
+    throttled = os.path.join(MARKERS, f"stop-throttled-{machine_id}")
+    if (
+        os.path.exists(os.path.join(FAKE_DIR, "throttle-first-machine-stop"))
+        and not os.path.exists(throttled)
+    ):
+        open(throttled, "w").close()
+        return 429, (
+            f"Error: failed to stop machine {machine_id}: request returned non-2xx "
+            "status, 429: rate limit exceeded (Request ID: fixture)"
+        )
+    with locked_state() as state:
+        found = find_machine(state, machine_id)
+        if found and not found.get("ignore_stop"):
+            found["state"] = "stopped"
+    return None
+
+
+def native_destroy(target):
+    """One provider force-destroy request, shared by flyctl and the Machines API."""
+    worker_marker = os.path.join(MARKERS, f"worker-clone-id-{target}")
+    destroy_failed = os.path.join(MARKERS, "worker-destroy-failed")
+    if (
+        os.path.exists(worker_marker)
+        and os.path.exists(os.path.join(FAKE_DIR, "fail-worker-destroy-once"))
+    ):
+        count_path = os.path.join(MARKERS, "worker-destroy-failure-count")
+        try:
+            destroy_failure_count = int(open(count_path).read().strip()) + 1
+        except (OSError, ValueError):
+            destroy_failure_count = 1
+        with open(count_path, "w") as fh:
+            fh.write(str(destroy_failure_count))
+        open(destroy_failed, "w").close()
+        # Exhaust reap_machine's five-attempt scale-down budget. Controller
+        # cleanup owns the same durable ID and its next (sixth) request succeeds.
+        if destroy_failure_count <= 5:
+            return 500, "injected worker scale-down destroy failure"
+    with locked_state() as state:
+        state["machines"] = [m for m in state["machines"] if m["id"] != target]
+    if os.path.exists(worker_marker):
+        open(os.path.join(MARKERS, "worker-scale-down-complete"), "w").close()
+    return None
+
+
+def machine_api_row(machine):
+    """Native Machines API row; each config generation is a new instance."""
+    row = json.loads(json.dumps(machine))
+    if not row.get("instance_id"):
+        digest = hashlib.sha256(
+            json.dumps([row["id"], row.get("config") or {}], sort_keys=True).encode()
+        ).hexdigest()
+        row["instance_id"] = "01" + digest[:24].upper()
+    return row
+
+
+def serve_machines_api(port_file):
+    """Loopback Machines API over the same journaled state as fake flyctl.
+
+    Controllers select it through the supported FLY_API_HOSTNAME and
+    FLY_FLAPS_BASE_URL overrides, so no fixture request reaches Fly.
+    """
+    import http.server
+    import threading
+
+    expected = "Bearer " + os.environ["CLOUDBENCH_FAKE_MACHINES_API_TOKEN"]
+    api_log = os.path.join(FAKE_DIR, "machines-api.log")
+    leases = {}
+    lease_lock = threading.Lock()
+
+    class MachinesApi(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_):
+            pass
+
+        def reply(self, status, value):
+            raw = json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            with open(api_log, "a") as fh:
+                fh.write(f"{self.command} {self.path} {status}\n")
+
+        def route(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
+            if self.headers.get("Authorization") != expected:
+                return self.reply(401, {"error": "fixture credential required"})
+            parts = urlsplit(self.path)
+            query = parse_qs(parts.query)
+            segments = parts.path.strip("/").split("/")
+            if segments[:2] != ["v1", "apps"] or len(segments) < 4 or segments[3] != "machines":
+                return self.reply(501, {"error": "route not modeled by fixture"})
+            app, rest = segments[2], segments[4:]
+            if app == PROD_APP:
+                with open(JOURNAL, "a") as journal:
+                    journal.write(f"FATAL machines API {self.command} {parts.path}\n")
+                return self.reply(403, {"error": "fake Machines API was pointed at the PRODUCTION app"})
+            if app != BENCH_APP:
+                return self.reply(404, {"error": "app not found"})
+            if not rest:
+                if self.command == "GET":
+                    return self.reply(200, [machine_api_row(m) for m in machines_listing()])
+                return self.reply(501, {"error": "route not modeled by fixture"})
+            machine_id, action = rest[0], rest[1:]
+            nonce = self.headers.get("fly-machine-lease-nonce")
+            if action == ["lease"] and self.command == "DELETE":
+                # The exact holder may release its lease after destroying the
+                # Machine under it (the existing reuse fakes model the same).
+                with lease_lock:
+                    held = leases.get(machine_id)
+                    if held is None or held["nonce"] != nonce:
+                        return self.reply(409, {"error": "lease nonce mismatch"})
+                    leases.pop(machine_id)
+                return self.reply(200, {"status": "success"})
+            found = next((m for m in machines_listing() if m["id"] == machine_id), None)
+            if found is None:
+                return self.reply(404, {"error": "machine not found"})
+            if action == ["lease"] and self.command == "POST":
+                with lease_lock:
+                    held = leases.get(machine_id)
+                    if held is not None and held["expires"] > time.time():
+                        return self.reply(409, {"error": "machine has an active lease"})
+                    ttl = int((json.loads(raw) if raw else {}).get("ttl") or 30)
+                    held = {"nonce": uuid.uuid4().hex, "expires": time.time() + ttl}
+                    leases[machine_id] = held
+                return self.reply(200, {"status": "success", "data": {
+                    "nonce": held["nonce"], "expires_at": int(held["expires"])}})
+            if self.command == "GET" and not action:
+                return self.reply(200, machine_api_row(found))
+            mutation = (
+                (self.command == "POST" and action == ["stop"])
+                or (self.command == "DELETE" and not action)
+            )
+            if not mutation:
+                return self.reply(501, {"error": "route not modeled by fixture"})
+            with lease_lock:
+                held = leases.get(machine_id)
+                if held is not None and held["expires"] > time.time() and held["nonce"] != nonce:
+                    return self.reply(409, {"error": "machine is leased by another owner"})
+            if self.command == "POST":
+                command, effect = f"machine stop {machine_id} -a {app}", native_stop
+            else:
+                if query.get("force") != ["true"] and found.get("state") not in ("stopped", "created"):
+                    return self.reply(412, {"error": "machine is active; force required"})
+                command, effect = f"machine destroy --force {machine_id} -a {app}", native_destroy
+            # The provider-effect journal keeps flyctl's vocabulary, so every
+            # existing native-effect assertion sees both transports.
+            with open(JOURNAL, "a") as journal:
+                journal.write(command + "\n")
+            error = effect(machine_id)
+            if error is not None:
+                return self.reply(error[0], {"error": error[1]})
+            return self.reply(200, {"ok": True})
+
+        do_GET = route
+        do_POST = route
+        do_DELETE = route
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MachinesApi)
+    with open(port_file + ".tmp", "w") as fh:
+        fh.write(str(server.server_port))
+    os.replace(port_file + ".tmp", port_file)
+    server.serve_forever()
+
+
+if args[:1] == ["__machines_api__"]:
+    serve_machines_api(args[1])
+    sys.exit(0)
 if args[:1] == ["__fake_driver__"]:
     run_fake_driver(args[1])
     sys.exit(0)
@@ -1508,13 +1693,7 @@ elif args[:2] == ["secrets", "set"]:
 elif args[:2] == ["apps", "list"]:
     print(json.dumps([{"Name": BENCH_APP}]))
 elif args[:2] == ["machines", "list"]:
-    with locked_state() as state:
-        machines = json.loads(json.dumps(state["machines"]))
-    if os.path.exists(os.path.join(FAKE_DIR, "stale-started-inventory")):
-        for machine in machines:
-            if machine.get("name") != "cloudbench-warm" and machine.get("state") == "stopped":
-                machine["state"] = "started"
-    print(json.dumps(machines))
+    print(json.dumps(machines_listing()))
 elif args[:2] == ["volumes", "list"]:
     # Fault injection for the pre-allocation durability boundary: registry init
     # has completed, but persisting the target name must now fail.
@@ -1764,47 +1943,15 @@ elif args[:2] == ["machine", "start"]:
             start_new_session=True,
         )
 elif args[:2] == ["machine", "stop"]:
-    throttled = os.path.join(MARKERS, f"stop-throttled-{args[2]}")
-    if (
-        os.path.exists(os.path.join(FAKE_DIR, "throttle-first-machine-stop"))
-        and not os.path.exists(throttled)
-    ):
-        open(throttled, "w").close()
-        print(
-            f"Error: failed to stop machine {args[2]}: request returned non-2xx "
-            "status, 429: rate limit exceeded (Request ID: fixture)",
-            file=sys.stderr,
-        )
+    error = native_stop(args[2])
+    if error is not None:
+        print(error[1], file=sys.stderr)
         sys.exit(1)
-    with locked_state() as state:
-        found = find_machine(state, args[2])
-        if found and not found.get("ignore_stop"):
-            found["state"] = "stopped"
 elif args[:2] == ["machine", "destroy"]:
-    target = args[3] if args[2] == "--force" else args[2]
-    worker_marker = os.path.join(MARKERS, f"worker-clone-id-{target}")
-    destroy_failed = os.path.join(MARKERS, "worker-destroy-failed")
-    if (
-        os.path.exists(worker_marker)
-        and os.path.exists(os.path.join(FAKE_DIR, "fail-worker-destroy-once"))
-    ):
-        count_path = os.path.join(MARKERS, "worker-destroy-failure-count")
-        try:
-            destroy_failure_count = int(open(count_path).read().strip()) + 1
-        except (OSError, ValueError):
-            destroy_failure_count = 1
-        with open(count_path, "w") as fh:
-            fh.write(str(destroy_failure_count))
-        open(destroy_failed, "w").close()
-        # Exhaust reap_machine's five-attempt scale-down budget. Controller
-        # cleanup owns the same durable ID and its next (sixth) request succeeds.
-        if destroy_failure_count <= 5:
-            print("injected worker scale-down destroy failure", file=sys.stderr)
-            sys.exit(1)
-    with locked_state() as state:
-        state["machines"] = [m for m in state["machines"] if m["id"] != target]
-    if os.path.exists(worker_marker):
-        open(os.path.join(MARKERS, "worker-scale-down-complete"), "w").close()
+    error = native_destroy(args[3] if args[2] == "--force" else args[2])
+    if error is not None:
+        print(error[1], file=sys.stderr)
+        sys.exit(1)
 elif args[:3] == ["ssh", "sftp", "put"]:
     mdir = machine_dir(flag_value("--machine"))
     # positional tail after dropping flag values: [-a APP, --machine ID, -m MODE]
@@ -2324,6 +2471,79 @@ exec python3 "$FAKE_DIR/flyctl.py" "\$@"
 SH
 chmod +x "$FAKE_BIN/flyctl"
 
+# Controllers also reach Fly through raw Machines API helpers (fenced
+# stop/destroy, start accounting). Serve those from the same fake state on
+# loopback through their supported endpoint overrides; unmodeled routes such as
+# optional dependency-proof metadata are refused. A fixture must never send even
+# its fake credential to the real provider.
+FAKE_FLY_TOKEN="fake-offline-fleet-token"
+rm -f "$FAKE_DIR/machines-api.port"
+CLOUDBENCH_FAKE_DIR="$FAKE_DIR" CLOUDBENCH_FAKE_MACHINES_API_TOKEN="$FAKE_FLY_TOKEN" \
+    python3 "$FAKE_DIR/flyctl.py" __machines_api__ "$FAKE_DIR/machines-api.port" \
+    >"$FAKE_DIR/machines-api.stderr" 2>&1 &
+FAKE_MACHINES_API_PID=$!
+PIDS+=("$FAKE_MACHINES_API_PID")
+for _ in $(seq 1 100); do
+    [ -s "$FAKE_DIR/machines-api.port" ] && break
+    kill -0 "$FAKE_MACHINES_API_PID" 2>/dev/null || break
+    sleep 0.1
+done
+FAKE_MACHINES_API_PORT="$(cat "$FAKE_DIR/machines-api.port" 2>/dev/null || true)"
+case "$FAKE_MACHINES_API_PORT" in
+    ''|*[!0-9]*) cat "$FAKE_DIR/machines-api.stderr" >&2; fail "fake Machines API did not start" ;;
+esac
+export FLY_API_HOSTNAME="http://127.0.0.1:$FAKE_MACHINES_API_PORT"
+export FLY_FLAPS_BASE_URL="$FLY_API_HOSTNAME"
+
+fake_machines_api_contract() (
+    local mid journal rc
+    mid="$(python3 -c 'import uuid; print(uuid.uuid4().hex[:14])')"
+    add_fake_machine "$mid" cloudbench-api-contract started 0
+    journal="$TMP_ROOT/fenced-effect-contract"
+    : > "$FAKE_DIR/machines-api.log"
+    # The production helper fails closed without a credential: no request.
+    for token_case in unset empty; do
+        rc=0
+        if [ "$token_case" = unset ]; then
+            env -u FLY_API_TOKEN python3 -S "$ROOT_DIR/scripts/cloudbench-archived-machine-reuse.py" \
+                fenced-effect --machine "$mid" --operation destroy --journal "$journal-$token_case" \
+                >/dev/null 2>&1 || rc=$?
+        else
+            FLY_API_TOKEN="" python3 -S "$ROOT_DIR/scripts/cloudbench-archived-machine-reuse.py" \
+                fenced-effect --machine "$mid" --operation destroy --journal "$journal-$token_case" \
+                >/dev/null 2>&1 || rc=$?
+        fi
+        [ "$rc" -ne 0 ] || { echo "FAIL: fenced effect ran with a $token_case credential" >&2; return 1; }
+    done
+    [ ! -s "$FAKE_DIR/machines-api.log" ] \
+        || { echo "FAIL: a credential-less fenced effect sent a Machines request" >&2; return 1; }
+    # A foreign credential is refused by the fake, and nothing changes.
+    rc=0
+    FLY_API_TOKEN="not-the-fixture-token-at-all" python3 -S \
+        "$ROOT_DIR/scripts/cloudbench-archived-machine-reuse.py" fenced-effect --machine "$mid" \
+        --operation destroy --journal "$journal-foreign" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] && fake_machine_exists "$mid" \
+        || { echo "FAIL: the fake Machines API accepted a foreign credential" >&2; return 1; }
+    # The exact fixture credential performs one leased, journaled destroy.
+    FLY_API_TOKEN="$FAKE_FLY_TOKEN" python3 -S "$ROOT_DIR/scripts/cloudbench-archived-machine-reuse.py" \
+        fenced-effect --machine "$mid" --operation destroy --journal "$journal-fixture" \
+        || { echo "FAIL: the fixture fenced destroy failed" >&2; return 1; }
+    if fake_machine_exists "$mid"; then echo "FAIL: fenced destroy left the Machine" >&2; return 1; fi
+    grep -qxF "machine destroy --force $mid -a $FLEET_BENCH_APP" "$FAKE_DIR/journal.log" \
+        || { echo "FAIL: fenced destroy was not journaled as a native effect" >&2; return 1; }
+    python3 - "$FAKE_DIR/machines-api.log" "$mid" "$FLEET_BENCH_APP" <<'PY'
+import sys
+rows = [line.split() for line in open(sys.argv[1])]
+mid, app = sys.argv[2:]
+base = f"/v1/apps/{app}/machines/{mid}"
+assert [r for r in rows if r[2] == "401"] == [["POST", base + "/lease", "401"]], rows
+assert [r for r in rows if r[2] != "401"] == [
+    ["POST", base + "/lease", "200"], ["GET", base, "200"],
+    ["DELETE", base + "?force=true", "200"], ["DELETE", base + "/lease", "200"],
+], rows
+PY
+)
+
 journal_must_be_read_only() {  # journal_must_be_read_only <phase>
     if grep -qE '^secrets set' "$FAKE_DIR/journal.log"; then
         fail "$1: the benchmark run path must never stage app-level secrets (refresh is an explicit maintenance op)"
@@ -2370,12 +2590,14 @@ os.execvp(sys.argv[1], sys.argv[1:])')
     # (which needs a real /data/repo volume the fake does not simulate).
     # Leaked GIT_* / CLOUDBENCH_FLEET_ROOT from a parent agent shell must not
     # redirect this worktree's ownership roots into a foreign sandbox.
+    # Real provider credentials must not reach the fixture's children either.
     env -u CLOUDBENCH_SNAPSHOT_ID -u CLOUDBENCH_FLEET_ROOT \
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
         -u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS \
+        -u FLY_API_TOKEN -u FLY_ACCESS_TOKEN \
         PATH="$FAKE_BIN:$PATH" \
         TMPDIR="$SCRIPT_SNAPSHOT_TMP" \
-        FLY_BENCH_API_TOKEN="fake-offline-fleet-token" \
+        FLY_BENCH_API_TOKEN="$FAKE_FLY_TOKEN" \
         CONDUCTOR_PORT="$port" \
         BENCHMARK_HUB_UPLOAD_URL="http://127.0.0.1:$((port + 5764))" \
         BENCHMARK_HUB_API_KEY="test-key" \
@@ -2468,6 +2690,14 @@ with open(os.environ["FAKE_STATE"]) as fh:
 raise SystemExit(0 if any(machine["id"] == os.environ["MACHINE_ID"] for machine in machines) else 1)
 PY
 }
+
+cp "$FAKE_DIR/state.json" "$FAKE_DIR/state.before-api-contract"
+cp "$FAKE_DIR/journal.log" "$FAKE_DIR/journal.before-api-contract" 2>/dev/null || : > "$FAKE_DIR/journal.before-api-contract"
+fake_machines_api_contract || fail "raw Machines API effects must use the hermetic fixture provider"
+mv "$FAKE_DIR/state.before-api-contract" "$FAKE_DIR/state.json"
+mv "$FAKE_DIR/journal.before-api-contract" "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/machines-api.log"
+echo "PASS: raw Machines API effects use the fixture provider and fail closed without a credential"
 
 remove_fake_machine_and_volume_exact() {  # <machine-id> <volume-id>
     FAKE_STATE="$FAKE_DIR/state.json" MACHINE_ID="$1" VOLUME_ID="$2" python3 - <<'PY'
