@@ -41,6 +41,8 @@ class CampaignTickets(unittest.TestCase):
                 "run-bench-campaign.py",
                 "cloudbench-cleanup-tickets.py",
                 "cloudbench-infra-canary-preflight.py",
+                "cloudbench-provider-capacity.py",
+                "cloudbench-provider-limits.json",
             ):
                 shutil.copyfile(ROOT / "scripts" / name, scripts / name)
             if "external" in mode:
@@ -333,6 +335,13 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                     RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT=repr(SHARD_EPOCH),
                     FIXTURE_BARRIER_SECONDS="6" if mode == "external-deadline" else "30",
                 )
+                # This 600-copy group exceeds the reviewed provider cap; select a
+                # validated wide registry (every limit x100), never a skip.
+                limits = json.loads((ROOT / "scripts/cloudbench-provider-limits.json").read_text())
+                for row in limits["enforced"] + limits["informational"]:
+                    row["limit"] *= 100
+                (root / "provider-limits.json").write_text(json.dumps(limits))
+                env["CLOUDBENCH_PROVIDER_LIMITS_FILE"] = str(root / "provider-limits.json")
             if mode == "fresh":
                 stamp = root / ".context/fleet-infra-canary.last-pass"
                 stamp.parent.mkdir(parents=True, exist_ok=True)

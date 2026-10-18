@@ -1549,6 +1549,39 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
     fi
 fi
 
+# Provider rate limits are shared with production. Refuse a launch wider than
+# the reviewed provider cap (scripts/cloudbench-provider-limits.json) before
+# credentials, detaching, locks or any Fly call. A campaign child counts its
+# whole campaign or sharded group, never only itself; the inherited widths can
+# only raise the counted width. Only task-free infra probes and validated
+# read-only DEMO replays make no live task-agent provider calls.
+provider_capacity_simultaneous_benches() {
+    local width="${#BENCHES[@]}" name value
+    for name in CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES; do
+        value="${!name:-}"
+        [ -n "$value" ] || continue
+        case "$value" in
+            *[!0-9]*|0*) echo "❌ $name must be a positive integer" >&2; return 1 ;;
+        esac
+        [ "${#value}" -le 6 ] || { echo "❌ $name exceeds the campaign group bound" >&2; return 1; }
+        [ "$value" -le "$width" ] || width="$value"
+    done
+    printf '%s\n' "$width"
+}
+if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ] && [ "$INFRA_PROBE" != "1" ]; then
+    if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ] \
+        && python3 -B "$ROOT_DIR/scripts/cloudbench-demo-cache.py" \
+            "$ROOT_DIR/agents/benchmarks/tasks.json" "${BENCHES[@]}" >/dev/null 2>&1; then
+        echo "🧊 provider rate-limit cap not applied: validated DEMO replay makes no live task-agent provider calls"
+    else
+        provider_capacity_width="$(provider_capacity_simultaneous_benches)" || exit 2
+        provider_capacity_status=0
+        python3 -I -S -B "$ROOT_DIR/scripts/cloudbench-provider-capacity.py" \
+            check --benches "$provider_capacity_width" || provider_capacity_status=$?
+        [ "$provider_capacity_status" -eq 0 ] || exit "$provider_capacity_status"
+    fi
+fi
+
 [ "$RECOVER_STALE_ONLY" = "1" ] \
     || { [ -z "$BENCH_REF" ] && BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"; }
 canonicalize_bench_ref() {

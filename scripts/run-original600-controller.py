@@ -811,12 +811,22 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
 
 
 
-def shard_selection(args, runner):
-    """Ordered task selection and shard plan for a fresh run (None = legacy single controller)."""
-    manifest = json.loads(runner['read'](args.tasks))
+def selected_task_count(args, manifest):
     count = len(manifest) if args.task_count is None else args.task_count
     if not 1 <= count <= len(manifest) or not 1 <= args.repetitions <= 10:
         raise ValueError('--task-count must select 1..%d manifest tasks and --repetitions 1..10' % len(manifest))
+    return count
+
+
+def simultaneous_copies(args, runner):
+    """Global simultaneous benches: every copy of every selected task, across all shards."""
+    return selected_task_count(args, json.loads(runner['read'](args.tasks))) * args.repetitions
+
+
+def shard_selection(args, runner):
+    """Ordered task selection and shard plan for a fresh run (None = legacy single controller)."""
+    manifest = json.loads(runner['read'](args.tasks))
+    count = selected_task_count(args, manifest)
     if args.controllers == '1' and count == len(manifest) and args.repetitions == 3:
         return None  # explicit single controller: the original 200x3 shape
     coordinator = runpy.run_path(str(Path(__file__).with_name('cloudbench-shard-coordinator.py')))
@@ -1912,6 +1922,19 @@ def main():
         if archive.resolve(strict=True) != archive or not archive.is_dir():
             raise ValueError('original archive run must be a physical directory')
     runner['campaign_argv'](json.loads(runner['read'](args.tasks)), time.time())
+    # Every mode (--check, --run and continuations) admits all copies at once:
+    # refuse a width above the provider rate-limit cap before any credential,
+    # Fly CLI or provider read.
+    copies = simultaneous_copies(args, runner)
+    capacity = runpy.run_path(str(root/'scripts/cloudbench-provider-capacity.py'))
+    try:
+        refused = capacity['check'](copies)
+    except capacity['RegistryError'] as error:
+        raise ValueError(str(error)) from None
+    if refused:
+        print(json.dumps(dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=args.source_ref, copies=copies,
+                              max_concurrent_benches=capacity['load_registry']()['cap'], provider_calls=0)))
+        return refused
     facts_from(runner['read'](args.facts))
     token_from_agents(runner['read'](args.agents_env))
     github = github_token(root, args.backend_env, args.agents_env)

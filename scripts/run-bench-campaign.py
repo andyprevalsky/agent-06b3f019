@@ -1062,6 +1062,31 @@ def campaign_workspace(root: Path, forward_args: list[str]) -> tuple[Path, dict[
                        "snapshot": str(snapshot), "snapshot_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}
 
 
+PROVIDER_GLOBAL_BENCHES_ENV = "CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES"
+
+
+def campaign_simultaneous_benches(concurrency: int, job_count: int, group_total: int | None) -> int:
+    """Global simultaneous benches: this campaign's width, or the whole sharded group's."""
+    if concurrency < 1 or job_count < 1:
+        raise ValueError("campaign width requires positive concurrency and jobs")
+    # A shard's own --concurrency is only its slice of one externally released
+    # group; every shard's members run at the same time.
+    return max(min(concurrency, job_count), group_total or 0)
+
+
+def provider_capacity_refusal(benches: int) -> int:
+    """0 when the provider rate-limit cap admits `benches`; else its refusal exit code.
+
+    The helper and its reviewed registry ship beside this control script, so a
+    separate task workspace cannot substitute other limits.
+    """
+    capacity = runpy.run_path(str(Path(__file__).resolve().with_name("cloudbench-provider-capacity.py")))
+    try:
+        return capacity["check"](benches)
+    except capacity["RegistryError"] as error:
+        raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
+
+
 def main() -> int:
     args = parse_args()
     if args.runs < 1 or args.concurrency < 1 or not args.task:
@@ -1104,6 +1129,17 @@ def main() -> int:
         rows = get_task_metadata(root / "agents/benchmarks/tasks.json", args.task)
         print(json.dumps(stress_default_requirements(root, rows, peak=args.concurrency, baseline=None, repetitions=args.runs if args.concurrency == 600 else 1), indent=2))
         return 2  # Planning only: baseline unknown, no campaign/provider mutation.
+    global_benches = campaign_simultaneous_benches(
+        args.concurrency, len(args.task) * args.runs, shard["group_total"]
+    )
+    if "--demo-cache" in args.forward_arg:
+        # Read-only DEMO replays: each child's run-bench admits only replay
+        # tasks (no browser) before provisioning; no live task-agent calls.
+        print("🧊 provider rate-limit cap not applied: --demo-cache replay makes no live task-agent provider calls")
+    else:
+        refused = provider_capacity_refusal(global_benches)
+        if refused:
+            return refused
     controller_nice = os.environ.get("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE", "0")
     if controller_nice not in ("0", "10"):
         raise SystemExit("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE must be 0 or 10")
@@ -1848,6 +1884,8 @@ def main() -> int:
                         # Fleets pace guest Temporal visibility calls across
                         # every concurrently admitted campaign controller.
                         "CLOUDBENCH_CAMPAIGN_CONCURRENT_GUESTS": str(args.concurrency),
+                        # The provider rate-limit check counts the whole group.
+                        PROVIDER_GLOBAL_BENCHES_ENV: str(global_benches),
                         "RUN_BENCH_CAMPAIGN_JOB_ID": str(job["job_id"]),
                         "RUN_BENCH_CAMPAIGN_RUN": str(job["run"]),
                         "RUN_BENCH_CAMPAIGN_TASK": str(job["task"]),

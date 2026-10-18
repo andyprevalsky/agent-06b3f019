@@ -329,6 +329,7 @@ run_suite "Benchmark Live Results" python3 scripts/tests/benchmark-live-results.
 run_suite "Benchmark Campaign Grouping" bash scripts/tests/campaign-hub-grouping.test.sh
 run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
 run_suite "Original600 Portable Operator" python3 scripts/tests/original600-portable-operator.test.py
+run_suite "Benchmark Provider Rate-Limit Concurrency Cap" python3 scripts/tests/cloudbench-provider-capacity.test.py
 run_suite "Sharded Benchmark Controllers" python3 scripts/tests/cloudbench-shard-coordinator.test.py
 run_suite "Original600 Bulk Controller Transfer" python3 scripts/tests/cloudbench-controller-bulk-transfer.test.py
 run_suite "Original600 Existing Controller Payload Recovery" python3 scripts/tests/cloudbench-resume-controller-payload.test.py

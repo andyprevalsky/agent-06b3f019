@@ -40,6 +40,26 @@ def private(path, value):
     return path
 
 
+PROVIDER_CAPACITY_MEMBERS = ('cloudbench-provider-capacity.py', 'cloudbench-provider-limits.json')
+PROVIDER_REFUSAL_600 = """\
+❌ Benchmark concurrency is limited by provider rate limits: requested 600 concurrent benches, maximum 70.
+Limiting providers (20% of each limit reserved for production):
+  - Parallel Search+Extract API: 600 requests/min per key (PARRALLEL_API_KEY) → max 70 concurrent benches (peak 6.83 requests/min per bench, measured run600c)
+  - Kernel browser sessions: 150 concurrent sessions, Start-up plan (KERNEL_API_KEY) → max 135 concurrent benches (peak 0.884 sessions per bench, measured run600c)
+STOP: do not retry, split, or work around this limit. Halt and ask the user to either
+  1. increase these provider rate limits (then record the new limits in scripts/cloudbench-provider-limits.json), or
+  2. rerun with a lower concurrency (70 or fewer concurrent benches).
+"""
+
+
+def wide_provider_limits():
+    """The reviewed registry with every limit raised 100x: a validated wide-fixture registry, not a skip."""
+    value = json.loads((ROOT/'scripts/cloudbench-provider-limits.json').read_text())
+    for row in value['enforced'] + value['informational']:
+        row['limit'] *= 100
+    return value
+
+
 def warm_fixture(now=None, listed=True, status='created', created_age=86400, retention=5, metadata_snapshot=None):
     """Producer-shaped donor Machine, snapshot listing and the two operator inputs."""
     now = time.time() if now is None else now
@@ -1645,10 +1665,9 @@ class Portable(unittest.TestCase):
                 server.server_close()
             self.assertFalse(thread.is_alive())
 
-    def test_public_check_is_path_independent_read_only_and_creates_no_state(self):
-        now = time.time()
-        fixture = warm_fixture(now)
-        requests = []
+    @contextmanager
+    def public_check(self, fixture, requests, limits=None):
+        """The public CLI in a committed fixture checkout; `limits` selects a validated registry."""
         class Machines(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 requests.append(('GET', self.path, self.headers.get('Authorization')))
@@ -1680,6 +1699,9 @@ class Portable(unittest.TestCase):
                 target.write_bytes(selected.read_bytes())
             (root/'scripts/lib').mkdir(exist_ok=True)
             (root/'scripts/lib/cloudbench-env.sh').write_bytes((ROOT/'scripts/lib/cloudbench-env.sh').read_bytes())
+            # The committed provider rate-limit helper and its reviewed registry.
+            for member in PROVIDER_CAPACITY_MEMBERS:
+                (root/'scripts'/member).write_bytes((ROOT/'scripts'/member).read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             subprocess.run(['git', '-C', str(root), 'add', 'scripts'], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
@@ -1693,7 +1715,7 @@ class Portable(unittest.TestCase):
             fakebin.mkdir()
             marker = inputs/'provider-called'
             fly = fakebin/'flyctl'
-            fly.write_text('#!/bin/sh\nif [ "$1" = version ]; then echo "flyctl v0.4.115 linux/amd64"; exit 0; fi\n: > "$PROVIDER_MARKER"\nexit 99\n')
+            fly.write_text('#!/bin/sh\nif [ "$1" = version ]; then : > "$PROVIDER_MARKER.version"; echo "flyctl v0.4.115 linux/amd64"; exit 0; fi\n: > "$PROVIDER_MARKER"\nexit 99\n')
             fly.chmod(0o700)
             args = [sys.executable, str(root/'scripts/run-original600-controller.py'), '--source-ref', ref,
                     '--state-dir', str(state)]
@@ -1708,6 +1730,16 @@ class Portable(unittest.TestCase):
                        GIT_CONFIG_GLOBAL='/dev/null',GIT_CONFIG_NOSYSTEM='1',
                        FLY_API_HOSTNAME='http://127.0.0.1:'+str(server.server_port))
             for key in ['GITHUB_TOKEN','GH_TOKEN','CLOUDBENCH_GITHUB_TOKEN_B64']:env.pop(key,None)
+            if limits is not None:
+                env['CLOUDBENCH_PROVIDER_LIMITS_FILE'] = str(private(inputs/'provider-limits.json', limits))
+            yield types.SimpleNamespace(root=root, args=args, env=env, marker=marker, state=state, inputs=inputs, fakebin=fakebin)
+
+    def test_public_check_is_path_independent_read_only_and_creates_no_state(self):
+        now = time.time()
+        fixture = warm_fixture(now)
+        requests = []
+        with self.public_check(fixture, requests, limits=wide_provider_limits()) as fx:
+            root, args, env, marker, state, inputs = fx.root, fx.args, fx.env, fx.marker, fx.state, fx.inputs
             result = subprocess.run(args, cwd='/', env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             check = json.loads(result.stdout)
@@ -1772,6 +1804,39 @@ class Portable(unittest.TestCase):
             # Disabled/invalid policy runs read twice each; local refusals read nothing.
             self.assertEqual(len(requests), 2)
             self.assertEqual(list(state.iterdir()), [])
+
+    def test_provider_capacity_refuses_600_copies_before_any_credential_or_provider_read(self):
+        requests = []
+        with self.public_check(warm_fixture(time.time()), requests) as fx:
+            for mode in ([], ['--run']):
+                result = subprocess.run(fx.args + mode, cwd='/', env=fx.env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 78, result.stderr)
+                self.assertEqual(result.stderr, PROVIDER_REFUSAL_600)
+                self.assertEqual(json.loads(result.stdout), dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=fx.args[3],
+                                                                 copies=600, max_concurrent_benches=70, provider_calls=0))
+                self.assertNotIn('CHECKED_NOT_LAUNCHED', result.stdout)
+            # No Fly API read, no flyctl invocation (not even version), no GitHub read, no state.
+            self.assertEqual(requests, [])
+            self.assertFalse(fx.marker.exists())
+            self.assertFalse(Path(str(fx.marker) + '.version').exists())
+            self.assertEqual(list(fx.state.iterdir()), [])
+            # The sharded diagnostic ladder counts every copy of every selected task.
+            over = subprocess.run(fx.args + ['--task-count', '71', '--repetitions', '1'], cwd='/', env=fx.env,
+                                  capture_output=True, text=True, timeout=10)
+            self.assertEqual(over.returncode, 78, over.stderr)
+            self.assertIn('requested 71 concurrent benches, maximum 70.', over.stderr)
+            self.assertIn('  - Parallel Search+Extract API: 600 requests/min per key', over.stderr)
+            self.assertNotIn('Kernel browser sessions', over.stderr)
+            self.assertEqual((requests, list(fx.state.iterdir())), ([], []))
+            # Exactly the cap proceeds to the ordinary read-only check.
+            fits = subprocess.run(fx.args + ['--task-count', '35', '--repetitions', '2'], cwd='/', env=fx.env,
+                                  capture_output=True, text=True, timeout=10)
+            self.assertEqual(fits.returncode, 0, fits.stderr)
+            check = json.loads(fits.stdout)
+            self.assertEqual((check['status'], check['copies']), ('CHECKED_NOT_LAUNCHED', 70))
+            self.assertNotIn('❌', fits.stderr)
+            self.assertEqual(len(requests), 2)
+            self.assertEqual(list(fx.state.iterdir()), [])
 
     def test_warm_snapshot_preflight_refuses_expired_or_unproven_pin_before_allocation(self):
         now = time.time()
