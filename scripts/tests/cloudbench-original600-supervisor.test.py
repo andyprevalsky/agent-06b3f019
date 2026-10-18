@@ -74,7 +74,7 @@ while True:time.sleep(.01)
    def fail_save(path,raw):
     if path.name=='threshold-original-parent.private.json':raise OSError('injected post-spawn save failure')
     return real_save(path,raw)
-   command=['operator',str(epoch),'bash','scripts/run-bench','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref','c9875959893737ed352b6ccd08372faa94a4745d','--strict-barrier',*tasks]
+   command=['operator',str(epoch),'bash','scripts/run-bench','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref','1387ae608e7cfb8e3f0a876daae92093f503b465','--strict-barrier',*tasks]
    env=dict(REVIEWED_OPERATOR_ROOT=str(repo),REVIEWED_OPERATOR_SOURCE_REF=ref,REVIEWED_OPERATOR_TASKS=str(tasks_path),REVIEWED_OPERATOR_TASKS_SHA256=__import__('hashlib').sha256(tasks_path.read_bytes()).hexdigest())
    handlers={s:signal.getsignal(s)for s in(signal.SIGTERM,signal.SIGINT)}
    try:
@@ -146,7 +146,7 @@ while True:time.sleep(.01)
                  "--e2e-started-at",
                  str(epoch),
                  "--ref",
-                 "c9875959893737ed352b6ccd08372faa94a4745d",
+                 "1387ae608e7cfb8e3f0a876daae92093f503b465",
                  "--strict-barrier",
                  *tasks,
              ]
@@ -279,7 +279,7 @@ class Shard(unittest.TestCase):
    return child
   jobs=str(len(shard['tasks'])*shard['runs'])
   task_timeout,e2e_timeout=timeouts or (str(shard.get('task_timeout',1200)),str(shard.get('e2e_timeout',5400)))
-  command=['operator',str(epoch),'bash','scripts/run-bench','--strict-barrier','--concurrency',jobs,'-k',str(shard['runs']),'--retry-infra','1','--timeout',task_timeout,'--e2e-timeout',e2e_timeout,'--e2e-started-at',str(epoch),'--ref','c9875959893737ed352b6ccd08372faa94a4745d',*shard['tasks']]
+  command=['operator',str(epoch),'bash','scripts/run-bench','--strict-barrier','--concurrency',jobs,'-k',str(shard['runs']),'--retry-infra','1','--timeout',task_timeout,'--e2e-timeout',e2e_timeout,'--e2e-started-at',str(epoch),'--ref','1387ae608e7cfb8e3f0a876daae92093f503b465',*shard['tasks']]
   env=dict(REVIEWED_OPERATOR_ROOT=str(repo),REVIEWED_OPERATOR_SOURCE_REF=ref,REVIEWED_OPERATOR_TASKS=str(tasks_path),REVIEWED_OPERATOR_TASKS_SHA256=hashlib.sha256(tasks_path.read_bytes()).hexdigest(),
            REVIEWED_OPERATOR_IDENTITY_PATH=str(identity),REVIEWED_OPERATOR_SHARD=str(shard_path),REVIEWED_OPERATOR_SHARD_SHA256=hashlib.sha256(shard_path.read_bytes()).hexdigest(),
            RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER=str(identity.with_suffix('.barrier')),RUN_BENCH_CAMPAIGN_TASK_INDEXES=','.join(map(str,shard['task_indexes'])),RUN_BENCH_CAMPAIGN_GROUP_TOTAL=str(shard['group_total']),

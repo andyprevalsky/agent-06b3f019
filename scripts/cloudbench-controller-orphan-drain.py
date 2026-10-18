@@ -77,7 +77,7 @@ def owner(path,repo,common,pending,ref):
  run=meta['run_id'];need(re.fullmatch('[0-9]{8}-[0-9]{6}-[0-9]+',run) and run.endswith('-'+str(pid)),'run/PID mismatch')
  need(meta['owned_ids_file']==str(audit/'owned-clones.ids') and meta['owned_names_file']==str(audit/'owned-clones.names'),'owned files differ')
  need(argv[:2]==['bash',str(repo/'scripts/run-bench-fleet')] and len(argv)>2 and '--foreground' in argv and '--strict-barrier' in argv,'unsupported fleet invocation')
- task=argv[2];taskref='c9875959893737ed352b6ccd08372faa94a4745d'
+ task=argv[2];taskref='1387ae608e7cfb8e3f0a876daae92093f503b465'
  need('--ref' in argv and argv[argv.index('--ref')+1]==taskref,'task ref differs')
  need(FLEET_SHA==EXPECTED_FLEET_SHA,'fleet source differs')
  successor_path=repo/'.context/fleet/runs'/run/task/'archived-successor.json';successor_raw=read(successor_path);successor=json.loads(successor_raw)

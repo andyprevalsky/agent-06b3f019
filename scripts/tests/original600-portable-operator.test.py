@@ -2099,7 +2099,7 @@ class Portable(unittest.TestCase):
             self.assertEqual(argv[argv.index('--concurrency')+1], '600')
             self.assertEqual(argv[argv.index('--timeout')+1], '1200')
             self.assertEqual(argv[argv.index('--e2e-timeout')+1], '5400')
-            self.assertEqual(argv[argv.index('--ref')+1], 'c9875959893737ed352b6ccd08372faa94a4745d')
+            self.assertEqual(argv[argv.index('--ref')+1], '1387ae608e7cfb8e3f0a876daae92093f503b465')
             self.assertNotIn('infra_early_stop', value)
             args.infra_early_stop = 'disabled'
             disabled = directory / 'disabled'

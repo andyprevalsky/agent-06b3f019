@@ -42,7 +42,7 @@ class Drain(unittest.TestCase):
         self.seed = self.repo / ".context/benchmarks/campaigns/exact/startup-cohorts/c001/seed-proof.private.json"
         self.seed.parent.mkdir(parents=True)
         self.ref = "b" * 40
-        self.taskref = "c9875959893737ed352b6ccd08372faa94a4745d"
+        self.taskref = "1387ae608e7cfb8e3f0a876daae92093f503b465"
         self.task = "exact-task"
         authority = {
             "source": {"ref": self.ref},

@@ -3,7 +3,7 @@
 import argparse,base64,errno,gzip,hashlib,json,math,os,re,secrets,shlex,signal,stat,subprocess,sys,tempfile,time
 from contextlib import contextmanager
 from pathlib import Path
-TASK_REF='c9875959893737ed352b6ccd08372faa94a4745d'
+TASK_REF='1387ae608e7cfb8e3f0a876daae92093f503b465'
 TASK_NAMES_SHA='660873a9e02c6c5682a98e9a00dd0133c394a16dcdefd726bcb0a8987f1b59f5'
 APP='navi-whisper-lux-bench'
 # One pinned warm donor dependency snapshot. Fly keeps volume snapshots for
