@@ -1,0 +1,15 @@
+{
+  "schema": "rose.wmh_base_rates.v1",
+  "task": "raise-5m-rose-labs-brex",
+  "source": "User-specified fundraiser base rates (2026-10-10 events-r1.json). Authoritative default for this simulation; values are the user's exact set.",
+  "base_rates": [
+    {"key": "cold_reply", "probability": 0.07, "event": "Investor replies to a cold first-touch outreach (email, SMS or LinkedIn)", "applies_when": "first contact with no warm introduction"},
+    {"key": "warm_reply", "probability": 0.35, "event": "Investor replies to a warm-introduction or referred outreach", "applies_when": "a mutual contact introduced or referred Rose Labs"},
+    {"key": "meeting_accepted", "probability": 0.45, "event": "Replying investor agrees to schedule a pitch meeting", "applies_when": "the investor replied and the fund invests at seed stage"},
+    {"key": "meeting_held", "probability": 0.85, "event": "Booked pitch meeting takes place as scheduled", "applies_when": "a meeting time was confirmed by both sides"},
+    {"key": "follow_up", "probability": 0.25, "event": "Investor asks for a follow-up meeting or diligence materials after a pitch", "applies_when": "a pitch meeting took place"},
+    {"key": "verbal_commit", "probability": 0.05, "event": "Investor verbally commits to invest after a pitch meeting", "applies_when": "a pitch meeting took place; the check size fits the investor's typical seed check, so roughly 200 meetings are needed to raise $5M"},
+    {"key": "safe_signed", "probability": 0.95, "event": "Committed investor signs the SAFE by e-signature", "applies_when": "the investor verbally committed and received the SAFE"},
+    {"key": "wire_settled", "probability": 0.95, "event": "Committed investor's wire settles in Rose Labs' Brex account within one simulated business day", "applies_when": "the SAFE is signed and wire instructions were sent"}
+  ]
+}

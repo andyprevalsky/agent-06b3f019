@@ -2472,4 +2472,77 @@ def test_served_world_model_request_shows_each_demo_real_duration():
         rendered = {e["transition_id"]: e.get("elapsed") for e in evidence["grounded_examples"]}
         assert rendered == {"example-1": "2m 14s", "example-2": "850ms", "example-3": "1h 0m 5s", "example-4": None}
 
+
+def test_v4_send_samples_a_concrete_reply_that_is_delivered_when_world_time_reaches_it():
+    """Runs 13/18: replies were deferred as placeholders and never sampled or delivered."""
+    from benchmarks.wmh_outcome_policy_v4_test import outcome, reply_event, send_distribution, world
+
+    hour = 3_600_000
+
+    async def run():
+        seen = []
+
+        async def complete(request):
+            evidence = json.loads(request.messages[1].content)
+            call = evidence["candidate_response"]["tool_calls"][0]
+            at = call["arguments"]["timestamp_ms"]
+            events = evidence["environment_state"]["structured"]["scheduled_events"]
+            seen.append((at, [e["id"] for e in events]))
+            due = [e["id"] for e in events if e["available_at_ms"] <= at and "delivered_at_ms" not in e]
+            if len(seen) == 1:
+                payload = send_distribution(event=reply_event(at=at + 2 * hour))
+            else:
+                payload = {
+                    "schema": "rose.wmh_timed_outcome_distribution.v4",
+                    "base_rates": [],
+                    "outcomes": [
+                        outcome(
+                            "inbox", 1.0, delivered=due, elapsed=2 * hour,
+                            content="1 new reply from Dana Lee" if due else "No new replies",
+                        )
+                    ],
+                }
+            for item in payload["outcomes"]:
+                item["tool_results"][0]["call_id"] = call["call_id"]
+            return json.dumps(payload)
+
+        model = distribution_model(complete, policy="rose-outcome-distribution-v4", sample_uniform=lambda: 0.01)
+        session = model.new_session("Pitch Dana", world(), "root")
+        sent = await model.step(session.id, _timed_action(1), "send")
+        assert sent["metadata"]["outcome_selection"]["selected_outcome_id"] == "delivered_reply_later"
+        assert sent["metadata"]["outcome_selection"]["base_rate_results"] == {"cold_reply": True}
+        early = await model.step(session.id, _timed_action(2), "check-early")
+        late = await model.step(session.id, _timed_action(3), "check-late")
+        assert seen[1][1] == [] and seen[2][1] == ["evt-reply-1"]
+        assert early["content"] == "No new replies" and late["content"] == "1 new reply from Dana Lee"
+        assert late["metadata"]["outcome_selection"]["delivered_event_ids"] == ["evt-reply-1"]
+        [event] = session.state["structured"]["scheduled_events"]
+        assert event["delivered_at_ms"] == late["metadata"]["world_time_ms"] >= event["available_at_ms"]
+        assert event["available_at_ms"] == seen[0][0] + 2 * hour
+        # Sampled at the send (elapsed 30 s); hidden at +30 s, delivered once the clock passed +2 h.
+        assert seen[1][0] < event["available_at_ms"] <= seen[2][0]
+
+    asyncio.run(run())
+
+
+def test_v4_placeholder_reply_is_rejected_and_never_commits():
+    from exp.simulation.engines.text.prompt import TextWorldModelProtocolError
+
+    from benchmarks.wmh_outcome_policy_v4_test import send_distribution, world
+
+    async def run():
+        async def complete(request):
+            call = json.loads(request.messages[1].content)["candidate_response"]["tool_calls"][0]
+            payload = send_distribution(event={"available_at_ms": call["arguments"]["timestamp_ms"] + 1,
+                                               "description": "Investor may respond; no response guaranteed"})
+            for item in payload["outcomes"]:
+                item["tool_results"][0]["call_id"] = call["call_id"]
+            return json.dumps(payload)
+
+        model = distribution_model(complete, policy="rose-outcome-distribution-v4", sample_uniform=lambda: 0.01)
+        session = model.new_session("Pitch Dana", world(), "root")
+        with pytest.raises(TextWorldModelProtocolError):
+            await model.step(session.id, _timed_action(1), "send")
+        assert session.revision == 0 and session.state["structured"]["scheduled_events"] == []
+
     asyncio.run(run())

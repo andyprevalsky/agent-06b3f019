@@ -6132,6 +6132,7 @@ def test_native_rose_provider_regressions():
             str(root / "agents/benchmarks/wmh_world_clock_test.py"),
             str(root / "agents/benchmarks/wmh_wire_stream_test.py"),
             str(root / "agents/benchmarks/world_model_vendor_test.py"),
+            str(root / "agents/benchmarks/wmh_outcome_policy_v4_test.py"),
         ],
         cwd=root,
         env={**os.environ, "PYTHONPATH": str(root / "agents")},

@@ -181,7 +181,11 @@ def test_context_insertion_adds_researched_outcome_examples_without_changing_the
     examples_file.write_text(json.dumps(examples))
     out = tmp_path / "run-state.json"
     assert main(["--task", task.name, "--examples", str(examples_file), "--out", str(out)]) == 0
-    assert json.loads(out.read_text()) == state
+    # The CLI inserts the user's canonical base rates by default; examples ride on top.
+    from benchmarks.wmh_context_insertion import insert_base_rates, load_canonical_base_rates
+
+    with_rates = insert_base_rates(task.wmh_initial_state, load_canonical_base_rates(), item_id=task.name)
+    assert json.loads(out.read_text()) == insert_outcome_examples(with_rates, examples, item_id=task.name)
 
 
 def _example(**changes):

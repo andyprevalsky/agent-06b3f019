@@ -47,6 +47,7 @@ from benchmarks.wmh_completion_retry import (
 from benchmarks.wmh_outcomes import (
     DISTRIBUTION_PROTOCOL,
     DISTRIBUTION_PROTOCOLS,
+    OUTCOME_V4_PROTOCOL,
     TIMED_DISTRIBUTION_PROTOCOL,
     parse_distribution,
 )
@@ -121,6 +122,7 @@ _WMH_CALL_SITES = {
     "text-world-model-v3": "wmh_world_model_v3",
     DISTRIBUTION_PROTOCOL: "wmh_world_model_distribution_v1",
     TIMED_DISTRIBUTION_PROTOCOL: "wmh_world_model_timed_distribution_v1",
+    OUTCOME_V4_PROTOCOL: "wmh_world_model_timed_distribution_v4",
 }
 
 
@@ -372,6 +374,22 @@ def _native_call_ids(messages: list[dict]) -> tuple[str, ...] | None:
     return None
 
 
+def _native_candidate_arguments(messages: list[dict]) -> dict | None:
+    """The canonical arguments of the first candidate call: its world time and category."""
+    for message in _fold_system_evidence(messages):
+        if message.get("role") != "user":
+            continue
+        try:
+            evidence = json.loads(_prompt_text(message["content"]))
+        except (ValueError, TypeError, KeyError):
+            continue
+        if isinstance(evidence, dict) and isinstance(evidence.get("candidate_response"), dict):
+            calls = evidence["candidate_response"].get("tool_calls") or ()
+            arguments = calls[0].get("arguments") if calls and isinstance(calls[0], dict) else None
+            return arguments if isinstance(arguments, dict) else None
+    return None
+
+
 def _native_environment_state(messages: list[dict]) -> dict | None:
     """Read the exact state bound to the native candidate, without a fallback.
 
@@ -439,11 +457,20 @@ def _require_wmh_prediction(
                 raise ValueError("Missing native candidate call IDs")
             # Validate every possible result, including branches that will not
             # be sampled. No invalid branch may enter the shared response cache.
+            candidate = None
+            if protocol == OUTCOME_V4_PROTOCOL:
+                messages = request.get("messages") if isinstance(request, dict) else None
+                candidate = _native_candidate_arguments(messages) if isinstance(messages, list) else None
+                if candidate is None:
+                    raise ValueError("Missing native candidate world time and category")
             parse_distribution(
                 content,
                 base_state=base_state,
                 expected_call_ids=expected_call_ids,
                 timed=protocol == TIMED_DISTRIBUTION_PROTOCOL,
+                protocol=protocol,
+                at_ms=candidate.get("timestamp_ms") if candidate else None,
+                action_category=candidate.get("category") if candidate else None,
             )
         except (ValueError, TypeError, KeyError) as exc:
             reason = str(exc)

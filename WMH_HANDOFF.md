@@ -133,6 +133,16 @@ settles in Brex within one simulated business day 0.95. Window: 3,600 s
 (user-authorized). Each run uses an external WMH started by
 `.context/wmh-resume-20261009/run-fundraiser.sh <seconds> <state file>`.
 
+Runs 13-18 did not use that table: their state (`009394a4…`) carried the
+12-entry researched set from `.claude/skills/instantiate-whm/assets/fundraiser-examples-researched.json`
+(cold 0.065, warm-intro meeting 0.6, SAFE 0.8, wire 0.85). The user's set is now
+the canonical default (`agents/benchmarks/fixtures/wmh/fundraiser-base-rates.json`,
+inserted as `structured.base_rates`), and the fundraiser helpers default to
+`WMH_EXECUTION_POLICY=rose-outcome-distribution-v4`: it separates invented
+history from the simulated result of the action, samples later replies as
+concrete scheduled events, rejects certainty where a base rate applies and
+records delivery of due events (`agents/benchmarks/wmh_outcome_policy_v4_test.py`).
+
 Fixes from these runs, each with an owning test in the WMH/rose/benchmark gates:
 
 - Native explore starvation: conflicted operations take the commit turn oldest
