@@ -199,11 +199,26 @@ validate_wmh_rose_pool_at_ref() {  # validate_wmh_rose_pool_at_ref <ref> <pool>
         echo "Invalid WMH_ROSE_POOL: the Rose pool registry is missing at $ref" >&2
         return 2
     fi
+    # Read the selected ref's registry as data; never execute its code here.
     python3 - "$registry" "$pool" <<'PY_WMH_POOL'
-import runpy
+import ast
 import sys
 
-runpy.run_path(sys.argv[1])["get_pool"](sys.argv[2])
+names = None
+for node in ast.parse(open(sys.argv[1], encoding="utf-8").read()).body:
+    if isinstance(node, ast.AnnAssign):
+        target = node.target
+    elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target = node.targets[0]
+    else:
+        continue
+    if isinstance(target, ast.Name) and target.id == "POOL_REGISTRY" and isinstance(node.value, ast.Dict):
+        keys = node.value.keys
+        if all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in keys):
+            names = {key.value for key in keys}
+if names is None:
+    sys.exit("POOL_REGISTRY is not a literal dict of pool names")
+sys.exit(0 if sys.argv[2] in names else 1)
 PY_WMH_POOL
     status=$?
     rm -f "$registry"

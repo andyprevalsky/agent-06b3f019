@@ -149,12 +149,13 @@ class WorldModelLaunch(unittest.TestCase):
             git("init", "-q")
             git("config", "user.email", "test@example.invalid")
             git("config", "user.name", "test")
-            def commit(pool):
-                registry.write_text(
-                    "def get_pool(name):\n"
-                    f"    if name != {pool!r}:\n"
-                    "        raise KeyError(name)\n"
-                )
+            marker = repo / "executed"
+            def commit(pool, registry_text=None):
+                # Importing this registry would leave a marker; validation must not run it.
+                registry.write_text(registry_text or (
+                    f"open({str(marker)!r}, 'w').close()\n"
+                    f"POOL_REGISTRY: dict = {{{pool!r}: object()}}\n"
+                ))
                 git("add", "-A")
                 git("commit", "-qm", pool)
                 return git("rev-parse", "HEAD")
@@ -165,6 +166,11 @@ class WorldModelLaunch(unittest.TestCase):
                 with self.subTest(ref=ref, pool=pool):
                     outcome = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": ref, "WMH_ROSE_POOL": pool})
                     self.assertEqual(outcome.returncode, code, outcome.stderr)
+            self.assertFalse(marker.exists(), "the selected ref's registry code must not execute")
+            # A registry that is not a literal dict of names cannot be validated as data.
+            computed = commit("computed", "POOL_REGISTRY = dict(computed=1)\n")
+            self.assertEqual(run(check, {"ROOT_DIR": str(repo), "BENCH_REF": computed,
+                                         "WMH_ROSE_POOL": "computed"}).returncode, 2)
             # Only a commit this controller has not fetched skips the check.
             missing = run(check, {"ROOT_DIR": str(repo), "BENCH_REF": "0" * 40,
                                   "WMH_ROSE_POOL": "ref-only-pool"})
