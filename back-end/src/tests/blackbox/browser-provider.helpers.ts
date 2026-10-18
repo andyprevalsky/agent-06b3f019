@@ -289,7 +289,7 @@ export async function assertSteelSameProfileReplacement(retryReleased: boolean):
     startUrl: null,
     proxyRotationCount: 4,
     status: 'ACTIVE',
-    closedAt: null,
+    closedAt: null as Date | null,
     context: { userId: 'offline-user' },
   };
   let ready = false;

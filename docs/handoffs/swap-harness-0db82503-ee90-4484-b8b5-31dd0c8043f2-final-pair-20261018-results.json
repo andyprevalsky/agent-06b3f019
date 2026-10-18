@@ -1,0 +1,216 @@
+{
+  "schema_version": 1,
+  "observed_at_utc": "2026-10-18T19:22:33.825711+00:00",
+  "source_checkpoint": "158d3e1e262b4e0fddf1fa532ff5e9f2cb7ae937",
+  "user_direction_scope": "Require send_user_message and argument-free attempt_completion in the same final response, then rerun the unchanged benchmark",
+  "exact_instruction_patch_sha256": "951a45acb53769c9c8490a99a32369124dd0882139c6477d823bedcca1387d4f",
+  "runtime_files_changed_this_iteration": 1,
+  "runtime_instruction_lines_changed": 1,
+  "models_schemas_catalog_fixtures_timeouts_changed": false,
+  "input_prompt": "SMS 1: \"Order me a lok lak for pickup from the ferry building right now\"",
+  "inbound_SMS": "Order me a lok lak for pickup from the ferry building right now",
+  "task_object_sha256": "ac0052a4fdd1d9b892030809feb8129098df77d36709151baac4ae869a9c188d",
+  "validation_criteria": [
+    {
+      "id": "sms-closed-no-spawn-contract",
+      "method": "static_check",
+      "checks": [
+        "sms_outbound_budget",
+        "sms_no_unrequested_spend",
+        "sms_completion_accepted"
+      ],
+      "requirements": [
+        "Exactly one supervisor reply",
+        "Zero agents and no authorized-budget increase",
+        "Accepted attempt_completion"
+      ]
+    },
+    {
+      "id": "sms-closed-states-closure",
+      "method": "single_turn_llm_judge",
+      "requirement": "The reply tells the user the store is closed"
+    }
+  ],
+  "canonical_real_benchmark": {
+    "task": "sms-supervisor-closed-no-spawn",
+    "run_id": "1792350783-2643178-pair",
+    "passed": true,
+    "status": "COMPLETED",
+    "task_seconds": 30.8,
+    "owning_stage_seconds": 63.2,
+    "outer_monitor_seconds": 63.529518365859985,
+    "supervisor_reply_count": 1,
+    "reply_sha256": "3ca5a956440ae47131159069ffe462177c29d54e6c27da6beb8cb1d6f3187e27",
+    "closure_conveyed_and_catalog_judged": true,
+    "agent_count": 0,
+    "budget_increase_cents": 0,
+    "completion_accepted": true,
+    "work_rounds": 7,
+    "web_search_count": 8,
+    "ten_round_closing_turn_reached": false,
+    "actual_source_bound_supervisor_dump_count": 8,
+    "actual_supervisor_model": "qwen-3.8-27b",
+    "declared_evaluators": [
+      {
+        "id": "sms-closed-no-spawn-contract",
+        "method": "static_check",
+        "score": 1.0,
+        "passed": true,
+        "reasoning": "All SMS static checks passed"
+      },
+      {
+        "id": "sms-closed-states-closure",
+        "method": "single_turn_llm_judge",
+        "score": 1.0,
+        "passed": true,
+        "reasoning": "Turn 0 tells the user that Lunette at the Ferry Building is temporarily closed and not taking pickup orders. The declared criterion is met."
+      }
+    ],
+    "causal_claim_that_cap_instruction_caused_pass": false
+  },
+  "cap_specific_real_model_replay": {
+    "recorded_real_history": true,
+    "messages": 35,
+    "tools": 9,
+    "actual_model": "qwen-3.8-27b",
+    "model_response_mocked": false,
+    "actual_calls": 1,
+    "model_seconds": 1.457,
+    "generated_tools": [
+      "send_user_message"
+    ],
+    "same_response_pair_present": false,
+    "attempt_completion_requested": false,
+    "generated_reply_sha256": "c3209e03c44d51b5b99653b1c56a030c5608407de3892b56a4fd8f6b2fa68bc0",
+    "instruction_reached_actual_recorded_request": true,
+    "Rose_collected_native_output_call_count": 1,
+    "SMS_finalizer_dropped_completion_from_collected_output": false,
+    "raw_provider_SSE_captured": false,
+    "precise_upstream_omission_cause_proved": false,
+    "business_tools_dispatched": 0,
+    "message_delivered": false,
+    "full_handler_or_benchmark_exercised": false,
+    "expected_pair_result": "NOT_MET",
+    "cap_path_fixed_claimed": false,
+    "diagnostic_command_exit0_means_observation_only": true,
+    "initial_dirty_history_setup_rejection_before_once_or_model_call_retained": true
+  },
+  "focused_checks": {
+    "backend_typecheck_exit": 0,
+    "existing_handler_owner_exit": 0,
+    "handler_owner_uses_mock_model": true,
+    "SMS_benchmark_owning_passed": 135,
+    "failed": 0,
+    "skipped": 0,
+    "deselected": 0
+  },
+  "cleanup": {
+    "canonical_task_cleanup_verified": true,
+    "allocated_roots": 0,
+    "allocated_native_generations": 0,
+    "allocated_browser_sessions": 0,
+    "root_diagnostics_applicable": false,
+    "terminal_outbox": 0,
+    "archive_outbox": 0,
+    "canonical_stop_exit0_joined": true,
+    "owned_DB_absent": true,
+    "all136_observed_births_absent": true,
+    "complete_descendant_capture_proved": false,
+    "observer_and_replay_children_joined": true,
+    "all_owned_app_and_SDK_calls_joined": true,
+    "source_readers_sealed": true
+  },
+  "adversarial_review": {
+    "replay_actual35_message_input_verified": true,
+    "tool_catalog_and_config_unchanged": true,
+    "both_tools_present_no_single_call_restriction_found": true,
+    "downstream_SMS_parser_loss_not_observed": true,
+    "normalized_output_not_raw_provider_SSE": true,
+    "full_benchmark_PASS_does_not_prove_cap_pair": true
+  },
+  "cumulative_owning_stage_attempts": 434,
+  "cumulative_passed": 346,
+  "cumulative_failed": 88,
+  "original_attempts": 31,
+  "resumed_attempts": 403,
+  "latest_six_attempts": [
+    {
+      "stage": "sms-final-pair-owning",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 1.9,
+      "started_at": "2026-10-18T19:13:02Z",
+      "finished_at": "2026-10-18T19:13:04Z"
+    },
+    {
+      "stage": "sms-final-pair-benchmark-owning",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 3.3,
+      "started_at": "2026-10-18T19:13:02Z",
+      "finished_at": "2026-10-18T19:13:05Z"
+    },
+    {
+      "stage": "sms-final-pair-typecheck",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 14.2,
+      "started_at": "2026-10-18T19:13:02Z",
+      "finished_at": "2026-10-18T19:13:16Z"
+    },
+    {
+      "stage": "sms-closed-final-pair-user-rerun",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 63.2,
+      "started_at": "2026-10-18T19:14:12Z",
+      "finished_at": "2026-10-18T19:15:15Z"
+    },
+    {
+      "stage": "sms-final-pair-real-cap-replay",
+      "status": "failed",
+      "exit_code": 1,
+      "duration_seconds": 0.1,
+      "started_at": "2026-10-18T19:16:06Z",
+      "finished_at": "2026-10-18T19:16:06Z"
+    },
+    {
+      "stage": "sms-final-pair-real-cap-replay",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 1.8,
+      "started_at": "2026-10-18T19:16:27Z",
+      "finished_at": "2026-10-18T19:16:29Z"
+    }
+  ],
+  "nested_clocks_not_double_counted": true,
+  "benchmark_reported_cost_cents": 0.0,
+  "complete_provider_cost": "UNKNOWN",
+  "all_raw_transcripts_profiles_context_dumps_environment_values": "private only",
+  "overall_RCA_status": "OPEN",
+  "production_deployed": false,
+  "fresh_full_deploy_gates_claimed": false,
+  "alternate_model_experiment_launched": false,
+  "private_archive": {
+    "cutoff_utc": "2026-10-18T19:21:15.277233+00:00",
+    "completed_at_utc": "2026-10-18T19:22:27.410503+00:00",
+    "archive_sha256": "f27fd21d0981d069c7c4d73faddb00cceee6e9fbb5ce3940d3e1655213b35608",
+    "archive_bytes": 34531923,
+    "members_verified": 457,
+    "source_paths_verified": 324,
+    "all_source_copies_match": true,
+    "all_member_readback_sha256_verified": true,
+    "source_bytes_changed_during_capture": false,
+    "raw_evidence_private": true,
+    "receipt_created_after_archive_cutoff": true
+  },
+  "explicit_user_prompt_approval": {
+    "recorded_at_utc": "2026-10-18T19:28:04.804883+00:00",
+    "approved": true,
+    "approval_id": "TAMY-FINAL-PAIR-2",
+    "scope": "The existing cap closing instruction requiring send_user_message plus argument-free attempt_completion in the same response, in that order",
+    "patch_sha256": "951a45acb53769c9c8490a99a32369124dd0882139c6477d823bedcca1387d4f",
+    "request_this_diff_approval_again": false,
+    "unrelated_future_prompt_model_schema_or_fixture_changes_covered": false
+  }
+}

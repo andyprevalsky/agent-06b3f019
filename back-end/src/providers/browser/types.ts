@@ -25,6 +25,7 @@ export interface BrowserProviderSession {
 }
 
 export interface BrowserProviderResumeSession {
+  validationBrowser?: Browser;
   provider: BrowserProviderName | 'local';
   debugUrl: string;
   sessionId: string;

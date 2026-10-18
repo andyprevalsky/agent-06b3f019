@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "timestamp_utc": "2026-10-18T19:44:22.922272+00:00",
+  "branch": "sms-supervisor-native-tools",
+  "pre_sync_head": "6234eb5f8b39b8a08e54d69290c648dbd2e10343",
+  "fetched_main": "c7fc3b3d2a282a93ee4d482fef813fe0c4148fdc",
+  "new_main_commits": 396,
+  "local_main_fast_forwarded": true,
+  "merge_commit": "3902b8955b326e9984b5d7fb7945bdc6248f7340",
+  "post_correction_source_head": "a7a56bd148dc46195e797d269c6a1a494b30c057",
+  "merge_conflicts_resolved": 8,
+  "independent_merge_audit": {
+    "both_parent_runtime_behaviors_retained": true,
+    "both_RCA_appendices_retained": true,
+    "source_policy_exact_parent_union": true,
+    "reviewed_source_hash_count": 54,
+    "newly_certified_source_hashes": 0,
+    "duplicate_skip_test_registration_corrected": true
+  },
+  "sms_escalation": {
+    "exact_existing_instruction": "If grep and web_search can't find information you need, escalate with start_new_agent instead of asking the user for it.",
+    "present_before_and_after_sync": true,
+    "contextBuilder_entire_file_unchanged": true,
+    "closing_handler_entire_file_unchanged": true,
+    "spawned_agent_model": "rose-labs/rose-1-flash",
+    "explicit_upgrade_to_ultra": false
+  },
+  "database_refresh": {
+    "canonical_setup_script": "scripts/setup-db.sh",
+    "passed": true,
+    "owned_local_baseline_only": true,
+    "pre_refresh_active_clients": 0,
+    "private_baseline_backup": true,
+    "backup_catalog_readback_passed": true,
+    "schema_and_production_data_sync_completed": true,
+    "local_benchmark_seed_cache_materialized": true,
+    "cloud_canonical_fixture_published": false
+  },
+  "preservation": {
+    "original_244_ancestry": true,
+    "original_c8_checkpoint_ancestry": true,
+    "preservation_paths_byte_exact_to_pre_sync": 36,
+    "original_source_blobs": 32,
+    "decompressed_original_hash_checks_passed": 32,
+    "original_source_restored_or_reconstructed": false
+  },
+  "verification": {
+    "backend_typecheck": "PASS after correcting invocation to installed hoisted CLI; initial exit127 retained",
+    "native_tools_sms_focused_existing_checks": "24 PASS",
+    "provider_cache_existing_checks": "PASS",
+    "frontend_typecheck": "PASS",
+    "frontend_selected_owning_tests": {
+      "files_passed": 2,
+      "tests_passed": 58,
+      "existing_skipped_tests": 1
+    },
+    "conflict_format_check": "PASS",
+    "full_agents_benchmark_blackbox": "FAIL in SMS custody fixture; failed full-domain attempt retained",
+    "isolated_sms_custody_before_fix": {
+      "failed": 1,
+      "passed": 134
+    },
+    "isolated_sms_custody_after_test_only_fix": {
+      "failed": 0,
+      "passed": 135,
+      "seconds": 2.31
+    },
+    "test_correction_independent_review": "PASS; exact callback forwarding and deduplication assertions preserved",
+    "full_domain_rerun_after_test_only_fix": false,
+    "RCA_archive_validation_log_retained_privately": true
+  },
+  "all_sync_stage_attempts_retained": [
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-backend-typecheck-20261018",
+      "started_at": "2026-10-18T19:34:39Z",
+      "finished_at": "2026-10-18T19:34:39Z",
+      "started_epoch": 1792352079.676605,
+      "finished_epoch": 1792352079.680916,
+      "duration_seconds": 0.0,
+      "status": "failed",
+      "exit_code": 127,
+      "log": "logs/sync-main-backend-typecheck-20261018-20261018-193439-2865059.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-backend-typecheck-20261018",
+      "started_at": "2026-10-18T19:35:12Z",
+      "finished_at": "2026-10-18T19:35:27Z",
+      "started_epoch": 1792352112.7776628,
+      "finished_epoch": 1792352127.6042376,
+      "duration_seconds": 14.8,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sync-main-backend-typecheck-20261018-20261018-193512-2871236.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-native-sms-offline-20261018",
+      "started_at": "2026-10-18T19:35:27Z",
+      "finished_at": "2026-10-18T19:35:29Z",
+      "started_epoch": 1792352127.855631,
+      "finished_epoch": 1792352129.817281,
+      "duration_seconds": 2.0,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sync-main-native-sms-offline-20261018-20261018-193527-2874356.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-conflict-format-20261018",
+      "started_at": "2026-10-18T19:35:54Z",
+      "finished_at": "2026-10-18T19:35:56Z",
+      "started_epoch": 1792352154.7425804,
+      "finished_epoch": 1792352156.2407994,
+      "duration_seconds": 1.5,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sync-main-conflict-format-20261018-20261018-193554-2879949.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-cache-provider-20261018",
+      "started_at": "2026-10-18T19:36:51Z",
+      "finished_at": "2026-10-18T19:36:52Z",
+      "started_epoch": 1792352211.9418018,
+      "finished_epoch": 1792352212.5229034,
+      "duration_seconds": 0.6,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sync-main-cache-provider-20261018-20261018-193651-2891194.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-frontend-attention-20261018",
+      "started_at": "2026-10-18T19:36:50Z",
+      "finished_at": "2026-10-18T19:37:37Z",
+      "started_epoch": 1792352210.776707,
+      "finished_epoch": 1792352257.563245,
+      "duration_seconds": 46.8,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sync-main-frontend-attention-20261018-20261018-193650-2890958.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-database-20261018",
+      "started_at": "2026-10-18T19:34:46Z",
+      "finished_at": "2026-10-18T19:37:48Z",
+      "started_epoch": 1792352086.7269027,
+      "finished_epoch": 1792352268.381476,
+      "duration_seconds": 181.7,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sync-main-database-20261018-20261018-193446-2866065.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-benchmark-owning-20261018",
+      "started_at": "2026-10-18T19:37:41Z",
+      "finished_at": "2026-10-18T19:41:15Z",
+      "started_epoch": 1792352261.1089652,
+      "finished_epoch": 1792352475.3037605,
+      "duration_seconds": 214.2,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sync-main-benchmark-owning-20261018-20261018-193741-2901953.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-sms-custody-repro-20261018",
+      "started_at": "2026-10-18T19:42:02Z",
+      "finished_at": "2026-10-18T19:42:05Z",
+      "started_epoch": 1792352522.767964,
+      "finished_epoch": 1792352525.852923,
+      "duration_seconds": 3.1,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sync-main-sms-custody-repro-20261018-20261018-194202-2965677.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sync-main-sms-custody-repro-20261018",
+      "started_at": "2026-10-18T19:42:34Z",
+      "finished_at": "2026-10-18T19:42:37Z",
+      "started_epoch": 1792352554.8291018,
+      "finished_epoch": 1792352557.5817873,
+      "duration_seconds": 2.8,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sync-main-sms-custody-repro-20261018-20261018-194234-2970487.log"
+    }
+  ],
+  "unchanged_prior_approval": {
+    "approval_id": "TAMY-FINAL-PAIR-2",
+    "exact_existing_closing_diff_approved": true,
+    "approval_required_again_for_that_diff": false
+  },
+  "acceptance_limits": [
+    "Prior CLOSED task PASS is source-bound to pre-sync runtime158d3e; no post-sync canonical SMS benchmark result is claimed.",
+    "Prior capped-history replay omitted attempt_completion; no newer reliability proof is claimed.",
+    "Current full deploy gates, bounded exact-HEAD review, merge and applicable production verification remain outstanding.",
+    "FILL canonical failure remains unresolved; no classifier, model, schema, prompt or benchmark-definition change was introduced by the fixture correction."
+  ],
+  "PR_merged": false,
+  "production_deployed": false
+}

@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "at": "2026-10-15T19:01:51.173518+00:00",
+  "tested_product_head": "cea52afefa5b5d28c768343d6f7c1d93f9c12960",
+  "integrated_main": "d70436ea5e8c2074ca654b3b665104c9c2bc9669",
+  "product_source_edits_after_integration": 0,
+  "agents": {
+    "actual_full_exit": 0,
+    "blackbox": 110,
+    "cache_tests": 184,
+    "unit_tests": 134,
+    "coverage_percent": 82.03785024854551,
+    "coverage_required_percent": 80,
+    "seconds": 285.7,
+    "source_hashes_unchanged": 889,
+    "observed_births_absent": 1726,
+    "observed_groups_empty": 339,
+    "private_archive_sha256": "4f1b41cba8734bf267bc338efa6b6daaf79ae966ebba8a919e40cc64ef48c4e0",
+    "archive_member_hashes_verified": 354
+  },
+  "backend_first_full_attempt": {
+    "exit": 1,
+    "domains_passed": 196,
+    "domains_failed": 4,
+    "unit_files_passed": 271,
+    "unit_files_failed": 1,
+    "unit_files_total": 272,
+    "coverage_threshold_result": "NOT_RUN_AFTER_FAILURE",
+    "failed_domains": [
+      "admin-health-waitlist-idempotency",
+      "agents",
+      "rose",
+      "treasury-rails"
+    ],
+    "ignored_launcher_error": "BENCHMARK_ISOLATED_RUN=true changed ordinary memory, mocked messaging and static-card routing. Corrected ignored launch only.",
+    "corrected_offline_owners": {
+      "admin_health": {
+        "passed": 9,
+        "exit": 0
+      },
+      "purchase_charge_flow": {
+        "passed": 15,
+        "exit": 0
+      },
+      "planner_memory_defaults": {
+        "exit": 0
+      }
+    },
+    "rose_first_boundary": "Merged test expects nested arguments after approved native projection flattens them.",
+    "rose_applied_fix": "Test schema lookup only; all existing assertions preserved. No runtime decoder or schema edit.",
+    "rose_focused_actual_owner_exit": 0,
+    "treasury_boundary": "Prior pending mint return check fails before any new mint creation; inherited ownership/native status under audit. No waiver.",
+    "current_native_resources_closed_or_absent": {
+      "kernel_browsers": 7,
+      "kernel_profiles": 2,
+      "steel_sessions": 4,
+      "E2B_sandboxes": 3
+    },
+    "observed_births_absent": 75,
+    "private_archive_sha256": "ed68b63d299e59ffa7f4766eeeaca7d2c9577c89abfabb30dc431f3fd3b8fe72",
+    "archive_member_hashes_verified": 523,
+    "corrected_full_rerun": "NOT_LAUNCHED; financial receipt reconciliation pending"
+  },
+  "static": {
+    "backend_lint_types_structural_exit": 0,
+    "deploy_structural_exit": 1,
+    "failed_suites": [
+      "cloudbench-quiesced-forensic-retirement",
+      "cloudbench-bootstrap-recovery",
+      "benchmark-live-results"
+    ],
+    "cause": "New finite composite executable source was not registered.",
+    "independent_source_review": {
+      "bindings": 40,
+      "reviewed_parent_composition_matches_all": true,
+      "non_author": true,
+      "new_fingerprint": "c6039c4e1d631c58df5999dbc5b9fc645e1984af337802ab32117465471b63dd",
+      "phases": [
+        "before-stack-launch",
+        "agent-network-index-bootstrap"
+      ],
+      "validators_or_phase_widening": false,
+      "registration_applied": "Fresh owning checks pending"
+    }
+  },
+  "frontend": {
+    "recorded_at": "2026-10-15T18:51:53.241696+00:00",
+    "current_head": "cea52afefa5b5d28c768343d6f7c1d93f9c12960",
+    "prior_full_FE_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "tracked_coverage_build_static_inputs_compared": 1192,
+    "changed_input_paths": [],
+    "exact_tracked_inputs_equal": true,
+    "semantic_runner_excluded_from_coverage_scope": [
+      "front-end/scripts/run-semantic-tests.sh"
+    ],
+    "fresh_semantic_runner_owner_still_required": true,
+    "untracked_root_lockfile": "Excluded: not committed in either source, npm run does not install dependencies; prior failed comparison retained separately",
+    "dependency_reinstallation_since_prior": "None; existing pinned toolchain/install reused",
+    "prior_results_qualified_not_newly_rerun": true
+  },
+  "pending_unapplied_approvals": [
+    "TAMY-RETRIEVAL-352",
+    "TAMY-FIXTURE-MENU-1"
+  ],
+  "SMS_current_integrated_runtime": "PREPARED_NOT_RUN; historical3521PASS2FAIL retained",
+  "semantic_E2B_latency_current_integrated_runtime": "PREPARED_NOT_RUN",
+  "smoke_and_AgentCard_current_integrated_runtime": "NOT_RUN",
+  "original_narrow_abandonment_warning_not_applied_to_treasury_or_production": true,
+  "no_new_paid_rerun_while_financial_recovery_pending": true,
+  "raw_transcripts_captures_LLM_dumps_environment_values": "PRIVATE",
+  "all_tests_green": false,
+  "bounded_review_cycle2": "NOT_STARTED",
+  "merged": false,
+  "deployed": false,
+  "ready_to_close": false
+}

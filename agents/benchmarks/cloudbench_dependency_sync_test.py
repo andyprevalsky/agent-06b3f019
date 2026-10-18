@@ -309,6 +309,10 @@ def test_exact_recovery_consumes_runtime_receipt_preserved_pre_service_config(ch
             verifier(fixture.meta, fixture.row, fixture.originals, config_preserved=True)
         with pytest.raises((AssertionError, KeyError)):
             verifier(fixture.meta, fixture.row, fixture.originals)
+        if not changed:
+            fixture.reviewed_sources.clear()
+            with pytest.raises(AssertionError):
+                verifier(fixture.meta, fixture.row, fixture.originals, config_preserved=True)
     finally:
         fixture.doCleanups()
 

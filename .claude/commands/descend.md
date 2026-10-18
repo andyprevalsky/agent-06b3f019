@@ -192,18 +192,19 @@ Use `scripts/run-bench` for every suite, slice, task, bounded-concurrency
 campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
 `run-bench-cloud`, or an ad hoc repetition loop directly.
 
-Use CLAUDE.md's current cloud startup and monitoring instructions for that
+Use the current cloud startup and monitoring instructions in
+the Operations Runbook in `agents/benchmarks/README.md` for that
 command. Strict cohorts now coordinate their physical cleanup reserves on the
 controller filesystem; a reserve refusal requires actual disk/cohort evidence,
 not lowered storage floors or a replacement launcher. The owning quick
 regressions run in the normal benchmark deploy gate.
 
-Keep retained failed-owner recovery on CLAUDE.md's supported exact-owner CLI
+Keep retained failed-owner recovery on the Operations Runbook's supported exact-owner CLI
 route. `archive-verified.json` preserves originals with zero proof credit;
 completion still requires the final native release audit and owner retirement.
 
 For the current user-requested five consecutive LIVE DAILY runs of fifty,
-follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
+follow the Operations Runbook's **Current width-fifty LIVE acceptance** subsection. Each run
 uses fifty distinct randomly selected eligible names together in one ordinary
 fleet, without `-k` or `--concurrency`, temporary execution 1,200 seconds and
 hard image-build-start through final publication/native release 3,600 seconds.
@@ -216,7 +217,7 @@ with accepted LIVE latency. The existing stability wrapper's width-32 cap does
 not restrict this ordinary fleet; do not substitute smaller slices.
 
 The ordinary CLI automatically reuses verified completed dependency snapshots
-across fresh checkouts. Follow CLAUDE.md's "Cloud startup reuse" guidance and
+across fresh checkouts. Follow the Operations Runbook's "Cloud startup reuse" guidance and
 `scripts/run-bench --help`; source-only changes do not require dependency rebuilds.
 
 Cold-image builds, image activation, and the recorded mass-demo cached run are
@@ -224,7 +225,7 @@ explicitly requested diagnostics, never a step of an ordinary descent. The curre
 user-requested five LIVE trials explicitly require their fresh uncached image.
 
 For an explicitly requested cold-image or cached startup diagnostic, follow
-CLAUDE.md's CLI commands and `/benchmark` guidance through the same entrypoint.
+the Operations Runbook's CLI commands and `/benchmark` guidance through the same entrypoint.
 Do not automatically rebuild images during ordinary branch runs. Cached DEMO
 copies earn zero LIVE acceptance credit and retain genuine evaluation; declared
 judges may call providers. The mass-demo fifty-copy command means fifty
@@ -276,7 +277,7 @@ seconds, then follow each job log's exact printed fleet-monitor handle through
 controller exit and owned teardown. The campaign directory itself is not a
 fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
 
-Follow CLAUDE.md's "Monitor every cloud launch" instructions and the exact command
+Follow the Operations Runbook's "Monitor every cloud launch" instructions and the exact command
 printed at launch. Poll every 30 seconds, check terminal status on every poll, and
 observe through owned-resource release. A stale observation never authorizes a reset.
 
@@ -338,7 +339,7 @@ and report provider latency and resource release. Do not split that request into
 smaller slices and label it a wide run. Check current provider capacity, controller
 CPU and disk before allocation; never reclaim another workspace's resources.
 An explicitly infrastructure-only validation accepts terminal task failures under
-the user's contract in `CLAUDE.md`; it does not change this command's default
+the user's contract in the Operations Runbook; it does not change this command's default
 task-success goal or the stricter predeploy smoke qualification.
 
 ## Persistent state
@@ -1220,5 +1221,5 @@ Only then propose or enable the cron.
 For fleet publication/cleanup regressions, follow the canonical benchmark CLI
 and `scripts/tests/benchmark-live-results.test.py`, not a private replacement
 harness. Distinguish an evaluated verdict from resource release: the parent stays
-live through teardown. Follow CLAUDE.md for any explicitly authorized temporary
+live through teardown. Follow the Operations Runbook for any explicitly authorized temporary
 execution setting; keep normal defaults and exact ownership cleanup unchanged.

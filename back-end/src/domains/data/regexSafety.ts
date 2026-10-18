@@ -156,6 +156,37 @@ export function stripNamedGroups(pattern: string): string {
   return pattern.replace(/\(\?<([A-Za-z_][A-Za-z0-9_]*)>/g, '(');
 }
 
+/**
+ * Patterns are validated as JS RegExp but run as Postgres ARE, where `\b` is a
+ * backspace and `\B` a synonym for `\`. ARE's `\y` / `\Y` use locale-aware
+ * word characters, whereas JS (without Unicode mode) uses ASCII letters,
+ * digits and underscore. Express the adjacent-character transition explicitly;
+ * both alternatives are zero-width, including at either end of the string.
+ * Spell out class members so locale-dependent ranges cannot include accented
+ * letters. Escaped backslashes and `[\b]` are left alone.
+ */
+export function translateWordBoundaries(pattern: string): string {
+  const word = '[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]';
+  const boundary = `(?:(?<!${word})(?=${word})|(?<=${word})(?!${word}))`;
+  const nonBoundary = `(?:(?<=${word})(?=${word})|(?<!${word})(?!${word}))`;
+  let out = '';
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '\\' && i + 1 < pattern.length) {
+      const next = pattern[i + 1];
+      out +=
+        !inClass && next === 'b' ? boundary : !inClass && next === 'B' ? nonBoundary : ch + next;
+      i++;
+      continue;
+    }
+    if (ch === '[') inClass = true;
+    else if (ch === ']') inClass = false;
+    out += ch;
+  }
+  return out;
+}
+
 /** True if a thrown DB error is a Postgres "invalid regular expression" (SQLSTATE 2201B). */
 export function isPostgresRegexError(error: unknown): boolean {
   const e = error as { code?: string; meta?: { code?: string }; message?: string };

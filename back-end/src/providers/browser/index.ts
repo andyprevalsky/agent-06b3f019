@@ -254,17 +254,20 @@ export async function closeSession(
 
 export async function resumeSession(
   taskId: string,
-  options: { forceFreshProfile?: boolean } = {}
+  options: {
+    forceFreshProfile?: boolean;
+    keepValidationConnection?: boolean;
+  } = {}
 ): Promise<BrowserProviderResumeSession> {
   const provider = await providerForTask(taskId);
-  if (provider === 'kernel') return resumeKernelSession(taskId);
+  if (provider === 'kernel') return resumeKernelSession(taskId, options);
   if (provider === 'browser-use') {
     if (!browserUseEnabled()) {
       const previous = await prisma.browserSession.findUniqueOrThrow({
         where: { id: taskId },
         select: { sessionId: true },
       });
-      const replacement = await resumeKernelSession(taskId);
+      const replacement = await resumeKernelSession(taskId, options);
       await releaseSupersededBrowser({
         taskId,
         previousProvider: 'browser-use',
@@ -273,8 +276,10 @@ export async function resumeSession(
       });
       return replacement;
     }
-    const { previousSessionId, previousProvider, ...session } =
-      await resumeBrowserUseSession(taskId);
+    const { previousSessionId, previousProvider, ...session } = await resumeBrowserUseSession(
+      taskId,
+      options
+    );
     await releaseSupersededBrowser({
       taskId,
       previousProvider,
@@ -295,6 +300,7 @@ export async function resumeSession(
     });
   }
   return {
+    ...(session.validationBrowser ? { validationBrowser: session.validationBrowser } : {}),
     provider: session.sessionId.startsWith('local-') ? 'local' : 'steel',
     debugUrl: session.debugUrl,
     sessionId: session.sessionId,
@@ -323,13 +329,14 @@ export interface BrowserProxyRotationResult extends BrowserProviderResumeSession
 /** Execute one server-selected rotate_ip recovery step. */
 export async function rotateProxy(
   taskId: string,
-  step: RotationStep
+  step: RotationStep,
+  options: { keepValidationConnection?: boolean } = {}
 ): Promise<BrowserProxyRotationResult> {
   const currentProvider = await providerForTask(taskId);
   if (step.provider === 'kernel') {
     if (currentProvider !== 'kernel') throw new ProxyRotationUnsupportedError(currentProvider);
     return {
-      ...(await rotateKernelSession(taskId, step.proxyType)),
+      ...(await rotateKernelSession(taskId, step.proxyType, options)),
       previousProvider: currentProvider,
       recoveryAction: step.recoveryAction,
       proxyType: step.proxyType,
@@ -340,8 +347,10 @@ export async function rotateProxy(
     if (!browserUseEnabled()) {
       throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
     }
-    const { previousSessionId, previousProvider, ...session } =
-      await rotateBrowserUseSession(taskId);
+    const { previousSessionId, previousProvider, ...session } = await rotateBrowserUseSession(
+      taskId,
+      options
+    );
     await releaseSupersededBrowser({
       taskId,
       previousProvider,
@@ -356,7 +365,7 @@ export async function rotateProxy(
     };
   }
 
-  const replacement = await rotateSteelSession(taskId);
+  const replacement = await rotateSteelSession(taskId, options);
   const { previousSessionId, previousProvider, previousSessionReleased, ...session } = replacement;
   if (!previousSessionReleased) {
     await releaseSupersededBrowser({
@@ -368,6 +377,7 @@ export async function rotateProxy(
   }
 
   return {
+    ...(session.validationBrowser ? { validationBrowser: session.validationBrowser } : {}),
     provider: 'steel',
     debugUrl: session.debugUrl,
     sessionId: session.sessionId,
@@ -489,7 +499,9 @@ export async function captureScreenshot(sessionId: string): Promise<{
     return { provider, image: await captureKernelScreenshot(sessionId) };
   }
   if (provider === 'browser-use') {
-    const session = await prisma.browserSession.findUniqueOrThrow({ where: { sessionId } });
+    const session = await prisma.browserSession.findUniqueOrThrow({
+      where: { sessionId },
+    });
     if (!session.wsUrl) throw new Error('Browser Use CDP URL unavailable for screenshot');
     const { chromium } = await import('playwright');
     const browser = await chromium.connectOverCDP(session.wsUrl);
@@ -525,7 +537,11 @@ export async function captureScreenshot(sessionId: string): Promise<{
 export async function pressSessionKeys(
   sessionId: string,
   keys: string[]
-): Promise<{ provider: BrowserProviderName; supported: boolean; pressed: boolean }> {
+): Promise<{
+  provider: BrowserProviderName;
+  supported: boolean;
+  pressed: boolean;
+}> {
   return pressSessionKeysUsingDependencies(sessionId, keys, {
     providerForSession,
     pressKernelKeys,
@@ -541,7 +557,11 @@ export async function pressSessionKeysUsingDependencies(
     pressKernelKeys: (sessionId: string, keys: string[]) => Promise<void>;
     pressBrowserUseKeys: (sessionId: string, keys: string[]) => Promise<void>;
   }
-): Promise<{ provider: BrowserProviderName; supported: boolean; pressed: boolean }> {
+): Promise<{
+  provider: BrowserProviderName;
+  supported: boolean;
+  pressed: boolean;
+}> {
   const provider = await dependencies.providerForSession(sessionId);
   if (provider === 'kernel') await dependencies.pressKernelKeys(sessionId, keys);
   else if (provider === 'browser-use') await dependencies.pressBrowserUseKeys(sessionId, keys);

@@ -1,0 +1,736 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-14T21:19:49.614790+00:00",
+  "source_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+  "pr": 1473,
+  "source_preservation": {
+    "checkpoint": "c8e72ed8821f5cc219c616b6454afee729c837a1",
+    "original_warning_skip": "244a961d25558d4df563636ef3f8cc74d7894b89",
+    "both_original_commits_remain_ancestors": true,
+    "all_preserved_source_blob_and_archive_manifest_bytes_unchanged": true,
+    "inventory_and_handoff_changes_only_prior_verified_replacement_metadata": true
+  },
+  "applied_snapshots": {
+    "TAMY-FIXTURE-DATE-1": "3f24860060f62316472d30a431ed434a0c677ff73828e037bb9b84d08e1788a3",
+    "TAMY-JUDGE-PROFILE-1": "2f6029ab3502bb4e161d6799541db02e40a97c1d2a1a37e9d35edd7349cdfc43"
+  },
+  "existing_Rose_projection_three_files_identical_to_431": true,
+  "approved_owning_suite": {
+    "passed": 77,
+    "pytest_seconds": 0.71,
+    "source": "0602da33edff2780bd850f364b20ef09fc45caf9"
+  },
+  "observed_SMS": {
+    "source": "0602da33edff2780bd850f364b20ef09fc45caf9",
+    "run_id": "444136cc-2def-4995-bc1d-4a8014e96e70",
+    "stage_seconds": 167.1,
+    "stage_exit": 1,
+    "tasks": [
+      {
+        "name": "sms-supervisor-closed-no-spawn",
+        "passed": false,
+        "seconds": 53.1
+      },
+      {
+        "name": "sms-supervisor-fill-form-searches-then-delegates",
+        "passed": true,
+        "seconds": 41.1
+      },
+      {
+        "name": "sms-supervisor-open-spawns-agent",
+        "passed": true,
+        "seconds": 26.0
+      }
+    ],
+    "reported_cost_cents": 0.0,
+    "cost_limit": "Reported zero omits direct SMS/provider cost; invoice cost unknown",
+    "closed_first_reported_failure": "start_new_agent default omitted budget commits +100c; no independent increase_budget call",
+    "all_11_distinct_search_results_present_before_spawn_with_correct_native_ID_order": true,
+    "no_decoder_or_tool_history_loss_observed": true,
+    "vendor_identity_uncertainty": "Observed model interpretation, not proved root cause"
+  },
+  "SMS_known_native_cleanup": {
+    "source_git_sha": "0602da33edff2780bd850f364b20ef09fc45caf9",
+    "observed_at": "2026-10-14T19:43:02.303069+00:00",
+    "current": {
+      "tasks": 3,
+      "passed": 2,
+      "failed": 1,
+      "captured_process_births": 27,
+      "all_captured_births_retired": true,
+      "known_workflows": 4,
+      "all_known_workflows_terminal": true,
+      "browser_handles": 1,
+      "profiles": 1,
+      "native_browser_profile_retirement_complete": true
+    },
+    "prior": {
+      "runs": 3,
+      "known_workflows": 6,
+      "all_known_workflows_terminal": true,
+      "additional_terminations": 0,
+      "browser_handles": 1,
+      "profiles": 1,
+      "native_browser_profile_retirement_complete": true
+    },
+    "source_bound_dumps": 19,
+    "private_archive_path": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/sms-native-audit-20261014T194200Z",
+    "archive_files": 132,
+    "all_archive_readbacks_verified": true,
+    "private_manifest_sha256": "0507acb6c4b1372ef9f554767f3134a3f00614fc0d0384ff5d0a20a70f702e4f",
+    "limitations": [
+      "Known exact roots/resources from source-owned logs; no namespace-wide inventory claim.",
+      "Historic generic cleanup receipts did not prove native workflow closure; this audit supplies the missing exact proof.",
+      "Closed SMS failure remains historical and current: start_new_agent default budget accounted as +100c; no independent increase_budget call."
+    ],
+    "native_generation_readback": {
+      "verified_at": "2026-10-14T20:08:22.683015+00:00",
+      "known_generations": 10,
+      "first_run_matches": 10,
+      "queue_matches": 10,
+      "terminal": 10,
+      "receipt_sha256": "9b42abd0846f3225c57a803202e63f0e54159e32bf6d0f09749a7935ed6bd682",
+      "global_inventory_claimed": false
+    }
+  },
+  "owning_fixture_failure_and_repair": {
+    "schema_version": 1,
+    "status": "owning-fixture-causal-repro-complete; full-agents-retry-pending-integration",
+    "source_head": "0602da33edff2780bd850f364b20ef09fc45caf9",
+    "observed_full_gate": {
+      "exit_code": 1,
+      "blackbox_domains_passed": 109,
+      "blackbox_domains_failed": 1,
+      "blackbox_domains_total": 110,
+      "wall_seconds": 203.72475171089172,
+      "failed_domain": "benchmark",
+      "fast_cache_units_coverage_threshold_reached": false
+    },
+    "owning_case": "test_declared_judge_without_verdict_is_judge_unavailable_error",
+    "critical_path": "mocked deps -> approved required SMS profile SQL read -> AttributeError caught as SMS ERROR -> evaluator never invoked -> unchanged call_sites assertion fails",
+    "classification": "test-bug",
+    "problem_class": "fixture-environment-data-mismatch",
+    "first_bad_boundary": "existing blackbox SimpleNamespace dependency fixture lacks run_sql/sql_literal required by the approved profile ground-truth read",
+    "scope": "Fixture dependency-only correction; required runtime profile read and unavailable-judge ERROR handling remain intact",
+    "red": {
+      "exit_code": 1,
+      "sms_status": "ERROR",
+      "judge_call_sites": [],
+      "error_class": "AttributeError",
+      "missing_dependency": "run_sql"
+    },
+    "green_candidate": {
+      "exit_code": 0,
+      "unavailable_status": "ERROR",
+      "recovered_status": "PASSED"
+    },
+    "green_actual_worktree": {
+      "exit_code": 0,
+      "unavailable_status": "ERROR",
+      "recovered_status": "PASSED",
+      "source_matches_reviewed_candidate": true,
+      "source_file_sha256": "62e57383dd3df8b416110ba20ae338ccf6bca6625cfd19ed7827a9145461bbd6"
+    },
+    "existing_assertions_unchanged": true,
+    "runtime_prompt_model_timeout_evaluator_environment_values_modified": false,
+    "existing_permanent_deploy_owning_suite": "agents benchmark blackbox under full agents coverage",
+    "full_gate_rerun_pending": true,
+    "captured_agents_gate_process_births": 1489,
+    "captured_exact_processes_present": 0,
+    "global_resource_cleanup_certified": false,
+    "production_or_live_sms_success_certified": false,
+    "setup_error_attempt_preserved": true,
+    "recorded_utc": "2026-10-14T19:35:49.685218+00:00",
+    "artifact_sha256": {
+      "candidate.patch": "1ed6208293627ec502cbee708ad195840f48084d08843df6026e4c5adaafc7f4",
+      "candidate-setup-failed.log": "420d2d4c4058165606d71ce0a9ae82f4d904bcb0b8130d662a490dd045d04dac",
+      "actual-worktree-green.log": "2debf5f24518b9bdf9861ea47b3765eaba78649b58d0b9f55cdbeee1dedf30a8",
+      "repro.py": "78701febf1bdc62f98491ce7cf025422a701d72cf2d71e82173ee8cd74dea2af",
+      "actual-worktree-verification.json": "d1159e1ed9529a92bdadd1b20af4b506db064464019bc02b302c1f69573fe521",
+      "red.log": "6577fa50ba904cf667ef3391ff8bbb751a7baee86f9a4a2879fe44f7de210786",
+      "green.log": "2bc0a0e0ffeba1d3bd9e569a869e49b64af20f989a3a742ff500432126b8490e",
+      "benchmark.blackbox.py": "62e57383dd3df8b416110ba20ae338ccf6bca6625cfd19ed7827a9145461bbd6"
+    }
+  },
+  "fresh_integrated_agents": {
+    "schema_version": 1,
+    "stage": "approval-postfix-integrated-agents",
+    "source_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "dispatch_source_unchanged_at_terminal": true,
+    "overall_exit_code": 0,
+    "blackbox": {
+      "passed": 110,
+      "failed": 0,
+      "total": 110,
+      "concurrency": 4,
+      "benchmark_domain_ran_once_and_passed": true
+    },
+    "focused_pytest_summaries": [
+      {
+        "passed": 184,
+        "duration_seconds": 6.55
+      },
+      {
+        "passed": 134,
+        "duration_seconds": 48.5
+      }
+    ],
+    "coverage": {
+      "statements": 32703,
+      "missed_statements": 5001,
+      "branches": 12112,
+      "partial_branches": 1943,
+      "combined_percentage": 82,
+      "threshold_percentage": 80,
+      "threshold_enforced": true,
+      "threshold_passed": true
+    },
+    "started_utc": "2026-10-14T19:43:02.916912+00:00",
+    "finished_utc": "2026-10-14T19:47:22.267019+00:00",
+    "wall_seconds": 259.35012912750244,
+    "canonical_stage_duration_seconds": 259.1,
+    "timing_run": "20261012-234924-2614623",
+    "timing_stage_recorded_once": true,
+    "prior_failed_full_attempt_preserved": true,
+    "captured_process_births": 1486,
+    "captured_exact_processes_present": 0,
+    "observed_owned_process_groups": 332,
+    "members_present_in_observed_groups": 0,
+    "monitor_native_absent": true,
+    "complete_descendant_capture_proved": false,
+    "global_resource_cleanup_certified": false,
+    "new_paid_cloud_machines": 0,
+    "raw_logs_task_captures_environment_values_transcripts_private": true,
+    "console_sha256": "c184be8ad493f947ccbac3d0904ac77eb6c09201a3c05d0cfd5275ebbcc9d2d3",
+    "canonical_blackbox_summary_sha256": "72e9c52165648ca901f2050726f2b765c2b8d9780d6eea4c29f37617ff76e65a",
+    "controller_integrated_readback_sha256": "4722fcb81a033d5bc2480047d6a020cd380ab3175c3e09a16210dc4400fb87f8",
+    "recorded_utc": "2026-10-14T19:48:08.547463+00:00"
+  },
+  "fresh_integrated_frontend": {
+    "source_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "stages": [
+      {
+        "stage": "main-d1b-frontend-coverage",
+        "exit": 0,
+        "seconds": 167.062,
+        "source_start": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "source_end": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "command": [
+          "npm",
+          "run",
+          "test:coverage",
+          "--",
+          "--maxWorkers=4"
+        ],
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-main-d1b-frontend-static/frontend-coverage-private.log"
+      },
+      {
+        "stage": "main-d1b-frontend-lint",
+        "exit": 0,
+        "seconds": 28.975,
+        "source_start": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "source_end": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "command": [
+          "npm",
+          "run",
+          "lint"
+        ],
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-main-d1b-frontend-static/frontend-lint-private.log"
+      },
+      {
+        "stage": "main-d1b-frontend-format",
+        "exit": 0,
+        "seconds": 12.76,
+        "source_start": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "source_end": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "command": [
+          "npm",
+          "run",
+          "format:check"
+        ],
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-main-d1b-frontend-static/frontend-format-private.log"
+      },
+      {
+        "stage": "main-d1b-frontend-build",
+        "exit": 0,
+        "seconds": 22.713,
+        "source_start": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "source_end": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "command": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-main-d1b-frontend-static/frontend-build-private.log"
+      },
+      {
+        "stage": "main-d1b-command-structural",
+        "exit": 0,
+        "seconds": 319.36,
+        "source_start": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "source_end": "d1b836316c1967cc107b7c72508e66d382b29f34",
+        "command": [
+          "python3",
+          "scripts/run-deploy-structural-gates.py",
+          "--max-workers",
+          "4"
+        ],
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-main-d1b-frontend-static/command-structural-private.log"
+      }
+    ],
+    "guards": {
+      "prompt-approved": {
+        "exit": 0,
+        "stage": "main-d1b-prompt-approved",
+        "stage_log": "/home/boxes/rose/.context/deploy-runs/20261012-234924-2614623/logs/main-d1b-prompt-approved-20261014-194256-470484.log"
+      },
+      "agent-behavior": {
+        "exit": 0,
+        "stage": "main-d1b-agent-behavior",
+        "stage_log": "/home/boxes/rose/.context/deploy-runs/20261012-234924-2614623/logs/main-d1b-agent-behavior-20261014-194257-471505.log"
+      },
+      "trajectory": {
+        "exit": 0,
+        "stage": "main-d1b-trajectory",
+        "stage_log": "/home/boxes/rose/.context/deploy-runs/20261012-234924-2614623/logs/main-d1b-trajectory-20261014-194257-471730.log"
+      }
+    },
+    "preserved_unflagged_prompt_exit": 1,
+    "fresh_FE_files_passed": 162,
+    "fresh_FE_tests_passed": 2750,
+    "fresh_FE_tests_existing_skipped": 3,
+    "fresh_FE_tests_total": 2753,
+    "coverage": {
+      "lines": {
+        "total": 13556,
+        "covered": 11300,
+        "skipped": 0,
+        "pct": 83.35
+      },
+      "statements": {
+        "total": 15225,
+        "covered": 12337,
+        "skipped": 0,
+        "pct": 81.03
+      },
+      "functions": {
+        "total": 3935,
+        "covered": 3203,
+        "skipped": 0,
+        "pct": 81.39
+      },
+      "branches": {
+        "total": 11205,
+        "covered": 8199,
+        "skipped": 0,
+        "pct": 73.17
+      },
+      "branchesTrue": {
+        "total": 0,
+        "covered": 0,
+        "skipped": 0,
+        "pct": 100
+      }
+    },
+    "full46_structural_passed": true,
+    "observed_native_owner_births": 37,
+    "observed_native_owner_births_remaining": [],
+    "backend_live_qualification": {
+      "current_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+      "earlier_qualified_source": "0af01a88e2b083ef72bb64325014b9ae72147245",
+      "backend_tree_byte_identical": true,
+      "backend_tracked_files": 1763,
+      "actual_live_probe_command_and_dependency_inputs_match": {
+        "scripts/run_deploy_live_probes.py": true,
+        "back-end/src/tests/blackbox/integration-health.blackbox.ts": true,
+        "back-end/src/tests/blackbox/admin-health.blackbox.ts": true,
+        "back-end/src/tests/blackbox/chat-router-failover.blackbox.ts": true,
+        "back-end/src/tests/blackbox/chat-router-failover.live.support.ts": true,
+        "back-end/scripts/run-blackbox-tests.sh": true
+      },
+      "actual_fixture_inputs_covered_by_backend_tree": [
+        "back-end/src/tests/fixtures/chat-router-failover-prod-e8f2279b.json",
+        "back-end/src/tests/fixtures/chat-router-failover-prod-e8f2279b-streams.json"
+      ],
+      "benchmark_serving_agent_prompt_projection_unchanged": true,
+      "full_tasks_metadata_changed_only_approved_SMS_fixture_judge": true,
+      "qualification": "Prior backend197-domain/266-unit/type/lint and3focusedlive results qualify by exact runtime/dependency source bytes, not newly rerun backend or fresh provider-availability claims.",
+      "env_or_provider_freshness": "No credential/environment mutation performed; earlier external provider responses retain their recorded execution timestamps.",
+      "current_authoritative_openrouter_matches_actual_prior_probed_account_fingerprint": true,
+      "credential_values_printed": false
+    },
+    "existing_skips_source_proof": [
+      {
+        "path": "front-end/src/tests/blackbox/low-cov-chips-feedback.blackbox.tsx",
+        "declaration": "it.skip('Cancel resets selected rating and collapses panel', async () => {",
+        "exact_declaration_present_prior": true
+      },
+      {
+        "path": "front-end/src/tests/blackbox/low-cov-chips.blackbox.tsx",
+        "declaration": "it.skip('renders outputs with various value types and copy button', async () => {",
+        "exact_declaration_present_prior": true
+      },
+      {
+        "path": "front-end/src/tests/blackbox/feedback-banner.blackbox.tsx",
+        "declaration": "it.skip('Cancel resets selected rating and collapses panel', async () => {",
+        "exact_declaration_present_prior": true
+      }
+    ]
+  },
+  "qualified_existing_controller": {
+    "schema_version": 1,
+    "prior_gate_dispatch_source": "87032ebe60b9187f7086c5067258ebe7c4cfa0e3",
+    "approved_current_source": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "incoming_main": "01886ebb50a6d1ca377a6416321d656febb7a27d",
+    "snapshot_entries_compared": 249,
+    "snapshot_mismatches": [],
+    "incoming_main_changed_snapshot_entries": [],
+    "step4cb_exact_commands_unchanged": true,
+    "unified_catalog_task_count": 420,
+    "controller_catalog_routing_and_group_selection_and_eligibility_outputs_byte_equivalent": true,
+    "catalog_projection_sha256": "2663609354a84afdad035e8050571a1856fb6e84453b79df693e86277ef12d93",
+    "changed_sms_runner_is_lazy_imported_only_when_actual_runner_sms_executes": true,
+    "controller_proof_does_not_certify_new_sms_runner_or_definitions": true,
+    "integration_not_yet_checked_out": false,
+    "requires_post_integration_actual_input_readback": false,
+    "all_changed_full_catalog_bytes_equivalent": false
+  },
+  "sync": {
+    "head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "observed_at_epoch": 1792007639.3675764,
+    "stage_exit": 0,
+    "stage_wall_seconds": 158.4,
+    "actual_local_database_identity_matches": true,
+    "all_prisma_model_tables_present": true,
+    "prisma_model_table_count": 73,
+    "all_12_sms_profile_columns_present": true,
+    "authoritative_user_profiles_synced": true,
+    "captured_sync_wrapper_births_retired": 3,
+    "earlier_readonly_inspector_errors": [
+      "wrong UserProfile table name",
+      "unsupported >100 public table assumption; replaced by actual Prisma model contract"
+    ],
+    "all_values_private": true
+  },
+  "private_archive_readbacks": {
+    "0602_agents_and_fixture_repro": {
+      "files": 369,
+      "archive_sha256": "c84fb4a0a90ed71064f16e01f4e25ec51ca745427e09b4cf5c428151c0cb9476"
+    },
+    "integrated_agents": {
+      "files": 354,
+      "archive_sha256": "c37143bbe5d67da3124453394626e14f565f5fa1dc17af0012d751e481ecaa08"
+    },
+    "integrated_FE_static_review": {
+      "files": 59,
+      "manifest_sha256": "d5545627bc4f338340d05183793e16f78ffba3d625705ba26229058521ca2281"
+    },
+    "SMS_native_audit": {
+      "files": 132,
+      "manifest_sha256": "0507acb6c4b1372ef9f554767f3134a3f00614fc0d0384ff5d0a20a70f702e4f"
+    },
+    "all_source_readbacks_verified": true,
+    "fresh_post_sync_live_probes": {
+      "archive_path": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/current-live-probes-d1b-20261014-201157.tar.gz",
+      "archive_sha256": "5b9f92cf80f3fce31d57d9385465f77eacf5c1442a27e4afd5dd0e226827d627",
+      "mode": "0o600",
+      "regular_files_verified": 50,
+      "all_archive_member_hashes_equal_source_files": true,
+      "all_original_file_hashes_match_readback": true,
+      "raw_captures_task_data_environment_values_private": true,
+      "safe_summary_sha256": "ba07897e757bb9b23421d4668596e2dc3f963a67ec38181e639eaab4549a406c",
+      "source_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+      "archive_file_manifest_sha256": "ee55cd0e648ce201e8d6ef8de014f4c7b86fb2cfa700ea5b2711071d8eb46d14",
+      "checked_utc": "2026-10-14T20:13:13.520295+00:00"
+    }
+  },
+  "pending": {
+    "TAMY-FIXTURE-MENU-1": {
+      "status": "AWAITING_DECISION_UNAPPLIED",
+      "requested_at_utc": "2026-10-14T19:49:45.852556+00:00",
+      "sha256": "6d8cf29d38d109d51f3cddaf0599661d1871e864c15b52ed6b584203f877ca41",
+      "private_owning_RED_wall_seconds": 0.6515704210032709,
+      "private_owning_GREEN_wall_seconds": 0.9959104790032143,
+      "owning_green_count": 77,
+      "live_outcome": "NOT_ESTABLISHED"
+    },
+    "SMS_cleanup_correction": "PRIVATE_DURABLE_OUTBOX_CONSUMER_CORRECTION_IN_PROGRESS; pending flag retained; actual2ERRORs, known native/provider/process resources closed",
+    "review_cycle_2": "NOT_STARTED",
+    "Group4_production_gates": "NOT_FRESHLY_VERIFIED"
+  },
+  "all_raw_transcripts_environment_values_task_captures_LLM_dumps": "PRIVATE",
+  "merged": false,
+  "deployed": false,
+  "all_tests_green": false,
+  "fresh_post_sync_live_probes": {
+    "schema_version": 1,
+    "recorded_utc": "2026-10-14T20:11:22.819718+00:00",
+    "source_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "source_readback_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "timing_run": "20261012-234924-2614623",
+    "purpose": "Fresh canonical /deploy Step4p live probes after authoritative primary /sync; no full backend coverage rerun",
+    "result": "PASS with existing Anthropic warning",
+    "credential_health": {
+      "exit_code": 0,
+      "passed": 6,
+      "warnings": 1,
+      "overrides": 0,
+      "failed": 0,
+      "total": 7,
+      "providers": [
+        {
+          "name": "E2B (sandboxes)",
+          "status": "PASS"
+        },
+        {
+          "name": "Steel (browser sessions)",
+          "status": "PASS"
+        },
+        {
+          "name": "Parallel.ai (web search)",
+          "status": "PASS"
+        },
+        {
+          "name": "Anthropic (Claude API)",
+          "status": "WARN"
+        },
+        {
+          "name": "OpenRouter (LLM judge)",
+          "status": "PASS"
+        },
+        {
+          "name": "OpenRouter credit balance",
+          "status": "PASS"
+        },
+        {
+          "name": "Supabase (auth/DB)",
+          "status": "PASS"
+        }
+      ],
+      "warning": "Anthropic credit balance exhausted; existing warn-only policy",
+      "retained_initial_pass": true,
+      "duration_seconds": 0.7
+    },
+    "amplitude_live": {
+      "exit_code": 0,
+      "owning_cases_passed": 1,
+      "owning_cases_total": 1,
+      "all_six_funnel_counts_ready_enforced_by_unchanged_owning_assertions": true,
+      "strict_probe": true,
+      "duration_seconds": 9.5
+    },
+    "chat_router_failover_live": {
+      "exit_code": 0,
+      "owning_cases_passed": 1,
+      "owning_cases_total": 1,
+      "real_configured_openrouter_account_enforced_by_unchanged_owning_assertions": true,
+      "production_address_correction_fixture_unchanged": true,
+      "live_sample_outcome_markers": [
+        {
+          "label": "sample 1",
+          "kind": "escalated",
+          "at_ms": 8932
+        }
+      ],
+      "duration_seconds": 17.0
+    },
+    "owning_summaries": [
+      {
+        "requested": [
+          "admin-health"
+        ],
+        "run_id": "1792008404-750592-3342",
+        "passed_domains": 1,
+        "failed_domains": 0,
+        "summary_sha256": "5ff4a09d9aa2556f947baa2d4a43d593b5e2bd3e75d6c2b33123f9ba001db570"
+      },
+      {
+        "requested": [
+          "chat-router-failover"
+        ],
+        "run_id": "1792008413-752817-21846",
+        "passed_domains": 1,
+        "failed_domains": 0,
+        "summary_sha256": "71b9ae62bfac7c6aad7dd7bed7b7af39edce969b31c7697f731f262c62e1bf66"
+      }
+    ],
+    "initial_setup_failure_preserved": {
+      "wall_seconds": 7.13983678817749,
+      "exit_code": 1,
+      "amplitude_exit_code": 1,
+      "chat_router_failover_exit_code": 1,
+      "reason": "Private isolated owner wrapper omitted required safe BENCHMARK_RUN_ID; both backends exited before probe cases started",
+      "source_gate_failures_classified_as_pass": false
+    },
+    "retry": {
+      "wall_seconds": 26.75900936126709,
+      "exit_code": 0,
+      "corrected_resource_identity": "BENCHMARK_RUN_ID bound to existing fresh unique owner workspace",
+      "canonical_commands_imported_unchanged": true,
+      "credential_probe_not_duplicated": true,
+      "models_timeouts_definitions_assertions_unchanged": true
+    },
+    "setup": {
+      "source_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+      "created_fresh_owned_database": true,
+      "target_read_back_matches_owner": true,
+      "seeded_user_table_nonempty": true,
+      "complete_env_api_key_match": true,
+      "pinned_toolchains_verified": true,
+      "primary_read_only_dump": true,
+      "schema_model_timeouts_source_environment_values_changed": false
+    },
+    "source_inputs": {
+      "file_count": 8,
+      "all_selected_source_hashes_match_dispatch_and_exact_git_blobs": true,
+      "hashes": {
+        "scripts/run_deploy_live_probes.py": "a39f40d9552fb325a4d070805d64a355f559894b1f58c8de58a59a9d5d69cd6b",
+        "back-end/scripts/run-blackbox-tests.sh": "c3bd792c4a1ccbfa21e999e51ed3c22eefbadd2251deef8fe4dec3f875bec987",
+        "scripts/lib/cloudbench-env.sh": "690c74e98d24268e6888c556b5077eb71a13d24ddcd6b06c5f6446e801129b8f",
+        "scripts/lib/run-process-cleanup.sh": "ecc491254ef4e0e7b1712215757045ddf797ca3414c2185e55e09e346690a338",
+        "back-end/src/providers/benchmarkHubStorage.ts": "87def7a99c4b5b98eac9e974688397695067b757e924681d2d713a53db170e5d",
+        "back-end/src/tests/blackbox/chat-router-failover.blackbox.ts": "8ec6f26e163188aa2afb41b6a8c3df4d3fc1298bb5278e05a50be8766cc8e901",
+        "back-end/src/tests/blackbox/admin-health.blackbox.ts": "652339b6f740311e732460deefe6da1b952b9e86194b225442ea88e1f0a7af92",
+        "back-end/src/tests/blackbox/integration-health.blackbox.ts": "edef9df79920aeb0fbd3eff3ab0b518f5dde682f5fdc5099a0f9fbe26ce52923"
+      },
+      "relevant_tracked_runtime_worktree_edits": false
+    },
+    "retirement": {
+      "checked_utc": "2026-10-14T20:08:52.976429+00:00",
+      "boot_id": "6af9c450-c2c8-4647-a911-8ab19a296bbf",
+      "captured_process_births_initial": 42,
+      "captured_process_births_retry": 57,
+      "monitor_births_checked": 2,
+      "captured_process_births_remaining": [],
+      "observed_owned_group_count": 15,
+      "observed_group_members_remaining": [],
+      "backend_ports": [
+        {
+          "port": 37100,
+          "listener_absent": true
+        }
+      ],
+      "port_locks_remaining": [],
+      "owned_database_name": "victoria_tamy-probes-8e6223da",
+      "owned_database_readback_matches": true,
+      "owned_database_active_sessions_before_drop": 0,
+      "owned_database_dropped": true,
+      "owned_database_native_absent": true,
+      "complete_descendant_capture_proved": false,
+      "global_resource_cleanup_claimed": false,
+      "real_temporal_workflows_started": false,
+      "canonical_fake_temporal_fixture": true,
+      "cleanup_source": "back-end/scripts/run-blackbox-tests.sh uses current cloudbench_terminate_tree_and_wait; owner-only normal dropdb after zero sessions",
+      "foreign_resource_actions": 0
+    },
+    "raw_capture_and_environment_values_private": true,
+    "private_console_hashes": {
+      "initial": "e8971ca779ba63b0ad0dbb98943e9040ae63e4b1b13d03cc374acb1df356a268",
+      "retry": "b3e82b1a6e32c305369f50212d87f61cdbb7cbb4640fd63994a349093909d465",
+      "failover_owning": "f3a611a852dfcb7eca738aa3c26fd975d9cf86500dc507b1545d95b154b43740"
+    },
+    "new_paid_cloud_machines": 0,
+    "paid_ad_hoc_probes": false,
+    "primary_database_writes": false,
+    "foreign_resource_actions": 0
+  },
+  "latest_cleanup_source": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+  "latest_cleanup_receipt": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-sms-cleanup-validation.json",
+  "current_cleanup_source": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+  "current_full_agents_after_cleanup": {
+    "schema_version": 1,
+    "stage": "sms-nullable-guard-agents",
+    "source_head": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+    "source_head_at_readback": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+    "dispatch_source_unchanged_at_terminal": true,
+    "overall_exit_code": 0,
+    "blackbox": {
+      "passed": 110,
+      "failed": 0,
+      "total": 110,
+      "concurrency": 4,
+      "benchmark_domain_ran_exactly_once": true
+    },
+    "focused_pytest_summaries": [
+      {
+        "suite": "fast_cache",
+        "passed": 184,
+        "seconds": 4.97
+      },
+      {
+        "suite": "unit",
+        "passed": 134,
+        "seconds": 47.99
+      }
+    ],
+    "coverage": {
+      "combined_percent": 82,
+      "required_threshold_percent": 80,
+      "passed": true,
+      "statements": 32703,
+      "statement_misses": 5001,
+      "branches": 12112,
+      "partial_branches": 1943
+    },
+    "started_utc": "2026-10-14T20:56:47.604880+00:00",
+    "finished_utc": "2026-10-14T21:01:02.861306+00:00",
+    "wall_seconds": 255.2564561367035,
+    "canonical_stage_duration_seconds": 255.0,
+    "timing_run": "20261012-234924-2614623",
+    "timing_stage_recorded_once": true,
+    "prior_failed_0602_full_attempt_preserved": true,
+    "actual_permanent_owning_registration": "Current benchmark owning SMS entire-file pytest subprocess PASS plus35 direct cloud cleanup markers; separately archived canonical149 owning stdout/timing proves all40 parametrized cloud cases",
+    "retirement": {
+      "checked_utc": "2026-10-14T21:03:46.741682+00:00",
+      "observed_process_births": 1488,
+      "observed_owned_group_count": 332,
+      "captured_exact_processes_remaining": [],
+      "observed_group_members_remaining": [],
+      "monitor_native_absent": true,
+      "complete_descendant_capture_proved": false,
+      "global_resource_cleanup_certified": false,
+      "primary_database_mutated": false,
+      "new_database_or_queue_allocated": false,
+      "foreign_or_prior_controller_resource_mutations_or_signals": 0
+    },
+    "source_hashes_unchanged_since_dispatch": true,
+    "changed_selected_dispatch_sources": [],
+    "source_qualification_files": {
+      "controller_captured_inputs": "controller-integrated-readback.json",
+      "controller_changed_python_transitive": "controller-python-transitive-qualification.json",
+      "frontend_backend": "frontend-backend-source-qualification.json"
+    },
+    "entire_12_controller_gates_all_inputs_byte_equal_claimed": false,
+    "full_backend_or_production_agents_runtime_unchanged_claimed": false,
+    "new_paid_cloud_machines": 0,
+    "raw_logs_task_captures_environment_values_transcripts_private": true,
+    "console_sha256": "8600a17dcaef0a003c39f821807bb666a9b96d82d9bccecfb06c58f9b5e43aa6",
+    "canonical_blackbox_summary_sha256": "24f8c9bed4d23d692829846e6e750f475783141f4fc4fe692b3a81dc383f3ac4",
+    "recorded_utc": "2026-10-14T21:03:46.782359+00:00",
+    "previous_434_full_gate_PASS_preserved_as_historical_not_current": true,
+    "fresh_canonical_owning_current_109SMS_40cloud_149PASS_separate_from_full_lane": true,
+    "gate_agent_source_env_model_timeout_assertion_edits": false
+  },
+  "current_full_agents_private_readback": {
+    "archive_path": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/sms-nullable-guard-agents-20261014-210422.tar.gz",
+    "archive_sha256": "cd9b96c07db9360a38be9a471370a3954d8e7923128e4baad1e7831d346b2d84",
+    "mode": "0o600",
+    "regular_files_verified": 370,
+    "all_archive_member_hashes_equal_source_files": true,
+    "all_original_file_hashes_match_readback": true,
+    "raw_captures_task_data_environment_values_private": true,
+    "safe_summary_sha256": "8d1094f092f58c452f3c0540b02ff7d53c1bcb0b899207a87cf41fd5802b2797",
+    "source_head": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+    "archive_file_manifest_sha256": "512f19403cf1e9c3b04cc007c0d06740f9bc4588a5a77d4bdacdbbe24cc84b47",
+    "checked_utc": "2026-10-14T21:04:27.142661+00:00"
+  },
+  "current_live_SMS_open": "ERROR29.8s even though evaluatorPASS: durablecleanup pending; no task PASS or dischargedoutbox claimed",
+  "current_runtime_proof": {
+    "source_head": "f5c3c84238240ae457acabc9d9973f5145086889",
+    "proof": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-current-validation-20261014.json",
+    "all_tests_green": false,
+    "closed_store_behavior_failure_retained": true,
+    "fresh_normal_open_pass": true,
+    "main_integration_pending": true
+  }
+}

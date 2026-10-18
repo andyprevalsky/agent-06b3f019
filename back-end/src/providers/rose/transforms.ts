@@ -7,7 +7,8 @@
  * response_format.
  */
 
-import type { CompletionMessage, ContentBlock, ResponseFormat } from './types';
+import { canonicalTool, namedToolChoice } from './toolContract';
+import type { CompletionMessage, CompletionOptions, ContentBlock, ResponseFormat } from './types';
 import { isUncachedContext, markUncachedContext } from './cache';
 
 const DATA_URI_RE = /^data:([^;]+);base64,([\s\S]+)$/;
@@ -327,6 +328,15 @@ function unwrapNullableUnion(schema: JsonSchema): JsonSchema | null {
   return merged;
 }
 
+function isObjectSchema(schema: JsonSchema | undefined): schema is JsonSchema {
+  return (
+    schema !== undefined &&
+    typeof schema === 'object' &&
+    schema.type === 'object' &&
+    typeof schema.properties === 'object'
+  );
+}
+
 /**
  * Read a tool-variant discriminator, which JSON-Schema generators spell two
  * ways: `const: "name"` (a bare literal) and `enum: ["name"]` (what
@@ -354,7 +364,8 @@ function discriminatorName(toolField: JsonSchema | undefined): string | null {
  * dropped from the input schema. Returns null when the schema doesn't fit.
  */
 export function extractToolsFromResponseFormat(
-  responseFormat?: ResponseFormat | null
+  responseFormat?: ResponseFormat | null,
+  anthropic = true
 ): ExtractedTools | null {
   if (!responseFormat) return null;
   const jsonSchema = responseFormat.json_schema;
@@ -386,24 +397,59 @@ export function extractToolsFromResponseFormat(
       (r) => r !== 'tool'
     );
 
-    const inputSchema: JsonSchema = {
-      type: 'object',
-      properties: variantProps,
-      required,
-    };
-    if ('additionalProperties' in variantObj) {
+    // A `{ tool, arguments: {...} }` variant carries its parameters one level
+    // down. Native tools take them flat, as every Python tool model does, and
+    // the caller replays history with the flat arguments object.
+    const nested = variantProps.arguments as JsonSchema | undefined;
+    const flattenArguments = Object.keys(variantProps).length === 1 && isObjectSchema(nested);
+    const inputSchema: JsonSchema = flattenArguments
+      ? { ...nested, properties: nested.properties ?? {}, required: nested.required ?? [] }
+      : { type: 'object', properties: variantProps, required };
+    if (!flattenArguments && 'additionalProperties' in variantObj) {
       inputSchema.additionalProperties = variantObj.additionalProperties;
     }
 
     tools.push({
       name: toolName,
       description,
-      input_schema: relaxNullableUnionsForAnthropic(transformSchemaForAnthropic(inputSchema)),
+      input_schema: anthropic
+        ? relaxNullableUnionsForAnthropic(transformSchemaForAnthropic(inputSchema))
+        : inputSchema,
+      ...(!anthropic && typeof jsonSchema.strict === 'boolean'
+        ? { strict: jsonSchema.strict }
+        : {}),
     });
   }
 
   const responseFieldSchema = properties.response ?? { type: 'string' };
   return { tools, responseFieldSchema };
+}
+
+/**
+ * Project a tool-envelope `response_model` into native tools for every leg,
+ * as agents/providers/rose/client.py does with `direct_auth_tools`. A tool call
+ * is then the only legal answer on OpenAI-dialect legs too; plain response
+ * models, explicit `tools` and raw `response_format` callers are unchanged.
+ */
+export function withNativeToolContract(options: CompletionOptions): CompletionOptions {
+  if (!options.response_model || options.tools !== undefined) return options;
+  const extracted = extractToolsFromResponseFormat(options.response_format, false);
+  if (!extracted) return options;
+  const anthropicTools = extractToolsFromResponseFormat(options.response_format)?.tools;
+  return {
+    ...options,
+    tools: extracted.tools,
+    anthropic_tools: anthropicTools,
+    cerebras_tools_source: extracted.tools,
+    cerebras_tools: anthropicTools?.map((tool, index) => ({
+      ...tool,
+      ...(typeof extracted.tools[index].strict === 'boolean'
+        ? { strict: extracted.tools[index].strict }
+        : {}),
+    })),
+    tool_choice: options.tool_choice ?? 'any',
+    response_format: undefined,
+  };
 }
 
 /**
@@ -492,12 +538,20 @@ export function applyAnthropicToolConfig(
   toolChoice?: unknown
 ): boolean {
   if (tools && tools.length > 0) {
-    body.tools = tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      ...('strict' in t ? { strict: t.strict } : {}),
-      input_schema: t.input_schema,
-    }));
+    // Accept the Anthropic shape and the OpenAI `{function:{parameters}}` shape,
+    // like apply_anthropic_tool_config in agents/providers/rose/transforms.py.
+    body.tools = tools.flatMap((t) => {
+      const tool = canonicalTool(t);
+      if (!tool) return [];
+      return [
+        {
+          name: tool.name,
+          description: tool.description,
+          ...(tool.strict !== undefined ? { strict: tool.strict } : {}),
+          input_schema: tool.parameters,
+        },
+      ];
+    });
     body.tool_choice = normalizeAnthropicToolChoice(toolChoice) ?? { type: 'auto' };
     delete body.output_config;
     delete body.output_format;
@@ -535,17 +589,8 @@ function normalizeAnthropicToolChoice(toolChoice: unknown): Record<string, unkno
   if (toolChoice === null || toolChoice === undefined) return null;
   if (toolChoice === 'auto') return { type: 'auto' };
   if (toolChoice === 'required' || toolChoice === 'any') return { type: 'any' };
-  if (
-    typeof toolChoice === 'object' &&
-    toolChoice !== null &&
-    'function' in toolChoice &&
-    typeof (toolChoice as Record<string, unknown>).function === 'object'
-  ) {
-    const fn = (toolChoice as { function: Record<string, unknown> }).function;
-    if (typeof fn.name === 'string') {
-      return { type: 'tool', name: fn.name };
-    }
-  }
+  const name = namedToolChoice(toolChoice);
+  if (name !== null) return { type: 'tool', name };
   if (typeof toolChoice === 'object' && toolChoice !== null && 'type' in toolChoice) {
     return toolChoice as Record<string, unknown>;
   }

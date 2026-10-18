@@ -1,0 +1,226 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-15T18:42:57.010824+00:00",
+  "runtime_head": "352e8c4e6987f51efcd9a621965eda3e89126d93",
+  "merged_main": "cdbe16c54ac36e369cc019967390fbc5528a46f5",
+  "next_main_observed": "d70436ea5e8c2074ca654b3b665104c9c2bc9669",
+  "next_main_integration": "Conflict resolution complete; merge commit pending; fresh integrated gates not yet run",
+  "original_timing_run": "20261012-234924-2614623",
+  "original_start_utc": "2026-10-12T18:39:09Z",
+  "preservation": {
+    "checkpoint": "c8e72ed8821f5cc219c616b6454afee729c837a1",
+    "exact_original_warning_skip": "244a961d25558d4df563636ef3f8cc74d7894b89",
+    "both_ancestors_verified": true,
+    "all_original_source_preserved": true,
+    "raw_evidence_private": true
+  },
+  "backend": {
+    "full_suite_actual_source_sha": "9deb51d15de74711050cdd910e6c0d34800f9126",
+    "current_qualified_sha": "352e8c4e6987f51efcd9a621965eda3e89126d93",
+    "canonical_full_backend_actual_exit": 0,
+    "blackbox_domains_passed": 197,
+    "blackbox_domains_failed": 0,
+    "unit_test_files_passed": 267,
+    "coverage": {
+      "statements": 89.59,
+      "branches": 81.04,
+      "functions": 92.6,
+      "lines": 89.59
+    },
+    "fresh_current_352_existing_profile_owner_exit": 0,
+    "fresh_current_352_existing_startup_unit_exit": 0,
+    "prior_full_9deb_proof_qualified_not_fresh352_fullrerun": true,
+    "native_kind_closed_counts": {
+      "kernel_browser": 7,
+      "steel_session": 3,
+      "kernel_profile": 2
+    }
+  },
+  "agents": {
+    "head": "9deb51d15de74711050cdd910e6c0d34800f9126",
+    "started_utc": "2026-10-14T23:59:35.911499+00:00",
+    "finished_utc": "2026-10-15T00:03:58.623452+00:00",
+    "canonical_seconds": 262.7,
+    "exit_code": 0,
+    "blackbox": {
+      "passed": 110,
+      "failed": 0,
+      "total": 110,
+      "concurrency": 4
+    },
+    "fastcache": {
+      "passed": 184,
+      "seconds": 5.06
+    },
+    "units": {
+      "passed": 134,
+      "seconds": 48.51
+    },
+    "coverage": {
+      "percent": 82,
+      "threshold": 80,
+      "statements": 32735,
+      "missed": 5000,
+      "branches": 12126,
+      "partial_branches": 1941
+    },
+    "actual_notification_owning_cases": {
+      "sms-activities": 4,
+      "send-message-to-user": 18,
+      "request-user-approval": 30,
+      "total": 52,
+      "fresh_safe_receipt": "fresh-Python-notification-owning-safe.json"
+    },
+    "captured_births1568_absent": true,
+    "complete_descendant_capture_proved": false
+  },
+  "static": {
+    "deploy_structural_suites": 46,
+    "deploy_exit": 0,
+    "backend_structural_commands": 21,
+    "backend_exit": 0,
+    "current_352_eslint_exit": 0,
+    "current_352_tsc_exit": 0,
+    "original_9deb_no_unsafe_finally_failure_retained": true
+  },
+  "focused_live": {
+    "source_head": "352e8c4e6987f51efcd9a621965eda3e89126d93",
+    "canonical_probes_passed": 3,
+    "exit": 0,
+    "seconds": 22.7159,
+    "anthropic_warn_only_retained": true
+  },
+  "sms": {
+    "source_head": "352e8c4e6987f51efcd9a621965eda3e89126d93",
+    "passed": 1,
+    "failed": 2,
+    "stage_exit": 1,
+    "stage_seconds": 184.568,
+    "closed": {
+      "passed": false,
+      "seconds": 43.3,
+      "first_bad_check": "sms_no_unrequested_spend",
+      "agents_started": 1,
+      "budget_delta_cents": 100
+    },
+    "fill": {
+      "passed": false,
+      "seconds": 64.0,
+      "first_bad_check": "sms_agent_goal_contains",
+      "missing_fixture_fact_count": 2,
+      "lookup_before_delegation": false,
+      "native_dispatch_and_saved_goal_equal": true,
+      "served_model_call_counts": {
+        "gpt-5.6-luna-foundry": 2,
+        "qwen": 1
+      }
+    },
+    "open": {
+      "passed": true,
+      "seconds": 39.6
+    },
+    "semantic_judges_on_failed_cases": "NOT_REACHED",
+    "canonical_owned_cleanup_verified": 3,
+    "durable_terminal_archive_receipts_verified": 3,
+    "durable_archive_refs": 4,
+    "original_native_generations_terminal": 3,
+    "exact_kernel_session_terminal": 1,
+    "new_owned_profile_deleted_native404": 1,
+    "source_bound_private_llm_dumps": 16,
+    "diagnostics_parent_reported_exit": 143,
+    "independent_exit_receipt": "ABSENT",
+    "independent_pre_stop_SQL": "UNKNOWN"
+  },
+  "ui_e2b": {
+    "UI_passed": 8,
+    "UI_exit": 0,
+    "UI_seconds": 33.79794907569885,
+    "E2B_passed": 56,
+    "E2B_exit": 0,
+    "E2B_seconds": 33.72471356391907,
+    "native_original_chains_terminal": 2,
+    "native_E2B_absent": 3,
+    "observed_process_births_absent": 546,
+    "canonical_stack_cleanup_state": "failed",
+    "semantic_sandbox_creation": "RESOLVED: both source-bound original native histories terminate before code sandbox activity scheduling; no allocation by these exact chains",
+    "latency": "NOT_RUN",
+    "no_global_or_inherited_resource_claim": true
+  },
+  "interrupted_smoke_and_agentcard": {
+    "fresh_gate_pass": false,
+    "terminal_controller_receipts": "ABSENT",
+    "cause": "UNKNOWN; concurrently launched stacks exceeded documented memory scheduling guidance; exact interruption cause not established",
+    "source_databases": "DROPPED",
+    "canonical_DB_consumer_PASS": false,
+    "manual_exact_recovery": {
+      "original_native_generations_terminal": 7,
+      "exact_fenced_terminations": 4,
+      "positive_Kernel_handles_native404": 4,
+      "positive_cards_CLOSED_zero": 2,
+      "testshop_funding_reclaimed_and_captured_charge_fully_refunded": true,
+      "setup_resume_CLEARED_legitimate_capture_retained": true,
+      "financial_reconciliation_complete": true,
+      "global_clean_claimed": false
+    }
+  },
+  "pending_approvals": [
+    {
+      "id": "TAMY-FIXTURE-MENU-1",
+      "patch_sha256": "6d8cf29d38d109d51f3cddaf0599661d1871e864c15b52ed6b584203f877ca41",
+      "requested_at": "2026-10-14T19:49:45.852556Z",
+      "status": "PENDING_UNAPPLIED",
+      "live_behavior_fix_proved": false
+    },
+    {
+      "id": "TAMY-RETRIEVAL-352",
+      "patch_sha256": "b2d83ea7da62d2b89982c0eb14c1ed22f8776a97df331c7eb33c974467dac1b6",
+      "requested_at": "2026-10-15T18:39:50.211513Z",
+      "status": "PENDING_UNAPPLIED",
+      "live_behavior_fix_proved": false,
+      "new_Rose_policy_not_copied_from_Rose_complete": true
+    }
+  ],
+  "private_archives": [
+    {
+      "scope": "current SMS and source-bound dumps",
+      "sha256": "19601812fc8240ea79f5ade67306ea66aa28e6b45dabeebd19cb2deb64f941de",
+      "files_readback_verified": 81,
+      "mode": "0600"
+    },
+    {
+      "scope": "interrupted smoke/payment exact recovery",
+      "sha256": "fa7a803b8cb936132a614df91fe1492cffd1e0f993a05bc2e626b1239ac24557",
+      "files_readback_verified": 529,
+      "mode": "0600"
+    },
+    {
+      "scope": "current UI E2B recovery",
+      "sha256": "d0b218d4c91152a6b568155fc1715109bf2c47340bb86375f6d071eb01873bed",
+      "files_readback_verified": 61,
+      "mode": "0600"
+    },
+    {
+      "scope": "semantic Claude exact history/source supplement",
+      "sha256": "b32e4bd5c267b239825638bb6bcab7ae20a83ac2d5e4b0c5406043f8009ffd7e",
+      "files_readback_verified": 28,
+      "mode": "0600"
+    }
+  ],
+  "private_input_hashes": {
+    "backend": "e2646e4b964b484fcd4db126cb60c6d8ecab853b4e8414c3f62ec1e1a45d34bc",
+    "agents": "3786f1e8e9702240bf63f088a1b3b86a7fbf4df0d42ea4d7e678effbc324875f",
+    "ui_e2b": "2742d4aabd53481d0b9f9ba504e40de6e1e52e548cdf0e94b04c664b92f475a1",
+    "financial": "a5ea86172ad9b13431f8bb66bf8c5405bb27affcd84c95abd57481cbb59ec988",
+    "sms_dump_manifest": "4dfb65464794b5bc6f370feba510a4b4d0890343cc92e82a7b7fdaf8d993448c"
+  },
+  "review": {
+    "initial_clean_head": "3dcc252c0",
+    "later_exact_HEAD_review": "NOT_YET_RUN",
+    "max_cycles": 3,
+    "ledger_not_reset": true
+  },
+  "all_tests_green": false,
+  "merged": false,
+  "deployed": false,
+  "ready_to_close": false
+}

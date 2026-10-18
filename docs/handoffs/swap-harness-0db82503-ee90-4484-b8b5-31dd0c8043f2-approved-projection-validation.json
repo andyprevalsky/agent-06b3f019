@@ -1,0 +1,689 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-14T02:14:36.430474+00:00",
+  "runtime_source": "4310587e0e57ad35582e03232c91b3306e90a08b",
+  "current_checkpoint": "d1b836316c1967cc107b7c72508e66d382b29f34",
+  "approval": "TAMY-CEREBRAS-1 approved and applied exactly",
+  "native_owning_gate": "PASS",
+  "fresh_SMS": {
+    "run_id": "65f3f4d0-3490-4793-b314-eb03a7c52586",
+    "triggered_at_utc": "2026-10-14T01:54:27.848791+00:00",
+    "catalog_sha256": "330f865234e1472aa899fff95940499490f05dcf278afe89ac7e0c6e86b6aee9",
+    "original_timeouts": {
+      "sms-supervisor-open-spawns-agent": 420,
+      "sms-supervisor-closed-no-spawn": 420,
+      "sms-supervisor-fill-form-searches-then-delegates": 420
+    },
+    "task_outcomes": [
+      {
+        "name": "sms-supervisor-fill-form-searches-then-delegates",
+        "passed": false,
+        "duration_seconds": 45.7
+      },
+      {
+        "name": "sms-supervisor-open-spawns-agent",
+        "passed": true,
+        "duration_seconds": 78.2
+      },
+      {
+        "name": "sms-supervisor-closed-no-spawn",
+        "passed": false,
+        "duration_seconds": 31.5
+      }
+    ],
+    "passed": 1,
+    "failed": 2,
+    "reported_cost_cents": 0.0,
+    "direct_SMS_provider_cost": "Not metered by zero-cost benchmark summary",
+    "argument_type_failure": "Absent in20 captured dispatcher records; numeric/boolean/object types valid",
+    "remaining_failure": "Closed fixture led to unexpected committed agent; fill-form declared LLM judge failed despite static contract passing; evaluator interpretation under audit",
+    "runner_process_owners_absent": true,
+    "cleanup_receipts_clean": true
+  },
+  "fresh_static": "PASS full backend TypeScript/structural443-file affected lint/fullformat",
+  "fresh_structural": "PASS46/46 suites;623 fixture cases+4existing skips; separate seed gates PASS",
+  "fresh_frontend": "PASS160files2736tests+3existing skips; lint/build PASS; formatter failure repaired with identical emitted JavaScript; final appTSC+11phone-card tests PASS",
+  "backend_coverage": {
+    "domains": 197,
+    "passed": 194,
+    "failed": 3,
+    "failed_domains": [
+      "browser-provider",
+      "browser-session-credential-injection",
+      "treasury-rails"
+    ],
+    "coverage_threshold_result": "Not established because blackbox phase failed"
+  },
+  "agents_coverage": {
+    "domains": 110,
+    "passed": 109,
+    "failed": 1,
+    "cause": "Duplicate original test copies shadow main strengthened fixture/flag setup",
+    "repair": "Applied duplicate-only test repair with all canonical assertions preserved; fresh full coverage running",
+    "latest_status": "PASS",
+    "latest_source": "e87ac65479b0ff20aad069dfe49a8f6214dfea44",
+    "latest_domains": 110,
+    "latest_passed": 110,
+    "latest_failed": 0,
+    "fast_cache_tests": 184,
+    "unit_tests": 134,
+    "coverage_percent": 82.0,
+    "threshold_percent": 80.0,
+    "tracked_PID_birth_identities_absent": 43,
+    "original_failed_attempt_retained": true
+  },
+  "non_author_finite_recipe_review": {
+    "fingerprint": "a6a1b58b4d679a971332ace36d66333549c62eb87c13e7209aa92a662b671933",
+    "input_count": 40,
+    "main_identical_inputs": 39,
+    "sole_other_input": "Previously independently approved frontend coverage manifest",
+    "registered_phases": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ]
+  },
+  "deployment_complete": false,
+  "PR_merged": false,
+  "raw_transcripts_and_values": "PRIVATE; not included in this receipt",
+  "updated_at_utc": "2026-10-14T20:01:28.407311+00:00",
+  "backend_credential_fixture_repair": {
+    "patch_sha256": "50ffb3495980fa84d920376f256c761e00a6ffafce01a7620fcadc351db1dac5",
+    "scope": "Existing test-only mock clock;25ms and all assertions preserved; production source unchanged",
+    "controlled_admission_delay_ms": 60,
+    "controlled_baseline_exit": 1,
+    "controlled_candidate_exit": 0,
+    "ordinary_baseline": "Passed on quieter run; not relabeled failure",
+    "actual_applied_local_owning_gate": "PASS",
+    "full_typescript_and_lint": "PASS",
+    "full_backend_coverage_after_repair": "NOT_RERUN;197-domain prior194PASS3FAIL retained"
+  },
+  "verification_target_incident": {
+    "incident": "One direct verification continued afterfailedDB guard andran againstremoteDB; notaccepted aslocalproof",
+    "fixture_data": "Generated anonymousjit-credentials rows only; realuserids notused",
+    "cleanup_readonly_audit": "PASS; all8affectedmodelcounts zero",
+    "corrected_local_gate": "PASS withset-euo-pipefail andexplicitlocalworkspaceDBtarget",
+    "source_environment_files_changed": false
+  },
+  "provider_native_cleanup_readback": {
+    "Kernel_sessions_deleted": 5,
+    "Steel_sessions_released": 1,
+    "owning_Kernel_profile": "GET404",
+    "cleanup_mutations": "NONE; readonlyexactresourceaudit",
+    "Steel_profile_metadata_state": "UNVERIFIED; noactiveownedsessionfound",
+    "overdue_old_mint_provider_readback": "UNVERIFIED; originalfailedledgerclassification preserved"
+  },
+  "new_pending_prompt_approval": {
+    "id": "TAMY-CONDITION-1",
+    "status": "WITHDRAWN_NOT_APPLIED",
+    "proposal_sha256": "6e01a73f22b685ea6ad7031210032a8b57932eeabe771024b158906680f1d206",
+    "scope": "OneaddedSMSconditionalactioninstruction; noclassifier/tooldescription/schema/model/catalog/timeout change",
+    "existing_composition_test": "PASS0.393s",
+    "real_post_fix_task_pass": "NOT_ESTABLISHED",
+    "independent_review": "Reasonablepromptproductdecision; ambiguousfallbackscope refined; notclaiminggoldencopyorprovedfix",
+    "withdrawal_observed_at_utc": "2026-10-14T04:54:46.235315+00:00",
+    "reason": "The actual SMS request is unconditional. Prior response incorrectly described an explicit condition. Fixture includes August15 date during October14 run; proposed explicit-condition instruction is unsupported.",
+    "human_approval_or_rejection": false
+  },
+  "private_dump_archive_readback": {
+    "files": 46,
+    "sha256_matches": 46,
+    "descendant_completeness": "NOT_INDEPENDENTLY_ESTABLISHED"
+  },
+  "all_raw_transcripts_values_task_captures": "PRIVATE",
+  "test_input_correction": {
+    "task": "sms-supervisor-closed-no-spawn",
+    "catalog_prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "actual_inbound": "Order me a lum lok Togo from the ferry building asap",
+    "explicit_condition_in_user_input": false,
+    "fixture_date_phrase": "closed for kitchen renovations through August15",
+    "run_date_utc": "2026-10-14",
+    "potential_calendar_ambiguity": true,
+    "flakiness_proved": false,
+    "catalog_fixture_or_product_prompt_changed": false,
+    "prior_agent_description": "Explicitconditionalrequestdescription was incorrect; corrected and proposedpromptwithdrawn"
+  },
+  "fresh_backend_20261014_current": {
+    "source_git_sha": "87032ebe60b9187f7086c5067258ebe7c4cfa0e3",
+    "stage": {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "backend-coverage-blackbox",
+      "started_at": "2026-10-14T18:15:22Z",
+      "finished_at": "2026-10-14T18:21:57Z",
+      "started_epoch": 1792001722.7146165,
+      "finished_epoch": 1792002117.7381163,
+      "duration_seconds": 395.0,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/backend-coverage-blackbox-20261014-181522-3273397.log"
+    },
+    "blackbox": {
+      "passed": 195,
+      "failed": 2,
+      "total": 197,
+      "failed_domains": [
+        "browser-provider",
+        "treasury-rails"
+      ],
+      "credential_injection_passed": true
+    },
+    "unit": {
+      "total": 266,
+      "passed": 266,
+      "failed": 0
+    },
+    "coverage": {
+      "fresh_report_generated": false,
+      "reason": "canonical coverage stops after failed blackbox phase"
+    },
+    "trailing_teardown_gate": {
+      "ran": false,
+      "reason": "npm && gate conditional on coverage success"
+    },
+    "inherited_exclusion": {
+      "domain": "integration-health",
+      "verification": "not verified by this coverage gate",
+      "skip_flag_changed": false
+    },
+    "preserved_failure_dir": "/home/boxes/rose/.context/test-runs/backend-coverage-failed-20261014-182156-3273513",
+    "process_retirement": {
+      "observed_pid_births": 30,
+      "alive_exact_births": [],
+      "reused_pids": [],
+      "all_observed_births_retired": true
+    },
+    "native_retirement": {
+      "complete": true,
+      "kernel_browsers_deleted": 7,
+      "steel_sessions_released": 2,
+      "kernel_profiles_404": 2,
+      "auth_persist_journals": [
+        {
+          "path": ".context/test-runs/browser-provider-custody/auth-persist-6Pn2eE/custody.json",
+          "sha256": "e11d937c438fbca960afcaf7ababdb7ab9aaf617a1052376ef25bf9b8034c789",
+          "phase": "cleanup-complete",
+          "ownerRetained": false,
+          "cleanupFailures": 0
+        }
+      ],
+      "source_allocation_markers_audited": [
+        "Kernel browser creation completed",
+        "Created Steel session",
+        "Created new Steel session",
+        "auth-persist allocated journal"
+      ]
+    },
+    "evidence_sha256": {
+      ".context/tamy-resumed/current-backend-coverage-console.log": "4af93c1d11b862b23b74840e85c242d90321ae247b1f4056dffba30ac26f62be",
+      ".context/tamy-resumed/current-backend-coverage-retirement.json": "02a39a2f64f3d235cd9b556ce75d0361740404bb4d10cef409cbf0a52a3b43db",
+      ".context/tamy-resumed/current-backend-browser-native-audit.json": "07f083e445419155c3e04d06971d604e0a27e1680b22ffbc1ccf75ff8f9c8c7f",
+      "/home/boxes/rose/.context/test-runs/backend-coverage-failed-20261014-182156-3273513/server.log": "2cc800eb34a7b761e5c8ca31bc6879a895e2582d06e46e1024cd47dcf901a074",
+      "/home/boxes/rose/.context/test-runs/backend-coverage-failed-20261014-182156-3273513/summary.json": "67b792dc28dd983353583ecaa4fcb5a85eaf29769d50d35634aa1b9d3d9bc318"
+    },
+    "source_unchanged_by_gate_agent": true,
+    "no_timeout_or_skip_changes": true,
+    "recorded_at": "2026-10-14T18:28:30.174245+00:00",
+    "treasury_native_card_readback": {
+      "file": ".context/tamy-resumed/current-treasury-overdue-native-rows.json",
+      "sha256": "cec8dbad9a68838c6427984b0c2657284dd0a937a6dcc054283891dda1d4f207",
+      "cards_closed_balance_zero": 2,
+      "matched_card_and_cardholder_bindings": 2,
+      "sandbox_consumed_released_zero": 2,
+      "financial_reclamation_proven": false
+    },
+    "treasury_canonical_ledger_readback": {
+      "file": ".context/tamy-resumed/current-treasury-ledger-readback.json",
+      "sha256": "53ab4056200a852241d3305273708c57e6585326f9956a2cf79eff6a251350b2",
+      "selected_resolved_overdue": 2,
+      "selected_open_remaining": 0,
+      "all_open_remaining": 0,
+      "manual_ledger_mutation": false
+    }
+  },
+  "current_Steel_static_validation": {
+    "source": "0af01a88e2b083ef72bb64325014b9ae72147245",
+    "reverse_importer_count": 130,
+    "results": [
+      {
+        "stage": "current-steel-typescript",
+        "exit": 0,
+        "seconds": 27.027,
+        "source_start": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "source_end": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-steel-static/typescript.log"
+      },
+      {
+        "stage": "current-steel-backend-structural",
+        "exit": 0,
+        "seconds": 23.899,
+        "source_start": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "source_end": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-steel-static/backend-structural.log"
+      },
+      {
+        "stage": "current-steel-format",
+        "exit": 0,
+        "seconds": 1.982,
+        "source_start": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "source_end": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-steel-static/format.log"
+      },
+      {
+        "stage": "current-steel-eslint",
+        "exit": 0,
+        "seconds": 20.801,
+        "source_start": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "source_end": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-steel-static/eslint.log"
+      },
+      {
+        "stage": "current-steel-command-structural",
+        "exit": 0,
+        "seconds": 330.001,
+        "source_start": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "source_end": "0af01a88e2b083ef72bb64325014b9ae72147245",
+        "log": "/home/boxes/rose/.context/tamy-resumed/current-steel-static/command-structural.log"
+      }
+    ],
+    "recorded_at_utc": "2026-10-14T18:47:36.425480+00:00",
+    "owned_births_observed": 25,
+    "owned_births_remaining": [],
+    "all_observed_owners_retired": true,
+    "source_final": "0af01a88e2b083ef72bb64325014b9ae72147245",
+    "p2_overlap": [],
+    "p2_excluded_count": 72,
+    "explicit_local_database_verified": true,
+    "no_source_edits": true,
+    "runtime_prompt_text_original_and_approved_byte_matches": true,
+    "catalog_unchanged": true,
+    "guards": {
+      "prompt-approved": {
+        "exit": 0,
+        "stage": "current-steel-prompt-approved",
+        "durable_stage_log": "/home/boxes/rose/.context/deploy-runs/20261012-234924-2614623/logs/current-steel-prompt-approved-20261014-184250-3820817.log",
+        "local_log_sha256": "0947370b775407dd39810c99a16c5e5ee8d39b346c6bfed84b5ba77985e212c0"
+      },
+      "agent-behavior": {
+        "exit": 0,
+        "stage": "current-steel-agent-behavior",
+        "durable_stage_log": "/home/boxes/rose/.context/deploy-runs/20261012-234924-2614623/logs/current-steel-agent-behavior-20261014-184253-3823316.log",
+        "local_log_sha256": "31ff30d5ee580f9c4ef642e489e40ef27b68922dd4d622efcc05bc60b907d867"
+      },
+      "trajectory": {
+        "exit": 0,
+        "stage": "current-steel-trajectory",
+        "durable_stage_log": "/home/boxes/rose/.context/deploy-runs/20261012-234924-2614623/logs/current-steel-trajectory-20261014-184253-3823597.log",
+        "local_log_sha256": "f80eab0951eb3d8a5c60fdc00d78379b4068f8fa04662796ba498ac88b249868"
+      }
+    },
+    "preserved_unflagged_prompt_exit": 1,
+    "unflagged_classification": "Inherited exact-approved runtime, unchanged tombstone and instruction/evidence files; new evidence JSON quotes only unapplied candidate, no runtime input changes.",
+    "log_sha256": {
+      "command-structural.log": "6460eb168ef0d9534668ba947ffdebed1fc24f1b9dd909f0b4f99249e66bd006",
+      "format.log": "5ee89a019f390a2eebfdef44ca32b14a0902f327578275180aad898eb2c8320d",
+      "typescript.log": "dbd1cb373b89a36f2d13030151f31fda50702b00bd981754f5476abc8352f144",
+      "agent-behavior.log": "31ff30d5ee580f9c4ef642e489e40ef27b68922dd4d622efcc05bc60b907d867",
+      "trajectory.log": "f80eab0951eb3d8a5c60fdc00d78379b4068f8fa04662796ba498ac88b249868",
+      "backend-structural.log": "e1a1e5d588b6c0621bef0bfd05d19d9359e658ba7f6b6c24b022f611600531d1",
+      "eslint.log": "72d275a3e242467e6e6c2f2c203f9a9502652dad8d17984335b343c90ddd5f2f",
+      "prompt-unflagged.log": "d771d9ffc65046cf43422d464b50ce37a3e94dc074fbf9d9d336464934ca3def",
+      "prompt-approved.log": "0947370b775407dd39810c99a16c5e5ee8d39b346c6bfed84b5ba77985e212c0"
+    },
+    "tracked_worktree_status": []
+  },
+  "current_native_controller_validation": {
+    "schema_version": 1,
+    "stage": "cloudbench-controller-native",
+    "source_head": "87032ebe60b9187f7086c5067258ebe7c4cfa0e3",
+    "source_head_at_finish": "0af01a88e2b083ef72bb64325014b9ae72147245",
+    "source_matches_dispatch": false,
+    "runtime_dirty_paths": [],
+    "main_integrated": "9e36c9f1fe1dd7573fac246a8d25282fdfefd90f",
+    "timing_run": "20261012-234924-2614623",
+    "timing_run_preserved": true,
+    "started_utc": "2026-10-14T18:18:08.014883+00:00",
+    "finished_utc": "2026-10-14T18:47:20.363928+00:00",
+    "wall_seconds": 1752.3490664958954,
+    "overall_exit_code": 0,
+    "suite_count": 12,
+    "passed_suites": 12,
+    "failed_suites": 0,
+    "suite_results": [
+      {
+        "suite_index": 1,
+        "command": "bash scripts/tests/cloudbench-env.test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 2,
+        "command": "bash scripts/tests/cloudbench-acceptance-autoscale.test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 3,
+        "command": "python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 4,
+        "command": "bash scripts/tests/fleet-infra-canary.test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 5,
+        "command": "bash scripts/tests/fleet-infra-stability-proof.test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 6,
+        "command": "python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 7,
+        "command": "bash scripts/tests/cloudbench-multi-workstream.test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 8,
+        "command": "python3 scripts/tests/cloudbench-controller-linux.test.py",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 9,
+        "command": "bash scripts/tests/cloudbench-github-token.test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 10,
+        "command": "bash scripts/tests/seed-dump-toolchain.test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 11,
+        "command": "agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py",
+        "exit_code": 0
+      },
+      {
+        "suite_index": 12,
+        "command": "agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py  agents/benchmarks/cloudbench_worker_snapshot_test.py  agents/benchmarks/cloudbench_recovery_review_test.py  agents/benchmarks/cloudbench_codex_auth_test.py  agents/benchmarks/cloud_batch_cleanup_test.py  -k 'fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone or clone_creation_cannot_start_copied_primary or cloudbench_codex_auth or autoscaler_runtime_handoff or prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or boot_payload or boot_launch_compresses_complete_payload or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or refresh_deps_applies_exact_workspace_before_rebuild or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or fresh_controller_reuses_only_proven_donor_dependencies or verified_legacy_snapshot or dependency_proof_publication or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers or pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper or exact_recovery_seals_actual_retained_owner_remote_evidence_paths or hub_transport or guest_shutdown_child_confirmation or exact_guest_recovery_archives_bound_child_token or exact_recovery_consumes_runtime_receipt_completed_absent_primary or exact_recovery_consumes_runtime_receipt_publishes_audited_release or fleet_lifecycle_receipt_requires_final_registry_retirement or watchdog_collects_cancelled_artifact_after_bounded_shutdown or terminal_projection_preserves_benchmark_outcome or boot_driver_state_write_failure or driver_cleanup_persists_evidence_in_fresh_data_directory or driver_cleanup_requires_current_stack_receipt_on_normal_completion or autoscaled_worker_uses_authenticated_fetch_ref_helper or terminal_projection_empty_tasks or terminal_projection_rejection_removes_all_artifacts or status_recovery_read_closes_descriptor or cloudbench_recovery_review or migration or migrated_registry or owned_worker_volume or composite_result_finalizes_each_exact_root or minted_dispatch_preserves_live_root_observer or evaluated_wrapper_completion_publishes_once or data_plane_mirror_reads_current_owner_port or fleet_publishes_evaluation_before_teardown or boot_terminal_runtime_evidence_collects_complete_logs or cloudbench_worker_snapshot or quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt'",
+        "exit_code": 0
+      }
+    ],
+    "doc_sha256": "ab647e2babbff9cea738c0647ddba1ea62dd6541eb95c3205d11750ece23be1f",
+    "exact_command_snapshot_sha256": "f9bcc94e9106823e7b5dfbefcb1aa61188f80ab10ef003b1170400c30bb9aa2e",
+    "private_console_sha256": "8c1cf854c7d0c58e94101744ebb5385f0e30b9e470515b46450f605bd3e74a1f",
+    "captured_process_births": 10141,
+    "captured_exact_processes_present": 0,
+    "observed_owned_process_groups": 159,
+    "members_present_in_observed_groups": 0,
+    "complete_descendant_capture_proved": false,
+    "offline_container_count": 1,
+    "offline_containers_native_absent": true,
+    "container_native_observations": [
+      {
+        "id": "03a772b7b65562bd6d88c2d280b4718fde6d0099dc531faf29aaafacf7fc32ae",
+        "native_absent": true,
+        "owner_receipt_sha256": "c95a3c93aefb1c76e9b964b1b59ce4ea5b74b9031723f42f277d4db0e81e7115",
+        "source_receipt_sha256": "f93de22bca4d35bc00c78210aae3af5b89c102d76688b2f373cdccfb498d1576"
+      }
+    ],
+    "new_paid_cloud_machines": 0,
+    "benchmark_domain": "already passed once in fresh agents coverage; not rerun",
+    "raw_logs_environment_values_transcripts": "private",
+    "audited_utc": "2026-10-14T18:47:52.793726+00:00",
+    "controller_source_equivalence_verified": true,
+    "source_equivalence_qualification": {
+      "schema_version": 1,
+      "dispatch_source": "87032ebe60b9187f7086c5067258ebe7c4cfa0e3",
+      "finish_source": "0af01a88e2b083ef72bb64325014b9ae72147245",
+      "sha_identity_preserved": false,
+      "changed_paths": [
+        "agents/benchmarks/history/task_attempts.jsonl",
+        "back-end/src/providers/browser/index.ts",
+        "back-end/src/providers/steel/sessionResume.ts",
+        "back-end/src/tests/blackbox/browser-provider-rotation.support.ts",
+        "back-end/src/tests/blackbox/browser-provider.blackbox.ts",
+        "back-end/src/tests/blackbox/browser-provider.helpers.ts",
+        "back-end/src/tests/unit/steel-session-startup-failure.test.ts",
+        "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-approved-projection-validation.json",
+        "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-sms-repeat-audit.json",
+        "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-steel-profile-reuse.json"
+      ],
+      "controller_executable_changes": [],
+      "controller_dependency_seed_input_changes": [],
+      "offline_snapshot_source_entries_verified_against_dispatch_finish_and_worktree": 249,
+      "offline_snapshot_source_mismatches": [],
+      "controller_source_equivalence_verified": true,
+      "broader_changed_backend_runtime_certified": false,
+      "scope": "Exact documented controller gates, not backend browser runtime or production lanes"
+    },
+    "broader_changed_backend_runtime_certified": false,
+    "canonical_timing_stage_recorded": true,
+    "canonical_timing_stage_duration_seconds": 1752.2,
+    "canonical_timing_stage_record_sha256": "fddf89484932cd68ef35c24ac98e50bcba009de641b63f4664e5f81809f9c874"
+  },
+  "private_offline_gate_readback": {
+    "recorded_at_utc": "2026-10-14T18:50:27.674745+00:00",
+    "archive_sha256": "2f470ccb9def3acccd61444fc40aad6889918512ec9c91dd65cb3ee0f2d6a8e2",
+    "manifest_sha256": "5c49ac21b115d52eef343875b9ff8413557ddaff0c71e54b3acd3693657490d8",
+    "files": 42,
+    "matched_files": 42,
+    "archive_readback": "PASS",
+    "private_archive": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/current-offline-gates-20261014/gate-evidence.tar.gz",
+    "raw_publication": false
+  },
+  "latest_deploy_state": {
+    "runtime_head": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+    "Group3": "FRESH_FULL_AGENTS_ead_PASS110_DOMAINS_82_PERCENT; unchangedFE/backend/controller/liveprobes qualified; realSMScleanup gate ERROR on durableoutbox pending",
+    "SMS_test_changes": "TAMY-FIXTURE-DATE-1 and TAMY-JUDGE-PROFILE-1 APPROVED_APPLIED_EXACTLY",
+    "SMS_current_outcome": "2_PASS_1_FAIL; closed no-spawn still fails",
+    "SMS_native_resource_audit": "10 earlier known nativegenerations terminal; both newer open roots terminal with ownqueue/firstRun match; positivelycreatedcurrent Kernelprofile deleted404; capturedprocesses retired; stopped DB outbox discharge UNKNOWN",
+    "pending_snapshot_IDs": [
+      "TAMY-FIXTURE-MENU-1"
+    ],
+    "cleanup_source_fix": "APPLIED_b08_AND_NULL_OVERRIDE_606; canonical149PASS; actualtwoopenERRORs expose missing durableobligation drain; private correction under sourceRCA",
+    "current_receipt": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-post-approval-validation.json",
+    "historic_fields": "Earlier result sections retain their stated source/timestamp; do not treat them as current runtime proof",
+    "review_cycle_2": "NOT_STARTED",
+    "production": "NOT_DEPLOYED",
+    "merged": false
+  },
+  "fresh_backend_after_Steel_integration": {
+    "source_git_sha": "0af01a88e2b083ef72bb64325014b9ae72147245",
+    "stage": {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "backend-coverage-blackbox",
+      "started_at": "2026-10-14T18:41:17Z",
+      "finished_at": "2026-10-14T18:51:39Z",
+      "started_epoch": 1792003277.4775975,
+      "finished_epoch": 1792003899.807886,
+      "duration_seconds": 622.3,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/backend-coverage-blackbox-20261014-184117-3749296.log"
+    },
+    "domain_counts": {
+      "passed": 197,
+      "failed": 0,
+      "total": 197
+    },
+    "unit_counts": {
+      "passed": 266,
+      "failed": 0,
+      "total": 266
+    },
+    "coverage": {
+      "lines": {
+        "total": 116158,
+        "covered": 104049,
+        "skipped": 0,
+        "pct": 89.57
+      },
+      "statements": {
+        "total": 116158,
+        "covered": 104049,
+        "skipped": 0,
+        "pct": 89.57
+      },
+      "functions": {
+        "total": 10834,
+        "covered": 10031,
+        "skipped": 0,
+        "pct": 92.58
+      },
+      "branches": {
+        "total": 31464,
+        "covered": 25485,
+        "skipped": 0,
+        "pct": 80.99
+      },
+      "branchesTrue": {
+        "total": 0,
+        "covered": 0,
+        "skipped": 0,
+        "pct": 100
+      }
+    },
+    "trailing_teardown": {
+      "normal_exit_passed": true,
+      "sigterm_passed": true
+    },
+    "selected_domains": [
+      {
+        "domain": "browser-provider",
+        "passed": true,
+        "duration": 106212,
+        "logPath": "/home/boxes/rose/back-end/coverage/blackbox-run/browser-provider.log"
+      },
+      {
+        "domain": "browser-session-credential-injection",
+        "passed": true,
+        "duration": 1355,
+        "logPath": "/home/boxes/rose/back-end/coverage/blackbox-run/browser-session-credential-injection.log"
+      },
+      {
+        "domain": "treasury-rails",
+        "passed": true,
+        "duration": 265758,
+        "logPath": "/home/boxes/rose/back-end/coverage/blackbox-run/treasury-rails.log"
+      }
+    ],
+    "native_retirement": {
+      "complete": true,
+      "kernel_browsers_deleted": 7,
+      "steel_sessions_released": 3,
+      "kernel_profiles_404": 2,
+      "auth_persist_journals": [
+        {
+          "path": "/home/boxes/rose/.context/test-runs/browser-provider-custody/auth-persist-VhyMJc/custody.json",
+          "sha256": "be891fa92144b92c895a8a77e432a6641eb232dff0ad1ff8c705c263f27ac74a",
+          "phase": "cleanup-complete",
+          "ownerRetained": false,
+          "cleanupFailures": 0
+        }
+      ]
+    },
+    "process_retirement": {
+      "captured_births": 45,
+      "all_captured_births_retired": true,
+      "alive_exact_births": [],
+      "boot_id": "6af9c450-c2c8-4647-a911-8ab19a296bbf",
+      "observed_at": "2026-10-14T18:53:38.312136+00:00"
+    },
+    "historical_overdue_state": "prior strict failure and native unreclaimed CLOSED/zero-balance sandbox facts retained; canonical resolved:overdue entries do not prove settlement",
+    "inherited_exclusion": {
+      "domain": "integration-health",
+      "verification": "not verified by this coverage gate",
+      "skip_changed": false
+    },
+    "no_retry_timeout_schema_prompt_model_catalog_or_env_changes_during_gate": true,
+    "collected_at": "2026-10-14T18:54:21.039845+00:00",
+    "new_pending_mint": {
+      "count": 1,
+      "card_closed": true,
+      "balance_cents": 0,
+      "transfer_status": "consumed",
+      "released_cents": 0,
+      "financial_reclamation_proven": false
+    },
+    "private_archive_readback": {
+      "private_archive": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/steel-integrated-backend-20261014/private-gate-evidence.tar.gz",
+      "archive_sha256": "da2b6384b142e50dd24ba9e0b2b4f015abe5bdb977a7dbce86d0875b1c8b19d4",
+      "manifest_sha256": "ea9b1e4ffce284313706daa8f4957e46bda8e2c150a4d88ecd0f54c79e057c0e",
+      "files": 209,
+      "sha_matches": 209,
+      "readback": "PASS",
+      "raw_publication": false
+    }
+  },
+  "current_live_tails": {
+    "recorded_at_utc": "2026-10-14T18:57:24.528799+00:00",
+    "source_start": "0af01a88e2b083ef72bb64325014b9ae72147245",
+    "source_final": "0af01a88e2b083ef72bb64325014b9ae72147245",
+    "supervisor_exit": 0,
+    "stages": [
+      {
+        "stage": "credential-health",
+        "exit": 0,
+        "seconds": 1.1,
+        "stage_log": "logs/credential-health-20261014-185408-4023873.log"
+      },
+      {
+        "stage": "amplitude-live",
+        "exit": 0,
+        "seconds": 11.1,
+        "stage_log": "logs/amplitude-live-20261014-185408-4023874.log"
+      },
+      {
+        "stage": "chat-router-failover-live",
+        "exit": 0,
+        "seconds": 24.7,
+        "stage_log": "logs/chat-router-failover-live-20261014-185420-4026654.log"
+      }
+    ],
+    "warnings": {
+      "anthropic": "CREDIT_EXHAUSTION_WARN_ONLY",
+      "credential_actual_summary": "6 passed,1 warning,0 overrides,0 failed,7 total"
+    },
+    "exact_observed_owner_births_absent": true,
+    "observed_owner_count": 12,
+    "isolated_probe_backend_listener_absent": true,
+    "isolated_probe_port_lock_absent": true,
+    "source_hashes_unchanged": true,
+    "private_archive": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/current-steel-live-probes-20261014/owned-probe-evidence.tar.gz",
+    "archive_sha256": "b1591c225c82d7cf1ecfb7166c491d95c2ede8cf56db97572f2d18e8c95b5009",
+    "private_manifest_sha256": "04aa585747643121f1910551f6586c98c40a0f2d00255efa95880e9001a21958",
+    "archive_files": 25,
+    "archive_readback_hashes_matched": 25,
+    "referenced_dump_paths_found": 2,
+    "all_possible_descendant_dump_completeness": "NOT_INDEPENDENTLY_ESTABLISHED",
+    "raw_data_publication": false
+  },
+  "approved_Rose_projection_unchanged": {
+    "current_source": "0af01a88e2b083ef72bb64325014b9ae72147245",
+    "files": [
+      {
+        "path": "back-end/src/providers/rose/cerebrasRoute.ts",
+        "sha256": "35ea1bfee8d6861a79c7799910de62c1c22b478d1db3af267da19928b8effb61",
+        "approved_bytes_unchanged": true
+      },
+      {
+        "path": "back-end/src/providers/rose/transforms.ts",
+        "sha256": "6623d49fbdd6d0692abb8a18c2bb7ce2342ae83af091555d5a0f0a2fd61290ba",
+        "approved_bytes_unchanged": true
+      },
+      {
+        "path": "back-end/src/providers/rose/types.ts",
+        "sha256": "6482c7c4ddff40121c47aeda35967f83637765c1857b7fca27e9e7f36b2da1f3",
+        "approved_bytes_unchanged": true
+      }
+    ],
+    "new_decoder_applied": false,
+    "SMS_product_prompt_changed_this_turn": false,
+    "catalog_unmodified": true
+  },
+  "previous_checkpoint_header": "e87ac65479b0ff20aad069dfe49a8f6214dfea44",
+  "prior_current_checkpoint_before_test_approval": "0af01a88e2b083ef72bb64325014b9ae72147245"
+}
