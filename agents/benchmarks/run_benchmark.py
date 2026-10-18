@@ -13777,7 +13777,7 @@ async def _run_single_task_as_run_user(
         )
 
     if task.name == "browser-cloud-iphone-settings":
-        from benchmarks.phone_connectivity import guard, device_id
+        from benchmarks.phone_connectivity import device_id, guard
         guard(base_url, _current_benchmark_user_id())
         device_id()
         if _interrupt_cleanup_contract() is None:
@@ -13918,6 +13918,7 @@ async def _run_single_task_as_run_user(
     interrupt_cleanup_started = False
     interrupt_cleanup_ready = False
     evaluated_failure_reason: Optional[str] = None
+    result: Optional[TaskResult] = None
 
     phone_cleanup_complete = False
     phone_cleanup_deadline = None
@@ -14811,8 +14812,14 @@ async def _run_single_task_as_run_user(
 
     finally:
         # Failure/cancellation/kept-agent paths also retain the DB on unconfirmed
-        # phone cleanup through the existing owner receipt counters.
-        await ensure_phone_cleanup()
+        # phone cleanup through the existing owner receipt counters. A failed
+        # physical cleanup must not skip independent task-owned collector joins
+        # or replace an ERROR result that has already been published.
+        phone_cleanup_error = None
+        try:
+            await ensure_phone_cleanup()
+        except Exception as exc:
+            phone_cleanup_error = exc
         realtime_tree_error = None
         if realtime_tree_task:
             try:
@@ -14849,6 +14856,24 @@ async def _run_single_task_as_run_user(
             os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_browser_auth
         if interrupt_cleanup_ready:
             _complete_interrupt_cleanup()
+        if phone_cleanup_error is not None:
+            if result is None or result.benchmark_status not in {"ERROR", "CANCELLED"}:
+                raise phone_cleanup_error
+            result.status = result.benchmark_status = "ERROR"
+            cleanup_detail = f"Phone cleanup failed: {type(phone_cleanup_error).__name__}: {phone_cleanup_error}"
+            result.failure_reason = f"{result.failure_reason} | {cleanup_detail}"
+            if result.logs is None:
+                result.logs = {}
+            result.logs.setdefault("failure_evidence", {}).setdefault("errors", []).append(cleanup_detail)
+            # Publish the retained original failure plus cleanup liability. The
+            # receipt stays pending/failed: no physical cleanup was confirmed.
+            if on_task_evaluated is not None:
+                try:
+                    publication = on_task_evaluated(result)
+                    if inspect.isawaitable(publication):
+                        await publication
+                except Exception as exc:
+                    print(f"    ⚠ evaluated outcome publication failed: {type(exc).__name__}")
         if realtime_tree_error is not None:
             raise realtime_tree_error
 
@@ -16298,6 +16323,15 @@ async def main_async(args):
                 cancelled = await asyncio.gather(*pending, return_exceptions=True)
                 for task_future, result in zip(pending, cancelled):
                     task = pending_results[task_future]
+                    evaluated_result = _evaluated_task_results.pop(task_future, None)
+                    if not isinstance(result, TaskResult) and evaluated_result is not None:
+                        interruption = result
+                        result = evaluated_result
+                        result.passed = False
+                        result.status = result.benchmark_status = "ERROR"
+                        result.failure_reason = (
+                            f"{result.failure_reason or ''} | Interrupted during task finalization: {interruption}"
+                        ).strip(" |")
                     if isinstance(result, TaskResult):
                         run.task_results.append(result)
                     else:
@@ -16330,6 +16364,20 @@ async def main_async(args):
                 _emit_report()
     finally:
         _report_ticker_task.cancel()
+        await asyncio.gather(_report_ticker_task, return_exceptions=True)
+        # A task's finally can fail after publishing its ERROR, before the
+        # serial coordinator appends it. Transfer unconsumed occurrences before
+        # clearing the reporting overlay so terminal evidence never requeues.
+        pending_error = sys.exc_info()[1]
+        for pending_result in _evaluated_task_results.values():
+            if pending_error is not None:
+                pending_result.passed = False
+                pending_result.status = pending_result.benchmark_status = "ERROR"
+                pending_result.failure_reason = (
+                    f"{pending_result.failure_reason or ''} | Task finalization failed: "
+                    f"{type(pending_error).__name__}: {pending_error}"
+                ).strip(" |")
+            run.task_results.append(pending_result)
         _evaluated_task_results.clear()
         _emit_report(force=True)
         fly_total = await stop_fly_log_collector()

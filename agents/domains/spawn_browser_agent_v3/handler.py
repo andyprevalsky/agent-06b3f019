@@ -8616,6 +8616,20 @@ async def _spawn_browser_agent_activity_v3_real(
                 else:
                     for refs in redaction_refs:
                         result = mask_secret_values(result, refs)
+                action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
+                if action.get("action") == "phone":
+                    # Phone dispatch bypasses DOM action implementations, which
+                    # normally record execution. Preserve the same real result
+                    # for completion verification and encrypted resume history.
+                    safe_params = action.get("params") or {}
+                    safe_thinking = action.get("thinking")
+                    for refs in redaction_refs:
+                        safe_params = mask_secret_values(safe_params, refs)
+                        safe_thinking = mask_secret_values(safe_thinking, refs)
+                    await action_history.record_action(
+                        dom_service=dom_service, action="phone", thinking=safe_thinking,
+                        params=safe_params, result=result,
+                    )
                 return result
             finally:
                 action_redaction_refs = None

@@ -1,3 +1,4 @@
+import { cleanupCases } from './iphone-control.cleanup.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -60,6 +61,7 @@ async function queued(h: Harness, userId: string) {
   return waiter;
 }
 export const cases: Case[] = [
+  ...cleanupCases,
   [
     'invalid lease requests and queued input cannot trigger cleanup for a pending phone',
     async (h) => {

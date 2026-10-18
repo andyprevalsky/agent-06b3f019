@@ -462,3 +462,120 @@ def test_real_finished_completion_summary_card_parser():
         assert phone.reported_heading({"messages": [rejected]}) == ""
     attempt = {**card, "metadata": {**card["metadata"], "toolName": "attempt_completion"}}
     assert phone.reported_heading({"messages": [attempt]}) == ""
+
+
+@pytest.mark.parametrize("original_phone_error", [True, False])
+def test_failed_phone_cleanup_drains_owned_collectors_and_preserves_error(monkeypatch, tmp_path, original_phone_error):
+    """Run the owner catch/finally with actual async collectors, never providers."""
+    from copy import deepcopy
+    from unittest.mock import AsyncMock
+
+    from benchmarks import run_benchmark as runner
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    async def exercise():
+        task = deepcopy(get_task_by_name(phone.TASK_NAME))
+        task.tags = ["smoke"]
+        root = "synthetic-phone-root"
+        tree_started = asyncio.Event()
+        monitor_started = asyncio.Event()
+        foreign_stop = asyncio.Event()
+        foreign = asyncio.create_task(foreign_stop.wait(), name="foreign-control")
+        owned = []
+        published = []
+        receipt = tmp_path / "cleanup.status"
+        original = (phone.PhoneCleanupBlocked("original physical cleanup blocked") if original_phone_error
+                    else RuntimeError("original execution failure"))
+        final_error = phone.PhoneCleanupBlocked("later cleanup still blocked; retain isolated database")
+
+        async def collector(started):
+            started.set()
+            await asyncio.Event().wait()
+
+        class Monitor:
+            def __init__(self, *args, **kwargs):
+                self.task = None
+
+            async def start(self):
+                self.task = asyncio.create_task(collector(monitor_started), name="synthetic-monitor")
+                owned.append(self.task)
+                await monitor_started.wait()
+
+            async def stop(self):
+                self.task.cancel()
+                await asyncio.gather(self.task, return_exceptions=True)
+
+        async def tree(*args):
+            current = asyncio.current_task()
+            if current not in owned:
+                owned.append(current)
+            await collector(tree_started)
+
+        async def poll(*args, **kwargs):
+            await tree_started.wait()
+            await monitor_started.wait()
+            raise original
+
+        async def execute(_base, _root, callback, **kwargs):
+            return await callback({})
+
+        async def failure_evidence(*args, **kwargs):
+            return {"messages": []}, {"failure_evidence": {"errors": []}}
+
+        async def publish(result):
+            published.append((result.status, result.benchmark_status, result.passed, result.failure_reason))
+
+        monkeypatch.setenv("PHONE_HARNESS_DEVICE_ID", "synthetic-device")
+        monkeypatch.setenv("BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE", str(receipt))
+        monkeypatch.setenv("BENCHMARK_INTERRUPT_CLEANUP_TOKEN", "synthetic-owner-token")
+        monkeypatch.setattr(runner, "_INTERRUPT_CLEANUP_STARTED", 0)
+        monkeypatch.setattr(runner, "_INTERRUPT_CLEANUP_COMPLETED", 0)
+        monkeypatch.setattr(phone, "guard", lambda *a: None)
+        monkeypatch.setattr(phone, "apply_fixture", AsyncMock())
+        cleanup = AsyncMock(side_effect=final_error)
+        monkeypatch.setattr(phone, "cleanup_phone", cleanup)
+        for name in ("prepare_sandbox_payment_residual", "_apply_live_fixtures", "_apply_memory_fixtures",
+                     "_apply_auth_test_site", "subscribe_supabase_realtime_agent", "post_world_model_update_events",
+                     "archive_agent_start", "_restore_live_fixture_scenarios_async", "_release_auth_test_site",
+                     "ensure_payment_lifecycle_cleanup"):
+            monkeypatch.setattr(runner, name, AsyncMock(return_value=None))
+        monkeypatch.setattr(runner, "_is_simulate_mode", lambda: False)
+        monkeypatch.setattr(runner, "_local_victoria_database_url", lambda: "postgresql://localhost/synthetic")
+        monkeypatch.setattr(runner, "create_agent", AsyncMock(return_value=root))
+        monkeypatch.setattr(runner, "pause_agent", AsyncMock(return_value=True))
+        deletion = AsyncMock()
+        monkeypatch.setattr(runner, "delete_agent", deletion)
+        monkeypatch.setattr(runner, "get_agent_tree", tree)
+        monkeypatch.setattr(runner, "SupabaseRealtimeSmokeMonitor", Monitor)
+        monkeypatch.setattr(runner, "_poll_agent", poll)
+        monkeypatch.setattr(runner, "_run_with_agent_execution_backstop", execute)
+        monkeypatch.setattr(runner, "_capture_task_failure_evidence", failure_evidence)
+        monkeypatch.setattr(runner, "finalize_archive_and_score_world_model", AsyncMock(return_value=(None, None)))
+        try:
+            try:
+                result = await runner._run_single_task_as_run_user(
+                    "http://localhost:55120", task, True, None, "", None, None, None, publish
+                )
+            except phone.PhoneCleanupBlocked as exc:
+                pytest.fail(f"cleanup replaced the terminal ERROR and skipped collector joins: {exc}")
+            assert result.status == result.benchmark_status == "ERROR" and not result.passed
+            assert str(original) in result.failure_reason
+            assert published and published[-1][:3] == ("ERROR", "ERROR", False)
+            assert str(original) in published[-1][3]
+            assert all(t.done() for t in owned), "task-owned realtime collector survived return"
+            assert not foreign.done(), "foreign async task must remain untouched"
+            assert runner._INTERRUPT_CLEANUP_STARTED == 1
+            assert runner._INTERRUPT_CLEANUP_COMPLETED == 0
+            runner._finalize_interrupt_cleanup_status()
+            assert "state=failed" in receipt.read_text(), "unconfirmed cleanup must retain isolated stack"
+            assert "token=synthetic-owner-token" in receipt.read_text()
+            deletion.assert_not_awaited()
+            assert cleanup.await_args.args[2] == root
+        finally:
+            # Only synthetic tasks created by this test; never process signals.
+            for pending in owned + [foreign]:
+                if not pending.done():
+                    pending.cancel()
+            await asyncio.gather(*owned, foreign, return_exceptions=True)
+
+    asyncio.run(exercise())

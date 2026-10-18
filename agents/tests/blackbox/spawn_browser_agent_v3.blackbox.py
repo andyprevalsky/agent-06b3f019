@@ -30101,6 +30101,8 @@ async def run_all_tests():
     await r.record_async("phone_reattach_reacquire_and_stale_cursor", test_phone_reattach_reacquire_and_stale_cursor)
     await r.record_async("phone_model_observation_and_account_isolation", test_phone_model_observation_and_account_isolation)
     await r.record_async("phone_revocation_and_safe_timeout", test_phone_revocation_and_safe_timeout)
+    await r.record_async("phone_live_completion_records_real_results", test_phone_live_completion_records_real_results_for_existing_verifier)
+    await r.record_async("phone_captured_verifier_same_client", test_phone_captured_verifier_replays_same_foundry_client_offline)
     return r.all_passed
 
 
@@ -30264,6 +30266,100 @@ async def test_phone_revocation_and_safe_timeout():
         result = await execute_action(SimpleNamespace(), SimpleNamespace(), {'action':'phone','params':{'mode':'status'}},config=config,user_id='u',agent_id='a',browser_task_id='t',tool_call_id_decision='c',phone_snapshot={'enabled':True})
     assert not result['success']
     assert 'CANARY' not in json.dumps(result)
+
+
+async def test_phone_live_completion_records_real_results_for_existing_verifier():
+    """Replay 20:09:54 launch/read/release/attempt/status/attempt boundary.
+
+    The actor's tool transcript had the receipts; the first verifier saw
+    `Browser Agent Execution Log (0 actions shown ...)` and returned score 0.
+    Exercise the actual activity-local action wrapper, not a replacement logger.
+    """
+    from domains.spawn_browser_agent_v3 import handler, service
+    from browser_tools.dom_service import ActionHistory
+    tree=ast.parse(Path(handler.__file__).read_text())
+    boundary=next(node for node in ast.walk(tree) if isinstance(node,ast.AsyncFunctionDef) and node.name=='_execute_action')
+    factory=ast.parse('def factory():\n    action_redaction_refs = None\n').body[0]
+    factory.body.extend([boundary,ast.Return(value=ast.Name(id='_execute_action',ctx=ast.Load()))])
+    code=ast.fix_missing_locations(ast.Module(body=[factory],type_ignores=[]))
+    history=ActionHistory()
+    ns=dict(handler.__dict__)
+    ns.update(secret_refs={'pwd:fixture':'CANARY-PRIVATE-PASSWORD'},dom_service=SimpleNamespace(),
+              action_history=history,_auth_context_for_url=AsyncMock(),current_url='https://phone-harness.com/cloud',
+              config=_fake_config(),user_id='user',agent_id='agent',task_id='task',
+              _redact_activity_value=lambda value:value)
+    exec(compile(code,handler.__file__,'exec'),ns)
+    execute=ns['factory']()
+    launch={'success':True,'operation':{'id':'a249778ec961bec36e73002e5a8afeea8a1ecbe8632688f10f2ab8cb64deeacb','cursor':1,'operation':'apps.launch','status':'SUCCEEDED','errorCode':None,'result':'com.apple.Preferences'}}
+    ocr={'success':True,'operation':{'id':'f48d35b86fe8a7246c3d2789a9c2192297fbd6184661dd84573fa889bf72665b','cursor':2,'operation':'screen.text','status':'SUCCEEDED','errorCode':None,'result':[{'text':'Paired Computers','confidence':1,'x':376,'y':86,'w':284,'h':32,'source':'pixels'}]}}
+    released={'success':True,'phone':{'lease':{'id':'e69479bd-cf9c-4f88-b82e-9a9264a24ca2','status':'RELEASED'}}}
+    actions=[{'mode':'operation','operation':'apps.launch','args':{'name':'Settings','fresh':False}},
+             {'mode':'operation','operation':'screen.text','args':{'min_confidence':0.3}},
+             {'mode':'release','args':{}},None,{'mode':'status','args':{}},None]
+    results=[launch,ocr,released,released]
+    with patch('domains.spawn_browser_agent_v3.phone.execute_phone',AsyncMock(side_effect=results)),patch.object(service,'list_session_files',AsyncMock(return_value=[])):
+        for params in actions:
+            if params is not None:
+                await execute(ns['dom_service'],history,{'action':'phone','params':params},config=ns['config'],user_id='user',agent_id='agent',browser_task_id='task',tool_call_id_decision='captured',phone_snapshot={'enabled':True})
+            else:
+                context=await service.build_browser_verifier_context(goal='Report the actual cloud phone heading and release',current_url='https://phone-harness.com/cloud',browser_state={'dom_tree':'Phone Harness Cloud marketing page'},action_history=history,config=ns['config'],session_id='browser')
+                recorded=next(row['text'] for row in context if row.get('metadata',{}).get('toolName')=='action_history')
+                assert launch['operation']['id'] in recorded, 'successful phone launch lost before completion verifier'
+                assert 'Paired Computers' in recorded and "'status': 'RELEASED'" in recorded
+                assert 'CANARY-PRIVATE-PASSWORD' not in str(context)
+    assert [row['action'] for row in history.get_entries()]==['phone']*4
+    # Exercise the recording boundary with a private value, not only absence
+    # checks against the nonsecret captured launch/read sequence above.
+    private_action={'action':'phone','thinking':'CANARY-PRIVATE-PASSWORD','params':{'mode':'operation','operation':'input.text','args':{'s':'CANARY-PRIVATE-PASSWORD'}}}
+    with patch('domains.spawn_browser_agent_v3.phone.execute_phone',AsyncMock(return_value={'success':False,'error':'CANARY-PRIVATE-PASSWORD'})):
+        await execute(ns['dom_service'],history,private_action,config=ns['config'],user_id='user',agent_id='agent',browser_task_id='task',tool_call_id_decision='private-boundary',phone_snapshot={'enabled':True})
+    assert 'CANARY-PRIVATE-PASSWORD' not in str(history.get_entries())
+
+
+async def test_phone_captured_verifier_replays_same_foundry_client_offline():
+    """Keep the captured rejection; a replay must never fabricate a passing judge.
+
+    The permanent reduced fixture preserves the captured missing-history
+    condition without depending on private workspace files. The full request,
+    including its unrelated screenshot, has a separate recorded RCA replay.
+    """
+    import httpx
+    from providers.rose import RoseClient
+    from _test_utils import set_mock_handler
+    captured={
+        'messages':[{'role':'user','content':'Goal: Report actual phone heading and release. TOOL_RESULT {"tool_name":"action_history","result":"Browser Agent Execution Log (0 actions shown - URL transitions, tool inputs/outputs):\\n\\n"}'}],
+        'response_format':None,
+        'output':{'content':'{"output":{"visible_heading":"","screen_text":"","phone_released":false},"reasoning":"There is no phone-tool result confirming a Settings launch, no screen.text OCR result from the cloud iPhone, and no result confirming its release.","score":0.0}'},
+    }
+    from helpers.llm import _build_verifier_response_model
+    properties=((captured.get('response_format') or {}).get('json_schema',{}).get('schema',{}).get('properties',{}).get('output',{}).get('properties',{}))
+    schema={'fields':[{'name':name,'type':'bool' if field['type']=='boolean' else 'str','description':field.get('description','')} for name,field in properties.items()]} if properties else None
+    response_model=_build_verifier_response_model(schema)
+    if properties:
+        assert response_model.model_json_schema()['properties']['output']['$ref']
+    frozen=captured['output']['content']
+    sse='event: response.output_text.delta\ndata: '+json.dumps({'type':'response.output_text.delta','delta':frozen})+'\n\nevent: response.completed\ndata: '+json.dumps({'type':'response.completed','response':{'usage':{'input_tokens':5154,'output_tokens':311,'total_tokens':5465}}})+'\n\ndata: [DONE]\n\n'
+    calls=[]
+    def transport(request):
+        assert request.url.host=='phone-rca.openai.azure.com', 'offline replay must not escape synthetic Foundry endpoint'
+        calls.append(json.loads(request.content))
+        return httpx.Response(200,text=sse,headers={'content-type':'text/event-stream'})
+    set_mock_handler(transport)
+    try:
+        with patch.dict(os.environ,{'GPT_API_KEY':'','ANTHROPIC_API_KEY':'','CEREBRAS_API_KEY':'','AZURE_FOUNDRY_ENDPOINT':'https://phone-rca.openai.azure.com','AZURE_FOUNDRY_API_KEY':'synthetic','AZURE_FOUNDRY_DEPLOYMENTS':'gpt-6-sol'}):
+            chunks=[chunk async for chunk in RoseClient(openrouter_key='synthetic').complete(
+                pool='rose-1-ultra',messages=captured['messages'],response_model=response_model,
+                max_tokens=16000,temperature=0.3,deadline_s=180,ttft_timeout_s=60,
+                idle_timeout_s=90,effort='xhigh',provider_fast_mode=False,
+                skip_cache_write=False,dump_context=False,call_site='verifier_browser',
+                request_id=captured['output'].get('request_id','captured-reduced'),
+            )]
+        content=''.join(str(chunk.data.get('text') or '') for chunk in chunks if chunk.kind=='content')
+        assert json.loads(content)['score']==0.0
+        assert len(calls)==1
+        assert '0 actions shown' in json.dumps(calls[0])
+    finally:
+        teardown_mock()
 
 
 if __name__ == "__main__":

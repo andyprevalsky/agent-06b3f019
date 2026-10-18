@@ -68,6 +68,8 @@ const deadAgent = {
 };
 
 export async function admit(tx: Transaction, deviceId: string): Promise<void> {
+  const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: deviceId } });
+  if (device.providerState === 'CLOSING') return;
   if (
     (await tx.iPhoneLease.findFirst({
       where: { deviceId, status: 'ACTIVE' },

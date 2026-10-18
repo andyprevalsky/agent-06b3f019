@@ -84,6 +84,7 @@ export class Harness {
   readonly physicalOperations: Array<{ op: string; kw: Record<string, unknown> }> = [];
   sessionState: 'ready' | 'provisioning' = 'ready';
   cleanupComplete = false;
+  beforeStop?: () => Promise<void>;
   createUnknown = false;
   hideReceipt = false;
   inputMode: 'success' | 'unknown' | 'disconnect' | 'unsupported' | 'echo-error' = 'success';
@@ -215,9 +216,10 @@ export class Harness {
           const sid = decodeURIComponent(path.slice('/sessions/'.length));
           const saved = [...this.sessions.values()].find((s) => s.id === sid);
           if (saved === undefined) json(404, { code: 'not_found' });
-          else if (method === 'DELETE')
+          else if (method === 'DELETE') {
+            await this.beforeStop?.();
             json(202, { close_requested: true, cleanup_complete: false });
-          else {
+          } else {
             const held = this.sessionState === 'provisioning' ? this.nextReadiness : undefined;
             if (held !== undefined) {
               this.nextReadiness = undefined;
@@ -353,6 +355,7 @@ export class Harness {
   }
 
   resetControls(): void {
+    this.beforeStop = undefined;
     this.holds.forEach((held) => held.release());
     this.nextHold = undefined;
     this.nextReadiness = undefined;

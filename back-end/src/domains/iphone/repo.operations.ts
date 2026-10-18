@@ -94,6 +94,7 @@ export async function beginExecution(claim: CommandClaim): Promise<boolean> {
       lease.status !== 'ACTIVE' ||
       lease.releaseRequestedAt !== null ||
       lease.controlOwner !== claim.command.actor ||
+      device.providerState === 'CLOSING' ||
       !device.enabled ||
       !(await leases.accountPermitted(tx, lease.userId))
     )
@@ -184,7 +185,27 @@ export async function cleanupCandidate(userId: string) {
   return leases.transaction(async (tx) => {
     const { device } = await leases.lockedDevice(tx, userId);
     const operation = await tx.iPhoneOperation.findUnique({ where: { activeDeviceId: device.id } });
-    if (operation === null) return null;
+    if (operation === null) {
+      // A completed command releases its slot, not the persistent session.
+      // Under the same device lock, keep a valid owner (including a FIFO
+      // successor) and any outstanding read RPC; otherwise fence admission
+      // before crossing the provider cleanup boundary.
+      if (device.providerStartKey === null) return null;
+      const owner = await tx.iPhoneLease.findFirst({
+        where: { deviceId: device.id, status: 'ACTIVE' },
+        select: { id: true },
+      });
+      const inFlight = await tx.iPhoneOperation.findFirst({
+        where: { deviceId: device.id, state: { in: ['CONNECTING', 'RUNNING'] } },
+        select: { id: true },
+      });
+      if (owner !== null || inFlight !== null) return null;
+      await tx.iPhoneDevice.update({
+        where: { id: device.id },
+        data: { providerState: 'CLOSING' },
+      });
+      return { device, operation: null, lease: null };
+    }
     const lease = await tx.iPhoneLease.findUnique({ where: { id: operation.leaseId } });
     const now = await leases.databaseNow(tx);
     if (lease?.releaseRequestedAt === null && operation.deadlineAt > now) return null;

@@ -167,7 +167,9 @@ async function main() {
     await check(
       'release and reacquire preserve old acquire intents including aliases',
       async () => {
+        h.cleanupComplete = true;
         await h.request(f.userId, `/leases/${leaseId}/release`, { method: 'POST' });
+        h.cleanupComplete = false;
         for (const key of [originalKey, aliasKey]) {
           const old = await ensure(f.userId, f.taskId, key);
           assert.equal(object(old.data.lease).id, leaseId);

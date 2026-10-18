@@ -58,7 +58,8 @@ export async function cleanupPhone(userId: string, clientFactory: PhoneClientFac
     if (!complete) return { state: 'cleanup_pending' };
     const key = candidate.device.providerStartKey;
     if (key !== null) await commands.confirmCleanup(candidate.device.id, key);
-    else await commands.confirmUnstartedCleanup(candidate.device.id, candidate.operation.id);
+    else if (candidate.operation !== null)
+      await commands.confirmUnstartedCleanup(candidate.device.id, candidate.operation.id);
     return { state: 'cleanup_complete' };
   } catch (error) {
     return {
