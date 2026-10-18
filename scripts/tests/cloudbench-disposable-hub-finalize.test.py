@@ -63,6 +63,29 @@ raise SystemExit(75 if active else 0)
  def test_gate_only_disposable_after_wait_and_before_export(self):
   gate=(ROOT/'scripts/run-cloudbench-controller-gate').read_text();a=gate.index('wait "$command_pid"; rc=$?');b=gate.index('controller-command.joined.json',a);c=gate.index('finalize_hubs=""',b);d=gate.index('bound_controller_export export',c)
   self.assertLess(a,b);self.assertLess(b,c);self.assertLess(c,d);self.assertIn('[ -z "$DISPOSABLE_AUTHORITY" ] || finalize_hubs=" --finalize-disposable-hubs"',gate)
+class GateExportDownload(unittest.TestCase):
+ """The gate's actual member download, against a fake flyctl transport on PATH."""
+ def run_get(self,failures,member='manifest.json'):
+  gate=Path(os.environ.get('HUB_GATE_SOURCE',ROOT/'scripts/run-cloudbench-controller-gate')).read_text()
+  start=gate.index("<<'PY_EXPORT_GET'\n")+len("<<'PY_EXPORT_GET'\n");helper=gate[start:gate.index('\nPY_EXPORT_GET\n',start)]
+  tmp=Path(tempfile.mkdtemp());self.addCleanup(__import__('shutil').rmtree,tmp)
+  (tmp/'bin').mkdir();(tmp/'export').mkdir();script=tmp/'get.py';script.write_text(helper)
+  fly=tmp/'bin/flyctl';fly.write_text('#!/bin/bash\nn=$(($(cat "$STATE" 2>/dev/null || echo 0)+1)); echo $n > "$STATE"\nif [ "$n" -le "$FAILURES" ]; then printf partial > "${@: -1}"; echo "Error: ssh: tunnel closed (attempt $n)" >&2; exit 1; fi\nprintf "%s" "$PAYLOAD" > "${@: -1}"\n');fly.chmod(0o755)
+  target=tmp/'export'/member
+  result=subprocess.run([sys.executable,'-I','-B',str(script),'120','fixture-app','abc123',member,str(target)],env=dict(os.environ,PATH=str(tmp/'bin')+':'+os.environ['PATH'],STATE=str(tmp/'state'),FAILURES=str(failures),PAYLOAD='{"version": 1}'),capture_output=True,text=True,timeout=60)
+  return result,target,tmp/'export'/('export-download-'+member+'.attempts.private.json')
+ def test_one_failed_manifest_download_is_retried_with_stderr_retained(self):
+  # run600b shard-08: remote GATE_EXPORT exit=0, one manifest transfer failure retained the host.
+  result,target,log=self.run_get(1)
+  self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(target.read_text(),'{"version": 1}')
+  attempts=json.loads(log.read_text())['attempts'];self.assertEqual([a['exit_code'] for a in attempts],[1,0])
+  self.assertIn('tunnel closed (attempt 1)',attempts[0]['stderr']);self.assertEqual(log.stat().st_mode&0o777,0o600)
+ def test_persistent_transfer_failure_stays_pending_without_partial_member(self):
+  result,target,log=self.run_get(5)
+  self.assertNotEqual(result.returncode,0);self.assertFalse(os.path.lexists(target))
+  self.assertEqual(len(json.loads(log.read_text())['attempts']),3)
+
+
 class QuiescingOriginalsExport(unittest.TestCase):
  """Real launch/export/verify on private originals; the only fake is ext4's late writeback."""
  def setUp(self):

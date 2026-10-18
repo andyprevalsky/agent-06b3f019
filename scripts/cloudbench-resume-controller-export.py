@@ -136,8 +136,12 @@ def main(v):
  assert joined['command_sha256']==command_sha and joined['driver_pid']==driver and joined['driver_birth']==record['driver_birth']and type(joined['exit_code'])is int
  assert command['machine_id']==v['machine']and command['source_ref']==v['source_ref']
  assert command.get('already_joined')or scope['birth'](command['pid'])!=command['birth']
- _,pending_raw=scope['sealed_bytes'](custody/'pending.json',1048576);pending=json.loads(pending_raw)
- assert resumable_pending(pending,record_sha)
+ if v['action']=='canonical':
+  # The original gate export completed (no pending); only its transfer was lost.
+  assert not os.path.lexists(custody/'pending.json')and not os.path.lexists(custody/'export-resume.intent.json')
+ else:
+  _,pending_raw=scope['sealed_bytes'](custody/'pending.json',1048576);pending=json.loads(pending_raw)
+  assert resumable_pending(pending,record_sha)
  roots=[repo,Path(record['common_git']),*[Path(p)for p in record['temp_state_roots']if Path(p).exists()]]
  idle_observations=scoped_idle_writers(scope,record,repo)
  phase('LAUNCH_DONE')
@@ -152,6 +156,11 @@ def main(v):
  result={'machine':v['machine'],'launch_sha256':record_sha,'driver_pid':driver,'driver_birth':record['driver_birth'],'joined':joined,'hubs':hubs,'non_hub_writers':[],'idle_writer_observations':idle_observations}
  if v['action']=='check':
   encoded=json.dumps(dict(result,drain_evidence=drain_evidence(scope)));phase('RESPONSE_READY');print(encoded);return
+ if v['action']=='canonical':
+  phase('VERIFY_START')
+  scope['verify'](SimpleNamespace(record=record_path,archive=custody/'originals.tar.gz',manifest=custody/'manifest.json',caller=Path('/tmp/controller-host-caller.json'),ref=v['source_ref'],machine=v['machine'],app=record['app'],image=record['image'],repo=repo))
+  phase('VERIFY_DONE')
+  encoded=json.dumps(dict(result,remote_stage=str(custody),canonical_export_exit=0,drain_evidence=drain_evidence(scope)));phase('RESPONSE_READY');print(encoded);return
  assert v['action']=='export'
  phase('HUB_START')
  assert readonly_hubs(scope,source,repo,custody)==hubs
@@ -362,6 +371,37 @@ def normal_clock(epoch, deadline, cleanup_deadline_epoch=None):
     return cleanup_deadline_epoch
 
 
+WINDOW_FIELDS = {
+    "schema", "run_directory", "machine_id", "original_epoch", "created_at",
+    "cleanup_deadline_epoch", "authorized_by", "reason", "benchmark_credit", "cleanup_only",
+}
+MAX_CLEANUP_WINDOW_SECONDS = 3600
+
+
+def cleanup_window_proof(path, out, now=None):
+    """One explicit private post-deadline window for one exact controller; zero credit."""
+    raw = read(Path(path).absolute())
+    window = json.loads(raw)
+    now = time.time() if now is None else now
+    numbers = [window.get(key) for key in ("original_epoch", "created_at", "cleanup_deadline_epoch")]
+    need(
+        isinstance(window, dict)
+        and set(window) == WINDOW_FIELDS
+        and window["schema"] == "controller-export-cleanup-window-v1"
+        and window["run_directory"] == str(out)
+        and re.fullmatch("[0-9a-f]{14}", window["machine_id"] or "")
+        and window["benchmark_credit"] == 0
+        and window["cleanup_only"] is True
+        and isinstance(window["authorized_by"], str) and window["authorized_by"]
+        and isinstance(window["reason"], str) and window["reason"]
+        and all(type(x) in (int, float) and math.isfinite(x) for x in numbers)
+        and window["created_at"] <= now < window["cleanup_deadline_epoch"]
+        <= window["created_at"] + MAX_CLEANUP_WINDOW_SECONDS,
+        "explicit cleanup window refused or expired",
+    )
+    return window, sha(raw)
+
+
 def transfer_budget(state, now=None):
     """One owned download may use the active authorized window, never past it."""
     end = state.get("cleanup_deadline_epoch") or state.get("deadline")
@@ -372,7 +412,7 @@ def transfer_budget(state, now=None):
     return int(min(3600, remaining))
 
 
-def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
+def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None, cleanup_window=None):
     """Current normal owner proof; never a retrospective borrower capture."""
     need(
         not (out / "payload-borrow.intent.json").exists(),
@@ -394,7 +434,10 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
     source_root = Path(cfg["source_root"])
     pins = B["source_identity"](source_root, cfg["source_ref"], cfg["source_files"])
     if "host_operator_provenance" not in cfg:
-        return runner_owner_state(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch)
+        return runner_owner_state(
+            cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, cleanup_window
+        )
+    need(cleanup_window is None, "explicit cleanup window requires the live runner owner")
     provenance = cfg["host_operator_provenance"]
     host_ref = provenance["host_operator_source_ref"]
     need(
@@ -442,7 +485,7 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None):
     return normal_tail(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, R, owner_ok)
 
 
-def runner_owner_state(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch):
+def runner_owner_state(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, cleanup_window):
     """The run's own live original600 runner is the cleanup owner (sharded launches)."""
     script = source_root / "scripts/cloudbench-original600-runner.py"
     runner = runpy.run_path(str(script))
@@ -463,10 +506,14 @@ def runner_owner_state(cfg, config_path, config_sha256, out, source_root, pins, 
             == [str(script), "--config", str(config_path), "--config-sha256", config_sha256, "--output", str(out)]
         )
 
-    return normal_tail(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok)
+    return normal_tail(
+        cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok, cleanup_window
+    )
 
 
-def normal_tail(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok):
+def normal_tail(
+    cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok, cleanup_window=None
+):
     shard = [cfg["shard"]] if "shard" in cfg else []
     caller = obj(out / "caller.json")
     identity = obj(out / "controller.identity.json")
@@ -486,7 +533,17 @@ def normal_tail(cfg, config_path, config_sha256, out, source_root, pins, cleanup
         and Path(authority["output_directory"]) == out / "export",
         "normal authority/caller differs",
     )
-    normal_clock(caller["epoch"], caller["deadline"], cleanup_deadline_epoch)
+    if cleanup_window is None:
+        normal_clock(caller["epoch"], caller["deadline"], cleanup_deadline_epoch)
+    else:
+        need(cleanup_deadline_epoch is None, "one cleanup authority only")
+        window, window_sha = cleanup_window_proof(cleanup_window, out)
+        need(
+            window["machine_id"] == identity["machine"]
+            and window["original_epoch"] == caller["epoch"]
+            and caller["deadline"] == caller["epoch"] + 5400,
+            "cleanup window binds another controller or clock",
+        )
     template_path = Path(cfg["authority_template"])
     template = obj(template_path)
     need(
@@ -645,6 +702,13 @@ def normal_tail(cfg, config_path, config_sha256, out, source_root, pins, cleanup
     )
     if cleanup_deadline_epoch is not None:
         state.update(cleanup_deadline_epoch=cleanup_deadline_epoch, cleanup_hold_id=CLEANUP_HOLD_ID, cleanup_only=True)
+    if cleanup_window is not None:
+        state.update(
+            cleanup_deadline_epoch=window["cleanup_deadline_epoch"],
+            cleanup_hold_id="window-sha256:" + window_sha,
+            cleanup_only=True,
+            cleanup_window=str(Path(cleanup_window).absolute()),
+        )
     return F["normalized"](state)
 
 
@@ -653,8 +717,19 @@ def validate_normal(state):
         state["schema"] == "controller-normal-export-identities-v1",
         "unknown normal export proof",
     )
-    normal_clock(state["epoch"], state["deadline"], state.get("cleanup_deadline_epoch"))
-    if "cleanup_deadline_epoch" in state:
+    if "cleanup_window" in state:
+        window, window_sha = cleanup_window_proof(state["cleanup_window"], Path(state["out"]))
+        need(
+            state.get("cleanup_hold_id") == "window-sha256:" + window_sha
+            and state.get("cleanup_deadline_epoch") == window["cleanup_deadline_epoch"]
+            and state.get("cleanup_only") is True
+            and window["original_epoch"] == state["epoch"]
+            and window["machine_id"] == state["machine_id"],
+            "normal cleanup authority differs",
+        )
+    else:
+        normal_clock(state["epoch"], state["deadline"], state.get("cleanup_deadline_epoch"))
+    if "cleanup_deadline_epoch" in state and "cleanup_window" not in state:
         need(
             state.get("cleanup_hold_id") == CLEANUP_HOLD_ID and state.get("cleanup_only") is True,
             "normal cleanup authority differs",
@@ -677,11 +752,11 @@ def validate_normal(state):
     return True
 
 
-def check(config, config_sha256, run_directory, operator_ref, *, cleanup_deadline_epoch=None):
+def check(config, config_sha256, run_directory, operator_ref, *, cleanup_deadline_epoch=None, cleanup_window=None):
     out = Path(run_directory).absolute()
     borrowed = (out / "payload-finalizer.identities.private.json").exists()
     if borrowed:
-        need(cleanup_deadline_epoch is None, "cleanup-only window requires normal owner")
+        need(cleanup_deadline_epoch is None and cleanup_window is None, "cleanup-only window requires normal owner")
         state = obj(out / "payload-finalizer.identities.private.json")
         roots = {
             str(Path(path).parent.parent)
@@ -695,7 +770,9 @@ def check(config, config_sha256, run_directory, operator_ref, *, cleanup_deadlin
             "original gate is not positively gone/reaped",
         )
     else:
-        state = normal_state(config, config_sha256, out, cleanup_deadline_epoch=cleanup_deadline_epoch)
+        state = normal_state(
+            config, config_sha256, out, cleanup_deadline_epoch=cleanup_deadline_epoch, cleanup_window=cleanup_window
+        )
         capture_root = HERE.parent
         validate_normal(state)
     need(
@@ -778,9 +855,11 @@ def check(config, config_sha256, run_directory, operator_ref, *, cleanup_deadlin
     }
     if not borrowed:
         binding["capture_kind"] = "normal-current-owner"
-    if cleanup_deadline_epoch is not None:
+    if cleanup_deadline_epoch is not None or cleanup_window is not None:
         binding.update(
-            cleanup_deadline_epoch=cleanup_deadline_epoch, cleanup_hold_id=CLEANUP_HOLD_ID, cleanup_only=True
+            cleanup_deadline_epoch=state["cleanup_deadline_epoch"],
+            cleanup_hold_id=state["cleanup_hold_id"],
+            cleanup_only=True,
         )
     binding["orphan_drain"] = local_drain_binding(out, pins)
     need(
@@ -873,7 +952,7 @@ def remote(fly, value, journal, action, *, allow_pending=False):
         {"command_sha256": sha(command.encode()), "payload": payload},
     )
     rc, stdout, stderr = fly.flyctl(
-        600 if action == "export" else 30,
+        600 if action in ("export", "canonical") else 30,
         "ssh",
         "console",
         "-a",
@@ -1112,6 +1191,7 @@ def _execute(value, fly, cancelled):
 
     active()
     unchanged(value)
+    need(not (out / "controller-export-download").exists(), "download recovery already owns this run")
     # An incomplete prior invocation is never authority to repeat remote export.
     journal.mkdir(mode=0o700)
     fd = os.open(out, os.O_RDONLY | os.O_DIRECTORY)
@@ -1147,31 +1227,47 @@ def _execute(value, fly, cancelled):
         remote_stage == expected_stage and exported["canonical_export_exit"] == 0,
         "foreign remote staging",
     )
+    return publish(value, fly, journal, remote_stage, active)
+
+
+DOWNLOAD_ATTEMPTS = 3
+
+
+def publish(value, fly, journal, remote_stage, active):
+    """Download, verify with the run's own collector and mark only via export-ready."""
+    out = Path(value["state"]["out"])
     stage = journal / "download"
     stage.mkdir(mode=0o700)
     for name in ("launch.json", "manifest.json", "originals.tar.gz"):
-        active()
-        rc, stdout, stderr = fly.flyctl(
-            transfer_budget(value["state"]),
-            "ssh",
-            "sftp",
-            "get",
-            "-a",
-            R["APP"],
-            "--machine",
-            value["state"]["machine_id"],
-            ("/tmp/gate/controller-host-custody/launch.json" if name == "launch.json" else remote_stage + "/" + name),
-            str(stage / name),
-        )
-        save(
-            journal / (name + ".download.json"),
-            {
-                "exit_code": rc,
-                "stdout": stdout,
-                "stderr": stderr,
-                "local_transport_joined": True,
-            },
-        )
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            active()
+            rc, stdout, stderr = fly.flyctl(
+                transfer_budget(value["state"]),
+                "ssh",
+                "sftp",
+                "get",
+                "-a",
+                R["APP"],
+                "--machine",
+                value["state"]["machine_id"],
+                ("/tmp/gate/controller-host-custody/launch.json" if name == "launch.json" else remote_stage + "/" + name),
+                str(stage / name),
+            )
+            save(
+                journal / (name + (".download.json" if attempt == 1 else ".download-%d.json" % attempt)),
+                {
+                    "attempt": attempt,
+                    "exit_code": rc,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "local_transport_joined": True,
+                },
+            )
+            if rc == 0 and (stage / name).is_file() and not (stage / name).is_symlink():
+                break
+            # The private staging file did not exist before this owned attempt.
+            if os.path.lexists(stage / name):
+                (stage / name).unlink()
         need(rc == 0, "download incomplete; retain staging and unknown invocation")
         os.chmod(stage / name, 0o600)
         active()
@@ -1247,6 +1343,51 @@ def _execute(value, fly, cancelled):
     }
 
 
+def download_verified(value, fly=None):
+    """The original gate export completed remotely; only its transfer is recovered."""
+    return owned_operation(_download_verified, value, fly)
+
+
+def _download_verified(value, fly, cancelled):
+    out = Path(value["state"]["out"])
+    journal = out / "controller-export-download"
+
+    def active():
+        if cancelled:
+            if journal.is_dir():
+                save(journal / "cancelled.json", {"signals": cancelled, "owned_transport_joined": True, "no_next_effect": True})
+            raise ExportCancelled("cancelled after current transport joined")
+
+    active()
+    unchanged(value)
+    need(not (out / "controller-export-recovery").exists(), "export recovery already owns this run")
+    log = read(out / "gate.private.log")
+    need(b"GATE_EXPORT_PENDING machine=" + value["state"]["machine_id"].encode() in log, "gate did not retain the export")
+    journal.mkdir(mode=0o700)  # one owned download recovery; never replayed
+    fd = os.open(out, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    if value["state"].get("schema") == "controller-normal-export-identities-v1":
+        save(journal / "normal-owner-proof.private.json", value["state"])
+    save(journal / "intent.json", value["binding"])
+    fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))["Fly"](
+        R["APP"], F["selected_token"](value["state"])
+    )
+    active()
+    native(fly, value, journal, "before")
+    active()
+    checked = remote(fly, value, journal, "canonical")
+    require_recorded_drain(value["binding"].get("orphan_drain"), checked["drain_evidence"])
+    need(
+        checked["remote_stage"] == "/tmp/gate/controller-host-custody" and checked["canonical_export_exit"] == 0,
+        "foreign canonical custody",
+    )
+    active()
+    return publish(value, fly, journal, checked["remote_stage"], active)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -1254,9 +1395,15 @@ def main(argv=None):
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument("--operator-ref", required=True)
     parser.add_argument("--cleanup-deadline-epoch", type=float)
+    parser.add_argument("--cleanup-window", type=Path, help="Explicit private post-deadline cleanup window.")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--run", action="store_true")
+    mode.add_argument(
+        "--download-verified",
+        action="store_true",
+        help="Recover only the transfer of an export the original gate completed.",
+    )
     mode.add_argument(
         "--observe",
         action="store_true",
@@ -1269,6 +1416,7 @@ def main(argv=None):
         args.run_directory,
         args.operator_ref,
         **({"cleanup_deadline_epoch": args.cleanup_deadline_epoch} if args.cleanup_deadline_epoch is not None else {}),
+        **({"cleanup_window": args.cleanup_window} if args.cleanup_window is not None else {}),
     )
     if args.check:
         print(
@@ -1301,7 +1449,7 @@ def main(argv=None):
             result = observe(value)
             print(json.dumps(result))
             return 0 if result["ready"] else 75
-        print(json.dumps(execute(value)))
+        print(json.dumps(download_verified(value) if args.download_verified else execute(value)))
     finally:
         os.close(lock)
     return 0

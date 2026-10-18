@@ -848,8 +848,9 @@ class ExportResume(unittest.TestCase):
             }
         ).encode()
 
-    def api(self, *, wrong=False, fail_download=False, writers=False):
+    def api(self, *, wrong=False, fail_download=False, writers=False, flaky=None):
         test = self
+        flaky = dict(flaky or {})
 
         class API:
             def __init__(self):
@@ -899,6 +900,9 @@ class ExportResume(unittest.TestCase):
                             ),
                             "",
                         )
+                    if payload["action"] == "canonical":
+                        test.canonical_calls = getattr(test, "canonical_calls", 0) + 1
+                        result.update(canonical_export_exit=0, remote_stage="/tmp/gate/controller-host-custody")
                     if payload["action"] == "export":
                         raw_custody = b"actual immutable TERM intent fixture\n"
                         result["drain_evidence"] = {
@@ -922,6 +926,10 @@ class ExportResume(unittest.TestCase):
                 if fail_download:
                     return 75, "", "fixture download failure"
                 destination = Path(args[-1])
+                if flaky.get(destination.name):
+                    flaky[destination.name] -= 1
+                    destination.write_bytes(b"partial")
+                    return 1, "", "Error: ssh: tunnel closed during sftp"
                 destination.write_bytes(test.payloads[destination.name])
                 return 0, "", ""
 
@@ -979,6 +987,59 @@ class ExportResume(unittest.TestCase):
             self.assertEqual(len(api.calls), count)
         self.assertTrue((self.export / "originals.tar.gz").exists())
         self.assertFalse((self.out / "controller-export-recovery/download/originals.tar.gz").exists())
+
+    def test_download_only_recovers_one_lost_manifest_transfer_through_export_ready(self):
+        # run600b shard-08: canonical remote export exit 0, one manifest sftp loss, host retained.
+        (self.out / "gate.private.log").write_text("GATE_EXPORT_PENDING machine=" + self.mid + "\nGATE_RESULT exit=1\n")
+        (self.out / "gate.private.log").chmod(0o600)
+        api = self.api(flaky={"manifest.json": 1})
+
+        def ready(argv, **kwargs):
+            self.assertEqual(argv[3], "export-ready")
+            write(self.export / "disposable-export.verified.json", {
+                "authority_sha256": M["sha"](self.auth.read_bytes()), "machine_id": self.mid,
+                "files": {name: M["file_sha"](self.export / name) for name in (*self.payloads, "caller.json")}})
+            api.marker = True
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        with (
+            mock.patch.dict(M["execute"].__globals__, unchanged=lambda _: None),
+            mock.patch("subprocess.run", side_effect=ready),
+        ):
+            result = M["download_verified"](self.value, api)
+            self.assertEqual(result["status"], "EXPORT_VERIFIED")
+            consoles = [call for call in api.calls if call[:2] == ("ssh", "console")]
+            self.assertEqual((len(consoles), self.canonical_calls), (1, 1))  # one read-only check; no re-export
+            journal = self.out / "controller-export-download"
+            first = json.loads((journal / "manifest.json.download.json").read_bytes())
+            self.assertEqual(first["exit_code"], 1)
+            self.assertIn("tunnel closed", first["stderr"])
+            self.assertEqual(json.loads((journal / "manifest.json.download-2.json").read_bytes())["exit_code"], 0)
+            self.assertEqual((self.export / "manifest.json").read_bytes(), self.payloads["manifest.json"])
+            count = len(api.calls)
+            for operation in (M["download_verified"], M["execute"]):
+                with self.assertRaises((FileExistsError, ValueError)):
+                    operation(self.value, api)
+            self.assertEqual(len(api.calls), count)
+
+    def test_explicit_cleanup_window_binds_one_controller_clock_and_expires(self):
+        epoch = time.time() - 6000
+        window = dict(schema="controller-export-cleanup-window-v1", run_directory=str(self.out), machine_id=self.mid,
+                      original_epoch=epoch, created_at=time.time() - 10, cleanup_deadline_epoch=time.time() + 1800,
+                      authorized_by="parent coordinator", reason="retained owned controller", benchmark_credit=0,
+                      cleanup_only=True)
+        path = write(self.root / "window.json", window)
+        proof, digest = M["cleanup_window_proof"](path, self.out)
+        self.assertEqual((proof["machine_id"], digest), (self.mid, M["sha"](path.read_bytes())))
+        self.assertIn(M["transfer_budget"]({"cleanup_deadline_epoch": window["cleanup_deadline_epoch"]}), (1739, 1740))
+        for key, bad in (("benchmark_credit", 1), ("cleanup_only", False), ("run_directory", str(self.root)),
+                         ("cleanup_deadline_epoch", window["created_at"] + 3601), ("authorized_by", ""), ("extra", 1)):
+            write(path, dict(window, **{key: bad}))
+            with self.assertRaises(ValueError):
+                M["cleanup_window_proof"](path, self.out)
+        write(path, window)
+        with self.assertRaisesRegex(ValueError, "expired"):
+            M["cleanup_window_proof"](path, self.out, now=window["cleanup_deadline_epoch"])
 
     def test_wrong_incarnation_and_unknown_download_never_publish_or_repeat(self):
         api = self.api(wrong=True)
