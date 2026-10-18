@@ -346,7 +346,7 @@ def observe_reuse_configs(
     return [observed.get(row["id"], row) for row in inventory]
 
 
-def capacity_snapshot(api, token, org, directory, extra):
+def capacity_snapshot(api, token, org, directory, extra, summary=False):
     started = time.time()
     query = 'query { organization(slug:' + json.dumps(org) + ') { id slug settings billingStatus } }'
     req = urllib.request.Request('https://api.fly.io/graphql', data=json.dumps({'query': query}).encode(),
@@ -382,7 +382,8 @@ def capacity_snapshot(api, token, org, directory, extra):
         name = app['Name']
         if not isinstance(name, str) or not name or any(c not in 'abcdefghijklmnopqrstuvwxyz0123456789-' for c in name):
             raise ValueError('invalid inventory app name')
-        machines = api(name, token).api('GET', '/machines', timeout=20)
+        # A count needs no configs; summary rows are ~2 KB instead of ~200 KB.
+        machines = api(name, token).api('GET', '/machines?summary=true' if summary else '/machines', timeout=20)
         if not isinstance(machines, list) or len({m['id'] for m in machines}) != len(machines):
             raise ValueError('complete native Machine inventory required')
         native_by_app[name] = machines
@@ -872,7 +873,8 @@ def sharded_run(args, root, pins, runner, github, plan):
         bound = shard_objects[index]
         slots = coordinator['capacity_demand'](len(bound['tasks']) * bound['runs'], 1)
         with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
-            fresh = capacity_snapshot(capture['Fly'], token, args.org, attempt_dir, args.extra_destroying_count)
+            fresh = capacity_snapshot(capture['Fly'], token, args.org, attempt_dir, args.extra_destroying_count,
+                                      summary=True)
         fresh.update(qualified_reuse_count=0, new_machine_demand=slots, qualified_ids=[], new_controller_slots=1,
                      requested_original_primary_slots=len(bound['tasks']) * bound['runs'], retry_of_shard=index)
         if fresh['available_slots_conservative'] < slots:

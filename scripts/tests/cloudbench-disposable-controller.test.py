@@ -50,7 +50,7 @@ class FakeAPI:
         pending = self.refusals.get((method, path))
         if pending:
             raise sys.modules['disposable_controller_test_boundary'].Refused(pending.pop(0))
-        if method == 'GET' and path == '/machines':
+        if method == 'GET' and path in ('/machines', '/machines?summary=true'):
             return copy.deepcopy(self.machines)
         if method == 'GET' and path == '/machines/' + MID:
             return copy.deepcopy(self.machine)
@@ -101,7 +101,7 @@ else:
   outcome = plan.pop(0) if plan else 200
   state_path.write_text(json.dumps(state))
   if outcome != 200: raise Refused(outcome)
-  if method == "GET" and path == "/machines": return state["machines"]
+  if method == "GET" and path in ("/machines", "/machines?summary=true"): return state["machines"]
   raise AssertionError("unexpected subprocess boundary: " + method + " " + path)
 class Fly:
  def __init__(self, app, token): assert app == "navi-whisper-lux-bench" and token == "fixture-token"
@@ -372,7 +372,7 @@ class DisposableController(ControllerFixture):
         with patch.object(sys, 'argv', argv):
             S['main']()
         self.assertFalse(self.out.exists())
-        self.assertEqual([x[:2] for x in self.api.calls], [('GET', '/machines')])
+        self.assertEqual([x[:2] for x in self.api.calls], [('GET', '/machines?summary=true')])
 
     def test_backup_disabled_and_verified_before_host_seal(self):
         self.seal()
@@ -572,18 +572,18 @@ class DisposableController(ControllerFixture):
     def test_admission_inventory_rate_limit_retries_read_then_admits(self):
         # 20 sibling controllers admitted within ~2 s drew Fly HTTP 429 on the
         # full-app read; a refused GET has no effect and is re-read with jitter.
-        self.api.refusals[('GET', '/machines')] = [429, 503]
+        self.api.refusals[('GET', '/machines?summary=true')] = [429, 503]
         clock = FakeClock()
         with clock.patched():
             self.entry('admit')
-        self.assertEqual([c[:2] for c in self.api.calls], [('GET', '/machines')] * 3)
+        self.assertEqual([c[:2] for c in self.api.calls], [('GET', '/machines?summary=true')] * 3)
         self.assertEqual(len(clock.sleeps), 2)
         self.assertTrue(1 <= clock.sleeps[0] <= 2 and 2 <= clock.sleeps[1] <= 4, clock.sleeps)
         raws = sorted(self.out.glob('native-admit-*/*.raw.json'))
         self.assertEqual([json.loads(p.read_bytes())['status'] for p in raws], [429, 503, 200])
 
     def test_admission_read_retry_is_bounded_and_other_refusals_stay_terminal(self):
-        self.api.refusals[('GET', '/machines')] = [429] * 10
+        self.api.refusals[('GET', '/machines?summary=true')] = [429] * 10
         clock = FakeClock()
         with clock.patched(), self.assertRaisesRegex(Exception, 'HTTP 429'):
             self.entry('admit')
@@ -591,7 +591,7 @@ class DisposableController(ControllerFixture):
         self.assertTrue(all(1 <= x <= 20 for x in clock.sleeps) and len(clock.sleeps) == 5, clock.sleeps)
         for status in (400, 401, 403, 409):
             self.api.calls.clear()
-            self.api.refusals[('GET', '/machines')] = [status]
+            self.api.refusals[('GET', '/machines?summary=true')] = [status]
             with self.subTest(status=status), clock.patched(), self.assertRaisesRegex(Exception, 'HTTP %d' % status):
                 self.entry('admit')
             self.assertEqual(len(self.api.calls), 1)
@@ -605,7 +605,7 @@ class DisposableController(ControllerFixture):
     def test_admission_read_retry_stays_inside_creation_authority_window(self):
         self.auth['verified_epoch'] = time.time() - 285
         self.write_auth()
-        self.api.refusals[('GET', '/machines')] = [429, 429]
+        self.api.refusals[('GET', '/machines?summary=true')] = [429, 429]
         clock = FakeClock()
         with clock.patched(), self.assertRaisesRegex(Exception, 'HTTP 429'):
             self.entry('admit')
@@ -689,9 +689,9 @@ class ControllerGateAdmission(ControllerFixture):
     def test_early_admission_refusal_writes_receipt_and_runner_fails_before_dispatch(self):
         # The private self-copy re-runs the first admission, then the second
         # call site follows; the live 429s hit these. None has any intent yet.
-        for name, plan in [('before self-copy', {'GET /machines': [403]}),
-                           ('self-copy first site', {'GET /machines': [200, 403]}),
-                           ('self-copy second site', {'GET /machines': [200, 200, 403]})]:
+        for name, plan in [('before self-copy', {'GET /machines?summary=true': [403]}),
+                           ('self-copy first site', {'GET /machines?summary=true': [200, 403]}),
+                           ('self-copy second site', {'GET /machines?summary=true': [200, 200, 403]})]:
             with self.subTest(site=name):
                 child, stderr, run, export, calls = self.gate(plan)
                 self.assertEqual(child.returncode, 1, stderr)
@@ -709,7 +709,7 @@ class ControllerGateAdmission(ControllerFixture):
                 self.assertIsNone(self.RUNNER['preallocation_terminal'](True, 1, child.pid + 1, self.ref, export, receipt))
 
     def test_admission_refusal_after_workspace_intent_never_writes_receipt(self):
-        child, stderr, run, export, calls = self.gate({'GET /machines': [200, 200, 200, 403]})
+        child, stderr, run, export, calls = self.gate({'GET /machines?summary=true': [200, 200, 200, 403]})
         self.assertEqual(child.returncode, 1, stderr)
         self.assertEqual(len(calls), 4, calls)
         self.assertTrue((export / 'workspace-volume.intent.json').is_file(), stderr)

@@ -115,7 +115,10 @@ def env_files(a,directory):
         with os.fdopen(os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb')as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
 
 def admit(a,api,fresh=True):
-    rows=api('GET','/machines');need(isinstance(rows,list),'full current inventory required')
+    # Admission needs only identities. The full list carries every Machine's
+    # config files (~200 KB each); with hundreds of sharded guests booting it
+    # outran the action deadline and failed later controllers at startup.
+    rows=api('GET','/machines?summary=true');need(isinstance(rows,list),'full current inventory required')
     need(not fresh or time.time()-a['verified_epoch']<=300,'stale creation authority')
     ids=[r['id']for r in rows];need(len(ids)==len(set(ids)),'duplicate Machine inventory')
     # K controllers admitted from one measured snapshot: each reserves room for

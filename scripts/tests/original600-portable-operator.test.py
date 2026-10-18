@@ -2049,8 +2049,9 @@ class Sharded(unittest.TestCase):
                     raise AssertionError('no runner should be signalled')
 
             snapshots = []
-            def snapshot(api, token, org, target, extra):
+            def snapshot(api, token, org, target, extra, summary=False):
                 snapshots.append(target)
+                self.assertEqual(summary, len(snapshots) > 1)  # retries count from summary lists
                 private(target/'navi-whisper-lux-bench.private.json', [])
                 cap = self.capacity(directory, free=700); cap.pop('proof_path')
                 return cap

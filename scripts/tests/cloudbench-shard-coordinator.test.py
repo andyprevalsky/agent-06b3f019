@@ -255,6 +255,20 @@ class Coordination(unittest.TestCase):
         self.assertEqual(respawned, [])
         self.assertIsNotNone(record['aborted_at'])
 
+    def test_a_respawn_that_raises_a_base_exception_aborts_instead_of_crashing(self):
+        # The second live 600-copy launch lost its coordinator when a retry's capacity read
+        # raised the runner's Deadline (a BaseException), orphaning every runner.
+        class Deadline(BaseException):
+            pass
+        world, _, respawned = self.retry_world('FAILED_BEFORE_PROVIDER_DISPATCH')
+        def respawn(shard):
+            raise Deadline('external controller I/O deadline')
+        world.runners[0].script = {0: ('ready', 0, None), 6: ('aborted', 0, 1)}
+        record = world.run(scheduled_total=6, respawn=respawn)
+        self.assertIsNotNone(record['aborted_at'])
+        self.assertEqual([r['error'] for r in record['retries']], ['Deadline'])
+        self.assertTrue((world.shards[0]['out'] / 'global-abort.json').exists())
+
     def test_runner_spawns_are_staggered(self):
         scripts = [{0: ('ready', 0, None), 5: ('released', 0, 0)} for _ in range(3)]
         world = World(self.tmp.name, scripts)

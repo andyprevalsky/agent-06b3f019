@@ -182,7 +182,9 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                         continue
                     try:
                         replacement, process = respawn(shard)
-                    except Exception as error:  # a failed retry is an ordinary startup failure
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
+                    except BaseException as error:  # a failed retry (incl. I/O Deadline) is an ordinary startup failure
                         record['retries'].append(dict(shard=i, attempt=attempts[i] + 1, at=clock(),
                                                       previous=terminal, error=type(error).__name__,
                                                       detail=str(error)[:300],
