@@ -745,7 +745,7 @@ async def world_clock_activity(
     wait: JsonObject | None = None,
     session_scope_id: str | None = None,
 ) -> JsonObject:
-    """Register, finish or wait for one agent on its world's shared clock.
+    """Register, finish, wait for or read ("time") one agent on its world's shared clock.
 
     Waits long-poll the WMH (resumed=false after each poll) and heartbeat, so a
     retried activity rejoins the same wait_id. A root without a live world, or
@@ -756,6 +756,10 @@ async def world_clock_activity(
     model = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
     if not base_url or not model:
         return {"skipped": "no_world_model"}
+    if operation == "time":
+        # This agent's own world time, the same reading the planner uses.
+        time_ms = await world_time_ms(agent_id)
+        return {"skipped": "no_world_session"} if time_ms is None else {"agent_id": agent_id, "time_ms": time_ms}
     scope = session_scope_id
     if not scope:
         from providers.fast_cache.client import resolve_agent_fast_mode
@@ -772,7 +776,7 @@ async def world_clock_activity(
         if operation == "finish":
             return await _clock_request(base_url, path, {}, 30)
         if operation != "wait" or not isinstance(wait, dict):
-            raise ValueError("World clock operation must be register, finish or wait")
+            raise ValueError("World clock operation must be register, finish, wait or time")
         payload = {key: wait[key] for key in ("wait_id", "until_ms", "duration_ms") if wait.get(key) is not None}
         payload["poll_seconds"] = 50
         while True:

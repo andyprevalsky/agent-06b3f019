@@ -259,3 +259,281 @@ def test_world_clock_ack_retry_and_concurrent_duplicates(monkeypatch,first,opera
   assert len(calls)==(1 if first=='success' else 2)
   assert wf.simulated_clock_offset_seconds==(-86400 if operation=='register' else 0)
  asyncio.run(run())
+
+
+# The agent's own clock (simulated_now: what wait_for measures from and what
+# simulated actions are stamped with) must read the agent's shared world time.
+# World time advances only by predicted action durations, so it can fall behind
+# the wall clock (Run12/Run16: 48 and 36 simulated minutes in 60 wall minutes).
+# Repro of 2026-10-15-shared-world-clock-wait-and-acknowledgement-diverged.
+PINNED = datetime(2026, 10, 12, 23, 0, tzinfo=timezone.utc)
+MINUTE = 60_000
+
+
+def _ms(value):
+    return int(value.timestamp() * 1000)
+
+
+def _registered_agent(monkeypatch):
+    """A simulated agent registered on a world pinned before today's wall date."""
+    import workflows.agent_workflow as m
+
+    wf = types.SimpleNamespace(
+        world_model_mode='simulate', agent_id='child', parent_agent_id='root',
+        _world_clock_events=set(), simulated_clock_offset_seconds=0,
+    )
+
+    async def register(*_a, **_kw):
+        return {'agent_id': 'child', 'time_ms': _ms(PINNED)}
+
+    monkeypatch.setattr(m, 'workflow', types.SimpleNamespace(execute_activity=register, now=lambda: NOW))
+    asyncio.run(m.AgentWorkflow._world_clock_event(wf, 'register'))
+    return wf
+
+
+def _shared_world(monkeypatch, module, *, wall_now, world_ms_after):
+    """Patch one handler's workflow and the shared wait helper; return the wait calls."""
+    import importlib
+
+    shared = importlib.import_module(module._wait_on_world_clock.__module__)
+    calls = []
+
+    async def activity(fn, **kw):
+        calls.append(kw['args'])
+        wait = kw['args'][3]
+        return {'resumed': True, 'time_ms': world_ms_after(wait), 'deadline_ms': world_ms_after(wait)}
+
+    fake = types.SimpleNamespace(execute_activity=activity, now=lambda: wall_now, logger=types.SimpleNamespace(error=lambda *a: None))
+    monkeypatch.setattr(shared, 'workflow', fake)
+    monkeypatch.setattr(module, 'workflow', fake)
+    return calls
+
+
+def test_after_a_shared_wait_the_agent_clock_equals_the_acknowledged_world_time(monkeypatch):
+    from domains.wait_seconds import handler as m
+    from utils.simulated_clock import simulated_now
+
+    wf = _registered_agent(monkeypatch)
+    assert simulated_now(wf, NOW) == PINNED
+    # One wall hour later the agent's world time is only 10 minutes past the pin.
+    wall = NOW + timedelta(hours=1)
+    world_before = _ms(PINNED) + 10 * MINUTE
+    calls = _shared_world(monkeypatch, m, wall_now=wall, world_ms_after=lambda wait: world_before + wait['duration_ms'])
+
+    async def wait():
+        return [e async for e in m.WaitSecondsManager().execute_tool(wf, {'seconds': 300}, 'wait-1')]
+
+    events = asyncio.run(wait())
+    assert calls == [['wait', 'child', None, {'wait_id': 'wait-1', 'duration_ms': 300_000}]]
+    acknowledged = datetime.fromtimestamp((world_before + 300_000) / 1000, timezone.utc)
+    assert events[-1].status.name == 'FINISHED'
+    assert simulated_now(wf, wall) == acknowledged, (
+        f'agent clock {simulated_now(wf, wall).isoformat()} != shared world acknowledgement {acknowledged.isoformat()}'
+    )
+
+
+def test_wait_for_a_future_world_timestamp_waits_on_the_shared_clock(monkeypatch):
+    from domains.wait_for import handler as m
+
+    wf = _registered_agent(monkeypatch)
+    wall = NOW + timedelta(hours=1)
+    target = PINNED + timedelta(minutes=30)  # 20 world minutes ahead of this agent
+    calls = _shared_world(monkeypatch, m, wall_now=wall, world_ms_after=lambda wait: wait['until_ms'])
+    monkeypatch.setattr(m, 'skip_wait_wall_clock_for_fast_mode_replay', lambda _wf: False)
+
+    async def wait():
+        return [e async for e in m.WaitForManager().execute_tool(wf, {'until_timestamp': target.isoformat()}, 'wait-2')]
+
+    events = asyncio.run(wait())
+    assert events[-1].status.name == 'FINISHED', events[-1].message
+    assert calls == [['wait', 'child', None, {'wait_id': 'child:wait-2', 'until_ms': _ms(target)}]]
+
+
+def test_when_every_agent_waits_or_holds_on_children_all_jump_to_the_earliest_wait():
+    """Parents blocked on their children never hold time; waiters wake in deadline order at once."""
+    async def scenario():
+        clock = WorldClock(start_ms=0)
+        clock.register("root")
+        clock.commit("root", started_ms=0, elapsed_ms=1 * DAY)
+        clock.register("mid", parent="root")  # root now holds on its child, not a wait_for
+        clock.commit("mid", started_ms=1 * DAY, elapsed_ms=1 * DAY)
+        for leaf in ("x", "y"):
+            clock.register(leaf, parent="mid")  # mid holds on its children too
+        clock.register("z", parent="root")
+        deadlines = {"x": 9 * DAY, "y": 4 * DAY, "z": 7 * DAY}
+        woke = []
+
+        async def waiter(agent):
+            result = await clock.wait(agent, "w", until_ms=deadlines[agent], poll_seconds=5)
+            woke.append((agent, result["time_ms"], clock.shared_time()))
+            clock.finish(agent)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.wait_for(asyncio.gather(*(waiter(a) for a in deadlines)), 1)
+        assert loop.time() - started < 0.5, "world jumps must not wait in real time"
+        assert [(a, t) for a, t, _ in woke] == [("y", 4 * DAY), ("z", 7 * DAY), ("x", 9 * DAY)]
+        assert woke[0][2] == 4 * DAY  # the jump goes to min(Ti), not past it
+        clock.finish("mid")
+        assert clock.time_of("mid") == 9 * DAY and clock.time_of("root") == 9 * DAY
+
+    run(scenario())
+
+
+# World-time cursor contract (approved clock fix). Fakes route the workflow's
+# world_clock_activity calls straight into a real WorldClock.
+def _clock_activity(clock, calls=None):
+    async def execute_activity(fn, **kw):
+        operation, agent_id, *rest = kw['args']
+        if calls is not None:
+            calls.append(operation)
+        if operation == 'register':
+            return {'agent_id': agent_id, 'time_ms': clock.register(agent_id, rest[0] if rest else None)}
+        if operation == 'time':
+            return {'agent_id': agent_id, 'time_ms': clock.time_of(agent_id)}
+        if operation == 'finish':
+            clock.finish(agent_id)
+            return {'agent_id': agent_id, 'time_ms': clock.time_of(agent_id)}
+        raise AssertionError(operation)
+    return execute_activity
+
+
+def _simulated_workflow(agent_id, parent=None, mode='simulate'):
+    from workflows.agent_workflow import AgentWorkflow
+
+    wf = AgentWorkflow.__new__(AgentWorkflow)  # the real methods, without a Temporal runtime
+    wf.__dict__.update(
+        world_model_mode=mode, agent_id=agent_id, parent_agent_id=parent,
+        _world_clock_events=set(), simulated_clock_offset_seconds=0, simulated_world_time_ms=None,
+        _deployment_resume=False,
+    )
+    return wf
+
+
+def _patch_workflows(monkeypatch, activity, sleeps=None):
+    import importlib
+
+    import workflows.agent_workflow as m
+
+    async def sleep(duration):
+        if sleeps is not None:
+            sleeps.append(duration)
+
+    fake = types.SimpleNamespace(execute_activity=activity, now=lambda: NOW, sleep=sleep,
+                                 logger=types.SimpleNamespace(error=lambda *a: None))
+    monkeypatch.setattr(m, 'workflow', fake)
+    shared = importlib.import_module(m._refresh_world_time_cursor.__module__)
+    monkeypatch.setattr(shared, 'workflow', fake)
+    return m
+
+
+def test_a_child_starts_at_its_parents_world_time_cursor(monkeypatch):
+    from utils.simulated_clock import simulated_now
+
+    clock = WorldClock(start_ms=_ms(PINNED))
+    m = _patch_workflows(monkeypatch, _clock_activity(clock))
+    root, child = _simulated_workflow('root'), _simulated_workflow('child', 'root')
+    asyncio.run(m.AgentWorkflow._register_on_world_clock(root))
+    clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=DAY)  # one simulated day of work
+    asyncio.run(m.AgentWorkflow._register_on_world_clock(child))
+    assert child.simulated_world_time_ms == _ms(PINNED) + DAY == clock.time_of('root')
+    assert simulated_now(child, NOW) == PINNED + timedelta(days=1)
+
+
+def test_simulated_actions_and_a_child_result_move_the_parent_cursor(monkeypatch):
+    from utils.simulated_clock import simulated_now, simulated_timestamp_ms
+
+    clock = WorldClock(start_ms=_ms(PINNED))
+    m = _patch_workflows(monkeypatch, _clock_activity(clock))
+    root, child = _simulated_workflow('root'), _simulated_workflow('child', 'root')
+    asyncio.run(m.AgentWorkflow._register_on_world_clock(root))
+
+    async def tool(self, name, args, call_id):
+        # Stand-ins for the WMH committing what this tool did on the world clock.
+        if name == 'web_search':
+            clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=90 * MINUTE)
+        if name == 'spawn_agent':
+            await m.AgentWorkflow._register_on_world_clock(child)
+            clock.commit('child', started_ms=clock.action_time('child'), elapsed_ms=2 * DAY)
+            await m.AgentWorkflow._world_clock_event(child, 'finish')
+        return {'success': True}
+
+    monkeypatch.setattr(m.AgentWorkflow, '_execute_tool_once', tool, raising=False)
+    asyncio.run(m.AgentWorkflow._execute_tool(root, 'web_search', {}, 'c1'))
+    assert root.simulated_world_time_ms == _ms(PINNED) + 90 * MINUTE  # thinking is free; the action costs 90 min
+    asyncio.run(m.AgentWorkflow._execute_tool(root, 'spawn_agent', {}, 'c2'))
+    finished = _ms(PINNED) + 90 * MINUTE + 2 * DAY
+    assert clock.time_of('child') == finished
+    assert root.simulated_world_time_ms == finished, 'the parent receives the result at the child finish'
+    assert simulated_timestamp_ms(root, NOW) == finished
+    assert simulated_now(root, NOW) == PINNED + timedelta(minutes=90, days=2)
+
+
+def test_a_simulated_agent_without_a_world_session_fails_closed(monkeypatch):
+    calls, sleeps = [], []
+
+    async def no_world(fn, **kw):
+        calls.append(kw['args'][0])
+        return {'skipped': 'no_world_session'}
+
+    m = _patch_workflows(monkeypatch, no_world, sleeps)
+    root = _simulated_workflow('root')
+    asyncio.run(m.AgentWorkflow._register_on_world_clock(root))
+    assert calls == ['register'] * m.WORLD_CLOCK_REGISTER_ATTEMPTS, 'a missing world retries a bounded number of times'
+    assert len(sleeps) == m.WORLD_CLOCK_REGISTER_ATTEMPTS - 1
+    assert m.AgentWorkflow._world_clock_missing(root), 'the agent must not start or plan on the real date'
+    assert root.simulated_world_time_ms is None and 'world' in m.WORLD_CLOCK_UNAVAILABLE_MESSAGE.lower()
+    # A world that appears on the retry is used; a resumed generation keeps its restored cursor.
+    clock = WorldClock(start_ms=_ms(PINNED))
+    results = iter([{'skipped': 'no_world_session'}])
+
+    async def late_world(fn, **kw):
+        return next(results, None) or await _clock_activity(clock)(fn, **kw)
+
+    m = _patch_workflows(monkeypatch, late_world)
+    late = _simulated_workflow('late')
+    asyncio.run(m.AgentWorkflow._register_on_world_clock(late))
+    assert late.simulated_world_time_ms == _ms(PINNED) and not m.AgentWorkflow._world_clock_missing(late)
+    resumed = _simulated_workflow('resumed')
+    resumed._deployment_resume = True
+    assert not m.AgentWorkflow._world_clock_missing(resumed)
+
+
+@pytest.mark.parametrize('mode', ['real', 'shadow'])
+def test_non_simulated_agents_keep_the_wall_clock_and_make_no_clock_calls(monkeypatch, mode):
+    from utils.simulated_clock import advance_simulated_clock, simulated_now, simulated_timestamp_ms
+
+    calls, sleeps = [], []
+
+    async def forbidden(fn, **kw):
+        calls.append(kw['args'][0])
+        raise AssertionError('non-simulated agents must not touch the world clock')
+
+    m = _patch_workflows(monkeypatch, forbidden, sleeps)
+    wf = _simulated_workflow('prod', mode=mode)
+    wf.simulated_world_time_ms = _ms(PINNED)  # even a stray cursor is ignored outside simulate
+    asyncio.run(m.AgentWorkflow._register_on_world_clock(wf))
+
+    async def tool(self, name, args, call_id):
+        return {'success': True, 'name': name}
+
+    monkeypatch.setattr(m.AgentWorkflow, '_execute_tool_once', tool, raising=False)
+    assert asyncio.run(m.AgentWorkflow._execute_tool(wf, 'web_search', {}, 'c1')) == {'success': True, 'name': 'web_search'}
+    assert calls == [] and sleeps == [] and not m.AgentWorkflow._world_clock_missing(wf)
+    assert simulated_now(wf, NOW) == NOW and simulated_timestamp_ms(wf, NOW) == _ms(NOW)
+    assert advance_simulated_clock(wf, 300) == 0 and simulated_now(wf, NOW) == NOW
+
+
+def test_each_child_result_reaches_the_parent_at_that_childs_finish():
+    clock = WorldClock(start_ms=0)
+    clock.register("root")
+    clock.register("fast", parent="root")
+    clock.register("slow", parent="root")
+    clock.commit("fast", started_ms=0, elapsed_ms=2 * DAY)
+    clock.commit("slow", started_ms=0, elapsed_ms=6 * DAY)
+    clock.finish("fast")
+    # The parent may act on the first result while the other child still runs.
+    assert clock.time_of("root") == 2 * DAY
+    assert clock.action_time("root") == 2 * DAY
+    clock.finish("slow")
+    assert clock.time_of("root") == 6 * DAY

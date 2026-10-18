@@ -5210,6 +5210,78 @@ async def test_simulated_planner_sees_its_world_date_not_the_wall_clock():
     assert systems and "Current UTC date: 2026-09-28." in systems[0]
 
 
+async def test_simulated_planner_date_is_the_agents_world_time_cursor():
+    """The planner's date and the agent's cursor are the same world-clock reading, never the wall clock."""
+    import importlib
+    import os
+    import types
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    import httpx
+
+    from benchmarks.wmh_world_clock import WorldClock
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_planner_llm_activity
+    from helpers.wait_on_world_clock import _refresh_world_time_cursor
+    from helpers.world_model_runtime import world_clock_activity
+
+    hour = 3_600_000
+    pinned = int(datetime(2026, 9, 28, 14, tzinfo=timezone.utc).timestamp() * 1000)
+    clock = WorldClock(start_ms=pinned)
+    clock.register("root")
+    clock.commit("root", started_ms=pinned, elapsed_ms=72 * hour)
+    clock.register("child", parent="root")
+    clock.commit("child", started_ms=clock.action_time("child"), elapsed_ms=12 * hour)  # world: 2026-10-02T02:00Z
+    plan_json = json.dumps(
+        {"title": "Plan", "tasks": [{"task_idx": "0", "goal": "g", "tool_name": "spawn_explore_agent", "depends_on": []}],
+         "join": "all"}
+    )
+    body = _anthropic_sse_body(text=plan_json, input_tokens=10, output_tokens=5)
+    systems = []
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            systems.append("\n".join(block["text"] for block in json.loads(req.content.decode())["system"]))
+            return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+        if req.url.path == "/world_models/rose-archive/scopes/root/clock":
+            return httpx.Response(200, json=clock.snapshot())
+        return httpx.Response(404, json={"detail": "Unknown world scope"})
+
+    set_mock_handler(handler)
+
+    async def execute_activity(fn, **kw):
+        return await fn(*kw["args"])
+
+    wall = datetime(2026, 10, 18, 9, tzinfo=timezone.utc)
+    shared = importlib.import_module(_refresh_world_time_cursor.__module__)
+    wf = types.SimpleNamespace(world_model_mode="simulate", agent_id="child", simulated_clock_offset_seconds=0,
+                               simulated_world_time_ms=pinned)
+    with (
+        patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
+        patch("providers.fast_cache.client.resolve_agent_fast_mode",
+              AsyncMock(return_value=(False, None, False, "root", None, False))),
+        patch.object(shared, "workflow", types.SimpleNamespace(execute_activity=execute_activity, now=lambda: wall,
+                                                               logger=types.SimpleNamespace(error=lambda *a: None))),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        assert world_clock_activity is shared.world_clock_activity
+        cursor = await _refresh_world_time_cursor(wf)
+        await call_planner_llm_activity(
+            messages=[{"role": "user", "content": "raise money"}],
+            model="rose",
+            tools_description="web_search: search the web",
+            user_context="",
+            claude_max_token="ct-planner-123",
+            agent_id="child",
+            claude_token_user_id="planner-user",
+        )
+    assert cursor == wf.simulated_world_time_ms == clock.time_of("child") == pinned + 84 * hour
+    cursor_date = datetime.fromtimestamp(cursor / 1000, timezone.utc).date().isoformat()
+    assert cursor_date == "2026-10-02"
+    assert systems and f"Current UTC date: {cursor_date}." in systems[0]
+
+
 async def test_planner_world_clock_failure_stops_liveness_and_never_uses_wall_clock():
     """An unreadable or unrepresentable world clock fails the planner and stops its heartbeat."""
     import httpx
@@ -9716,6 +9788,9 @@ async def run_all_tests():
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     await r.record_async(
         "simulated_planner_sees_world_date", test_simulated_planner_sees_its_world_date_not_the_wall_clock
+    )
+    await r.record_async(
+        "simulated_planner_date_is_world_time_cursor", test_simulated_planner_date_is_the_agents_world_time_cursor
     )
     await r.record_async(
         "planner_world_clock_failure_stops_liveness",

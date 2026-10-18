@@ -5,7 +5,8 @@
     shared time = min(running agents' times ∪ waiting agents' deadlines)
 
 A parent idle on live children (it has not acted since spawning them) is
-excluded from shared time and resumes at the latest child's finish; a parent
+excluded from shared time; each finished child moves its parent to at least
+that child's finish, so the parent resumes at the latest child's finish; a parent
 that keeps acting beside its children holds shared time like any agent. When every included agent waits, shared
 time is the earliest deadline, so the earliest waiter always wakes (no
 deadlock). Model thinking takes no world time. Updates are heap-backed:
@@ -148,8 +149,9 @@ class WorldClock:
             parent = self._agents[agent.parent]
             parent.live_children.discard(agent_id)
             parent.children_finish_ms = max(parent.children_finish_ms, agent.time_ms)
-            if not parent.live_children:
-                parent.time_ms = max(parent.time_ms, parent.children_finish_ms)
+            # The parent receives this child's result at the child's finish
+            # time, so it can never act on that result earlier in the world.
+            parent.time_ms = max(parent.time_ms, parent.children_finish_ms)
             self._touch(agent.parent)
         self._release()
 

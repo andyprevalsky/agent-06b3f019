@@ -9,7 +9,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from helpers.world_model_runtime import world_clock_activity
-from utils.simulated_clock import SIMULATED_CLOCK_ATTR, simulated_clock_offset_seconds
+from utils.simulated_clock import set_world_time_cursor, world_time_cursor_ms
 
 
 async def _wait_on_world_clock(
@@ -19,7 +19,8 @@ async def _wait_on_world_clock(
 
     The clock resumes this agent once every other agent in the world has passed
     the deadline (or waits beyond it), so a waiting agent never overtakes one
-    that is still working. Afterwards this agent's own clock follows world time.
+    that is still working. Afterwards this agent's cursor is exactly the
+    acknowledged world time.
     """
     wait: dict[str, Any] = {"wait_id": wait_id}
     if until_ms is not None:
@@ -39,10 +40,34 @@ async def _wait_on_world_clock(
         return None
     if not isinstance(result, dict) or type(result.get("time_ms")) is not int:
         return None
-    world_seconds = result["time_ms"] // 1000 - int(workflow.now().timestamp())
-    setattr(
-        workflow_instance,
-        SIMULATED_CLOCK_ATTR,
-        max(simulated_clock_offset_seconds(workflow_instance), world_seconds),
-    )
+    set_world_time_cursor(workflow_instance, result["time_ms"], now=workflow.now())
     return result["time_ms"]
+
+
+async def _refresh_world_time_cursor(workflow_instance: Any) -> int | None:
+    """Simulate mode: re-read this agent's time on the world clock into its cursor.
+
+    Simulated actions advance the agent on the world clock by their predicted
+    duration, and a parent's time moves to a child's finish, so the cursor is
+    re-read after a tool rather than inferred. The agent's world time never
+    decreases; an out-of-order read keeps the later value. None (no cursor
+    change) when no cursor exists or the clock cannot be read.
+    """
+    cursor = world_time_cursor_ms(workflow_instance)
+    if cursor is None or not getattr(workflow_instance, "agent_id", None):
+        return None
+    try:
+        result = await workflow.execute_activity(
+            world_clock_activity,
+            args=["time", workflow_instance.agent_id],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+    except Exception as exc:
+        workflow.logger.error(f"[world_clock] Cursor read failed; keeping the last world time: {exc}")
+        return None
+    if not isinstance(result, dict) or type(result.get("time_ms")) is not int:
+        return None
+    latest = max(world_time_cursor_ms(workflow_instance) or cursor, result["time_ms"])
+    set_world_time_cursor(workflow_instance, latest, now=workflow.now())
+    return latest
