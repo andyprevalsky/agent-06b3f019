@@ -286,9 +286,7 @@ fi
 
 
 @pytest.mark.parametrize("changed", [False, True])
-def test_exact_recovery_consumes_runtime_receipt_preserved_pre_service_config(
-    changed: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_exact_recovery_consumes_runtime_receipt_preserved_pre_service_config(changed: bool) -> None:
     """A read-only capture proves preservation, while the inert mode stays strict."""
     spec = importlib.util.spec_from_file_location("startup_pre_service_fixture", ROOT / "scripts/tests/cloudbench-forensic-quiesced.test.py")
     fixture_module = importlib.util.module_from_spec(spec)
@@ -304,14 +302,6 @@ def test_exact_recovery_consumes_runtime_receipt_preserved_pre_service_config(
                        after_config_sha256="f" * 64 if changed else receipt["original_config_sha256"])
         fixture.originals["original-capture-receipt.json"] = json.dumps(receipt).encode()
         verifier = fixture_module.retirement.verify_pre_service_archive
-        # This archive-format test supplies its own reviewed fixture source;
-        # changing the checkout must not require approving it for production.
-        source = fixture_module.retirement.runpy.run_path(str(ROOT / "scripts/cloudbench-prestack-recovery.py"))
-        _, _, fingerprint = source["native_recipe"](
-            fixture.meta, json.loads(fixture.originals["original-native-config.json"])
-        )
-        monkeypatch.setattr(fixture_module.retirement.runpy, "run_path", lambda _: source)
-        source["trusted_source_review_policy"] = lambda: {fingerprint: ["before-stack-launch"]}
         if changed:
             with pytest.raises(AssertionError):
                 verifier(fixture.meta, fixture.row, fixture.originals, config_preserved=True)
@@ -320,7 +310,7 @@ def test_exact_recovery_consumes_runtime_receipt_preserved_pre_service_config(
         with pytest.raises((AssertionError, KeyError)):
             verifier(fixture.meta, fixture.row, fixture.originals)
         if not changed:
-            source["trusted_source_review_policy"] = lambda: {}
+            fixture.reviewed_sources.clear()
             with pytest.raises(AssertionError):
                 verifier(fixture.meta, fixture.row, fixture.originals, config_preserved=True)
     finally:
