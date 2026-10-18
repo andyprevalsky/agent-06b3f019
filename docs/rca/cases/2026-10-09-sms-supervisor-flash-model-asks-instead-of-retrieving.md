@@ -523,3 +523,55 @@ request exit0 means observation completed, not a benchmark pass; nested clocks
 are not counted again. No alternate model or previously unapproved MENU/
 USE-RETRIEVED-FACTS proposal was applied. Full current deploy verification,
 exact-HEAD bounded review, merge and production lanes remain outstanding.
+
+
+### Explicit same-response send/completion instruction, October18
+
+The user directed the cap instruction to request send_user_message plus
+attempt_completion, and asked for the unchanged benchmark input, criteria and
+actual outcome. Exact one-line diff was shown before application. Runtime
+158d3e1e262b4e0fddf1fa532ff5e9f2cb7ae937 now explicitly requests both calls
+in the same response, in that order. No other runtime instruction, model,
+schema, classifier, catalog, fixture, retry policy or timeout was changed.
+The existing handler owner and backend typecheck exit0; all135 SMS owning
+tests pass. These owners do not substitute for a real-model outcome.
+
+Fresh canonical run1792350783-2643178-pair PASSED the unchanged CLOSED task
+in30.8 task seconds/63.2 owning-stage seconds. Input is still the exact
+paired immediate-pickup request. All eight source-bound SMS model dumps
+served Qwen3.8-27b. Across seven work rounds it ran eight web searches,
+sent one supervisor reply conveying the closure, then called completion
+which the handler accepted. No agent or authorized budget was added. Both
+the static contract and semantic closure evaluator scored1.0. The loop
+stopped before the cap: this is a real benchmark PASS, not proof that the
+new closing instruction caused it or that the capped two-call path works.
+
+The separate real-model continuation preserves the verified original
+35-message history and nine native tools; only the user-requested terminal
+line differs from the earlier replay. The actual request contains the exact
+new instruction. Qwen still generated only send_user_message and omitted
+attempt_completion. It ran no business tools and delivered no SMS. The
+expected same-response pair therefore remains NOT_MET. Independent source/
+dump audit found both tools available and no one-call restriction. Rose's
+collected native output already contains just one call, and the SMS finalizer
+preserves it. This capture is normalized output, not raw provider SSE, so no
+precise upstream cause is proved. Do not infer harmless flakiness, model
+incapability, or a fixed cap path from this single observation. The initial
+replay setup rejection was before once intent or inference; both setup and
+actual observation attempts remain in the ledger.
+
+Canonical cleanup verified zero roots, native generations and browsers.
+There were zero applicable root diagnostics, not three passing diagnostics.
+The owned terminal/archive outboxes were empty. Eight model dumps, exact
+owned DB dump and the replay request/response were preserved privately before
+root-reviewed stack stop. Canonical stop exited0, observer and replay child
+were joined, the owned DB was absent, and all136 observed process births
+were absent. Complete descendant capture remains unproved.
+
+Original and failed attempts remain intact. Current full deploy gates,
+unresolved FILL behavior, cap-pair reliability, bounded exact-HEAD review,
+merge and production verification remain outstanding. No production deploy,
+alternate-model comparison or previously unapproved prompt proposal is
+implied by the single canonical PASS.
+
+Private archive SHA256 f27fd21d0981d069c7c4d73faddb00cceee6e9fbb5ce3940d3e1655213b35608 has full457-member read-back and all324 source copies verified; cutoff 2026-10-18T19:21:15.277233+00:00. Later safe receipts and case/scorecard updates are outside that archive. The original31 and resumed403 owning attempts are retained:434 total,346 passed/88 failed. Nested clocks are not double-counted.
