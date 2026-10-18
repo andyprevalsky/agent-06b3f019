@@ -12,8 +12,9 @@ This presentation rule applies to current and future agents; approval payloads
 retain their required `text` fence.
 
 Apply `.claude/shared/report-display-format.md` to every user-facing fenced
-display: 12-hour America/Los_Angeles time (PDT/PST by date), one status emoji and
-0–100% milestone progress, LIFE at the far right and no UPD or progress wheels.
+display: 12-hour America/Los_Angeles time (PDT/PST by date), one status emoji,
+current-assignment tokens and rolling 15-minute tokens/min, LIFE at the far
+right and no UPD or progress wheels.
 Place blocking agents above the experiment history.
 Persist every user display correction in CLAUDE.md and the shared format.
 Report measured Machine states/costs, protected warm capacity and a concrete
@@ -688,7 +689,7 @@ while the requested goal still has authorized work:
     once the requested goal passes: complete normal deploy/publication/owned cleanup
 ```
 
-Do not stop for Andy to fix infra. Below5%, unrelated infra RCAs, runtime
+Do not stop for Andy to fix infra. Below 5%, unrelated infra RCAs, runtime
 approvals and deploys do not add a global next-slice gate. At >=5%, stop the
 active owned run and repair its critical failures before rerunning the original
 experiment. A verified local fix need not be deployed to production before its
@@ -1049,8 +1050,8 @@ and lifecycle subrows. Preserve the frame, denominators and active-worker lines;
 remove the old standalone active-run/progress/metrics and last-slice blocks. Never
 display nulls or empty sentinels: use a concrete coverage state or an evidenced
 milestone estimate, and use `warming <age>` for incomplete rate history rather
-than fabricated zeroes. Progress cards are
-exactly one fenced `diff` block with no surrounding narrative. Apply the shared
+than fabricated zeroes. On boxes.dev publish only the rendered HTML card; the
+`--text` fallback is one fenced `diff` block with no surrounding narrative. Apply the shared
 LIFE far-right column (no UPD or progress wheels), verified rolling 15-minute rate and stall rules.
 
 The scorecard describes the latest concrete slice, not every background proof
