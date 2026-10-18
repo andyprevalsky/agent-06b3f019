@@ -146,7 +146,7 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
             runners[shard['index']] = spawn(shard)
             record['shards'][str(shard['index'])] = dict(out=str(shard['out']), pid=runners[shard['index']].pid)
         save(journal, record)
-        decided = None
+        decided, decision = None, None
         while True:
             exited = {i: p.poll() for i, p in runners.items()}
             statuses = {s['index']: read_status(s['out']) for s in shards}
@@ -160,17 +160,20 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                     decided = 'abort'
                     record.update(aborted_at=clock(), abort_reason=(
                         'operator ' + stop[0] if stop[0] else 'shard %s failed before global release' % failed))
-                    for shard in shards:
-                        write_once(Path(shard['out']) / 'global-abort.json',
-                                   dict(release_id=release_id, reason=record['abort_reason']))
+                    decision = ('global-abort.json', dict(release_id=release_id, reason=record['abort_reason']))
                     save(journal, record)
                 elif all(barrier[i] in RELEASED_STATES for i in runners):
                     decided = 'release'
                     record['released_at'] = clock()
-                    for shard in shards:
-                        write_once(Path(shard['out']) / 'global-release.json',
-                                   dict(release_id=release_id, reason='all %d shards ready' % len(shards)))
+                    decision = ('global-release.json', dict(release_id=release_id,
+                                                            reason='all %d shards ready' % len(shards)))
                     save(journal, record)
+            if decision is not None:
+                # A runner creates its own output directory; deliver once it exists.
+                for shard in shards:
+                    target = Path(shard['out'])
+                    if target.is_dir() and not (target / decision[0]).exists():
+                        write_once(target / decision[0], decision[1])
             threshold = infra_early_stop == 'enabled' and 20 * infra >= scheduled_total
             if record['terminated_at'] is None and (stop[0] or threshold):
                 record.update(terminated_at=clock(), terminate_reason=(

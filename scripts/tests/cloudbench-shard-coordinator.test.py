@@ -182,6 +182,24 @@ class Coordination(unittest.TestCase):
         self.assertEqual(set(record['exit_codes'].values()), {143})
         self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
 
+    def test_abort_before_a_runner_created_its_directory_is_delivered_later(self):
+        scripts = [{0: ('failed', 0, None), 6: ('failed', 0, 1)}, {0: ('waiting', 0, None), 8: ('aborted', 0, 1)}]
+        world = World(self.tmp.name, scripts)
+        late = world.shards[1]['out']
+        late.rmdir()
+        original = world.sleep
+
+        def create_late(seconds):
+            if world.n == 4:
+                late.mkdir()
+            original(seconds)
+
+        world.sleep = create_late
+        world.runners[1].tick = lambda n, tick=world.runners[1].tick: tick(n) if late.is_dir() else None
+        record = world.run(scheduled_total=6)
+        self.assertIsNotNone(record['aborted_at'])
+        self.assertTrue((late / 'global-abort.json').exists())
+
     def test_decision_files_are_never_replaced(self):
         path = Path(self.tmp.name) / 'global-release.json'
         C['write_once'](path, dict(release_id='first'))
