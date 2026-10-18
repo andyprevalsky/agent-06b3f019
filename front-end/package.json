@@ -11,7 +11,7 @@
     "format": "prettier --write 'src/**/*.{ts,tsx}'",
     "format:check": "prettier --check 'src/**/*.{ts,tsx}'",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "tsc --noEmit -p tsconfig.app.json && vitest run --coverage",
     "test:coverage:report": "vitest run --coverage --reporter=verbose",
     "test:e2e": "playwright test",
     "test:e2e:list": "playwright test --list",

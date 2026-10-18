@@ -68,6 +68,10 @@ import ClaudeCodeChip from '@/features/terminal-component-group/components/Claud
 // ClaudeCodeChip
 // ═════════════════════════════════════════════════════════════════════════════
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ClaudeCodeChip
+// ═════════════════════════════════════════════════════════════════════════════
+
 describe('ClaudeCodeChip', () => {
   const originalWebSocket = globalThis.WebSocket;
 

@@ -779,6 +779,29 @@ All realtime and tool message types are defined in `front-end/src/lib/realtime-t
 
 In-process model racing (claudeAuth → OpenRouter waterfall). No external HTTP hop.
 
+**Scripts and experiments that fire LLM requests reuse Rose.complete.** Replays,
+model A/Bs, judges and one-off probes go through the same client production uses,
+never hand-rolled provider HTTP or a raw API key:
+
+- **Python:** lease a token with `helpers.llm.fetch_compute_token_activity(user_id, token_type=...)`.
+  Build auth with `_build_compute_auth_context(...)`. Then call
+  `providers.rose.RoseClient().complete(...)` or `.collect(...)` with `pool=`,
+  `claude_auth=`/`gpt_auth=` and a `call_site`. Release the lease afterwards.
+- **TypeScript:** call `createStreamingCompletion` (`back-end/src/providers/rose`).
+  Pass a token from `fetchComputeTokenForUser(userId, { tokenType })`.
+
+Pick the model by pool and token type:
+
+| Pool | Claude lease | GPT lease | No token |
+| --- | --- | --- | --- |
+| `rose-1-ultra` | Opus | GPT-6 Sol | API-key/waterfall legs |
+| `rose-1-flash` | — | — | Cerebras Qwen then its waterfall |
+
+An exhausted or missing local `GPT_API_KEY`/`ANTHROPIC_API_KEY` is not a blocker.
+Leased compute tokens are the supported path. Record the served `actual_model` and
+`pool_name` for every call: a fall-through to another model invalidates a model
+comparison.
+
 Python waterfall TTFT/progress guards belong inside each configured leg. Before
 productive output, a stalled leg may use the existing next model; partial-output
 idle errors and the fixed whole-call deadline remain terminal. Do not raise the

@@ -25,6 +25,7 @@ import {
   RoseStallError,
 } from './errors';
 import { parseOpenAISSE } from './streaming';
+import { openAiChatToolChoice, openAiChatTools } from './toolContract';
 import { coerceLeadingOnlySystemMessages, normalizeOpenAiToolCalls } from './transforms';
 import { postCerebrasStream } from './transport';
 import type { CompletionOptions, RoseStreamChunk } from './types';
@@ -119,8 +120,22 @@ export function buildCerebrasChatBody(
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_completion_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),
-    ...(options.tools ? { tools: options.tools } : {}),
-    ...(options.tool_choice !== undefined ? { tool_choice: options.tool_choice } : {}),
+    ...cerebrasToolFields(options, model),
+  };
+}
+
+function cerebrasToolFields(options: CompletionOptions, model: string): Record<string, unknown> {
+  const selectedTools =
+    options.cerebras_tools_source === options.tools
+      ? (options.cerebras_tools ?? options.tools)
+      : options.tools;
+  const tools = openAiChatTools(selectedTools);
+  if (!tools) return {};
+  return {
+    tools,
+    ...(options.tool_choice !== undefined
+      ? { tool_choice: openAiChatToolChoice(options.tool_choice, model) }
+      : {}),
   };
 }
 

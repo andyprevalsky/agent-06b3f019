@@ -32,6 +32,7 @@ import {
   providerRequiredWaitMs,
 } from './rateLimitReset';
 import { parseResponsesSSE } from './streaming';
+import { responsesToolChoice, responsesTools } from './toolContract';
 import { postCodexStream, postOpenAIResponsesStream } from './transport';
 import type { CompletionMessage, ContentBlock, ResponseFormat, RoseStreamChunk } from './types';
 
@@ -252,29 +253,6 @@ function normalizeCodexMessageItem(item: Record<string, unknown>): ResponsesInpu
   };
 }
 
-function responsesTools(
-  tools?: Array<Record<string, unknown>>
-): Array<Record<string, unknown>> | undefined {
-  const out: Array<Record<string, unknown>> = [];
-  for (const tool of tools ?? []) {
-    const fn =
-      typeof tool.function === 'object' && tool.function !== null
-        ? (tool.function as Record<string, unknown>)
-        : tool;
-    if (typeof fn.name !== 'string' || fn.name.length === 0) continue;
-    const parameters =
-      typeof fn.parameters === 'object' && fn.parameters !== null ? fn.parameters : {};
-    out.push({
-      type: 'function',
-      name: fn.name,
-      description: typeof fn.description === 'string' ? fn.description : '',
-      strict: typeof fn.strict === 'boolean' ? fn.strict : false,
-      parameters,
-    });
-  }
-  return out.length > 0 ? out : undefined;
-}
-
 function buildResponsesInput(
   messages: CompletionMessage[],
   cacheBreakpoints = false
@@ -400,7 +378,7 @@ export function buildCodexResponsesBody(opts: BuildBodyOptions): Record<string, 
     stream: true,
     store: false,
     parallel_tool_calls: true,
-    tool_choice: opts.toolChoice ?? 'auto',
+    tool_choice: responsesToolChoice(opts.toolChoice),
     prompt_cache_key: buildPromptCacheKey(opts, instructions),
     reasoning: { effort: normalizeReasoningEffort(opts.effort), summary: 'auto' },
     include: ['reasoning.encrypted_content'],

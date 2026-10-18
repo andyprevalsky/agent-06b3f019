@@ -46,7 +46,7 @@ describe('committed INSERT delivery', () => {
     const hook = renderHook(() => useRealtimeSubscription(deps));
     await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
     act(() => handlers.onInsert?.(insert));
-    deps.setStreamingPlan.mockClear();
+    vi.mocked(deps.setStreamingPlan).mockClear();
     act(() => handlers.onInsert?.(insert));
     expect(deps.dispatchMessage).toHaveBeenCalledOnce();
     expect(deps.setStreamingPlan).not.toHaveBeenCalled();

@@ -57,6 +57,9 @@ import type { Agent } from '../hooks';
 type DrawerTab = 'agents' | 'notifications';
 
 interface MobileAgentDrawerProps {
+  onResumeAgent?: (agentId: string) => Promise<void>;
+  resumingAgentId?: string | null;
+  realtimeReady?: boolean;
   agents: Agent[];
   isLoadingAgents: boolean;
   selectedAgentId: string | null;

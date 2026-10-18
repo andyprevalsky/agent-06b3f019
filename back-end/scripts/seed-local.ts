@@ -1252,7 +1252,12 @@ function throwBrowserAuthSyncFailures(failures: Error[]): void {
  * for the passkey rows, or later at `POST /api/browser-session/init`.
  */
 async function ensureSeedUserExists(): Promise<void> {
-  const synced = await syncUserRecord(remote.user, local.user, SEED_USER_ID);
+  const synced = await syncUserRecord(
+    remote.user,
+    local.user,
+    SEED_USER_ID,
+    COMPUTE_TOKENS_ONLY || PASSKEYS_ONLY || CREDENTIALS_ONLY || EMAIL_CREDENTIALS_ONLY
+  );
   if (synced === 0) {
     throw new Error(
       `User ${SEED_USER_ID} not found in the remote database; cannot seed credentials for an identity that does not exist upstream`

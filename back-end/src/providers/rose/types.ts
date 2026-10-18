@@ -58,6 +58,12 @@ export interface CompletionOptions {
   response_format?: ResponseFormat;
   response_model?: import('./schema').ZodResponseModel;
   tools?: Array<Record<string, unknown>>;
+  /** Internal Anthropic compatibility schemas; body builders never serialize this field. */
+  anthropic_tools?: Array<Record<string, unknown>>;
+  /** Derived Cerebras dialect tools; explicit caller tools are never projected. */
+  cerebras_tools?: Array<Record<string, unknown>>;
+  /** Identity binding: replacing generic tools invalidates the derived dialect. */
+  cerebras_tools_source?: Array<Record<string, unknown>>;
   tool_choice?: unknown;
   effort?: string;
   provider_fast_mode?: boolean;

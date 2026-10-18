@@ -1,0 +1,212 @@
+{
+  "old_devbox_id": "0db82503-ee90-4484-b8b5-31dd0c8043f2",
+  "original_head": "244a961d25558d4df563636ef3f8cc74d7894b89",
+  "files": [
+    {
+      "original": ".context/g3/live-probes.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g3/live-probes.sh",
+      "sha256": "4e9073f225f37649b5ca7ba9f7a803019f867b98fc62f97d2d993b35dd71505e",
+      "bytes": 355
+    },
+    {
+      "original": ".context/g3/rerun-structural.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g3/rerun-structural.sh",
+      "sha256": "8fc5095bf6db011f5d27a9d48fd05c50146fe378201daf80524cdea55481f0b2",
+      "bytes": 451
+    },
+    {
+      "original": ".context/g3/run-lanes.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g3/run-lanes.sh",
+      "sha256": "872616cd7b7a29f1577d1239d85d942e1519b02341e3fdaefe30a648453e5b50",
+      "bytes": 1960
+    },
+    {
+      "original": ".context/g3/seed-ratchet.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g3/seed-ratchet.sh",
+      "sha256": "852b0c6e42edba9ec66e37a098f7763e44a0852c5435e516668c2d23f7115725",
+      "bytes": 448
+    },
+    {
+      "original": ".context/g4/agentcard.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/agentcard.sh",
+      "sha256": "8cc4c1488e64caa4770473f676c9ed6b8c2bbbe22f5fa2961218685fca86ee84",
+      "bytes": 542
+    },
+    {
+      "original": ".context/g4/bb-benchmark.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/bb-benchmark.sh",
+      "sha256": "2f25526667050ff36f59948a3965f5dd1af16c0ca0decfea1579ac491810d1fb",
+      "bytes": 197
+    },
+    {
+      "original": ".context/g4/e2b.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/e2b.sh",
+      "sha256": "edce945a00ee89fc79e0bf66d2758535b682bd675131166f9078e464a09a1fcd",
+      "bytes": 890
+    },
+    {
+      "original": ".context/g4/env.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/env.sh",
+      "sha256": "b3abbea0d0a9d19039176526a93986cafad70d9b59d02dfe4cd60a56857852c6",
+      "bytes": 211
+    },
+    {
+      "original": ".context/g4/review.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/review.sh",
+      "sha256": "920d5a5f1b0ceeb1cb6212816b4f6e319cd209e752d4ac833d8628f2b158b3d5",
+      "bytes": 509
+    },
+    {
+      "original": ".context/g4/semantic.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/semantic.sh",
+      "sha256": "68581e3a0a34a726e6508db8485848c7aff20dde50e06f9387b240dd66a5c42d",
+      "bytes": 864
+    },
+    {
+      "original": ".context/g4/smoke.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/smoke.sh",
+      "sha256": "359f08138c4b1c877b8442eac24b405b254fadc726e1b4344755f2357b93ae56",
+      "bytes": 205
+    },
+    {
+      "original": ".context/g4/stack.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/stack.sh",
+      "sha256": "6e52b985807ad54089480212f33db6eefa582580ddf22c551eb75544035d6bb9",
+      "bytes": 471
+    },
+    {
+      "original": ".context/g4/sweep.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/sweep.sh",
+      "sha256": "d5bac74566595fe810326a8d0af7bd026f30d1d9ba33922f333225749d2e9cc5",
+      "bytes": 223
+    },
+    {
+      "original": ".context/history-hold-sms/ledger-2.patch",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/history-hold-sms/ledger-2.patch.gz",
+      "sha256": "4c1f65d5c98c8706be15f8768ddef0981ba96beadbc5eb93f41ea37d20d51016",
+      "bytes": 8294,
+      "encoding": "gzip",
+      "stored_sha256": "54c0bce57712520c10924516dcd0a72b89ff6adea3b8b33505d194e4c4e8026e"
+    },
+    {
+      "original": ".context/history-hold-sms/ledger-3.patch",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/history-hold-sms/ledger-3.patch.gz",
+      "sha256": "a418215ae083da8f17d47130be825c25d70861ede84353d8e851cf8141da4773",
+      "bytes": 5244,
+      "encoding": "gzip",
+      "stored_sha256": "df581089a5ecba2a7ae2620752ee6bf3bbadb89517e3ce3cacd3001e4085d195"
+    },
+    {
+      "original": ".context/history-hold-sms/ledger-4.patch",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/history-hold-sms/ledger-4.patch.gz",
+      "sha256": "ee63f4910d0641f21eaa10fae10c2e89eb8460b17d8f75e784a43c79cae1b87f",
+      "bytes": 4813,
+      "encoding": "gzip",
+      "stored_sha256": "3d3d751bb380faae1153ff3c0272daeb0d99e3228b476c28d47100de12780d00"
+    },
+    {
+      "original": ".context/history-hold-sms/ledger.patch",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/history-hold-sms/ledger.patch.gz",
+      "sha256": "dbebcf6c5faacb249c4532eccf2fe04dd5086ccd97fbb50f0973e859d5ad33f4",
+      "bytes": 24734,
+      "encoding": "gzip",
+      "stored_sha256": "06cdbc44cf3b60203581c2825aaac5004642d057d0a7495d861a5946e76c7f97"
+    },
+    {
+      "original": ".context/rca-tamy-eta/bench2/launch-azure-sol.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/bench2/launch-azure-sol.sh",
+      "sha256": "d981abe54d7d309160975a6ebb507cc936a7a829f3bc090d1621bfb14544ce47",
+      "bytes": 725
+    },
+    {
+      "original": ".context/rca-tamy-eta/bench2/launch-with-azure.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/bench2/launch-with-azure.sh",
+      "sha256": "57f8f1d11eb81092905fe46b35faf6eefab64ef3664c443500198ec3cd2eb787",
+      "bytes": 683
+    },
+    {
+      "original": ".context/rca-tamy-eta/bench2/run-config.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/bench2/run-config.sh",
+      "sha256": "066b7125e536b331a0f991344acb90896ba79073a67b1cc1fdc0b4a07b0db3b3",
+      "bytes": 1422
+    },
+    {
+      "original": ".context/rca-tamy-eta/bench2/run-task.sh",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/bench2/run-task.sh",
+      "sha256": "8daa0bb6ae4e8c42f7f54619a102a223c1d76a50e73ac4f54bc443e0ee3333a8",
+      "bytes": 1439
+    },
+    {
+      "original": ".context/rca-tamy-eta/bench2/stop_retained.py",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/bench2/stop_retained.py",
+      "sha256": "c15e5c51bc96c1d4777012dbd348b71900c70cb722a64108abca734e1ee9da98",
+      "bytes": 882
+    },
+    {
+      "original": ".context/rca-tamy-eta/localreplay/rca_local_replay.ts",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/localreplay/rca_local_replay.ts",
+      "sha256": "bb89bdb80d38d17f43ab6489cce4278d3274b410e5b04dc3d20384ba966cfb9f",
+      "bytes": 7867
+    },
+    {
+      "original": ".context/rca-tamy-eta/localreplay/seed_local.py",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/localreplay/seed_local.py",
+      "sha256": "c38d2d47e344f2a3fe8e5bf4c59a88af4c93272f2cd4bd56633bdedba140751a",
+      "bytes": 1758
+    },
+    {
+      "original": ".context/rca-tamy-eta/scripts/rca_capture_seq8.ts",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/scripts/rca_capture_seq8.ts",
+      "sha256": "f09b22672a014716b177e92624c5ff533ab6afa3d4ab4f84c35c503ffaa5c25f",
+      "bytes": 2187
+    },
+    {
+      "original": ".context/rca-tamy-eta/scripts/rca_eval.ts",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/scripts/rca_eval.ts",
+      "sha256": "f614f8efe5ee5ba65a360ad388eb6db4aa6eeb317a5ac110c4b625af4fefa162",
+      "bytes": 11413
+    },
+    {
+      "original": ".context/wip/sync-20261012T033122Z.base",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/wip/sync-20261012T033122Z.base",
+      "sha256": "e06389803f8bf54f356b48d7d3ea2aa8e802dad662b81d82ce04e3be24788f98",
+      "bytes": 41
+    },
+    {
+      "original": ".context/wip/sync-20261012T033122Z.patch",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/wip/sync-20261012T033122Z.patch.gz",
+      "sha256": "bdd58fc173ef9c4889912b617e201d9d9bb0d5d05447368a899cd4fa4098c302",
+      "bytes": 174707,
+      "encoding": "gzip",
+      "stored_sha256": "d0f1376ba1f19dfc4d479a97053d93e7286de413e6f29502d21665fc39c37f67"
+    },
+    {
+      "original": "stash@{0}",
+      "stash_sha": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/inherited-stash.patch.gz",
+      "sha256": "eb82294cd8ac31ecfd5e1cc38a947b659fd6f81ff20f5d5ce8aa1cef6b320043",
+      "bytes": 2835297,
+      "encoding": "gzip",
+      "stored_sha256": "3575e1c6e25b3ccecbcf4f9e1293b7f86d91e3e510a37623e173851b80d885cf"
+    },
+    {
+      "original": "stash@{0}^3:docs/rca/cases/2026-09-30-explore-wait-cancel-drops-saved-tool-evidence.md",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/inherited-stash-untracked/docs/rca/cases/2026-09-30-explore-wait-cancel-drops-saved-tool-evidence.md",
+      "sha256": "79c2ba7f1cd0bf210ffcefd9a5479acd61b9c4cc6a6280aa9cfa8cccfde3e1ec",
+      "bytes": 4917
+    },
+    {
+      "original": ".context/rca-tamy-eta/DRAFT-RCA.md",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/rca-tamy-eta/DRAFT-RCA.md",
+      "sha256": "96db241c07c51f5ed899d219d4e0ed7f7153109293838457b69edbd06f925260",
+      "bytes": 6723
+    },
+    {
+      "original": ".context/g4/stack.env",
+      "preserved": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source/original-context/g4/stack.env",
+      "sha256": "18352f83aabc3c208e25409efc843e2224a73c58c1cbd333ad4a386fae7efb9b",
+      "bytes": 218
+    }
+  ],
+  "warning": "Original task source snapshots are preserved byte-for-byte as historical artifacts. Old teardown wrappers may use unsafe sweeps; use current canonical exact-owner cleanup. The September 30 stash is inherited, not new Tamy work."
+}

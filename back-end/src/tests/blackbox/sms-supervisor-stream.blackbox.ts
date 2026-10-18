@@ -51,6 +51,14 @@ import {
   callWithRetries,
   dispatchToolSafely,
 } from '../../providers/smsSupervisor/supervisorResilience';
+import {
+  dispatchToolCall,
+  type PendingOp,
+  type ToolCall,
+} from '../../providers/smsSupervisor/supervisorTools';
+import { buildNativeToolFeedbackMessages } from '../../providers/smsSupervisor/environmentMessages';
+import { unknownSupervisorToolError } from '../../providers/smsSupervisor/supervisorTools.helpers';
+import { SmsSupervisorToolCallSchema } from '../../providers/smsSupervisor/schema';
 
 const noSleep = async (): Promise<void> => {};
 
@@ -399,6 +407,70 @@ function testFallbackMessageStaysWarm(): void {
   );
 }
 
+async function testNativeArgumentsValidatedBeforeDispatch(): Promise<void> {
+  const pending: PendingOp[] = [];
+  const invalid: ToolCall = {
+    tool: 'start_new_agent',
+    id: 'native-invalid-budget',
+    arguments: { goal: 'Offline fixture', budget_dollars: '1', start_phase: 'plan' },
+  };
+  const rejected = await dispatchToolCall(invalid, 'offline', pending);
+  assert.equal(rejected.success, false);
+  assert.match(rejected.error ?? '', /invalid_type/);
+  assert.match(rejected.error ?? '', /budget_dollars/);
+  assert.deepEqual(pending, [], 'invalid native arguments must not queue a write');
+
+  const feedback = buildNativeToolFeedbackMessages({
+    round: 0,
+    toolCalls: [invalid],
+    resultsByCall: new Map([[invalid, [rejected]]]),
+    roundResults: [],
+    guidance: '',
+  });
+  assert.equal(feedback[0].tool_calls?.[0].id, invalid.id);
+  assert.equal(feedback[1].tool_call_id, invalid.id);
+  assert.ok(String(feedback[1].content).includes(rejected.error!));
+
+  const grep = SmsSupervisorToolCallSchema.options.find(
+    (schema) => schema.shape.tool.value === 'grep'
+  );
+  assert.ok(grep);
+  const grepArgs = Object.fromEntries(
+    Object.keys(grep.shape.arguments.shape).map((key) => [key, null])
+  );
+  Object.assign(grepArgs, { pattern: 'fixture', source: 'messages', filters: 'null' });
+  const badFilters = await dispatchToolCall(
+    { tool: 'grep', arguments: grepArgs },
+    'offline',
+    pending
+  );
+  assert.equal(badFilters.success, false);
+  assert.match(badFilters.error ?? '', /invalid_type/);
+  assert.match(badFilters.error ?? '', /filters/);
+  assert.doesNotMatch(badFilters.error ?? '', /filters\.0/);
+  assert.deepEqual(pending, []);
+
+  const args = { goal: 'Offline fixture', budget_dollars: 1, start_phase: 'plan' };
+  const accepted = await dispatchToolCall(
+    { tool: 'start_new_agent', arguments: args },
+    'offline',
+    pending
+  );
+  assert.equal(accepted.success, true);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].kind, 'start_new_agent');
+  assert.deepEqual(pending[0].args, args);
+
+  const unknown = await dispatchToolCall(
+    { tool: 'spawn_agent', arguments: {} },
+    'offline',
+    pending
+  );
+  assert.equal(unknown.success, false);
+  assert.equal(unknown.error, unknownSupervisorToolError('spawn_agent'));
+  assert.equal(pending.length, 1);
+}
+
 function testAnySingleUnicodeEmoji(): void {
   for (const emoji of ['😢', '❤️', '🙏🏽', '👩🏽‍💻', '👨‍👩‍👧‍👦', '🇯🇵', '1️⃣', '🏳️‍🌈', '🪼']) {
     assert.equal(isSingleEmoji(emoji), true, `accept ${emoji}`);
@@ -516,7 +588,8 @@ async function main(): Promise<void> {
   testMalformedToolIsDroppedNotThrown();
   testFinalizeUsesZodNotFinalText();
   testFallbackMessageStaysWarm();
-  console.log('PASS sms-supervisor-stream (18 cases)');
+  await testNativeArgumentsValidatedBeforeDispatch();
+  console.log('PASS sms-supervisor-stream (19 cases)');
 }
 
 main().catch((error) => {

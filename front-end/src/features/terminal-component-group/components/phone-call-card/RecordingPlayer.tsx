@@ -5,6 +5,12 @@ import { fetchPhoneCallRecording } from '../../hooks';
 import { formatDuration } from './formatDuration';
 import { useRecordingPlayer } from './useRecordingPlayer';
 
+interface RecordingPlayerProps {
+  agentId?: string | null;
+  callId?: string;
+  recordingUrl?: string;
+}
+
 /**
  * Inline audio player used for completed (ended) calls.
  *
@@ -21,11 +27,7 @@ export const RecordingPlayer = memo(function RecordingPlayer({
   agentId,
   callId,
   recordingUrl,
-}: {
-  agentId?: string | null;
-  callId?: string;
-  recordingUrl?: string;
-}) {
+}: RecordingPlayerProps) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);

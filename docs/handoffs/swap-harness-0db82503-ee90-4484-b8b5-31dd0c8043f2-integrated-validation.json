@@ -1,0 +1,810 @@
+{
+  "recorded_at_utc": "2026-10-13T19:38:43.293443+00:00",
+  "task": "Tamy Whatsapp Bug",
+  "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473",
+  "source_head": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+  "runtime_source": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+  "preserved_checkpoint": "c8e72ed8821f5cc219c616b6454afee729c837a1",
+  "preserved_original_warning_skip": "244a961d25558d4df563636ef3f8cc74d7894b89",
+  "production_deploy_complete": false,
+  "current_integrated_gates": {
+    "source": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+    "runtime_equivalence": "Backend unchanged from0593671c6; only3test typing lines added",
+    "completed_offline": {
+      "integrated-main-backend-typescript": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 15.6,
+        "started_at": "2026-10-13T18:58:07Z",
+        "finished_at": "2026-10-13T18:58:22Z"
+      },
+      "integrated-main-backend-structural": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 15.0,
+        "started_at": "2026-10-13T19:00:18Z",
+        "finished_at": "2026-10-13T19:00:33Z"
+      },
+      "integrated-main-backend-affected-lint": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 1.3,
+        "started_at": "2026-10-13T19:01:36Z",
+        "finished_at": "2026-10-13T19:01:37Z"
+      },
+      "integrated-main-approval-format": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 0.5,
+        "started_at": "2026-10-13T19:03:32Z",
+        "finished_at": "2026-10-13T19:03:33Z"
+      },
+      "integrated-main-descend-command": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 51.7,
+        "started_at": "2026-10-13T19:03:32Z",
+        "finished_at": "2026-10-13T19:04:24Z"
+      },
+      "integrated-main-campaign-owning": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 35.7,
+        "started_at": "2026-10-13T19:03:32Z",
+        "finished_at": "2026-10-13T19:04:08Z"
+      },
+      "integrated-main-campaign-grouping": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 3.3,
+        "started_at": "2026-10-13T19:04:09Z",
+        "finished_at": "2026-10-13T19:04:12Z"
+      },
+      "integrated-main-backend-importer-lint": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 14.3,
+        "started_at": "2026-10-13T19:18:31Z",
+        "finished_at": "2026-10-13T19:18:46Z"
+      },
+      "integrated-main-frontend-typeonly-coverage": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 176.8,
+        "started_at": "2026-10-13T19:22:56Z",
+        "finished_at": "2026-10-13T19:25:53Z"
+      },
+      "integrated-main-frontend-typeonly-lint": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 21.4,
+        "started_at": "2026-10-13T19:22:58Z",
+        "finished_at": "2026-10-13T19:23:19Z"
+      },
+      "integrated-main-frontend-final-static": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 20.8,
+        "started_at": "2026-10-13T19:28:50Z",
+        "finished_at": "2026-10-13T19:29:11Z"
+      },
+      "integrated-main-frontend-final-build": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 26.5,
+        "started_at": "2026-10-13T19:28:52Z",
+        "finished_at": "2026-10-13T19:29:18Z"
+      }
+    },
+    "frontend": {
+      "source": "44aef9823b6d8c875d81775a4ae911bde83e7be4",
+      "source_tree": "a4b3211b4a3624acfaefd171116598130059bf55",
+      "typecheck_exit": 0,
+      "owning_tests_passed": 7,
+      "full_coverage": {
+        "files_passed": 160,
+        "tests_total": 2739,
+        "tests_passed": 2736,
+        "tests_skipped": 3,
+        "tests_failed": 0,
+        "exit_code": 0,
+        "vitest_duration_seconds": 163.68,
+        "measured_gate_duration_seconds": 185.3,
+        "thresholds": {
+          "lines": 80,
+          "statements": 75,
+          "functions": 75,
+          "branches": 70
+        },
+        "metrics": {
+          "lines": {
+            "total": 13556,
+            "covered": 11303,
+            "skipped": 0,
+            "pct": 83.38
+          },
+          "statements": {
+            "total": 15225,
+            "covered": 12340,
+            "skipped": 0,
+            "pct": 81.05
+          },
+          "functions": {
+            "total": 3936,
+            "covered": 3203,
+            "skipped": 0,
+            "pct": 81.37
+          },
+          "branches": {
+            "total": 11205,
+            "covered": 8203,
+            "skipped": 0,
+            "pct": 73.2
+          },
+          "branchesTrue": {
+            "total": 0,
+            "covered": 0,
+            "skipped": 0,
+            "pct": 100
+          }
+        },
+        "fresh_summary_generated_at": "2026-10-13T19:10:39.992105+00:00",
+        "summary_sha256": "fa57e854df1e74fc58c64e365d7842fdfeb84076137589226275532f3b8528e8",
+        "existing_skip_count_verified_from_prior_same_task_cohort": true
+      },
+      "affected_paths": 11,
+      "affected_eslint_exit": 0,
+      "affected_format_exit": 0,
+      "production_build_and_bundle_assertion_exit": 0,
+      "vite_seconds": 39.51,
+      "all26coverage_child_process_identities_and6controllers_absent": true,
+      "subsequent_type_only_lint_repairs": "pending fresh checks; no claim this source is unchanged"
+    },
+    "canonical_sms": "no current source PASS; latest0/3 on e96 retained",
+    "full_backend_coverage": "pending exact wire-scope decision and source freeze",
+    "smoke_semantics_production": "fresh affected lanes remain required",
+    "backend_equivalence_to059": true,
+    "frontend_after_type_only_lint_repairs": {
+      "coverage_source": "efcf6521c4e37e23dab02348269c9a87b512045a",
+      "coverage": {
+        "files_passed": 160,
+        "tests_passed": 2736,
+        "tests_skipped": 3,
+        "tests_total": 2739,
+        "failed": 0,
+        "vitest_duration_seconds": 155.79,
+        "combined_tsc_coverage_stage_duration_seconds": 176.8,
+        "thresholds": {
+          "lines": 80,
+          "statements": 75,
+          "functions": 75,
+          "branches": 70
+        },
+        "metrics": {
+          "lines": {
+            "total": 13556,
+            "covered": 11303,
+            "skipped": 0,
+            "pct": 83.38
+          },
+          "statements": {
+            "total": 15225,
+            "covered": 12340,
+            "skipped": 0,
+            "pct": 81.05
+          },
+          "functions": {
+            "total": 3936,
+            "covered": 3203,
+            "skipped": 0,
+            "pct": 81.37
+          },
+          "branches": {
+            "total": 11205,
+            "covered": 8203,
+            "skipped": 0,
+            "pct": 73.2
+          },
+          "branchesTrue": {
+            "total": 0,
+            "covered": 0,
+            "skipped": 0,
+            "pct": 100
+          }
+        },
+        "fresh_summary_at": "2026-10-13T19:25:53.574268+00:00",
+        "summary_sha256": "fa57e854df1e74fc58c64e365d7842fdfeb84076137589226275532f3b8528e8",
+        "same_existing_skip_count_as_prior_source44": true
+      },
+      "full_eslint": {
+        "exit_code": 0,
+        "errors": 0,
+        "warnings": 9,
+        "duration_seconds": 21.4,
+        "console_sha256": "51ca336bf318a09b59667490a8e679498b389c016e7f2742964dc7ec33f83e49",
+        "earlier_broader_failed_lint_attempt_preserved": true
+      },
+      "all18captured_coverage_process_identities_absent": true,
+      "monitor_stopped": true,
+      "final_source": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+      "final_full_typecheck_and_twofile_formatter_exit": 0,
+      "final_production_build_and_bundle_assertion_exit": 0,
+      "difference_after_full_coverage": "One formatting-only call collapse; normalized emitted JavaScript unchanged. No claimed new full coverage run on later format commit."
+    },
+    "frontend_type_only_repairs": {
+      "recording_player": "Existing props moved into interface plus formatting; normalized emitted JavaScript unchanged",
+      "benchmark_group_fixtures": "Existing production HubRunDetail type replaces erased asany; normalized emitted JavaScript unchanged",
+      "commit": "efcf6521c4e37e23dab02348269c9a87b512045a",
+      "final_format_commit": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+      "additional_failed_lint_attempts_retained": true,
+      "P2_exclusive_source_overlap": []
+    }
+  },
+  "focused_sms": {
+    "status": "fail",
+    "runs": [
+      {
+        "id": "6c33c1f9-7208-42e0-8d2c-235d6eec9349",
+        "passed": 0,
+        "total": 3,
+        "owned_cleanup": "clean"
+      },
+      {
+        "id": "aec45ad6-56cd-44cc-bb75-67e345be33f0",
+        "passed": 0,
+        "total": 3,
+        "owned_cleanup": "clean"
+      },
+      {
+        "id": "cd5b4088-de16-4e0e-8ab1-b5345f250a9d",
+        "passed": 0,
+        "total": 3,
+        "owned_cleanup": "clean",
+        "source_head": "e96e3c332573b6b9727d6fbce96c18829611fcfc",
+        "execution_seconds": [
+          37.2,
+          28.8,
+          43.0
+        ],
+        "catalog_unchanged": true
+      }
+    ],
+    "observed_failure": "Native calls contain scalar and object strings despite correctly typed schemas; actual validation feedback did not repair encoding.",
+    "provider_internal_parser_mechanism": "unproved",
+    "pending_decoder": "SET_ASIDE_NOT_APPLIED. Exact snapshot0f2cade672c076b4128da8a2854b6175f57a2094655702e8c66f28c3ded71bad is preserved privately. User's copy-only Rose.complete condition remains; no broader decoder approval is being pursued."
+  },
+  "pending_required_inputs": [
+    "TAMY-CEREBRAS-1 exact existing TS projection reuse on Cerebras; source unapplied"
+  ],
+  "incoming_main": "9fcea8b67ee1f6cb1f35325ad5ee50755f8f8803",
+  "incoming_frontend_verification": "Fresh full application typecheck and all157coverage files pass on1484; fresh local semantic UI8pass and latency lane running.",
+  "historic_semantic_and_e2b_source": "7cf5cbefd5d2480921af7cc1d46d4ba2d1bcfe4f",
+  "historic_proof_is_not_current_changed_frontend_proof": true,
+  "task_boundaries_preserved": [
+    "Freedom and protected instructions",
+    "No Browser Mode P2 feature work",
+    "No new migration or replacement",
+    "Exact-diff approval",
+    "Narrow sandbox warning only; production strict",
+    "Only exact owned teardown",
+    "No original source reconstruction or stash application"
+  ],
+  "frontend_repair": {
+    "original_app_typecheck_diagnostics": 215,
+    "cache_bug": "Cache compared absent content properties instead of actual Message.text, allowing stale same-id text.",
+    "existing_owning_regression": "RED before fix / GREEN15cases; current fullcoverage includes it.",
+    "type_only_application_edits": "Executable emissions unchanged except proven text cache comparison.",
+    "raw_wire_compatibility": "Generic metadata retains arbitrary action strings, partial approvals, and unknown keys; specialized tool contracts unchanged.",
+    "compiler_target_alignment": "ES2024 noEmit checker; installed Vite/SWC production targets unchanged;773-source emission comparison identical.",
+    "future_gate": "Existing frontend test:coverage performs full app typecheck before unchanged Vitest command.",
+    "p2_path_overlap": [],
+    "protected_instruction_edits": false,
+    "fresh_full_frontend_coverage": {
+      "source": "4bc120536+applied frontend repairs",
+      "status": "pass",
+      "test_files": 154,
+      "tests_passed": 2725,
+      "existing_skips": 3,
+      "app_type_diagnostics": 0,
+      "lines_percent": 83.33,
+      "statements_percent": 81.01,
+      "functions_percent": 81.38,
+      "branches_percent": 73.12,
+      "duration_seconds": 240,
+      "production_executable_source_sha256": {
+        "front-end/src/features/index/api.ts": "6dd6ab02746cd7edf60d3193d84f19869484a7c6751630c96122d44d04dbc635",
+        "front-end/src/features/index/hooks/useVideoStateMachine.ts": "44ca843cd05584ad2103eb11eb78f1d004158c3529edc949ef5e28ed384e8990",
+        "front-end/src/features/index/hooks/useVideoWatchdog.ts": "d1aaac5221438888321117e780819c67f7f8cfcb1d4c4f15a37f261a84379bd8",
+        "front-end/src/features/index/types.ts": "70a883492b69626643c1e158e2a8578bfb44b08b5bd644f5a044e755132fa652",
+        "front-end/src/features/terminal/components/TerminalContent.tsx": "13ab6eedfac1e6c5bda36bd05dceb7b0f0ff61c0b044e681b33b499639c7fe54",
+        "front-end/src/features/terminal/hooks/useAgentActions.ts": "65bb45c26e9c7dc915cce5cc10f54ac37f660aa877cb2f5cffdab11b00a808ae",
+        "front-end/src/features/terminal/hooks/useAgentOps.ts": "6aa4e2e927d062a522f397a0640f51ee643698bb96658fee8a98011455a0524b",
+        "front-end/src/features/terminal/hooks/useTerminalAgents.ts": "2be422d7bc79904836ab9c2b3ccd8e4a90f7aa9740cf23da58581dd1de86d1b0",
+        "front-end/src/features/terminal/types.ts": "35283e9b1e55ed6fe940144c22e1cb1e52d84d3345bc54849c190117f4125ce7",
+        "front-end/src/features/terminal-component-group/components/ExploreAgentBubble.tsx": "3e6d4aefbef54c5bfea7755443dead3b0f6692c746eb8f0d5f88c68dedddf595",
+        "front-end/src/features/terminal-component-group/components/MobileAgentDrawer.tsx": "3f9daaa1aa92a72f609585d03c88fffa58f4b4ccf28ce39a83409dfaf85cd260",
+        "front-end/src/features/terminal-component-group/components/SubAgentToolBubble.tsx": "82e0d8e740e53f7b21a3f6ec47acb4f30e94b22bdd6a24d03e3de2399d5e39bc",
+        "front-end/src/features/terminal-component-group/components/claudeCodeChip.terminal.ts": "a962c74c0b85da6f3898fe1c2e8ca15c619cd93b840d0e9a96c495fcdf10dd8b",
+        "front-end/src/features/terminal-component-group/components/useSubAgentTreeMerge.ts": "ae9406e14819e21ef252cb0f8350a04a05f6e3d43fad41a901a29b0d61c31143",
+        "front-end/src/features/terminal-component-group/components/wait-for-chip/InlineExploreChipHeader.tsx": "af4e5ef136dfdeac83a44a84d3a3a9b9040569ea45c50d84901b8dfd755f0d8d",
+        "front-end/src/lib/adminUsers.ts": "dd6ef4c13d39000e12cc6dc7ae2d4c0e38baa8edebe347822845240cdeffdc84",
+        "front-end/src/lib/api/types.ts": "56d5d81f1fd87808baf8273df776609663271da09a168f3a7d71df1becb21654",
+        "front-end/src/lib/realtime-types/message-metadata.ts": "ac1232756c1a9aeeba82a7d4654abdb9e48d6697a6c28b89472da56cff93670b",
+        "front-end/src/lib/realtime-types/message-payloads.ts": "c879f979aca8e7271075c2907ca819981f101387c4e28dac6c18b3c98b9b1268",
+        "front-end/src/lib/realtime-types/tool-metadata.ts": "24a315bd7b98dafe8b93da8981cd1b2d5e6ecab454e69eb04c42ae780a4f9391"
+      }
+    },
+    "final_lint_format": "pass after whitespace-only trim; existing whole-coverage proof retains identical executable code",
+    "future_gate_instruction_file_unchanged": true
+  },
+  "remaining_required_gates": [
+    "TAMY-CEREBRAS-1 exact existing TS projection wiring decision; unapplied",
+    "Apply approved source, owning native-schema checks and exact unchanged focused SMS3-task pass; all three0/3 prior runs retained",
+    "Finish current frontend and rerun applicable integrated backend/static/smoke/semantic/live gates on changed runtime",
+    "Bounded immutable exact-head review cycle2",
+    "Merge PR1473 and verify applicable production lanes including strict live AgentCard transfer",
+    "Full original+resumed scorecard; no complete invoice or old-proof GREEN claim"
+  ],
+  "frontend_suppression_cleanup": {
+    "recorded_at_utc": "2026-10-13T06:04:36.690159+00:00",
+    "source_parent": "2201b2fe0491d15e4bce8d9088fcc205dbdd576b",
+    "tested_frontend_files_sha256": {
+      "front-end/src/features/terminal-component-group/components/claudeCodeChip.terminal.ts": "48ae9d44bf04b7428486ed8c7e0c24737348a0cfed592d4326c75641dc184484",
+      "front-end/src/features/terminal-component-group/components/claudeCodeChip.theme.ts": "adbafbc42a7897c215ce7012a3bc14319cd8e60b1001f0a33e9942a027852b8f",
+      "front-end/src/lib/realtime-types/guards.ts": "03afef9d92c7f1a6d038c8f2a78d6d3c752d764f6c517d57a0f5c45a3f4f70f6",
+      "front-end/src/tests/blackbox/message-bubble-routing.blackbox.tsx": "6fe4aa0d959badc7ae1a0213acaa944802f080ece7915ca76ab3f85cfc04a3e8",
+      "front-end/src/tests/blackbox/message-bubble.blackbox.tsx": "8dbeb4963be920e84195a7b26829f60dd2c56bd5a5a2fac0dcba8b30c99e5844",
+      "front-end/src/tests/blackbox/realtime-types-extractors.blackbox.ts": "5a23a248ba33a47425a0de8ffcdb79d4d1bf48150d462d6a2fe8473a952c5fea",
+      "front-end/src/tests/blackbox/realtime-types.blackbox.ts": "2838f099352bc1db8ae2e200b9c281054abd6f56d7608ff639026b778afdecf5",
+      "front-end/src/tests/blackbox/terminal-component-chips.blackbox.tsx": "fab55c3c2a8047bae575b84afba8d46ef4dee890b02fb28f13541f2634ffb643",
+      "front-end/src/tests/blackbox/terminal-component-tree.blackbox.tsx": "13573c108632ef271b5c5de5a74553e0f93f596530757bf2d61f580797bbab01"
+    },
+    "formatting_after_coverage": "Prettier-only changes in five test split files; executable production source unchanged since coverage/build.",
+    "fresh_coverage": {
+      "status": "pass",
+      "test_files": 157,
+      "tests_passed": 2725,
+      "existing_skips": 3,
+      "app_typescript_errors": 0,
+      "statements_percent": 81.03,
+      "branches_percent": 73.14,
+      "functions_percent": 81.36,
+      "lines_percent": 83.36,
+      "duration_seconds": 254.1
+    },
+    "fresh_build": {
+      "status": "pass",
+      "vite_seconds": 27.21,
+      "stage_seconds": 28.1
+    },
+    "touched_frontend_suppressions_remaining": 0,
+    "test_split_preservation": {
+      "existing_cases_before": 214,
+      "existing_cases_after": 214,
+      "exact_case_name_multiset": true,
+      "existing_assertion_calls": 730,
+      "assertion_semantics_preserved": true,
+      "new_cases": 0
+    },
+    "terminal_formatter_extraction": "20 pure definitions moved unchanged to existing theme module; public exports and all four terminal/WebSocket/saved-fetch hooks preserve behavior.",
+    "raw_guard": "Type input permits invalid raw toolName so the unchanged negative fixture needs no suppression; emitted runtime is unchanged.",
+    "p2_feature_edits": false,
+    "p2_overlap": [],
+    "preserved_checkpoint_ancestor": true,
+    "preserved_original_warning_skip_ancestor": true,
+    "previous_failed_format_attempt_retained": true,
+    "actual_final_format_and_lint": "pass across65 changed frontend TypeScript files; zero errors"
+  },
+  "fresh_semantics": {
+    "source": "2201b2fe0491d15e4bce8d9088fcc205dbdd576b",
+    "status": "pass",
+    "ui_passed": 8,
+    "latency_passed": 5,
+    "latency_paths": {
+      "direct_answer": {
+        "p50_ms": 800.0,
+        "max_ms": 821.0,
+        "smoothness": 1.0
+      },
+      "web_search": {
+        "p50_ms": 1846.0,
+        "max_ms": 2287.0,
+        "smoothness": 1.0
+      },
+      "agent_plan": {
+        "p50_ms": 646.0,
+        "max_ms": 2551.0,
+        "smoothness": 1.0
+      },
+      "agent_execute": {
+        "p50_ms": 643.0,
+        "max_ms": 908.0,
+        "smoothness": 1.0
+      }
+    },
+    "ui_duration_seconds": 31.3,
+    "latency_duration_seconds": 578.0,
+    "exact_owned_root_and_services_teardown": "pass",
+    "subsequent_terminal_extraction": "Fresh frontend coverage/build passed after equivalent pure-formatter move; semantic source remains explicitly bound to its earlier commit."
+  },
+  "incoming_main_integration": "normal merge complete at56e1e7133; all ledgers retained; RCA index canonical count refreshed to852.",
+  "latest_integrated_source": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+  "production_payment_fixture": {
+    "status": "ready",
+    "read_only_prior_run_correlation": "three latest successful production agents match same dedicated107 payer and authoritative DB root",
+    "repair": "Restored only the dedicated fixture subscription pointer to its verified latest successful existing customer using compare-and-set and read-back.",
+    "saved_default_card_and_customer_membership": "verified",
+    "new_customers_during_repair": 0,
+    "new_Checkout_during_repair": 0,
+    "charges_during_repair": 0,
+    "human_card_entry_required": false,
+    "historical_deployed_Stripe_mode": "test",
+    "canonical_AgentCard_transfer_mode": "live required; unchanged",
+    "production_lane_after_merge": "still required; not yet run",
+    "prior_wrong_account_hosted_setup_request": "withdrawn; forced alternate live account did not match prior actual successful runs."
+  },
+  "historical_source_bound_passes": {
+    "backend_coverage_508042952": {
+      "status": "pass",
+      "domains": 193,
+      "unit_files": 266,
+      "lines_statements_percent": 89.55,
+      "branches_percent": 80.99,
+      "functions_percent": 92.59,
+      "normal_and_signal_teardown": "pass"
+    },
+    "pre_main_6f_integration": {
+      "receipt_runtime_source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+      "gates": {
+        "backend_coverage": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "domains_passed": 193,
+          "domains_failed": 0,
+          "unit_files_passed": 266,
+          "lines_percent": 89.55,
+          "statements_percent": 89.55,
+          "branches_percent": 80.97,
+          "functions_percent": 92.58,
+          "all_configured_thresholds_met": true,
+          "normal_and_sigterm_teardown_gate": "pass",
+          "all_eighteen_recorded_process_identities_absent_or_reused": true
+        },
+        "cloud_controller": {
+          "status": "pass",
+          "remote_suites": 9,
+          "native_status_shutdown_control": "pass",
+          "owned_machine": "896269c6e67948",
+          "exact_machine_absence_verified": true
+        },
+        "static": {
+          "typescript": "pass",
+          "eslint": "pass",
+          "backend_structural": "pass",
+          "complete_deploy_structural_registry": "pass"
+        },
+        "live_probes": {
+          "credential_health": "pass with existing optional Anthropic funded-key warning",
+          "amplitude": "pass",
+          "chat_router_failover": "pass"
+        },
+        "predeploy_smoke": {
+          "status": "pass",
+          "actual_tasks": 10,
+          "passed": 10,
+          "failed": 0,
+          "duration_seconds": 1362.2,
+          "concurrency": 2,
+          "reported_benchmark_llm_cost_usd": 0.2,
+          "both_batch_benchmark_and_stack_cleanup_receipts": "clean"
+        },
+        "agents_coverage": {
+          "status": "pass",
+          "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
+          "domains": 110,
+          "fast_cache_tests": 184,
+          "unit_tests": 134,
+          "coverage_percent": 82,
+          "duration_seconds": 377.9,
+          "exit_code": 0,
+          "source_changes_after_this_pass": "Only RCA count and independently reviewed source fingerprint registration; agents executable bytes unchanged."
+        },
+        "agentcard_sandbox": {
+          "status": "pass",
+          "source": "4bc120536114baca9c56b1a006206c305a038a56",
+          "run_id": "edf3c373-c7f8-49d5-bdfb-70682bab563f",
+          "tasks": 4,
+          "passed": 4,
+          "failed": 0,
+          "skipped": 0,
+          "duration_seconds": 1023,
+          "reported_benchmark_llm_cost_usd": 0.02,
+          "provider_roots": 4,
+          "provider_cleanup_errors": 0,
+          "provider_cleanup_warnings": 0,
+          "benchmark_and_stack_cleanup_receipts": "clean",
+          "owned_stage_controller_stack_absent": true,
+          "approved_narrow_skip_flag_was_scoped_to_sandbox": true,
+          "skip_was_not_needed": true
+        },
+        "backend_coverage_latest": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "domains_passed": 193,
+          "domains_failed": 0,
+          "unit_files_passed": 266,
+          "lines_percent": 89.55,
+          "statements_percent": 89.55,
+          "branches_percent": 80.97,
+          "functions_percent": 92.58,
+          "all_configured_thresholds_met": true,
+          "normal_and_sigterm_teardown_gate": "pass",
+          "all_eighteen_recorded_process_identities_absent_or_reused": true
+        },
+        "recovery_recipe_requalification": {
+          "status": "pass",
+          "source": "a8793a97afb7b25e443d75ae6c934b463ac4fc07",
+          "independent_review_source": "56e1e7133effb79fa549b9052a06c073297c51f6",
+          "fingerprint": "d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda",
+          "checkout_inputs": 21,
+          "injected_controls": 15,
+          "boot_controls": 3,
+          "only_changed_recipe_input": "frontend existing coverage command prefixes actual application typecheck",
+          "reviewed_phases": [
+            "before-stack-launch",
+            "agent-network-index-bootstrap"
+          ],
+          "quiesced_tests_passed": 15,
+          "bootstrap_tests_passed": 27,
+          "benchmark_live_results_tests_passed": 572,
+          "existing_canonical_skips": 4,
+          "new_skips_or_selectors": false,
+          "all_exact_stage_owners_absent": true,
+          "earlier_RED_preserved": true,
+          "helpers_phase_authority_and_original_receipts_unchanged": true
+        },
+        "frontend_coverage_latest": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "files_passed": 157,
+          "tests_passed": 2725,
+          "existing_skips": 3,
+          "statements_percent": 81.03,
+          "branches_percent": 73.14,
+          "functions_percent": 81.36,
+          "lines_percent": 83.36,
+          "all_configured_thresholds_met": true,
+          "all_seven_recorded_process_identities_absent_or_reused": true
+        },
+        "static_final_integration": {
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "typescript_exit": 0,
+          "backend_structural_exit": 0,
+          "affected_importer_eslint_exit": 0,
+          "changed_backend_prettier_exit": 0,
+          "affected_lint_seeds": 48,
+          "approval_format_owning_exit": 0,
+          "agent_behavior_guard_exit": 0,
+          "trajectory_guard_exit": 0,
+          "prompt_guard": "pass; exact original approved bytes and code-only transport; classification proof private"
+        },
+        "recovery_recipe_continuity": {
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "fingerprint": "d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda",
+          "checkout_inputs_unchanged": 21,
+          "injected_inputs_unchanged": 15,
+          "boot_inputs_unchanged": 3,
+          "independent_actual_native_helper_readback": "pass",
+          "committed_trusted_policy_covers_existing_two_phases": true,
+          "new_registration_required": false
+        },
+        "predeploy_smoke_latest": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "tasks_passed": 10,
+          "tasks_failed": 0,
+          "transient": 0,
+          "normal_batches": 2,
+          "duration_seconds": 1394.6,
+          "reported_benchmark_llm_cost_usd": 0.13,
+          "all_four_benchmark_and_stack_receipts": "token and birth verified clean",
+          "all_recorded_controllers_and_services_absent": true,
+          "kernel_allocations_reconciled": 5,
+          "native_kernel_closed": 5,
+          "e2b_allocations": 1,
+          "e2b_release": "Successful authenticated connect followed by same-instance awaited kill; SDK treats 2xx or 404 as terminal.",
+          "e2b_independent_current_get": "not performed; runtime credential hash not captured, no account guessed",
+          "e2b_raw_delete_status": "not captured; killed versus already absent not distinguished"
+        },
+        "agentcard_sandbox_latest": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "tasks_passed": 4,
+          "tasks_failed": 0,
+          "warnings": 0,
+          "skips": 0,
+          "stage_duration_seconds": 1040.9,
+          "reported_benchmark_llm_cost_usd": 0.05,
+          "provider_priced_usage_estimate_usd": 0.067195,
+          "cost_note": "Reported cents truncate/round differently; provider estimate is not a billed invoice. Infrastructure unmetered.",
+          "all_four_roots_deleted_and_tree_sealed": true,
+          "provider_cleanup_errors": 0,
+          "provider_cleanup_warnings": 0,
+          "provider_sessions_verified_absent": 5,
+          "benchmark_and_stack_receipts": "token-bound clean",
+          "all_recorded_controllers_absent": true,
+          "abandonment_transfer": "genuinely reclaimed, card closed; livemode false; refund succeeded",
+          "narrow_sandbox_warning_flag_scoped": true,
+          "approved_skip_was_not_needed": true
+        }
+      },
+      "not_current_changed_runtime_proof": true
+    }
+  },
+  "historical_backend_failures": [
+    {
+      "status": "fail",
+      "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
+      "domains_passed": 192,
+      "domains_failed": 1,
+      "unit_files_passed": 266,
+      "failed_domain": "browser-provider",
+      "observed_failure": "Live credential CDP reconnect times out after provider rotation. Exact standalone owning domain also failed on a later provider leg.",
+      "coverage_threshold_result": "not reported because actual blackbox failed",
+      "owned_local_processes_cleanup": "all30observedownersabsent/terminal",
+      "root_cause": "open; no source fix or fresh GREEN yet"
+    }
+  ],
+  "provider_transport_fix": {
+    "status": "owning and unchanged live reproduction pass; full coverage running",
+    "source_parent": "4f92c94ba3bca42b5565deb8b3be9e5eb6c168c9",
+    "exact_patch_sha256": "47945b316378754923f83148877d1862351f5106f17e86d9fe81958df28577fb",
+    "owning_cases_passed": 13,
+    "typescript_exit": 0,
+    "eslint_exit": 0,
+    "prettier_exit": 0,
+    "unchanged_live_domain_before": "FAIL",
+    "unchanged_live_domain_after": "PASS",
+    "live_domain_duration_ms": 122168,
+    "validated_transports_reused": 10,
+    "credential_reconnect_timeout_count": 0,
+    "independent_review": "clean",
+    "p2_overlap": [],
+    "schema_model_catalog_prompt_timeout_changes": false,
+    "generic_decoder_applied": false,
+    "ten_thousand_agents": "One existing per-request connection is retained through bounded setup and closed by that request owner; no shared state, fan-in, polling or additional per-agent allocation.",
+    "full_backend_coverage": {
+      "source": "34dd3573d8bf354ada45bc0bc4ce23febae8bf04",
+      "status": "pass",
+      "domains_passed": 193,
+      "domains_failed": 0,
+      "unit_files_passed": 266,
+      "lines_percent": 89.54,
+      "branches_percent": 80.96,
+      "functions_percent": 92.58,
+      "normal_and_sigterm_teardown_gate": "pass",
+      "all_eight_recorded_owned_processes_absent": true,
+      "later_main_integrated": "Fresh subsequent-source coverage running; earlier result retained with its exact source."
+    }
+  },
+  "incoming_main_latest_fetched": "b12f0ef0521766d65d1199f143fb5de54a7ac885",
+  "incoming_main_latest_integration": "Normal merge complete; exact c8/244 ancestry preserved; fresh backend/frontend coverage running.",
+  "fresh_semantics_latest": {
+    "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+    "ui_passed": 8,
+    "latency_passed": 5,
+    "skips": 0,
+    "ui_seconds": 40.6,
+    "latency_stage_seconds": 1541.5,
+    "latency_stage_includes_existing_isolated_benchmark_wait": true,
+    "playwright_duration_minutes": 9.6,
+    "paths": {
+      "direct_answer": {
+        "p50_ms": 813,
+        "max_ms": 859
+      },
+      "web_search": {
+        "p50_ms": 1844,
+        "max_ms": 2321
+      },
+      "agent_plan": {
+        "p50_ms": 649,
+        "max_ms": 802
+      },
+      "agent_execute": {
+        "p50_ms": 643,
+        "max_ms": 963
+      }
+    },
+    "all_smoothness": 1.0,
+    "root_teardown": "pass; exact root and all four recorded services absent; owned queue workers and required listeners zero; system PG and root database preserved"
+  },
+  "all_fresh_independent_continuation_gates_complete": false,
+  "all_current_continuation_owned_stacks_stopped": true,
+  "reported_benchmark_llm_cost_so_far_usd": 1.48,
+  "cost_coverage": "Reported benchmark cost_cents, including original attempts. Some direct API and infrastructure costs remain unmetered; provider estimates differ from rounded cents.",
+  "copy_only_native_validation_audit": {
+    "recorded_at_utc": "2026-10-13T17:53:20.316149+00:00",
+    "audited_head": "da363393dd68cb4dbf0b9276ea6cc8e1e09a1aa0",
+    "source_edits": false,
+    "paid_calls": false,
+    "same_raw_argument_cases": 9,
+    "existing_python_behavior": "Actual Python Grep model accepts/coerces numeric and boolean strings; rejects encoded dictionary strings and string null. Outer JSON parsing and original native ID replay already exist on both paths.",
+    "current_ts_behavior": "Native arguments remain strings; Zod dispatch rejects supplied wrong types and replays validation errors under original native IDs. Content-path malformed entries are discarded.",
+    "no_universal_decoder_to_copy": true,
+    "provider_wire_causality": "No cause established by strict-policy, optional/required or integer/number differences. Both actual native schemas flatten arguments and retain nullable anyOf.",
+    "fresh_offline_owning_check": {
+      "command": "node --import tsx back-end/src/tests/blackbox/rose-native-schema.blackbox.ts",
+      "exit_code": 0,
+      "result": "PASS native schema projection, provider compatibility, explicit tools and Responses wire contract",
+      "network": "mocked; no paid calls"
+    },
+    "task_complete": false
+  },
+  "native_wire_verification": {
+    "source_head": "e96e3c332573b6b9727d6fbce96c18829611fcfc",
+    "source_changes": false,
+    "actual_python_whole_call": "Validation and paired-ID repair verified offline; repeated invalid capped at3 total calls",
+    "actual_sms_whole_call": "Returns invalid native arguments; existing dispatcher later rejects supplied wrong types",
+    "captured_native_tools": "9 flat correctly typed schemas, strict true, no response_format alongside tools",
+    "provider_header_control": "Same body named-tool calls fail with string budget under both TS version2 and Python omitted header",
+    "schema_projection_control": "Existing TS native Anthropic projection retained strict/names/descriptions and returned numeric budget; raw request returned string budget. Grep boolean became typed and unused nullable fields were omitted. All other body fields equal.",
+    "actual_raw_provider_sse": "Stored privately and independently parsed; wrong types precede TS parser",
+    "new_decoder": "WITHDRAWN_NOT_APPLIED",
+    "whole_native_retry_candidate": "PRIVATE_UNAPPLIED; incompatible with omitted fields under unchanged full Zod",
+    "cerebras_projection_candidate": {
+      "status": "PRIVATE_UNAPPLIED_AWAITING_EXACT_WIRE_SCOPE_APPROVAL",
+      "id": "TAMY-CEREBRAS-1",
+      "runtime_sha256": "69f8742a0139b126707e506e59217a735211b1daf1caba276ca72eeb352b9741",
+      "full_candidate_sha256": "0295c285434102ac15ae10dc27be271a7344a93d23aa4dff38bbac5a4c3ba219",
+      "independent_review": "no blocking revised runtime defect; scope broader than literal Python Rose projection",
+      "actual_sms_schema_effect": "27 nullable fields optional non-null; no bound keys or open objects exist in actual nine SMS schemas",
+      "general_projection_scope": "All automatically derived Cerebras tool envelopes; existing projection strips bounds, closes open objects and removes nullable array/map branches where present",
+      "candidate_task_outcome": "Not established; canonical current source0/3 retained"
+    },
+    "benchmark_fixed": false,
+    "all_current_owned_controllers_and_services_absent": true,
+    "private_archive_readback": "107 files PASS",
+    "private_candidate_review_archive_readback": "27 additional files PASS; original107 files PASS",
+    "fresh_candidate_offline_regression": {
+      "status": "PASS",
+      "seconds": 2.049,
+      "scope": "Private candidate only; mocked fetch/no provider calls; no changed-source benchmark success inferred"
+    }
+  },
+  "incoming_main_6f_integration": {
+    "incoming_main": "6f5c4a9f9502dcd0a4a25cfe7cbffccc64edd1e5",
+    "merge_commit": "0593671c6a0304ba5c14007ee17df2183aa3a64a",
+    "paths": 33,
+    "only_conflict": "docs/rca/INDEX.md regenerated from all854 cases; both source cases retained",
+    "rose_sms_catalog_paths_changed": false,
+    "P2_exclusive_source_overlap": [],
+    "P2_shared_ledger_overlap": [
+      "agents/benchmarks/history/task_attempts.jsonl",
+      "agents/benchmarks/history/task_durations.jsonl"
+    ],
+    "all_old_ledger_lines_retained": true,
+    "foreign_main_history_not_counted_as_Tamy_verification": true,
+    "native_recipe_input_continuity": {
+      "all39inputs_unchanged": true,
+      "independent_readback": true
+    }
+  },
+  "incoming_frontend_test_typing_repair": {
+    "source": "0593671c6a0304ba5c14007ee17df2183aa3a64a",
+    "typecheck_exit_before": 2,
+    "diagnostics_before": 2,
+    "path": "front-end/src/tests/blackbox/hooks-lib-insert-delivery.blackbox.ts",
+    "commit": "44aef9823b6d8c875d81775a4ae911bde83e7be4",
+    "runtime_values_and_assertions_unchanged": true,
+    "scratch_full_typecheck": "PASS0diagnostics",
+    "existing_scratch_owning_tests_passed": 7,
+    "actual_full_frontend_gate": "PASS on44aef9823 exact frontend tree before subsequent type-only lint repairs",
+    "reported_early_patch_sha256": "0b42df61bbffdb6dce3aeb2ce2feea7d4545516bd9fa36d8899d81ab462c9055",
+    "early_patch_hash_independently_verified": false,
+    "committed_git_diff_sha256": "b600d62cdfda96aa2673cf7df031229c2a1ecd77fab3008c0b768d62e5fb7095",
+    "final_scratch_patch_sha256": "5447f5f50494dcdd335c9296b5fc53f8729f0e9358783c6078ff44df66501d97",
+    "actual_committed_file_sha256": "0c3a37a0e72802f66fc6fff87dc7b3b85ce55ae6394428548bb0b814cd317df2"
+  },
+  "current_frontend_and_static_checks_complete": true
+}

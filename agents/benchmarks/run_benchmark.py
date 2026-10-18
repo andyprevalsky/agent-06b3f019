@@ -348,6 +348,7 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     DOORDASH_FOOD_PLAN_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
     "agent-payment-setup-resume",
+    "sms-supervisor-fill-form-searches-then-delegates",
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
@@ -14020,6 +14021,7 @@ async def run_single_task(
     checkpoint_tree_out: Path | None = None,
     on_agent_created: Optional[Callable[[str, str], None]] = None,
     on_task_evaluated: Optional[Callable[[TaskResult], None | Awaitable[None]]] = None,
+    other_task_roots: Callable[[], set[str]] | None = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
@@ -14038,7 +14040,14 @@ async def run_single_task(
     if task.runner == "sms":
         from benchmarks.sms_runner import build_deps_from_module, run_sms_task
 
-        return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__]))
+        if resolve_live_fixtures(getattr(task, "environment", None)):
+            with _benchmark_run_user_scope(_run_user_id_override_for_task(task, base_url)):
+                manifests = await _apply_live_fixtures(task, base_url)
+                try:
+                    return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__], other_task_roots, on_agent_created, task.name))
+                finally:
+                    await _restore_live_fixture_scenarios_async(manifests)
+        return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__], other_task_roots, on_agent_created, task.name))
     if _effective_harness(task) == "codex":
         if not await _check_codex_harness_credentials(base_url):
             print(f"  ⚠ Codex harness credentials unavailable at task dispatch — skipping: {task.name}")
@@ -16481,13 +16490,25 @@ async def main_async(args):
         token = asyncio.current_task()
         assert token is not None
         _admitted_tasks[token] = task
+        registered_roots: set[str] = set()
 
         def remember_agent(task_name: str, agent_id: str) -> None:
             # Creation can run in a child task; retain the admitted owner.
             # Cleanup owns every root, including composite or interrupted runs.
             _remember_live_agent(task_name, agent_id)
             if agent_id:
+                registered_roots.add(agent_id)
                 _admitted_agent_ids.setdefault(token, agent_id)
+
+        def retire_verified_sms_roots(receipt: dict | None) -> None:
+            if not isinstance(receipt, dict) or receipt.get("verified") is not True:
+                return
+            retired = set(receipt.get("owned_agent_ids", receipt.get("root_agent_ids", []))) & registered_roots
+            kept = [aid for aid in _live_task_agent_ids.get(task.name, []) if aid not in retired]
+            if kept:
+                _live_task_agent_ids[task.name] = kept
+            else:
+                _live_task_agent_ids.pop(task.name, None)
 
         async def evaluated(result: TaskResult) -> None:
             from benchmarks.outcome_publication import prepare, wait_for_publication
@@ -16505,12 +16526,23 @@ async def main_async(args):
             await wait_for_publication(pending)
 
         try:
+            sms_options = {}
+            if getattr(task, "runner", "agent") == "sms":
+                sms_options["other_task_roots"] = lambda: {aid for ids in _live_task_agent_ids.values()
+                                                          for aid in ids if aid not in registered_roots}
             result = await run_single_task(
-                base_url, task, on_agent_created=remember_agent, on_task_evaluated=evaluated, **kwargs
+                base_url, task, on_agent_created=remember_agent, on_task_evaluated=evaluated,
+                **sms_options, **kwargs
             )
+            metadata = getattr(result, "stop_metadata", None)
+            if isinstance(metadata, dict) and metadata.get("runner") == "sms":
+                retire_verified_sms_roots(metadata.get("owned_cleanup_receipt"))
             if token not in _evaluated_task_results:
                 await evaluated(result)
             return result
+        except asyncio.CancelledError as exc:
+            retire_verified_sms_roots(getattr(exc, "owned_cleanup_receipt", None))
+            raise
         finally:
             _admitted_tasks.pop(token, None)
             _admitted_agent_ids.pop(token, None)

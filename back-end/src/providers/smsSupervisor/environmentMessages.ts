@@ -1,6 +1,6 @@
 import type { CompletionMessage } from '../rose';
 import { buildSmsContext } from './contextBuilder';
-import type { ToolInvocationContext } from './supervisorTools';
+import type { ToolCall, ToolResult } from './supervisorTools';
 
 export const MAX_TOOL_ROUNDS = 10;
 
@@ -50,6 +50,57 @@ export function buildToolFeedbackMessages(params: {
   ];
 }
 
+/** Provider call id for a supervisor tool call; content-path calls carry none. */
+export function supervisorToolCallId(round: number, index: number, toolCall: ToolCall): string {
+  return toolCall.id ?? `sms-${String(round)}-${String(index)}`;
+}
+
+export function formatToolResult(result: ToolResult): string {
+  return `[${result.tool}] ${result.success ? 'OK' : 'ERROR'}: ${result.result || result.error}`;
+}
+
+/**
+ * Replay a round in the native tool-calling shape (Rose.complete standard): the
+ * assistant turn carries the model's actual tool calls and each call gets its
+ * own tool result. Round-level outcomes that belong to no single call (queued
+ * writes committing, a failure notice sent to the user) and the loop guidance
+ * travel on the last result, so control text never becomes a user turn.
+ */
+export function buildNativeToolFeedbackMessages(params: {
+  round: number;
+  toolCalls: ToolCall[];
+  resultsByCall: ReadonlyMap<ToolCall, ToolResult[]>;
+  roundResults: ToolResult[];
+  guidance: string;
+}): CompletionMessage[] {
+  const ids = params.toolCalls.map((toolCall, index) =>
+    supervisorToolCallId(params.round, index, toolCall)
+  );
+  const results: CompletionMessage[] = params.toolCalls.map((toolCall, index) => {
+    const own = params.resultsByCall.get(toolCall) ?? [];
+    return {
+      role: 'tool',
+      tool_call_id: ids[index],
+      content: own.length > 0 ? own.map(formatToolResult).join('\n') : 'No result recorded.',
+    };
+  });
+  const last = results[results.length - 1];
+  const trailer = [...params.roundResults.map(formatToolResult), params.guidance].join('\n');
+  last.content = `${String(last.content)}\n\n${trailer}`;
+  return [
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: params.toolCalls.map((toolCall, index) => ({
+        id: ids[index],
+        type: 'function',
+        function: { name: toolCall.tool, arguments: JSON.stringify(toolCall.arguments ?? {}) },
+      })),
+    },
+    ...results,
+  ];
+}
+
 /** Run-local environment injection placed after the newest inbound SMS. */
 export function buildEnvironmentToolMessages(
   contextUserMessage: string,
@@ -87,36 +138,10 @@ export async function refreshEnvironmentSnapshot(
   return context.contextUserMessage;
 }
 
-export function buildToolInvocationContext(params: {
-  inboundText: string;
-  sessionHistory: CompletionMessage[];
-  pendingAttentionRequestIds: string[];
-}): ToolInvocationContext {
-  return {
-    currentUserMessage: params.inboundText || 'The user sent an attachment without text.',
-    visibleSessionHistory: params.sessionHistory.flatMap((message) =>
-      typeof message.content === 'string' ? [message.content] : []
-    ),
-    pendingAttentionRequestIds: params.pendingAttentionRequestIds,
-  };
-}
-
 export async function prepareSmsEnvironment(
   userId: string,
   sequence: number,
-  inboundAlreadyPersisted: boolean,
-  inboundText: string
+  inboundAlreadyPersisted: boolean
 ) {
-  const context = await buildSmsContext(
-    userId,
-    inboundAlreadyPersisted ? { excludeInboundSeq: sequence } : {}
-  );
-  return {
-    ...context,
-    invocationContext: buildToolInvocationContext({
-      inboundText,
-      sessionHistory: context.sessionHistory,
-      pendingAttentionRequestIds: context.pendingAttentionRequestIds,
-    }),
-  };
+  return buildSmsContext(userId, inboundAlreadyPersisted ? { excludeInboundSeq: sequence } : {});
 }

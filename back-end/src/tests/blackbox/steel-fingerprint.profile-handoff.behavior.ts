@@ -12,6 +12,7 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
   const integrationFindUnique = prisma.integration.findUnique;
   const profileUpsert = prisma.browserProviderProfile.upsert;
   const contextUpdate = prisma.browserContext.update;
+  const leaseUpdateMany = prisma.toolSideEffect.updateMany;
   const fixture = randomUUID();
   const sourceId = `steel-profile-handoff-old-${fixture}`;
   const profileId = `steel-profile-handoff-profile-${fixture}`;
@@ -220,12 +221,61 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
     assert((await first) === undefined, 'exclusive owner could not finish replacement');
     createStarted = undefined;
     createBarrier = undefined;
+
+    // A committed replacement is not handed off if final lease release throws.
+    resetSource();
+    const releaseFailure = new Error('fixture lease release failed');
+    let localCloses = 0;
+    const localBrowser = {
+      close: async () => {
+        localCloses++;
+        throw new Error('fixture local close failed');
+      },
+    } as unknown as import('playwright').Browser;
+    prisma.toolSideEffect.updateMany = (async (args: Parameters<typeof leaseUpdateMany>[0]) => {
+      if (args.where?.operationKey === leaseKey && args.data.status === 'RELEASED') {
+        throw releaseFailure;
+      }
+      return leaseUpdateMany.call(prisma.toolSideEffect, args);
+    }) as typeof leaseUpdateMany;
+    const beforeReleaseFailureCreates = creates;
+    const beforeReleaseFailureSourceReleases = releases;
+    const beforeReleaseFailureCandidateReleases = candidateReleases;
+    let caughtReleaseFailure: unknown;
+    try {
+      await recreateSession(
+        row.id,
+        { forceManagedRotation: true, keepValidationConnection: true },
+        {
+          ...dependencies,
+          validateConnection: async () => ({ browser: localBrowser, failure: null }),
+        }
+      );
+    } catch (error) {
+      caughtReleaseFailure = error;
+    } finally {
+      prisma.toolSideEffect.updateMany = leaseUpdateMany;
+    }
+    assert(caughtReleaseFailure === releaseFailure, 'local close replaced the lease release error');
+    assert(localCloses === 1, 'unhanded owned validation connection was not closed exactly once');
+    assert(creates === beforeReleaseFailureCreates + 1, 'lease release failure retried creation');
+    assert(releases === beforeReleaseFailureSourceReleases + 1, 'source release was repeated');
+    assert(
+      candidateReleases === beforeReleaseFailureCandidateReleases,
+      'committed remote session was released'
+    );
+    assert(
+      row.status === 'ACTIVE' && row.sessionId !== sourceId,
+      'lease release failure changed the committed binding'
+    );
+    assert(row.providerProfileId === profileId, 'lease release failure changed the profile');
   } finally {
     prisma.browserSession.findUnique = findUnique;
     prisma.browserSession.updateMany = updateMany;
     prisma.integration.findUnique = integrationFindUnique;
     prisma.browserProviderProfile.upsert = profileUpsert;
     prisma.browserContext.update = contextUpdate;
+    prisma.toolSideEffect.updateMany = leaseUpdateMany;
     await prisma.toolSideEffect.deleteMany({ where: { operationKey: leaseKey } });
   }
 }

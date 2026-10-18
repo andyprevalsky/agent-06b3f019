@@ -1,0 +1,80 @@
+{
+  "at": "2026-10-16T04:32:49.601591+00:00",
+  "runtime_source": "66620cc07ae4c6dab86c8878e54226122fa85193",
+  "all_three_required_ancestors_verified": true,
+  "original_source_subtree_unchanged_from_checkpoint": true,
+  "new_prompt_fixture_candidates_unapplied": true,
+  "full_group3": {
+    "status": "PASS_SOURCE_QUALIFIED",
+    "receipt_sha256": "27234c70060f34ec82e6e01ba86d55eee6821ba492ff59a7d871a589adbdca58"
+  },
+  "SMS3": {
+    "passed": 1,
+    "failed": 2,
+    "stage_exit": 1,
+    "task_seconds": 121.4,
+    "actual_stage_seconds": 156.33268523216248,
+    "all_canonical_task_cleanup_verified": true,
+    "final_current_teardown_sha256": "3ee4cd06a783be341b4b26b75d648c523e4835251aa337e882a94f85ee5bb598"
+  },
+  "merge_or_production_success": false,
+  "actual_source_subtree": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-source",
+  "source_subtree_existence_verified": true,
+  "exact_tree_entry_unchanged": true,
+  "source_manifest_sha256": "0e304f786550661099de86733b86df92cf609550d6fb06c930aa28a74b0a8d66",
+  "actual_tree_verification_at": "2026-10-16T04:33:07.040316+00:00",
+  "snapshot_at": "2026-10-16T04:34:00.246854+00:00",
+  "private_raw_artifacts_published": false,
+  "original_timing_run": "20261012-234924-2614623",
+  "original_started_at": "2026-10-12T18:39:09Z",
+  "canonical_terminal_attempts": 415,
+  "original_attempts": 31,
+  "resumed_attempts": 384,
+  "canonical_statuses": {
+    "failed": 81,
+    "passed": 334
+  },
+  "all_historical_failures_retained": true,
+  "reported_benchmark_cost_cents": 205,
+  "reported_cost_scope": "Prior370 combined baseline plus only newly attributed run receipts absent from that set; current new SMS receipt reports zero. Complete provider and infrastructure cost UNKNOWN.",
+  "unclassified_historical_controller_gap_seconds": 64557.1925,
+  "pending_approvals": [
+    {
+      "id": "TAMY-FIXTURE-MENU-1",
+      "original_request_at": "2026-10-14T19:49:45.852556Z",
+      "patch_sha256": "6d8cf29d38d109d51f3cddaf0599661d1871e864c15b52ed6b584203f877ca41",
+      "applied": false
+    },
+    {
+      "id": "TAMY-USE-RETRIEVED-FACTS-1",
+      "requested_at": "2026-10-16T04:31:07.088028Z",
+      "patch_sha256": "f10ce942df76e7a1a9525d87f7fe99adb3bd99739e0794207259d0ca79ec8a4e",
+      "applied": false
+    }
+  ],
+  "withdrawn_unapplied": [
+    {
+      "id": "TAMY-RETRIEVE-FIRST-1",
+      "withdrawn_at": "2026-10-16T04:28:29.383267Z",
+      "reason": "Current observed retrieval occurred; search-first wording does not address the proved decision boundary."
+    }
+  ],
+  "current_SMS_private_archive": {
+    "sha256": "9c9d39b64e8b8223f897fad88214d0a7658fcf41b1f7e36b6cfaff4cadc1095e",
+    "files": 779,
+    "readback_receipt_sha256": "cb394571bec4ee28ab36cdbdec503522c7342971da1ce5a9703b180ec5da2bc0"
+  },
+  "current_SMS_cleanup": {
+    "canonical_owned_cleanup_all_three_verified": true,
+    "native_original_generations_terminal": 1,
+    "observed_births_absent": 269,
+    "exact_own_database_absent": true,
+    "own_port_listeners": 0,
+    "complete_global_capture_claimed": false
+  },
+  "source_change_since_runtime_checkpoint": "Metadata-only history/results checkpoint; runtime/prompt/model/schema/tool code unchanged.",
+  "bounded_review_cycle2_started": false,
+  "remaining_gates": "SMS behavior repair/verification, current Group4, bounded review, merge, applicable production verification.",
+  "ready_to_close": false,
+  "historical_gap_is_rounded_unclassified_not_measured_runtime_or_user_idle": true
+}
