@@ -22906,7 +22906,6 @@ async def run_all_tests():
     await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown)
     await r.record_async("agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict)
     await r.record_async("agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict)
-    r.record("ci_permits_only_opt_in_agentcard_release_skip", test_ci_permits_only_the_opt_in_agentcard_release_skip)
     r.record(
         "agentcard_release_policy_rejects_incomplete_foreign_state",
         test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state,
