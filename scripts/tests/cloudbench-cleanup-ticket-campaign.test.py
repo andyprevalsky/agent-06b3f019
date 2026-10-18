@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import signal
 import time
@@ -13,6 +14,19 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+CAMPAIGN = runpy.run_path(str(ROOT / "scripts/run-bench-campaign.py"))
+SHARD_EPOCH = 1792287011.18
+READY_KEYS = {"schema", "cohort_id", "status", "ready_count", "failed_count",
+              "expected_count", "survivor_count", "updated_at"}
+
+
+def write_exclusive(path, value):
+    """The coordinator's O_EXCL barrier write."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, json.dumps(value).encode())
+    finally:
+        os.close(descriptor)
 
 
 class CampaignTickets(unittest.TestCase):
@@ -29,6 +43,9 @@ class CampaignTickets(unittest.TestCase):
                 "cloudbench-infra-canary-preflight.py",
             ):
                 shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+            if "external" in mode:
+                # External modes join the actual per-fleet barrier helper.
+                shutil.copyfile(ROOT / "scripts/cloudbench-campaign-barrier.py", scripts / "cloudbench-campaign-barrier.py")
             if mode.startswith(("mutation", "relay")):
                 for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "cloudbench-port-lease.py", "cloudbench-cohort-reconcile.py", "cloudbench-machine-readiness.py", "cloudbench-campaign-machines.py"):
                     shutil.copyfile(ROOT / "scripts" / name, scripts / name)
@@ -68,6 +85,15 @@ while not(p/'stop').exists():time.sleep(.01)
                         "signal.signal(signal.SIGTERM,lambda *a:sys.exit(0))\nprint('Proxying localhost:',flush=True)\ntry:\n while True:time.sleep(.02)\nfinally:agent.close()\n")
                     (fake / "flyctl").chmod(0o700)
                 (scripts / "cloudbench-campaign-seed.py").write_text("import pathlib,sys\np=pathlib.Path(sys.argv[sys.argv.index('--barrier')+1]);(p/'seed-proof.private.json').write_text('{}')\n")
+                if "external" in mode:
+                    # A canonical fixture GET that only ends when interrupted.
+                    (scripts / "cloudbench-campaign-seed.py").write_text(
+                        "import os,pathlib,signal,sys,time\n"
+                        "events=pathlib.Path(os.environ['FIXTURE_ROOT'])/'events'\n"
+                        "def joined(*unused):\n with events.open('a') as f:f.write('SEED_JOINED\\n')\n sys.exit(143)\n"
+                        "signal.signal(signal.SIGTERM,joined)\n"
+                        "with events.open('a') as f:f.write('SEED_ENTER\\n')\n"
+                        "while True:time.sleep(.05)\n")
             if old:
                 (scripts / "run-bench-campaign.py").write_bytes(
                     subprocess.check_output(
@@ -164,7 +190,7 @@ if [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" = 1 ]; then
  trap 'printf "CANARY_JOINED\n" >> "$FIXTURE_ROOT/events"; exit 143' TERM INT
  case "$FIXTURE_CANARY_MODE" in
   fail) exit 17 ;;
-  cancel|relay-cancel) while :; do sleep .05; done ;;
+  cancel|relay-cancel|external-abort-canary) while :; do sleep .05; done ;;
  esac
  printf 'CANARY_DONE\n' >> "$FIXTURE_ROOT/events"
  exit 0
@@ -173,6 +199,15 @@ printf 'TASK_START\n' >> "$FIXTURE_ROOT/events"
 [ -n "${CLOUDBENCH_COHORT_PREFLIGHT_RECEIPT:-}" ] || exit 92
 if [ "$FIXTURE_CANARY_MODE" = tamper ]; then CLOUDBENCH_COHORT_PREFLIGHT_SHA256=0000000000000000000000000000000000000000000000000000000000000000; fi
 CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="$FIXTURE_COLD" CLOUDBENCH_INFRA_CANARY_REF="$FIXTURE_BENCH_REF" python3 -S "$FIXTURE_ROOT/scripts/cloudbench-infra-canary-preflight.py" --stamp "$FIXTURE_ROOT/.context/fleet-infra-canary.last-pass" --lock "$FIXTURE_ROOT/.context/fleet-infra-canary-preflight.transaction.lock" --ttl-seconds 3600 --width 2 --canary "$FIXTURE_ROOT/scripts/run-fleet-infra-canary" --nested-controller-lock cloudbench-controller-infra-canary-preflight.lock
+if [ -n "${FIXTURE_BARRIER_SECONDS:-}" ]; then
+ printf 'ENV|%s|%s|%s|%s|%s\n' "$RUN_BENCH_CAMPAIGN_JOB_ID" "$RUN_BENCH_CAMPAIGN_TOTAL_JOBS" "$RUN_BENCH_CAMPAIGN_STARTED_AT" "$BENCHMARK_HUB_GROUP_RUN_ID" "${RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER:-}${RUN_BENCH_CAMPAIGN_TASK_INDEXES:-}${RUN_BENCH_CAMPAIGN_GROUP_TOTAL:-}${RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT:-}" >> "$FIXTURE_ROOT/events"
+ if python3 "$FIXTURE_ROOT/scripts/cloudbench-campaign-barrier.py" --deadline "$(python3 -c 'import sys,time;print(time.time()+float(sys.argv[1]))' "$FIXTURE_BARRIER_SECONDS")" --controller-pid "$$"; then
+  printf 'BARRIER_RELEASED\n' >> "$FIXTURE_ROOT/events"
+  exit 0
+ fi
+ printf 'BARRIER_FAILED\n' >> "$FIXTURE_ROOT/events"
+ exit 1
+fi
 python3 - "$RUN_BENCH_CAMPAIGN_BARRIER_DIR" "$RUN_BENCH_CAMPAIGN_JOB_ID" "$$" <<'READY'
 import json,sys,time
 from pathlib import Path
@@ -286,6 +321,18 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 env.update(CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="1", CLOUDBENCH_CAMPAIGN_SHARED_RELAY="0", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="1")
                 if mode.startswith("relay"):
                     env.update(CLOUDBENCH_CAMPAIGN_SHARED_RELAY="1", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="0", FLY_API_TOKEN="offline-fixture", PATH=str(root / "bin") + os.pathsep + env["PATH"])
+            if "external" in mode:
+                barrier = root / "external-barrier"
+                barrier.mkdir(mode=0o700)
+                env.update(
+                    RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER=str(barrier),
+                    # Global manifest positions of fixture-a/b/c in a 300-task
+                    # manifest (600 = 300 tasks x 2 runs across all shards).
+                    RUN_BENCH_CAMPAIGN_TASK_INDEXES="7,3,190",
+                    RUN_BENCH_CAMPAIGN_GROUP_TOTAL="600",
+                    RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT=repr(SHARD_EPOCH),
+                    FIXTURE_BARRIER_SECONDS="6" if mode == "external-deadline" else "30",
+                )
             if mode == "fresh":
                 stamp = root / ".context/fleet-infra-canary.last-pass"
                 stamp.parent.mkdir(parents=True, exist_ok=True)
@@ -299,7 +346,7 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 "--runs",
                 "2",
                 "--concurrency",
-                "3",
+                "6" if "external" in mode else "3",
                 "--task",
                 "fixture-a",
                 "--task",
@@ -316,6 +363,8 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                         "--forward-arg=--cold-primary-bootstrap",
                     ]
                 )
+            if "external" in mode:
+                return self.external_barrier_run(root, argv, env, mode)
             if mode in ("cancel", "relay-cancel"):
                 child = subprocess.Popen(
                     argv,
@@ -413,6 +462,12 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
             summary = json.loads(summaries[0].read_text())
             self.assertEqual(summary["status"], "passed")
             self.assertEqual(len(summary["startup_cohorts"]), 2)
+            # Unset shard variables keep the original schedule and projection.
+            self.assertEqual([job["job_id"] for job in summary["jobs"]],
+                             [f"r{1 + i // 3:03d}-j{i + 1:04d}" for i in range(6)])
+            self.assertFalse({"external_barrier", "job_prefix", "group_total", "group_started_at"} & set(summary))
+            self.assertEqual([path for path in root.rglob("*.json")
+                              if "campaign-external-barrier-ready-v1" in path.read_text()], [])
             self.assertEqual(events.count("CANARY_DONE"), 0 if mode == "fresh" else 1)
             self.assertEqual(events.count("TASK_START"), 6)
             if mode != "fresh":
@@ -448,6 +503,229 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                         / (budget["global_budget_id"] + ".json")
                     ).exists()
                 )
+
+    def external_barrier_run(self, root, argv, env, mode):
+        """Act as the sharded coordinator against one real strict campaign."""
+        barrier = Path(env["RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER"])
+        events_path = root / "events"
+        release_id = "a1" * 16
+
+        def events():
+            return events_path.read_text().splitlines() if events_path.exists() else []
+
+        def status():
+            try:
+                return json.loads((barrier / "ready.json").read_text())["status"]
+            except (OSError, ValueError, KeyError):
+                return None
+
+        child = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            def wait_until(check, label):
+                deadline = time.monotonic() + 30
+                while not check():
+                    if child.poll() is not None or time.monotonic() > deadline:
+                        if child.poll() is None:
+                            child.terminate()
+                        raise AssertionError(label + " was not reached: " + str(events()) + "".join(child.communicate()))
+                    time.sleep(0.02)
+
+            if mode in ("external-release", "external-abort"):
+                wait_until(lambda: status() == "ready", "external readiness")
+                cohort = next((root / ".context/benchmarks/campaigns").glob("*/startup-cohorts/c001"))
+                self.assertEqual(len(list((cohort / "ready").glob("*.json"))), 6)
+                time.sleep(0.5)
+                # Every member is ready, yet no copy passes before the global release.
+                self.assertEqual(status(), "ready")
+                self.assertFalse((cohort / "release.json").exists())
+                self.assertNotIn("BARRIER_RELEASED", events())
+                if mode == "external-release":
+                    write_exclusive(barrier / "release.json", {
+                        "schema": "campaign-external-barrier-release-v1",
+                        "release_id": release_id, "released_at": "2026-10-18T00:00:00+00:00"})
+                else:
+                    write_exclusive(barrier / "abort.json", {
+                        "schema": "campaign-external-barrier-abort-v1",
+                        "release_id": release_id, "reason": "coordinator abort fixture"})
+            elif mode in ("external-abort-canary", "mutation-external-abort-seed"):
+                marker = "CANARY_ENTER" if mode == "external-abort-canary" else "SEED_ENTER"
+                wait_until(lambda: marker in events(), marker)
+                self.assertEqual(status(), "waiting")
+                write_exclusive(barrier / "abort.json", {
+                    "schema": "campaign-external-barrier-abort-v1",
+                    "release_id": release_id, "reason": "coordinator abort fixture"})
+            stdout, stderr = child.communicate(timeout=60)
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait()
+        observed = events()
+        output = stdout + stderr + str(observed)
+        (summary_path,) = (root / ".context/benchmarks/campaigns").glob("*/summary.json")
+        summary = json.loads(summary_path.read_text())
+        cohort = summary_path.parent / "startup-cohorts/c001"
+        ready = json.loads((barrier / "ready.json").read_text())
+        history = [item["status"] for item in summary["external_barrier"]["status_history"]]
+        self.assertEqual(set(ready), READY_KEYS, output)
+        self.assertEqual((ready["schema"], ready["cohort_id"], ready["expected_count"]),
+                         ("campaign-external-barrier-ready-v1", "c001", 6))
+        self.assertEqual(ready["status"], history[-1], output)
+        self.assertEqual(len(summary["startup_cohorts"]), 1)
+        self.assertEqual(list(barrier.glob(".*")), [], "atomic replace leaves no temporary file")
+        if mode == "external-release":
+            self.assertEqual(child.returncode, 0, output)
+            self.assertEqual(history, ["waiting", "ready", "released"])
+            self.assertEqual((ready["ready_count"], ready["failed_count"], ready["survivor_count"]), (6, 0, 6))
+            self.assertEqual(summary["external_barrier"]["release_id"], release_id)
+            self.assertEqual(json.loads((cohort / "release.json").read_text())["cohort_id"], "c001")
+            self.assertEqual(observed.count("BARRIER_RELEASED"), 6)
+            self.assertEqual(summary["status"], "passed")
+            expected = ["r001-j0008", "r001-j0004", "r001-j0191", "r002-j0308", "r002-j0304", "r002-j0491"]
+            self.assertEqual([job["job_id"] for job in CAMPAIGN["campaign_jobs"](
+                ["fixture-a", "fixture-b", "fixture-c"], 2, [7, 3, 190], 300)], expected)
+            self.assertEqual([job["job_id"] for job in summary["jobs"]], expected)
+            self.assertEqual(summary["total_jobs"], 6)
+            self.assertEqual((summary["task_indexes"], summary["group_total"], summary["group_started_at"]),
+                             ([7, 3, 190], 600, CAMPAIGN["campaign_group_timestamp"](SHARD_EPOCH)))
+            # Cohort manifest and cleanup tickets carry the same global IDs.
+            self.assertEqual(sorted(json.loads((cohort / "manifest.json").read_text())["jobs"]), sorted(expected))
+            children = sorted(line.split("|")[1:] for line in observed if line.startswith("ENV|"))
+            # Children publish the operator's group identity, size and clock;
+            # shard controls themselves never reach a child fleet.
+            self.assertEqual(children, sorted(
+                [job, "600", CAMPAIGN["campaign_group_timestamp"](SHARD_EPOCH), "fixture", ""] for job in expected))
+            self.assertFalse((summary_path.parent / "hub-group.json").exists(),
+                             "a shard with a preset group never publishes its own group record")
+            return
+        self.assertNotEqual(child.returncode, 0, output)
+        self.assertNotIn("BARRIER_RELEASED", observed)
+        self.assertFalse((cohort / "release.json").exists())
+        self.assertNotIn("released", history)
+        if mode == "external-deadline":
+            self.assertEqual(history[0], "waiting")
+            self.assertIn("ready", history)
+            self.assertEqual(history[-1], "failed")
+            self.assertEqual(observed.count("BARRIER_FAILED"), 6)
+            self.assertEqual((ready["failed_count"], ready["survivor_count"]), (6, 0))
+            self.assertEqual(summary["startup_cohorts"][0]["status"], "failed")
+            self.assertEqual({job["status"] for job in summary["jobs"]}, {"failed"})
+            self.assertIsNone(summary["external_barrier"]["abort"])
+            return
+        self.assertEqual(history[-1], "aborted")
+        self.assertEqual(json.loads((cohort / "abort.json").read_text())["reason"],
+                         "external barrier abort: coordinator abort fixture")
+        self.assertEqual((summary["external_barrier"]["abort"]["reason"], summary["external_barrier"]["abort"]["release_id"]),
+                         ("coordinator abort fixture", release_id))
+        self.assertEqual(summary["startup_cohorts"][0]["status"], "aborted")
+        self.assertEqual({job["status"] for job in summary["jobs"]}, {"cancelled"})
+        if mode == "external-abort":
+            self.assertEqual(history, ["waiting", "ready", "aborted"])
+            # Ready children observe the cohort abort through their own barrier.
+            self.assertEqual(observed.count("BARRIER_FAILED"), 6)
+        else:
+            self.assertEqual(history, ["waiting", "aborted"])
+            self.assertNotIn("TASK_START", observed)
+            if mode == "external-abort-canary":
+                self.assertIn("CANARY_JOINED", observed)
+            else:
+                self.assertIn("SEED_JOINED", observed)
+                self.assertNotIn("CANARY_ENTER", observed)
+
+    def test_external_barrier_holds_release_until_coordinator_release(self):
+        self.campaign_fixture(mode="external-release")
+
+    def test_external_abort_before_release_aborts_ready_cohort(self):
+        self.campaign_fixture(mode="external-abort")
+
+    def test_external_abort_interrupts_parent_canary_and_seed_preflight(self):
+        for mode in ("external-abort-canary", "mutation-external-abort-seed"):
+            with self.subTest(mode=mode):
+                self.campaign_fixture(mode=mode)
+
+    def test_external_barrier_without_release_fails_at_fleet_deadline(self):
+        self.campaign_fixture(mode="external-deadline")
+
+    def test_shard_environment_refused_before_campaign_artifacts(self):
+        with tempfile.TemporaryDirectory(prefix="campaign-shard-refusal-") as temporary:
+            root = Path(temporary)
+            barrier = root / "barrier"
+            barrier.mkdir(mode=0o700)
+            base = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("RUN_BENCH_CAMPAIGN_", "BENCHMARK_HUB_", "CLOUDBENCH_STRICT"))}
+            base["RUN_BENCH_CAMPAIGN_ROOT"] = str(root / "campaigns")
+            strict = ["--forward-arg=--strict-barrier"]
+            cases = [
+                ("two cohorts", {"RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER": str(barrier)}, "3", strict, "exactly one startup cohort"),
+                ("not strict", {"RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER": str(barrier)}, "6", [], "exactly one startup cohort"),
+                ("relative barrier", {"RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER": "barrier"}, "6", strict, "existing absolute directory"),
+                ("missing barrier", {"RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER": str(root / "absent")}, "6", strict, "existing absolute directory"),
+            ]
+            group = {"BENCHMARK_HUB_GROUP_RUN_ID": "operator-group"}
+            indexed = {**group, "RUN_BENCH_CAMPAIGN_GROUP_TOTAL": "600"}
+            cases.append(("indexes without total", {**group, "RUN_BENCH_CAMPAIGN_TASK_INDEXES": "0,1,2"}, "6", [], "requires RUN_BENCH_CAMPAIGN_GROUP_TOTAL"))
+            cases.append(("total not runs multiple", {**group, "RUN_BENCH_CAMPAIGN_GROUP_TOTAL": "601", "RUN_BENCH_CAMPAIGN_TASK_INDEXES": "0,1,2"}, "6", [], "multiple of --runs"))
+            for indexes in ("", "1,2", "0,1,2,3", "1,1,2", "0,1,300", "-1,2,3", "a,b,c", "01,2,3", "1, 2,3", "1,2,3,"):
+                message = ("one per --task" if indexes in ("1,2", "0,1,2,3", "1,1,2", "0,1,300")
+                           else "non-negative integers")
+                cases.append(("indexes " + repr(indexes), {**indexed, "RUN_BENCH_CAMPAIGN_TASK_INDEXES": indexes}, "6", [], message))
+            for total in ("0", "5", "abc", "-600", "100001", "06"):
+                cases.append(("total " + total, {**group, "RUN_BENCH_CAMPAIGN_GROUP_TOTAL": total}, "6", [], "GROUP_TOTAL must be"))
+            for started in ("nan", "inf", "-1", "0", "2026-10-18T00:00:00Z", ""):
+                cases.append(("started " + started, {**group, "RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT": started}, "6", [], "positive finite epoch"))
+            cases.append(("total without group", {"RUN_BENCH_CAMPAIGN_GROUP_TOTAL": "600"}, "6", [], "preset BENCHMARK_HUB_GROUP_RUN_ID"))
+            cases.append(("start without group", {"RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT": "1792287011.18"}, "6", [], "preset BENCHMARK_HUB_GROUP_RUN_ID"))
+            for label, extra, concurrency, forward, message in cases:
+                with self.subTest(case=label):
+                    result = subprocess.run(
+                        [sys.executable, str(ROOT / "scripts/run-bench-campaign.py"), "--root", str(root),
+                         "--runs", "2", "--concurrency", concurrency, "--task", "a", "--task", "b", "--task", "c", *forward],
+                        env={**base, **extra}, capture_output=True, text=True, timeout=30)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertFalse((root / "campaigns").exists(), "refusal precedes campaign artifacts")
+                    self.assertEqual(list(barrier.iterdir()), [])
+
+    def test_shard_job_lists_concatenate_into_one_unique_group_schedule(self):
+        campaign_jobs, sharded = CAMPAIGN["campaign_jobs"], CAMPAIGN["sharded_campaign_jobs"]
+        tasks = [f"task-{index}" for index in range(7)]
+        single = campaign_jobs(tasks, 3)
+        self.assertEqual([job["job_id"] for job in campaign_jobs(tasks[:2], 2)],
+                         ["r001-j0001", "r001-j0002", "r002-j0003", "r002-j0004"])
+        self.assertEqual(campaign_jobs(tasks, 3, list(range(7)), 7), single)
+        for layout in ([[0, 1, 2], [3, 4], [5, 6]], [[0, 5, 2], [1, 3, 4, 6]], [[6], [0, 1, 2, 3, 4, 5]]):
+            with self.subTest(layout=layout):
+                shards = [{"tasks": [tasks[i] for i in indexes], "runs": 3, "task_indexes": indexes} for indexes in layout]
+                lists = [campaign_jobs(shard["tasks"], 3, shard["task_indexes"], 7) for shard in shards]
+                identifiers = [job["job_id"] for jobs in lists for job in jobs]
+                # K shard lists concatenate to the single controller's unique IDs.
+                self.assertEqual(len(identifiers), len(set(identifiers)))
+                self.assertEqual(sorted(identifiers), sorted(job["job_id"] for job in single))
+                self.assertEqual(sharded(shards, 7), single)
+        self.assertEqual([job["job_id"] for job in campaign_jobs(["task-5", "task-1"], 2, [5, 1], 7)],
+                         ["r001-j0006", "r001-j0002", "r002-j0013", "r002-j0009"])
+        for indexes, total in (([0, 0], 7), ([0, 7], 7), ([0, -1], 7), ([0, True], 7), ([0], 7), ([0, 1], None)):
+            with self.assertRaises(ValueError):
+                campaign_jobs(tasks[:2], 3, indexes, total)
+        with self.assertRaises(ValueError):
+            campaign_jobs(tasks[:2], 3, None, 7)
+        overlapping = [{"tasks": tasks[:2], "runs": 3, "task_indexes": [0, 1]},
+                       {"tasks": tasks[1:3], "runs": 3, "task_indexes": [1, 2]}]
+        with self.assertRaises(ValueError):
+            sharded(overlapping, 7)
+        with self.assertRaises(ValueError):
+            sharded([], 7)
+        combined = sharded([{"tasks": tasks[:3], "runs": 3, "task_indexes": [0, 1, 2]},
+                            {"tasks": tasks[3:], "runs": 3, "task_indexes": [3, 4, 5, 6]}], 7)
+        identifiers = [job["job_id"] for job in combined]
+        state = CAMPAIGN["campaign_group_state"]("operator-group", SHARD_EPOCH, combined)
+        record = CAMPAIGN["campaign_group_record"](state)
+        self.assertEqual((record["run_id"], record["timestamp"]),
+                         ("operator-group", CAMPAIGN["campaign_group_timestamp"](SHARD_EPOCH)))
+        self.assertEqual([member["member_id"] for member in record["run_group"]["members"]], identifiers)
+        self.assertEqual({outcome["status"] for outcome in record["run_group"]["outcomes"].values()}, {"queued"})
+        self.assertEqual(CAMPAIGN["campaign_group_timestamp"](SHARD_EPOCH), "2026-10-18T01:30:11.180000+00:00")
+        with self.assertRaises(ValueError):
+            CAMPAIGN["campaign_group_state"]("operator-group", SHARD_EPOCH, combined + combined[:1])
 
     def test_parent_n2_and_workers_use_owned_shared_relay_without_default_agent(self):
         self.campaign_fixture(mode="relay")
