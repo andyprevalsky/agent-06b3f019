@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """External owner of one original600 disposable controller. No gate/VM kill on cancellation."""
-import argparse,base64,errno,gzip,hashlib,json,os,re,secrets,shlex,signal,stat,subprocess,sys,time
+import argparse,base64,errno,gzip,hashlib,json,math,os,re,secrets,shlex,signal,stat,subprocess,sys,tempfile,time
 from contextlib import contextmanager
 from pathlib import Path
 TASK_REF='570830dbf17635e13d16a6f03b4d705f6b6443b1'
@@ -38,9 +38,47 @@ def bounded(seconds):
   signal.setitimer(signal.ITIMER_REAL,0);signal.signal(signal.SIGALRM,handler)
   if old[0]:signal.setitimer(signal.ITIMER_REAL,max(.000001,old[0]-(time.monotonic()-start)))
 
-def campaign_argv(tasks,epoch):
+SHARD_FIELDS={'index','count','tasks','tasks_sha256','task_indexes','runs','group_run_id','group_total','group_started_at'}
+def shard_shape(shard):
+ """Self-consistent shard fields; returns the shard's logical job count."""
+ need(isinstance(shard,dict) and SHARD_FIELDS<=set(shard)<=SHARD_FIELDS|{'infra_threshold'},'exact shard fields required')
+ index,count,runs,names=shard['index'],shard['count'],shard['runs'],shard['tasks']
+ need(all(type(x)is int for x in (index,count,runs)) and 0<=index<count and runs>=1,'invalid shard index/count/runs')
+ need(isinstance(names,list) and names and all(isinstance(t,str) and t for t in names) and len(set(names))==len(names),'distinct shard tasks required')
+ need(shard['tasks_sha256']==sha(('\n'.join(names)+'\n').encode()),'shard task hash changed')
+ indexes=shard['task_indexes'];need(isinstance(indexes,list) and len(indexes)==len(names) and all(type(i)is int and i>=0 for i in indexes) and len(set(indexes))==len(indexes),'distinct task indexes for every shard task required')
+ need(isinstance(shard['group_run_id'],str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}',shard['group_run_id']),'invalid shared group id')
+ need(type(shard['group_total'])is int and shard['group_total']>=len(names)*runs and shard['group_total']%runs==0,'group total must cover its shard in whole runs')
+ # Campaign job IDs are r{run}-j{(run-1)*width+index+1}; indexes beyond the group width would collide.
+ need(all(i<shard['group_total']//runs for i in indexes),'task index outside the group width')
+ started=shard['group_started_at'];need(type(started)in(int,float) and math.isfinite(started) and started>0,'invalid shared group start')
+ threshold=shard.get('infra_threshold',30);need(type(threshold)is int and threshold>=1,'invalid infrastructure threshold')
+ return len(names)*runs
+def validate_shard(shard,manifest):
+ """A shard is an ordered subset of the pinned original manifest."""
+ jobs=shard_shape(shard);indexes=shard['task_indexes']
+ # Job IDs stay the single-controller r{run}-j{global index}, so each task carries its manifest index.
+ need(all(i<len(manifest) and manifest[i]==t for i,t in zip(indexes,shard['tasks'])) and indexes==sorted(indexes),'shard tasks must be an ordered subset of the original manifest at their indexes')
+ need(shard['group_total']<=len(manifest)*shard['runs'],'group total exceeds the original manifest')
+ return jobs
+def campaign_argv(tasks,epoch,shard=None):
  need(len(tasks)==len(set(tasks))==200 and sha(('\n'.join(tasks)+'\n').encode())==TASK_NAMES_SHA,'original ordered task manifest required')
- return ['bash','scripts/run-bench','--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref',TASK_REF,*tasks]
+ if shard is None:return ['bash','scripts/run-bench','--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref',TASK_REF,*tasks]
+ # --stress-defaults admits only the complete 200-task k3 profile; a shard
+ # instead carries the operator's global limits in shard_env.
+ jobs=validate_shard(shard,tasks)
+ return ['bash','scripts/run-bench','--strict-barrier','--concurrency',str(jobs),'-k',str(shard['runs']),'--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref',TASK_REF,*shard['tasks']]
+def shard_env(remote_env,shard,identity_name):
+ """Legacy (no shard) returns remote_env unchanged; a shard adds only its bound campaign controls."""
+ if shard is None:return remote_env
+ env=dict(remote_env);need(re.fullmatch(r'original600-supervisor\.[0-9a-f]{24}\.json',identity_name),'exact supervisor identity name required')
+ for key in ('CLOUDBENCH_APP_MACHINE_CEILING','CLOUDBENCH_SHARED_CPU_GOVERNOR'):
+  need(isinstance(env.get(key),str) and re.fullmatch('[1-9][0-9]{0,5}',env[key]),'explicit operator limit required without stress defaults: '+key)
+ controls=dict(CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='1',RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER='/tmp/gate/repo/.context/'+identity_name[:-len('.json')]+'.barrier',
+               RUN_BENCH_CAMPAIGN_TASK_INDEXES=','.join(map(str,shard['task_indexes'])),RUN_BENCH_CAMPAIGN_GROUP_TOTAL=str(shard['group_total']),
+               RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT=str(shard['group_started_at']),BENCHMARK_HUB_GROUP_RUN_ID=shard['group_run_id'])
+ for key,value in controls.items():need(env.get(key,value)==value,'shard campaign control changed: '+key);env[key]=value
+ return env
 
 # Stage bound inputs, publish this PID/birth, then exec the canonical supervisor.
 # Its owned-parent finally writes the terminal receipt after campaign join.
@@ -93,6 +131,13 @@ for item in v['remote_files']:
 policy=v.get('infra_early_stop','enabled');assert policy in ('enabled','disabled')
 assert v['remote_env'].get('CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP','enabled')==policy
 tasks=identity.with_suffix('.tasks.json');save(tasks,(json.dumps(v['tasks'],sort_keys=True)+'\n').encode());env=dict(os.environ,**v['remote_env']);env.update(REVIEWED_OPERATOR_ROOT=str(root),REVIEWED_OPERATOR_SOURCE_REF=v['source_ref'],REVIEWED_OPERATOR_TASKS=str(tasks),REVIEWED_OPERATOR_TASKS_SHA256=hashlib.sha256(tasks.read_bytes()).hexdigest(),REVIEWED_OPERATOR_IDENTITY_PATH=str(identity),CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP=policy)
+shard=v.get('shard')
+if shard is not None:
+ # The external barrier exists before the identity becomes visible to REMOTE_CONTROL.
+ barrier=identity.with_suffix('.barrier');assert v['remote_env']['RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER']==str(barrier)
+ barrier.mkdir(mode=0o700);fd=os.open(identity.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+ bound=identity.with_suffix('.shard.json');save(bound,(json.dumps(shard,sort_keys=True)+'\n').encode())
+ env.update(REVIEWED_OPERATOR_SHARD=str(bound),REVIEWED_OPERATOR_SHARD_SHA256=hashlib.sha256(bound.read_bytes()).hexdigest())
 row=dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth=birth(os.getpid()),machine=os.environ['FLY_MACHINE_ID'],source_ref=v['source_ref'],epoch=v['epoch'],infra_early_stop=policy)
 assert row['pid']>1;save(identity,(json.dumps(row,sort_keys=True)+'\n').encode());print('ORIGINAL600_SUPERVISOR '+json.dumps(row),flush=True)
 os.chdir(root);os.execve(sys.executable,[sys.executable,str(script),str(v['epoch']),*v['campaign_argv']],env)
@@ -212,15 +257,63 @@ else:
   t=json.loads(terminal.read_bytes());assert all(t[k]==j[k]for k in j)and t['supervisor_joined']is True
   result=dict(state='JOINED',identity=j,terminal=t,identity_sha256=hashlib.sha256(raw).hexdigest())
  else:result=dict(state='ABSENT_UNCONFIRMED',identity=j)
+if v['action']!='TERM':
+ # Sharded launches only (REMOTE_LAUNCH created the barrier): the campaign's external
+ # barrier and supervisor infra count. Legacy ACKs stay unchanged; a missing or
+ # unreadable file never hides the supervisor state above.
+ import ctypes,datetime,errno,re,stat,tempfile
+ barrier=p.with_suffix('.barrier')
+ def observed(path):
+  try:
+   with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb')as f:
+    s=os.fstat(f.fileno());assert stat.S_ISREG(s.st_mode) and s.st_size<16384
+    value=json.loads(f.read(16384));assert isinstance(value,dict);return value
+  except FileNotFoundError:return None
+  except (OSError,ValueError,AssertionError):result.setdefault('observation_errors',[]).append(path.name);return None
+ if barrier.is_dir() and not barrier.is_symlink():result.update(barrier=observed(barrier/'ready.json'),infra=observed(p.with_suffix('.infra.json')))
+ def decide(kind):
+  # One exclusive, complete decision file per barrier; same release_id is idempotent.
+  rid,reason=v['release_id'],v['reason']
+  assert isinstance(rid,str) and re.fullmatch('[0-9a-f]{16,64}',rid) and isinstance(reason,str) and len(reason)<=1024,'invalid barrier decision'
+  info=barrier.lstat();assert stat.S_ISDIR(info.st_mode) and not info.st_mode&0o077,'exact private barrier directory required'
+  name=kind+'.json';other=barrier/('abort.json' if kind=='release' else 'release.json')
+  def existing(path):
+   try:
+    with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW),'rb')as f:return json.loads(f.read(16384))
+   except FileNotFoundError:return None
+  def outcome(record):
+   if record.get('release_id')==rid:return dict(state='RELEASED' if kind=='release' else 'ABORTED',record=record)
+   return dict(state='REFUSED',reason='different '+kind+' id exists',record=record)
+  conflict=existing(other)
+  if conflict is not None:return dict(state='REFUSED',reason='conflicting barrier decision exists',record=conflict)
+  found=existing(barrier/name)
+  if found is not None:return outcome(found)
+  record=dict(schema='campaign-external-barrier-'+kind+'-v1',release_id=rid)
+  if kind=='release':record['released_at']=datetime.datetime.now(datetime.timezone.utc).isoformat()
+  else:record['reason']=reason
+  fd,temporary=tempfile.mkstemp(prefix='.'+name+'.',dir=barrier)
+  try:
+   with os.fdopen(fd,'wb')as f:
+    f.write((json.dumps(record,sort_keys=True)+'\n').encode());f.flush();os.fchown(f.fileno(),info.st_uid,info.st_gid);os.fsync(f.fileno())
+   # RENAME_NOREPLACE publishes complete bytes, one link, never overwriting.
+   if ctypes.CDLL(None,use_errno=True).renameat2(-100,os.fsencode(temporary),-100,os.fsencode(barrier/name),1)!=0:
+    error=ctypes.get_errno();assert error==errno.EEXIST,os.strerror(error);return outcome(existing(barrier/name))
+  finally:
+   if os.path.lexists(temporary):os.unlink(temporary)
+  fd=os.open(barrier,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+  return outcome(record)
+ if v['action']in('RELEASE','ABORT') and result['state']=='LIVE':result.update(decide(v['action'].lower()))
 print(json.dumps(result))
 '''
+ACK_STATES=dict(PROBE={'NOT_PUBLISHED','LIVE','TERM_SENT','JOINED','ABSENT_UNCONFIRMED'},TERM={'NOT_PUBLISHED','LIVE','TERM_SENT','JOINED','ABSENT_UNCONFIRMED'},
+                RELEASE={'NOT_PUBLISHED','JOINED','ABSENT_UNCONFIRMED','RELEASED','REFUSED'},ABORT={'NOT_PUBLISHED','JOINED','ABSENT_UNCONFIRMED','ABORTED','REFUSED'})
 def exec_command(script,payload):return shlex.join(['python3','-c',script,base64.b64encode(json.dumps(payload,sort_keys=True).encode()).decode()])
 def machine_control(api,mid,payload):
- need(re.fullmatch('[0-9a-f]{14}',mid),'exact Machine required');need(payload['action']in('PROBE','TERM'),'invalid supervisor action')
+ need(re.fullmatch('[0-9a-f]{14}',mid),'exact Machine required');need(payload['action']in ACK_STATES,'invalid supervisor action')
  with bounded(20):
   response=api.api('POST','/machines/'+mid+'/exec',dict(cmd=exec_command(REMOTE_CONTROL,payload),timeout=20,machine=True),timeout=20)
   need(isinstance(response,dict)and response.get('exit_code',0)==0 and response.get('exit_signal',0)==0 and response.get('stderr')in(None,''),'exact supervisor exec failed')
-  raw=response.get('stdout');need(isinstance(raw,str)and len(raw.encode())<65536,'bounded supervisor ACK');v=json.loads(raw);need(v.get('state')in('NOT_PUBLISHED','LIVE','TERM_SENT','JOINED','ABSENT_UNCONFIRMED'),'invalid supervisor ACK');return v
+  raw=response.get('stdout');need(isinstance(raw,str)and len(raw.encode())<65536,'bounded supervisor ACK');v=json.loads(raw);need(isinstance(v,dict) and v.get('state')in ACK_STATES[payload['action']],'invalid supervisor ACK');return v
 
 def request_term(api,mid,payload,identity,out):
  need(identity.get('state')=='LIVE'and type(identity['identity']['pid'])is int and identity['identity']['pid']>1,'only exact live supervisor may be signalled')
@@ -417,6 +510,49 @@ def spawn_gate(command,root,env,stream,out,config_path,config_sha,authority):
   raise
 
 
+def replace_json(path,value):
+ """Atomically replace a private status file; readers never see partial bytes."""
+ raw=(json.dumps(value,sort_keys=True,allow_nan=False)+'\n').encode();fd,temporary=tempfile.mkstemp(prefix='.'+path.name+'.',dir=path.parent)
+ try:
+  with os.fdopen(fd,'wb')as f:f.write(raw);f.flush();os.fsync(f.fileno())
+  os.replace(temporary,path)
+ finally:
+  if os.path.lexists(temporary):os.unlink(temporary)
+ fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+ try:os.fsync(fd)
+ finally:os.close(fd)
+
+def shard_status(out,probe,mid):
+ replace_json(out/'shard-status.json',dict(schema='original600-shard-status-v1',state=probe.get('state'),barrier=probe.get('barrier'),
+              infra=probe.get('infra'),observed_at=time.time(),machine=mid))
+
+def global_decision(path):
+ """The coordinator's {release_id, reason}; None while absent or still being published."""
+ try:value=json.loads(read(path))
+ except (OSError,ValueError):return None
+ if not(isinstance(value,dict) and set(value)=={'release_id','reason'} and isinstance(value['release_id'],str)
+        and re.fullmatch('[0-9a-f]{16,64}',value['release_id']) and isinstance(value['reason'],str) and len(value['reason'])<=1024):return None
+ return value
+
+def deliver_global(api,mid,base,out,probe,delivery,stopping):
+ """Deliver a coordinator barrier decision by idempotent exec until ACK or supervisor JOINED.
+ Never signals the supervisor, gate or VM; a stopping owner releases no new work."""
+ for kind,action,acked in (('release','RELEASE','RELEASED'),('abort','ABORT','ABORTED')):
+  request=out/('global-'+kind+'.json');ack=out/('global-'+kind+'.ack.json');refused=out/('global-'+kind+'.refused.json');undelivered=out/('global-'+kind+'.undelivered.json')
+  if not request.exists() or any(path.exists() for path in (ack,refused,undelivered)) or(kind=='release'and stopping):continue
+  decision=global_decision(request)
+  if decision is None:continue
+  if probe.get('state')=='JOINED':save(undelivered,dict(decision,supervisor_state='JOINED',observed_at=time.time()));continue
+  if time.monotonic()<delivery.get(kind,0):continue
+  delivery[kind]=time.monotonic()+2;attempts=delivery[kind+'_attempts']=delivery.get(kind+'_attempts',0)+1
+  try:result=machine_control(api,mid,dict(base,action=action,**decision))
+  except (Exception,Deadline) as error:
+   replace_json(out/('global-'+kind+'.pending.json'),dict(decision,attempts=attempts,error=type(error).__name__,observed_at=time.time(),retry=True));continue
+  if result['state']==acked and result.get('record',{}).get('release_id')==decision['release_id']:save(ack,dict(result,release_id=decision['release_id'],attempts=attempts,delivered_at=time.time()))
+  elif result['state']in(acked,'REFUSED'):save(refused,dict(result,release_id=decision['release_id'],attempts=attempts,observed_at=time.time()))
+  elif result['state']=='JOINED':save(undelivered,dict(decision,supervisor_state='JOINED',attempts=attempts,observed_at=time.time()))
+  else:replace_json(out/('global-'+kind+'.pending.json'),dict(decision,attempts=attempts,supervisor_state=result['state'],observed_at=time.time(),retry=True))
+
 def run(config_path,config_sha,out,*,github_token=None):
  os.umask(0o077);raw=read(config_path);need(sha(raw)==config_sha,'root config bytes changed');v=json.loads(raw)
  need(v['schema']=='original600-controller-runner-v1'and v['allowed']is True,'explicit root operation config required')
@@ -425,7 +561,8 @@ def run(config_path,config_sha,out,*,github_token=None):
  root=Path(v['source_root']).resolve(strict=True);ref=v['source_ref'];need(re.fullmatch('[0-9a-f]{40}',ref or''),'UNBOUND final source')
  need(subprocess.check_output(['git','--no-replace-objects','-C',str(root),'rev-parse','HEAD'],text=True).strip()==ref,'source HEAD mismatch')
  validate_source_members(root,ref,v['source_files'])
- tasks=json.loads(read(v['tasks_path']));epoch=v['started_at_epoch'];need(type(epoch)in(int,float)and epoch>0 and time.time()<epoch+5400,'original new attempt clock expired');argv=campaign_argv(tasks,epoch)
+ tasks=json.loads(read(v['tasks_path']));epoch=v['started_at_epoch'];need(type(epoch)in(int,float)and epoch>0 and time.time()<epoch+5400,'original new attempt clock expired')
+ shard=v.get('shard');argv=campaign_argv(tasks,epoch,shard);shard_env(dict(v.get('remote_env',{})),shard,'original600-supervisor.'+'0'*24+'.json') # refuse before any output
  authority_template=json.loads(read(v['authority_template']));need(authority_template['allowed']is True and authority_template['source_ref']==ref,'root authority must match final source')
  out=Path(out).absolute();out.mkdir(mode=0o700);need(out.resolve()==out,'physical new output')
  if v.get('host_operator_provenance'):save(out/'host-operator-provenance.json',v['host_operator_provenance'])
@@ -443,7 +580,9 @@ def run(config_path,config_sha,out,*,github_token=None):
  snapshot_name='.git/cloudbench-warm-snapshot-inventory.cloudbench-warm-t10-ord-85a7e2c.json'
  snapshot=next((i for i in files if i['relative_path']==snapshot_name),None);need(snapshot is not None,'authentic selected warm snapshot inventory required')
  remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']
- identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote=dict(source_ref=ref,supervisor_sha256=v['source_files']['cloudbench-original600-supervisor.py'],identity_name=identity_name,tasks=tasks,epoch=epoch,campaign_argv=argv,remote_env=remote_env,remote_files=files,infra_early_stop=policy)
+ identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote_env=shard_env(remote_env,shard,identity_name)
+ remote=dict(source_ref=ref,supervisor_sha256=v['source_files']['cloudbench-original600-supervisor.py'],identity_name=identity_name,tasks=tasks,epoch=epoch,campaign_argv=argv,remote_env=remote_env,remote_files=files,infra_early_stop=policy)
+ if shard is not None:remote['shard']=shard
  try:payload,payload_sha,remote_command=launch_handoff(out,remote)
  except ValueError as error:
   if str(error)in('compressed launch payload too large for config transport','launch payload exceeds bounded decoded size'):
@@ -471,7 +610,7 @@ def run(config_path,config_sha,out,*,github_token=None):
   stream.close()
   for number,handler in old_handlers.items():signal.signal(number,handler)
   raise
- mid=None;probe={};attempt=0;cleanup=None;cleanup_action=None;last_error=None;next_probe=0
+ mid=None;probe={};attempt=0;cleanup=None;cleanup_action=None;last_error=None;next_probe=0;delivery={}
  try:
   save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=TASK_REF,epoch=epoch,deadline=epoch+5400,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))
   while True:
@@ -499,10 +638,14 @@ def run(config_path,config_sha,out,*,github_token=None):
     try:
      probe=machine_control(api,mid,payload);save(out/('supervisor-probe-%06d.json'%attempt),probe);attempt+=1
      if(stop[0]or time.time()>=epoch+5400)and probe['state']=='LIVE':request_term(api,mid,payload,probe,out)
+     if shard is not None:shard_status(out,probe,mid)
     except BaseException as e:
      last_error=type(e).__name__
      save(out/('supervisor-read-pending-%06d.json'%attempt),dict(error=last_error,no_gate_signal=True));attempt+=1
     next_probe=time.monotonic()+5
+   if shard is not None and cleanup is None and mid:
+    try:deliver_global(api,mid,dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name),out,probe,delivery,stop[0]or time.time()>=epoch+5400)
+    except (Exception,Deadline) as e:last_error=type(e).__name__ # retried next loop; never a cleanup or signal decision
    verified=export/'disposable-export.verified.json'
    mode=cleanup_mode(joined,ownership.exists(),(export/'workspace-volume.ownership.json').exists(),probe,verified.exists())
    if mode is not None and cleanup is None:
@@ -598,6 +741,130 @@ def self_test():
     p=Path(d)/'original600-supervisor.fixture.json';save(p,dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth='wrong',machine='1234567890abcd',source_ref='a'*40,epoch=1))
     command=exec_command(REMOTE_CONTROL,dict(identity_path=str(p),machine='1234567890abcd',source_ref='a'*40,epoch=1,action='TERM',identity_sha256=sha(p.read_bytes())))
     result=subprocess.run(shlex.split(command),env=dict(os.environ,FLY_MACHINE_ID='1234567890abcd'),capture_output=True);self.assertNotEqual(result.returncode,0)
+  def manifest(self):return json.loads((Path(__file__).absolute().parent/'tests/fixtures/original600-tasks.json').read_bytes())
+  def shard(self,manifest,**changes):
+   names=[manifest[3],manifest[10],manifest[199]]
+   value=dict(index=0,count=20,tasks=names,tasks_sha256=sha(('\n'.join(names)+'\n').encode()),task_indexes=[3,10,199],runs=3,group_run_id='campaign-group-fixture',group_total=600,group_started_at=1792287011.18)
+   value.update(changes);return value
+  def test_legacy_argv_and_env_byte_identical_without_shard(self):
+   tasks=self.manifest();epoch=1792287011.18
+   legacy=['bash','scripts/run-bench','--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref',TASK_REF,*tasks]
+   self.assertEqual(json.dumps(campaign_argv(tasks,epoch)),json.dumps(legacy));self.assertEqual(json.dumps(campaign_argv(tasks,epoch,None)),json.dumps(legacy))
+   env=dict(CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP='enabled',CLOUDBENCH_REGION='ord');before=json.dumps(env,sort_keys=True)
+   self.assertIs(shard_env(env,None,'original600-supervisor.'+'a'*24+'.json'),env);self.assertEqual(json.dumps(env,sort_keys=True),before)
+  def test_shard_argv_env_and_validation(self):
+   tasks=self.manifest();epoch=1792287011.18;shard=self.shard(tasks);argv=campaign_argv(tasks,epoch,shard)
+   legacy=campaign_argv(tasks,epoch);expected=[x for x in legacy[:-200] if x!='--stress-defaults'];expected[expected.index('--concurrency')+1]='9'
+   self.assertEqual(argv,expected+shard['tasks']);self.assertNotIn('--stress-defaults',argv);self.assertEqual(argv[argv.index('-k')+1],'3')
+   self.assertEqual(campaign_argv(tasks,epoch,self.shard(tasks,runs=1,group_total=200))[3:7],['--concurrency','3','-k','1'])
+   name='original600-supervisor.'+'b'*24+'.json';base=dict(CLOUDBENCH_APP_MACHINE_CEILING='138',CLOUDBENCH_SHARED_CPU_GOVERNOR='300',CLOUDBENCH_REGION='ord')
+   env=shard_env(base,shard,name)
+   self.assertEqual({k:v for k,v in env.items() if k not in base},dict(CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='1',RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER='/tmp/gate/repo/.context/original600-supervisor.'+'b'*24+'.barrier',
+                    RUN_BENCH_CAMPAIGN_TASK_INDEXES='3,10,199',RUN_BENCH_CAMPAIGN_GROUP_TOTAL='600',RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT='1792287011.18',BENCHMARK_HUB_GROUP_RUN_ID='campaign-group-fixture'))
+   self.assertNotIn('RUN_BENCH_CAMPAIGN_TASK_INDEXES',base)
+   for missing in ('CLOUDBENCH_APP_MACHINE_CEILING','CLOUDBENCH_SHARED_CPU_GOVERNOR'):
+    with self.assertRaisesRegex(ValueError,'explicit operator limit'):shard_env({k:v for k,v in base.items() if k!=missing},shard,name)
+   with self.assertRaisesRegex(ValueError,'shard campaign control changed'):shard_env(dict(base,RUN_BENCH_CAMPAIGN_TASK_INDEXES='3,10'),shard,name)
+   with self.assertRaisesRegex(ValueError,'shard campaign control changed'):shard_env(dict(base,CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='0'),shard,name)
+   reordered=[tasks[10],tasks[3]]
+   for bad in [dict(tasks=reordered,tasks_sha256=sha(('\n'.join(reordered)+'\n').encode()),task_indexes=[10,3]),dict(tasks=['foreign'],tasks_sha256=sha(b'foreign\n'),task_indexes=[0]),dict(tasks_sha256='0'*64),
+               dict(runs=0),dict(runs=True),dict(index=20),dict(task_indexes=[3,11,199]),dict(task_indexes=[3,10]),dict(task_indexes=[3,10,True]),dict(task_indexes=[3,10,200]),
+               dict(task_indexes=[3,3,199]),dict(task_indexes=None),dict(job_prefix='s00-'),dict(group_total=8),dict(group_total=601),dict(group_total=598),dict(group_total=300),
+               dict(group_run_id='bad id'),dict(group_started_at=float('nan')),dict(infra_threshold=0),dict(unexpected=1)]:
+    with self.subTest(bad=bad),self.assertRaises(ValueError):campaign_argv(tasks,epoch,self.shard(tasks,**bad))
+   self.assertEqual(validate_shard(self.shard(tasks,index=7,infra_threshold=5),tasks),9)
+  def test_remote_launch_stages_private_barrier_and_bound_shard(self):
+   tasks=self.manifest();shard=self.shard(tasks)
+   with tempfile.TemporaryDirectory()as d:
+    root=Path(d);(root/'scripts').mkdir();script=root/'scripts/cloudbench-original600-supervisor.py'
+    script.write_text("import json,os,sys\nfrom pathlib import Path\np=Path(os.environ['REVIEWED_OPERATOR_IDENTITY_PATH'])\n(p.parent/'handoff.json').write_text(json.dumps(dict(env={k:v for k,v in os.environ.items() if k.startswith(('REVIEWED_OPERATOR_SHARD','RUN_BENCH_CAMPAIGN_','BENCHMARK_HUB_'))},argv=sys.argv[1:])))\n")
+    git=lambda *a:subprocess.check_output(['git','-C',str(root),'-c','user.name=fixture','-c','user.email=fixture@example.invalid',*a],text=True)
+    git('init','-q');git('add','.');git('commit','-qm','fixture');ref=git('rev-parse','HEAD').strip();epoch=time.time();name='original600-supervisor.'+'c'*24+'.json'
+    env=shard_env(dict(CLOUDBENCH_APP_MACHINE_CEILING='138',CLOUDBENCH_SHARED_CPU_GOVERNOR='300'),shard,name);argv=campaign_argv(tasks,epoch,shard)
+    env['RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER']=str(root/'.context'/(name[:-5]+'.barrier'))
+    remote=dict(source_ref=ref,supervisor_sha256=sha(script.read_bytes()),epoch=epoch,identity_name=name,tasks=tasks,campaign_argv=argv,remote_files=[],remote_env=env,infra_early_stop='enabled',shard=shard)
+    path,digest,command=launch_handoff(root,remote)
+    command[2]=command[2].replace("Path('/tmp/controller-launch-payload.json.gz')",'Path('+repr(str(path))+')').replace("root=Path('/tmp/gate/repo')",'root=Path('+repr(str(root))+')');command[3]=str(path)
+    result=subprocess.run(command,capture_output=True,text=True,timeout=10,env=dict(os.environ,FLY_MACHINE_ID='1'*14));self.assertEqual(result.returncode,0,result.stderr)
+    identity=root/'.context'/name;barrier=identity.with_suffix('.barrier');handoff=json.loads((root/'.context/handoff.json').read_text())
+    self.assertTrue(barrier.is_dir());self.assertEqual(barrier.stat().st_mode&0o777,0o700);self.assertEqual(list(barrier.iterdir()),[])
+    self.assertEqual(json.loads(identity.with_suffix('.shard.json').read_bytes()),shard);self.assertEqual(handoff['argv'],[str(epoch),*argv])
+    self.assertEqual(handoff['env']['REVIEWED_OPERATOR_SHARD_SHA256'],sha(identity.with_suffix('.shard.json').read_bytes()))
+    self.assertEqual({k:handoff['env'][k] for k in ('RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER','RUN_BENCH_CAMPAIGN_TASK_INDEXES','RUN_BENCH_CAMPAIGN_GROUP_TOTAL','BENCHMARK_HUB_GROUP_RUN_ID')},
+                     dict(RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER=str(barrier),RUN_BENCH_CAMPAIGN_TASK_INDEXES='3,10,199',RUN_BENCH_CAMPAIGN_GROUP_TOTAL='600',BENCHMARK_HUB_GROUP_RUN_ID='campaign-group-fixture'))
+  class Supervisor:
+   """A live fixture whose cmdline names the supervisor, with an exact identity receipt."""
+   def __init__(self,directory,mid,sharded=True):
+    self.done=directory/'done';self.process=subprocess.Popen([sys.executable,'-c',"import signal,time,sys;from pathlib import Path;signal.signal(signal.SIGTERM,lambda *a:(Path(sys.argv[1]).write_text('cleanup'),sys.exit(7)));print('ready',flush=True);time.sleep(60)",str(self.done),'cloudbench-original600-supervisor.py'],stdout=subprocess.PIPE,text=True)
+    assert self.process.stdout.readline().strip()=='ready'
+    self.identity=directory/'original600-supervisor.fixture.json';self.row=dict(schema='original600-supervisor-identity-v1',pid=self.process.pid,birth=birth(self.process.pid),machine=mid,source_ref='a'*40,epoch=1)
+    save(self.identity,self.row);self.barrier=self.identity.with_suffix('.barrier')
+    if sharded:self.barrier.mkdir(mode=0o700)
+   def close(self):
+    if self.process.poll()is None:self.process.terminate();self.process.wait(timeout=5)
+    self.process.stdout.close()
+  class ExecAPI:
+   def __init__(self,mid):self.mid=mid;self.calls=[];self.fail=0
+   def api(self,method,path,body,timeout):
+    assert method=='POST'and path=='/machines/'+self.mid+'/exec';self.calls.append(json.loads(base64.b64decode(shlex.split(body['cmd'])[3])))
+    if self.fail:self.fail-=1;raise TimeoutError('fixture transport loss')
+    p=subprocess.run(shlex.split(body['cmd']),capture_output=True,text=True,env=dict(os.environ,FLY_MACHINE_ID=self.mid),timeout=10);return dict(stdout=p.stdout,stderr=p.stderr,exit_code=p.returncode)
+  def test_release_abort_idempotent_through_real_remote_control(self):
+   with tempfile.TemporaryDirectory()as d:
+    mid='1234567890abcd';api=self.ExecAPI(mid);first=self.Supervisor(Path(d),mid);(Path(d)/'second').mkdir();second=self.Supervisor(Path(d)/'second',mid)
+    try:
+     ready=dict(schema='campaign-external-barrier-ready-v1',cohort_id='c001',status='ready',ready_count=9,failed_count=0,expected_count=9,survivor_count=9,updated_at='2026-10-18T00:00:00+00:00')
+     (first.barrier/'ready.json').write_text(json.dumps(ready));save(first.identity.with_suffix('.infra.json'),dict(schema='original600-shard-infra-v1',infra_true=1,unique_jobs=9,observed_at=2.0))
+     base=lambda sup:dict(machine=mid,source_ref='a'*40,epoch=1,identity_path=str(sup.identity))
+     probe=machine_control(api,mid,dict(base(first),action='PROBE'));self.assertEqual((probe['state'],probe['barrier'],probe['infra']['infra_true']),('LIVE',ready,1))
+     self.assertEqual((machine_control(api,mid,dict(base(second),action='PROBE'))['barrier'],machine_control(api,mid,dict(base(second),action='PROBE'))['infra']),(None,None))
+     rid='0123456789abcdef'*2;release=dict(base(first),action='RELEASE',release_id=rid,reason='all shards ready')
+     ack=machine_control(api,mid,release);self.assertEqual(ack['state'],'RELEASED');record=json.loads((first.barrier/'release.json').read_text())
+     self.assertEqual(record,ack['record']);self.assertEqual((record['schema'],record['release_id']),('campaign-external-barrier-release-v1',rid));self.assertIn('released_at',record)
+     info=(first.barrier/'release.json').stat();self.assertEqual((info.st_mode&0o777,info.st_nlink),(0o600,1));self.assertEqual(sorted(x.name for x in first.barrier.iterdir()),['ready.json','release.json'])
+     self.assertEqual(machine_control(api,mid,release),dict(ack,barrier=ready,infra=probe['infra']));self.assertEqual(json.loads((first.barrier/'release.json').read_text()),record)
+     self.assertEqual(machine_control(api,mid,dict(release,release_id='f'*32))['state'],'REFUSED');self.assertEqual(machine_control(api,mid,dict(release,action='ABORT'))['state'],'REFUSED')
+     self.assertFalse((first.barrier/'abort.json').exists());self.assertIsNone(first.process.poll())
+     abort=dict(base(second),action='ABORT',release_id=rid,reason='shard s03 failed before release')
+     self.assertEqual(machine_control(api,mid,abort)['state'],'ABORTED');self.assertEqual(machine_control(api,mid,abort)['state'],'ABORTED')
+     self.assertEqual(json.loads((second.barrier/'abort.json').read_text()),dict(schema='campaign-external-barrier-abort-v1',release_id=rid,reason='shard s03 failed before release'))
+     self.assertEqual(machine_control(api,mid,dict(abort,action='RELEASE'))['state'],'REFUSED');self.assertFalse((second.barrier/'release.json').exists())
+     with self.assertRaises(ValueError):machine_control(api,mid,dict(abort,release_id='not-hex'))
+     (first.barrier/'ready.json').write_text('{"partial');probe=machine_control(api,mid,dict(base(first),action='PROBE'))
+     self.assertEqual((probe['state'],probe['barrier'],probe['observation_errors']),('LIVE',None,['ready.json']))
+     second.process.terminate();second.process.wait(timeout=5);save(second.identity.with_suffix('.terminal.json'),dict(second.row,supervisor_joined=True))
+     joined=machine_control(api,mid,dict(abort,release_id='e'*32));self.assertEqual(joined['state'],'JOINED');self.assertEqual(json.loads((second.barrier/'abort.json').read_text())['release_id'],rid)
+     with self.assertRaises(ValueError):machine_control(api,mid,dict(base(first),action='KILL'))
+     (Path(d)/'legacy').mkdir();legacy=self.Supervisor(Path(d)/'legacy',mid,sharded=False)
+     try:
+      probe=machine_control(api,mid,dict(base(legacy),action='PROBE'));self.assertEqual(set(probe),{'state','identity','identity_sha256'},'legacy ACK unchanged')
+      with self.assertRaises(ValueError):machine_control(api,mid,dict(base(legacy),action='RELEASE',release_id=rid,reason='no barrier'))
+      self.assertFalse(legacy.barrier.exists())
+     finally:legacy.close()
+    finally:first.close();second.close()
+  def test_shard_status_and_global_delivery_with_fake_api(self):
+   with tempfile.TemporaryDirectory()as d:
+    root=Path(d);mid='1234567890abcd';api=self.ExecAPI(mid);sup=self.Supervisor(root,mid);out=root/'out';out.mkdir(mode=0o700)
+    try:
+     base=dict(machine=mid,source_ref='a'*40,epoch=1,identity_path=str(sup.identity));ready=dict(schema='campaign-external-barrier-ready-v1',status='ready')
+     (sup.barrier/'ready.json').write_text(json.dumps(ready));probe=machine_control(api,mid,dict(base,action='PROBE'));shard_status(out,probe,mid)
+     status=json.loads(read(out/'shard-status.json'));self.assertEqual({k:status[k] for k in ('schema','state','barrier','infra','machine')},dict(schema='original600-shard-status-v1',state='LIVE',barrier=ready,infra=None,machine=mid))
+     shard_status(out,dict(probe,barrier=None),mid);self.assertIsNone(json.loads(read(out/'shard-status.json'))['barrier']);self.assertEqual([x.name for x in out.iterdir()],['shard-status.json'])
+     delivery={};calls=len(api.calls);deliver_global(api,mid,base,out,probe,delivery,False);self.assertEqual(len(api.calls),calls)
+     (out/'global-release.json').write_text('{"release_id":');(out/'global-release.json').chmod(0o600);deliver_global(api,mid,base,out,probe,delivery,False);self.assertEqual(len(api.calls),calls)
+     rid='a'*32;(out/'global-release.json').write_text(json.dumps(dict(release_id=rid,reason='all 20 shards ready')))
+     deliver_global(api,mid,base,out,probe,delivery,True);self.assertEqual(len(api.calls),calls,'a stopping owner releases no new work')
+     api.fail=1;deliver_global(api,mid,base,out,probe,delivery,False);self.assertEqual(json.loads(read(out/'global-release.pending.json'))['error'],'TimeoutError')
+     deliver_global(api,mid,base,out,probe,delivery,False);self.assertEqual(len(api.calls),calls+1,'retry waits for the bounded spacing')
+     delivery['release']=0;deliver_global(api,mid,base,out,probe,delivery,False);ack=json.loads(read(out/'global-release.ack.json'))
+     self.assertEqual((ack['state'],ack['release_id'],ack['attempts']),('RELEASED',rid,2));self.assertEqual(json.loads((sup.barrier/'release.json').read_text())['release_id'],rid)
+     calls=len(api.calls);delivery['release']=0;deliver_global(api,mid,base,out,probe,delivery,False);self.assertEqual(len(api.calls),calls,'ACK ends delivery')
+     (out/'global-abort.json').write_text(json.dumps(dict(release_id='b'*32,reason='late failure')));(out/'global-abort.json').chmod(0o600)
+     deliver_global(api,mid,base,out,probe,delivery,True);self.assertEqual(json.loads(read(out/'global-abort.refused.json'))['state'],'REFUSED')
+     self.assertFalse((sup.barrier/'abort.json').exists());self.assertIsNone(sup.process.poll(),'release/abort never signal the supervisor')
+     (out/'global-abort.refused.json').unlink();calls=len(api.calls);deliver_global(api,mid,base,out,dict(state='JOINED'),delivery,False)
+     self.assertEqual(len(api.calls),calls);self.assertEqual(json.loads(read(out/'global-abort.undelivered.json'))['supervisor_state'],'JOINED')
+    finally:sup.close()
  suite=unittest.defaultTestLoader.loadTestsFromTestCase(Tests);result=unittest.TextTestRunner().run(suite);return 0 if result.wasSuccessful()else 1
 if __name__=='__main__':
  p=argparse.ArgumentParser();p.add_argument('--self-test',action='store_true');p.add_argument('--config',type=Path);p.add_argument('--config-sha256');p.add_argument('--output',type=Path);args=p.parse_args()

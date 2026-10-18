@@ -194,7 +194,7 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
                 if not isinstance(proof,dict) or not isinstance(proof.get('native_marker'),dict):raise ValueError('invalid claim binding')
                 expected_successor=dict(controller_id=payload['machine'],harness_ref=payload['source_ref'],
                     owner_token=owner,run_id=fleet_id,task=task,campaign_job_id=ident,
-                    campaign_total_jobs=600,campaign_attempt=number)
+                    campaign_total_jobs=payload.get('campaign_total_jobs',600),campaign_attempt=number)
                 if (any(successor.get(k)!=v for k,v in expected_successor.items())
                     or any(type(successor.get(k))is not int for k in ('ordinal','campaign_total_jobs','campaign_attempt'))
                     or successor.get('ordinal')!=0 or successor.get('task_ref')!=ORIGINAL_TASK_REF
@@ -217,11 +217,20 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
             except (OSError,ValueError,TypeError,KeyError,UnicodeError,SyntaxError):unavailable.add(ident)
     return dict(proofs=proofs,unavailable_jobs=len(unavailable),inspected_logs=inspected,bytes_read=16*1024*1024-budget[0])
 
-def project(summary,startup=None,infra_early_stop="enabled"):
+def shard_job_ids(payload):
+    """A bound shard's exact group-wide IDs r{run}-j{(run-1)*width+index+1}; None without a shard."""
+    if 'task_indexes' not in payload:return None
+    width=payload['campaign_total_jobs']//payload['runs']
+    return {'r%03d-j%04d'%(run,(run-1)*width+index+1) for run in range(1,payload['runs']+1) for index in payload['task_indexes']}
+
+def project(summary,startup=None,infra_early_stop="enabled",total=600,threshold=30,job_ids=None):
     if infra_early_stop not in ("enabled","disabled"):raise ValueError("invalid infrastructure early-stop policy")
+    if type(total) is not int or total<1 or type(threshold) is not int or threshold<1:raise ValueError('invalid bound totals')
     jobs=summary['jobs']
-    if not isinstance(jobs,list) or type(summary.get('total_jobs')) is not int or summary['total_jobs']!=600 or len(jobs)!=600:
+    if not isinstance(jobs,list) or type(summary.get('total_jobs')) is not int or summary['total_jobs']!=total or len(jobs)!=total:
         raise ValueError('invalid original600 canonical jobs')
+    if job_ids is not None and {job.get('job_id') for job in jobs}!=job_ids:
+        raise ValueError('invalid shard canonical job identities')
     statuses={};infra=set();unknown_infra=set();attempts=0;terminal=0;unknown_failures=0;unknown_attempts=0;seen=set()
     for job in jobs:
         ident=job['job_id']
@@ -246,15 +255,15 @@ def project(summary,startup=None,infra_early_stop="enabled"):
                terminal_attempt_records_with_unknown_infra=unknown_attempts,
                jobs_with_unknown_terminal_infra=len(unknown_infra-infra),
                observed_jobs=len(jobs),benchmark_success_inferred=False)
-    value.update(infra_early_stop=infra_early_stop,infra_stop_threshold=30,infra_threshold_breached=len(infra)>=30,infra_stop_required=infra_early_stop=='enabled' and len(infra)>=30)
+    value.update(infra_early_stop=infra_early_stop,infra_stop_threshold=threshold,infra_threshold_breached=len(infra)>=threshold,infra_stop_required=infra_early_stop=='enabled' and len(infra)>=threshold)
     for key in ('campaign_id','total_jobs','startup_cohorts','finished_at','started_at'):
         if key in summary:value[key]=summary[key]
     if startup is not None:
         roots={proof['job_id'] for proof in startup['proofs']}
         value.update(startup_evidence_schema='original600-startup-failure-v1',
                      original_startup_infra_affected_jobs=len(roots),
-                     combined_infra_affected_jobs=len(infra|roots),infra_stop_threshold=30,
-                     infra_threshold_breached=len(infra|roots)>=30,infra_stop_required=infra_early_stop=='enabled' and len(infra|roots)>=30,
+                     combined_infra_affected_jobs=len(infra|roots),infra_stop_threshold=threshold,
+                     infra_threshold_breached=len(infra|roots)>=threshold,infra_stop_required=infra_early_stop=='enabled' and len(infra|roots)>=threshold,
                      original_startup_failure_evidence=startup['proofs'],
                      startup_evidence_unavailable_jobs=startup['unavailable_jobs'],
                      startup_evidence_inspected_logs=startup['inspected_logs'],
@@ -285,9 +294,10 @@ def guest_status(payload,repo,boot_id):
     if summary.get('campaign_id')!=campaign or summary.get('e2e_started_at_epoch')!=payload['epoch']:
         raise ValueError('canonical campaign/original epoch mismatch')
     # Validate the canonical shape before using any job-selected evidence paths.
-    project(summary,infra_early_stop=policy)
+    bound=dict(total=payload.get('total_jobs',600),threshold=payload.get('infra_stop_threshold',30),job_ids=shard_job_ids(payload))
+    project(summary,infra_early_stop=policy,**bound)
     startup=startup_evidence(summary,repo,path.parent,payload)
-    return dict(base,status='SUMMARY',summary=project(summary,startup,policy))
+    return dict(base,status='SUMMARY',summary=project(summary,startup,policy,**bound))
 
 if __name__=='__main__':
     payload=json.loads(base64.b64decode(sys.argv[1]))
@@ -376,9 +386,15 @@ def binding(run,config=None,agents_env=None):
     root=Path(cfg['source_root']);need(root.resolve(strict=True)==root,'physical source checkout required')
     credential=Path(agents_env).absolute() if agents_env else Path(auth['env_files']['agents']['path'])
     need(digest(read(credential))==auth['env_files']['agents']['sha256'],'selected complete agents input changed')
+    payload=dict(machine=mid,source_ref=ref,epoch=caller['epoch'],identity_path=caller['identity_path'],infra_early_stop=policy)
+    if cfg.get('shard') is not None:
+        # Totals come from the bound shard config; absent shard keeps the original 600/30 payload.
+        shard=cfg['shard']
+        payload.update(total_jobs=RUNNER['shard_shape'](shard),campaign_total_jobs=shard['group_total'],infra_stop_threshold=shard.get('infra_threshold',30),
+                       task_indexes=shard['task_indexes'],runs=shard['runs'])
     return dict(mode='REMOTE',app=auth['app'],machine=mid,source_ref=ref,root=root,
                 agents_env=credential,credential_sha256=auth['env_files']['agents']['sha256'],source_files=cfg['source_files'],
-                payload=dict(machine=mid,source_ref=ref,epoch=caller['epoch'],identity_path=caller['identity_path'],infra_early_stop=policy))
+                payload=payload)
 
 
 def status_command(payload):

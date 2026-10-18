@@ -219,4 +219,98 @@ while True:time.sleep(.01)
    finally:
     for child in children:
      if child.poll()is None:child.terminate();child.wait(timeout=5)
+def shard_fixture(manifest,**changes):
+ import hashlib
+ names=[manifest[1],manifest[50],manifest[199]]
+ value=dict(index=2,count=20,tasks=names,tasks_sha256=hashlib.sha256(('\n'.join(names)+'\n').encode()).hexdigest(),task_indexes=[1,50,199],runs=3,group_run_id='campaign-group-fixture',group_total=600,group_started_at=1792287011.18)
+ value.update(changes);return value
+def shard_summary(shard,infra=0):
+ # The same r{run}-j{global index} IDs a single 200-task controller assigns.
+ jobs=[]
+ for run in range(1,shard['runs']+1):
+  for position,task in zip(shard['task_indexes'],shard['tasks']):
+   jobs.append(dict(job_id=f"r{run:03d}-j{(run-1)*(shard['group_total']//shard['runs'])+position+1:04d}",task=task,run=run,attempts=[dict(attempt=1,status='failed',finished_at=1,infra_failure=True)] if len(jobs)<infra else []))
+ return dict(campaign_id='campaign',e2e_started_at_epoch=1,total_jobs=len(jobs),concurrency=len(jobs),group_total=shard['group_total'],jobs=jobs)
+class Shard(unittest.TestCase):
+ def setUp(self):self.tasks=json.loads((Path(__file__).parent/'fixtures/original600-tasks.json').read_bytes())
+ def test_shard_parameterized_membership_and_threshold(self):
+  shard=shard_fixture(self.tasks);self.assertEqual(S['validate_shard'](shard,self.tasks),9)
+  v=shard_summary(shard,1);manifest=dict(cohort_id='c001',jobs={j['job_id']:None for j in v['jobs']},e2e_deadline_monotonic=5401)
+  result=S['validate_snapshot'](v,manifest,1,'campaign',5401,self.tasks,shard);self.assertEqual((result['infra_true'],result['trigger']),(1,False))
+  self.assertTrue(S['validate_snapshot'](shard_summary(shard,9),dict(manifest),1,'campaign',5401,self.tasks,shard)['trigger']is False,'default threshold stays 30')
+  low=shard_fixture(self.tasks,infra_threshold=2)
+  self.assertFalse(S['validate_snapshot'](v,manifest,1,'campaign',5401,self.tasks,low)['trigger']);self.assertTrue(S['validate_snapshot'](shard_summary(low,2),manifest,1,'campaign',5401,self.tasks,low)['trigger'])
+  self.assertTrue(S['fold'](summary(30))['trigger']);self.assertFalse(S['fold'](summary(30),31)['trigger'])
+  with self.assertRaises(ValueError):S['fold'](summary(1),0)
+  with self.assertRaisesRegex(ValueError,'600 membership'):S['validate_snapshot'](v,manifest,1,'campaign',5401,self.tasks)
+  legacy=summary(1);legacy_manifest=dict(cohort_id='c001',jobs={j['job_id']:None for j in legacy['jobs']},e2e_deadline_monotonic=5401)
+  with self.assertRaisesRegex(ValueError,'9 membership'):S['validate_snapshot'](legacy,legacy_manifest,1,'campaign',5401,self.tasks,shard)
+  self.assertEqual([j['job_id'] for j in v['jobs']][:4],['r001-j0002','r001-j0051','r001-j0200','r002-j0202'])
+  # A narrower group (T = group_total/runs = 100) shares one ID space across its shards.
+  narrow=shard_fixture(self.tasks,tasks=[self.tasks[1],self.tasks[50],self.tasks[99]],task_indexes=[1,50,99],group_total=300)
+  narrow['tasks_sha256']=__import__('hashlib').sha256(('\n'.join(narrow['tasks'])+'\n').encode()).hexdigest();n=shard_summary(narrow)
+  self.assertEqual(sorted(j['job_id'] for j in n['jobs'] if j['run']==2),['r002-j0102','r002-j0151','r002-j0200'])
+  self.assertFalse(S['validate_snapshot'](n,dict(manifest,jobs={j['job_id']:None for j in n['jobs']}),1,'campaign',5401,self.tasks,narrow)['trigger'])
+  with self.assertRaisesRegex(ValueError,'group width'):S['validate_shard'](dict(shard,group_total=300),self.tasks)
+  ungrouped=copy.deepcopy(v);del ungrouped['group_total']
+  with self.assertRaisesRegex(ValueError,'group total changed'):S['validate_snapshot'](ungrouped,manifest,1,'campaign',5401,self.tasks,shard)
+  for mutate in (lambda x:x['jobs'][0].update(job_id='r001-j0001'),lambda x:x['jobs'][0].update(job_id='r002-j0002'),lambda x:x['jobs'][0].update(job_id='s02-r001-j0002'),
+                 lambda x:x['jobs'][0].update(task=self.tasks[0]),lambda x:x['jobs'][0].update(run=2)):
+   bad=copy.deepcopy(v);mutate(bad);bad_manifest=dict(manifest,jobs={j['job_id']:None for j in bad['jobs']})
+   with self.subTest(job=bad['jobs'][0]),self.assertRaises(ValueError):S['validate_snapshot'](bad,bad_manifest,1,'campaign',5401,self.tasks,shard)
+  swapped=[self.tasks[50],self.tasks[1],self.tasks[199]];import hashlib
+  for bad in (dict(tasks=swapped,tasks_sha256=hashlib.sha256(('\n'.join(swapped)+'\n').encode()).hexdigest(),task_indexes=[50,1,199]),dict(task_indexes=[1,51,199]),dict(task_indexes=[1,50]),
+              dict(task_indexes=[1,50,200]),dict(task_indexes=[1,50,True]),dict(tasks_sha256='0'*64),dict(job_prefix='s02-'),dict(runs=0),dict(index=20),dict(group_total=8),dict(group_total=598),dict(extra=True)):
+   with self.subTest(bad=bad),self.assertRaises(ValueError):S['validate_shard'](shard_fixture(self.tasks,**bad),self.tasks)
+ def run_main(self,repo,shard,environment,infra=0,ending=None):
+  import hashlib
+  tasks_path=Path(__file__).parent/'fixtures/original600-tasks.json';epoch=time.time();ref='a'*40;context=repo/'.context';context.mkdir(exist_ok=True)
+  identity=context/'original600-supervisor.fixture.json';identity.write_text(json.dumps(dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth=S['birth'](os.getpid()),machine='1234567890abcd',source_ref=ref,epoch=epoch)));shard_path=identity.with_suffix('.shard.json');shard_path.write_text(json.dumps(shard,sort_keys=True)+'\n')
+  script=repo/'run-bench-campaign.py'
+  script.write_text("import fcntl,signal,sys,time\nfrom pathlib import Path\np=Path(sys.argv[1]);f=(p/'startup-cohorts/parent.lock').open('w');fcntl.flock(f,fcntl.LOCK_EX)\ndef done(*a):\n (p/'ending').write_text('term');sys.exit(7)\nsignal.signal(signal.SIGTERM,done);(p/'ready').write_text('ready');time.sleep(.6);(p/'ending').write_text('natural')\n")
+  original_popen=subprocess.Popen;children=[];campaigns=[]
+  def spawn(*unused,**kwargs):
+   cid=kwargs['env']['RUN_BENCH_CAMPAIGN_ID'];campaign=repo/'.context/benchmarks/campaigns'/cid;(campaign/'startup-cohorts/c001').mkdir(parents=True)
+   value=shard_summary(shard,infra);value.update(campaign_id=cid,e2e_started_at_epoch=epoch)
+   (campaign/'summary.json').write_text(json.dumps(value));(campaign/'startup-cohorts/c001/manifest.json').write_text(json.dumps(dict(cohort_id='c001',jobs={j['job_id']:None for j in value['jobs']},e2e_deadline_monotonic=time.monotonic()+5400)))
+   child=original_popen([sys.executable,str(script),str(campaign)],cwd=repo/'agents');children.append(child);campaigns.append(campaign)
+   end=time.monotonic()+5
+   while not(campaign/'ready').exists()and time.monotonic()<end:time.sleep(.01)
+   return child
+  jobs=str(len(shard['tasks'])*shard['runs'])
+  command=['operator',str(epoch),'bash','scripts/run-bench','--strict-barrier','--concurrency',jobs,'-k',str(shard['runs']),'--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at',str(epoch),'--ref','570830dbf17635e13d16a6f03b4d705f6b6443b1',*shard['tasks']]
+  env=dict(REVIEWED_OPERATOR_ROOT=str(repo),REVIEWED_OPERATOR_SOURCE_REF=ref,REVIEWED_OPERATOR_TASKS=str(tasks_path),REVIEWED_OPERATOR_TASKS_SHA256=hashlib.sha256(tasks_path.read_bytes()).hexdigest(),
+           REVIEWED_OPERATOR_IDENTITY_PATH=str(identity),REVIEWED_OPERATOR_SHARD=str(shard_path),REVIEWED_OPERATOR_SHARD_SHA256=hashlib.sha256(shard_path.read_bytes()).hexdigest(),
+           RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER=str(identity.with_suffix('.barrier')),RUN_BENCH_CAMPAIGN_TASK_INDEXES=','.join(map(str,shard['task_indexes'])),RUN_BENCH_CAMPAIGN_GROUP_TOTAL=str(shard['group_total']),
+           RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT=str(shard['group_started_at']),BENCHMARK_HUB_GROUP_RUN_ID=shard['group_run_id'],CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='1')
+  env.update(environment);handlers={sig:signal.getsignal(sig)for sig in(signal.SIGTERM,signal.SIGINT)}
+  try:
+   with patch.dict(os.environ,env),patch.object(sys,'argv',command),patch.object(subprocess,'Popen',side_effect=spawn),patch.object(subprocess,'check_output',return_value=ref+'\n'):
+    result=S['main']()
+   return result,campaigns,children,identity
+  finally:
+   for child in children:
+    if child.poll()is None:child.terminate();child.wait(timeout=5)
+   for sig,handler in handlers.items():signal.signal(sig,handler)
+ def test_main_binds_shard_inputs_and_publishes_infra_json(self):
+  for threshold,infra,expected_code,ending in ((None,1,0,'natural'),(2,2,7,'term')):
+   with self.subTest(threshold=threshold),tempfile.TemporaryDirectory()as name:
+    repo=Path(name);(repo/'agents').mkdir();shard=shard_fixture(self.tasks,**({}if threshold is None else dict(infra_threshold=threshold)))
+    result,campaigns,children,identity=self.run_main(repo,shard,{},infra)
+    self.assertEqual(result,expected_code);self.assertEqual((campaigns[0]/'ending').read_text(),ending)
+    status=json.loads(identity.with_suffix('.infra.json').read_bytes());self.assertEqual({k:status[k] for k in ('schema','infra_true','unique_jobs')},dict(schema='original600-shard-infra-v1',infra_true=infra,unique_jobs=9))
+    self.assertEqual(identity.with_suffix('.infra.json').stat().st_mode&0o777,0o600);self.assertEqual(sorted(x.name for x in identity.parent.iterdir() if x.name.startswith('.original600')),[])
+ def test_shard_controls_and_inputs_refused_before_campaign_spawn(self):
+  for environment in (dict(RUN_BENCH_CAMPAIGN_TASK_INDEXES='1,50'),dict(BENCHMARK_HUB_GROUP_RUN_ID='other'),dict(RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER='/tmp/elsewhere'),
+                      dict(CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='0'),dict(REVIEWED_OPERATOR_SHARD_SHA256='0'*64)):
+   with self.subTest(environment=environment),tempfile.TemporaryDirectory()as name:
+    repo=Path(name);(repo/'agents').mkdir()
+    with self.assertRaises(ValueError):self.run_main(repo,shard_fixture(self.tasks),environment)
+    self.assertFalse((repo/'.context/benchmarks').exists())
+class RunnerSelfTest(unittest.TestCase):
+ def test_runner_built_in_self_test_runs_in_this_registered_suite(self):
+  # The runner's shard argv/env, RELEASE/ABORT and delivery controls live in its
+  # built-in self-test; this registered suite executes it unchanged.
+  result=subprocess.run([sys.executable,str(ROOT/'cloudbench-original600-runner.py'),'--self-test'],capture_output=True,text=True,timeout=120)
+  self.assertEqual(result.returncode,0,result.stderr[-4000:]);self.assertRegex(result.stderr,r'Ran [0-9]+ tests')
 if __name__=='__main__':unittest.main()

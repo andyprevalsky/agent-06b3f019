@@ -183,8 +183,49 @@ class Status(unittest.TestCase):
                 write(path,dict(summary,**changed))
                 with self.assertRaises(ValueError):scope['guest_status'](payload,repo,'boot-fixture')
             write(path,summary)
+            # A bound shard reads its own job count and exact group-wide IDs from the payload.
+            shard_jobs=[dict(job_id='r%03d-j%04d'%(r,(r-1)*200+i+1),status='queued',attempts=[]) for r in (1,2,3) for i in (0,7,9)]
+            write(path,dict(summary,total_jobs=9,jobs=shard_jobs))
+            sharded=dict(payload,total_jobs=9,campaign_total_jobs=600,infra_stop_threshold=30,task_indexes=[0,7,9],runs=3)
+            self.assertEqual(scope['guest_status'](sharded,repo,'boot-fixture')['summary']['observed_jobs'],9)
+            for wrong in (payload,dict(sharded,task_indexes=[0,7,8]),dict(sharded,campaign_total_jobs=300)):
+                with self.assertRaises(ValueError):scope['guest_status'](wrong,repo,'boot-fixture')
+            write(path,summary)
             with self.assertRaises(ValueError):scope['guest_status'](dict(payload,identity_path='/private/arbitrary.json'),repo,'boot-fixture')
             with self.assertRaises(ValueError):scope['guest_status'](dict(payload,epoch=self.epoch+1),repo,'boot-fixture')
+
+    def test_shard_totals_come_from_bound_config_not_fixed_600(self):
+        cfg=json.loads(self.cfg.read_bytes())
+        legacy=M['binding'](self.run)['payload']
+        self.assertEqual(set(legacy),{'machine','source_ref','epoch','identity_path','infra_early_stop'})
+        names=['task-a','task-b','task-c']
+        shard=dict(index=0,count=20,tasks=names,tasks_sha256=M['digest'](('\n'.join(names)+'\n').encode()),task_indexes=[0,7,9],runs=3,
+                   group_run_id='campaign-group-fixture',group_total=600,group_started_at=self.epoch)
+        write(self.cfg,dict(cfg,shard=shard))
+        payload=M['binding'](self.run)['payload']
+        added=('total_jobs','campaign_total_jobs','infra_stop_threshold','task_indexes','runs')
+        self.assertEqual({k:payload[k] for k in added},dict(total_jobs=9,campaign_total_jobs=600,infra_stop_threshold=30,task_indexes=[0,7,9],runs=3))
+        self.assertEqual({k:v for k,v in payload.items() if k not in added},legacy)
+        write(self.cfg,dict(cfg,shard=dict(shard,infra_threshold=2)))
+        self.assertEqual(M['binding'](self.run)['payload']['infra_stop_threshold'],2)
+        write(self.cfg,dict(cfg,shard=dict(shard,runs=0)))
+        with self.assertRaises(ValueError):M['binding'](self.run)
+        scope={'__name__':'offline_status_payload'};exec(M['REMOTE'],scope)
+        jobs=[dict(job_id='r%03d-j%04d'%(1+i//3,(i//3)*200+[0,7,9][i%3]+1),task=names[i%3],status='failed' if i<2 else 'queued',
+                   attempts=[dict(attempt=1,status='failed',finished_at=1,infra_failure=True)] if i<2 else []) for i in range(9)]
+        summary=dict(total_jobs=9,jobs=jobs)
+        counts=scope['project'](summary,None,'enabled',total=9,threshold=2)
+        self.assertEqual((counts['observed_jobs'],counts['canonical_infra_affected_jobs'],counts['infra_stop_threshold'],counts['infra_stop_required']),(9,2,2,True))
+        self.assertFalse(scope['project'](summary,None,'enabled',total=9)['infra_threshold_breached'])
+        with self.assertRaises(ValueError):scope['project'](summary)
+        with self.assertRaises(ValueError):scope['project'](dict(total_jobs=600,jobs=[dict(job_id=str(i),attempts=[]) for i in range(600)]),total=9)
+        self.assertEqual(sorted(j['job_id'] for j in jobs)[:3],['r001-j0001','r001-j0008','r001-j0010'])
+        ids=scope['shard_job_ids'](dict(payload,task_indexes=[0,7,9],runs=3,campaign_total_jobs=600))
+        self.assertEqual(ids,{j['job_id'] for j in jobs});self.assertIsNone(scope['shard_job_ids'](legacy))
+        self.assertEqual(scope['project'](summary,None,'enabled',total=9,threshold=2,job_ids=ids)['observed_jobs'],9)
+        renamed=dict(summary,jobs=[dict(jobs[0],job_id='r001-j0002')]+jobs[1:])
+        with self.assertRaisesRegex(ValueError,'shard canonical job identities'):scope['project'](renamed,None,'enabled',total=9,job_ids=ids)
+        self.assertEqual(scope['project'](renamed,None,'enabled',total=9)['observed_jobs'],9)
 
     def test_cancelled_and_unfinished_exact_true_infra_count_without_terminal_credit(self):
         scope={'__name__':'offline_status_payload'};exec(M['REMOTE'],scope)
@@ -408,6 +449,13 @@ class Status(unittest.TestCase):
         self.assertEqual(counts["terminal_attempts"], 0)
         self.assertFalse(counts["benchmark_success_inferred"])
         self.assertEqual(sum(p['reason']=='shared_environment_identity_changed' for p in counts['original_startup_failure_evidence']),2)
+        # A shard binds archived-reuse successors to its group total, not a fixed 600.
+        unsharded = payload
+        payload = dict(unsharded, campaign_total_jobs=599)
+        self.assertEqual(observe()['original_startup_infra_affected_jobs'], 2)
+        payload = dict(unsharded, campaign_total_jobs=600)
+        self.assertEqual(observe()['original_startup_infra_affected_jobs'], 30)
+        payload = unsharded
         cohort['jobs']['r001-j0029']=9999;write(cohort_path,cohort)
         self.assertEqual(observe()['original_startup_infra_affected_jobs'],29)
         cohort['jobs']['r001-j0029']=2029;write(cohort_path,cohort)
