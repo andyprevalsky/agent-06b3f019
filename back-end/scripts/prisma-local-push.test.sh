@@ -53,9 +53,16 @@ NORMALIZE_LOCAL_USER_PHONES_DRY_RUN=1 bash "$NORMALIZE" "$LOCAL_URL" | grep -Fq 
 
 # Exercise the real SQL on a scratch database when a local Postgres is up:
 # blanks become NULL, the oldest row keeps a duplicated phone, reruns are no-ops.
-if command -v psql >/dev/null 2>&1 && command -v pg_isready >/dev/null 2>&1 &&
-  pg_isready -h localhost -p 5432 -q 2>/dev/null; then
-  ADMIN_URL=postgresql://postgres:postgres@localhost:5432/postgres
+ADMIN_URL=postgresql://postgres:postgres@localhost:5432/postgres
+# Only when a local server accepts these credentials with a role that may create
+# the scratch database; otherwise the SQL check is reported as skipped.
+can_create_scratch_db() {
+  command -v psql >/dev/null 2>&1 || return 1
+  [ "$(psql "$ADMIN_URL" -Atc \
+    'SELECT rolsuper OR rolcreatedb FROM pg_roles WHERE rolname = current_user' \
+    2>/dev/null)" = t ]
+}
+if can_create_scratch_db; then
   SCRATCH_DB="phone_normalize_test_$$"
   SCRATCH_URL="postgresql://postgres:postgres@localhost:5432/$SCRATCH_DB"
   psql "$ADMIN_URL" -qc "CREATE DATABASE $SCRATCH_DB" >/dev/null

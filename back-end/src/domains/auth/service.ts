@@ -143,6 +143,14 @@ async function handleNewUser(
   const fullName = nameParts.length > 0 ? nameParts.join(' ') : null;
   const normalizedEmail = normalizeEmail(email);
 
+  // Another account may already own this number in either stored form (legacy
+  // bare digits never collide with '+digits' on the unique index).
+  const owner = await repo.findUserByPhone(phone);
+  if (owner !== null && owner.userId !== userId) {
+    log.warn('OTP login phone already belongs to another account', { user_id: userId });
+    return false;
+  }
+
   try {
     await repo.createUser({
       userId,
@@ -177,6 +185,26 @@ async function handleNewUser(
     await mergeAnonymousUserResources(anonymousUserId, userId);
   }
   return true;
+}
+
+/**
+ * Apply OTP-login updates. If another account claimed the phone after the
+ * owner check (unique User.phone), keep the login and the other updates and
+ * simply leave the phone off this account.
+ */
+async function applyUserUpdates(
+  userId: string,
+  updates: { phone?: string; name?: string; isAnonymous?: boolean }
+): Promise<void> {
+  try {
+    await repo.updateUser(userId, updates);
+  } catch (error) {
+    if (!isUniqueViolation(error) || updates.phone === undefined) throw error;
+    const rest = { ...updates };
+    delete rest.phone;
+    log.warn('Phone was claimed by another account during OTP login', { user_id: userId });
+    if (Object.keys(rest).length > 0) await repo.updateUser(userId, rest);
+  }
 }
 
 /** Handle updating an existing user record during OTP verification. */
@@ -225,7 +253,7 @@ async function handleExistingUser(
 
   if (existingUser.isAnonymous) {
     updates.isAnonymous = false;
-    await repo.updateUser(userId, updates);
+    await applyUserUpdates(userId, updates);
     let bonusGranted = true;
     try {
       await createSignupBonusCredit(userId);
@@ -241,7 +269,7 @@ async function handleExistingUser(
       bonusGranted,
     });
   } else if (Object.keys(updates).length > 0) {
-    await repo.updateUser(userId, updates);
+    await applyUserUpdates(userId, updates);
     // Log field names only — `updates` can carry PII (email, name).
     log.info('Updated user', { user_id: userId, updatedFields: Object.keys(updates).join(',') });
   } else {
