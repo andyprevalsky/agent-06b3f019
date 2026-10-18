@@ -16679,24 +16679,73 @@ PY
     # started its poller tasks; worker.py flips it back to 503 on fatal exit.
     # Pair it with the live process check so a stale HTTP response can never
     # preserve capacity after the worker process has gone away.
-    fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
-        -C "bash -c \"pgrep -f 'python [w]orker.py' >/dev/null && curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:$FLEET_WORKER_HEALTH_PORT/health\"" \
-        >/dev/null 2>&1
+    # Returns 0 healthy, 1 when the worker itself reported a missing process or
+    # failed /health, and 75 when no remote verdict arrived (controller agent,
+    # tunnel or SSH transport failure). Only the remote shell prints the
+    # verdict line; the quoted split keeps it out of the command text.
+    local output rc=0
+    output="$(fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+        -C "bash -c \"pgrep -f 'python [w]orker.py' >/dev/null && curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:$FLEET_WORKER_HEALTH_PORT/health && exit 0; echo cloudbench-worker-health=unhealth''y; exit 1\"" 2>&1)" || rc=$?
+    [ "$rc" = 0 ] && return 0
+    if [ -n "$out" ]; then
+        printf '[%s] health probe rc=%s\n%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "$output" \
+            >> "$out/worker-$wid.health.log" 2>/dev/null || true
+    fi
+    case $'\n'"${output//$'\r'/}"$'\n' in
+        *$'\n'cloudbench-worker-health=unhealthy$'\n'*) return 1 ;;
+    esac
+    return 75
+}
+
+worker_operational_reobserved() {  # <machine-id> <bench-output-dir>
+    # A transport failure is a missing observation, not a negative one. Retry
+    # only that case, boundedly; a remote unhealthy verdict is final at once.
+    local wid="$1" out="$2" attempt=1 rc
+    local attempts="${CLOUDBENCH_FINAL_WORKER_HEALTH_ATTEMPTS:-3}"
+    local delay="${CLOUDBENCH_FINAL_WORKER_HEALTH_RETRY_SECONDS:-5}"
+    case "$attempts" in ''|*[!0-9]*|0) return 1 ;; esac
+    case "$delay" in ''|*[!0-9]*) return 1 ;; esac
+    while :; do
+        rc=0
+        worker_operational "$wid" "$out" || rc=$?
+        [ "$rc" = 75 ] && [ "$attempt" -lt "$attempts" ] || return "$rc"
+        attempt=$((attempt + 1))
+        sleep "$delay"
+    done
 }
 
 ready_workers_operational() {  # ready_workers_operational <bench-output-dir>
-    local out="$1" wid pid failed=0
+    # 0 = every ready worker observed healthy; 1 = some worker reported itself
+    # unhealthy; 75 = some worker stayed unobservable through its retries.
+    local out="$1" wid pid rc result=0
     local -a probe_pids=()
     [ -s "$out/worker-ready.ids" ] || return 0
     while read -r wid; do
         [ -n "$wid" ] || continue
-        worker_operational "$wid" "$out" &
+        worker_operational_reobserved "$wid" "$out" &
         probe_pids+=("$!")
     done < "$out/worker-ready.ids"
     for pid in "${probe_pids[@]}"; do
-        wait "$pid" || failed=1
+        rc=0
+        wait "$pid" || rc=$?
+        case "$rc" in
+            0) ;;
+            75) [ "$result" = 1 ] || result=75 ;;
+            *) result=1 ;;
+        esac
     done
-    [ "$failed" = "0" ]
+    return "$result"
+}
+
+mandatory_worker_health_acceptable() {  # <bench-output-dir> <bench>
+    local rc=0
+    ready_workers_operational "$1" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        75) echo "❌ [$2] mandatory autoscaler worker health unobservable before final acceptance: controller SSH transport failed on every bounded probe (see worker-*.health.log)" >&2 ;;
+        *) echo "❌ [$2] mandatory autoscaler worker became unhealthy before final acceptance" >&2 ;;
+    esac
+    return 1
 }
 
 CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
@@ -18608,8 +18657,7 @@ for j in "${!AUTOSCALER_PIDS[@]}"; do
     elif ! printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler did not persist desired worker capacity" >&2
         AUTOSCALER_FAILURE=1
-    elif ! ready_workers_operational "${CHILD_OUT[$j]}"; then
-        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler worker became unhealthy before final acceptance" >&2
+    elif ! mandatory_worker_health_acceptable "${CHILD_OUT[$j]}" "${CHILD_BENCH[$j]}"; then
         AUTOSCALER_FAILURE=1
     elif [ "$tracked_workers" != "$ready_workers" ] \
         || find "${CHILD_OUT[$j]}" -maxdepth 1 -name 'worker-*.pending' -print -quit 2>/dev/null | grep -q .; then
