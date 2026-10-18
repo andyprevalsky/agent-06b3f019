@@ -756,7 +756,8 @@ def summary_from_export(export):
         return None
     with tarfile.open(archive, 'r:gz') as stream:
         for member in stream:
-            if member.isfile() and re.search(r'/\.context/benchmarks/campaigns/[^/]+/summary\.json$', member.name):
+            # The controller export stores the workspace .context directory as context/.
+            if member.isfile() and re.search(r'(^|/)\.?context/benchmarks/campaigns/[^/]+/summary\.json$', member.name):
                 return json.loads(stream.extractfile(member).read())
     return None
 
@@ -829,7 +830,7 @@ def sharded_run(args, root, pins, runner, github, plan):
         extra_destroying=cap['conservative_extra_destroying_bench_objects'], planned_shared_cpus=planned,
         baseline_shared_cpus=baseline, controllers=controllers)
     group_id = 'original600-' + str(time.time_ns())
-    shards = []
+    shards, shard_objects = [], {}
     for item in plan['shards']:
         shard_dir = directory / ('shard-%02d' % item['index'])
         shard_dir.mkdir(mode=0o700)
@@ -837,6 +838,7 @@ def sharded_run(args, root, pins, runner, github, plan):
                      group_total=copies, group_started_at=started_at)
         config = prepare(args, root, pins, runner, shard_dir, cap, started_at=started_at, shard=shard,
                          runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies)
+        shard_objects[item['index']] = shard
         shards.append(dict(index=item['index'], out=shard_dir / 'run', config=str(config),
                            config_sha256=digest(runner['read'](config))))
     runner['save'](directory / 'shards.private.json', dict(plan=plan, runtime_env=env, group_run_id=group_id,
@@ -844,9 +846,9 @@ def sharded_run(args, root, pins, runner, github, plan):
     runner['save'](directory / 'controller-launch.intent.json', dict(sharded=True, controllers=controllers,
                    shards=[dict(config_path=s['config'], config_sha256=s['config_sha256'], run_directory=str(s['out']))
                            for s in shards]))
-    shard_objects = [dict(tasks=s['tasks'], task_indexes=s['task_indexes'], runs=s['runs']) for s in plan['shards']]
+    group_shards = [dict(tasks=s['tasks'], task_indexes=s['task_indexes'], runs=s['runs']) for s in plan['shards']]
     try:
-        group_registered = publish_shard_group(root, directory, args, runner, group_id, started_at, shard_objects)
+        group_registered = publish_shard_group(root, directory, args, runner, group_id, started_at, group_shards)
     except Exception as error:  # Hub visibility is reported, never a reason to skip release or cleanup
         group_registered = False
         print(json.dumps(dict(status='HUB_GROUP_REGISTRATION_WARNING', error=type(error).__name__)), flush=True)
@@ -861,8 +863,32 @@ def sharded_run(args, root, pins, runner, github, plan):
                                      shard['config_sha256'], '--output', str(shard['out'])],
                                     cwd=root, env=env_vars, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
+    def respawn(shard):
+        """A fresh attempt for a shard that created nothing (or verifiably released it) before release."""
+        index = shard['index']
+        shard_dir = directory / ('shard-%02d' % index)
+        attempt_dir = shard_dir / ('attempt-%02d' % (len(list(shard_dir.glob('attempt-[0-9]*'))) + 2))
+        attempt_dir.mkdir(mode=0o700)
+        bound = shard_objects[index]
+        slots = coordinator['capacity_demand'](len(bound['tasks']) * bound['runs'], 1)
+        with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
+            fresh = capacity_snapshot(capture['Fly'], token, args.org, attempt_dir, args.extra_destroying_count)
+        fresh.update(qualified_reuse_count=0, new_machine_demand=slots, qualified_ids=[], new_controller_slots=1,
+                     requested_original_primary_slots=len(bound['tasks']) * bound['runs'], retry_of_shard=index)
+        if fresh['available_slots_conservative'] < slots:
+            raise ValueError('insufficient measured capacity for a shard retry')
+        runner['save'](attempt_dir / 'capacity-proof.private.json', fresh)
+        fresh['proof_path'] = str(attempt_dir / 'capacity-proof.private.json')
+        config = prepare(args, root, pins, runner, attempt_dir, fresh, started_at=started_at, shard=bound,
+                         runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies)
+        replacement = dict(index=index, out=attempt_dir / 'run', config=str(config),
+                           config_sha256=digest(runner['read'](config)))
+        print(json.dumps(dict(status='SHARD_RETRY', shard=index, directory=str(attempt_dir))), flush=True)
+        return replacement, spawn(replacement)
+
     record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=copies,
-                                       infra_early_stop=args.infra_early_stop)
+                                       infra_early_stop=args.infra_early_stop, respawn=respawn,
+                                       stagger_seconds=coordinator['DEFAULT_SPAWN_STAGGER_SECONDS'])
     summaries = [summary_from_export(Path(s['out']) / 'export') for s in shards]
     merged = coordinator['merge']([v for v in summaries if v is not None], copies)
     merged.update(shards_without_summary=[s['index'] for s, v in zip(shards, summaries) if v is None],
@@ -871,7 +897,7 @@ def sharded_run(args, root, pins, runner, github, plan):
                 for summary in summaries if summary for job in summary.get('jobs') or []}
     try:
         merged['hub_group_final_published'] = publish_shard_group(
-            root, directory, args, runner, group_id, started_at, shard_objects, outcomes,
+            root, directory, args, runner, group_id, started_at, group_shards, outcomes,
             dict(status='completed' if not merged['missing_jobs'] else 'failed',
                  finished_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                  wall_clock_seconds=round(time.time() - started_at, 3)))

@@ -200,6 +200,70 @@ class Coordination(unittest.TestCase):
         self.assertIsNotNone(record['aborted_at'])
         self.assertTrue((late / 'global-abort.json').exists())
 
+    def retry_world(self, terminal, retry_outcome='ready'):
+        """Shard 1's first runner ends before release with `terminal`; respawns behave per retry_outcome."""
+        scripts = [{0: ('ready', 0, None), 30: ('released', 0, 0)}, {0: (None, 0, None), 3: (None, 0, 1)}]
+        world = World(self.tmp.name, scripts)
+        first = world.runners[1]
+        original_tick = first.tick
+
+        def tick(n):
+            original_tick(n)
+            if first.code is not None and not (first.out / 'terminal.json').exists():
+                (first.out / 'terminal.json').write_text(json.dumps(dict(status=terminal)))
+        first.tick = tick
+        respawned = []
+
+        def respawn(shard):
+            out = Path(self.tmp.name) / f"shard-{shard['index']:02d}-attempt-{len(respawned) + 2}"
+            out.mkdir()
+            if retry_outcome == 'ready':
+                runner = FakeRunner(out, {0: ('waiting', 0, None), 2: ('ready', 0, None), 30: ('released', 0, 0)})
+            else:
+                runner = FakeRunner(out, {0: (None, 0, None), 2: (None, 0, 1)})
+                base = runner.tick
+                def failing(n, runner=runner, base=base):
+                    base(n)
+                    if runner.code is not None and not (runner.out / 'terminal.json').exists():
+                        (runner.out / 'terminal.json').write_text(json.dumps(dict(status=terminal)))
+                runner.tick = failing
+            runner.pid = 5000 + len(respawned)
+            world.runners[shard['index']] = runner
+            respawned.append(out)
+            return dict(out=out), runner
+        return world, respawn, respawned
+
+    def test_shard_that_failed_before_dispatch_is_retried_and_the_run_still_releases(self):
+        world, respawn, respawned = self.retry_world('FAILED_BEFORE_PROVIDER_DISPATCH')
+        record = world.run(scheduled_total=6, respawn=respawn)
+        self.assertEqual(len(respawned), 1)
+        self.assertIsNone(record['aborted_at'])
+        self.assertIsNotNone(record['released_at'])
+        self.assertTrue((respawned[0] / 'global-release.json').exists())
+        self.assertEqual([r['previous'] for r in record['retries']], ['FAILED_BEFORE_PROVIDER_DISPATCH'])
+
+    def test_retries_are_bounded_then_the_run_aborts(self):
+        world, respawn, respawned = self.retry_world('FAILED_STARTUP_WORKSPACE_RELEASED', retry_outcome='fail')
+        record = world.run(scheduled_total=6, respawn=respawn)
+        self.assertEqual(len(respawned), C['MAX_SHARD_ATTEMPTS'] - 1)
+        self.assertIsNotNone(record['aborted_at'])
+        self.assertIsNone(record['released_at'])
+
+    def test_a_shard_that_may_hold_resources_is_never_retried(self):
+        world, respawn, respawned = self.retry_world('CONTROLLER_RELEASE_VERIFIED')
+        record = world.run(scheduled_total=6, respawn=respawn)
+        self.assertEqual(respawned, [])
+        self.assertIsNotNone(record['aborted_at'])
+
+    def test_runner_spawns_are_staggered(self):
+        scripts = [{0: ('ready', 0, None), 5: ('released', 0, 0)} for _ in range(3)]
+        world = World(self.tmp.name, scripts)
+        sleeps = []
+        original = world.sleep
+        world.sleep = lambda seconds: (sleeps.append(seconds), original(seconds))
+        world.run(scheduled_total=9, stagger_seconds=2.0)
+        self.assertEqual(sleeps[:2], [2.0, 2.0])
+
     def test_decision_files_are_never_replaced(self):
         path = Path(self.tmp.name) / 'global-release.json'
         C['write_once'](path, dict(release_id='first'))

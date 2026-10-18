@@ -21,6 +21,7 @@ from pathlib import Path
 import secrets
 import signal
 import time
+import traceback
 
 # Copies per controller that one VM handles easily. The single performance-8x
 # controller failed at 600 copies (flyctl/parent OOM, load 1,146 on 8 vCPU);
@@ -34,6 +35,11 @@ CANARY_MACHINES_PER_CONTROLLER = 2
 BASE_SNAPSHOT_POLL_SECONDS = 15
 CONTROLLER_PROFILES = {'performance-8x': dict(vcpus=8, memory_mib=32768)}
 RELEASED_STATES = ('ready', 'released')
+# Runner terminals that prove the shard created nothing, or verifiably released
+# what it created, before any task ran: a fresh attempt cannot double-allocate.
+RETRYABLE_STARTUP_TERMINALS = ('FAILED_BEFORE_PROVIDER_DISPATCH', 'FAILED_STARTUP_WORKSPACE_RELEASED')
+MAX_SHARD_ATTEMPTS = 3
+DEFAULT_SPAWN_STAGGER_SECONDS = 2.0
 FAILED_STATES = ('failed', 'aborted')
 TERMINAL_SUPERVISOR = ('JOINED', 'ABSENT_UNCONFIRMED')
 
@@ -119,11 +125,22 @@ def read_status(out):
     return value if isinstance(value, dict) else None
 
 
+def runner_terminal_status(out):
+    try:
+        value = json.loads((Path(out) / 'terminal.json').read_bytes())
+    except (OSError, ValueError):
+        return None
+    return value.get('status') if isinstance(value, dict) else None
+
+
 def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='enabled',
-               poll_seconds=1.0, clock=time.time, sleep=time.sleep):
+               poll_seconds=1.0, clock=time.time, sleep=time.sleep, respawn=None,
+               stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS):
     """Run K runners to completion under one global barrier. Returns the coordination record.
 
     shards: [{'index': i, 'out': Path}], spawn(shard) -> Popen-like (poll/wait/send_signal/pid).
+    respawn(shard) -> (shard, Popen-like): a fresh attempt for a shard whose runner ended
+    before release with a retryable startup terminal; None disables retries.
     """
     journal = Path(journal)
     need(scheduled_total > 0 and shards, 'scheduled shards required')
@@ -140,10 +157,14 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                   scheduled_total=scheduled_total, infra_early_stop=infra_early_stop, started_at=clock(),
                   released_at=None, aborted_at=None, abort_reason=None, terminated_at=None,
                   terminate_reason=None, shards={})
-    runners = {}
+    runners, attempts = {}, {}
+    record['retries'] = []
     try:
-        for shard in shards:
+        for position, shard in enumerate(shards):
+            if position and stagger_seconds:
+                sleep(stagger_seconds)  # spread K controller admissions over the provider API
             runners[shard['index']] = spawn(shard)
+            attempts[shard['index']] = 1
             record['shards'][str(shard['index'])] = dict(out=str(shard['out']), pid=runners[shard['index']].pid)
         save(journal, record)
         decided, decision = None, None
@@ -153,6 +174,28 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
             barrier = {i: ((v or {}).get('barrier') or {}).get('status') for i, v in statuses.items()}
             infra = sum(int(((v or {}).get('infra') or {}).get('infra_true') or 0) for v in statuses.values())
             record['infra_true'] = infra
+            if decided is None and respawn is not None and not stop[0]:
+                for shard in shards:
+                    i = shard['index']
+                    terminal = runner_terminal_status(shard['out']) if exited[i] is not None else None
+                    if terminal not in RETRYABLE_STARTUP_TERMINALS or attempts[i] >= max_attempts:
+                        continue
+                    try:
+                        replacement, process = respawn(shard)
+                    except Exception as error:  # a failed retry is an ordinary startup failure
+                        record['retries'].append(dict(shard=i, attempt=attempts[i] + 1, at=clock(),
+                                                      previous=terminal, error=type(error).__name__,
+                                                      detail=str(error)[:300],
+                                                      where=traceback.format_exc().strip().splitlines()[-4:]))
+                        attempts[i] = max_attempts  # one failed respawn ends this shard's retries
+                        continue
+                    shard.update(replacement)
+                    runners[i], exited[i], statuses[i], barrier[i] = process, None, None, None
+                    attempts[i] += 1
+                    record['retries'].append(dict(shard=i, attempt=attempts[i], at=clock(), previous=terminal,
+                                                  out=str(shard['out']), pid=process.pid))
+                    record['shards'][str(i)] = dict(out=str(shard['out']), pid=process.pid)
+                    save(journal, record)
             if decided is None:
                 failed = [i for i in runners if barrier[i] in FAILED_STATES or exited[i] is not None
                           or (statuses[i] or {}).get('state') in TERMINAL_SUPERVISOR]

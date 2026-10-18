@@ -1924,7 +1924,7 @@ class Sharded(unittest.TestCase):
                         raw = json.dumps(dict(jobs=jobs)).encode()
                         import tarfile
                         with tarfile.open(export/'originals.tar.gz', 'w:gz') as tar:
-                            info = tarfile.TarInfo('originals/repo/.context/benchmarks/campaigns/campaign-x/summary.json')
+                            info = tarfile.TarInfo('context/benchmarks/campaigns/campaign-x/summary.json')  # actual export layout
                             info.size = len(raw); tar.addfile(info, io.BytesIO(raw))
                         self.code = 0
                     elif self.polls == 1:
@@ -1998,6 +1998,75 @@ class Sharded(unittest.TestCase):
             self.assertEqual(list((directory/'state').iterdir()), [])
             private(args.backend_env, 'COMPLETE=fixture\nGITHUB_DISPATCH_TOKEN=fixture-dispatch\n')
             self.assertEqual(CLI.missing_prompt_secrets(ROOT, RUNNER, [needs], (args.agents_env, args.backend_env)), [])
+
+    def test_sharded_run_retries_a_shard_that_failed_before_provider_dispatch(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            args = self.args(directory, task_count=12, repetitions=3, tasks_per_controller=4)
+            plan = CLI.shard_selection(args, RUNNER)
+            launched = []
+
+            class Runner:
+                def __init__(self, argv, **kwargs):
+                    self.out = Path(argv[argv.index('--output')+1])
+                    self.config = json.loads(Path(argv[argv.index('--config')+1]).read_bytes())
+                    self.pid, self.code, self.polls = 7000 + len(launched), None, 0
+                    self.out.mkdir(mode=0o700)
+                    self.fail_first = self.config['shard']['index'] == 1 and 'attempt-' not in str(self.out)
+                    launched.append(self)
+
+                def poll(self):
+                    self.polls += 1
+                    if self.fail_first and self.code is None:
+                        (self.out/'terminal.json').write_text(json.dumps(dict(status='FAILED_BEFORE_PROVIDER_DISPATCH')))
+                        self.code = 1
+                    elif (self.out/'global-release.json').exists() and self.code is None:
+                        shard = self.config['shard']
+                        jobs = [dict(job_id=f"r{r:03d}-j{(r-1)*12+i+1:04d}", status='passed', task_status='PASSED',
+                                     terminal_task=True, lifecycle_verified=True, resources_released=True, infra_failure=False)
+                                for r in range(1, shard['runs']+1) for i in shard['task_indexes']]
+                        export = self.out/'export'; export.mkdir(mode=0o700)
+                        (export/'disposable-export.verified.json').write_text('{}')
+                        raw = json.dumps(dict(jobs=jobs)).encode()
+                        import tarfile
+                        with tarfile.open(export/'originals.tar.gz', 'w:gz') as tar:
+                            info = tarfile.TarInfo('context/benchmarks/campaigns/campaign-x/summary.json')  # actual export layout
+                            info.size = len(raw); tar.addfile(info, io.BytesIO(raw))
+                        self.code = 0
+                    elif self.polls == 1:
+                        (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status='ready'), infra=dict(infra_true=0))))
+                    return self.code
+
+                def wait(self):
+                    return self.code
+
+                def send_signal(self, number):
+                    raise AssertionError('no runner should be signalled')
+
+            snapshots = []
+            def snapshot(api, token, org, target, extra):
+                snapshots.append(target)
+                private(target/'navi-whisper-lux-bench.private.json', [])
+                cap = self.capacity(directory, free=700); cap.pop('proof_path')
+                return cap
+            with patch.object(CLI, 'capacity_snapshot', snapshot), \
+                 patch.object(CLI, 'shared_cpu_plan', lambda *a: (36, 0)), \
+                 patch.object(CLI, 'publish_shard_group', lambda *a, **k: True), \
+                 patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
+                 patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
+                 patch.object(CLI.subprocess, 'Popen', Runner):
+                code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+            self.assertEqual(code, 0)
+            self.assertEqual(len(launched), 4)
+            self.assertEqual(len(snapshots), 2)
+            self.assertEqual(snapshots[1].name, 'attempt-02')
+            admission = next((directory/'state').iterdir())
+            result = json.loads((admission/'result.json').read_bytes())
+            self.assertEqual((result['observed_jobs'], result['missing_jobs']), (36, 0))
+            self.assertEqual([r['previous'] for r in result['coordination']['retries']], ['FAILED_BEFORE_PROVIDER_DISPATCH'])
+            retry_proof = json.loads((admission/'shard-01/attempt-02/capacity-proof.private.json').read_bytes())
+            self.assertEqual(retry_proof['new_machine_demand'], 12 + 1 + 2)
 
     def test_sharded_run_refuses_before_any_runner_when_capacity_is_short(self):
         with tempfile.TemporaryDirectory() as name:
