@@ -1948,6 +1948,7 @@ class Sharded(unittest.TestCase):
                  patch.object(CLI, 'shared_cpu_plan', lambda *a: (36, 0)), \
                  patch.object(CLI, 'publish_shard_group', publish), \
                  patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
+                 patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
                  patch.object(CLI.subprocess, 'Popen', Runner):
                 code = CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
             self.assertEqual([p['outcomes'] is None for p in published], [True, False])
@@ -1978,6 +1979,23 @@ class Sharded(unittest.TestCase):
                     CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
             self.assertEqual(list((directory/'state').iterdir()), [])
 
+    def test_prompt_secret_missing_from_env_refuses_before_provider_reads(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            manifest = json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())
+            needs = 'cuda-kernel-github-top100-code-agent'
+            self.assertIn(needs, manifest)
+            args = self.args(directory, task_count=manifest.index(needs)+1, repetitions=1)
+            plan = CLI.shard_selection(args, RUNNER)
+            with patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
+                 patch.object(CLI, 'capacity_snapshot', side_effect=AssertionError('no provider read before the check')):
+                with self.assertRaisesRegex(ValueError, needs + ' needs GITHUB_DISPATCH_TOKEN'):
+                    CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)
+            self.assertEqual(list((directory/'state').iterdir()), [])
+            private(args.backend_env, 'COMPLETE=fixture\nGITHUB_DISPATCH_TOKEN=fixture-dispatch\n')
+            self.assertEqual(CLI.missing_prompt_secrets(ROOT, RUNNER, [needs], (args.agents_env, args.backend_env)), [])
+
     def test_sharded_run_refuses_before_any_runner_when_capacity_is_short(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -1990,6 +2008,7 @@ class Sharded(unittest.TestCase):
                 return dict(cap)
             with patch.object(CLI, 'capacity_snapshot', snapshot), \
                  patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
+                 patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
                  patch.object(CLI.subprocess, 'Popen', side_effect=AssertionError('no runner may start')):
                 with self.assertRaisesRegex(ValueError, '44 free Machine slots < 45 required'):
                     CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan)

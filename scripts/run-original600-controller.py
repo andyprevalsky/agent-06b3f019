@@ -712,6 +712,24 @@ def shard_selection(args, runner):
     return None if legacy else plan
 
 
+PROMPT_SECRET_PLACEHOLDERS = {'{GITHUB_DISPATCH_TOKEN}': 'GITHUB_DISPATCH_TOKEN'}
+
+
+def missing_prompt_secrets(root, runner, tasks, env_paths):
+    """Tasks whose prompt needs a secret absent from every authoritative env file."""
+    catalog = json.loads(subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                                  runner['TASK_REF'] + ':agents/benchmarks/tasks.json']))
+    prompts = {row.get('name'): json.dumps(row) for row in catalog if isinstance(row, dict)}
+    present = set()
+    for path in env_paths:
+        for line in runner['read'](path).decode().splitlines():
+            key, _, value = line.partition('=')
+            if value.strip().strip('"\''):
+                present.add(key.strip())
+    return sorted((task, key) for task in tasks for placeholder, key in PROMPT_SECRET_PLACEHOLDERS.items()
+                  if placeholder in prompts.get(task, '') and key not in present)
+
+
 def shared_cpu_plan(root, runner, tasks, runs, bench_rows):
     """Planned and baseline shared CPU units, from the task revision's catalog and the native baseline."""
     import tempfile
@@ -773,6 +791,11 @@ def sharded_run(args, root, pins, runner, github, plan):
     """One fresh admission, K shard configs, then the global-barrier coordinator over K runners."""
     coordinator = runpy.run_path(str(root / 'scripts/cloudbench-shard-coordinator.py'))
     os.environ['RUN_BENCH_HUB_PYTHON'] = hub_interpreter(args)
+    selected = [task for shard in plan['shards'] for task in shard['tasks']]
+    missing = missing_prompt_secrets(root, runner, selected, (args.agents_env, args.backend_env))
+    if missing:
+        raise ValueError('selected task prompts need secrets absent from the env files: '
+                         + ', '.join(f'{task} needs {key}' for task, key in missing))
     parent = args.state_dir.absolute()
     if parent.resolve(strict=True) != parent or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
         raise ValueError('private physical current-owner state directory required')
