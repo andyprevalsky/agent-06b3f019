@@ -12,7 +12,7 @@ import { SMS_TEMPLATES, getPersonalizedVcardUrl } from '../../providers/smsTempl
 import { mirrorOnboardingWelcomeToWhatsApp } from '../../providers/whatsappOnboarding';
 import { createLogger } from '../../providers/logger';
 import { canonicalPhone, isUniqueViolation } from '../../providers/phoneAccountLookup';
-import { applyUserUpdates, resolveRacedAccount } from './service.accounts';
+import { applyUserUpdates, preferPhoneOwner, resolveRacedAccount } from './service.accounts';
 import * as repo from './repo';
 import type { SessionTokens, AnonymousSessionResult } from './types';
 import { generateSupabaseSession, generateAnonymousSession } from './service.session';
@@ -309,14 +309,15 @@ export async function verifyOtpAndInitUser(params: {
 
   if (existingUser === null) {
     const created = await handleNewUser(userId, phone, firstName, lastName, email, anonymousUserId);
-    if (!created) {
-      // Lost a create race: sign in to the account that won it.
-      existingUser = await resolveRacedAccount(userId, phone);
-      if (existingUser.userId !== userId) {
-        userId = existingUser.userId;
-        session = generateSupabaseSession(userId, phone);
-      }
-    }
+    // Lost a create race: sign in to the account that won it.
+    if (!created) existingUser = await resolveRacedAccount(userId, phone);
+  } else {
+    // A phoneless account never shadows the account that owns this phone.
+    existingUser = await preferPhoneOwner(existingUser, phone);
+  }
+  if (existingUser !== null && existingUser.userId !== userId) {
+    userId = existingUser.userId;
+    session = generateSupabaseSession(userId, phone);
   }
   if (existingUser !== null) {
     await handleExistingUser(

@@ -40,3 +40,18 @@ export async function resolveRacedAccount(
   if (ownerRow === null) throw new Error('OTP login lost a create race but no account owns it');
   return ownerRow;
 }
+
+type UserRow = NonNullable<Awaited<ReturnType<typeof repo.findUserById>>>;
+
+/**
+ * The account an OTP login for `phone` must land on. A phoneless account
+ * (e.g. the phone was claimed concurrently by another flow) defers to the
+ * account that owns the phone, so one phone never signs in to two accounts.
+ */
+export async function preferPhoneOwner(user: UserRow, phone: string): Promise<UserRow> {
+  if (user.phone !== null && user.phone !== '') return user;
+  const owner = await repo.findUserByPhone(phone);
+  if (owner === null || owner.userId === user.userId) return user;
+  log.warn('OTP login resolved to the account that owns the phone', { user_id: owner.userId });
+  return (await repo.findUserById(owner.userId)) ?? user;
+}
