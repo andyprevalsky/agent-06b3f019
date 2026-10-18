@@ -625,3 +625,41 @@ source scope. This is not a full current deploy pass or production acceptance.
 - 2026-10-18 initial-state FILL rerun at source `3882424951a99a7d173729622153c845d561afb8`, with the user-approved confirmation/defaults system line: **FAIL**, 69.9 seconds, static 1.0 PASS, semantic 0.0 FAIL. Supervisor retrieved Travel docs, delegated once, replied once, and completed in round 4. The semantic failure came from the delegated agent lifecycle message reasking country. The supervisor itself omitted country but did not show assumed defaults. Six actual SMS model dumps preserved privately; no response mock. Exact native generation terminated, two durable archive refs, zero provider sessions, empty outboxes, owned DB and 193 observed process births absent after canonical stop. Passive observer failed while reading the partially written trigger JSON; independent terminal custody was verified. Seed-fixture cache diagnostic remains a no-events warning. No behavior fix or deploy acceptance claimed.
 
 - 2026-10-18 Tamy-account FILL rerun, source `f62f6ad8b043fb01f5ad33edd68caacc38e1b5bf`: **PASS**, 63.6 task seconds, static 1.0 and semantic 1.0. Existing account snapshot loaded Tamy before the unchanged seeded regression conversation; six actual SMS model dumps retained privately. One supervisor reply and one delegated start acknowledgement, with no follow-up question. This establishes benchmark success for this account/state, not eTA submission or whole-deploy acceptance. Exact workflow terminal; one browser session deleted; its positively new profile deleted and independently 404; no recording returned; two archive refs and empty outboxes. Canonical stack stopped, owned DB absent and all observed process births absent. Six diagnostics completed; seeded old-root cache no-events warning retained.
+
+
+### October 18 integrated deploy validation
+
+Runtime `2a7c873fdb18f33997562630dda51e58d83d20fa` passed fresh backend
+coverage (201 blackbox domains, 299 unit files plus isolated analyzer; 89.61%
+line coverage), static checks and all three live probes. The unchanged frontend,
+agents, controller, command and cold-seed components retain their explicitly
+recorded earlier execution sources: 2,806 frontend tests (3 existing skips),
+110 agent blackbox domains, 196 cache regressions, 152 unit tests, all 12
+controller commands, all 47 command suites, and 5/5 seed fidelity checks.
+
+Current-runtime semantic UI passed 8/8; latency passed 20 measured samples;
+real E2B passed 56/56 with no skip. Current smoke passed all 10 tasks, including
+the cached 50-child task. Sandbox AgentCard completed with 3 passes and the
+standing approved release-stall skip, not four passes. The skipped transfer
+remains consumed with 4,396 cents unreleased and its refund pending.
+
+Independent native readback verified 61 smoke workflow generations completed,
+five smoke browser sessions deleted, one smoke code sandbox absent, all four
+AgentCard workflows terminal and all five AgentCard browser sessions deleted.
+Canonical stack cleanup completed; all 1,510 smoke and 1,527 AgentCard observed
+process births were absent. Before database teardown, smoke still showed
+61 terminal and 9 archive obligations across its two contexts; AgentCard showed
+4 terminal and 4 archive obligations. These observations are retained: native
+effects were verified separately, and database disappearance is not evidence
+of empty persistence outboxes. Smoke retained 65 expected post-stop observer
+rejections, not a zero-error claim. Three settled smoke purchases were checked
+read-only in AgentCard sandbox/Stripe test mode: cards closed, captures settled,
+transfers partially released; no full-return claim or extra refund mutation.
+
+The general agent execution loop retried one idle timeout and one rejected
+plain-text AgentAction response during the last AgentCard case; this was not
+the SMS-supervisor route and no model/schema/timeout was changed. Original
+operator failures, the treasury TEST mint pending reclamation, and all timing
+attempts remain recorded. The original production release-stall waiver applies,
+but independent live-Stripe exception `TAMY-PROD-MODE-2` is still awaiting a
+decision. No override, merge or production acceptance is claimed.
