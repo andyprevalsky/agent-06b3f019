@@ -886,7 +886,7 @@ def build_auth_options_prompt_section(
         )
         minted_phone = minted.get("phone") or minted.get("agentPhone") or minted.get("agent_phone")
         if minted_email:
-            phone_clause = f" | Phone -> {minted_phone}" if minted_phone else ""
+            phone_clause = f" | Phone -> {minted_phone} (codes texted here reach you automatically)" if minted_phone else ""
             # The password to create the account with. Typing the ref saves it, so
             # the account can be signed into again on a later run.
             new_password = minted.get("newPassword") or minted.get("new_password") or {}
