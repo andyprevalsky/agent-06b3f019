@@ -11,6 +11,7 @@ import runpy
 import shlex
 import signal
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -673,18 +674,19 @@ class ExportResume(unittest.TestCase):
             args.manifest.unlink()
             remote["bounded_export"]({"export": lambda _a: (_ for _ in ()).throw(ValueError("controller originals changed during export"))}, args, attempts=3, sync=lambda: None, sleep=lambda _s: None)
 
-    def test_runner_owner_binds_the_runs_own_source_config_and_live_runner(self):
-        # run600c: sharded original600 runner is the live cleanup owner; no host
-        # provenance and no remembered commit. Small metadata rides inline.
+    def runner_fixture(self, owner_pid=123, owner_birth="runner-owner", gate_pid=987654321, with_pending=True,
+                       log=None):
+        """One sharded original600 run directory whose own runner is the bound cleanup owner."""
+        log = "GATE_EXPORT_PENDING machine=" + self.mid + "\nGATE_RESULT exit=1\n" if log is None else log
         source = "a252045f5090917bb00e562b72dbacbab8261c66"
         epoch = time.time() - 100
         runner_path = ROOT / "scripts/cloudbench-original600-runner.py"
         runner = runpy.run_path(str(runner_path))
-        caller = dict(pid=123, birth="runner-owner", gate_pid=987654321, gate_birth="gate", source_ref=source,
+        caller = dict(pid=owner_pid, birth=owner_birth, gate_pid=gate_pid, gate_birth="gate", source_ref=source,
                       epoch=epoch, deadline=epoch + 5400, task_ref=runner["TASK_REF"],
                       identity_path="/tmp/gate/repo/.context/original600-supervisor.fixture.json")
-        authority = dict(source_ref=source, app=M["R"]["APP"], region="iad", cleanup_owner_pid=123,
-                         cleanup_owner_birth="runner-owner", output_directory=str(self.export), env_files={},
+        authority = dict(source_ref=source, app=M["R"]["APP"], region="iad", cleanup_owner_pid=owner_pid,
+                         cleanup_owner_birth=owner_birth, output_directory=str(self.export), env_files={},
                          protected_machines=[], protected_volumes=[])
         auth = write(self.out / "authority.private.json", authority)
         auth_sha = M["sha"](auth.read_bytes())
@@ -738,11 +740,13 @@ class ExportResume(unittest.TestCase):
                       caller={"pid": caller["gate_pid"], "birth": caller["gate_birth"], "host": "fixture"})
         write(self.export / "caller.json", record["caller"])
         write(self.export / "launch.json", record)
-        (self.out / "gate.private.log").write_text("GATE_EXPORT_PENDING machine=" + self.mid + "\nGATE_RESULT exit=1\n")
+        (self.out / "gate.private.log").write_text(log)
+        (self.out / "gate.private.log").chmod(0o600)
         pending = dict(status="PENDING_EXTERNAL_OWNER_LIVE", gate_exit_code=1, supervisor_state="JOINED",
                        export_verified=False, no_host_destroy=True)
-        write(self.out / "gate.pending.json", pending)
-        owner = dict(pid=123, birth="runner-owner", cwd=str(self.root), argv=[
+        if with_pending:
+            write(self.out / "gate.pending.json", pending)
+        owner = dict(pid=owner_pid, birth=owner_birth, cwd=str(self.root), argv=[
             "/usr/bin/python3", str(runner_path), "--config", str(config), "--config-sha256", digest, "--output", str(self.out)])
         real_runpy = M["runpy"].run_path
 
@@ -755,6 +759,17 @@ class ExportResume(unittest.TestCase):
             name = command[-1].split(":scripts/", 1)[1]
             return (ROOT / "scripts" / name).read_bytes()
 
+        return SimpleNamespace(source=source, epoch=epoch, caller=caller, authority=authority, auth_sha=auth_sha,
+                               config=config, digest=digest, pending=pending, owner=owner, metadata=metadata,
+                               runpy_path=runpy_path, git=git)
+
+    def test_runner_owner_binds_the_runs_own_source_config_and_live_runner(self):
+        # run600c: sharded original600 runner is the live cleanup owner; no host
+        # provenance and no remembered commit. Small metadata rides inline.
+        f = self.runner_fixture()
+        source, epoch, config, digest, pending, owner, metadata = (
+            f.source, f.epoch, f.config, f.digest, f.pending, f.owner, f.metadata)
+        runpy_path, git = f.runpy_path, f.git
         with (
             mock.patch.dict(M["B"], source_identity=lambda *_a: {}, process_identity=lambda _pid: owner),
             mock.patch.object(M["runpy"], "run_path", side_effect=runpy_path),
@@ -777,6 +792,232 @@ class ExportResume(unittest.TestCase):
             metadata.chmod(0o600); metadata.write_bytes(b'{"snapshot": "changed"}\n')
             with self.assertRaisesRegex(ValueError, "inline remote file differs"):
                 M["check"](config, digest, self.out, "f" * 40)
+
+    def dead_pid(self):
+        child = subprocess.Popen(["true"])
+        child.wait()
+        self.assertFalse(Path("/proc", str(child.pid)).exists())
+        return child.pid
+
+    def dead_window(self, f, name="dead-window.json", **overrides):
+        window = dict(schema="controller-export-dead-owner-window-v1", run_directory=str(self.out), machine_id=self.mid,
+                      original_epoch=f.epoch, created_at=time.time() - 10, cleanup_deadline_epoch=time.time() + 1800,
+                      authorized_by="parent coordinator", reason="runner killed by a service restart", benchmark_credit=0,
+                      cleanup_only=True, dead_owner_pid=f.caller["pid"], dead_owner_birth=f.caller["birth"],
+                      coordinator_pid=self.dead_pid())
+        window.update(overrides)
+        return write(self.root / name, window)
+
+    @contextlib.contextmanager
+    def runner_patches(self, f):
+        def no_live_owner(_pid):
+            raise AssertionError("dead-owner recovery never reads a live owner")
+
+        with (
+            mock.patch.dict(M["B"], source_identity=lambda *_a: {}, process_identity=no_live_owner),
+            mock.patch.object(M["runpy"], "run_path", side_effect=f.runpy_path),
+            mock.patch.object(M["subprocess"], "check_output", side_effect=f.git),
+        ):
+            yield
+
+    def test_dead_runner_owner_is_accepted_only_when_provably_gone(self):
+        # polar70 19:24Z: a service restart killed the operator, all runners and their gates while the
+        # gates still waited: no gate.pending.json, no GATE_EXPORT_PENDING, and the run's own helper
+        # refuses every action for a dead cleanup owner.
+        f = self.runner_fixture(owner_pid=self.dead_pid(), owner_birth="proc-start:fixture:1", with_pending=False,
+                                log="GATE_START fixture\nGATE_STEP_START #1 supervisor\n")
+        window = self.dead_window(f)
+        args = (f.config, f.digest, self.out, "f" * 40)
+        with self.runner_patches(f):
+            # Without the explicit dead-owner mode the live runner remains required.
+            with self.assertRaises((ValueError, FileNotFoundError)):
+                M["check"](*args)
+            with self.assertRaises((ValueError, FileNotFoundError)):
+                M["check"](*args, cleanup_window=window)
+            with self.assertRaisesRegex(ValueError, "explicit cleanup window"):
+                M["check"](*args, dead_owner=True)
+            value = M["check"](*args, cleanup_window=window, dead_owner=True)
+            binding = value["binding"]
+            self.assertEqual((binding["capture_kind"], binding["cleanup_only"]), ("dead-runner-owner", True))
+            self.assertEqual(
+                {k: binding["dead_owner"][k] for k in ("pid", "owner_state", "gate_state", "coordinator_state")},
+                {"pid": f.caller["pid"], "owner_state": "ABSENT", "gate_state": "ABSENT", "coordinator_state": "ABSENT"},
+            )
+            M["unchanged"](value)
+            # An ordinary cleanup window never authorizes a dead owner.
+            plain = {k: v for k, v in json.loads(window.read_bytes()).items()
+                     if k not in ("dead_owner_pid", "dead_owner_birth", "coordinator_pid")}
+            plain = write(self.root / "plain-window.json", dict(plain, schema="controller-export-cleanup-window-v1"))
+            with self.assertRaisesRegex(ValueError, "window refused"):
+                M["check"](*args, cleanup_window=plain, dead_owner=True)
+            # A window naming a foreign owner or a changed birth binds another runner.
+            for index, overrides in enumerate(({"dead_owner_birth": "proc-start:foreign:2"},
+                                               {"dead_owner_pid": f.caller["pid"] + 1})):
+                foreign = self.dead_window(f, "foreign-%d.json" % index, **overrides)
+                with self.assertRaisesRegex(ValueError, "another runner owner"):
+                    M["check"](*args, cleanup_window=foreign, dead_owner=True)
+            # A coordinator PID that may still run is never assumed gone.
+            live_coordinator = self.dead_window(f, "coordinator.json", coordinator_pid=os.getpid())
+            with self.assertRaisesRegex(ValueError, "coordinator PID present"):
+                M["check"](*args, cleanup_window=live_coordinator, dead_owner=True)
+            # A gate that verified an export is not a lost-owner recovery.
+            (self.out / "gate.private.log").write_text("GATE_EXPORT_VERIFIED machine=" + self.mid + "\n")
+            with self.assertRaisesRegex(ValueError, "already verified"):
+                M["check"](*args, cleanup_window=window, dead_owner=True)
+
+    def test_live_or_reused_runner_birth_never_borrows_a_live_owner(self):
+        me = os.getpid()
+        f = self.runner_fixture(owner_pid=me, owner_birth=M["R"]["birth"](me), with_pending=False,
+                                log="GATE_START fixture\n")
+        args = (f.config, f.digest, self.out, "f" * 40)
+        with self.runner_patches(f):
+            with self.assertRaisesRegex(ValueError, "runner owner is live"):
+                M["check"](*args, cleanup_window=self.dead_window(f), dead_owner=True)
+        # The same PID with another birth is a reused PID: the recorded runner is gone.
+        self.temp.cleanup()
+        self.setUp()
+        f = self.runner_fixture(owner_pid=me, owner_birth="proc-start:fixture:1", with_pending=False,
+                                log="GATE_START fixture\n")
+        with self.runner_patches(f):
+            value = M["check"](f.config, f.digest, self.out, "f" * 40, cleanup_window=self.dead_window(f),
+                               dead_owner=True)
+        self.assertEqual(value["binding"]["dead_owner"]["owner_state"], "PID_REUSED")
+        # A live gate stays the export owner.
+        self.temp.cleanup()
+        self.setUp()
+        f = self.runner_fixture(owner_pid=self.dead_pid(), owner_birth="proc-start:fixture:1", gate_pid=me,
+                                with_pending=False, log="GATE_START fixture\n")
+        with self.runner_patches(f):
+            with self.assertRaisesRegex(ValueError, "gate"):
+                M["check"](f.config, f.digest, self.out, "f" * 40, cleanup_window=self.dead_window(f),
+                           dead_owner=True)
+
+    def test_pinned_helper_runs_unchanged_with_only_the_dead_owner_substituted(self):
+        ref = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        helper = ROOT / "scripts/cloudbench-disposable-controller.py"
+        dead = self.dead_pid()
+        authority = dict(schema="cloudbench-disposable-controller-authority-v1", allowed=True, single_host=True,
+                         app=M["R"]["APP"], region="iad", vm_size="performance-8x", memory_mib=32768,
+                         workspace_size_gb=256, output_directory=str(self.export), org_machine_limit=10,
+                         verified_epoch=time.time() - 1000, cleanup_owner_pid=dead,
+                         cleanup_owner_birth="proc-start:fixture:1", protected_machines=["p1", "p2", "p3", "p4"],
+                         protected_volumes=[], source_ref=ref)
+        auth = write(self.root / "helper-authority.json", authority)
+        argv = [str(helper), "export-ready", "--authority", str(auth), "--root", str(ROOT), "--directory",
+                str(self.export), "--machine", self.mid, "--image", "fixture-image"]
+        direct = subprocess.run([sys.executable, "-S", *argv], cwd="/", capture_output=True)
+        self.assertNotEqual(direct.returncode, 0)
+        self.assertIn(b"external cleanup owner must remain live", direct.stderr)
+        state = dict(source_root=str(ROOT), source_ref=ref, authority=authority,
+                     owner=dict(pid=dead, birth=authority["cleanup_owner_birth"]))
+        shimmed = subprocess.run(M["dead_owner_helper_argv"](state, argv), cwd="/", capture_output=True)
+        # Past the owner check the helper's own export verification still runs and refuses the missing archive.
+        self.assertNotEqual(shimmed.returncode, 0)
+        self.assertNotIn(b"must remain live", shimmed.stderr)
+        self.assertIn(b"originals.tar.gz", shimmed.stderr)
+        self.assertFalse((self.export / "disposable-export.verified.json").exists())
+        me = os.getpid()
+        live = dict(authority, cleanup_owner_pid=me, cleanup_owner_birth=M["R"]["birth"](me))
+        write(auth, live)
+        refused = subprocess.run(
+            M["dead_owner_helper_argv"](dict(state, authority=live, owner=dict(pid=me, birth=live["cleanup_owner_birth"])), argv),
+            cwd="/", capture_output=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(b"cleanup owner is live", refused.stderr)
+        for action in ("admit", "seal", "cleanup-workspace"):
+            with self.assertRaisesRegex(ValueError, "action refused"):
+                M["dead_owner_helper_argv"](state, [str(helper), action, *argv[2:]])
+
+    def dead_state(self):
+        caller = dict(pid=self.dead_pid(), birth="proc-start:fixture:1", gate_pid=self.dead_pid(), gate_birth="gate",
+                      epoch=time.time() - 600, identity_path="/tmp/gate/repo/.context/original600-supervisor.f.json")
+        authority = dict(cleanup_owner_pid=caller["pid"], cleanup_owner_birth=caller["birth"])
+        return dict(dead_owner=True, out=str(self.out), source_root=str(ROOT), source_ref="b" * 40,
+                    machine_id=self.mid, machine=self.value["state"]["machine"], caller=caller, authority=authority,
+                    owner=dict(pid=caller["pid"], birth=caller["birth"]), epoch=caller["epoch"],
+                    deadline=caller["epoch"] + 5400, cleanup_deadline_epoch=time.time() + 1800)
+
+    def test_dead_owner_release_requires_joined_supervisor_then_runs_the_runners_cleanup(self):
+        state = self.dead_state()
+        workspace = write(self.export / "workspace-volume.ownership.json", {"volume_id": "vol_fixture"})
+        write(self.export / "disposable-export.verified.json", {"fixture": "marker"})
+        api = self.api()
+        probes, calls = [], []
+
+        def runpy_path(path, **kwargs):
+            if str(path).endswith("cloudbench-original600-runner.py"):
+                def reconciled(out, export, authority, mid, action, joined, probe):
+                    self.assertEqual((mid, action, joined, probe["state"]), (self.mid, "cleanup", True, "JOINED"))
+                    self.assertEqual(json.loads((out / "cleanup-call.intent.json").read_bytes())["action"], "cleanup")
+                    return json.loads((export / "disposable-controller.release.json").read_bytes())
+                return {"machine_control": lambda _fly, mid, payload: (calls.append(payload), probes.pop(0))[1],
+                        "reconciled_release": reconciled}
+            return {"NotFound": KeyError}
+
+        def cleanup(argv, **kwargs):
+            self.assertEqual(argv[1:3], ["-S", "-c"])
+            self.assertEqual(argv[5:7], [str(ROOT / "scripts/cloudbench-disposable-controller.py"), "cleanup"])
+            self.assertIn(str(workspace), argv)
+            write(self.export / "disposable-controller.release.json",
+                  dict(machine_id=self.mid, volume_id="vol_fixture", volume_disposition="pending_destroy", machine_deleted=True))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        def native_reads(fly, mid, vid):
+            return dict(machine_id=mid, machine_state="ABSENT", volume_id=vid, volume_state="pending_destroy")
+
+        patches = dict(validate_normal=lambda _s: True, native_release=native_reads,
+                       F=dict(M["F"], verified_export=lambda _s: "m" * 64, selected_token=lambda _s: "fixture"))
+        with (
+            mock.patch.dict(M["release_dead_owner"].__globals__, patches),
+            mock.patch.object(M["runpy"], "run_path", side_effect=runpy_path),
+            mock.patch.object(M["subprocess"], "run", side_effect=cleanup) as run,
+            mock.patch.object(M["subprocess"], "check_output", return_value=b"pinned helper"),
+        ):
+            probes.append({"state": "LIVE"})
+            with self.assertRaisesRegex(ValueError, "supervisor not joined"):
+                M["release_dead_owner"](state, api)
+            self.assertEqual(run.call_count, 0)
+            self.assertFalse((self.out / "cleanup-call.intent.json").exists())
+            # The refused journal is never replayed; a fresh run directory recovers once.
+            (self.out / "dead-owner-release").rename(self.root / "refused-release-journal")
+            probes.append({"state": "JOINED"})
+            terminal = M["release_dead_owner"](state, api)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual((terminal["status"], terminal["benchmark_credit"], terminal["benchmark_success_inferred"]),
+                             ("DEAD_OWNER_CONTROLLER_RELEASE_VERIFIED", 0, False))
+            self.assertEqual(json.loads((self.out / "terminal.json").read_bytes()), terminal)
+            self.assertEqual([p["action"] for p in calls], ["PROBE", "PROBE"])
+            with self.assertRaisesRegex(ValueError, "already dispatched"):
+                M["release_dead_owner"](state, api)
+            self.assertEqual(run.call_count, 1)
+
+    def test_dead_gate_launch_record_is_fetched_once_and_bound_to_this_run(self):
+        state = self.dead_state()
+        (self.export / "launch.json").unlink()
+        workspace = write(self.export / "workspace-volume.ownership.json", {"volume_id": "vol_fixture"})
+        record = dict(self.record, image="fixture-image", workspace_ownership_sha256=M["sha"](workspace.read_bytes()),
+                      caller=dict(self.caller, pid=state["caller"]["gate_pid"], birth="gate"))
+        write(self.export / "caller.json", record["caller"])
+        state["machine"] = dict(state["machine"], config={"image": "fixture-image"})
+        self.value["state"]["machine"] = state["machine"]
+        api = self.api()
+        self.payloads["launch.json"] = json.dumps(record).encode()
+        patches = dict(validate_normal=lambda _s: True)
+        with (
+            mock.patch.dict(M["fetch_launch"].__globals__, patches),
+            mock.patch.object(M["subprocess"], "check_output", return_value=self.collector.read_bytes()),
+        ):
+            receipt = M["fetch_launch"](state, api)
+            self.assertEqual(receipt["launch_sha256"], M["sha"]((self.export / "launch.json").read_bytes()))
+            self.assertEqual((self.export / "launch.json").stat().st_nlink, 1)
+            with self.assertRaisesRegex(ValueError, "already present"):
+                M["fetch_launch"](state, api)
+            (self.export / "launch.json").unlink()
+            (self.out / "dead-owner-launch-fetch").rename(self.root / "first-fetch")
+            self.payloads["launch.json"] = json.dumps(dict(record, machine_id="f" * 14)).encode()
+            with self.assertRaisesRegex(ValueError, "differs from this run"):
+                M["fetch_launch"](state, api)
+            self.assertFalse((self.export / "launch.json").exists())
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

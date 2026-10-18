@@ -375,19 +375,35 @@ WINDOW_FIELDS = {
     "schema", "run_directory", "machine_id", "original_epoch", "created_at",
     "cleanup_deadline_epoch", "authorized_by", "reason", "benchmark_credit", "cleanup_only",
 }
+# A dead-owner window also names the exact lost runner owner and its coordinator.
+DEAD_OWNER_WINDOW_FIELDS = WINDOW_FIELDS | {"dead_owner_pid", "dead_owner_birth", "coordinator_pid"}
 MAX_CLEANUP_WINDOW_SECONDS = 3600
 
 
-def cleanup_window_proof(path, out, now=None):
-    """One explicit private post-deadline window for one exact controller; zero credit."""
+def cleanup_window_proof(path, out, now=None, dead_owner=False):
+    """One explicit private cleanup window for one exact controller; zero credit."""
     raw = read(Path(path).absolute())
     window = json.loads(raw)
     now = time.time() if now is None else now
     numbers = [window.get(key) for key in ("original_epoch", "created_at", "cleanup_deadline_epoch")]
+    schema, fields = (
+        ("controller-export-dead-owner-window-v1", DEAD_OWNER_WINDOW_FIELDS)
+        if dead_owner
+        else ("controller-export-cleanup-window-v1", WINDOW_FIELDS)
+    )
     need(
         isinstance(window, dict)
-        and set(window) == WINDOW_FIELDS
-        and window["schema"] == "controller-export-cleanup-window-v1"
+        and set(window) == fields
+        and window["schema"] == schema
+        and (
+            not dead_owner
+            or type(window["dead_owner_pid"]) is int
+            and window["dead_owner_pid"] > 1
+            and isinstance(window["dead_owner_birth"], str)
+            and window["dead_owner_birth"]
+            and type(window["coordinator_pid"]) is int
+            and window["coordinator_pid"] > 1
+        )
         and window["run_directory"] == str(out)
         and re.fullmatch("[0-9a-f]{14}", window["machine_id"] or "")
         and window["benchmark_credit"] == 0
@@ -412,7 +428,39 @@ def transfer_budget(state, now=None):
     return int(min(3600, remaining))
 
 
-def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None, cleanup_window=None):
+def process_gone(pid, recorded_birth, proc=Path("/proc")):
+    """ABSENT, ZOMBIE or PID_REUSED when the exact recorded process no longer runs; None while it lives."""
+    need(type(pid) is int and pid > 1 and isinstance(recorded_birth, str) and recorded_birth, "exact recorded process required")
+    try:
+        fields = (proc / str(pid) / "stat").read_text().rsplit(") ", 1)[1].split()
+        boot = (proc / "sys/kernel/random/boot_id").read_text().strip()
+    except FileNotFoundError:
+        return "ABSENT"
+    if "proc-start:" + boot + ":" + fields[19] != recorded_birth:
+        return "PID_REUSED"
+    return "ZOMBIE" if fields[0] in ("Z", "X") else None
+
+
+def dead_owner_proof(caller, window, proc=Path("/proc")):
+    """The run's own runner, its gate and its coordinator are all provably gone."""
+    need(
+        window["dead_owner_pid"] == caller["pid"] and window["dead_owner_birth"] == caller["birth"],
+        "dead-owner window names another runner owner",
+    )
+    owner = process_gone(caller["pid"], caller["birth"], proc)
+    gate = process_gone(caller["gate_pid"], caller["gate_birth"], proc)
+    need(owner is not None, "runner owner is live; the live runner remains the cleanup owner")
+    need(gate is not None, "original gate is live")
+    # The coordinator recorded no birth: only an absent PID proves it gone.
+    need(not (proc / str(window["coordinator_pid"])).exists(), "coordinator PID present; cannot prove it gone")
+    return dict(
+        pid=caller["pid"], birth=caller["birth"], owner_state=owner, gate_pid=caller["gate_pid"],
+        gate_birth=caller["gate_birth"], gate_state=gate, coordinator_pid=window["coordinator_pid"],
+        coordinator_state="ABSENT", successor="dead-runner-owner-recovery",
+    )
+
+
+def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None, cleanup_window=None, dead_owner=False):
     """Current normal owner proof; never a retrospective borrower capture."""
     need(
         not (out / "payload-borrow.intent.json").exists(),
@@ -435,9 +483,9 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None, cle
     pins = B["source_identity"](source_root, cfg["source_ref"], cfg["source_files"])
     if "host_operator_provenance" not in cfg:
         return runner_owner_state(
-            cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, cleanup_window
+            cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, cleanup_window, dead_owner
         )
-    need(cleanup_window is None, "explicit cleanup window requires the live runner owner")
+    need(cleanup_window is None and not dead_owner, "explicit cleanup window requires the live runner owner")
     provenance = cfg["host_operator_provenance"]
     host_ref = provenance["host_operator_source_ref"]
     need(
@@ -485,18 +533,28 @@ def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None, cle
     return normal_tail(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, R, owner_ok)
 
 
-def runner_owner_state(cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, cleanup_window):
+def runner_owner_state(
+    cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, cleanup_window, dead_owner=False
+):
     """The run's own live original600 runner is the cleanup owner (sharded launches)."""
     script = source_root / "scripts/cloudbench-original600-runner.py"
     runner = runpy.run_path(str(script))
     need(sha(script.read_bytes()) == cfg["source_files"]["cloudbench-original600-runner.py"], "normal runner source differs")
-    pending = obj(out / "gate.pending.json")
-    need(
-        pending.get("status") == "PENDING_EXTERNAL_OWNER_LIVE"
-        and pending.get("export_verified") is False
-        and pending.get("no_host_destroy") is True,
-        "runner did not positively retain an unverified export",
-    )
+    pending_path = out / "gate.pending.json"
+    # A runner killed while its gate still waited never wrote the pending receipt.
+    if not dead_owner or pending_path.exists():
+        pending = obj(pending_path)
+        need(
+            pending.get("status") == "PENDING_EXTERNAL_OWNER_LIVE"
+            and pending.get("export_verified") is False
+            and pending.get("no_host_destroy") is True,
+            "runner did not positively retain an unverified export",
+        )
+    if dead_owner:
+        need(
+            not any(os.path.lexists(out / name) for name in ("terminal.json", "cleanup.pending.json")),
+            "dead runner already recorded a terminal or cleanup outcome",
+        )
 
     def owner_ok(argv):
         return (
@@ -507,12 +565,14 @@ def runner_owner_state(cfg, config_path, config_sha256, out, source_root, pins, 
         )
 
     return normal_tail(
-        cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok, cleanup_window
+        cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok, cleanup_window,
+        dead_owner,
     )
 
 
 def normal_tail(
-    cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok, cleanup_window=None
+    cfg, config_path, config_sha256, out, source_root, pins, cleanup_deadline_epoch, runner, owner_ok, cleanup_window=None,
+    dead_owner=False,
 ):
     shard = [cfg["shard"]] if "shard" in cfg else []
     caller = obj(out / "caller.json")
@@ -533,11 +593,12 @@ def normal_tail(
         and Path(authority["output_directory"]) == out / "export",
         "normal authority/caller differs",
     )
+    need(not dead_owner or cleanup_window is not None, "dead-owner recovery requires an explicit cleanup window")
     if cleanup_window is None:
         normal_clock(caller["epoch"], caller["deadline"], cleanup_deadline_epoch)
     else:
         need(cleanup_deadline_epoch is None, "one cleanup authority only")
-        window, window_sha = cleanup_window_proof(cleanup_window, out)
+        window, window_sha = cleanup_window_proof(cleanup_window, out, dead_owner=dead_owner)
         need(
             window["machine_id"] == identity["machine"]
             and window["original_epoch"] == caller["epoch"]
@@ -556,11 +617,14 @@ def normal_tail(
         ),
         "normal authority differs from original template",
     )
-    owner = B["process_identity"](caller["pid"])
-    need(
-        owner["birth"] == caller["birth"] and owner_ok(owner["argv"]),
-        "normal live owner source differs",
-    )
+    if dead_owner:
+        owner = dead_owner_proof(caller, window)
+    else:
+        owner = B["process_identity"](caller["pid"])
+        need(
+            owner["birth"] == caller["birth"] and owner_ok(owner["argv"]),
+            "normal live owner source differs",
+        )
     need(not (Path("/proc") / str(caller["gate_pid"])).exists(), "normal gate not reaped")
     ownership_path = out / "export/disposable-controller.ownership.json"
     ownership = obj(ownership_path)
@@ -709,6 +773,8 @@ def normal_tail(
             cleanup_only=True,
             cleanup_window=str(Path(cleanup_window).absolute()),
         )
+    if dead_owner:
+        state.update(dead_owner=True, export_directory=str(out / "export"))
     return F["normalized"](state)
 
 
@@ -718,7 +784,9 @@ def validate_normal(state):
         "unknown normal export proof",
     )
     if "cleanup_window" in state:
-        window, window_sha = cleanup_window_proof(state["cleanup_window"], Path(state["out"]))
+        window, window_sha = cleanup_window_proof(
+            state["cleanup_window"], Path(state["out"]), dead_owner=state.get("dead_owner") is True
+        )
         need(
             state.get("cleanup_hold_id") == "window-sha256:" + window_sha
             and state.get("cleanup_deadline_epoch") == window["cleanup_deadline_epoch"]
@@ -734,10 +802,17 @@ def validate_normal(state):
             state.get("cleanup_hold_id") == CLEANUP_HOLD_ID and state.get("cleanup_only") is True,
             "normal cleanup authority differs",
         )
-    need(
-        B["process_identity"](state["caller"]["pid"]) == state["owner"],
-        "normal owner changed",
-    )
+    if state.get("dead_owner") is True:
+        need("cleanup_window" in state, "dead-owner recovery requires an explicit cleanup window")
+        need(
+            dead_owner_proof(state["caller"], window) == state["owner"],
+            "dead-owner proof changed",
+        )
+    else:
+        need(
+            B["process_identity"](state["caller"]["pid"]) == state["owner"],
+            "normal owner changed",
+        )
     need(
         not (Path("/proc") / str(state["caller"]["gate_pid"])).exists(),
         "normal gate not reaped",
@@ -752,11 +827,17 @@ def validate_normal(state):
     return True
 
 
-def check(config, config_sha256, run_directory, operator_ref, *, cleanup_deadline_epoch=None, cleanup_window=None):
+def check(
+    config, config_sha256, run_directory, operator_ref, *, cleanup_deadline_epoch=None, cleanup_window=None,
+    dead_owner=False,
+):
     out = Path(run_directory).absolute()
     borrowed = (out / "payload-finalizer.identities.private.json").exists()
     if borrowed:
-        need(cleanup_deadline_epoch is None and cleanup_window is None, "cleanup-only window requires normal owner")
+        need(
+            cleanup_deadline_epoch is None and cleanup_window is None and not dead_owner,
+            "cleanup-only window requires normal owner",
+        )
         state = obj(out / "payload-finalizer.identities.private.json")
         roots = {
             str(Path(path).parent.parent)
@@ -771,7 +852,8 @@ def check(config, config_sha256, run_directory, operator_ref, *, cleanup_deadlin
         )
     else:
         state = normal_state(
-            config, config_sha256, out, cleanup_deadline_epoch=cleanup_deadline_epoch, cleanup_window=cleanup_window
+            config, config_sha256, out, cleanup_deadline_epoch=cleanup_deadline_epoch, cleanup_window=cleanup_window,
+            dead_owner=dead_owner,
         )
         capture_root = HERE.parent
         validate_normal(state)
@@ -827,10 +909,14 @@ def check(config, config_sha256, run_directory, operator_ref, *, cleanup_deadlin
         )
     log_path = out / "gate.private.log"
     log = read(log_path)
-    need(
-        ("GATE_EXPORT_PENDING machine=" + state["machine_id"]).encode() in log and b"GATE_RESULT exit=" in log,
-        "old gate did not positively return export pending",
-    )
+    if dead_owner:
+        # The killed gate never reached its export result; it verified nothing.
+        need(b"GATE_EXPORT_VERIFIED" not in log, "dead gate already verified an export")
+    else:
+        need(
+            ("GATE_EXPORT_PENDING machine=" + state["machine_id"]).encode() in log and b"GATE_RESULT exit=" in log,
+            "old gate did not positively return export pending",
+        )
     drivers = [entry for entry in state["machine"]["config"]["files"] if entry["guest_path"] == "/tmp/gate.sh"]
     need(len(drivers) == 1, "exact sealed native driver required")
     driver = base64.b64decode(drivers[0]["raw_value"], validate=True)
@@ -854,7 +940,9 @@ def check(config, config_sha256, run_directory, operator_ref, *, cleanup_deadlin
         "original_deadline": state["deadline"],
     }
     if not borrowed:
-        binding["capture_kind"] = "normal-current-owner"
+        binding["capture_kind"] = "dead-runner-owner" if dead_owner else "normal-current-owner"
+    if dead_owner:
+        binding["dead_owner"] = state["owner"]
     if cleanup_deadline_epoch is not None or cleanup_window is not None:
         binding.update(
             cleanup_deadline_epoch=state["cleanup_deadline_epoch"],
@@ -1309,6 +1397,8 @@ def publish(value, fly, journal, remote_stage, active):
         "--image",
         value["image"],
     ]
+    if value["state"].get("dead_owner") is True:
+        ready = dead_owner_helper_argv(value["state"], ready[2:])
     save(
         journal / "export-ready.intent.json",
         {"argv": ready, "all_remote_helpers_joined": True, "hashes": hashes},
@@ -1332,7 +1422,7 @@ def publish(value, fly, journal, remote_stage, active):
             "status": "EXPORT_VERIFIED",
             "marker_sha256": verified,
             "no_remote_use_after_marker": True,
-            "controller_cleanup_owned_elsewhere": True,
+            "controller_cleanup_owned_elsewhere": value["state"].get("dead_owner") is not True,
         },
     )
     return {
@@ -1341,6 +1431,267 @@ def publish(value, fly, journal, remote_stage, active):
         "marker_sha256": verified,
         "benchmark_success_inferred": False,
     }
+
+
+# The run's own pinned disposable helper, unchanged, with exactly one substitution:
+# its live-owner check accepts the bound cleanup owner only after re-proving that
+# exact PID/birth is gone. Every other authority, source and native check runs.
+DEAD_OWNER_HELPER = r"""
+import base64,hashlib,json,subprocess,sys
+from pathlib import Path
+spec=json.loads(base64.b64decode(sys.argv[1]));argv=sys.argv[2:]
+root=Path(spec['root']);helper=root/'scripts/cloudbench-disposable-controller.py'
+assert argv[0]==str(helper) and argv[1] in ('export-ready','cleanup'),'dead-owner helper action refused'
+expected=subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',spec['source_ref']+':scripts/cloudbench-disposable-controller.py'])
+assert helper.read_bytes()==expected and hashlib.sha256(expected).hexdigest()==spec['helper_sha256'],'pinned helper differs'
+scope={'__name__':'dead_owner_disposable_controller','__file__':str(helper)}
+exec(compile(expected,str(helper),'exec'),scope)
+live=scope['birth']
+def gone(pid,recorded):
+ try:
+  fields=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()
+  boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+ except FileNotFoundError:return True
+ return 'proc-start:'+boot+':'+fields[19]!=recorded or fields[0] in ('Z','X')
+def birth(pid):
+ if pid!=spec['owner_pid']:return live(pid)
+ if not gone(pid,spec['owner_birth']):raise ValueError('cleanup owner is live; dead-owner recovery refused')
+ return spec['owner_birth']
+scope['birth']=birth
+sys.argv=argv
+scope['main']()
+"""
+
+
+def dead_owner_helper_argv(state, argv):
+    """The exact argv the runner would run, executed through the pinned dead-owner shim."""
+    root = Path(state["source_root"])
+    helper = root / "scripts/cloudbench-disposable-controller.py"
+    need(Path(argv[0]) == helper and argv[1] in ("export-ready", "cleanup"), "dead-owner helper action refused")
+    owner = state["owner"]
+    need(
+        state["authority"]["cleanup_owner_pid"] == owner["pid"]
+        and state["authority"]["cleanup_owner_birth"] == owner["birth"],
+        "dead owner differs from authority",
+    )
+    spec = {
+        "root": str(root),
+        "source_ref": state["source_ref"],
+        "helper_sha256": sha(
+            subprocess.check_output(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    str(root),
+                    "show",
+                    state["source_ref"] + ":scripts/cloudbench-disposable-controller.py",
+                ]
+            )
+        ),
+        "owner_pid": owner["pid"],
+        "owner_birth": owner["birth"],
+    }
+    encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
+    return [sys.executable, "-S", "-c", DEAD_OWNER_HELPER, encoded, *map(str, argv)]
+
+
+def fetch_launch(state, fly=None):
+    """Dead gate: one owned read of the remote launch record into export/, as the gate's first download."""
+    need(state.get("dead_owner") is True, "launch fetch is dead-owner recovery only")
+    validate_normal(state)
+    out = Path(state["out"])
+    export = out / "export"
+    target = export / "launch.json"
+    need(not os.path.lexists(target), "export launch record already present")
+    need(not (export / "disposable-export.verified.json").exists(), "export already verified")
+    journal = out / "dead-owner-launch-fetch"
+    journal.mkdir(mode=0o700)  # once only
+    save(journal / "intent.json", {"machine": state["machine_id"], "source_ref": state["source_ref"]})
+    fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))["Fly"](
+        R["APP"], F["selected_token"](state)
+    )
+    native(fly, {"state": state}, journal, "before")
+    staged = journal / "launch.json"
+    rc, stdout, stderr = fly.flyctl(
+        transfer_budget(state),
+        "ssh",
+        "sftp",
+        "get",
+        "-a",
+        R["APP"],
+        "--machine",
+        state["machine_id"],
+        "/tmp/gate/controller-host-custody/launch.json",
+        str(staged),
+    )
+    save(
+        journal / "launch.json.download.json",
+        {"exit_code": rc, "stdout": stdout, "stderr": stderr, "local_transport_joined": True},
+    )
+    need(rc == 0 and staged.is_file() and not staged.is_symlink(), "launch download incomplete")
+    os.chmod(staged, 0o600)
+    raw = read(staged)
+    launch = json.loads(raw)
+    root = Path(state["source_root"])
+    collector = subprocess.check_output(
+        [
+            "git",
+            "--no-replace-objects",
+            "-C",
+            str(root),
+            "show",
+            state["source_ref"] + ":scripts/cloudbench-controller-export.py",
+        ]
+    )
+    need(
+        launch["machine_id"] == state["machine_id"]
+        and launch["source_ref"] == state["source_ref"]
+        and launch["collector_sha256"] == sha(collector)
+        and launch["image"] == state["machine"]["config"]["image"]
+        and launch["caller"] == obj(export / "caller.json")
+        and launch["caller"]["pid"] == state["caller"]["gate_pid"]
+        and launch["caller"]["birth"] == state["caller"]["gate_birth"]
+        and launch["workspace_ownership_sha256"] == sha(read(export / "workspace-volume.ownership.json")),
+        "remote launch record differs from this run",
+    )
+    validate_normal(state)
+    os.link(staged, target)
+    staged.unlink()  # canonical file remains single-linked
+    for directory in (export, journal):
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    receipt = {"status": "LAUNCH_RECORD_FETCHED", "launch_sha256": sha(raw), "benchmark_credit": 0}
+    save(journal / "complete.json", receipt)
+    return receipt
+
+
+def native_release(fly, machine_id, volume_id):
+    """Independent post-cleanup native reads: no controller Machine or live workspace remains."""
+    not_found = runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))["NotFound"]
+
+    def current(path):
+        try:
+            return fly.api("GET", path, timeout=20)
+        except not_found:
+            return None
+
+    machine = current("/machines/" + machine_id)
+    volume = current("/volumes/" + volume_id)
+    need(
+        (machine is None or machine.get("id") == machine_id and machine.get("state") == "destroyed")
+        and (volume is None or volume.get("id") == volume_id and volume.get("state") in ("pending_destroy", "destroyed")),
+        "native release not verified",
+    )
+    return {
+        "machine_id": machine_id,
+        "machine_state": "ABSENT" if machine is None else machine["state"],
+        "volume_id": volume_id,
+        "volume_state": "ABSENT" if volume is None else volume["state"],
+        "observed_at": time.time(),
+    }
+
+
+def release_dead_owner(state, fly=None):
+    """After the verified export: the runner's own cleanup call, then its reconciliation."""
+    need(state.get("dead_owner") is True, "release is dead-owner recovery only")
+    validate_normal(state)
+    out = Path(state["out"])
+    export = out / "export"
+    root = Path(state["source_root"])
+    need(
+        not any(os.path.lexists(out / name) for name in ("cleanup-call.intent.json", "terminal.json")),
+        "controller cleanup already dispatched",
+    )
+    marker = F["verified_export"](state)
+    journal = out / "dead-owner-release"
+    journal.mkdir(mode=0o700)  # once only; the helper's own intents latch deletion
+    save(journal / "dead-owner-proof.private.json", state["owner"])
+    runner = runpy.run_path(str(root / "scripts/cloudbench-original600-runner.py"))
+    fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))["Fly"](
+        R["APP"], F["selected_token"](state)
+    )
+    native(fly, {"state": state}, journal, "before")
+    caller = state["caller"]
+    payload = dict(
+        machine=state["machine_id"],
+        source_ref=state["source_ref"],
+        epoch=caller["epoch"],
+        identity_path=caller["identity_path"],
+        action="PROBE",
+    )
+    probe = runner["machine_control"](fly, state["machine_id"], payload)
+    save(journal / "supervisor-probe.json", probe)
+    need(probe.get("state") == "JOINED", "supervisor not joined; no controller cleanup")
+    validate_normal(state)
+    verified = export / "disposable-export.verified.json"
+    save(
+        out / "cleanup-call.intent.json",
+        dict(
+            machine=state["machine_id"],
+            action="cleanup",
+            gate_joined=True,
+            supervisor_joined=True,
+            export_verified_file=sha(read(verified)),
+            dead_owner_recovery=str(journal),
+        ),
+    )
+    argv = dead_owner_helper_argv(
+        state,
+        [
+            str(root / "scripts/cloudbench-disposable-controller.py"),
+            "cleanup",
+            "--authority",
+            str(out / "authority.private.json"),
+            "--root",
+            str(root),
+            "--directory",
+            str(export),
+            "--workspace",
+            str(export / "workspace-volume.ownership.json"),
+        ],
+    )
+    save(journal / "cleanup.intent.json", {"argv": argv})
+    env = dict(os.environ, FLY_API_TOKEN=F["selected_token"](state))
+    result = subprocess.run(argv, cwd=str(root), env=env, capture_output=True, timeout=240, check=False)
+    save(
+        journal / "cleanup.response.json",
+        {
+            "exit_code": result.returncode,
+            "stdout_b64": base64.b64encode(result.stdout).decode(),
+            "stderr_b64": base64.b64encode(result.stderr).decode(),
+            "joined": True,
+        },
+    )
+    if not (export / "disposable-controller.release.json").exists():
+        save(out / "cleanup.pending.json", dict(status="PENDING_DEAD_OWNER_RECOVERY", helper_exit_code=result.returncode, no_cleanup_retry=True))
+        raise ValueError("controller cleanup produced no release; GET-only reconciliation required")
+    release = runner["reconciled_release"](
+        out, export, out / "authority.private.json", state["machine_id"], "cleanup", True, probe
+    )
+    after = native_release(fly, state["machine_id"], release["volume_id"])
+    save(journal / "native-after.json", after)
+    terminal = dict(
+        status="DEAD_OWNER_CONTROLLER_RELEASE_VERIFIED",
+        gate_exit_code=None,
+        controller_cleanup_exit_code=result.returncode,
+        externally_reconciled_after_helper_failure=result.returncode != 0,
+        machine=state["machine_id"],
+        source_ref=state["source_ref"],
+        started_at_epoch=state["epoch"],
+        original_deadline=state["deadline"],
+        release=release,
+        export_marker_sha256=marker,
+        dead_owner=state["owner"],
+        recovery_journal=str(journal),
+        benchmark_credit=0,
+        benchmark_success_inferred=False,
+    )
+    save(out / "terminal.json", terminal)
+    return terminal
 
 
 def download_verified(value, fly=None):
@@ -1396,6 +1747,11 @@ def main(argv=None):
     parser.add_argument("--operator-ref", required=True)
     parser.add_argument("--cleanup-deadline-epoch", type=float)
     parser.add_argument("--cleanup-window", type=Path, help="Explicit private post-deadline cleanup window.")
+    parser.add_argument(
+        "--dead-owner",
+        action="store_true",
+        help="The run's runner, gate and coordinator are provably gone; requires a dead-owner --cleanup-window.",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--run", action="store_true")
@@ -1409,7 +1765,43 @@ def main(argv=None):
         action="store_true",
         help="One read-only remote readiness observation; no export dispatch.",
     )
+    mode.add_argument(
+        "--fetch-launch",
+        action="store_true",
+        help="Dead owner only: fetch the remote launch record the killed gate never downloaded.",
+    )
+    mode.add_argument(
+        "--release",
+        action="store_true",
+        help="Dead owner only: after the verified export, run the runner's own controller cleanup.",
+    )
     args = parser.parse_args(argv)
+    need(not (args.fetch_launch or args.release) or args.dead_owner, "--fetch-launch/--release require --dead-owner")
+    if args.fetch_launch or args.release:
+        need(args.cleanup_window is not None and args.cleanup_deadline_epoch is None, "dead-owner window required")
+        state = normal_state(
+            args.config, args.config_sha256, Path(args.run_directory).absolute(),
+            cleanup_window=args.cleanup_window, dead_owner=True,
+        )
+        lock = os.open(
+            Path(state["out"]) / "controller-export-recovery.lock",
+            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            info = os.fstat(lock)
+            need(
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.geteuid()
+                and info.st_nlink == 1
+                and not info.st_mode & 0o077,
+                "private exclusive export lock required",
+            )
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            print(json.dumps(fetch_launch(state) if args.fetch_launch else release_dead_owner(state)))
+        finally:
+            os.close(lock)
+        return 0
     value = check(
         args.config,
         args.config_sha256,
@@ -1417,6 +1809,7 @@ def main(argv=None):
         args.operator_ref,
         **({"cleanup_deadline_epoch": args.cleanup_deadline_epoch} if args.cleanup_deadline_epoch is not None else {}),
         **({"cleanup_window": args.cleanup_window} if args.cleanup_window is not None else {}),
+        **({"dead_owner": True} if args.dead_owner else {}),
     )
     if args.check:
         print(

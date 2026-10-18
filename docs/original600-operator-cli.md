@@ -576,6 +576,38 @@ into private staging and verifies every original archive member. It publishes
 the canonical verified-export marker only after all remote helpers have joined.
 An uncertain export dispatch never authorizes repeating that export.
 
+If a host or service restart killed the operator, a shard's runner and its gate
+while the controller was still running, nothing remains to verify the export
+or run controller cleanup: the run's pinned disposable helper refuses every
+action for a dead cleanup owner. First stop new work through the runner's own
+barrier ABORT and wait for the supervisor to report JOINED. Then write one
+private `controller-export-dead-owner-window-v1` window per controller: the
+ordinary cleanup-window fields (at most one hour, `cleanup_only: true`,
+`benchmark_credit: 0`) plus `dead_owner_pid`/`dead_owner_birth` from the run's
+`caller.json` and the coordinator's `coordinator_pid`. Add `--dead-owner
+--cleanup-window <window>` to the commands above. The tool refuses unless that
+exact runner PID/birth and its gate are gone and the coordinator PID is absent.
+
+```bash
+recover() { python3 -S scripts/cloudbench-resume-controller-export.py \
+  --operator-ref "$EXACT_RECOVERY_COMMIT" --config "$EXISTING_CONFIG" \
+  --config-sha256 "$EXISTING_CONFIG_SHA256" --run-directory "$EXISTING_RUN_DIRECTORY" \
+  --dead-owner --cleanup-window "$PRIVATE_DEAD_OWNER_WINDOW" "$@"; }
+recover --fetch-launch       # the remote launch record the killed gate never downloaded
+recover --check              # local only; no provider requests
+recover --download-verified  # or --observe, then --run, when the remote export is pending
+recover --release            # supervisor JOINED, then the runner's own controller cleanup
+```
+
+`--release` probes the supervisor through the runner's exact control path,
+records the runner's `cleanup-call.intent.json`, and runs the pinned
+`cloudbench-disposable-controller.py cleanup`. The helper source is unchanged;
+only its live-owner check accepts the recorded owner after re-proving that the
+process is gone. It reconciles the release receipt with the runner's own
+reconciliation, rereads the controller Machine and workspace Volume, and writes
+`terminal.json` with `DEAD_OWNER_CONTROLLER_RELEASE_VERIFIED` and zero
+benchmark credit. Each step journals once and is never replayed.
+
 
 Within a live strict cohort, the fleet shares one successful read-only app-secret
 verification. The proof is bound to the campaign owner and process births,
