@@ -40,3 +40,44 @@ export async function testKnownPhoneInOtherStoredFormReusesAccount(
     await prisma.user.deleteMany({ where: { userId: { in: ids } } });
   }
 }
+
+/**
+ * Concurrent first texts from one new number provision exactly one account:
+ * the unique User.phone index lets one create win and the rest reuse it,
+ * instead of creating duplicates or failing with 500.
+ */
+export async function testConcurrentFirstTextsProvisionOneAccount(
+  deps: PhoneFormDeps
+): Promise<void> {
+  const phone = deps.uniqueSmsPhone();
+  const bare = phone.replace(/^\+/, '');
+  try {
+    // `/clear` provisions the sender without starting a supervisor run.
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, () => deps.postInbound(phone, '/clear'))
+    );
+    const statuses = responses.map((res) => res.status);
+    if (statuses.some((status) => status !== 200)) {
+      throw new Error(`Every concurrent first text must return 200, got ${statuses.join(',')}`);
+    }
+    const owners = await prisma.user.findMany({
+      where: { phone: { in: [phone, bare] } },
+      select: { phone: true },
+    });
+    if (owners.length !== 1) {
+      throw new Error(`Expected exactly one provisioned account, found ${owners.length}`);
+    }
+    if (owners[0]?.phone !== phone) {
+      throw new Error(`Expected the canonical ${phone}, stored ${String(owners[0]?.phone)}`);
+    }
+  } finally {
+    const rows = await prisma.user.findMany({
+      where: { phone: { in: [phone, bare] } },
+      select: { userId: true },
+    });
+    const ids = rows.map((row) => row.userId);
+    await prisma.smsSession.deleteMany({ where: { userId: { in: ids } } });
+    await prisma.credit.deleteMany({ where: { userId: { in: ids } } });
+    await prisma.user.deleteMany({ where: { userId: { in: ids } } });
+  }
+}

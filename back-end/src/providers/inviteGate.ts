@@ -52,7 +52,7 @@ export async function markOffWaitlistByPhone(phone: string): Promise<OffWaitlist
   const digits = phoneDigits(phone);
   if (digits === '') return { flagged: false, userId: null, alreadyOffWaitlist: false };
 
-  // User.phone is not unique and may be stored as '+digits' or bare 'digits'.
+  // Legacy rows may hold one number as '+digits' or bare 'digits'.
   // One phone maps to its oldest account — the one phone login resolves to.
   const target = await prisma.user.findFirst({
     where: phoneOwnerWhere(phone),
