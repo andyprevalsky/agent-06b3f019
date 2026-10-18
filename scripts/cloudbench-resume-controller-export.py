@@ -33,6 +33,21 @@ def phase(name):
 phase('REMOTE_ENTERED')
 import ast,base64,copy,hashlib,json,os,subprocess
 QUIESCENCE_RACES=('controller originals changed during export','original changed before export')
+
+def resumable_pending(pending,record_sha):
+ # Writer-shaped pending binds this launch; the collector's exception-shaped pending
+ # (its main()) records only a refused snapshot race and grants nothing.
+ return pending.get('status')=='pending'and(pending.get('record_sha256')==record_sha or(set(pending)=={'status','reason','resource_release_verified'}and pending['reason']in QUIESCENCE_RACES and pending['resource_release_verified']is False))
+
+def bounded_export(scope,args,attempts=3,settle=10,sync=os.sync,sleep=time.sleep):
+ races=[]
+ for attempt in range(attempts):
+  sync() # complete delayed allocation before the run's own strict snapshot
+  try:return scope['export'](args),races
+  except ValueError as error:
+   # A refused snapshot published nothing; only the bounded settling race repeats.
+   if str(error)not in QUIESCENCE_RACES or attempt==attempts-1 or args.archive.exists()or args.manifest.exists():raise
+   races.append(str(error));sleep(settle)
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -122,9 +137,7 @@ def main(v):
  assert command['machine_id']==v['machine']and command['source_ref']==v['source_ref']
  assert command.get('already_joined')or scope['birth'](command['pid'])!=command['birth']
  _,pending_raw=scope['sealed_bytes'](custody/'pending.json',1048576);pending=json.loads(pending_raw)
- # Writer-shaped pending binds this launch; the collector's exception-shaped pending
- # (main()) records only a snapshot race and grants nothing.
- assert pending['status']=='pending'and(pending.get('record_sha256')==record_sha or(set(pending)=={'status','reason','resource_release_verified'}and pending['reason']in QUIESCENCE_RACES and pending['resource_release_verified']is False))
+ assert resumable_pending(pending,record_sha)
  roots=[repo,Path(record['common_git']),*[Path(p)for p in record['temp_state_roots']if Path(p).exists()]]
  idle_observations=scoped_idle_writers(scope,record,repo)
  phase('LAUNCH_DONE')
@@ -157,14 +170,7 @@ def main(v):
  finally:os.close(fd)
  args=SimpleNamespace(record=record_path,archive=stage/'originals.tar.gz',manifest=stage/'manifest.json',pending=stage/'pending.json',capture_tool_ref=None,finalize_disposable_hubs=True)
  phase('EXPORT_START')
- races=[]
- for attempt in range(3):
-  os.sync() # complete delayed allocation before the run's own strict snapshot
-  try:code=scope['export'](args);break
-  except ValueError as error:
-   # A refused snapshot published nothing; only the bounded settling race repeats.
-   if str(error)not in QUIESCENCE_RACES or attempt==2 or args.archive.exists()or args.manifest.exists():raise
-   races.append(str(error));time.sleep(10)
+ code,races=bounded_export(scope,args)
  assert code==0,'canonical export still pending'
  phase('EXPORT_DONE')
  phase('VERIFY_START')

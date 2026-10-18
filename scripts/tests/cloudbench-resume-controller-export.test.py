@@ -639,6 +639,145 @@ class ExportResume(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "borrowed owner"):
                 M["check"](config, digest, self.out, "f" * 40)
 
+    def test_remote_resumes_only_bound_pending_and_repeats_only_refused_snapshot_races(self):
+        fixture = self.root / "pending-remote.py"
+        fixture.write_text(M["REMOTE"])
+        remote = runpy.run_path(str(fixture))
+        race = {"status": "pending", "reason": "controller originals changed during export", "resource_release_verified": False}
+        self.assertTrue(remote["resumable_pending"](race, "r" * 64))
+        self.assertTrue(remote["resumable_pending"]({"status": "pending", "reason": "live controller writers", "record_sha256": "r" * 64}, "r" * 64))
+        for bad in (dict(race, reason="controller export authority differs"), dict(race, resource_release_verified=True),
+                    dict(race, extra=1), {"status": "pending", "record_sha256": "x" * 64}, dict(race, status="done")):
+            self.assertFalse(remote["resumable_pending"](bad, "r" * 64))
+        events = []
+        args = SimpleNamespace(archive=self.root / "a.tar.gz", manifest=self.root / "m.json")
+
+        def export(_args):
+            events.append("export")
+            if events.count("export") < 3:
+                raise ValueError("controller originals changed during export")
+            return 0
+
+        code, races = remote["bounded_export"]({"export": export}, args, sync=lambda: events.append("sync"), sleep=events.append)
+        self.assertEqual((code, len(races)), (0, 2))
+        self.assertEqual(events, ["sync", "export", 10, "sync", "export", 10, "sync", "export"])
+        for error in (ValueError("controller export authority differs"), OSError("io")):
+            with self.assertRaises(type(error)):
+                remote["bounded_export"]({"export": lambda _a, e=error: (_ for _ in ()).throw(e)}, args, sync=lambda: None, sleep=lambda _s: None)
+        args.manifest.write_text("{}")
+        calls = []
+        with self.assertRaisesRegex(ValueError, "changed during export"):
+            remote["bounded_export"]({"export": lambda _a: calls.append(1) or (_ for _ in ()).throw(ValueError("controller originals changed during export"))}, args, sync=lambda: None, sleep=lambda _s: None)
+        self.assertEqual(calls, [1])
+        with self.assertRaisesRegex(ValueError, "changed during export"):
+            args.manifest.unlink()
+            remote["bounded_export"]({"export": lambda _a: (_ for _ in ()).throw(ValueError("controller originals changed during export"))}, args, attempts=3, sync=lambda: None, sleep=lambda _s: None)
+
+    def test_runner_owner_binds_the_runs_own_source_config_and_live_runner(self):
+        # run600c: sharded original600 runner is the live cleanup owner; no host
+        # provenance and no remembered commit. Small metadata rides inline.
+        source = "a252045f5090917bb00e562b72dbacbab8261c66"
+        epoch = time.time() - 100
+        runner_path = ROOT / "scripts/cloudbench-original600-runner.py"
+        runner = runpy.run_path(str(runner_path))
+        caller = dict(pid=123, birth="runner-owner", gate_pid=987654321, gate_birth="gate", source_ref=source,
+                      epoch=epoch, deadline=epoch + 5400, task_ref=runner["TASK_REF"],
+                      identity_path="/tmp/gate/repo/.context/original600-supervisor.fixture.json")
+        authority = dict(source_ref=source, app=M["R"]["APP"], region="iad", cleanup_owner_pid=123,
+                         cleanup_owner_birth="runner-owner", output_directory=str(self.export), env_files={},
+                         protected_machines=[], protected_volumes=[])
+        auth = write(self.out / "authority.private.json", authority)
+        auth_sha = M["sha"](auth.read_bytes())
+        caller["authority_sha256"] = auth_sha
+        write(self.out / "caller.json", caller)
+        write(self.out / "controller.identity.json",
+              dict(source_ref=source, authority_sha256=auth_sha, machine=self.mid, instance="native-instance"))
+        workspace = write(self.export / "workspace-volume.ownership.json",
+                          dict(schema="cloudbench-controller-workspace-ownership-v1", app=M["R"]["APP"],
+                               source_ref=source, size_gb=256, volume_id="vol_fixture"))
+        template = write(self.root / "authority-template.json", {k: v for k, v in authority.items()
+                         if k not in {"cleanup_owner_pid", "cleanup_owner_birth", "output_directory"}})
+        tasks = json.loads((ROOT / "scripts/tests/fixtures/original600-tasks.json").read_bytes())
+        tasks_path = write(self.root / "tasks.json", tasks)
+        metadata = self.root / "inventory.json"
+        metadata.write_bytes(b'{"snapshot": "fixture"}\n')
+        metadata.chmod(0o600)
+        rel = ".git/cloudbench-warm-snapshot-inventory.fixture.json"
+        names = [tasks[3], tasks[10], tasks[199]]
+        shard = dict(index=0, count=20, tasks=names, tasks_sha256=M["sha"](("\n".join(names) + "\n").encode()),
+                     task_indexes=[3, 10, 199], runs=3, group_run_id="campaign-group-fixture", group_total=600,
+                     group_started_at=epoch)
+        sources = {name: M["sha"]((ROOT / "scripts" / name).read_bytes())
+                   for name in ("cloudbench-original600-supervisor.py", "cloudbench-original600-runner.py")}
+        config = write(self.root / "shard.config.json", dict(
+            source_ref=source, source_root=str(ROOT), source_files=sources, schema="original600-controller-runner-v1",
+            allowed=True, authority_template=str(template), tasks_path=str(tasks_path), started_at_epoch=epoch,
+            remote_files=[dict(relative_path=rel, source_path=str(metadata), sha256=M["sha"](metadata.read_bytes()))],
+            remote_env={}, shard=shard))
+        digest = M["sha"](config.read_bytes())
+        envelope = dict(source_ref=source, epoch=epoch, tasks=tasks, shard=shard,
+                        campaign_argv=runner["campaign_argv"](tasks, epoch, shard),
+                        supervisor_sha256=sources["cloudbench-original600-supervisor.py"],
+                        identity_name="original600-supervisor.fixture.json", remote_env={},
+                        remote_files=[runner["encode_remote_file"](dict(relative_path=rel, sha256=M["sha"](metadata.read_bytes())), metadata.read_bytes())])
+        envelope_raw = gzip.compress(json.dumps(envelope).encode(), mtime=0)
+        (self.out / "controller-launch-payload.private.json.gz").write_bytes(envelope_raw)
+        (self.out / "controller-launch-payload.private.json.gz").chmod(0o600)
+        driver = b"bound_controller_export export\nwhile :; do sleep 60; done\n"
+        machine = dict(id=self.mid, instance_id="native-instance", name="cloudbench-gate-fixture-s00", region="iad", state="started", config={
+            "env": {"GATE_REF": source}, "guest": {"cpu_kind": "performance", "cpus": 8, "memory_mb": 32768},
+            "mounts": [{"volume": "vol_fixture", "path": "/tmp/gate"}], "image": "registry.example/warm@sha256:" + "1" * 64,
+            "files": [{"guest_path": "/tmp/gate.sh", "raw_value": base64.b64encode(driver).decode()},
+                      {"guest_path": "/tmp/controller-launch-payload.json.gz", "raw_value": base64.b64encode(envelope_raw).decode()}]})
+        write(self.export / "disposable-controller.ownership.json", dict(
+            schema="cloudbench-disposable-controller-ownership-v1", authority_sha256=auth_sha,
+            workspace_sha256=M["sha"](workspace.read_bytes()), machine=machine,
+            volume={"id": "vol_fixture", "attached_machine_id": self.mid, "auto_backup_enabled": False}))
+        record = dict(self.record, source_ref=source, image=machine["config"]["image"],
+                      workspace_ownership_sha256=M["sha"](workspace.read_bytes()),
+                      caller={"pid": caller["gate_pid"], "birth": caller["gate_birth"], "host": "fixture"})
+        write(self.export / "caller.json", record["caller"])
+        write(self.export / "launch.json", record)
+        (self.out / "gate.private.log").write_text("GATE_EXPORT_PENDING machine=" + self.mid + "\nGATE_RESULT exit=1\n")
+        pending = dict(status="PENDING_EXTERNAL_OWNER_LIVE", gate_exit_code=1, supervisor_state="JOINED",
+                       export_verified=False, no_host_destroy=True)
+        write(self.out / "gate.pending.json", pending)
+        owner = dict(pid=123, birth="runner-owner", cwd=str(self.root), argv=[
+            "/usr/bin/python3", str(runner_path), "--config", str(config), "--config-sha256", digest, "--output", str(self.out)])
+        real_runpy = M["runpy"].run_path
+
+        def runpy_path(path, **kwargs):
+            if str(path).endswith("cloudbench-disposable-controller.py"):
+                return {"authority": lambda *_a, **_k: (authority, auth_sha)}
+            return real_runpy(path, **kwargs)
+
+        def git(command, **kwargs):
+            name = command[-1].split(":scripts/", 1)[1]
+            return (ROOT / "scripts" / name).read_bytes()
+
+        with (
+            mock.patch.dict(M["B"], source_identity=lambda *_a: {}, process_identity=lambda _pid: owner),
+            mock.patch.object(M["runpy"], "run_path", side_effect=runpy_path),
+            mock.patch.object(M["subprocess"], "check_output", side_effect=git),
+        ):
+            value = M["check"](config, digest, self.out, "f" * 40)
+            self.assertEqual((value["binding"]["source_ref"], value["binding"]["capture_kind"]), (source, "normal-current-owner"))
+            M["unchanged"](value)
+            self.assertEqual(M["transfer_budget"](value["state"], now=epoch), 3600)
+            with self.assertRaisesRegex(ValueError, "too short"):
+                M["transfer_budget"](value["state"], now=epoch + 5400 - 100)
+            for argv in (owner["argv"][:4] + ["0" * 64] + owner["argv"][5:], owner["argv"][:-1] + [str(self.root)]):
+                with mock.patch.dict(M["B"], process_identity=lambda _pid, a=argv: dict(owner, argv=a)):
+                    with self.assertRaisesRegex(ValueError, "owner source differs"):
+                        M["check"](config, digest, self.out, "f" * 40)
+            write(self.out / "gate.pending.json", dict(pending, export_verified=True))
+            with self.assertRaisesRegex(ValueError, "unverified export"):
+                M["check"](config, digest, self.out, "f" * 40)
+            write(self.out / "gate.pending.json", pending)
+            metadata.chmod(0o600); metadata.write_bytes(b'{"snapshot": "changed"}\n')
+            with self.assertRaisesRegex(ValueError, "inline remote file differs"):
+                M["check"](config, digest, self.out, "f" * 40)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

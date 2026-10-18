@@ -252,7 +252,14 @@ def inventory_pointer_members(manifest, config):
     return pointers, generations
 
 
-RESERVE_COLLECTOR_SHA256 = "ff7681d3eefde5df2c678cb0f900b66cb2427cf39180c0ed9a5c28e7dd721c1b"
+# Reviewed collectors whose cleanup-reserve exclusion semantics are identical; the
+# second only adds pre-snapshot flushing and bounded strict snapshot repetition.
+RESERVE_COLLECTOR_SHA256S = frozenset(
+    {
+        "ff7681d3eefde5df2c678cb0f900b66cb2427cf39180c0ed9a5c28e7dd721c1b",
+        "8a004d2f194f90229fd4e96306866c3c91502d434b3b535e2f44eddaee3daf19",
+    }
+)
 
 
 def excluded_cleanup_reserves(manifest, config):
@@ -269,10 +276,10 @@ def excluded_cleanup_reserves(manifest, config):
     anchor = record.get("root_anchors", {}).get(common, {})
     source = files.get("source/scripts/cloudbench-controller-export.py", {})
     need(
-        record.get("collector_sha256") == RESERVE_COLLECTOR_SHA256
-        and config.get("source_files", {}).get("cloudbench-controller-export.py") == RESERVE_COLLECTOR_SHA256
+        record.get("collector_sha256") in RESERVE_COLLECTOR_SHA256S
+        and config.get("source_files", {}).get("cloudbench-controller-export.py") == record["collector_sha256"]
         and source.get("kind") == "file"
-        and source.get("sha256") == RESERVE_COLLECTOR_SHA256,
+        and source.get("sha256") == record["collector_sha256"],
         "unknown cleanup reserve collector",
     )
     for name, value in excluded.items():
@@ -443,7 +450,7 @@ def archive_members(run, closure, request, config, inputs):
         closure["cleanup_reserve_exclusions"] = dict(
             schema="canonical-cleanup-reserve-exclusions-v1",
             excluded=reserve_exclusions,
-            collector_sha256=RESERVE_COLLECTOR_SHA256,
+            collector_sha256=manifest["record"]["collector_sha256"],
             payload_read=False,
             capacity_credit=0,
             claim_credit=0,
