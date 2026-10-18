@@ -1,10 +1,30 @@
 #!/usr/bin/env python3
 """Disable scheduled backups only for a newly allocated, exact run-owned Volume."""
-import argparse,base64,json,os,re,runpy,signal,stat,time
+import argparse,base64,json,os,random,re,runpy,signal,stat,time
 from contextlib import contextmanager
 from pathlib import Path
 
 class Deadline(Exception): pass
+
+class Rejected(ValueError):
+    """The bounded native CLI completed and rejected one call (not a deadline)."""
+
+# Fly can transiently reject a call during a clone burst, e.g. a Volume PUT
+# answering "volume not found" 240 ms after GET showed the same exact Volume
+# attached. Every call here is a read or the absolute, idempotent backup
+# setting, so a completed rejection is retried a bounded number of times.
+ATTEMPTS=3
+
+def pause(attempt):
+    # Exponential backoff with jitter keeps a burst's retries from realigning.
+    time.sleep(random.uniform(1,2)*2**attempt)
+
+def retried(call):
+    for attempt in range(ATTEMPTS):
+        try:return call()
+        except Rejected:
+            if attempt+1==ATTEMPTS:raise
+            pause(attempt)
 
 def need(value,message):
     if not value: raise ValueError(message)
@@ -66,10 +86,10 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
         if not directory.exists():directory.mkdir(mode=0o700)
         need(directory.resolve(strict=True)==directory and directory.is_dir(),'linked evidence directory')
         def inspect():
-            config=command(['machine','status',mid,'-a',app,'-d'])
+            config=retried(lambda:command(['machine','status',mid,'-a',app,'-d']))
             mounts=config.get('mounts',[])
             need(len(mounts)==1 and mounts[0].get('volume')==vid,'native mount changed')
-            value=command(['volumes','show',vid,'-a',app,'--json'])
+            value=retried(lambda:command(['volumes','show',vid,'-a',app,'--json']))
             need(value.get('id')==vid and value.get('state')=='created','Volume identity/state changed')
             need(type(value.get('auto_backup_enabled')) is bool,'backup setting missing')
             need(value.get('attached_machine_id')==mid,'Volume not attached to the exact owned Machine')
@@ -79,13 +99,27 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
         if before['auto_backup_enabled'] is False:
             if not (directory/'verified.json').exists():save(directory/'verified.json',dict(owner=owner,app=app,run_id=run,machine=mid,volume=vid,auto_backup_enabled=False,native=before))
             return
+        def unchanged(value):
+            for key in ('id','name','region','size_gb','snapshot_retention','encrypted','created_at'):
+                need(value.get(key)==before.get(key),'Volume properties changed: '+key)
+            return value
         save(directory/'intent.json',dict(machine=mid,volume=vid,app=app,auto_backup_enabled=False,before=before))
-        # Exactly one update. Any ambiguous response leaves the intent intact and refuses boot.
-        command(['volumes','update',vid,'-a',app,'--scheduled-snapshots=false','--json'])
-        after=inspect()
+        # A completed CLI rejection is decided by a fresh exact read: replay the
+        # idempotent setting only while the same owned, attached, unchanged
+        # Volume still reports backups enabled. An ambiguous transport failure
+        # or deadline leaves the intent intact and refuses boot without replay.
+        after=None
+        for attempt in range(ATTEMPTS):
+            try:command(['volumes','update',vid,'-a',app,'--scheduled-snapshots=false','--json'])
+            except Rejected:
+                if attempt+1==ATTEMPTS:raise
+                pause(attempt)
+                current=unchanged(inspect())
+                if current['auto_backup_enabled'] is False:after=current;break
+                continue
+            after=inspect();break
         need(after['auto_backup_enabled'] is False,'scheduled snapshots still enabled')
-        for key in ('id','name','region','size_gb','snapshot_retention','encrypted','created_at'):
-            need(after.get(key)==before.get(key),'Volume properties changed: '+key)
+        unchanged(after)
         save(directory/'verified.json',dict(owner=owner,app=app,run_id=run,machine=mid,volume=vid,auto_backup_enabled=False,native=after))
 
 def main():
@@ -108,7 +142,9 @@ def main():
             save(intent,dict(argv=argv,started_monotonic=started))
             status,out,err=helper['run_bounded'](['bash','-c','FLY "$@"','disposable-volume',*argv],20,dict(os.environ))
             save(result,dict(argv=argv,status=status,stdout_base64=base64.b64encode(out).decode(),stderr_base64=base64.b64encode(err).decode(),started_monotonic=started,finished_monotonic=time.monotonic()))
-            need(status==0,'Volume configuration CLI failed (exit '+str(status)+'; private receipt '+str(result)+')')
+            if status!=0:
+                # 142 is the bounded child's deadline: that request may still be in flight.
+                raise (ValueError if status==142 else Rejected)('Volume configuration CLI failed (exit '+str(status)+'; private receipt '+str(result)+')')
             value=json.loads(out);need(isinstance(value,dict),'invalid native JSON');return value
         configure(args.registry,args.owner,args.app,args.name,args.machine,args.volume,args.protected,command,audit=args.audit,run=args.run)
 if __name__=='__main__':main()
