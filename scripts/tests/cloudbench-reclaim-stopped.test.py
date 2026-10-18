@@ -2,6 +2,7 @@
 """Owning regression for `run-bench reclaim-stopped` (Fly org slots held by stopped task Machines)."""
 from pathlib import Path
 import http.server, json, os, runpy, subprocess, tempfile, threading, time, unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 H = runpy.run_path(str(ROOT / 'scripts/cloudbench-reclaim-stopped.py'))
@@ -177,6 +178,38 @@ class Reclaim(unittest.TestCase):
         result, summary = self.cli(fake, '--execute')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f'/v1/apps/fixture/volumes/vol_{0:016x}', fake.deletes())
+
+    def test_slow_exact_read_is_reread_not_abandoned(self):
+        calls = []
+
+        class Api:
+            def api(self, method, path, body=None, timeout=None):
+                calls.append((method, path))
+                if len(calls) == 1:
+                    time.sleep(1)  # exceeds the (patched) per-call cap
+                return {'id': f'{0:014x}', 'state': 'destroyed'} if method == 'GET' else {}
+
+        with patch.dict(H['call'].__globals__, CALL_CAP_SECONDS=.2):
+            row = H['read'](Api(), f'/machines/{0:014x}', time.monotonic() + 10)
+        self.assertEqual(row['state'], 'destroyed')
+        self.assertEqual(len(calls), 2)
+
+    def test_ambiguous_delete_that_took_effect_still_releases_volume(self):
+        path = f'/v1/apps/fixture/machines/{0:014x}'
+        fake = FakeFly([task(0)], delete_status={path: [500]})
+        original = fake.server.RequestHandlerClass.do_DELETE
+
+        def applied_then_failed(handler):
+            if handler.path == path:
+                with fake.lock:
+                    fake.rows[f'{0:014x}'] = dict(fake.rows[f'{0:014x}'], state='destroyed')
+            return original(handler)
+
+        fake.server.RequestHandlerClass.do_DELETE = applied_then_failed
+        result, summary = self.cli(fake, '--execute')
+        self.assertEqual(fake.deletes().count(path), 1)
+        self.assertIn(f'/v1/apps/fixture/volumes/vol_{0:016x}', fake.deletes())
+        self.assertEqual(summary['results'], {'RECLAIMED': 1})
 
     def test_running_on_a_target_machine_excludes_it(self):
         rows = [task(0), task(1)]

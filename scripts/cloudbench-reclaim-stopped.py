@@ -37,6 +37,7 @@ MACHINE_ID = re.compile(r'[0-9a-f]{8,32}')
 VOLUME_ID = re.compile(r'vol_[0-9a-z]{8,40}')
 PROTECTED_METADATA_PREFIXES = ('whm_deploy', 'rose_controller', 'cloudbench_protected', 'polar')
 GONE_VOLUME_STATES = {'destroyed', 'pending_destroy', 'destroying'}
+CALL_CAP_SECONDS = 30
 
 
 class Deadline(Exception):
@@ -80,10 +81,32 @@ def save(path, value):
         os.fsync(stream.fileno())
 
 
+class CallTimeout(Exception):
+    """One provider call exceeded its own cap; the target deadline may still allow a re-read."""
+
+
 def call(api, method, path, end, body=None):
-    cap = min(end, time.monotonic() + 30)
-    with until(cap):
-        return api.api(method, path, body, timeout=max(.001, cap - time.monotonic()))
+    cap = min(end, time.monotonic() + CALL_CAP_SECONDS)
+    try:
+        with until(cap):
+            return api.api(method, path, body, timeout=max(.001, cap - time.monotonic()))
+    except Deadline:
+        if cap < end:
+            raise CallTimeout(method + ' ' + path) from None
+        raise
+
+
+def read(api, path, end):
+    """GET with re-reads after a per-call timeout or transient error; 404 propagates."""
+    while True:
+        try:
+            return call(api, 'GET', path, end)
+        except Deadline:
+            raise
+        except Exception as error:
+            if is_not_found(error) or time.monotonic() >= end - 1:
+                raise
+            time.sleep(min(2, max(0, end - time.monotonic())))
 
 
 def is_not_found(error):
@@ -188,7 +211,7 @@ def reclaim_one(api, before, target, out, end):
     try:
         with until(end):
             out.mkdir(mode=0o700)
-            current = call(api, 'GET', '/machines/' + mid, end)
+            current = read(api, '/machines/' + mid, end)
             save(out / 'exact-before.json', current)
             same_machine(before, current)
             need(current.get('state') == 'stopped', 'Machine is no longer stopped')
@@ -196,9 +219,11 @@ def reclaim_one(api, before, target, out, end):
             result['machine_delete'] = outcome
             gone = outcome == 'not-found'
             reads = 0
-            while not gone and outcome == 'accepted' and time.monotonic() < end:
+            # An ambiguous DELETE is never resent; a few reads show whether it took effect.
+            while (not gone and time.monotonic() < end
+                   and (outcome == 'accepted' or (outcome == 'ambiguous' and reads < 5))):
                 try:
-                    row = call(api, 'GET', '/machines/' + mid, end)
+                    row = read(api, '/machines/' + mid, end)
                     save(out / f'read-{reads}.json', dict(state=row.get('state'), instance_id=row.get('instance_id')))
                     gone = row.get('state') == 'destroyed'
                     need(gone or row.get('state') in ('stopped', 'destroying'), 'unexpected state after destroy')
@@ -218,7 +243,7 @@ def reclaim_one(api, before, target, out, end):
                 state = delete_once(api, '/volumes/' + volume, out, 'volume-destroy-' + volume, end)
                 if state == 'accepted':
                     try:
-                        state = call(api, 'GET', '/volumes/' + volume, end).get('state') or 'unknown'
+                        state = read(api, '/volumes/' + volume, end).get('state') or 'unknown'
                     except Deadline:
                         raise
                     except Exception as error:
@@ -242,7 +267,7 @@ def run(api, app, output, protected_ids, *, execute=False, workers=8, seconds=18
     os.umask(0o077)
     output.mkdir(mode=0o700)
     end = time.monotonic() + seconds
-    rows = inventory(call(api, 'GET', '/machines', end))
+    rows = inventory(read(api, '/machines', end))
     save(output / 'before.json', rows)
     targets, kept = plan(rows, protected_ids, self_id)
     if max_targets is not None:
@@ -281,7 +306,7 @@ def run(api, app, output, protected_ids, *, execute=False, workers=8, seconds=18
             results.append(json.loads((output / target['machine'] / 'terminal.json').read_bytes()))
         except (OSError, ValueError):
             results.append(dict(machine=target['machine'], status='PENDING'))
-    after = inventory(call(api, 'GET', '/machines', end))
+    after = inventory(read(api, '/machines', end))
     save(output / 'after.json', after)
     remaining = {row['id'] for row in after if row.get('state') != 'destroyed'}
     counts = {}
