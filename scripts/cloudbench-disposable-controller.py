@@ -53,6 +53,7 @@ def authority(path,root,fresh=True):
     need(a['app']=='navi-whisper-lux-bench' and a['region']=='iad' and a['vm_size']=='performance-8x' and a['memory_mib']==32768 and a['workspace_size_gb']==256,'fixed controller profile required')
     need(Path(a['output_directory']).is_absolute() and Path(a['output_directory']).parent.resolve(strict=True)==Path(a['output_directory']).parent,'physical output parent required')
     need(type(a['org_machine_limit'])is int and 1<=a['org_machine_limit']<=1000,'measured organization Machine limit required')
+    need(type(a.get('sibling_controller_slots',0))is int and 0<=a.get('sibling_controller_slots',0)<a['org_machine_limit'],'invalid sibling controller slots')
     need(type(a['verified_epoch'])in(int,float) and a['verified_epoch']<=time.time() and (not fresh or time.time()-a['verified_epoch']<=300),'stale creation authority')
     need(birth(a['cleanup_owner_pid'])==a['cleanup_owner_birth'],'external cleanup owner must remain live')
     need(isinstance(a['protected_machines'],list) and isinstance(a['protected_volumes'],list) and len(a['protected_machines'])>=4,'explicit protected cohort required')
@@ -89,7 +90,10 @@ def env_files(a,directory):
 def admit(a,api):
     rows=api('GET','/machines');need(isinstance(rows,list),'full current inventory required')
     ids=[r['id']for r in rows];need(len(ids)==len(set(ids)),'duplicate Machine inventory')
-    need(type(a['org_object_count'])is int and len(ids)<=a['org_object_count'] and a['org_object_count']+1<=a['org_machine_limit'],'no measured organization room for one controller')
+    # K controllers admitted from one measured snapshot: each reserves room for
+    # its K-1 siblings, and later siblings may observe the earlier ones.
+    siblings=a.get('sibling_controller_slots',0)
+    need(type(a['org_object_count'])is int and len(ids)<=a['org_object_count']+siblings and a['org_object_count']+1+siblings<=a['org_machine_limit'],'no measured organization room for one controller')
     proof=read(a['capacity_proof']['path']);need(hashlib.sha256(proof).hexdigest()==a['capacity_proof']['sha256'],'organization capacity proof changed')
     need(set(a['protected_machines'])<=set(ids),'protected inventory changed')
     return rows

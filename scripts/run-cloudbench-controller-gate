@@ -32,6 +32,13 @@ set -euo pipefail
 umask 077
 ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 cd "$ROOT_DIR"
+# Optional CLOUDBENCH_GATE_NAME_SUFFIX keeps controller names distinct when several
+# gates start in the same second (sharded controllers). Validated before any effect.
+GATE_NAME_SUFFIX="${CLOUDBENCH_GATE_NAME_SUFFIX:-}"
+if [ -n "$GATE_NAME_SUFFIX" ] && ! [[ "$GATE_NAME_SUFFIX" =~ ^[a-z0-9-]{1,12}$ ]]; then
+  echo "invalid CLOUDBENCH_GATE_NAME_SUFFIX: expected [a-z0-9-]{1,12}" >&2; exit 2
+fi
+gate_machine_name() { printf 'cloudbench-gate-%s-%s%s\n' "${GATE_REF:0:8}" "$STAMP" "${GATE_NAME_SUFFIX:+-$GATE_NAME_SUFFIX}"; }
 python3 -I -B "$ROOT_DIR/scripts/cloudbench-operator-preflight.py" --require-flyctl
 DISPOSABLE_AUTHORITY=""
 if [ "${1:-}" = "--disposable-controller" ]; then
@@ -260,7 +267,7 @@ except Exception:
 GATE_NODE_VERSION="${GATE_NODE_VERSION:-v24.21.0}"
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
-MACHINE_NAME="cloudbench-gate-${GATE_REF:0:8}-${STAMP}"
+MACHINE_NAME="$(gate_machine_name)"
 # Repeated log pulls overlap; drop repeats but keep arrival order so each
 # suite's GATE_FAIL_TAIL section stays readable (sort -u interleaved them).
 dedupe_machine_log() {

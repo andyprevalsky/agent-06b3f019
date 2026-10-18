@@ -473,6 +473,64 @@ def resolve_token(request): raise AssertionError("no credential fallback in fixt
         self.entry('cleanup-workspace')
         self.assertEqual([c[1] for c in self.api.calls if c[0] == 'DELETE'], ['/volumes/' + VID])
 
+    def test_sibling_controller_slots_admit_k_controllers_from_one_snapshot(self):
+        # One measured snapshot (4 objects, limit 7) admits K=3 controllers only
+        # when each reserves its two siblings; later siblings observe earlier ones.
+        self.auth['org_machine_limit'] = 7
+        self.write_auth()
+        self.api.machines += [{'id': 'sibling0'}, {'id': 'sibling1'}]
+        with self.assertRaisesRegex(ValueError, 'room'):
+            self.entry('admit')
+        self.auth['sibling_controller_slots'] = 2
+        self.write_auth()
+        self.entry('admit')
+        self.api.machines.append({'id': 'unexpected-third'})
+        with self.assertRaisesRegex(ValueError, 'room'):
+            self.entry('admit')
+        self.api.machines.pop()
+        self.auth['org_machine_limit'] = 6
+        self.write_auth()
+        with self.assertRaisesRegex(ValueError, 'room'):
+            self.entry('admit')
+        for bad in (-1, True, '1', 6, 1.0):
+            self.auth['sibling_controller_slots'] = bad
+            self.write_auth()
+            calls = len(self.api.calls)
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'sibling controller slots'):
+                self.entry('admit')
+            self.assertEqual(len(self.api.calls), calls)
+        self.assertFalse(any(c[0] != 'GET' for c in self.api.calls))
+
+
+class ControllerGateName(unittest.TestCase):
+    GATE = Path(__file__).resolve().parents[1] / 'run-cloudbench-controller-gate'
+
+    def name(self, suffix):
+        source = self.GATE.read_text()
+        definition = [line for line in source.splitlines() if line.startswith('gate_machine_name() {')]
+        self.assertEqual(len(definition), 1)
+        self.assertEqual(source.count('MACHINE_NAME="$(gate_machine_name)"'), 1)
+        self.assertNotIn('MACHINE_NAME="cloudbench-gate-', source)
+        script = definition[0] + '\nGATE_REF=abcdef1234567890; STAMP=20261018-000000; GATE_NAME_SUFFIX="$1"; gate_machine_name\n'
+        return subprocess.run(['bash', '-c', script, 'gate', suffix], capture_output=True, text=True, check=True).stdout.strip()
+
+    def test_default_name_unchanged_and_suffix_distinguishes_same_second_gates(self):
+        self.assertEqual(self.name(''), 'cloudbench-gate-abcdef12-20261018-000000')
+        self.assertEqual(self.name('s00'), 'cloudbench-gate-abcdef12-20261018-000000-s00')
+        self.assertNotEqual(self.name('s00'), self.name('s01'))
+
+    def test_invalid_suffix_refused_before_any_preflight_or_provider_effect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for bad in ('S00', 's_00', 'a' * 13, 's00;x'):
+                env = {k: v for k, v in os.environ.items() if not k.startswith('CLOUDBENCH_')}
+                env.update(CLOUDBENCH_GATE_ROOT_DIR=directory, CLOUDBENCH_GATE_NAME_SUFFIX=bad, PATH='/usr/bin:/bin')
+                result = subprocess.run(['bash', str(self.GATE)], cwd=directory, env=env, capture_output=True, text=True, timeout=30)
+                with self.subTest(bad=bad):
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn('invalid CLOUDBENCH_GATE_NAME_SUFFIX', result.stderr)
+                    self.assertNotIn('operator-preflight', result.stderr)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
 
 if __name__ == '__main__':
     unittest.main()
