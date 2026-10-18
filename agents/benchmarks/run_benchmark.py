@@ -14279,9 +14279,9 @@ async def _run_single_task_as_run_user(
                 passed = False
                 failure_reason = evaluator_reason
 
-        # Collect prod logs for diagnostics
-        print("    Collecting prod logs...")
-        logs = await collect_logs(agent_id, data, start_time)
+        # Collect diagnostic logs; prod log APIs only for prod-backed runs.
+        print("    Collecting logs...")
+        logs = await collect_logs(agent_id, data, start_time, backend_url=base_url)
         if declared_evaluator_results:
             logs["declared_evaluators"] = declared_evaluator_results
         # Keep hydrated Claude Code transcripts in the run JSON so durable FE
@@ -14457,8 +14457,8 @@ async def _run_single_task_as_run_user(
             except Exception:
                 data = {}
             try:
-                print("    Collecting prod logs...")
-                logs = await collect_logs(agent_id, data, start_time)
+                print("    Collecting logs...")
+                logs = await collect_logs(agent_id, data, start_time, backend_url=base_url)
                 log_summary = []
                 for key, label in [
                     ("backend_logs", "backend"),
@@ -14541,7 +14541,7 @@ async def _run_single_task_as_run_user(
         logs = None
         if agent_id:
             try:
-                logs = await collect_logs(agent_id, {}, start_time)
+                logs = await collect_logs(agent_id, {}, start_time, backend_url=base_url)
             except Exception:
                 pass
             archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
@@ -15777,7 +15777,7 @@ async def main_async(args):
         print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s ({note})")
 
     # Start Fly.io log streaming
-    fly_status = await start_fly_log_collector()
+    fly_status = await start_fly_log_collector(backend_url=base_url)
     print(f"  📡 {fly_status}")
     is_private_realtime = "localhost" not in base_url and "127.0.0.1" not in base_url
     realtime_started = False

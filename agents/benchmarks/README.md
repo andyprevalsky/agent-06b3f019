@@ -537,6 +537,15 @@ curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT"
 - **Supabase**: REST API call to `api.supabase.com/v1/projects/.../analytics/endpoints/logs.all` with time window, filtered for completions-related requests
 - **Messages**: Extracted from the agent GET response (always available, no external API needed)
 
+These production sources are queried only when the backend under test is
+production (`--prod` or a non-loopback `--url`). A loopback stack — `run-bench
+--local`, `scripts/run.sh` or an isolated cloud guest — runs its own backend,
+worker and completions, so prod stores cannot contain its agents. Its
+`worker_logs` come from the stack's local worker files, and `backend_logs` /
+`research_logs` carry a skip note; the full stack logs stay in its run archive.
+`SUPABASE_PROJECT_REF` falls back only to the project named by the configured
+`SUPABASE_URL`, never to a hard-coded production project.
+
 ### Token Setup
 
 ```bash

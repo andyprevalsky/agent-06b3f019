@@ -14835,7 +14835,8 @@ async def test_tree_log_collection_fetches_supabase_once():
         fetch_calls.append((agent_id, start_time, end_time, limit))
         return ["root research log"]
 
-    async def fake_collect_logs(agent_id, agent_data, start_time, research_logs=None):
+    async def fake_collect_logs(agent_id, agent_data, start_time, research_logs=None, *, backend_url):
+        assert backend_url == "https://navi-j9a9.onrender.com"
         collect_calls.append((agent_id, research_logs))
         return {
             "messages": [],
@@ -14874,6 +14875,7 @@ async def test_tree_log_collection_fetches_supabase_once():
             ],
             start_time,
             get_agent_fn=fake_get_agent,
+            backend_url="https://navi-j9a9.onrender.com",
         )
     finally:
         logs.fetch_supabase_logs = original_fetch
@@ -20782,11 +20784,142 @@ async def test_collect_logs_prefers_local_worker_logs_over_remote_placeholders()
             agent_id,
             {},
             datetime(2026, 8, 31, 3, 0, tzinfo=timezone.utc),
+            backend_url="https://navi-j9a9.onrender.com",
         )
 
     assert result["worker_logs"] == [local_line]
     assert not any(line.startswith("[fly.io]") for line in result["worker_logs"])
     assert not any(line.startswith("[clickhouse]") for line in result["worker_logs"])
+
+
+async def test_local_stack_log_collection_makes_no_prod_log_api_calls():
+    """A loopback/guest stack never queries prod log APIs; a prod-backed run still does.
+
+    run600c: each of 600 isolated cloudbench guests queried prod Render
+    ``/v1/logs`` and the prod Supabase Management API (``SUPABASE_PROJECT_REF``
+    defaulted to the prod project) after its run, for 291 + 441 HTTP 429s. Those
+    stores only index agents served by the deployed backend and Fly workers, so
+    a local stack's agents can never appear there.
+    """
+    from datetime import datetime, timezone
+
+    import httpx
+
+    import benchmarks.logs as logs
+
+    agent_id = "aaaaaaaa-1111-2222-3333-444444444444"
+    child_id = "bbbbbbbb-1111-2222-3333-444444444444"
+    start_time = datetime(2026, 10, 18, 3, 0, tzinfo=timezone.utc)
+    local_line = json.dumps({"timestamp": "2026-10-18T03:01:00+00:00", "agent_id": agent_id, "event": "local"})
+    clickhouse_line = json.dumps({"agent_id": agent_id, "event": "retained"})
+    requests: list[tuple[str, str, str]] = []
+    subprocesses: list[tuple] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.host, request.url.path))
+        if request.url.host == "api.render.com":
+            return httpx.Response(200, json={"logs": [{"message": f"GET /api/agents/{agent_id} 200"}]})
+        if request.url.host == "api.supabase.com":
+            return httpx.Response(200, json={"result": [{"event_message": "POST /functions/v1/completions 200"}]})
+        return httpx.Response(200, text=json.dumps({"raw": clickhouse_line}) + "\n")
+
+    real_async_client = httpx.AsyncClient
+
+    def mock_async_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    class FakeFlyctl:
+        stdout = None
+        stderr = None
+
+        async def communicate(self):
+            return b"", b""
+
+        def terminate(self):
+            pass
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*argv, **_kwargs):
+        subprocesses.append(argv)
+        return FakeFlyctl()
+
+    async def get_agent(_aid):
+        return {"agent": {}}
+
+    tree_agents = [
+        {"agent_id": agent_id, "parent_agent_id": None, "goal": "root", "status": "COMPLETED"},
+        {"agent_id": child_id, "parent_agent_id": agent_id, "goal": "child", "status": "COMPLETED"},
+    ]
+
+    with (
+        patch.object(httpx, "AsyncClient", mock_async_client),
+        patch.object(asyncio, "create_subprocess_exec", fake_exec),
+        patch.object(logs, "RENDER_API_KEY", "render-test-key"),
+        patch.object(logs, "SUPABASE_ACCESS_TOKEN", "supabase-test-token"),
+        patch.object(logs, "SUPABASE_PROJECT_REF", "prodproject"),
+        patch.object(logs, "FLY_API_TOKEN", "fly-test-token"),
+        patch.object(logs, "DISABLE_FLY_LOG_STREAM", False),
+        patch.object(logs, "CLICKHOUSE_ENDPOINT", "https://clickhouse.test"),
+        patch.object(logs, "CLICKHOUSE_USER", "clickhouse-user"),
+        patch.object(logs, "CLICKHOUSE_PASSWORD", "clickhouse-password"),
+        patch.object(logs, "_find_flyctl", return_value="flyctl"),
+        patch.object(
+            logs,
+            "fetch_local_worker_logs",
+            side_effect=lambda aid, *_a, **_k: [local_line] if aid == agent_id else [],
+        ),
+        patch.object(logs, "get_supabase_realtime_logs_for_agent", return_value=[]),
+    ):
+        for backend_url in ("http://localhost:4100", "http://127.0.0.1:4100", "http://[::1]:4100", "localhost:4100"):
+            status = await logs.start_fly_log_collector(backend_url=backend_url)
+            single = await logs.collect_logs(agent_id, {}, start_time, backend_url=backend_url)
+            tree = await logs.collect_tree_logs(
+                agent_id, tree_agents, start_time, get_agent_fn=get_agent, backend_url=backend_url
+            )
+            assert requests == [] and subprocesses == [], (backend_url, requests, subprocesses)
+            assert logs._fly_collector is None and "skipped" in status, status
+            assert single["worker_logs"] == [local_line]
+            assert single["backend_logs"] == [f"[render] {logs._prod_logs_skipped_note(backend_url)}"]
+            assert single["research_logs"] == [f"[supabase] {logs._prod_logs_skipped_note(backend_url)}"]
+            assert set(tree) == {agent_id, child_id}
+            assert tree[agent_id]["logs"]["worker_logs"] == [local_line]
+            assert tree[agent_id]["logs"]["research_logs"] == single["research_logs"]
+            assert tree[child_id]["logs"]["worker_logs"] == [f"[local-worker] 0 logs for agent {child_id[:12]}"]
+
+        prod_url = "https://navi-j9a9.onrender.com"
+        await logs.start_fly_log_collector(backend_url=prod_url)
+        try:
+            prod = await logs.collect_logs(agent_id, {}, start_time, backend_url=prod_url)
+        finally:
+            await logs.stop_fly_log_collector()
+
+        no_ref_requests = len(requests)
+        with patch.object(logs, "SUPABASE_PROJECT_REF", ""):
+            unresolved = await logs.fetch_supabase_logs(agent_id, start_time)
+
+    assert sorted(requests) == sorted(
+        [
+            ("GET", "api.render.com", "/v1/logs"),
+            ("GET", "api.supabase.com", "/v1/projects/prodproject/analytics/endpoints/logs.all"),
+            ("POST", "clickhouse.test", "/"),
+        ]
+    ), requests
+    assert [argv[1:] for argv in subprocesses] == [
+        ("logs", "-a", "navi-whisper-lux"),
+        ("logs", "-a", "navi-whisper-lux", "--no-tail"),
+    ], subprocesses
+    assert prod["backend_logs"] == [f"GET /api/agents/{agent_id} 200"]
+    assert prod["research_logs"] == ["POST /functions/v1/completions 200"]
+    assert prod["worker_logs"] == [local_line, clickhouse_line]
+    assert len(requests) == no_ref_requests and unresolved[0].startswith("[supabase] SUPABASE_PROJECT_REF not set")
+    assert logs._supabase_project_ref_from_url("https://abcdefghij.supabase.co") == "abcdefghij"
+    assert logs._supabase_project_ref_from_url("http://localhost:54321") == ""
+    assert not logs.prod_log_sources_enabled("http://0.0.0.0:4100")
+    assert not logs.prod_log_sources_enabled("")
+    assert logs.prod_log_sources_enabled(prod_url)
 
 
 def test_agent_latency_reads_isolated_benchmark_stack_logs():
@@ -23733,6 +23866,10 @@ async def run_all_tests():
     await r.record_async(
         "collect_logs_prefers_local_worker_logs",
         test_collect_logs_prefers_local_worker_logs_over_remote_placeholders,
+    )
+    await r.record_async(
+        "local_stack_log_collection_makes_no_prod_log_api_calls",
+        test_local_stack_log_collection_makes_no_prod_log_api_calls,
     )
     r.record(
         "agent_latency_explicit_context_excludes_neighbor_stacks",
