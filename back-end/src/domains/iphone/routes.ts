@@ -4,8 +4,9 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import * as service from './service';
 import { IPhoneError, type ActionInput, type LeaseAction } from './types';
+import * as operations from './service.operations';
+import type { PhoneClientFactory } from './types.operations';
 
-const router = Router();
 const log = createLogger('IPhone');
 
 function bodyRecord(body: unknown): Record<string, unknown> {
@@ -34,7 +35,15 @@ function handle(handler: Handler, status = 200) {
     try {
       const userId = req.userId;
       if (userId === undefined || userId === '') throw new IPhoneError(401, 'User scope required');
-      res.status(status).json(await handler(req, userId));
+      const result = await handler(req, userId);
+      if (result instanceof Uint8Array) {
+        res
+          .status(status)
+          .set('Cache-Control', 'private, no-store')
+          .set('X-Content-Type-Options', 'nosniff')
+          .type('png')
+          .send(Buffer.from(result));
+      } else res.status(status).json(result);
     } catch (error) {
       if (error instanceof IPhoneError) {
         res.status(error.status).json({ error: error.message });
@@ -56,39 +65,80 @@ function handle(handler: Handler, status = 200) {
     }
   });
 }
-router.use(asyncHandler(hybridAuth));
-router.get(
-  '/capability',
-  handle((_req, userId) => service.capability(userId))
-);
-router.put(
-  '/device',
-  handle(async (req, userId) => {
-    if (req.isInternal !== true) throw new IPhoneError(403, 'Internal API key required');
-    return service.bind(userId, text(bodyRecord(req.body), 'providerDeviceId'));
-  })
-);
-router.post(
-  '/leases',
-  handle((req, userId) => {
-    const body = bodyRecord(req.body);
-    return service.acquire(userId, {
-      agentId: text(body, 'agentId'),
-      requestKey: text(body, 'requestKey'),
-      ...(body.browserTaskId !== undefined ? { browserTaskId: text(body, 'browserTaskId') } : {}),
-    });
-  }, 201)
-);
-router.get(
-  '/leases/:id',
-  handle((req, userId) => service.act(userId, req.params.id, 'read', {}))
-);
-for (const action of ['heartbeat', 'release', 'awaiting-auth', 'control'] as const) {
+export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory } = {}) {
+  const router = Router();
+  const clientFactory = options.phoneClient ?? operations.defaultPhoneClient;
+  router.use(asyncHandler(hybridAuth));
+  router.get(
+    '/capability',
+    handle((_req, userId) => service.capability(userId))
+  );
+  router.put(
+    '/device',
+    handle(async (req, userId) => {
+      if (req.isInternal !== true) throw new IPhoneError(403, 'Internal API key required');
+      return service.bind(userId, text(bodyRecord(req.body), 'providerDeviceId'));
+    })
+  );
   router.post(
-    `/leases/:id/${action}`,
+    '/leases',
+    handle((req, userId) => {
+      const body = bodyRecord(req.body);
+      return service.acquire(
+        userId,
+        {
+          agentId: text(body, 'agentId'),
+          requestKey: text(body, 'requestKey'),
+          ...(body.browserTaskId !== undefined
+            ? { browserTaskId: text(body, 'browserTaskId') }
+            : {}),
+        },
+        clientFactory
+      );
+    }, 201)
+  );
+  router.get(
+    '/leases/:id',
+    handle((req, userId) => service.act(userId, req.params.id, 'read', {}, clientFactory))
+  );
+  for (const action of ['heartbeat', 'release', 'awaiting-auth', 'control'] as const) {
+    router.post(
+      `/leases/:id/${action}`,
+      handle((req, userId) =>
+        service.act(userId, req.params.id, action, actionInput(action, req.body), clientFactory)
+      )
+    );
+  }
+  router.post(
+    '/leases/:id/operations',
+    handle((req, userId) => {
+      const body = bodyRecord(req.body);
+      const args = body.args === undefined ? {} : bodyRecord(body.args);
+      if (JSON.stringify(args).length > 16_384)
+        throw new IPhoneError(400, 'Phone input is too large');
+      return operations.performPhoneCommand(
+        userId,
+        req.params.id,
+        {
+          operationId: text(body, 'operationId'),
+          operation: text(body, 'operation'),
+          args,
+        },
+        req.isInternal === true ? 'agent' : 'user',
+        clientFactory
+      );
+    })
+  );
+  router.get(
+    '/leases/:id/operations/:operationId',
     handle((req, userId) =>
-      service.act(userId, req.params.id, action, actionInput(action, req.body))
+      operations.phoneOperationStatus(userId, req.params.id, req.params.operationId)
     )
   );
+  router.get(
+    '/leases/:id/frame',
+    handle((req, userId) => operations.phoneFrame(userId, req.params.id, clientFactory))
+  );
+  return router;
 }
-export default router;
+export default createIPhoneRouter();

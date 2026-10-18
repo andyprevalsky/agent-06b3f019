@@ -1,10 +1,12 @@
 /** Durable admission: device FOR UPDATE -> reconcile -> mutate -> FIFO admit.
  * Every process uses this lock order. Transactions perform database I/O only. */
+import { databaseNow } from './repo.clock';
+export { databaseNow } from './repo.clock';
+import { closeLease, reconcile } from './repo.lifecycle';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import {
   permitted,
   deadlineElapsed,
-  AUTH_REJECTED_RESPONSE,
   LEASE_TIMEOUT_MS,
   QUEUE_TIMEOUT_MS,
   TERMINAL_AGENT_STATUSES,
@@ -56,96 +58,15 @@ export async function readLease(tx: Transaction, id: string, userId?: string) {
   return tx.iPhoneLease.findFirst({ where: { id, userId } });
 }
 
-async function closeLease(tx: Transaction, id: string, status: string) {
-  await tx.iPhoneLease.update({
-    where: { id },
-    data: {
-      status,
-      activeDeviceId: null,
-      controlOwner: 'agent',
-      revision: { increment: 1 },
-    },
-  });
+export async function requireOwnedLease(userId: string, id: string): Promise<void> {
+  const lease = await prisma.iPhoneLease.findFirst({ where: { id, userId }, select: { id: true } });
+  if (lease === null) throw new IPhoneError(404, 'Lease not found');
 }
 
 const deadAgent = {
   OR: [{ deletedAt: { not: null } }, { status: { in: [...TERMINAL_AGENT_STATUSES] } }],
 };
 
-export async function databaseNow(tx: Transaction): Promise<Date> {
-  const [row] = await tx.$queryRaw<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
-  return row.now;
-}
-async function reconcileActive(tx: Transaction, lease: IPhoneLease) {
-  await tx.$queryRaw`SELECT id FROM "Agent" WHERE id = ${lease.agentId} FOR SHARE`;
-  const agent = await tx.agent.findUnique({ where: { id: lease.agentId } });
-  if (
-    agent === null ||
-    agent.deletedAt !== null ||
-    TERMINAL_AGENT_STATUSES.some((status) => status === agent.status)
-  ) {
-    await closeLease(tx, lease.id, 'CANCELLED');
-    return;
-  }
-  const auth =
-    lease.attentionRequestId === null
-      ? []
-      : await tx.$queryRaw<{ userResponse: string | null }[]>`
-    SELECT "userResponse" FROM "AgentAttentionRequest"
-    WHERE id = ${lease.attentionRequestId} AND "userId" = ${lease.userId}
-      AND "agentId" = ${lease.agentId} FOR SHARE`;
-  const now = await databaseNow(tx);
-  if (auth[0]?.userResponse === null) return;
-  if (auth[0]?.userResponse === AUTH_REJECTED_RESPONSE) {
-    await closeLease(tx, lease.id, 'RELEASED');
-    return;
-  }
-  if (auth[0] !== undefined) {
-    // Consume the answered transition exactly once; polling cannot extend grace.
-    await tx.iPhoneLease.update({
-      where: { id: lease.id },
-      data: {
-        attentionRequestId: null,
-        controlOwner: 'agent',
-        leaseExpiresAt: new Date(now.getTime() + LEASE_TIMEOUT_MS),
-        revision: { increment: 1 },
-      },
-    });
-    return;
-  }
-  if (lease.attentionRequestId !== null)
-    await tx.iPhoneLease.update({
-      where: { id: lease.id },
-      data: { attentionRequestId: null, revision: { increment: 1 } },
-    });
-  if (deadlineElapsed(lease.leaseExpiresAt, now)) await closeLease(tx, lease.id, 'EXPIRED');
-}
-async function reconcile(tx: Transaction, device: IPhoneDevice, enabled: boolean) {
-  if (!enabled) {
-    await tx.iPhoneLease.updateMany({
-      where: { deviceId: device.id, status: { in: ['WAITING', 'ACTIVE'] } },
-      data: {
-        status: 'CANCELLED',
-        activeDeviceId: null,
-        controlOwner: 'agent',
-        revision: { increment: 1 },
-      },
-    });
-  } else {
-    const active = await tx.iPhoneLease.findFirst({
-      where: { deviceId: device.id, status: 'ACTIVE' },
-    });
-    if (active !== null) await reconcileActive(tx, active);
-  }
-  await tx.iPhoneLease.updateMany({
-    where: {
-      deviceId: device.id,
-      status: 'WAITING',
-      queueDeadlineAt: { lte: await databaseNow(tx) },
-    },
-    data: { status: 'EXPIRED', revision: { increment: 1 } },
-  });
-}
 export async function admit(tx: Transaction, deviceId: string): Promise<void> {
   if (
     (await tx.iPhoneLease.findFirst({
@@ -247,6 +168,16 @@ export async function mutate(
     return null;
   }
   if (lease.status !== 'ACTIVE') return new IPhoneError(409, 'Lease is not active');
+  if (lease.releaseRequestedAt !== null)
+    return new IPhoneError(409, 'Phone interaction is finishing');
+  if (action === 'control' || action === 'awaiting-auth') {
+    const executing = await tx.iPhoneOperation.findFirst({
+      where: { leaseId: lease.id, activeDeviceId: { not: null } },
+      select: { id: true },
+    });
+    if (executing !== null)
+      return new IPhoneError(409, 'A phone command is still running or unconfirmed');
+  }
   if (lease.attentionRequestId === null && deadlineElapsed(lease.leaseExpiresAt, now)) {
     await closeLease(tx, lease.id, 'EXPIRED');
     return new IPhoneError(409, 'Lease expired');

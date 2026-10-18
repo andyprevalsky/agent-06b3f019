@@ -1,6 +1,6 @@
-import type { IPhoneDevice, IPhoneLease, Prisma } from '@prisma/client';
+import type { IPhoneDevice, IPhoneLease, IPhoneOperation, Prisma } from '@prisma/client';
 
-export type { IPhoneDevice, IPhoneLease };
+export type { IPhoneDevice, IPhoneLease, IPhoneOperation };
 export type Transaction = Prisma.TransactionClient;
 export type LeaseAction = 'read' | 'heartbeat' | 'release' | 'awaiting-auth' | 'control';
 export interface AcquireInput {

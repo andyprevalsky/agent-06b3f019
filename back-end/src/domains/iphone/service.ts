@@ -1,6 +1,7 @@
-/** Browser agent -> backend durable device FIFO -> persistent account iPhone.
- * This stage stops at admission and ownership; no provider I/O. */
+/** Browser agent -> durable device FIFO -> provider cleanup -> account iPhone. */
 import * as repo from './repo';
+import { cleanupPhoneIfConfigured, defaultPhoneClient } from './service.operations';
+import type { PhoneClientFactory } from './types.operations';
 import {
   IPhoneError,
   type AcquireInput,
@@ -21,7 +22,12 @@ export async function bind(userId: string, providerDeviceId: string) {
   await repo.bind(userId, providerDeviceId);
   return capability(userId);
 }
-export async function acquire(userId: string, input: AcquireInput) {
+export async function acquire(
+  userId: string,
+  input: AcquireInput,
+  clientFactory = defaultPhoneClient
+) {
+  const phone = await cleanupPhoneIfConfigured(userId, clientFactory);
   const result = await repo.transaction(async (tx) => {
     if (!(await repo.accountPermitted(tx, userId)))
       return new IPhoneError(403, 'iPhone access denied');
@@ -32,9 +38,17 @@ export async function acquire(userId: string, input: AcquireInput) {
     return id instanceof IPhoneError ? id : repo.view(tx, id);
   });
   if (result instanceof IPhoneError) throw result;
-  return present(result);
+  return { ...present(result), ...(phone === null ? {} : { phone }) };
 }
-export async function act(userId: string, id: string, action: LeaseAction, input: ActionInput) {
+export async function act(
+  userId: string,
+  id: string,
+  action: LeaseAction,
+  input: ActionInput,
+  clientFactory: PhoneClientFactory = defaultPhoneClient
+) {
+  await repo.requireOwnedLease(userId, id);
+  await cleanupPhoneIfConfigured(userId, clientFactory);
   const result = await repo.transaction(async (tx) => {
     if ((await repo.readLease(tx, id, userId)) === null)
       return new IPhoneError(404, 'Lease not found');
@@ -49,7 +63,16 @@ export async function act(userId: string, id: string, action: LeaseAction, input
   });
   // Reconciliation must commit even when a stale operation returns an error.
   if (result instanceof IPhoneError) throw result;
-  return present(result);
+  const phone = await cleanupPhoneIfConfigured(userId, clientFactory);
+  if (phone?.state === 'cleanup_complete') {
+    const refreshed = await repo.transaction(async (tx) => {
+      const { device, enabled } = await repo.lockedDevice(tx, userId);
+      if (enabled) await repo.admit(tx, device.id);
+      return repo.view(tx, id);
+    });
+    return { ...present(refreshed), phone };
+  }
+  return { ...present(result), ...(phone === null ? {} : { phone }) };
 }
 
 function present({ lease, queuePosition }: { lease: IPhoneLease; queuePosition: number | null }) {
