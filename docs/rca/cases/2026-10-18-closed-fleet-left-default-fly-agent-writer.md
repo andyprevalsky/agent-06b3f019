@@ -34,6 +34,8 @@ The first supplementary capture failed after assuming a live registration record
 
 The exact originating Fly invocation is not proven. A missing parent canary relay environment is a separate established routing defect, but other direct SSH and SFTP commands can also start a default agent.
 
+The first real retirement invocation then exposed a separate response-contract defect. Its guest plan completed with exit code zero, one target and no held targets, and returned a durable plan hash. Loading the canonical export checker also emitted exactly one `EXPORT_PHASE REMOTE_ENTERED` diagnostic on stderr. The host rejected all nonempty stderr, so it stopped after planning and before sending any signal. The recorded native responses and original plan remain the source of truth; rerunning the plan would not be an appropriate recovery.
+
 ## Prior archive search
 
 The search `Fly agent controller export relay parent preflight` found related normal-export ownership and retained-retirement evidence cases. Existing relay retirement explicitly excludes its isolated Fly agent and cannot stand in for ownership of this default agent.
@@ -48,9 +50,13 @@ Keep generic writer checks, archive verification and the original external calle
 
 Nine owning controls pass, including the normal command through recorded native request handling, one signal, duplicate-intent observation, existing export custody verification, real self-descriptor enumeration, and rejected incomplete captures, clients, queued connections and changed ownership. Actual retirement, export and resource release remain pending until their original receipts are obtained. Original77 remains a failed run with all attempts and clocks preserved.
 
+The scoped continuation adds three controls, bringing the owning file to twelve passing tests. They cover the exact known diagnostic, a signal-only continuation preserving the original plan identity, and the saved raw plan parser with changed-source, raw-hash and foreign-file denials. A separate reproduction executes the actual export checker's module load: the old empty-stderr predicate rejects its phase line, while the new strict handler accepts the same successful plan response. The continuation keeps the original deadline; passing these controls does not authorize execution after it expires.
+
 ## Human feedback
 
 Continue the authorized deployment and benchmark task without bypassing writer checks or discarding evidence. Current-run cleanup and future source repairs remain separately attributable.
+
+The user subsequently required discussion before starting each new fix. After the successful-plan refusal was explained, the user explicitly approved accepting the known diagnostic line and continuing from the saved retirement plan without replaying prior actions. This approval does not cover unrelated response errors, new cleanup authority, or changing the original run deadline.
 
 ## Reusable lesson
 

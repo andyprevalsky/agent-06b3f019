@@ -404,9 +404,216 @@ def command(payload):
     return body
 
 
+def successful_agent_response(response, payload, action):
+    need(
+        response.get("exit_code") == 0 and response.get("exit_signal", 0) == 0,
+        "drain exec uncertain; observe only",
+    )
+    result = json.loads(response["stdout"])
+    stderr = response.get("stderr")
+    if stderr not in (None, ""):
+        need(
+            payload.get("role") == "normal-agent"
+            and action in ("plan", "signal")
+            and isinstance(stderr, str)
+            and re.fullmatch(r"EXPORT_PHASE REMOTE_ENTERED [0-9]+\n", stderr),
+            "unknown drain exec diagnostic",
+        )
+        need(
+            (
+                action == "plan"
+                and result.get("status") == "PLANNED"
+                and result.get("targets") == 1
+                and result.get("held") == 0
+                and re.fullmatch("[0-9a-f]{64}", result.get("plan_sha256", ""))
+            )
+            or (
+                action == "signal"
+                and result.get("status") == "BATCH_FINISHED"
+                and len(result.get("results", [])) == 1
+                and result["results"][0].get("pid") == payload["agent_pid"]
+            ),
+            "diagnostic without positive bound result",
+        )
+    return result
+
+
+def saved_positive_plan(args, export):
+    root = args.run_directory.absolute() / "registered-orphan-drain"
+    names = {"intent.json"} | {
+        "wire-00000" + str(i) + suffix
+        for i in (1, 2)
+        for suffix in (".request.json", ".raw.json", ".decoded.json")
+    }
+    adopted = root / "result-adopted-plan.json"
+    need(
+        {p.name for p in root.iterdir()} in (names, names | {adopted.name}),
+        "unknown saved plan namespace",
+    )
+    inputs = {str(root / name): sha(read(root / name)) for name in names}
+    intent = F["obj"](root / "intent.json")
+    payload, operator = intent["payload"], intent["operator"]
+    old_ref = "30eb08e7ead85d03a44edf06cc557c8888ba4267"
+    need(
+        payload["identity_sha256"]
+        == sha(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in payload.items()
+                    if key != "identity_sha256"
+                },
+                sort_keys=True,
+            ).encode()
+        ),
+        "saved plan identity differs",
+    )
+    need(
+        payload["operator_ref"] == old_ref
+        and payload["role"] == operator["role"] == "normal-agent",
+        "unknown saved plan producer",
+    )
+    source_paths = [
+        Path(path)
+        for path in operator["source_pins"]
+        if Path(path).name == "cloudbench-controller-orphan-drain.py"
+    ]
+    need(
+        len(source_paths) == 1
+        and sha(read(source_paths[0]))
+        == "0690d2b29756e8ddcf81887f338d805296871b723fad4553cc3e138e38ed5263",
+        "saved plan source differs",
+    )
+    for path, expected in operator["source_pins"].items():
+        need(
+            F["normalized"](B["fingerprint"](path)) == expected,
+            "saved plan operator evidence changed",
+        )
+    expected_names = {
+        "cloudbench-controller-orphan-drain.py",
+        "cloudbench-resume-controller-export.py",
+        "cloudbench-controller-payload-finalization.py",
+        "cloudbench-original600-runner.py",
+        "cloudbench-resume-controller-payload.py",
+        "cloudbench-original-volume-capture.py",
+    }
+    need(
+        set(operator["source_hashes"]) == expected_names,
+        "incomplete saved plan producer sources",
+    )
+    for name, expected in operator["source_hashes"].items():
+        need(
+            sha(
+                subprocess.check_output(
+                    [
+                        "git",
+                        "--no-replace-objects",
+                        "-C",
+                        str(HERE.parent),
+                        "show",
+                        old_ref + ":scripts/" + name,
+                    ]
+                )
+            )
+            == expected,
+            "saved plan producer Git binding differs",
+        )
+    old = runpy.run_path(str(source_paths[0]))
+
+    def recorded(i):
+        stem = root / ("wire-00000" + str(i))
+        request, wire, decoded = (
+            F["obj"](Path(str(stem) + suffix))
+            for suffix in (".request.json", ".raw.json", ".decoded.json")
+        )
+        raw = base64.b64decode(wire["body_b64"], validate=True)
+        need(
+            wire["status"] == 200
+            and wire["bytes"] == len(raw)
+            and wire["sha256"] == sha(raw)
+            and json.loads(raw) == decoded
+            and wire["method"] == request["method"]
+            and wire["path"] == request["path"],
+            "saved plan raw response differs",
+        )
+        return request, decoded
+
+    first, native = recorded(1)
+    second, response = recorded(2)
+    need(
+        first
+        == {"method": "GET", "path": "/machines/" + payload["machine"], "body": None}
+        and second
+        == {
+            "method": "POST",
+            "path": "/machines/" + payload["machine"] + "/exec",
+            "body": old["command"](dict(payload, action="plan")),
+        },
+        "saved plan request differs",
+    )
+    plan = successful_agent_response(response, payload, "plan")
+    need(
+        response.get("stderr")
+        and plan["status"] == "PLANNED"
+        and plan["targets"] == 1
+        and plan["held"] == 0,
+        "not a known diagnostic plan refusal",
+    )
+    state = export["normal_state"](
+        args.config, args.config_sha256, args.run_directory.absolute()
+    )
+    need(
+        payload["machine"] == state["machine_id"]
+        and payload["source_ref"] == state["source_ref"]
+        and payload["epoch"] == state["epoch"]
+        and payload["deadline"] == state["deadline"]
+        and all(
+            native.get(k) == state["machine"].get(k)
+            for k in ("id", "instance_id", "config", "name", "region")
+        ),
+        "saved plan native binding differs",
+    )
+    record = F["obj"](args.run_directory / "export/launch.json")
+    need(
+        record == payload["export_probe"]["record"]
+        and sha(read(args.run_directory / "export/launch.json"))
+        == payload["launch_sha256"]
+        and record["caller"]["pid"] == state["caller"]["gate_pid"]
+        and record["caller"]["birth"] == state["caller"]["gate_birth"],
+        "saved plan launch differs",
+    )
+    value = dict(
+        state=state,
+        config=str(args.config.absolute()),
+        config_sha256=args.config_sha256,
+        pins={path: B["fingerprint"](path) for path in inputs},
+        binding={"launch_sha256": payload["launch_sha256"]},
+        record=record,
+        driver_sha256=payload["export_probe"]["driver_sha256"],
+    )
+    if adopted.exists():
+        receipt = F["obj"](adopted)
+        need(
+            receipt
+            == dict(
+                plan,
+                adopted_from_raw_sha256=inputs[str(root / "wire-000002.raw.json")],
+                observed_under_operator_ref=args.operator_ref,
+                prior_plan_operator_ref=old_ref,
+            ),
+            "foreign plan adoption receipt",
+        )
+    return dict(payload=payload, plan=plan, inputs=inputs, value=value)
+
+
 def normal_agent_state(args):
     export = runpy.run_path(str(HERE / "cloudbench-resume-controller-export.py"))
-    value = getattr(args, "_normal_export_value", None)
+    saved = (
+        saved_positive_plan(args, export)
+        if getattr(args, "resume_planned", False)
+        else None
+    )
+    value = saved["value"] if saved else getattr(args, "_normal_export_value", None)
     if value is None:
         value = export["check"](
             args.config, args.config_sha256, args.run_directory, args.operator_ref
@@ -504,6 +711,8 @@ def normal_agent_state(args):
         initial_capture_sha256=sha(read(capture_path)),
         role="normal-agent",
     )
+    if saved:
+        state["_saved_plan"] = saved
     payload = payload_for(args, state)
     function = next(
         node
@@ -626,6 +835,8 @@ def local_state(args):
 
 
 def payload_for(args, state):
+    if state.get("_saved_plan"):
+        return state["_saved_plan"]["payload"]
     payload = {
         "machine": state["machine_id"],
         "source_ref": state["source_ref"],
@@ -656,7 +867,11 @@ def _run(args, state):
     if getattr(args, "normal_agent", False):
         args._normal_export_value = state["_normal_export_value"]
         args._normal_joined_path = state["_normal_joined_path"]
-    out = Path(state["out"]) / "registered-orphan-drain"
+    out = Path(state["out"]) / (
+        "registered-orphan-drain-plan-continuation"
+        if state.get("_saved_plan")
+        else "registered-orphan-drain"
+    )
     payload = payload_for(args, state)
     if args.observe:
         need(out.is_dir(), "no existing drain invocation")
@@ -666,7 +881,37 @@ def _run(args, state):
         out.mkdir(mode=0o700)
     else:
         out.mkdir(mode=0o700)
-        save(out / "intent.json", {"payload": payload, "operator": state["_drain"]})
+        save(
+            out / "intent.json",
+            {
+                "payload": payload,
+                "operator": state["_drain"],
+                **(
+                    {
+                        "continuation_operator_ref": args.operator_ref,
+                        "prior_inputs": state["_saved_plan"]["inputs"],
+                    }
+                    if state.get("_saved_plan")
+                    else {}
+                ),
+            },
+        )
+        if state.get("_saved_plan"):
+            old = state["_saved_plan"]
+            save(
+                Path(state["out"]) / "registered-orphan-drain/result-adopted-plan.json",
+                dict(
+                    old["plan"],
+                    adopted_from_raw_sha256=old["inputs"][
+                        str(
+                            Path(state["out"])
+                            / "registered-orphan-drain/wire-000002.raw.json"
+                        )
+                    ],
+                    observed_under_operator_ref=args.operator_ref,
+                    prior_plan_operator_ref=payload["operator_ref"],
+                ),
+            )
     api = F["RecordedAPI"](F["api_for"](state), state, out)
 
     def call(action, **extra):
@@ -690,19 +935,13 @@ def _run(args, state):
             not state.get("_cancelled"),
             "normal agent operation cancelled after owned transport",
         )
-        need(
-            response.get("exit_code") == 0
-            and response.get("exit_signal", 0) == 0
-            and response.get("stderr") in (None, ""),
-            "drain exec uncertain; observe only",
-        )
-        result = json.loads(response["stdout"])
+        result = successful_agent_response(response, payload, action)
         save(out / ("result-" + str(time.time_ns()) + ".json"), result)
         return result
 
     if args.observe:
         return call("observe")
-    plan = call("plan")
+    plan = state["_saved_plan"]["plan"] if state.get("_saved_plan") else call("plan")
     for batch in range((plan["targets"] + 15) // 16):
         call("signal", batch=batch, plan_sha256=plan["plan_sha256"])
     return {
@@ -745,6 +984,7 @@ def main():
     p.add_argument("--run-directory", type=Path, required=True)
     p.add_argument("--operator-ref", required=True)
     p.add_argument("--normal-agent", action="store_true")
+    p.add_argument("--resume-planned", action="store_true")
     p.add_argument("--agent-custody", type=Path)
     p.add_argument("--joined-journal", type=Path)
     p.add_argument("--pending", type=Path)
@@ -758,6 +998,10 @@ def main():
             and args.pending is not None
         ),
         "exact normal agent or legacy drain arguments required",
+    )
+    need(
+        not args.resume_planned or args.normal_agent,
+        "saved plan requires normal agent mode",
     )
     os.umask(0o077)
     state = local_state(args)

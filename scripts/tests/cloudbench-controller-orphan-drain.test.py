@@ -2,6 +2,8 @@
 """Local kernel/process controls for the registered-owner drain; no provider calls."""
 
 import base64
+import contextlib
+import io
 import gzip
 import hashlib
 import json
@@ -599,10 +601,15 @@ class NormalAgent(unittest.TestCase):
                     source, payload = json.loads(
                         gzip.decompress(base64.b64decode(cmd[-1]))
                     )
+                    remote_file = self.root / "real-remote-top-level.py"
+                    remote_file.write_text(E["REMOTE"])
+                    diagnostic = io.StringIO()
+                    with contextlib.redirect_stderr(diagnostic):
+                        runpy.run_path(str(remote_file))
                     result = {
                         "exit_code": 0,
                         "exit_signal": 0,
-                        "stderr": "",
+                        "stderr": diagnostic.getvalue(),
                         "stdout": json.dumps(execute(payload)),
                     }
                 raw = json.dumps(result).encode()
@@ -669,6 +676,262 @@ class NormalAgent(unittest.TestCase):
             if p.is_file()
         }
         E["require_recorded_drain"](binding, {"present": True, "files": guestfiles})
+
+    def test_known_phase_requires_positive_plan_and_no_unknown_stderr(self):
+        payload = dict(self.v)
+        response = dict(
+            exit_code=0,
+            exit_signal=0,
+            stderr="EXPORT_PHASE REMOTE_ENTERED 123\n",
+            stdout=json.dumps(
+                dict(status="PLANNED", targets=1, held=0, plan_sha256="a" * 64)
+            ),
+        )
+        self.assertEqual(
+            M["successful_agent_response"](response, payload, "plan")["targets"], 1
+        )
+        for text in (
+            "foreign\n",
+            "EXPORT_PHASE REMOTE_ENTERED 123\nextra\n",
+            "EXPORT_PHASE REMOTE_ENTERED 123\nEXPORT_PHASE REMOTE_ENTERED 124\n",
+        ):
+            with self.assertRaises(ValueError):
+                M["successful_agent_response"](
+                    dict(response, stderr=text), payload, "plan"
+                )
+        with self.assertRaises(ValueError):
+            M["successful_agent_response"](
+                dict(
+                    response,
+                    stdout=json.dumps(
+                        dict(status="PLANNED", targets=2, held=0, plan_sha256="a" * 64)
+                    ),
+                ),
+                payload,
+                "plan",
+            )
+
+    def test_saved_plan_run_keeps_old_identity_and_never_replans(self):
+        out = self.root / "continuation-run"
+        old = out / "registered-orphan-drain"
+        old.mkdir(parents=True, mode=0o700)
+        payload = dict(self.v, operator_ref="1" * 40, fleet_source_sha256="a" * 64)
+        original = json.dumps({"payload": payload}).encode()
+        (old / "intent.json").write_bytes(original)
+        (old / "intent.json").chmod(0o600)
+        plan = dict(status="PLANNED", targets=1, held=0, plan_sha256="b" * 64)
+        state = dict(
+            out=str(out),
+            machine_id=self.mid,
+            machine={
+                "id": self.mid,
+                "instance_id": "native",
+                "config": {},
+                "name": "fixture",
+                "region": "iad",
+            },
+            _drain={},
+            _saved_plan={
+                "payload": payload,
+                "plan": plan,
+                "inputs": {str(old / "wire-000002.raw.json"): "c" * 64},
+            },
+        )
+        args = SimpleNamespace(normal_agent=False, observe=False, operator_ref="2" * 40)
+        actions = []
+
+        class API:
+            def api(inner, method, path, body=None, timeout=20, observer=None):
+                if method == "GET":
+                    result = state["machine"]
+                else:
+                    _, value = json.loads(
+                        gzip.decompress(base64.b64decode(shlex.split(body["cmd"])[-1]))
+                    )
+                    actions.append(value["action"])
+                    self.assertEqual(value["operator_ref"], "1" * 40)
+                    result = dict(
+                        exit_code=0,
+                        exit_signal=0,
+                        stderr="EXPORT_PHASE REMOTE_ENTERED 123\n",
+                        stdout=json.dumps(
+                            dict(status="BATCH_FINISHED", results=[{"pid": 321}])
+                        ),
+                    )
+                raw = json.dumps(result).encode()
+                if observer:
+                    observer(method, path, 200, raw)
+                return result
+
+        with (
+            mock.patch.dict(M["_run"].__globals__, local_state=lambda _args: state),
+            mock.patch.dict(M["F"], api_for=lambda _state: API()),
+        ):
+            M["_run"](args, state)
+        self.assertEqual(actions, ["signal"])
+        self.assertEqual((old / "intent.json").read_bytes(), original)
+        adopted = json.loads((old / "result-adopted-plan.json").read_bytes())
+        self.assertEqual(adopted["observed_under_operator_ref"], "2" * 40)
+
+    def test_saved_positive_plan_parser_binds_old_raw_and_source(self):
+        out = self.root / "saved-parser"
+        journal = out / "registered-orphan-drain"
+        journal.mkdir(parents=True)
+        producer = self.root / "old-producer"
+        producer.mkdir()
+        old_source = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "show",
+                "30eb08e7ead85d03a44edf06cc557c8888ba4267:scripts/cloudbench-controller-orphan-drain.py",
+            ]
+        )
+        old_path = producer / "cloudbench-controller-orphan-drain.py"
+        old_path.write_bytes(old_source)
+        for path in (ROOT / "scripts").iterdir():
+            if path.is_file() and path.name != old_path.name:
+                (producer / path.name).symlink_to(path)
+        old_module = runpy.run_path(str(old_path))
+        old_hashes = {
+            name: hashlib.sha256(
+                subprocess.check_output(
+                    [
+                        "git",
+                        "-C",
+                        str(ROOT),
+                        "show",
+                        "30eb08e7ead85d03a44edf06cc557c8888ba4267:scripts/" + name,
+                    ]
+                )
+            ).hexdigest()
+            for name in (
+                "cloudbench-controller-orphan-drain.py",
+                "cloudbench-resume-controller-export.py",
+                "cloudbench-controller-payload-finalization.py",
+                "cloudbench-original600-runner.py",
+                "cloudbench-resume-controller-payload.py",
+                "cloudbench-original-volume-capture.py",
+            )
+        }
+        record = dict(
+            machine_id=self.mid,
+            source_ref=self.ref,
+            caller={"pid": 456, "birth": "gate"},
+        )
+        (out / "export").mkdir()
+        launch = out / "export/launch.json"
+        launch.write_text(json.dumps(record))
+        launch.chmod(0o600)
+        payload = dict(
+            self.v,
+            operator_ref="30eb08e7ead85d03a44edf06cc557c8888ba4267",
+            export_probe={"record": record, "driver_sha256": "a" * 64},
+        )
+        payload["launch_sha256"] = hashlib.sha256(launch.read_bytes()).hexdigest()
+        payload.pop("identity_sha256")
+        payload["identity_sha256"] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()
+        ).hexdigest()
+        intent = {
+            "payload": payload,
+            "operator": {
+                "role": "normal-agent",
+                "source_hashes": old_hashes,
+                "source_pins": {
+                    str(old_path): M["F"]["normalized"](M["B"]["fingerprint"](old_path))
+                },
+            },
+        }
+
+        def write_json(path, value):
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
+
+        write_json(journal / "intent.json", intent)
+        machine = {
+            "id": self.mid,
+            "instance_id": "native",
+            "config": {},
+            "name": "fixture",
+            "region": "iad",
+        }
+        result = {
+            "exit_code": 0,
+            "exit_signal": 0,
+            "stderr": "EXPORT_PHASE REMOTE_ENTERED 123\n",
+            "stdout": json.dumps(
+                dict(status="PLANNED", targets=1, held=0, plan_sha256="a" * 64)
+            ),
+        }
+        for i, (request, decoded) in enumerate(
+            (
+                (
+                    {"method": "GET", "path": "/machines/" + self.mid, "body": None},
+                    machine,
+                ),
+                (
+                    {
+                        "method": "POST",
+                        "path": "/machines/" + self.mid + "/exec",
+                        "body": old_module["command"](dict(payload, action="plan")),
+                    },
+                    result,
+                ),
+            ),
+            1,
+        ):
+            raw = json.dumps(decoded).encode()
+            stem = journal / ("wire-00000" + str(i))
+            for suffix, value in (
+                (".request.json", request),
+                (".decoded.json", decoded),
+                (
+                    ".raw.json",
+                    dict(
+                        status=200,
+                        method=request["method"],
+                        path=request["path"],
+                        bytes=len(raw),
+                        sha256=hashlib.sha256(raw).hexdigest(),
+                        body_b64=base64.b64encode(raw).decode(),
+                    ),
+                ),
+            ):
+                write_json(Path(str(stem) + suffix), value)
+        state = dict(
+            machine_id=self.mid,
+            source_ref=self.ref,
+            epoch=self.epoch,
+            deadline=self.epoch + 5400,
+            machine=machine,
+            caller={"gate_pid": 456, "gate_birth": "gate"},
+        )
+        args = SimpleNamespace(
+            run_directory=out,
+            config=self.root / "config",
+            config_sha256="b" * 64,
+            operator_ref="c" * 40,
+        )
+        export = {"normal_state": lambda *_a: state}
+        self.assertEqual(M["saved_positive_plan"](args, export)["plan"]["targets"], 1)
+        extra = journal / "foreign.json"
+        extra.write_text("{}")
+        with self.assertRaises(ValueError):
+            M["saved_positive_plan"](args, export)
+        extra.unlink()
+        raw_path = journal / "wire-000002.raw.json"
+        original = raw_path.read_bytes()
+        wire = json.loads(original)
+        wire["sha256"] = "0" * 64
+        write_json(raw_path, wire)
+        with self.assertRaises(ValueError):
+            M["saved_positive_plan"](args, export)
+        raw_path.write_bytes(original)
+        old_path.write_bytes(old_source + b"\n# changed old source\n")
+        with self.assertRaises(ValueError):
+            M["saved_positive_plan"](args, export)
 
 
 if __name__ == "__main__":
