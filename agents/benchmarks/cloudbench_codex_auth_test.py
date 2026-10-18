@@ -882,15 +882,23 @@ cp "$stage_err" {shlex.quote(str(tmp_path / "stage-errors.private.log"))}
 
 
 @pytest.mark.parametrize(
-    "label,expected,reaped_before_recheck",
-    [("credential-handoff", 143, False), ("benchmark", 0, False), ("credential-handoff", 143, True), ("benchmark", 0, True)],
+    "label,expected,reaped_before_recheck,child_rc",
+    [
+        ("credential-handoff", 143, False, 0),
+        ("benchmark", 0, False, 0),
+        ("credential-handoff", 143, True, 7),
+        ("benchmark", 7, True, 7),
+    ],
 )
-def test_explicit_codex_pending_shutdown_survives_successful_child(tmp_path, label, expected, reaped_before_recheck):
+def test_explicit_codex_pending_shutdown_survives_successful_child(
+    tmp_path, label, expected, reaped_before_recheck, child_rc
+):
     """A TERM in the start window cancels the child once; the pending recheck must not exit.
 
     reaped_before_recheck holds the driver until the cancelled child has exited
     and been reaped, which a loaded host can do between the signal and the
-    recheck (the agents coverage flake of 2026-10-18 exited 143 there)."""
+    recheck (the agents coverage flake of 2026-10-18 exited 143 there). Its child
+    exits non-zero so the benchmark label must return that collected status."""
     import shlex
     import signal
     from pathlib import Path
@@ -919,7 +927,7 @@ def test_explicit_codex_pending_shutdown_survives_successful_child(tmp_path, lab
     pidfile = tmp_path / "pid"
     nextstep = tmp_path / "next"
     child.write_text(
-        "import os,signal,sys,time\nfrom pathlib import Path\nsignal.signal(signal.SIGINT,lambda *_:sys.exit(0))\nPath(sys.argv[1]).write_text(str(os.getpid()))\nwhile True:time.sleep(0.01)\n"
+        "import os,signal,sys,time\nfrom pathlib import Path\nsignal.signal(signal.SIGINT,lambda *_:sys.exit(%d))\nPath(sys.argv[1]).write_text(str(os.getpid()))\nwhile True:time.sleep(0.01)\n" % child_rc
     )
     command = 'set -euT\nACTIVE_COMMAND_PID=""\nACTIVE_COMMAND_STARTING=0\nACTIVE_COMMAND_SHUTDOWN_PENDING=0\nACTIVE_COMMAND_SIGNALLED=0\nHEARTBEAT_SLEEP_PID=""\nlog() { :; }\n'
     command += heartbeat + function("request_graceful_shutdown")
