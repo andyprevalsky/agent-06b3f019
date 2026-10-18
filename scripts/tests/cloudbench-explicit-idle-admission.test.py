@@ -213,7 +213,7 @@ claim_pool_machine shared-cpu-4x 8192 1
         self.assertEqual(claimed.stdout,self.mid)
         self.assertEqual((self.root/'claimed.ids').read_text(),self.mid+'\n')
         out=self.root/'task';out.mkdir();matrix=self.root/'matrix.json';matrix.write_text(json.dumps({'tasks':[{'name':'task','world_model_mode':'real'}]}))
-        intent_shell='\n'.join(function(n) for n in ('provision_primary_machine','primary_cold_bootstrap_requested'))
+        intent_shell='unset CLOUDBENCH_ARCHIVED_REUSE_REQUEST\nsource "$1"\n'+'\n'.join(function(n) for n in ('provision_primary_machine','primary_cold_bootstrap_requested'))
         intent_shell+='''
 primary_vm_size_for_bench() { echo shared-cpu-4x; }
 primary_vm_memory_for_bench() { echo 8192; }
@@ -223,7 +223,7 @@ pool_reuse_proof_file() { printf '%s/cloudbench-pool-reuse/%s.json' "$GIT_COMMON
 provision_primary_machine task "$OUT" && primary_cold_bootstrap_requested "$OUT" "$MID"
 '''
         env.update(POOL_COLD_BOOTSTRAP='1',FRESH_TARGET_REGION='',MID=self.mid,OUT=str(out),EXECUTION_TASK_MATRIX_FILE=str(matrix),RUN_ID='new-run',BENCH_REF=self.request['consumer']['source_ref'])
-        intent=subprocess.run(['bash','-c',intent_shell],env=env,capture_output=True,text=True)
+        intent=subprocess.run(['bash','-c',intent_shell,'intent',str(SCRIPT.parent/'lib/cloudbench-archived-reuse.sh')],env=env,capture_output=True,text=True)
         self.assertEqual(intent.returncode,0,intent.stderr);self.assertEqual(intent.stdout,'0\n')
         self.assertEqual(json.loads((out/'cold-primary-bootstrap').read_text())['policy'],'existing-git-reset-v1')
         with self.assertRaises(ValueError):mod.publish(req,mod.sha(req.read_bytes()),auth,mod.sha(auth.read_bytes()),fd)
@@ -696,16 +696,20 @@ class BorrowedPreconfigDeadlines(unittest.TestCase):
 
 
 class PreconfigSnapshotLayout(unittest.TestCase):
+    # The flat-layout PID predicate needs no publication authority; only the
+    # dead-owner plan case uses the root-published borrowed-recovery fixture.
     def setUp(self):
-        self.f=BorrowedPreconfigRecovery();self.f.setUp();self.addCleanup(self.f.doCleanups)
-        self.flat=self.f.f.root/'flat-snapshot';self.flat.mkdir()
+        temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+        self.flat=Path(temp.name)/'flat-snapshot';self.flat.mkdir()
         for path in SCRIPT.parent.glob('*.py'):shutil.copy2(path,self.flat/path.name)
         shutil.copy2(SCRIPT.parent/'lib/cloudbench-env.sh',self.flat/'cloudbench-env.sh')
         self.helper=self.flat/'cloudbench-explicit-idle-preconfig.py'
     def test_original_wrapper_supports_flat_snapshot_pid(self):
         helper=runpy.run_path(str(self.flat/'cloudbench-original-volume-capture.py'))
         self.assertEqual(helper['pid_birth_state']('99999999','dead-fixture'),'absent')
+    @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
     def test_actual_flat_snapshot_plan_runs_canonical_dead_owner_predicate(self):
+        self.f=BorrowedPreconfigRecovery();self.f.setUp();self.addCleanup(self.f.doCleanups)
         code='import runpy,sys; h=runpy.run_path(sys.argv[1]); p=h["plan"](*sys.argv[2:]); print(len(p["rows"]))'
         result=subprocess.run(['python3','-c',code,str(self.helper),str(self.f.registry),str(self.f.f.common),self.f.source],text=True,capture_output=True,timeout=20,cwd='/')
         self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(result.stdout.strip(),'1')
@@ -1249,5 +1253,39 @@ class WorkerStageSnapshotToken(unittest.TestCase):
         (scripts/'lib/cloudbench-inventory.sh').write_text('resolve_fly_token(){ echo nested-canonical; }\n')
         (scripts/'cloudbench-inventory.sh').write_text('resolve_fly_token(){ echo wrong-layout; }\n')
         helper=runpy.run_path(str(scripts/'cloudbench-original-volume-capture.py'));self.assertEqual(helper['resolve_token']({'workspace':str(self.f.repo)}),'nested-canonical')
+
+
+class ReuseProofAttemptRetirement(unittest.TestCase):
+    """Cold explicit/imported proof checks retire their private native-read attempt."""
+
+    def run_verify(self,kind,outcome):
+        root=Path(tempfile.mkdtemp());self.addCleanup(shutil.rmtree,root,True)
+        scratch=root/'tmp';scratch.mkdir();helpers=root/'helpers';helpers.mkdir()
+        proof=root/'proof.json';proof.write_text(json.dumps({kind:{}}))
+        body='raise SystemExit(7)' if outcome=='reject' else 'pass'
+        (helpers/'cloudbench-explicit-idle-admission.py').write_text(
+            'def descriptor(path): return path\ndef verify_pool(*args):\n    '+body+'\n')
+        (helpers/'archive.py').write_text('def verify_imported_pool_proof(*args, native_volume):\n    '+body+'\n')
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+        function=re.search(r'^pool_verify_reuse_proof\(\).*?^}\n',fleet,re.M|re.S).group()
+        script=f'''set -uo pipefail
+POOL_COLD_BOOTSTRAP=1 GIT_COMMON_DIR=/nonexistent BENCH_REF=0
+CLOUDBENCH_SCRIPT_SNAPSHOT={str(helpers)!r} STARTUP_FAILURE_ARCHIVE_HELPER={str(helpers/'archive.py')!r}
+pool_reuse_proof_file() {{ printf '%s' {str(proof)!r}; }}
+fleet_preconfig_native_read() {{ [ {outcome!r} != read-failure ] && printf '{{}}' > "$2"; }}
+fleet_cold_handoff_volume_read() {{ printf '{{}}' > "$2"; }}
+{function}
+pool_verify_reuse_proof machine-fixture vol_fixture
+'''
+        result=subprocess.run(['bash','-c',script],env={**os.environ,'TMPDIR':str(scratch)},capture_output=True,text=True,timeout=60)
+        return result,sorted(path.name for path in scratch.iterdir())
+
+    def test_every_cold_proof_outcome_removes_its_attempt_directory(self):
+        for kind in ('explicit_idle','imported_cold'):
+            for outcome,expected in (('accept',0),('reject',1),('read-failure',1)):
+                with self.subTest(kind=kind,outcome=outcome):
+                    result,left=self.run_verify(kind,outcome)
+                    self.assertEqual(result.returncode!=0,bool(expected),result.stderr)
+                    self.assertEqual(left,[],result.stderr)
 
 if __name__=='__main__':unittest.main()

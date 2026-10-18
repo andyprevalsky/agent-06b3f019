@@ -3,11 +3,13 @@
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
 
 SOURCE = Path(__file__).resolve().parents[1] / 'run-bench-fleet'
+ARCHIVED_REUSE_LIB = SOURCE.parent / 'lib/cloudbench-archived-reuse.sh'
 
 
 def function(name):
@@ -49,11 +51,13 @@ pool_verify_reuse_proof() { echo proof >> "$CASE_DIR/actions"; }
 clone_machine_target() { echo clone >> "$CASE_DIR/actions"; echo cdef; }
 primary_clone_storage_mode() { echo default; }
 '''
+            script += 'unset CLOUDBENCH_ARCHIVED_REUSE_REQUEST\nsource "$ARCHIVED_REUSE_LIB"\n'
             script += function('claim_pool_machine') + function('provision_primary_machine')
             if default_branch:
                 script += '\nbench_uses_default_pool_shape() { return 0; }\n'
             script += '\nprovision_primary_machine large "$CASE_DIR/out"\n'
             result = subprocess.run(['bash', '-c', script], env={**os.environ, 'CASE_DIR': directory,
+                                    'ARCHIVED_REUSE_LIB': str(ARCHIVED_REUSE_LIB),
                                     'POOL_REUSE_ONLY': '1' if reuse_only else '0',
                                     'CLOUDBENCH_BOOT_TRANSPORT': transport}, capture_output=True, text=True)
             cid = (root / 'out/.cid').read_text() if (root / 'out/.cid').exists() else None
@@ -101,6 +105,7 @@ class ReuseOnlyDefaults(unittest.TestCase):
                 'primary_vm_size_for_bench', 'primary_vm_memory_for_bench',
                 'bench_uses_default_pool_shape', 'shared_cpu_units_for_vm_size',
                 'pool_machine_shape_from_json', 'normalize_current_pool_shape'))
+            script += '\nunset CLOUDBENCH_ARCHIVED_REUSE_REQUEST\nsource ' + shlex.quote(str(ARCHIVED_REUSE_LIB)) + '\n'
             script += r'''
 FLEET_PRIMARY_VM_SIZE=shared-cpu-2x; FLEET_PRIMARY_VM_MEMORY=4096
 FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x; FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
@@ -140,7 +145,8 @@ unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
         source = function('enforce_app_capacity_guard')
         start = source.index('    primary_nx=')
         end = source.index('    capacity_parse_status=0')
-        result = self.run_shell('BENCHES=(plain browser-task); replacement_slots=2; warm_json="[]"; available_stopped_pool_machine_count() { echo 2; };\n' + source[start:end] + 'printf "%s %s %s" "$requested_shared" "$requested_fresh_machines" "$requested_pool_eligible_machines"')
+        # The guard body declares locals, so execute its exact slice inside a function.
+        result = self.run_shell('BENCHES=(plain browser-task); replacement_slots=2; warm_json="[]"; available_stopped_pool_machine_count() { echo 2; };\ncapacity_slice() {\n' + source[start:end] + 'printf "%s %s %s" "$requested_shared" "$requested_fresh_machines" "$requested_pool_eligible_machines"\n}\ncapacity_slice')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, '6 0 2')
 

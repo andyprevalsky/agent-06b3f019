@@ -25,6 +25,7 @@ class Consumer(unittest.TestCase):
  def test_environment_policy_required(self):
   r=copy.deepcopy(self.f.request);r['worker_environment_policy']['removed_keys']=[]
   with self.assertRaisesRegex(ValueError,'environment policy'):C['validate_request'](r)
+ @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')
  def test_publish_verify_worker_only(self):
   f=self.f;req,auth,fd=f.authority();a=json.loads(auth.read_bytes());a.update(app='navi-whisper-lux-bench',fixed_native_baseline_sha256=G['BASELINE_SHA'],future_role='worker');auth.write_bytes(H['canonical'](a))
   result=C['publish'](req,H['sha'](req.read_bytes()),auth,H['sha'](auth.read_bytes()),fd);self.assertEqual(result['status'],'COMPLETE');self.assertEqual(result['schema'],C['SCHEMA'])
@@ -65,6 +66,7 @@ class Consumer(unittest.TestCase):
   envfile.write_text('CLOUDBENCH_GITHUB_TOKEN_B64=CURRENT\n')
   argv=G['worker_entry_argv']();argv[-1]=str(wrapper)
   got=json.loads(subprocess.check_output(argv,env=inherited));self.assertNotIn('CLOUDBENCH_RUN_TOKEN',got);self.assertNotIn('CLOUDBENCH_BARRIER_TOKEN',got);self.assertNotIn('BENCHMARK_HUB_PARENT_RUN_ID',got);self.assertEqual(got['CLOUDBENCH_WORKER_RUN_TOKEN'],'current-token');self.assertEqual(got['REF'],'a'*40);self.assertEqual(got['CLOUDBENCH_BOOT'],'0');self.assertEqual(got.get('HOME'),os.environ.get('HOME'))
+ @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')
  def test_actual_claim_stage_cancel_return_and_next_policy(self):
   from types import SimpleNamespace
   from unittest.mock import patch
@@ -80,6 +82,7 @@ class Consumer(unittest.TestCase):
   calls=[]
   with self.assertRaisesRegex(ValueError,'profile'):C['stage_worker']('unused','source','n','p','shared-cpu-4x','8192',lambda *a,**k:calls.append(a))
   self.assertEqual(calls,[])
+ @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')
  def test_actual_primary_claim_skips_worker_only(self):
   import re,subprocess
   f=self.f;req,auth,fd=f.authority();a=json.loads(auth.read_bytes());a.update(app='navi-whisper-lux-bench',fixed_native_baseline_sha256=G['BASELINE_SHA'],future_role='worker');auth.write_bytes(H['canonical'](a));C['publish'](req,H['sha'](req.read_bytes()),auth,H['sha'](auth.read_bytes()),fd)

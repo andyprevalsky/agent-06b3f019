@@ -35,6 +35,18 @@ SPEC.loader.exec_module(CLI)
 RUNNER = runpy.run_path(os.environ.get('ORIGINAL600_RUNNER_SOURCE',str(ROOT/'scripts/cloudbench-original600-runner.py')))
 
 
+def controller_clock(wall, monotonic):
+    """Fake the controller's clock without leaking into the runner's real alarms.
+
+    Patching attributes of the shared ``time`` module also changes the runner's
+    ``bounded`` bookkeeping, which then re-arms its real outer timer by fake
+    elapsed seconds and can fire inside an unrelated save under host load.
+    """
+    clock = {name: getattr(time, name) for name in dir(time) if not name.startswith("__")}
+    clock.update(time=wall, monotonic=monotonic)
+    return types.SimpleNamespace(**clock)
+
+
 def private(path, value):
     path.write_text(json.dumps(value) if not isinstance(value, str) else value)
     path.chmod(0o600)
@@ -660,9 +672,8 @@ class Portable(unittest.TestCase):
             clock[0] = time.time()
             current = [RUNNER["Deadline"]("first20s unknown"), expected]
             before = len(calls)
-            with (
-                patch.object(CLI.time, "time", side_effect=lambda: clock[0]),
-                patch.object(CLI.time, "monotonic", side_effect=lambda: clock[0]),
+            with patch.object(
+                CLI, "time", controller_clock(lambda: clock[0], lambda: clock[0])
             ):
                 retried = CLI.observe_reuse_configs(
                     lambda out: helper["NativeAdapter"](Client(), out / "wire"),
@@ -683,11 +694,13 @@ class Portable(unittest.TestCase):
             backward_start = clock[0]
             with (
                 patch.object(
-                    CLI.time,
+                    CLI,
                     "time",
-                    side_effect=lambda: backward_start - (clock[0] - backward_start),
+                    controller_clock(
+                        lambda: backward_start - (clock[0] - backward_start),
+                        lambda: clock[0],
+                    ),
                 ),
-                patch.object(CLI.time, "monotonic", side_effect=lambda: clock[0]),
                 self.assertRaisesRegex(ValueError, "original phase deadline"),
             ):
                 CLI.observe_reuse_configs(

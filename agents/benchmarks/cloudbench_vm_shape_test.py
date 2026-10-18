@@ -82,7 +82,8 @@ def test_dynamic_pool_preserves_admitted_performance_shape(tmp_path):
     result = subprocess.run(
         ["bash", str(script)],
         env={**os.environ, "NATIVE_SHAPE_FIXTURE": str(fixture), "POOL_IDS_FILE": str(ids),
-             "FLEET_DIR": str(tmp_path), "CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE": "1",
+             "FLEET_DIR": str(tmp_path), "GIT_COMMON_DIR": str(tmp_path / "git-common"),
+             "CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE": "1",
              "FLEET_PRIMARY_VM_SIZE": "performance-1x", "FLEET_PRIMARY_VM_MEMORY": "4096",
              "FLEET_BUNDLED_FRONTEND_VM_SIZE": "performance-1x", "FLEET_BUNDLED_FRONTEND_VM_MEMORY": "8192"},
         capture_output=True, text=True, timeout=10,

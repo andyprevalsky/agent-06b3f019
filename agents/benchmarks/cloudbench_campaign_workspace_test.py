@@ -33,7 +33,9 @@ def bound_campaign(tmp_path):
     for name in ('run-bench', 'run-bench-campaign.py', 'cloudbench_catalog.py',
                  'cloudbench-production-only-tasks.py', 'cloudbench-campaign-seed.py',
                  'cloudbench-campaign-barrier.py', 'cloudbench-script-snapshot.py',
-                 'cloudbench_execution_provenance.py', 'cloudbench-campaign-stop.py'):
+                 'cloudbench_execution_provenance.py', 'cloudbench-campaign-stop.py',
+                 'cloudbench-shard-coordinator.py', 'cloudbench-provider-capacity.py',
+                 'cloudbench-provider-limits.json'):
         override = {'run-bench-campaign.py':'CLOUDBENCH_CAMPAIGN_UNDER_TEST','cloudbench-campaign-stop.py':'CLOUDBENCH_CAMPAIGN_STOP_UNDER_TEST'}.get(name)
         supplied = Path(os.environ[override]) if override and os.environ.get(override) else ROOT / 'scripts' / name
         shutil.copyfile(supplied, scripts / name)
@@ -138,7 +140,7 @@ def test_campaign_workspace_normal_cli_preserves_original600_shape(tmp_path):
     (source/'agents/benchmarks').mkdir(parents=True)
     report=source/'.claude/shared/benchmark-report-format.txt';report.parent.mkdir(parents=True)
     shutil.copyfile(ROOT/'.claude/shared/benchmark-report-format.txt',report)
-    for name in ('run-bench','cloudbench_catalog.py'):
+    for name in ('run-bench','cloudbench_catalog.py','cloudbench-shard-coordinator.py'):
         shutil.copyfile(ROOT/'scripts'/name,scripts/name)
     for path in (ROOT/'agents/benchmarks').glob('*.json'):
         shutil.copyfile(path,source/'agents/benchmarks'/path.name)

@@ -3379,6 +3379,9 @@ def test_boot_launch_compresses_complete_payload_under_provider_ceiling(tmp_path
             f"""set -euo pipefail
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 _envargs=()
+# The controller initializes the archived-generation proof empty before any
+# launch; an ordinary fresh boot carries no archived generation helper.
+CLOUDBENCH_ARCHIVED_PROOF_B64=""
 {block}
 {guard}
 boot_config_payload_guard "${{_boot_file_args[@]}}"
@@ -3431,6 +3434,10 @@ PY
             "CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT",
             "CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT",
         }:
+            continue
+        if name == "CLOUDBENCH_GUEST_GENERATION_SCRIPT":
+            # Only an archived-generation reuse boot carries this helper.
+            assert not (guest / Path(path).name).exists()
             continue
         original = ROOT / "scripts" / ("lib" if kind == "LIB" else "") / path
         assert (guest / Path(path).name).read_bytes() == original.read_bytes()
@@ -6871,6 +6878,8 @@ def test_guest_shutdown_child_confirmation_runner_publishes_exact_delivery_recei
         original = receipt_path.read_bytes()
     post_status = {"rejected": "503", "conflict-409": "409", "accepted-204": "204"}.get(case, "202")
     script = f"""set -uo pipefail
+# The runner sources the shared environment helpers (proxy liveness) first.
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 OUT_DIR={shlex.quote(str(tmp_path))}
 FLEET_MACHINE_ID={_NATIVE_STOP_MACHINE}
 RUN_LOG_TOKEN={_NATIVE_STOP_OWNER}-3
@@ -6935,6 +6944,8 @@ def test_guest_shutdown_child_confirmation_receipt_survives_term_during_delivery
         for signature in ("publish_guest_shutdown_delivery_receipt() {", "confirm_guest_shutdown() {")
     )
     script = f"""set -uo pipefail
+# The runner sources the shared environment helpers (proxy liveness) first.
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 OUT_DIR={shlex.quote(str(tmp_path))}
 FLEET_MACHINE_ID={_NATIVE_STOP_MACHINE}
 RUN_LOG_TOKEN={_NATIVE_STOP_OWNER}-3
@@ -9675,6 +9686,10 @@ def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Pa
             "fleet_finalize_released_projection() {",
             "cloudbench_fsync_directory() {",
             "cloudbench_collect_remaining_runtime_evidence() {",
+            "fleet_current_disposable_registry() {",
+            "fleet_release_cleanup_capacity() {",
+            "fleet_billing_stop_retained_idle() {",
+            "fleet_registry_release_verified() {",
             "cleanup() {",
         )
     )
@@ -9721,7 +9736,8 @@ for helper in release_cleanup_disk_reserve cloudbench_terminate_tree_and_wait \\
     reconcile_current_pool_transfer_claims reconcile_current_pool_claims \\
     reap_registry_clones capacity_release_owner_reservations \\
     finalize_terminal_projection cleanup_owned_script_snapshot \\
-    fleet_audit_finalize_provider_teardown cloudbench_controller_lock_release; do
+    fleet_audit_finalize_provider_teardown cloudbench_controller_lock_release \\
+    stop_current_registry_primaries_for_pool return_current_registry_primaries_to_pool; do
     eval "$helper() {{ return 0; }}"
 done
 fleet_registry_remove_if_empty() {{
@@ -9731,6 +9747,7 @@ fleet_registry_remove_if_empty() {{
         retained) return 0 ;;
     esac
 }}
+source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-archived-reuse.sh"))}
 {cleanup}
 trap cleanup EXIT
 exit 0
@@ -23788,7 +23805,17 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     assert poll_loop.index("refresh_bench_log") < poll_loop.index("cloudbench_update_progress_state")
     assert poll_loop.index('BENCH_LOG_HAS_MORE" = "1"') < poll_loop.rindex("cloudbench_watchdog_expired")
     # Proxy cleanup is PID-owned; no cross-run pattern kill is allowed.
-    assert 'cloudbench_terminate_and_wait 5 "${PROXY_PID:-}" "${STATUS_PROXY_PID:-}"' in cloud
+    # Each route is stopped through its exact owner: a direct flyctl tunnel PID
+    # is terminated and reaped, while a shared-relay route releases only its
+    # own lease and never signals the broker.
+    stop_proxy = _extract_fleet_function(cloud, "stop_proxy() {")
+    assert "cloudbench_proxy_stop PROXY_PID" in stop_proxy
+    assert "cloudbench_proxy_stop STATUS_PROXY_PID" in stop_proxy
+    proxy_stop = _extract_fleet_function(environment_helpers, "cloudbench_proxy_stop() {")
+    assert 'cloudbench_terminate_and_wait 5 "${!name:-}"' in proxy_stop
+    assert 'cloudbench_shared_relay_request release "${!token_name:-}" --lease "${!lease_name}"' in proxy_stop
+    assert "pkill" not in stop_proxy.split("IMESSAGE_RELAY_PID", 1)[0]
+    assert "pkill" not in proxy_stop
     assert 'flyctl proxy "$local_port:$remote_port"' in environment_helpers
     assert "cloudbench_start_data_plane_proxy" in _extract_fleet_function(cloud, "start_data_plane_proxy() {")
     assert 'FLY proxy "$local_port:$remote_port"' not in cloud
@@ -23800,7 +23827,8 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     fleet = fleet_source_text()
     assert 'flyctl proxy "$metrics_port:$BOX_HEALTH_PORT"' in fleet
     assert 'FLY proxy "$metrics_port:$BOX_HEALTH_PORT"' not in fleet
-    assert 'cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"' in fleet
+    # Its cleanup uses the same exact-owner stop as the status route.
+    assert "cloudbench_proxy_stop metrics_proxy_pid || true" in fleet
 
 
 def test_status_log_poll_is_incremental_when_full_log_exceeds_deadline(
@@ -26277,8 +26305,18 @@ os.posix_fallocate = allocate
 if mode == 'missing':
     del os.posix_fallocate
 if mode == 'fsync_failure':
+    # Fail only the reserve's own durability barrier; the admission ledger
+    # commits its debit (and rollback) through ordinary fsync first.
+    native_fsync = os.fsync
     def failed_fsync(fd):
-        raise OSError(errno.EIO, 'fsync failed')
+        observed = os.fstat(fd)
+        try:
+            reserve = os.stat(os.environ['RESERVE_PATH'])
+        except FileNotFoundError:
+            reserve = None
+        if reserve is not None and (observed.st_dev, observed.st_ino) == (reserve.st_dev, reserve.st_ino):
+            raise OSError(errno.EIO, 'fsync failed')
+        return native_fsync(fd)
     os.fsync = failed_fsync
 """)
     for mode in (
@@ -26318,6 +26356,7 @@ reserve_cleanup_disk_space
                 **isolated_env,
                 "PYTHONPATH": str(fault_dir) + os.pathsep + str(transport),
                 "RESERVE_FAULT": mode,
+                "RESERVE_PATH": str(exact),
                 "ALLOCATOR_CALLS": str(calls),
                 "DD_CALLS": str(writes),
             },
@@ -26351,7 +26390,14 @@ reserve_cleanup_disk_space
     (handoff_output / "bench-e2e.started-epoch").write_text("100\n")
     release_projection = "\n".join(
         _extract_fleet_function(fleet, signature)
-        for signature in ("registry_meta_value() {", "fleet_finalize_released_projection() {")
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_finalize_released_projection() {",
+            "fleet_current_disposable_registry() {",
+            "fleet_release_cleanup_capacity() {",
+            "fleet_billing_stop_retained_idle() {",
+            "fleet_registry_release_verified() {",
+        )
     )
     handoff_script = f"""set -uo pipefail
 CLEANUP_DISK_RESERVE_FILE="$1"
@@ -26376,12 +26422,14 @@ CHILD_OUT=({shlex.quote(str(handoff_output))})
 {reserve}
 {release}
 {release_projection}
+source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-archived-reuse.sh"))}
 {cleanup}
 for helper in cloudbench_confirm_guest_shutdowns fleet_registry_confirm_guest_teardown \\
     record_tainted_claimed_pool_machines reconcile_current_pool_transfer_claims \\
     reconcile_current_pool_claims fleet_native_reap_close capacity_release_owner_reservations \\
     finalize_terminal_projection \\
-    fleet_registry_remove_if_empty cloudbench_controller_lock_release cleanup_owned_script_snapshot; do
+    fleet_registry_remove_if_empty cloudbench_controller_lock_release cleanup_owned_script_snapshot \\
+    stop_current_registry_primaries_for_pool return_current_registry_primaries_to_pool; do
     eval "$helper() {{ return 0; }}"
 done
 observe_released_reserve() {{
@@ -26417,7 +26465,11 @@ exit 0
     assert not reserve_path.exists()
     assert (handoff_output / "bench-e2e.finished-epoch").read_text() == "123\n"
 
-    recovery = _extract_fleet_function(fleet, "reconcile_stale_fleet_registries() {")
+    # The cohort-serialized wrapper delegates each stale registry to the full
+    # reconciler; that body must release the reserve before provider reaping.
+    wrapper = _extract_fleet_function(fleet, "reconcile_stale_fleet_registries() {")
+    assert "reconcile_stale_fleet_registries_full || status=$?" in wrapper
+    recovery = _extract_fleet_function(fleet, "reconcile_stale_fleet_registries_full() {")
     stale_release = 'release_cleanup_disk_reserve "$registry/cleanup-disk-reserve"'
     assert recovery.index(stale_release) < recovery.index('reap_registry_clones "$registry" stale')
 
@@ -27895,6 +27947,10 @@ def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(
             "cleanup() {",
             "cloudbench_fsync_directory() {",
             "cloudbench_collect_remaining_runtime_evidence() {",
+            "fleet_current_disposable_registry() {",
+            "fleet_release_cleanup_capacity() {",
+            "fleet_billing_stop_retained_idle() {",
+            "fleet_registry_release_verified() {",
         )
     )
     workspace = tmp_path / "workspace"
@@ -27972,10 +28028,11 @@ CHILD_PIDS=()
 CHILD_OUT=()
 CHILD_MACHINE=()
 mkdir -p "$FLEET_DIR/_batch"
-for helper in release_cleanup_disk_reserve cloudbench_terminate_tree_and_wait  cloudbench_confirm_guest_shutdowns fleet_registry_confirm_guest_teardown  cloudbench_terminate_and_wait record_tainted_claimed_pool_machines  reconcile_current_pool_transfer_claims reconcile_current_pool_claims  capacity_release_owner_reservations finalize_terminal_projection  cloudbench_controller_lock_release; do
+for helper in release_cleanup_disk_reserve cloudbench_terminate_tree_and_wait  cloudbench_confirm_guest_shutdowns fleet_registry_confirm_guest_teardown  cloudbench_terminate_and_wait record_tainted_claimed_pool_machines  reconcile_current_pool_transfer_claims reconcile_current_pool_claims  capacity_release_owner_reservations finalize_terminal_projection  cloudbench_controller_lock_release  stop_current_registry_primaries_for_pool return_current_registry_primaries_to_pool; do
     eval "$helper() {{{{ return 0; }}}}"
 done
 cleanup_owned_script_snapshot() {{{{ rm -r {shlex.quote(str(snapshot))}; }}}}
+source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-archived-reuse.sh"))}
 trap cleanup EXIT
 trap 'exit 143' TERM
 """.replace("{{", "{").replace("}}", "}")
@@ -28175,6 +28232,7 @@ WARM_PARKED_VM_MEMORY=2048
 REGION=iad
 BENCH_REF=abc123
 BENCHES=(one)
+PROVISION_POOL=""
 CURRENT_NODE_FP=""
 CURRENT_PY_FP=""
 RUN_BENCH_CLOUD_BIN="$FIXTURE/run-bench-cloud"
@@ -28397,6 +28455,9 @@ private_source_allows_provider_call {command} {identity}
     # Exercise the actual wrapper: the protected-base fence must run before
     # either the shared pacing authority or the native provider transport.
     wrapper = _extract_fleet_function(fleet, "FLY() {")
+    # The wrapper's final transport step is the controller-sourced archived
+    # reuse library; ordinary Machines carry no archived proof and pass through.
+    archived_reuse = shlex.quote(str(ROOT / "scripts/lib/cloudbench-archived-reuse.sh"))
     calls = tmp_path / "native-calls"
     paced = tmp_path / "paced-calls"
     for admission in ("0", "1", "invalid"):
@@ -28411,6 +28472,7 @@ SHARED_WARM_VOLUME_ID=vol_shared
 CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION={admission}
 flyctl() {{ printf '%s\\n' "$*" >> "$NATIVE_CALLS"; }}
 cloudbench_mutation_admission() {{ printf 'pace\\n' >> "$PACED_CALLS"; }}
+source {archived_reuse}
 {guard}
 {wrapper}
 FLY machine update {identity}
@@ -28437,6 +28499,7 @@ FLEET_OWNER_PID_START=fixture-birth
 clone_timeout=1
 flyctl() {{ printf '%s\\n' "$*" >> "$NATIVE_CALLS"; }}
 cloudbench_mutation_admission() {{ printf 'pace\\n' >> "$PACED_CALLS"; return {pacing_status}; }}
+source {archived_reuse}
 {guard}
 {wrapper}
 FLY machine clone feedface000001
@@ -32059,6 +32122,8 @@ def test_guest_shutdown_child_confirmation_uses_fleet_identity_only_after_comple
     original = marker.read_bytes() if marker.exists() else None
     calls = tmp_path / "calls"
     script = f"""set -uo pipefail
+# The runner sources the shared environment helpers (proxy liveness) first.
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 OUT_DIR={shlex.quote(str(tmp_path))}
 FLEET_MACHINE_ID=deadbeef000001
 RUN_LOG_TOKEN={"6e24d19a05a94cc39402dd06db3b454e-0"}
@@ -33790,6 +33855,7 @@ CLOUDBENCH_SHARED_CPU_GOVERNOR=160
 CLOUDBENCH_SHARED_CPU_HEADROOM=20
 CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT=4
 POOL_IDS_FILE={shlex.quote(str(tmp_path / "missing.ids"))}
+source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-archived-reuse.sh"))}
 {support}
 capacity_reserve_slots() {{ echo forbidden-mutation >&2; return 99; }}
 enforce_app_capacity_guard
@@ -33839,12 +33905,18 @@ FLY() { printf '[{"id":"fresh-native"}]'; }
 
 @pytest.mark.parametrize("case", ["all", "limited", "hung", "expired", "foreign", "stale", "abort", "finished", "bool_deadline", "queued_abort", "queued_finished", "changed_deadline", "unheld", "badsource", "nested", "changed_owner", "bad_parent_birth", "foreign_barrier"])
 def test_private_fleet_source_clone_queue_uses_original_strict_deadline(tmp_path: Path, case: str) -> None:
-    """Real authority/pacing/FIFO: queue consumes parent clock, RPC keeps 2s."""
+    """Real authority/pacing: a queue consumes the parent clock, RPC keeps 2s.
+
+    Healthy admission is concurrent; strict primaries queue only behind an
+    actual published provider backoff. The queued cases therefore publish one
+    through the real ``backoff`` producer and change campaign state while every
+    copy is observably waiting in its native ``pace`` admission process.
+    """
     import fcntl
     workspace = tmp_path / "workspace"
     campaign = workspace / ".context/benchmarks/campaigns/owned"
     feed = campaign / "shared-inventory"
-    (feed / "inventory/current").mkdir(parents=True)
+    feed.mkdir(parents=True)
     barrier = campaign / "startup-cohorts/c001"; barrier.mkdir(parents=True)
     helper_dir = tmp_path / "helpers"; helper_dir.mkdir()
     names = ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py")
@@ -33858,15 +33930,26 @@ def test_private_fleet_source_clone_queue_uses_original_strict_deadline(tmp_path
         if case == "bad_parent_birth": owner['parent_start'] = 'wrong-original-birth'
         (feed / "owner").write_text("".join(key + "=" + value + "\n" for key, value in owner.items())); (feed / "owner").chmod(0o600)
         (feed / "machines.json").write_text("[]\n"); (feed / "machines.json").chmod(0o600)
-        expiry = int(time.time() + 30) if case != "stale" else int(time.time() - 1)
-        (feed / "inventory/current/health").write_text(f"publisher_token=owned-token\nvalid_until={expiry}\n"); (feed / "inventory/current/health").chmod(0o600)
+        (feed / "volumes.json").write_text("[]\n"); (feed / "volumes.json").chmod(0o600)
+        # Publish through the real inventory producer: admission consumes its
+        # atomically swapped generation and that generation's health binding.
+        publication = subprocess.run(
+            [sys.executable, "-c", "import runpy,sys\nfrom pathlib import Path\nfeed=Path(sys.argv[2])\nrunpy.run_path(sys.argv[1])['publish_index'](feed/'machines.json',feed/'volumes.json',feed/'inventory')",
+             str(ROOT / "scripts/cloudbench-machine-readiness.py"), str(feed)],
+            env={k: v for k, v in dict(os.environ, CLOUDBENCH_INVENTORY_PUBLISHER_TOKEN="owned-token", CLOUDBENCH_INVENTORY_MAX_STALE_SECONDS="30").items() if not k.startswith("CLOUDBENCH_INVENTORY_REFRESH_LOCK")},
+            capture_output=True, text=True, timeout=10, check=False)
+        assert publication.returncode == 0, publication.stderr
+        health = feed / "inventory" / os.readlink(feed / "inventory/current") / "health"
+        if case == "stale":
+            health.write_text(health.read_text().replace(next(line for line in health.read_text().splitlines() if line.startswith("valid_until=")), f"valid_until={int(time.time() - 1)}"))
         authority = dict(directory=str(feed.resolve()), owner=owner, source=dict(ref="fixture-checked-source", sha256={name: hashlib.sha256((helper_dir / name).read_bytes()).hexdigest() for name in names}))
         fleet = fleet_source_text(); library = (ROOT / "scripts/lib/cloudbench-inventory.sh").read_text(); envlib = (ROOT / "scripts/lib/cloudbench-env.sh").read_text()
         functions = "\n".join(_extract_fleet_function(text, signature) for text, signature in ((library, "fly_with_timeout() {"), (fleet, "private_source_allows_provider_call() {"), (fleet, "FLY() {"), (envlib, "cloudbench_mutation_launch_code() {"), (envlib, "cloudbench_mutation_admission() {"), (fleet, "fleet_clone_with_queue_admission() {")))
         count = 3 if case in ("all", "limited", "queued_abort", "queued_finished", "changed_deadline", "changed_owner") else 1
         release = tmp_path / "release"
         native_pids = {}
-        deadline = True if case == "bool_deadline" else time.monotonic() + (2 if case in ("limited", "stale") else 4)
+        queued = case in ("queued_abort", "queued_finished", "changed_deadline", "changed_owner")
+        deadline = True if case == "bool_deadline" else time.monotonic() + (2 if case in ("limited", "stale") else 8 if queued else 4)
         if case == "expired": deadline = time.monotonic() - 1
         for index in range(count):
             job = f"r001-j{index + 1:04d}"; task = f"task-{index}"; task_root = workspace / ".context/fleet/runs/original" / task; task_root.mkdir(parents=True)
@@ -33874,6 +33957,7 @@ def test_private_fleet_source_clone_queue_uses_original_strict_deadline(tmp_path
             ready = tmp_path / f"ready-{index}"; marker = tmp_path / f"rpc-{index}"
             script = f"""set -uo pipefail
 source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}
+source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-archived-reuse.sh"))}
 APP=offline-owned
 clone_timeout=2
 FLEET_OWNER_PID_START="$(cloudbench_pid_start_time $$)"
@@ -33900,12 +33984,40 @@ fleet_clone_with_queue_admission 2 {shlex.quote(str(task_root / "primary.ids"))}
         (barrier / "manifest.json").write_text(json.dumps(dict(cohort_id="c001", jobs=native_pids, e2e_deadline_monotonic=deadline))); (barrier / "manifest.json").chmod(0o600)
         if case == "abort": (barrier / "abort.json").touch()
         if case == "unheld": fcntl.flock(lock, fcntl.LOCK_UN)
+        if case == "limited" or queued:
+            # An actual provider rate response: longer than the original
+            # 2s clock for "limited", and a 4s wait inside the 8s clock for
+            # the queued state-change cases.
+            backoff = subprocess.run(
+                [sys.executable, str(helper_dir / "cloudbench-campaign-mutation.py"), "backoff", "--app", "offline-owned",
+                 "--root", str(tmp_path / "admission"), "--owner-pid", str(os.getpid()),
+                 "--owner-start", _pid_start_identity(os.getpid()), "--response-code", "429",
+                 "--retry-after", "3" if case == "limited" else "4"],
+                env=dict(os.environ, CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY=json.dumps(authority), CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=str(feed)),
+                capture_output=True, text=True, timeout=10, check=False)
+            assert backoff.returncode == 0, backoff.stderr
         release.touch()
-        if case in ("queued_abort", "queued_finished", "changed_deadline", "changed_owner"):
+        if queued:
+            helper_path = str(helper_dir / "cloudbench-campaign-mutation.py")
+
+            def waiting_pace_processes() -> int:
+                waiting = 0
+                for entry in Path("/proc").iterdir():
+                    if not entry.name.isdigit():
+                        continue
+                    try:
+                        argv = (entry / "cmdline").read_bytes().split(b"\0")
+                    except OSError:
+                        continue
+                    if helper_path.encode() in argv and b"pace" in argv and b"--strict-primary" in argv:
+                        waiting += 1
+                return waiting
+
             until = time.monotonic() + 3
-            while not any((tmp_path / f"rpc-{index}").exists() for index in range(count)):
+            while waiting_pace_processes() < count:
                 assert time.monotonic() < until
                 time.sleep(.01)
+            assert not any((tmp_path / f"rpc-{index}").exists() for index in range(count))
             if case == "queued_abort": (barrier / "abort.json").touch()
             elif case == "queued_finished":
                 for index in range(count):
@@ -33923,8 +34035,8 @@ fleet_clone_with_queue_admission 2 {shlex.quote(str(task_root / "primary.ids"))}
         elif case == "hung":
             assert children[0].returncode == 142 and dispatched == [True], results
         elif case in ("limited", "queued_abort", "queued_finished", "changed_deadline", "changed_owner"):
-            assert any(process.returncode != 0 for process in children)
-            assert not all(dispatched)
+            assert all(process.returncode != 0 for process in children), results
+            assert not any(dispatched), results
         else:
             assert all(process.returncode != 0 for process in children), results
             assert not any(dispatched), results
@@ -34207,7 +34319,9 @@ CAPACITY_RESERVATION_TOKEN=original-reservation
 cp "$INVENTORY_HOME/owner" "$ROOT/original-owner"
 capacity_release_reservation() { printf 'FORBIDDEN_NATIVE\n' >&2; return 93; }
 case "$CASE" in
- recovers) stale; (sleep 0.1; healthy) & recovery_writer=$! ;;
+ # Recover only after the waiter observed the pending generation and entered
+ # its retry pause; a timed background writer can win before the first read.
+ recovers) stale; sleep() { healthy; command sleep "$@"; } ;;
  exhausts) stale; CAPACITY_ADMISSION_DEADLINE=$((SECONDS+1)) ;;
  expired) stale; CAPACITY_ADMISSION_DEADLINE=$SECONDS ;;
  foreign) printf 'publisher_token=foreign\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health" ;;
@@ -34404,7 +34518,9 @@ enforce_app_capacity_guard() {
  return 0
 }
 case "$CASE" in
- recovers) stale; (sleep 0.1; healthy) & recovery_writer=$! ;;
+ # Recover only after the waiter observed the pending generation and entered
+ # its retry pause; a timed background writer can win before the first read.
+ recovers) stale; sleep() { healthy; command sleep "$@"; } ;;
  exhausts) stale ;;
  expired) stale; CAPACITY_ADMISSION_DEADLINE=$SECONDS; original_admission_deadline=$CAPACITY_ADMISSION_DEADLINE ;;
  foreign) printf 'publisher_token=foreign\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health" ;;
@@ -35849,3 +35965,71 @@ print(json.dumps({'elapsed':time.monotonic()-started,'remaining':remaining,'rest
         assert output[0]['status']=='FIXTURE_COMPLETE'
         assert 0<output[-1]['remaining']<.25
     assert output[-1]['restored'] is True
+
+
+@pytest.mark.parametrize("mounted", ["vol_late", "vol_other"])
+def test_stale_recovery_binds_late_machine_to_volume_only_record(
+    tmp_path: Path, mounted: str
+) -> None:
+    """A volume-first owner killed before ID publication stays recoverable.
+
+    The Machine resolves by exact name. Recovery binds its ID in the audit and
+    registry only when it mounts the owned Volume, then applies the usual
+    active-runner guard; any other mount retains the volume-only record.
+    """
+    fleet = fleet_source_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_record_machine_identity() {",
+            "fleet_registry_resume_volume_migrations() {",
+            "fleet_registry_reconcile_mounted_volume() {",
+            "machine_volume_id() {",
+            "fleet_reap_registry_record_native() {",
+        )
+    )
+    root = tmp_path / "ownership"
+    registry = root / ("a" * 32)
+    (registry / "clones").mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    record = registry / "clones" / "cloudbench-late"
+    record.write_text("name=cloudbench-late\nvolume_id=vol_late\n")
+    calls = tmp_path / "calls"
+    config = json.dumps({"mounts": [{"volume": mounted}]})
+    script = f"""set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(root))}
+FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / "audit"))}
+CALLS={shlex.quote(str(calls))}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_resolve_name() {{ printf 'resolve %s\\n' "$1" >> "$CALLS"; printf abc123; }}
+registry_machine_details() {{ printf 'started cloudbench-late'; }}
+machine_config_exact_read() {{ printf '%s' {shlex.quote(config)}; }}
+registry_runner_count() {{ printf 1; }}
+fleet_audit_update_registry_clone() {{ printf 'audit %s\\n' "$*" >> "$CALLS"; }}
+reap_machine() {{ printf 'reap_machine %s\\n' "$1" >> "$CALLS"; }}
+reap_volume() {{ printf 'reap_volume %s\\n' "$1" >> "$CALLS"; }}
+{functions}
+fleet_reap_registry_record_native {shlex.quote(str(registry))} stale 2 0 {shlex.quote(str(record))}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=60
+    )
+    call_log = calls.read_text().splitlines()
+    assert "resolve cloudbench-late" in call_log
+    assert not any(call.startswith(("reap_machine ", "reap_volume ")) for call in call_log)
+    if mounted == "vol_late":
+        assert result.returncode == 1, result.stderr
+        assert (
+            f"audit {registry} cloudbench-late abc123 vol_late owned" in call_log
+        )
+        assert sorted(record.read_text().splitlines()) == [
+            "id=abc123",
+            "name=cloudbench-late",
+            "volume_id=vol_late",
+        ]
+        assert "refusing to reap stale fleet machine abc123: runner count=1" in result.stderr
+    else:
+        assert result.returncode == 75, result.stderr
+        assert not any(call.startswith("audit ") for call in call_log)
+        assert record.read_text() == "name=cloudbench-late\nvolume_id=vol_late\n"
+        assert "does not mount owned volume vol_late; retaining record" in result.stderr

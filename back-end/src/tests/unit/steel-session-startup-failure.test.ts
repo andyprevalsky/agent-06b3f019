@@ -116,6 +116,11 @@ async function main(): Promise<void> {
                 assert.strictEqual(id, 'offline-source');
                 released = true;
               },
+              retrieveProfile: async (id) => {
+                assert.strictEqual(id, 'offline-profile');
+                assert.strictEqual(released, true, 'profile readiness follows source release');
+                return { status: 'READY' };
+              },
               validateConnection: async () => {
                 throw new Error('unexpected validation');
               },

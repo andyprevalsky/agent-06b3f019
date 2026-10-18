@@ -366,6 +366,8 @@ function fixtureRoot(name: string) {
     "run-bench",
     "cloudbench_catalog.py",
     "cloudbench-production-only-tasks.py",
+    // run-bench reads the sharded operator's per-controller copy bound.
+    "cloudbench-shard-coordinator.py",
   ])
     symlinkSync(
       path.join(project, "scripts", name),

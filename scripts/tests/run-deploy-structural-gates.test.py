@@ -714,7 +714,7 @@ else: print('origin/fixture')
                 def dispatch(self):
                     path=self.path.split('/v1/apps/navi-whisper-lux-bench',1)[1]
                     api_calls.append([self.command,path]);values=json.loads(state.read_text());result=None;status=200
-                    if self.command=='GET' and path=='/machines':result=[dict(id=x)for x in protected]+([values['machine']]if values['machine']else [])
+                    if self.command=='GET' and path in('/machines','/machines?summary=true'):result=[dict(id=x)for x in protected]+([values['machine']]if values['machine']else [])
                     elif self.command=='GET' and path=='/machines/abcdef12345678':result=values['machine'];status=200 if result else 404
                     elif self.command=='GET' and path=='/volumes/vol_fixture123':result=values['volume'];status=200 if result else 404
                     elif self.command=='PUT' and path=='/volumes/vol_fixture123':
@@ -737,11 +737,16 @@ else: print('origin/fixture')
         if admitted:
             # Only the offline fixture crosses admission. Keep the production
             # file untouched and retain all refusal checks in public tests.
+            # Four creation-admission sites: two direct exits and two early
+            # sites whose wrapper adds the typed no-effect refusal receipt.
             source = gate.read_text()
             boundary = "controller_machine_creation_admission || exit $?"
-            self.assertEqual(source.count(boundary), 4)
+            early = "\nearly_controller_admission\n"
+            self.assertEqual(source.count(boundary), 2)
+            self.assertEqual(source.count(early), 2)
             gate = root / "synthetically-admitted-gate.sh"
-            gate.write_text(source.replace(boundary, ": # offline fixture admission"))
+            gate.write_text(source.replace(boundary, ": # offline fixture admission")
+                            .replace(early, "\n: # offline fixture admission\n"))
             env["CLOUDBENCH_GATE_SELF_COPY"] = str(gate)
             env["CLOUDBENCH_GATE_ROOT_DIR"] = str(ROOT)
         flag=["--disposable-controller",str(authority)]if disposable else []

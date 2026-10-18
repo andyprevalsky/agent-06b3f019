@@ -289,6 +289,23 @@ PY
 SH
 wide_names=()
 while IFS= read -r name; do wide_names+=("$name"); done <"$tmp/wide-names"
+# By default fifty simultaneous copies exceed one controller's copy bound and
+# route to the sharded operator as one launch. Its unsupported fleet flag is
+# refused before any controller starts: the slice is never split into smaller
+# ordinary fleets.
+: >"$tmp/wide-capture"
+wide_status=0
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  "$RUN_BENCH" "${wide_names[@]}" --timeout 300 --autoscale-max 2 --strict-barrier --foreground \
+  >"$tmp/wide-sharded.out" 2>&1 || wide_status=$?
+[ "$wide_status" -eq 2 ] || { cat "$tmp/wide-sharded.out" >&2; echo "FAIL: wide sharded route exit $wide_status" >&2; exit 1; }
+grep -Fq "sharded controller operator: 50 simultaneous copies exceed one controller's" "$tmp/wide-sharded.out"
+grep -Fq -- "--autoscale-max is not a sharded operator option" "$tmp/wide-sharded.out"
+[ ! -s "$tmp/wide-capture" ] || { echo "FAIL: refused sharded route started an ordinary fleet" >&2; exit 1; }
+# The explicit ordinary fleet path keeps the whole wide slice in one fleet.
+RUN_BENCH_SHARDED_ROUTE=never \
 RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
 RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
@@ -322,7 +339,8 @@ shutil.copyfile(
     source / ".claude/shared/benchmark-report-format.txt",
     root / ".claude/shared/benchmark-report-format.txt",
 )
-for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py"):
+for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py",
+             "cloudbench-shard-coordinator.py"):
     shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
 (root / "agents/benchmarks/tasks.json").write_text(json.dumps([
     {"name": "production-route", "status": "ready", "production_only": True}
@@ -334,7 +352,10 @@ interpreter = root / "agents/venv/bin/python"
 interpreter.write_text("""#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
-if args[1].endswith(('cloudbench_catalog.py', 'cloudbench-production-only-tasks.py')):
+if args[1].endswith(('cloudbench_catalog.py', 'cloudbench-production-only-tasks.py')) or (
+    args[0] == '-c' and args[-1].endswith('/scripts/cloudbench-shard-coordinator.py')
+):
+    # Catalog, production classifier and the sharded copy-bound read are real.
     os.execv(os.environ['ROUTING_REAL_PYTHON'], [os.environ['ROUTING_REAL_PYTHON'], *args])
 assert args[1] == 'benchmarks/run_benchmark.py', args
 with open(os.environ['ROUTING_CAPTURE'], 'a') as stream:
