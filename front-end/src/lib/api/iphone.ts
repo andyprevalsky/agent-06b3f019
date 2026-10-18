@@ -98,6 +98,7 @@ export async function performPhoneOperation(
     operation: string;
     args: Record<string, unknown>;
     expectedCursor: number;
+    attentionRequestId?: string;
   },
   signal: AbortSignal,
 ): Promise<{ operation: PhoneOperation }> {

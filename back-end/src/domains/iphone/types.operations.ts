@@ -7,11 +7,13 @@ export interface PhoneCommand {
   operation: string;
   args: Record<string, unknown>;
   expectedCursor?: number;
+  attentionRequestId?: string;
 }
 export interface CommandPayload {
   operation: string;
   args: Record<string, unknown>;
   actor: PhoneActor;
+  attentionRequestId?: string;
 }
 export interface CommandClaim {
   device: IPhoneDevice;

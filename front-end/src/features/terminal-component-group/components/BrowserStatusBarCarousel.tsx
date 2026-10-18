@@ -12,12 +12,14 @@
  * State:
  * - activeIndex: number (current browser index)
  *
+ * [MISSING EXACT ATTENTION TASK] -> authenticated status, never another browser.
  * Auto-adjusts activeIndex when browsers array changes.
  */
 
 import { memo, useState, useCallback, useEffect } from 'react';
 import { ChevronUp, ChevronDown } from 'lucide-react';
 import { getQueryParams } from '@/lib/url';
+import { PhoneAttentionLinkStatus } from './browser-status-bar/phone/PhoneAttentionLinkStatus';
 import BrowserStatusBar from './BrowserStatusBar';
 
 interface BrowserSession {
@@ -138,6 +140,13 @@ function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProp
     setActiveIndex((prev) => (prev + 1) % browsers.length);
   }, [browsers.length]);
 
+  const query = getQueryParams();
+  const linkedTask = query.get('browser-id');
+  if (
+    query.has('attention-request-id') &&
+    !browsers.some((browser) => browser.taskId === linkedTask)
+  )
+    return <PhoneAttentionLinkStatus taskId={linkedTask ?? ''} />;
   if (browsers.length === 0) return null;
 
   if (!hasMultipleBrowsers) {

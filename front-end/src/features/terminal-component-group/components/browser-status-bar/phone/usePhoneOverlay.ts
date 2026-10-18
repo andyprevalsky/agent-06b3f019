@@ -14,11 +14,19 @@ import {
   readPhoneInteraction,
   readPhoneOperation,
 } from '@/lib/api/iphone';
+import type { PhoneAttention } from '@/lib/api/phoneAttention';
 import { phoneLeaseVisible, readPointBounds } from './phoneOverlayState';
-import { emptyView, type Scope, type View } from './phoneOverlaySession';
+import { emptyView, phoneScopeCanWrite, type Scope, type View } from './phoneOverlaySession';
 import { performScopedPhoneOperation, recordPhoneOutcome } from './phoneOverlayOperations';
 
-export function usePhoneOverlay(taskId: string, trigger: string, readOnly: boolean) {
+export function usePhoneOverlay(
+  taskId: string,
+  trigger: string,
+  readOnly: boolean,
+  attention?: PhoneAttention | null,
+) {
+  const attentionRef = useRef(attention);
+  attentionRef.current = attention;
   const [view, setView] = useState<View>(() => emptyView(taskId));
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
   const scopeRef = useRef<Scope | null>(null);
@@ -45,6 +53,7 @@ export function usePhoneOverlay(taskId: string, trigger: string, readOnly: boole
   }, []);
   const refresh = useCallback(
     async (scope: Scope) => {
+      scope.attention = attentionRef.current;
       const snapshot = await readPhoneInteraction(scope.taskId, scope.controller.signal);
       if (scope.controller.signal.aborted) return;
       if (snapshot.lease && snapshot.lease.browserTaskId !== scope.taskId) {
@@ -53,7 +62,8 @@ export function usePhoneOverlay(taskId: string, trigger: string, readOnly: boole
       }
       if (
         snapshot.lease?.id !== scope.snapshot?.lease?.id ||
-        snapshot.lease?.controlOwner !== scope.snapshot?.lease?.controlOwner
+        snapshot.lease?.controlOwner !== scope.snapshot?.lease?.controlOwner ||
+        snapshot.lease?.attentionRequestId !== scope.snapshot?.lease?.attentionRequestId
       ) {
         scope.bounds = null;
         scope.boundsAt = 0;
@@ -104,6 +114,7 @@ export function usePhoneOverlay(taskId: string, trigger: string, readOnly: boole
     if (!enabled || !visible) return;
     const scope: Scope = {
       taskId,
+      attention: attentionRef.current,
       notice: '',
       controller: new AbortController(),
       snapshot: null,
@@ -158,6 +169,7 @@ export function usePhoneOverlay(taskId: string, trigger: string, readOnly: boole
             if (
               !readOnly &&
               lease.controlOwner === 'user' &&
+              phoneScopeCanWrite(scope) &&
               (!scope.operation || ['SUCCEEDED', 'FAILED'].includes(scope.operation.status)) &&
               (!scope.bounds || Date.now() - scope.boundsAt > 15000)
             )
@@ -229,7 +241,12 @@ export function usePhoneOverlay(taskId: string, trigger: string, readOnly: boole
       setRefreshVersion((version) => version + 1);
   }, [trigger]);
   const act = useCallback(
-    async (mode: 'user' | 'agent' | null, name?: string, args: Record<string, unknown> = {}) => {
+    async (
+      mode: 'user' | 'agent' | null,
+      name?: string,
+      args: Record<string, unknown> = {},
+      expectedAttentionId?: string,
+    ) => {
       const scope = scopeRef.current;
       if (!scope || scope.controller.signal.aborted || readOnly || scope.action) return;
       scope.action = true;
@@ -237,8 +254,17 @@ export function usePhoneOverlay(taskId: string, trigger: string, readOnly: boole
       try {
         await scope.polling;
         const lease = scope.snapshot?.lease;
+        scope.attention = attentionRef.current;
+        if (
+          scope.controller.signal.aborted ||
+          scope !== scopeRef.current ||
+          !phoneScopeCanWrite(scope) ||
+          (lease?.attentionRequestId && expectedAttentionId !== lease.attentionRequestId)
+        )
+          return;
         if (lease?.status !== 'ACTIVE') return;
         if (mode) {
+          if (lease.attentionRequestId) return;
           scope.bounds = null;
           const result = await controlPhone(lease.id, mode, scope.controller.signal);
           if (result.lease.controlOwner !== mode) throw new Error('Control transition unconfirmed');
@@ -285,7 +311,7 @@ export function usePhoneOverlay(taskId: string, trigger: string, readOnly: boole
     ...(view.taskId === taskId && visible ? view : emptyView(taskId)),
     visible: visible && view.taskId === taskId && phoneLeaseVisible(view.snapshot?.lease),
     control: (mode: 'user' | 'agent') => act(mode),
-    input: (name: string, args: Record<string, unknown>) => act(null, name, args),
+    input: (name: string, args: Record<string, unknown>) => act(null, name, args, attention?.id),
     invalidateBounds,
     refreshView: () => setRefreshVersion((version) => version + 1),
   };

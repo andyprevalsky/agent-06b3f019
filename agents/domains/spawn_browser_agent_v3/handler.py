@@ -2559,6 +2559,54 @@ async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
     return yielded
 
 
+def _native_phone_auth_metadata(result: Dict[str, Any]) -> Dict[str, Any]:
+    target = result.get("auth_target")
+    if not isinstance(target, dict) or target.get("kind") != "iphone":
+        return {}
+    return {"target": target, "criticalReason": result.get("critical_reason"),
+            "steelSessionId": None, "liveViewUrl": None, "handoffMode": "manual_step"}
+
+
+async def _native_phone_auth_pause(
+    *, config, user_id, agent_id, task_id, decision_id, snapshot, critical_reason,
+    action_history, dom_service, unified_action, browser_turn_messages,
+    continuity_state, runtime,
+):
+    """Native handoff returns through the existing exact-request workflow pause."""
+    from .phone import _identity, request_native_phone_authentication
+    outcome = await request_native_phone_authentication(
+        config=config, user_id=user_id, agent_id=agent_id, task_id=task_id,
+        decision_id=decision_id, snapshot=snapshot, critical_reason=critical_reason,
+    )
+    info = outcome.get("request_info") or {}
+    request = info.get("request") or {}
+    result = ({"success": True, "request_id": request["id"], "target": request["target"],
+               "criticalReason": critical_reason} if outcome.get("success") else outcome)
+    await action_history.record_action(
+        dom_service=dom_service, action="request_user_assistance_for_authentication",
+        thinking=unified_action.get("thinking"), params=unified_action.get("params") or {}, result=result,
+    )
+    _append_browser_turn_messages(
+        browser_turn_messages, unified_action=unified_action, result=result,
+        tool_call_id=decision_id or _identity("native-auth-tool", task_id, (snapshot or {}).get("interaction", {}).get("cursor")),
+    )
+    if not outcome.get("success"):
+        return outcome
+    target = request["target"]
+    state = {**continuity_state(), "auth_target": target, "critical_reason": critical_reason}
+    return {
+        **runtime, "status": "awaiting_auth_assistance", "request_id": request["id"],
+        "auth_assistance_request": info, "auth_target": target, "critical_reason": critical_reason,
+        "task_id": task_id, "auth_realm": "iphone", "base_site": "Cloud iPhone",
+        "handoff_mode": "native_phone",
+        **(await persist_resume_context(
+            agent_id=agent_id, task_id=task_id,
+            force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+            state=state,
+        )),
+    }
+
+
 def _browser_action_tool_call_id(llm_result: Dict[str, Any]) -> str:
     """Return the one streamed tool-call id used for an action's full lifecycle."""
     return str(llm_result.get("tool_call_id") or uuid_module.uuid4())
@@ -5704,6 +5752,8 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "reasoning_messages",
     "action_summary",
     "auth_attempts",
+    "auth_target",
+    "critical_reason",
     "secret_values_used",
     "browser_resume_context_ref",
     "user_instruction_messages",
@@ -7009,13 +7059,13 @@ async def _spawn_browser_agent_activity_v3_real(
                 result["pending_action_target"]["index"] = target["index"]
         if isinstance(auth_response, dict):
             request_ids = ("id", "requestId", "request_id", "attentionRequestId", "agentId", "userId",
-                           "browserSessionId", "steelSessionId", "mode")
+                           "browserSessionId", "steelSessionId", "mode", "target", "criticalReason")
             visible_auth = result["auth_assistance_request"]
             for key in request_ids:
                 if key in auth_response:
                     visible_auth[key] = auth_response[key]
             for key, protocol_keys in (("request", request_ids),
-                                       ("handoff", ("type", "steelSessionId", "liveViewUrl"))):
+                                       ("handoff", ("type", "steelSessionId", "liveViewUrl", "target", "criticalReason"))):
                 original = auth_response.get(key)
                 if isinstance(original, dict):
                     visible_auth[key] = _redact_activity_value(original)
@@ -9277,6 +9327,32 @@ async def _spawn_browser_agent_activity_v3_real(
 
             # 5. Handle special actions
             if action_name == "request_user_assistance_for_authentication":
+                if (unified_action.get("params") or {}).get("targetKind", "browser") == "iphone":
+                    native_pause = await _native_phone_auth_pause(
+                        config=config, user_id=user_id, agent_id=agent_id, task_id=task_id,
+                        decision_id=str(llm_result.get("tool_call_id") or ""),
+                        snapshot=llm_result.get("_phone_snapshot"),
+                        critical_reason=(unified_action.get("params") or {}).get("criticalReason"),
+                        action_history=action_history, dom_service=dom_service,
+                        unified_action=unified_action, browser_turn_messages=browser_turn_messages,
+                        continuity_state=_pause_continuity_state,
+                        runtime={"session_id": session_id, "cdp_url": cdp_url, "browser_url": browser_url,
+                                 "step_count": iteration},
+                    )
+                    if native_pause.get("status") != "awaiting_auth_assistance":
+                        continue
+                    execution_time_ms = (safe_time() - start_time) * 1000
+                    native_pause["recorded_passkey_credential_ids"] = sorted(recorded_passkey_credential_ids)
+                    native_pause["execution_time_ms"] = execution_time_ms
+                    native_pause["usage_items"] = build_usage_items(
+                        total_input_tokens, total_output_tokens, model_pricing, execution_time_ms,
+                        usage_by_model, pricing_pool=browser_pool,
+                        fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                        provider=browser_session_metadata.get("provider"),
+                    )
+                    browser_task_paused_for_resume = True
+                    await browser_stream.finish_tools(status="FINISHED")
+                    return _visible_activity_result(native_pause)
                 tool_call_id_action = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
                 base_site = auth_realm or get_domain_from_url(current_url) or "Current Site"
                 logger.info(
@@ -12715,12 +12791,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "toolName": "spawn_browser_agent",
                                 "action_type": "auth_assistance",
                                 "task_id": result.get("task_id"),
+                                **({"authAssistance": {
+                                    "requestId": request_id, "mode": "manual_step",
+                                    **_native_phone_auth_metadata(result),
+                                }} if _native_phone_auth_metadata(result) else {}),
                                 "requestUserAuthentication": {
                                     "requestId": request_id,
                                     "authRealm": result.get("auth_realm"),
                                     "steelSessionId": result.get("session_id"),
                                     "taskId": result.get("task_id"),
                                     "handoffMode": result.get("handoff_mode"),
+                                    **_native_phone_auth_metadata(result),
                                     "browserUrl": result.get("browser_url"),
                                     "liveViewUrl": (
                                         auth_request.get("liveViewUrl")
@@ -12798,7 +12879,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": result.get("write_lock_approvals", {}),
-                        "approval_type": AUTH_ASSISTANCE_DECLINED if user_declined else "auth_assistance",
+                        "approval_type": (AUTH_ASSISTANCE_DECLINED if user_declined else
+                                          "native_auth_assistance" if (result.get("auth_target") or {}).get("kind") == "iphone" else "auth_assistance"),
                         "step_count": result.get("step_count", 0),
                         "session_id": result.get("session_id"),
                         "cdp_url": result.get("cdp_url"),
@@ -12825,12 +12907,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "toolName": "spawn_browser_agent",
                             "action_type": "auth_assistance",
                             "task_id": result.get("task_id"),
-                            "requestUserAuthentication": {
+                            **({"authAssistance": {
+                                    "requestId": request_id, "mode": "manual_step",
+                                    **_native_phone_auth_metadata(result),
+                                }} if _native_phone_auth_metadata(result) else {}),
+                                "requestUserAuthentication": {
                                 "requestId": request_id,
                                 "authRealm": result.get("auth_realm"),
                                 "steelSessionId": result.get("session_id"),
                                 "taskId": result.get("task_id"),
                                 "handoffMode": result.get("handoff_mode"),
+                                **_native_phone_auth_metadata(result),
                             },
                         },
                     )

@@ -1,85 +1,9 @@
-/** Bounded submitted-value vault. Never evict on lease/session expiry or handback. */
-import { openPhoneValue, sealPhoneValue } from '../../providers/phoneHarnessCredentials';
-import { IPhoneError, type IPhoneOperation } from './types';
-
-export interface PhonePrivacy {
-  version: 1;
-  active: boolean;
-  values: string[];
-  joined?: string;
-}
-export function privacyState(encrypted: string | null): PhonePrivacy {
-  if (encrypted === null) return { version: 1, active: false, values: [] };
-  let value: PhonePrivacy;
-  try {
-    value = openPhoneValue<PhonePrivacy>(encrypted);
-    if (
-      typeof value !== 'object' ||
-      value === null ||
-      value.version !== 1 ||
-      typeof value.active !== 'boolean' ||
-      !Array.isArray(value.values) ||
-      value.values.some((item) => typeof item !== 'string' || item.length === 0) ||
-      value.values.length > 64 ||
-      Buffer.byteLength(value.values.join(''), 'utf8') > 16_384 ||
-      (value.joined !== undefined &&
-        (typeof value.joined !== 'string' || !value.values.includes(value.joined)))
-    )
-      throw new Error('Invalid privacy envelope');
-  } catch {
-    throw new IPhoneError(409, 'Phone privacy state is unavailable');
-  }
-  return value;
-}
-export function rememberPrivate(encrypted: string | null, text: unknown): string {
-  if (typeof text !== 'string' || text.length === 0)
-    throw new IPhoneError(400, 'Private phone input must contain text');
-  if (Buffer.byteLength(text, 'utf8') > 16_384)
-    throw new IPhoneError(409, 'Phone private input capacity reached');
-  const state = privacyState(encrypted);
-  const joined = state.active && state.joined !== undefined ? state.joined + text : text;
-  for (const value of [text, joined]) if (!state.values.includes(value)) state.values.push(value);
-  if (state.values.length > 64 || Buffer.byteLength(state.values.join(''), 'utf8') > 16_384)
-    throw new IPhoneError(409, 'Phone private input capacity reached');
-  return sealPhoneValue({ ...state, joined, active: true });
-}
-export function resumedPrivacy(encrypted: string | null): string | null {
-  return encrypted === null
-    ? null
-    : sealPhoneValue({ ...privacyState(encrypted), joined: undefined, active: false });
-}
-export function isModelMedia(operation: string): boolean {
-  return operation === 'screen.capture' || operation === 'screen.frame';
-}
-const MEDIA_KEYS = new Set(['png_b64']); // screen.capture documented wire payload
-export function privateResult(
-  command: Pick<IPhoneOperation, 'operation' | 'actor' | 'state'>,
-  value: unknown,
-  encrypted: string | null
-): unknown {
-  const privacy = privacyState(encrypted);
-  if (command.actor === 'user' && command.operation === 'input.text')
-    return { success: command.state === 'SUCCEEDED', private: true };
-  if (isModelMedia(command.operation)) return { private: true };
-  if (privacy.active && command.operation !== 'screen.bounds') return { private: true };
-  const values = [...privacy.values].sort((a, b) => b.length - a.length);
-  let nodes = 0;
-  const visit = (item: unknown, depth: number): unknown => {
-    if (++nodes > 20_000 || depth > 32) return '[omitted]';
-    if (typeof item === 'string') {
-      if (/^data:(?:image|video)\//i.test(item)) return '[private media]';
-      for (const secret of values) item = (item as string).split(secret).join('[private]');
-      return item;
-    }
-    if (Array.isArray(item)) return item.map((child) => visit(child, depth + 1));
-    if (typeof item === 'object' && item !== null)
-      return Object.fromEntries(
-        Object.entries(item).map(([key, child]) => [
-          String(visit(key, depth + 1)),
-          MEDIA_KEYS.has(key) ? '[private media]' : visit(child, depth + 1),
-        ])
-      );
-    return item;
-  };
-  return visit(value, 0);
-}
+/** Stable domain entrypoint; explicit exports preserve fresh-worker ESM interop. */
+export {
+  privacyState,
+  rememberPrivate,
+  resumedPrivacy,
+  isModelMedia,
+  privateResult,
+} from '../../providers/phoneInputPrivacy';
+export type { PhonePrivacy } from '../../providers/phoneInputPrivacy';

@@ -12,16 +12,11 @@ export interface ActionInput {
   attentionRequestId?: string;
   mode?: 'user' | 'agent';
 }
-export class IPhoneError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string
-  ) {
-    super(message);
-  }
-}
+export { PhoneInteractionError as IPhoneError } from '../../providers/phoneInteractionError';
 export interface Capability {
   enabled: boolean;
   configured: boolean;
   setupState: string | null;
 }
+
+export * from '../../providers/phoneAccountPolicy';

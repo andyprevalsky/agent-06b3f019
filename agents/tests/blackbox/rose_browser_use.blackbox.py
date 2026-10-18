@@ -2555,6 +2555,9 @@ async def run_all_tests():
         test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
+    r.record("native_auth_typed_schema_and_normalization", test_native_auth_typed_schema_and_normalization)
+    r.record("native_auth_schema_account_isolation", test_native_auth_schema_account_isolation)
+    await r.record_async("native_auth_real_provider_tool_request", test_native_auth_real_provider_tool_request)
     r.record("normalize_provider_tool_call", test_normalize_provider_tool_call)
     r.record(
         "normalize_provider_tool_call_coercion",
@@ -2716,6 +2719,71 @@ def test_phone_native_call_normalizes_and_observation_is_visible():
     assert 'observed_phone_state' in content and 'input-old' in content and 'read-new' in content
     hidden=build_browser_use_messages(task='task',browser_state={'phone':state},action_history=[],available_actions=['wait'],turn_messages=[])
     assert 'observed_phone_state' not in json.dumps(hidden)
+
+
+
+def test_native_auth_typed_schema_and_normalization():
+    from browser_tools.schemas import validate_browser_tool_args
+    name = "request_user_assistance_for_authentication"
+    for reason in ("password", "verification_code", "device_passcode", "manual_verification"):
+        args = {"targetKind": "iphone", "criticalReason": reason}
+        for action in ({name: args}, {"action_name": name, **args}):
+            assert normalize_browser_use_response({"action": [action]})["params"] == args
+        assert normalize_browser_use_tool_call({"name": name, "arguments": json.dumps(args)})["params"] == args
+    assert normalize_browser_use_response({"action": [{name: {}}]})["params"] == {}
+    for args in ({"targetKind":"iphone"}, {"targetKind":"android","criticalReason":"password"},
+                 {"targetKind":"iphone","criticalReason":"queue"},
+                 {"targetKind":"iphone","criticalReason":"password","leaseId":"forged"},
+                 {"targetKind":"iphone","criticalReason":"password","password":"CANARY"},
+                 {"targetKind":"browser","criticalReason":"password"}):
+        try:
+            validate_browser_tool_args(name,args)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid or forged native assistance accepted")
+
+
+def test_native_auth_schema_account_isolation():
+    name = "request_user_assistance_for_authentication"
+    before = json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
+    enabled = next(t for t in build_browser_use_tools([name,"phone"]) if t["name"]==name)
+    assert enabled["input_schema"]["properties"]["targetKind"]["enum"] == ["browser","iphone"]
+    assert "criticalReason" in enabled["input_schema"]["properties"]
+    assert "targetKind=iphone" in enabled["description"]
+    disabled = build_browser_use_tools([name])[0]
+    assert "targetKind" not in disabled["input_schema"]["properties"]
+    assert "criticalReason" not in disabled["input_schema"]["properties"]
+    assert json.dumps(BROWSER_USE_TOOLS, sort_keys=True) == before
+
+
+async def test_native_auth_real_provider_tool_request():
+    name = "request_user_assistance_for_authentication"
+    params = {"targetKind": "iphone", "criticalReason": "verification_code"}
+    sse = _openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "native-decision-1", "type": "function", "function": {"name": name, "arguments": json.dumps(params)}}]}, "finish_reason": "tool_calls"}]}])
+    captured = []
+    def provider(request):
+        assert request.url.host == "openrouter.ai", "Synthetic replay must stay on the expected mocked provider path"
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            result = await RoseClient(openrouter_key="synthetic-native-key").complete_browser_use(
+                task="Inspect the cloud phone verification screen",
+                browser_state={**_browser_state(), "phone": {"enabled": True, "interaction": {"cursor": 7}}},
+                action_history=[], available_actions=[name, "phone"], include_screenshot=False,
+                call_site="test-native-phone-auth",
+            )
+        assert result["action"]["params"] == params
+        assert result["action"]["action"] == name
+        assert len(captured) == 1
+        advertised = next(t["function"] for t in captured[0]["tools"] if t["function"]["name"] == name)
+        assert advertised["parameters"]["properties"]["targetKind"]["enum"] == ["browser", "iphone"]
+        assert "targetKind=iphone" in advertised["description"]
+        assert "This authentication ladder applies to targetKind=browser" in json.dumps(captured[0]["messages"])
+    finally:
+        teardown_mock()
 
 
 if __name__ == "__main__":

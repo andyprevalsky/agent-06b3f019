@@ -61,6 +61,7 @@ import {
 import { smsTimezoneBehaviorCases } from './sms-supervisor.timezone.behavior';
 import { smsPausedReplyBehaviorCases } from './sms-supervisor.paused-reply.behavior';
 import { smsStartPhaseBehaviorCases } from './sms-supervisor.start-phase.behavior';
+import { smsPhoneAttentionBehaviorCases } from './sms-supervisor.phone-attention.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 const prisma = new PrismaClient();
@@ -628,6 +629,7 @@ async function runAll() {
     },
     replyIntentBlackboxCase(prisma),
     bareRejectionBlackboxCase(prisma),
+    ...smsPhoneAttentionBehaviorCases(prisma),
     ...smsPausedReplyBehaviorCases(prisma),
     ...smsStartPhaseBehaviorCases(prisma),
     {

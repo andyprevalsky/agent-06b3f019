@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { prisma } from '../../providers/database';
 import { PhoneHarnessClient } from '../../providers/phoneHarness';
+import { createAuthAssistanceRouter } from '../../domains/auth-assistance/routes';
 import { createIPhoneRouter } from '../../domains/iphone/routes';
 import { nonLocalDatabaseReason } from '../../utils/localDatabaseUrl';
 
@@ -90,6 +91,9 @@ export class Harness {
   beforeStop?: () => Promise<void>;
   createUnknown = false;
   hideReceipt = false;
+  beforeAuthCompletion?: () => Promise<void>;
+  authSignals = 0;
+  authResumes = 0;
   echoInputResult = false;
   observationResult: unknown = undefined;
   errorEcho: string | undefined;
@@ -334,6 +338,23 @@ export class Harness {
           }),
       })
     );
+    app.use(
+      '/api/auth-assistance',
+      createAuthAssistanceRouter({
+        completionDependencies: {
+          beforeCompletionClaim: async () => {
+            await this.beforeAuthCompletion?.();
+          },
+          signalCompleted: async () => {
+            this.authSignals++;
+          },
+          resumeAgent: async () => {
+            this.authResumes++;
+            return { success: true };
+          },
+        },
+      })
+    );
     this.appServer = createServer(app);
     this.base = await listen(this.appServer);
   }
@@ -479,10 +500,11 @@ export class Harness {
       body?: unknown;
       actor?: 'agent' | 'user';
       userApiKey?: string;
+      api?: 'iphone' | 'auth-assistance';
     } = {}
   ): Promise<ApiResult> {
     const user = options.actor === 'user';
-    const response = await fetch(`${this.base}/api/iphone${path}`, {
+    const response = await fetch(`${this.base}/api/${options.api ?? 'iphone'}${path}`, {
       method: options.method ?? 'GET',
       headers: {
         'Content-Type': 'application/json',
@@ -511,6 +533,7 @@ export class Harness {
           where: { context: { userId: { in: this.users } } },
         });
         await prisma.browserContext.deleteMany({ where: { userId: { in: this.users } } });
+        await prisma.smsSession.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.roseApiKey.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.agentAttentionRequest.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.agent.deleteMany({ where: { userId: { in: this.users } } });

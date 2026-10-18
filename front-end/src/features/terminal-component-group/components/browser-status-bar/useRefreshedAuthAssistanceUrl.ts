@@ -1,4 +1,5 @@
 /**
+ * Native phone handoffs never refresh browser sessions.
  * Keeps auth-assistance browser embeds pointed at a live provider session.
  *
  * Browser auth requests can sit in the attention inbox long enough for the
@@ -19,7 +20,7 @@ interface RefreshedUrlState {
 export function useRefreshedAuthAssistanceUrl(
   pendingAuthAssistance: PendingAuthAssistance | null,
 ): string | null {
-  const requestId = pendingAuthAssistance?.requestId;
+  const requestId = pendingAuthAssistance?.target ? undefined : pendingAuthAssistance?.requestId;
   const requestedLiveViewUrl = pendingAuthAssistance?.liveViewUrl ?? null;
   const [state, setState] = useState<RefreshedUrlState>({
     requestId,

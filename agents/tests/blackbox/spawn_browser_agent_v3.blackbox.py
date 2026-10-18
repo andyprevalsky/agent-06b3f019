@@ -9164,7 +9164,7 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_usage_items"
     ]
-    assert len(build_calls) == 6, f"expected 6 build_usage_items call sites including native input failure, found {len(build_calls)}"
+    assert len(build_calls) == 7, f"expected 7 build_usage_items call sites including native input failure and native auth pause, found {len(build_calls)}"
     for build_call in build_calls:
         forwarded = [ast.unparse(a) for a in build_call.args] + [
             *(ast.unparse(k.value) for k in build_call.keywords),
@@ -21197,7 +21197,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -21219,6 +21219,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         "same_session_available": True,
     }
     close_mock = AsyncMock()
+    propagation_mock = AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})
     create_auth_mock = AsyncMock()
     restart_mock = AsyncMock(
         return_value={
@@ -21267,6 +21268,12 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         {"action": {"action": "request_user_assistance_for_authentication", "thinking": "", "params": {}}, "usage": {}, "mode": "waterfall"},
         {"action": {"action": "attempt_completion", "thinking": "The signed-in page confirms completion.", "params": {"reasoning": "confirmed"}}, "usage": {}, "mode": "waterfall"},
     ]
+    native_request = AsyncMock(return_value={"success": True, "request_info": _native_phone_auth_fixture()[1]})
+    if native_auth:
+        actor_responses[0] = {
+            "action": {"action": "request_user_assistance_for_authentication", "params": {"targetKind": "iphone", "criticalReason": "password"}},
+            "tool_call_id": "native-decision", "_phone_snapshot": _native_phone_auth_fixture()[2], "usage": {},
+        }
     captured_turns = []
     captured_system_context = []
     decision_order = []
@@ -21308,6 +21315,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
             raise TimeoutError("resume input backend unavailable")
         return [await native_browser_start_source("2026-10-14T17:21:35.438+00:00"), *correction_rows]
     patch_targets = [
+        *([patch("domains.spawn_browser_agent_v3.phone.request_native_phone_authentication", native_request)] if native_auth else []),
         *([
             patch("domains.spawn_browser_agent_v3.handler._prepare_pending_write_lock_action", pending_preparation),
             patch("domains.spawn_browser_agent_v3.handler.execute_action", pending_execution),
@@ -21360,7 +21368,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
-            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+            propagation_mock,
         ),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
         patch(
@@ -21409,6 +21417,24 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         from domains.spawn_browser_agent_v3.handler import drain_background_browser_cleanups
         await drain_background_browser_cleanups(timeout=1)
 
+    if native_auth:
+        assert result["status"] == "awaiting_auth_assistance"
+        assert result["auth_target"] == _native_phone_auth_fixture()[0]
+        assert result["critical_reason"] == "password"
+        assert result["request_id"] == "attention-1"
+        assert result["usage_items"], "native auth pause lost actual model usage"
+        assert result["session_id"] == "session-1"
+        native_request.assert_awaited_once()
+        assert native_request.await_args.kwargs["decision_id"] == "native-decision"
+        assert native_request.await_args.kwargs["snapshot"] == _native_phone_auth_fixture()[2]
+        restart_mock.assert_not_awaited()
+        reconnect_mock.assert_not_awaited()
+        create_auth_mock.assert_not_awaited()
+        close_mock.assert_not_awaited()
+        propagation_mock.assert_not_awaited()
+        assert auth_boundary_calls == []
+        assert result["action_history"][-1]["action"] == "request_user_assistance_for_authentication"
+        return result
     if schema_failure:
         assert result["status"] != "completed", "schema failure accepted completion under the unacknowledged previous contract"
         assert result.get("structured_response") is None, "schema failure returned structured output from the previous contract"
@@ -30103,6 +30129,13 @@ async def run_all_tests():
     await r.record_async("phone_revocation_and_safe_timeout", test_phone_revocation_and_safe_timeout)
     await r.record_async("phone_live_completion_records_real_results", test_phone_live_completion_records_real_results_for_existing_verifier)
     await r.record_async("phone_captured_verifier_same_client", test_phone_captured_verifier_replays_same_foundry_client_offline)
+    await r.record_async("native_phone_auth_http_identity_recovery", test_native_phone_auth_http_identity_recovery)
+    await r.record_async("native_phone_auth_denials_and_safe_errors", test_native_phone_auth_denials_and_safe_errors)
+    await r.record_async("native_phone_auth_manager_exact_resume", test_native_phone_auth_manager_exact_resume)
+    await r.record_async("native_phone_auth_actual_activity_before_browser_recovery", test_native_phone_auth_actual_activity_before_browser_recovery)
+    await r.record_async("native_phone_auth_manager_rejection_preserves_target", test_native_phone_auth_manager_rejection_preserves_target)
+    await r.record_async("native_phone_auth_generation_reattaches_exact_request", test_native_phone_auth_generation_reattaches_exact_request)
+    await r.record_async("native_phone_auth_cancellation_preserves_exact_pending_request", test_native_phone_auth_cancellation_preserves_exact_pending_request)
     return r.all_passed
 
 
@@ -30354,13 +30387,294 @@ async def test_phone_captured_verifier_replays_same_foundry_client_offline():
                 skip_cache_write=False,dump_context=False,call_site='verifier_browser',
                 request_id=captured['output'].get('request_id','captured-reduced'),
             )]
-        content=''.join(str(chunk.data.get('text') or '') for chunk in chunks if chunk.kind=='content')
-        assert json.loads(content)['score']==0.0
-        assert len(calls)==1
-        assert '0 actions shown' in json.dumps(calls[0])
+        content = "".join(str(chunk.data.get("text") or "") for chunk in chunks if chunk.kind == "content")
+        assert json.loads(content)["score"] == 0.0
+        assert len(calls) == 1
+        assert "0 actions shown" in json.dumps(calls[0])
     finally:
         teardown_mock()
 
 
+def _native_phone_auth_fixture():
+    target = {"kind": "iphone", "browserTaskId": "task-1", "leaseId": "lease-1"}
+    receipt = {
+        "request": {
+            "id": "attention-1",
+            "agentId": "agent-1",
+            "userId": "user-1",
+            "target": target,
+            "criticalReason": "password",
+        },
+        "handoff": {
+            "type": "manual_step",
+            "liveViewUrl": None,
+            "steelSessionId": None,
+            "target": target,
+            "criticalReason": "password",
+        },
+    }
+    snapshot = {
+        "enabled": True,
+        "interaction": {
+            "cursor": 7,
+            "lease": {"id": "lease-1", "status": "ACTIVE", "browserTaskId": "task-1", "attentionRequestId": None},
+        },
+    }
+    return target, receipt, snapshot
+
+
+async def test_native_phone_auth_http_identity_recovery():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import request_native_phone_authentication
+
+    target, receipt, snapshot = _native_phone_auth_fixture()
+    calls = []
+    lost = False
+
+    def backend(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.method == "POST":
+            if lost:
+                raise httpx.ReadError("CANARY-PRIVATE-TRANSPORT", request=request)
+            return httpx.Response(201, json={**receipt, "private": "CANARY-PRIVATE-RESPONSE"})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "lease": {"id": "lease-1", "attentionRequestId": "attention-1", "browserTaskId": "task-1"},
+                    "cursor": 7,
+                },
+            )
+        assert request.url.path.endswith("/auth-assistance/attention-1")
+        return httpx.Response(200, json=receipt)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        args = dict(
+            config=_fake_config(),
+            user_id="user-1",
+            agent_id="agent-1",
+            task_id="task-1",
+            decision_id="decision-1",
+            snapshot=snapshot,
+            critical_reason="password",
+            client=client,
+        )
+        first = await request_native_phone_authentication(**args)
+        lost = True
+        second = await request_native_phone_authentication(**args)
+        restarted_snapshot = copy.deepcopy(snapshot)
+        restarted_snapshot["interaction"]["lease"]["attentionRequestId"] = "attention-1"
+        before_restart_posts = sum(c[0] == "POST" for c in calls)
+        restarted = await request_native_phone_authentication(**{**args, "decision_id": "new-worker-decision", "snapshot": restarted_snapshot})
+        assert restarted["success"] and restarted["request_info"] == first["request_info"]
+        assert sum(c[0] == "POST" for c in calls) == before_restart_posts, "restart recreated an already reserved attention"
+    assert first["success"] and second["success"]
+    assert first["request_info"] == second["request_info"]
+    assert first["request_info"]["request"]["target"] == target
+    assert "CANARY" not in json.dumps(first)
+    posts = [c[2] for c in calls if c[0] == "POST"]
+    assert len(posts) == 2 and posts[0] == posts[1]
+    body = posts[0]
+    assert body["targetKind"] == "iphone" and body["mode"] == "manual_step" and body["authRealm"] == "iphone"
+    assert body["browserTaskId"] == "task-1" and body["expectedCursor"] == 7
+    assert set(body) == {
+        "agentId",
+        "authRealm",
+        "mode",
+        "targetKind",
+        "browserTaskId",
+        "criticalReason",
+        "requestKey",
+        "expectedCursor",
+    }
+    assert body["requestKey"] and not any(c[0] == "POST" and "/iphone/" in c[1] for c in calls)
+
+
+async def test_native_phone_auth_denials_and_safe_errors():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import request_native_phone_authentication
+
+    _, receipt, snapshot = _native_phone_auth_fixture()
+    status = 409
+    calls = []
+
+    def backend(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.method == "POST":
+            return httpx.Response(status, json={"error": "CANARY-PRIVATE-ERROR"})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json={"lease": {"id": "lease-1", "attentionRequestId": "attention-1"}})
+        return httpx.Response(
+            200, json={**receipt, "request": {**receipt["request"], "criticalReason": "verification_code"}}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        args = dict(
+            config=_fake_config(),
+            user_id="user-1",
+            agent_id="agent-1",
+            task_id="task-1",
+            decision_id="d",
+            snapshot=snapshot,
+            critical_reason="password",
+            client=client,
+        )
+        rejected = await request_native_phone_authentication(**args)
+        assert not rejected["success"] and len([c for c in calls if c[0] == "POST"]) == 1
+        assert not any("/interactions/" in c[1] for c in calls)
+        status = 500
+        wrong = await request_native_phone_authentication(**args)
+        assert not wrong["success"] and "CANARY" not in json.dumps(wrong)
+        calls.clear()
+        assert not (await request_native_phone_authentication(**{**args, "snapshot": {"enabled": False}}))["success"]
+        assert calls == []
+        queued = copy.deepcopy(snapshot)
+        queued["interaction"]["lease"]["status"] = "WAITING"
+        assert not (await request_native_phone_authentication(**{**args, "snapshot": queued}))["success"]
+        assert calls == [], "queued phone fabricated authentication attention"
+
+
+async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETED__", handoff=False, cancel=False):
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    target, receipt, _ = _native_phone_auth_fixture()
+    first = {
+        "status": "awaiting_auth_assistance",
+        "request_id": "attention-1",
+        "auth_realm": "iphone",
+        "base_site": "Cloud iPhone",
+        "auth_assistance_request": receipt,
+        "auth_target": target,
+        "critical_reason": "password",
+        "task_id": "task-1",
+        "session_id": "browser-session",
+        "browser_url": "https://browser.test",
+        "cdp_url": "ws://browser",
+        "step_count": 3,
+    }
+
+    class Handle:
+        def __init__(self, value):
+            self.value = value
+
+        def done(self):
+            return True
+
+        def __await__(self):
+            async def result():
+                return self.value
+
+            return result().__await__()
+
+    instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        _signal_responses={},
+        _update_tree_state=AsyncMock(),
+    )
+    calls = []
+
+    def start(*args, **kwargs):
+        calls.append(kwargs)
+        return Handle(
+            first
+            if len(calls) == 1
+            else {"status": "completed", "success": True, "message": "observed result", "output_files": []}
+        )
+
+    async def wait(predicate, *args, **kwargs):
+        if not instance.is_paused:
+            assert predicate()
+            return
+        assert not predicate()
+        if cancel:
+            raise asyncio.CancelledError()
+        if handoff:
+            from helpers.generation_handoff import GenerationHandoffRequested
+            raise GenerationHandoffRequested("next-worker-generation")
+        instance._signal_responses["foreign-attention"] = "__AUTH_ASSISTANCE_COMPLETED__"
+        assert not predicate()
+        instance._signal_responses["attention-1"] = signal
+        assert predicate()
+
+    if handoff:
+        from workflows.agent_workflow import AgentWorkflow
+        instance._tool_parking_enabled = True
+        instance._active_tool_calls = {"tool-1": ("spawn_browser_agent", {"goal": "Inspect actual phone screen"})}
+        instance._pending_tool_resumes = []
+        instance._park_pending_tool = AgentWorkflow._park_pending_tool.__get__(instance)
+    with (
+        patch.object(h.workflow, "start_activity", side_effect=start),
+        patch.object(h.workflow, "wait_condition", wait),
+        patch.object(h.workflow, "logger", MagicMock()),
+    ):
+        events = []
+        try:
+            async for event in h.SpawnBrowserAgentManagerV3().execute_tool(instance, {"goal": "Inspect actual phone screen"}, "tool-1"):
+                events.append(event)
+        except BaseException as error:
+            if cancel:
+                assert isinstance(error, asyncio.CancelledError)
+                assert len(calls) == 1 and instance.is_paused
+                assert instance._signal_responses == {}
+                native_event = next(event for event in events if (getattr(event, "metadata", None) or {}).get("requestUserAuthentication"))
+                assert native_event.metadata["requestUserAuthentication"]["requestId"] == "attention-1"
+                assert native_event.metadata["requestUserAuthentication"]["target"] == target
+                return
+            from helpers.generation_handoff import GenerationHandoffRequested
+            assert isinstance(error, GenerationHandoffRequested) and error.parked
+            assert handoff and len(calls) == 1
+            parked = instance._pending_tool_resumes[0]
+            assert parked["resume"]["parked_result"]["auth_target"] == target
+            assert parked["resume"]["parked_result"]["request_id"] == "attention-1"
+            instance._tool_resume_hints = {"tool-1": parked["resume"]}
+            instance._take_tool_resume = AgentWorkflow._take_tool_resume.__get__(instance)
+            handoff = False
+            async for event in h.SpawnBrowserAgentManagerV3().execute_tool(instance, {"goal": "Inspect actual phone screen"}, "tool-1"):
+                events.append(event)
+    assert not cancel, "cancelled native wait fabricated a resume"
+    resumed = calls[1]["args"][12]
+    assert resumed["auth_target"] == target and resumed["critical_reason"] == "password"
+    assert resumed["approval_type"] == (h.AUTH_ASSISTANCE_DECLINED if signal == "__REJECTED__" else "native_auth_assistance")
+    assert calls[1]["args"][5] == "browser-session" and calls[1]["args"][6] == "ws://browser"
+    native = [e.metadata for e in events if (getattr(e, "metadata", None) or {}).get("requestUserAuthentication")]
+    assert len(native) == 2
+    for meta in native:
+        assert meta["requestUserAuthentication"]["target"] == target
+        assert meta["authAssistance"]["target"] == target
+        assert meta["requestUserAuthentication"]["criticalReason"] == "password"
+        assert meta["requestUserAuthentication"]["steelSessionId"] is None
+    assert "foreign-attention" in instance._signal_responses
+    assert "attention-1" not in instance._signal_responses
+
+
+async def test_native_phone_auth_manager_exact_resume():
+    await _exercise_native_phone_auth_manager()
+
+
+async def test_native_phone_auth_manager_rejection_preserves_target():
+    await _exercise_native_phone_auth_manager(signal="__REJECTED__")
+
+
+async def test_native_phone_auth_generation_reattaches_exact_request():
+    await _exercise_native_phone_auth_manager(handoff=True)
+
+
+async def test_native_phone_auth_actual_activity_before_browser_recovery():
+    result = await _exercise_browser_resume_user_input(native_auth=True)
+    assert not result.get("success"), "A handoff must not claim task or login completion"
+
+
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
+
+
+async def test_native_phone_auth_cancellation_preserves_exact_pending_request():
+    await _exercise_native_phone_auth_manager(cancel=True)

@@ -117,6 +117,7 @@ export function useAttentionActions({
 
   const handleRespond = (requestId: string, overrideResponse?: string) => {
     const request = requests.find((item) => item.id === requestId);
+    if (request && getAuthAssistanceMetadata(request)?.target) return;
     const isAuthAssistance = request ? getAuthAssistanceMetadata(request) !== null : false;
     const response =
       overrideResponse ??

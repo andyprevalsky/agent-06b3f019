@@ -198,3 +198,44 @@ export async function rejectAttentionRequest(requestId: string, message?: string
     throw new Error(error.error || 'Failed to reject attention request');
   }
 }
+
+export class AuthAssistanceReadError extends Error {
+  constructor(public readonly status: number) {
+    super('Phone authentication request unavailable');
+  }
+}
+
+/** Exact authenticated lookup; no provider URL or secret is needed to resolve native attention. */
+export async function readAuthAssistanceRequest(
+  requestId: string,
+  signal: AbortSignal,
+): Promise<{ request: unknown }> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener('abort', abort, { once: true });
+  if (signal.aborted) controller.abort();
+  const deadline = setTimeout(abort, 15000);
+  try {
+    const response = await fetch(
+      `${API_BASE_WITH_PATH}/auth-assistance/${encodeURIComponent(requestId)}`,
+      { headers: getAuthHeaders(), cache: 'no-store', signal: controller.signal },
+    );
+    if (!response.ok) throw new AuthAssistanceReadError(response.status);
+    return (await response.json()) as { request: unknown };
+  } finally {
+    clearTimeout(deadline);
+    signal.removeEventListener('abort', abort);
+  }
+}
+
+/** Native completion returns only HTTP classification; never surface arbitrary response bodies. */
+export async function submitPhoneAuthCompletion(
+  requestId: string,
+  signal: AbortSignal,
+): Promise<number> {
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/auth-assistance/${encodeURIComponent(requestId)}/complete`,
+    { method: 'POST', headers: getAuthHeaders(), signal },
+  );
+  return response.status;
+}

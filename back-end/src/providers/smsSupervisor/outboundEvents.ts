@@ -474,7 +474,8 @@ export async function notifyAuthAssistance(
   userId: string,
   agent: { id: string },
   authRealm: string,
-  browserSessionId?: string | null
+  browserSessionId?: string | null,
+  attentionRequestId?: string | null
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -492,7 +493,7 @@ export async function notifyAuthAssistance(
   }
 
   const prefix = agent.id.substring(0, 6);
-  const url = getAgentUrl(agent.id, browserSessionId);
+  const url = getAgentUrl(agent.id, browserSessionId, attentionRequestId);
   const message = SMS_TEMPLATES.authAssistance(prefix, authRealm, url);
 
   const result = await sendLifecycleSms(
@@ -505,6 +506,7 @@ export async function notifyAuthAssistance(
         event_type: 'auth_assistance',
         user_id: userId,
         browser_session_id: browserSessionId ?? null,
+        attention_request_id: attentionRequestId ?? null,
       },
     }
   );

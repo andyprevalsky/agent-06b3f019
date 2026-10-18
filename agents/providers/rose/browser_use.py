@@ -741,11 +741,28 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
                 "authentication blockers. Wait briefly or try an alternate URL/path instead "
                 "of trying to solve them yourself."
             )
+        input_schema = _collapse_nullable_schema(generated_tool["input_schema"])
+        if action_name == "request_user_assistance_for_authentication":
+            if "phone" in known_actions:
+                description = (
+                    "For targetKind=browser (default): " + description +
+                    " For targetKind=iphone: request help only for a blocking password, "
+                    "user-only verification code, device passcode, or manual_verification "
+                    "requiring user presence (biometrics or trusted-device approval). "
+                    "The browser authentication waterfall does not apply to this native target. "
+                    "Navigate and approve accessible phone authentication autonomously. "
+                    "Never request attention for queue timeouts, ordinary navigation, terms, "
+                    "unsupported operations or transport errors. Do not include credentials or routing IDs."
+                )
+            else:
+                # Each generated schema is invocation-local; never mutate the registry.
+                for field in ("targetKind", "criticalReason"):
+                    input_schema.get("properties", {}).pop(field, None)
         tools.append(
             {
                 "name": action_name,
                 "description": description,
-                "input_schema": _collapse_nullable_schema(generated_tool["input_schema"]),
+                "input_schema": input_schema,
             }
         )
     return tools
@@ -761,7 +778,12 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY by the caller when dynamic context is
     present. Provider transforms strip the marker before sending the request.
     """
-    _ = available_actions
+    native_auth_rule = (
+        "This authentication ladder applies to targetKind=browser. For targetKind=iphone, "
+        "use the native criticalReason contract: request help only for a blocking password "
+        "or user-only verification; ordinary phone navigation stays autonomous.\n"
+        if "phone" in available_actions else ""
+    )
     recover_enabled = (
         recover_from_challenge_enabled()
         and "recover_from_challenge" in set(available_actions or [])
@@ -846,7 +868,7 @@ action envelope in text; use the provided tool call.
 - If Amazon shows that a return request needs to be reviewed or to contact customer service, that item's self-service return path is blocked. Do not open Contact Us. Leave that item, pick the next eligible non-excluded item, or report the exact visible blocker if none remain.
 
 # Authentication
-
+{native_auth_rule}
 - Use the cheapest viable authentication path for this single site.
 - Priority:
   - 1. Existing Steel/cookie session
@@ -1429,6 +1451,12 @@ def _normalize_action_params(
     first_action: Dict[str, Any],
     index: Any,
 ) -> Dict[str, Any]:
+    if normalized_action == "request_user_assistance_for_authentication":
+        from browser_tools.schemas import validate_browser_tool_args
+        normalized = validate_browser_tool_args(normalized_action, params)
+        if normalized.get("targetKind") == "browser":
+            normalized.pop("targetKind")
+        return normalized
     if normalized_action == "phone":
         from browser_tools.schemas import validate_browser_tool_args
         return validate_browser_tool_args("phone", params)

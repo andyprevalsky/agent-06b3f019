@@ -1,6 +1,7 @@
 /**
  * Development preview state: [BROWSER] renders the expandable status chip;
- * [?phone] renders the real fullscreen view with a phone-action fixture.
+ * [?phone] renders the real fullscreen view with a phone-action fixture;
+ * [?phone&native] adds an exact native authentication request for visual QA.
  * Network responses stay outside this fixture and use the normal API client.
  */
 import React from 'react';
@@ -17,6 +18,8 @@ import type { AgentContextValue } from '@/features/agent-context/types';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
 import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
 import type { Message } from '@/lib/api';
+import { getQueryParams } from '@/lib/url';
+import { readCriticalReason } from '@/lib/api/phoneAttention';
 import '@/index.css';
 
 const messages: Message[] = [
@@ -69,7 +72,10 @@ const messages: Message[] = [
   },
 ];
 
-const phonePreview = new URLSearchParams(window.location.search).has('phone');
+const previewParams = getQueryParams();
+const phonePreview = previewParams.has('phone');
+const nativePreview = phonePreview && previewParams.has('native');
+const criticalReason = readCriticalReason(previewParams.get('reason')) ?? 'password';
 const previewMessages: Message[] = phonePreview
   ? [
       ...messages,
@@ -88,6 +94,28 @@ const previewMessages: Message[] = phonePreview
       },
     ]
   : messages;
+
+if (nativePreview) {
+  previewMessages.push({
+    message_id: 'phone-authentication',
+    timestamp: '2026-10-18T22:00:00Z',
+    text: '',
+    role: 'TOOL',
+    metadata: {
+      toolName: 'spawn_browser_agent',
+      toolStatus: 'IN_PROGRESS',
+      task_id: 'browser-preview',
+      action_type: 'auth_assistance',
+      title: 'Complete protected phone authentication',
+      requestUserAuthentication: {
+        requestId: 'qa-phone-attention',
+        handoffMode: 'manual_step',
+        target: { kind: 'iphone', browserTaskId: 'browser-preview', leaseId: 'qa-phone-lease' },
+        criticalReason,
+      },
+    },
+  });
+}
 
 function makeContext(): AgentContextValue {
   return {
@@ -127,7 +155,7 @@ export function PreviewApp() {
                   <TopRightControls>
                     <AdminAccountSwitcher isAdmin ownAccountLabel="+19729777432" />
                   </TopRightControls>
-                  {new URLSearchParams(window.location.search).has('inspection') && (
+                  {previewParams.has('inspection') && (
                     <InspectionAccountBadge
                       context={{
                         user_id: 'preview-owner',
@@ -142,6 +170,7 @@ export function PreviewApp() {
               {phonePreview && (
                 <BrowserStatusBarFullscreen
                   agentId="phone-preview-agent"
+                  readOnly={previewParams.has('readonly')}
                   taskId="browser-preview"
                   browserUrl="about:blank"
                   messages={previewMessages}
@@ -149,7 +178,7 @@ export function PreviewApp() {
                   browserSessionMetadata={null}
                   stepProgress={{ stepsTaken: 8, totalSteps: 30 }}
                   isDisconnected={false}
-                  isWaitingForAuthAssistance={false}
+                  isWaitingForAuthAssistance={nativePreview}
                   isResuming={false}
                   isUserControlling={false}
                   pendingWriteLockApproval={null}

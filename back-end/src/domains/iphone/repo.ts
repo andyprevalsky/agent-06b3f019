@@ -1,5 +1,6 @@
 /** Durable admission: device FOR UPDATE -> reconcile -> mutate -> FIFO admit.
  * Every process uses this lock order. Transactions perform database I/O only. */
+import { nativeControlError } from './repo.attention';
 import { resumePrivacy } from './repo.privacy';
 import { databaseNow } from './repo.clock';
 export { databaseNow } from './repo.clock';
@@ -182,6 +183,8 @@ export async function mutate(
     input.mode === 'agent'
   )
     return new IPhoneError(409, 'Only the user can return phone control');
+  const nativeError = await nativeControlError(tx, lease, action);
+  if (nativeError !== null) return nativeError;
   if (action === 'control' || action === 'awaiting-auth') {
     const executing = await tx.iPhoneOperation.findFirst({
       where: {

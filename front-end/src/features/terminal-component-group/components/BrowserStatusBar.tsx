@@ -69,6 +69,7 @@
  */
 
 import { memo } from 'react';
+import { phoneAttentionCandidate } from './browser-status-bar/phone/phoneAttentionState';
 import { usePhoneFullscreenEntry } from './browser-status-bar/phone/usePhoneFullscreenEntry';
 import { useAgentContext } from '../hooks';
 import { BrowserStatusBarExpanded } from './browser-status-bar/BrowserStatusBarExpanded';
@@ -81,7 +82,11 @@ import {
   useBrowserStatusBarUi,
 } from './browser-status-bar/useBrowserStatusBarUi';
 import { useRefreshedAuthAssistanceUrl } from './browser-status-bar/useRefreshedAuthAssistanceUrl';
-import type { BrowserStatusBarProps, PendingAuthAssistance } from './browser-status-bar/types';
+import type {
+  BrowserStatusBarProps,
+  PendingAuthAssistance,
+  BrowserStatusBarViewModel,
+} from './browser-status-bar/types';
 
 function presentedControlState(
   isUserControlling: boolean,
@@ -109,6 +114,15 @@ function controlActionFor(
   return () => ui.onTakeControl(isDisconnected);
 }
 
+function sharedBrowserView(vm: BrowserStatusBarViewModel, ui: BrowserStatusBarUi) {
+  return {
+    browserUrl: ui.browserUrl,
+    browserLive: ui.isLive,
+    outputSchema: vm.outputSchema,
+    browserSessionMetadata: vm.browserSessionMetadata,
+  };
+}
+
 function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const { taskId, browserUrl, forceMinimized = false } = props;
   const { agent, messages, selectedAgentId } = useAgentContext();
@@ -125,14 +139,15 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
     handoffBrowserUrl,
     vm.readOnly,
   );
-  usePhoneFullscreenEntry(taskId, messages, ui, forceMinimized);
-  const sharedViewProps = {
-    browserUrl: ui.browserUrl,
-    browserLive: ui.isLive,
-    outputSchema: vm.outputSchema,
-    browserSessionMetadata: vm.browserSessionMetadata,
-  };
-  const isWaitingForAuthAssistance = vm.pendingAuthAssistance !== null && !ui.hasReconnected;
+  const nativeRequestId = phoneAttentionCandidate(
+    taskId,
+    agent?.agent_id ?? selectedAgentId,
+    messages,
+  );
+  usePhoneFullscreenEntry(taskId, messages, ui, forceMinimized, vm.readOnly ? '' : nativeRequestId);
+  const sharedViewProps = sharedBrowserView(vm, ui);
+  const isWaitingForAuthAssistance =
+    vm.pendingAuthAssistance !== null && !vm.pendingAuthAssistance.target && !ui.hasReconnected;
 
   const controlState = presentedControlState(
     ui.isUserControlling,

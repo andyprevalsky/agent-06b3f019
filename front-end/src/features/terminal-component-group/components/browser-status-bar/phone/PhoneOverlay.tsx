@@ -8,11 +8,21 @@
  * Portrait screen fits the remaining pane; controls/progress stay outside its pixels.
  */
 import { useEffect, useRef, type PointerEvent } from 'react';
+import { matchesPhoneAttention } from './phoneAttentionState';
+import type { PhoneAttentionModel } from './usePhoneAttention';
 import { PhoneOverlayControls } from './PhoneOverlayControls';
 import type { PhoneOverlayModel } from './usePhoneOverlay';
 import { phonePoint } from './phoneOverlayState';
 
-export function PhoneOverlay({ phone, readOnly }: { phone: PhoneOverlayModel; readOnly: boolean }) {
+export function PhoneOverlay({
+  phone,
+  readOnly,
+  attention,
+}: {
+  phone: PhoneOverlayModel;
+  readOnly: boolean;
+  attention?: PhoneAttentionModel;
+}) {
   const image = useRef<HTMLImageElement>(null);
   const region = useRef<HTMLElement>(null);
   const pointer = useRef<{ x: number; y: number } | null>(null);
@@ -62,6 +72,8 @@ export function PhoneOverlay({ phone, readOnly }: { phone: PhoneOverlayModel; re
   const active = lease.status === 'ACTIVE';
   const enabled =
     !readOnly &&
+    !attention?.completing &&
+    (!lease.attentionRequestId || matchesPhoneAttention(attention?.request, lease)) &&
     active &&
     user &&
     !!phone.bounds &&
@@ -195,7 +207,12 @@ export function PhoneOverlay({ phone, readOnly }: { phone: PhoneOverlayModel; re
         Tap or drag the screen with a pointer. Press Enter to tap its center. Home, scroll and text
         controls are below.
       </span>
-      <PhoneOverlayControls phone={phone} readOnly={readOnly} enabled={enabled} />
+      <PhoneOverlayControls
+        phone={phone}
+        readOnly={readOnly}
+        enabled={enabled}
+        attention={attention}
+      />
     </section>
   );
 }

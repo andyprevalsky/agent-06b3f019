@@ -1,3 +1,6 @@
+import { NativePhoneAttentionError } from '../../providers/nativePhoneAttention';
+import { parseNativeCreate } from './routes.native';
+import type { AuthAssistanceCompletionDependencies } from '../../providers/authAssistanceCompletion';
 import { Router, type Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
@@ -15,7 +18,6 @@ import { AUTH_ASSISTANCE_MODES, type AuthAssistanceMode } from './types';
 import { AttentionUserMessageForbiddenError } from '../../providers/attentionUserMessages';
 import { AttentionWorkflowTargetOwnershipError } from '../../providers/attentionWorkflowTargets';
 
-const router = Router();
 const log = createLogger('AuthAssistance');
 
 function errMsg(error: unknown): string {
@@ -23,6 +25,10 @@ function errMsg(error: unknown): string {
 }
 
 function mapError(error: unknown, res: Response): boolean {
+  if (error instanceof NativePhoneAttentionError) {
+    res.status(error.status).json({ error: error.message });
+    return true;
+  }
   if (error instanceof BadRequestError) {
     res.status(400).json({ error: error.message });
     return true;
@@ -56,6 +62,9 @@ function parseCreateBody(body: unknown) {
     throw new BadRequestError('Request body must be an object');
   }
   const record = body as Record<string, unknown>;
+  if (record.targetKind === 'iphone') return parseNativeCreate(record);
+  if (record.targetKind !== undefined && record.targetKind !== 'browser')
+    throw new BadRequestError('Invalid assistance target kind');
   const agentId = readString(record, 'agentId', 'agent_id');
   const authRealm = readString(record, 'authRealm', 'auth_realm');
   const mode = readString(record, 'mode', 'mode');
@@ -94,69 +103,82 @@ function requireUserId(req: HybridAuthRequest, res: Response): string | null {
   return userId;
 }
 
-router.post(
-  '/',
-  asyncHandler(hybridAuth),
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    try {
-      const userId = requireUserId(req, res);
-      if (userId === null) return;
-      const input = parseCreateBody(req.body);
-      res.status(201).json(await createAuthAssistanceRequest(userId, input));
-    } catch (error) {
-      if (mapError(error, res)) return;
-      log.error('Failed to create auth assistance request', { error: errMsg(error) });
-      res.status(500).json({ error: 'Failed to create auth assistance request' });
-    }
-  })
-);
+export function createAuthAssistanceRouter(
+  options: { completionDependencies?: Partial<AuthAssistanceCompletionDependencies> } = {}
+) {
+  const router = Router();
+  router.post(
+    '/',
+    asyncHandler(hybridAuth),
+    asyncHandler<HybridAuthRequest>(async (req, res) => {
+      try {
+        const userId = requireUserId(req, res);
+        if (userId === null) return;
+        const input = parseCreateBody(req.body);
+        res.status(201).json(await createAuthAssistanceRequest(userId, input));
+      } catch (error) {
+        if (mapError(error, res)) return;
+        log.error('Failed to create auth assistance request', { error: errMsg(error) });
+        res.status(500).json({ error: 'Failed to create auth assistance request' });
+      }
+    })
+  );
 
-router.get(
-  '/:id',
-  asyncHandler(hybridAuth),
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    try {
-      const userId = requireUserId(req, res);
-      if (userId === null) return;
-      res.json(await getAuthAssistanceRequest(req.params.id, userId));
-    } catch (error) {
-      if (mapError(error, res)) return;
-      log.error('Failed to fetch auth assistance request', { error: errMsg(error) });
-      res.status(500).json({ error: 'Failed to fetch auth assistance request' });
-    }
-  })
-);
+  router.get(
+    '/:id',
+    asyncHandler(hybridAuth),
+    asyncHandler<HybridAuthRequest>(async (req, res) => {
+      try {
+        const userId = requireUserId(req, res);
+        if (userId === null) return;
+        res.json(await getAuthAssistanceRequest(req.params.id, userId));
+      } catch (error) {
+        if (mapError(error, res)) return;
+        log.error('Failed to fetch auth assistance request', { error: errMsg(error) });
+        res.status(500).json({ error: 'Failed to fetch auth assistance request' });
+      }
+    })
+  );
 
-router.post(
-  '/:id/refresh-session',
-  asyncHandler(hybridAuth),
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    try {
-      const userId = requireUserId(req, res);
-      if (userId === null) return;
-      res.json(await refreshAuthAssistanceSession(req.params.id, userId));
-    } catch (error) {
-      if (mapError(error, res)) return;
-      log.error('Failed to refresh auth assistance session', { error: errMsg(error) });
-      res.status(500).json({ error: 'Failed to refresh auth assistance session' });
-    }
-  })
-);
+  router.post(
+    '/:id/refresh-session',
+    asyncHandler(hybridAuth),
+    asyncHandler<HybridAuthRequest>(async (req, res) => {
+      try {
+        const userId = requireUserId(req, res);
+        if (userId === null) return;
+        res.json(await refreshAuthAssistanceSession(req.params.id, userId));
+      } catch (error) {
+        if (mapError(error, res)) return;
+        log.error('Failed to refresh auth assistance session', { error: errMsg(error) });
+        res.status(500).json({ error: 'Failed to refresh auth assistance session' });
+      }
+    })
+  );
 
-router.post(
-  '/:id/complete',
-  asyncHandler(hybridAuth),
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    try {
-      const userId = requireUserId(req, res);
-      if (userId === null) return;
-      res.json(await completeAuthAssistanceRequest(req.params.id, userId));
-    } catch (error) {
-      if (mapError(error, res)) return;
-      log.error('Failed to complete auth assistance request', { error: errMsg(error) });
-      res.status(500).json({ error: 'Failed to complete auth assistance request' });
-    }
-  })
-);
+  router.post(
+    '/:id/complete',
+    asyncHandler(hybridAuth),
+    asyncHandler<HybridAuthRequest>(async (req, res) => {
+      try {
+        const userId = requireUserId(req, res);
+        if (userId === null) return;
+        res.json(
+          await completeAuthAssistanceRequest(
+            req.params.id,
+            userId,
+            req.body?.userMessage ?? req.body?.user_message,
+            options.completionDependencies
+          )
+        );
+      } catch (error) {
+        if (mapError(error, res)) return;
+        log.error('Failed to complete auth assistance request', { error: errMsg(error) });
+        res.status(500).json({ error: 'Failed to complete auth assistance request' });
+      }
+    })
+  );
 
-export default router;
+  return router;
+}
+export default createAuthAssistanceRouter();

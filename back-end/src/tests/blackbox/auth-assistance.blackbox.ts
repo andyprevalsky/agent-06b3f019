@@ -6,6 +6,7 @@
  *   npx tsx src/tests/blackbox/auth-assistance.blackbox.ts
  */
 
+import { authAssistanceNativeTests } from './auth-assistance.native-cases';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
@@ -611,6 +612,7 @@ async function main(): Promise<void> {
       testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent,
     ],
     ...authAssistanceProviderCompletionTests,
+    ...authAssistanceNativeTests,
     [
       'POST /api/attention-requests/:id/respond completes auth assistance',
       testAttentionRespondCompletesAuthAssistance,

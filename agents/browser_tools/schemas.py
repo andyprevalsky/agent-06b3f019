@@ -455,9 +455,20 @@ class PhoneBrowserTool(BaseModel):
 
 
 class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
-    """Ask the user to sign in after all automated auth paths are exhausted."""
+    """Request browser sign-in help or critical native phone authentication."""
 
+    model_config = {"extra": "forbid"}
     tool: Literal["request_user_assistance_for_authentication"]
+    targetKind: Literal["browser", "iphone"] = "browser"
+    criticalReason: Optional[Literal["password", "verification_code", "device_passcode", "manual_verification"]] = None
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if self.targetKind == "iphone" and self.criticalReason is None:
+            raise ValueError("iPhone assistance requires a criticalReason")
+        if self.targetKind == "browser" and self.criticalReason is not None:
+            raise ValueError("criticalReason is only used for iPhone assistance")
+        return self
 
 
 class RecoverFromChallengeBrowserTool(BaseModel):

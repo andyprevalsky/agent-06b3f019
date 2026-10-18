@@ -6,12 +6,14 @@
  *   v
  * [GENERIC_ACTIONS] -- Accept/Skip/Reject --> parent action handler
  *
+ * [NATIVE AUTH] -> exact request/task locator; authenticated fullscreen resolves authority.
  * [AUTH_ASSISTANCE]
  *   | Open Live Browser selects the agent and fullscreen-opens the browser task
  *   v
  * [LIVE_VIEW_FULLSCREEN]
  */
 
+import type { PhoneAttentionTarget } from '@/lib/api/phoneAttention';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Maximize2 } from 'lucide-react';
@@ -135,12 +137,17 @@ function GenericRequestBody({
         <AuthAssistanceBlock
           authRealm={authAssistance.authRealm}
           liveViewUrl={authAssistance.liveViewUrl}
+          target={authAssistance.target}
           loading={loading}
           isCompleting={actionRequestId === request.id}
           onOpenLiveView={() => {
             openAuthBrowserInApp({
               agentId: request.agent_id,
-              browserId: authAssistance.browserSessionId ?? authAssistance.taskId,
+              browserId:
+                authAssistance.target?.browserTaskId ??
+                authAssistance.browserSessionId ??
+                authAssistance.taskId,
+              requestId: authAssistance.target ? request.id : undefined,
               onSelectAgent,
               onClose,
             });
@@ -183,21 +190,25 @@ function GenericRequestBody({
 function openAuthBrowserInApp({
   agentId,
   browserId,
+  requestId,
   onSelectAgent,
   onClose,
 }: {
   agentId: string;
   browserId: string | undefined;
+  requestId?: string;
   onSelectAgent?: (agentId: string) => void;
   onClose: () => void;
 }) {
+  onSelectAgent?.(agentId);
   const url = new URL(window.location.href);
   url.searchParams.set('agent-id', agentId);
+  if (requestId) url.searchParams.set('attention-request-id', requestId);
+  else url.searchParams.delete('attention-request-id');
   if (browserId) {
     url.searchParams.set('browser-id', browserId);
   }
   window.history.replaceState({}, '', url.toString());
-  onSelectAgent?.(agentId);
   if (browserId) {
     window.dispatchEvent(new CustomEvent('navi-open-browser', { detail: { taskId: browserId } }));
   }
@@ -207,6 +218,7 @@ function openAuthBrowserInApp({
 interface AuthAssistanceBlockProps {
   authRealm?: string;
   liveViewUrl?: string | null;
+  target?: PhoneAttentionTarget;
   loading: boolean;
   isCompleting: boolean;
   onOpenLiveView: () => void;
@@ -215,6 +227,7 @@ interface AuthAssistanceBlockProps {
 function AuthAssistanceBlock({
   authRealm,
   liveViewUrl,
+  target,
   loading,
   isCompleting,
   onOpenLiveView,
@@ -228,12 +241,12 @@ function AuthAssistanceBlock({
       <div className="flex flex-wrap gap-2">
         <Button
           size="sm"
-          disabled={loading || !liveViewUrl || isCompleting}
+          disabled={loading || (!liveViewUrl && !target) || isCompleting}
           onClick={onOpenLiveView}
           className="bg-primary text-primary-foreground hover:bg-primary/90"
         >
           <Maximize2 className="mr-2 h-4 w-4" />
-          Open Live Browser
+          {target ? 'Open phone' : 'Open Live Browser'}
         </Button>
       </div>
     </div>

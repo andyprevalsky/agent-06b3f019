@@ -1,6 +1,7 @@
 /** Per-device command slot. Provider calls happen only after this transaction commits. */
-import { sealPhoneValue, phoneCommandHash } from '../../providers/phoneHarnessCredentials';
+import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import * as leases from './repo';
+import { validateAttentionInput, taskBoundError, phoneIntent } from './repo.attention';
 import { privateResult } from './privacy';
 import { claimPrivacy } from './repo.privacy';
 import { LEASE_TIMEOUT_MS } from './config';
@@ -41,20 +42,16 @@ export async function claimCommand(
     const lease = await leases.readLease(tx, leaseId, userId);
     if (lease === null || lease.status !== 'ACTIVE' || lease.releaseRequestedAt !== null)
       return new IPhoneError(409, 'The phone is not reserved for this interaction');
-    if (taskBound) {
-      const task =
-        lease.browserTaskId === null
-          ? null
-          : await tx.browserSession.findFirst({
-              where: { id: lease.browserTaskId, agentId: lease.agentId, context: { userId } },
-              select: { id: true },
-            });
-      if (task === null) return new IPhoneError(404, 'Browser phone interaction not found');
-    }
+    const taskError = await taskBoundError(tx, lease, taskBound);
+    if (taskError !== null) return taskError;
     if (observation) actor = lease.controlOwner === 'user' ? 'user' : 'agent';
     if (lease.controlOwner !== actor)
       return new IPhoneError(409, 'Phone control belongs to the other participant');
-    const inputHash = phoneCommandHash(input.operation, input.args, actor);
+    if (!observation) {
+      const error = await validateAttentionInput(tx, lease, input, actor);
+      if (error !== null) return error;
+    }
+    const { inputHash, requestEncrypted } = phoneIntent(input, actor);
     const existing = await tx.iPhoneOperation.findUnique({
       where: { leaseId_requestKey: { leaseId, requestKey: input.operationId } },
     });
@@ -88,7 +85,7 @@ export async function claimCommand(
         actor,
         inputHash,
         cursor: lease.actionCursor + (observation ? 0 : 1),
-        requestEncrypted: sealPhoneValue({ operation: input.operation, args: input.args, actor }),
+        requestEncrypted,
         activeDeviceId: active === null ? device.id : null,
         providerEpoch: device.providerEpoch,
         deadlineAt: new Date(now.getTime() + 300_000),

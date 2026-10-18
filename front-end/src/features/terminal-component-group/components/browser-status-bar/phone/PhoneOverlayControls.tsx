@@ -1,22 +1,31 @@
 /**
  * [AGENT] Take control -> broker confirmation; [USER] navigation/Type -> stable owned command.
  * [BUSY|UNKNOWN|STALE|READ_ONLY] -> writes disabled; Type panel owns ephemeral text/focus.
+ * [NATIVE ATTENTION] -> exact masked form, no generic Type/handback.
  * Handback -> agent; hide/lease change -> discard text. Controls remain outside phone pixels.
  */
 import { useEffect, useRef, useState } from 'react';
+import { PhoneAttentionNotice } from './PhoneAttentionNotice';
+import { PhoneAuthenticationForm } from './PhoneAuthenticationForm';
+import { matchesPhoneAttention } from './phoneAttentionState';
+import type { PhoneAttentionModel } from './usePhoneAttention';
 import type { PhoneOverlayModel } from './usePhoneOverlay';
 
 export function PhoneOverlayControls({
   phone,
   readOnly,
   enabled,
+  attention,
 }: {
   phone: PhoneOverlayModel;
   readOnly: boolean;
   enabled: boolean;
+  attention?: PhoneAttentionModel;
 }) {
   const lease = phone.snapshot?.lease;
   const active = lease?.status === 'ACTIVE';
+  const pending = !!lease?.attentionRequestId;
+  const privateForm = !readOnly && !!attention && matchesPhoneAttention(attention.request, lease);
   const user = lease?.controlOwner === 'user';
   const [text, setText] = useState('');
   const [typing, setTyping] = useState(false);
@@ -24,7 +33,7 @@ export function PhoneOverlayControls({
   useEffect(() => {
     setText('');
     setTyping(false);
-  }, [lease?.id]);
+  }, [lease?.id, lease?.attentionRequestId]);
   useEffect(() => {
     if (typing) input.current?.focus();
   }, [typing]);
@@ -42,14 +51,19 @@ export function PhoneOverlayControls({
   return (
     <div
       data-testid="phone-controls"
-      className="flex-none space-y-2 border-t border-white/10 px-3 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+      className={
+        pending
+          ? 'flex-none space-y-0 border-t border-white/10 px-3 pt-1 pb-[max(0.5rem,env(safe-area-inset-bottom))]'
+          : 'flex-none space-y-2 border-t border-white/10 px-3 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]'
+      }
     >
-      {phone.notice && (
+      {!privateForm && <PhoneAttentionNotice attention={attention} lease={lease} />}
+      {phone.notice && !privateForm && (
         <p role="status" className="text-xs text-amber-200">
           {phone.notice}
         </p>
       )}
-      {phone.error && (
+      {phone.error && !privateForm && (
         <p role="status" className="text-xs text-amber-200">
           {phone.error}
         </p>
@@ -63,33 +77,37 @@ export function PhoneOverlayControls({
           Refresh phone view
         </button>
       )}
-      {phone.uncertain && (
+      {phone.uncertain && !privateForm && (
         <p role="status" className="text-xs text-amber-200">
           Checking the previous operation. New input is disabled; it will not be replayed.
         </p>
       )}
       {active && !readOnly && (
         <>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs text-white/70">
-              {phone.busy
-                ? 'Updating phone…'
-                : user && !phone.bounds
-                  ? 'Waiting for fresh screen bounds'
-                  : user
-                    ? 'You have control'
-                    : 'Agent in progress'}
-            </span>
-            <button
-              type="button"
-              aria-label={user ? 'Hand back phone control' : 'Take phone control'}
-              disabled={phone.busy || phone.uncertain}
-              onClick={() => void phone.control(user ? 'agent' : 'user')}
-              className="rounded-full bg-blue-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-400 disabled:opacity-50"
-            >
-              {user ? 'Hand back' : 'Take control'}
-            </button>
-          </div>
+          {!pending && (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs text-white/70">
+                {phone.busy
+                  ? 'Updating phone…'
+                  : user && !phone.bounds
+                    ? 'Waiting for fresh screen bounds'
+                    : user
+                      ? 'You have control'
+                      : 'Agent in progress'}
+              </span>
+              {!pending && (
+                <button
+                  type="button"
+                  aria-label={user ? 'Hand back phone control' : 'Take phone control'}
+                  disabled={phone.busy || phone.uncertain}
+                  onClick={() => void phone.control(user ? 'agent' : 'user')}
+                  className="rounded-full bg-blue-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-400 disabled:opacity-50"
+                >
+                  {user ? 'Hand back' : 'Take control'}
+                </button>
+              )}
+            </div>
+          )}
           {user && (
             <>
               <div className="flex gap-2">
@@ -119,17 +137,19 @@ export function PhoneOverlayControls({
                 >
                   ↓
                 </button>
-                <button
-                  type="button"
-                  disabled={!enabled}
-                  aria-expanded={typing}
-                  onClick={() => setTyping((current) => !current)}
-                  className="min-h-11 rounded border border-white/20 px-3 text-sm disabled:opacity-50"
-                >
-                  Type
-                </button>
+                {!pending && (
+                  <button
+                    type="button"
+                    disabled={!enabled}
+                    aria-expanded={typing}
+                    onClick={() => setTyping((current) => !current)}
+                    className="min-h-11 rounded border border-white/20 px-3 text-sm disabled:opacity-50"
+                  >
+                    Type
+                  </button>
+                )}
               </div>
-              {typing && (
+              {typing && !pending && (
                 <form
                   className="flex gap-2"
                   onSubmit={(event) => {
@@ -163,6 +183,14 @@ export function PhoneOverlayControls({
             </>
           )}
         </>
+      )}
+      {privateForm && (
+        <PhoneAuthenticationForm
+          key={`${attention.request.id}:${phone.taskId}`}
+          phone={phone}
+          attention={attention}
+          enabled={enabled}
+        />
       )}
       {readOnly && <p className="text-xs text-white/70">Read-only phone view</p>}
     </div>

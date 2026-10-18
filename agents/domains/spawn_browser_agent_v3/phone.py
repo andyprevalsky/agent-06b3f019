@@ -40,6 +40,14 @@ Queue/lease timeout is a tool outcome, not a request for user attention. Pending
 or UNKNOWN input must never be blindly retried: inspect the durable receipt and
 screen, and wait for confirmed cleanup when necessary. Private password refs
 require verified phone app/account binding, which is not available yet.
+Use accessible Gmail push approvals and OTP flows autonomously. If a password,
+user-only verification code, device passcode, or user-presence authentication
+(biometrics/trusted-device approval) blocks progress, call
+request_user_assistance_for_authentication with targetKind="iphone" and the
+matching criticalReason. The browser auth waterfall applies only to browser
+targets. Queue expiry, unsupported operations, ordinary navigation, terms and
+transport errors are tool outcomes, never reasons to request authentication help.
+User completion means observe and verify again, never assume sign-in succeeded.
 """
 
 
@@ -282,3 +290,106 @@ async def with_phone_heartbeat(work, config, user_id: str, snapshot: dict, *, cl
         keepalive.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await keepalive
+
+
+def _native_auth_receipt(data, *, user_id, agent_id, task_id, lease_id, reason, request_id=None):
+    """Return only exact public handoff fields; never echo arbitrary provider data."""
+    request = data.get("request") if isinstance(data, dict) else None
+    handoff = data.get("handoff") if isinstance(data, dict) else None
+    if not isinstance(request, dict) or not isinstance(handoff, dict):
+        return None
+    target = {"kind": "iphone", "browserTaskId": task_id, "leaseId": lease_id}
+    identity = request.get("id")
+    if (
+        not isinstance(identity, str) or not identity
+        or (request_id is not None and identity != request_id)
+        or request.get("userId") != user_id or request.get("agentId") != agent_id
+        or request.get("target") != target or handoff.get("target") != target
+        or request.get("criticalReason") != reason or handoff.get("criticalReason") != reason
+        or handoff.get("type") != "manual_step" or handoff.get("liveViewUrl") is not None
+        or handoff.get("steelSessionId") is not None
+    ):
+        return None
+    return {
+        "request": {"id": identity, "agentId": agent_id, "userId": user_id,
+                    "target": target, "criticalReason": reason},
+        "handoff": {"type": "manual_step", "liveViewUrl": None, "steelSessionId": None,
+                    "target": target, "criticalReason": reason},
+    }
+
+
+async def request_native_phone_authentication(
+    *, config, user_id: str, agent_id: str, task_id: str, decision_id: str,
+    snapshot: dict | None, critical_reason: str, client=None,
+) -> dict:
+    """One stable create intent; observe its owned receipt after an uncertain POST."""
+    if client is None:
+        async with httpx.AsyncClient() as owned:
+            return await request_native_phone_authentication(
+                config=config, user_id=user_id, agent_id=agent_id, task_id=task_id,
+                decision_id=decision_id, snapshot=snapshot, critical_reason=critical_reason,
+                client=owned,
+            )
+    failure = {"success": False, "error": "Native authentication assistance unavailable"}
+    view = (snapshot or {}).get("interaction") or {}
+    lease = view.get("lease") or {}
+    cursor = view.get("cursor")
+    if (
+        not all((user_id, agent_id, task_id)) or not (snapshot or {}).get("enabled")
+        or lease.get("status") != "ACTIVE" or not isinstance(lease.get("id"), str)
+        or lease.get("browserTaskId") != task_id
+        or not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0
+        or critical_reason not in {"password", "verification_code", "device_passcode", "manual_verification"}
+    ):
+        return failure
+    if not (await fetch_phone_capability(config, user_id, client=client))["enabled"]:
+        return failure
+    intent = decision_id or _identity("auth-cursor", task_id, lease["id"], cursor)
+    key = _identity("auth-assistance", task_id, lease["id"], intent)
+    from .repo import create_phone_auth_assistance_request
+
+    def validate(data, request_id=None):
+        return _native_auth_receipt(
+            data, user_id=user_id, agent_id=agent_id, task_id=task_id,
+            lease_id=lease["id"], reason=critical_reason, request_id=request_id,
+        )
+
+    async def read_receipt(request_id):
+        response = await client.get(
+            f"{config.backend.api_url.rstrip('/')}/api/auth-assistance/{quote(request_id, safe='')}",
+            headers={"X-API-Key": config.backend.api_key or "", "X-User-Id": user_id}, timeout=10.0,
+        )
+        receipt = validate(response.json(), request_id) if response.is_success else None
+        return {"success": True, "request_info": receipt} if receipt else failure
+
+    # An activity can restart after creation but before its pause result commits.
+    # Reattach to the observed exact request rather than issuing another intent.
+    pending_id = lease.get("attentionRequestId")
+    if isinstance(pending_id, str) and pending_id:
+        try:
+            return await read_receipt(pending_id)
+        except Exception:
+            return failure
+    try:
+        response = await create_phone_auth_assistance_request(
+            config, user_id=user_id, agent_id=agent_id, task_id=task_id,
+            critical_reason=critical_reason, request_key=key, expected_cursor=cursor,
+            client=client,
+        )
+        if response.status_code < 500:
+            if not response.is_success:
+                return {**failure, "httpStatus": response.status_code}
+            receipt = validate(response.json())
+            return {"success": True, "request_info": receipt} if receipt else failure
+    except Exception:
+        # Creation may have committed. No response text, exception or new POST.
+        pass
+    try:
+        current = await _request(client, config, user_id, "GET", f"interactions/{quote(task_id, safe='')}")
+        owned = current.get("lease") or {}
+        request_id = owned.get("attentionRequestId")
+        if owned.get("id") != lease["id"] or not isinstance(request_id, str) or not request_id:
+            return failure
+        return await read_receipt(request_id)
+    except Exception:
+        return failure

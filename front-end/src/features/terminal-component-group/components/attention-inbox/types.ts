@@ -5,6 +5,12 @@
  * layer so sub-components import from one place.
  */
 
+import {
+  readPhoneTarget,
+  readCriticalReason,
+  type PhoneAttentionTarget,
+  type PhoneCriticalReason,
+} from '@/lib/api/phoneAttention';
 import type { AttentionRequest } from '../../hooks';
 
 export type { AttentionRequest };
@@ -42,6 +48,8 @@ export interface AuthAssistanceMetadata {
   mode?: string;
   steelSessionId?: string;
   liveViewUrl?: string | null;
+  target?: PhoneAttentionTarget;
+  criticalReason?: PhoneCriticalReason;
 }
 
 /**
@@ -118,5 +126,7 @@ export function getAuthAssistanceMetadata(
     mode: readString(source, 'mode') ?? readString(source, 'handoffMode'),
     steelSessionId: readString(source, 'steelSessionId') ?? readString(source, 'steel_session_id'),
     liveViewUrl: liveViewUrl ?? null,
+    target: readPhoneTarget(source.target),
+    criticalReason: readCriticalReason(source.criticalReason),
   };
 }

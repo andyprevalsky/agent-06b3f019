@@ -2,7 +2,11 @@ import * as repo from './repo';
 import { gateSchema, type CreateAttentionRequestInput, type RespondInput } from './types';
 import { REJECTED_RESPONSE } from './config';
 import { createLogger } from '../../providers/logger';
-import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
+import {
+  AUTH_ASSISTANCE_COMPLETED_RESPONSE,
+  completeAuthAssistanceForUser,
+} from '../../providers/authAssistanceCompletion';
+import { isNativePhoneAttention } from '../../providers/nativePhoneAttention';
 import { resumePausedAgentForUserMessage } from '../../providers/agentResume';
 import { logJson } from '../../utils/log';
 import { emitGateMessage, extractGate, maybeDispatchGateSms, toCreateResult } from './gateHelpers';
@@ -32,6 +36,17 @@ export class BadRequestError extends Error {
   constructor(msg: string) {
     super(msg);
   }
+}
+
+/** Native attention accepts protocol answers; credential text stays in the phone broker. */
+function assertNativePhoneResponse(metadata: unknown, response: string, userMessage?: string) {
+  if (!isNativePhoneAttention(metadata)) return;
+  if (
+    (response.trim() !== AUTH_ASSISTANCE_COMPLETED_RESPONSE &&
+      response.trim() !== REJECTED_RESPONSE) ||
+    (userMessage !== undefined && userMessage.trim() !== '')
+  )
+    throw new ForbiddenError('Enter private information in the secure phone view.');
 }
 
 export async function validateCreateOwnership(
@@ -186,6 +201,8 @@ export async function respond(id: string, userId: string, data: RespondInput) {
     );
   }
 
+  assertNativePhoneResponse(request.metadata, data.response, data.user_message);
+
   // A decline is an answer like any other gate's: it must reach the agent as a
   // decline, never be recorded as the user having signed in.
   if (request.authAssistance !== null && data.response.trim() !== REJECTED_RESPONSE) {
@@ -237,6 +254,8 @@ export async function reject(id: string, userId: string, message: string | undef
   const request = await repo.findById(id);
   if (request === null) throw new NotFoundError('Attention request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
+
+  assertNativePhoneResponse(request.metadata, REJECTED_RESPONSE, message);
 
   await resolveAndSignalForUser(request, REJECTED_RESPONSE, message);
 

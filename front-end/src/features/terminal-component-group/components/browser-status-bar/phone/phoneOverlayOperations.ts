@@ -1,9 +1,11 @@
 /** A task-local command claims one UUID before POST; UNKNOWN recovers by GET only, never by replay. */
 import { performPhoneOperation, PhoneRequestError, type PhoneOperation } from '@/lib/api/iphone';
-import type { Scope } from './phoneOverlaySession';
+import { phoneScopeCanWrite, type Scope } from './phoneOverlaySession';
 
 export function recordPhoneOutcome(scope: Scope, operation: PhoneOperation) {
   scope.operation = operation;
+  if (scope.attention && operation.operation === 'input.text' && operation.status === 'SUCCEEDED')
+    scope.notice = 'Typed privately. Check phone, then Done.';
   if (operation.status === 'FAILED' && operation.operation !== 'screen.bounds')
     scope.notice =
       operation.errorCode === 'phone_connection_not_ready'
@@ -18,7 +20,7 @@ export async function performScopedPhoneOperation(
   publish: (scope: Scope) => void,
 ) {
   const lease = scope.snapshot?.lease;
-  if (!lease) return null;
+  if (!lease || !phoneScopeCanWrite(scope)) return null;
   const id = crypto.randomUUID();
   if (name !== 'screen.bounds') scope.notice = '';
   // Preserve this identity even if the POST response is lost. Never resubmit the mutation.
@@ -34,7 +36,13 @@ export async function performScopedPhoneOperation(
   try {
     const result = await performPhoneOperation(
       lease.id,
-      { operationId: id, operation: name, args, expectedCursor: scope.snapshot.cursor },
+      {
+        operationId: id,
+        operation: name,
+        args,
+        expectedCursor: scope.snapshot.cursor,
+        ...(lease.attentionRequestId ? { attentionRequestId: lease.attentionRequestId } : {}),
+      },
       scope.controller.signal,
     );
     recordPhoneOutcome(scope, result.operation);

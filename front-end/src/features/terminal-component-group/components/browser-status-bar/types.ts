@@ -5,6 +5,7 @@
  * contracts and derived view-model shapes in one place.
  */
 
+import type { PhoneAttentionTarget, PhoneCriticalReason } from '@/lib/api/phoneAttention';
 import type { Message, ResponseSchemaField } from '../../hooks';
 
 /** Public props for the BrowserStatusBar component. */
@@ -36,7 +37,9 @@ export interface PendingAuthAssistance {
   requestId: string;
   authRealm?: string;
   request: string;
-  liveViewUrl: string;
+  liveViewUrl?: string;
+  target?: PhoneAttentionTarget;
+  criticalReason?: PhoneCriticalReason;
 }
 
 /** Browser provider/proxy metadata surfaced by browser-session init/resume. */

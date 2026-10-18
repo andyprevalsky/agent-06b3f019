@@ -88,6 +88,9 @@ function executePhoneOperation(
       operation: text(body, 'operation'),
       args,
       ...(typeof cursor === 'number' ? { expectedCursor: cursor } : {}),
+      ...(body.attentionRequestId !== undefined
+        ? { attentionRequestId: text(body, 'attentionRequestId') }
+        : {}),
     },
     req.isInternal === true ? 'agent' : 'user',
     clientFactory

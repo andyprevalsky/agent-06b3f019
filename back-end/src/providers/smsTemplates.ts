@@ -16,12 +16,17 @@ export function getPersonalizedVcardUrl(userId: string): string {
   return `https://navi-j9a9.onrender.com/api/vcard/${userId}.vcf`;
 }
 
-export function getAgentUrl(agentId: string, browserId?: string | null): string {
+export function getAgentUrl(
+  agentId: string,
+  browserId?: string | null,
+  attentionRequestId?: string | null
+): string {
   const url = new URL(ROSE_LABS_URL);
   url.searchParams.set('agent-id', agentId);
   if (browserId) {
     url.searchParams.set('browser-id', browserId);
   }
+  if (attentionRequestId) url.searchParams.set('attention-request-id', attentionRequestId);
   return url.toString();
 }
 /* c8 ignore stop */
