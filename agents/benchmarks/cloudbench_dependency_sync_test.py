@@ -8382,6 +8382,7 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     clone_function = (
         _worker_ledger_lock_bundle(fleet)
         + "\n"
+        + _disposable_volume_backup_function(fleet)
         + "\n".join(
             _extract_fleet_function(fleet, signature)
             for signature in (
@@ -8937,7 +8938,7 @@ def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
             "fleet_clone_with_queue_admission() {",
             "clone_machine_target() {",
         )
-    )
+    ) + "\n" + _disposable_volume_backup_function(fleet)
     registry = tmp_path / "registry"
     (registry / "clones").mkdir(parents=True)
     ledger = tmp_path / "owned.ids"
@@ -10642,6 +10643,18 @@ def _worker_ledger_lock_bundle(source: str) -> str:
     )
 
 
+def _disposable_volume_backup_function(source: str) -> str:
+    """Production backup step that every storage-ready clone runs.
+
+    It is a subshell-bodied function, so it ends at ``)`` rather than ``}``.
+    Outside the disposable lifecycle it returns success without provider calls;
+    fixtures exercising clone retry/identity therefore load the real function
+    instead of stubbing a step that clone_machine_target always reaches.
+    """
+    start = source.index("fleet_disable_disposable_volume_snapshots() (")
+    return source[start : source.index("\n)\n", start) + 3]
+
+
 def _clone_machine_bundle(source: str) -> str:
     return "\n".join(
         (
@@ -10650,6 +10663,7 @@ def _clone_machine_bundle(source: str) -> str:
             "reap_volume() { :; }",
             "fleet_audit_update_fresh_clone() { return 0; }",
             _worker_ledger_lock_bundle(source),
+            _disposable_volume_backup_function(source),
             _extract_fleet_function(source, "clone_failure_definitively_unallocated() {"),
             _extract_fleet_function(source, "clone_failure_owned_volume_id() {"),
             _extract_fleet_function(source, "fleet_clone_with_queue_admission() {"),
@@ -22789,11 +22803,15 @@ def test_clone_burst_is_rate_limit_resilient() -> None:
     assert 'max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"' in fleet
     # Launch burst is staggered, not simultaneous.
     assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in fleet
-    # Exponential backoff (bit-shift by attempt) with a cap and jitter.
+    # Exponential backoff (clamped bit-shift by attempt) with a cap and jitter.
     clone_fn = _clone_machine_bundle(fleet)
-    assert "1 << (attempt - 1)" in clone_fn
+    assert "backoff_shift=$((attempt - 1))" in clone_fn
+    assert "retry_delay * 2 ** backoff_shift" in clone_fn
     assert "CLOUDBENCH_CLONE_RETRY_MAX_SECONDS" in clone_fn
-    assert "RANDOM % 5" in clone_fn
+    assert "jitter_span=5" in clone_fn and "RANDOM % jitter_span" in clone_fn
+    # run600c: proven pre-allocation throttles spend a bounded window, not the
+    # attempt cap; behavior is covered by cloudbench-clone-rate-response.test.py.
+    assert "CLOUDBENCH_CLONE_RATE_LIMIT_WINDOW_SECONDS:-600" in clone_fn
     # The old fixed-delay retry (`sleep "$retry_delay"` unconditionally) is gone.
     assert 'sleep "$retry_delay"\n' not in clone_fn
 

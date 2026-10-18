@@ -12534,6 +12534,7 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
     local clone_out clone_status target_id target_name target_volume diagnostic_log names_ledger deadline
     local storage_deadline storage_status failed_storage_status preallocation_failure reap_status terminal_disposition
     local attempt max_attempts retry_delay clone_timeout
+    local charged_attempts rate_limit_window rate_window_deadline
     # --detach still launches the clone. CMD can be made inert at creation only
     # when no inherited exec/entrypoint takes precedence; use the shared native
     # inventory and reject unknown shapes before creating any provider resource.
@@ -12580,12 +12581,24 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
     # teardown reaps any machine that did materialize — no new leak path).
     max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"
     retry_delay="${CLOUDBENCH_CLONE_RETRY_SECONDS:-8}"
+    # A provider throttle that the single-error classifier proves happened
+    # before allocation (the source-Machine GET that `machine clone` issues
+    # first, or target-volume creation) created nothing. It spends this bounded
+    # window instead of the ambiguous-failure attempt cap: at campaign width all
+    # copies GET the same donor, and a fixed count dropped copies while the
+    # donor's read limit was still draining the burst. 600 s fits inside the
+    # 900 s fleet-readiness target and the original whole-run deadline, which
+    # strict campaign pacing still enforces on every attempt.
+    rate_limit_window="${CLOUDBENCH_CLONE_RATE_LIMIT_WINDOW_SECONDS:-600}"
+    case "$rate_limit_window" in ''|*[!0-9]*) return 2 ;; esac
     # Bound each clone so a hung Fly API call can't freeze the whole loop. A real
     # clone-from-snapshot + --detach returns well under this; 25min+ = hung.
     mkdir -p "$(dirname "$ledger")"
     names_ledger="${ledger%.ids}.names"
     diagnostic_log="${ledger%.ids}.log"
     attempt=1
+    charged_attempts=0
+    rate_window_deadline=$((SECONDS + rate_limit_window))
     while :; do
         # Stop only fresh worker allocations once its task has finished. Any
         # already issued attempt above was reconciled before returning here;
@@ -12853,14 +12866,39 @@ Error: snapshot storage entered terminal failed state"
         # (an infra loss, not a benchmark verdict — it silently shrinks coverage).
         # Backing off exponentially with jitter lets a rate-limited clone outlast
         # the burst instead of giving up.
-        local this_delay cap="${CLOUDBENCH_CLONE_RETRY_MAX_SECONDS:-90}"
-        this_delay=$(( retry_delay * (1 << (attempt - 1)) ))
+        local this_delay cap="${CLOUDBENCH_CLONE_RETRY_MAX_SECONDS:-90}" backoff_shift jitter_span=5
+        local rate_code="" shared_delay rate_limited_preallocation=0 rate_window_remaining
+        # Here-strings: under pipefail an early-exiting `grep -q` can SIGPIPE
+        # its printf writer and silently misclassify an actual rate response.
+        if grep -Eiq '(^|[^[:alnum:]])429([^[:alnum:]]|$)' <<<"$clone_out"; then rate_code=429
+        elif grep -Eiq 'resource_exhausted' <<<"$clone_out"; then rate_code=resource_exhausted; fi
+        # Uncharged only when the one terminal error line itself is the throttle
+        # (its opaque Request ID may contain any digits) and the existing
+        # classifier proved no target resource exists. Ambiguous, timed-out or
+        # volume-owning outcomes keep the attempt cap and name reconciliation.
+        if [ "$preallocation_failure" -eq 1 ] && [ -z "$target_volume" ] && [ -n "$rate_code" ] \
+            && grep -E '^[[:space:]]*Error:' <<<"$clone_out" \
+                | sed -E 's/\(Request ID: [^)]*\)//g' \
+                | grep -Ei '(^|[^[:alnum:]])429([^[:alnum:]]|$)|resource_exhausted' >/dev/null; then
+            rate_limited_preallocation=1
+        else
+            charged_attempts=$((charged_attempts + 1))
+        fi
+        # Exponent is clamped so uncharged retries can never overflow the shift.
+        backoff_shift=$((attempt - 1))
+        [ "$backoff_shift" -le 16 ] || backoff_shift=16
+        this_delay=$(( retry_delay * 2 ** backoff_shift ))
         [ "$this_delay" -gt "$cap" ] && this_delay="$cap"
-        this_delay=$(( this_delay + (RANDOM % 5) ))
+        # Throttled copies rejected together must not return together: spread
+        # them over half the capped delay rather than a fixed 5-second band.
+        [ "$rate_limited_preallocation" -eq 0 ] || jitter_span=$(( this_delay / 2 + 5 ))
+        this_delay=$(( this_delay + (RANDOM % jitter_span) ))
+        if [ "$rate_limited_preallocation" -eq 1 ]; then
+            rate_window_remaining=$((rate_window_deadline - SECONDS))
+            [ "$this_delay" -le "$rate_window_remaining" ] || this_delay="$rate_window_remaining"
+        fi
+        shared_delay="$this_delay"
         if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then
-            local rate_code="" shared_delay="$this_delay"
-            if printf '%s\n' "$clone_out" | grep -Eiq '(^|[^[:alnum:]])429([^[:alnum:]]|$)'; then rate_code=429
-            elif printf '%s\n' "$clone_out" | grep -Eiq 'resource_exhausted'; then rate_code=resource_exhausted; fi
             if [ -n "$rate_code" ]; then
                 [ "$shared_delay" -ge 1 ] || shared_delay=1
                 [ "$shared_delay" -le 90 ] || shared_delay=90
@@ -12870,12 +12908,20 @@ Error: snapshot storage entered terminal failed state"
                     --response-code "$rate_code" --retry-after "$shared_delay" || return 1
             fi
         fi
-        if [ "$attempt" -ge "$max_attempts" ]; then
+        if [ "$rate_limited_preallocation" -eq 1 ]; then
+            if [ "$this_delay" -lt 1 ]; then
+                echo "❌ Fly clone provider rate limit persisted before allocation for the bounded ${rate_limit_window}s window after $attempt attempt(s) (last name=$target_name, source=$source_id, status=$clone_status)" >&2
+                printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
+                return 1
+            fi
+            echo "⏳ provider rate limit before allocation (attempt $attempt, not charged to the $max_attempts-attempt cap; ${rate_window_remaining}s of ${rate_limit_window}s window left); retrying in ${this_delay}s ..." >&2
+        elif [ "$charged_attempts" -ge "$max_attempts" ]; then
             echo "❌ Fly clone did not return a distinct authoritative target after $attempt attempt(s) (last name=$target_name, source=$source_id, status=$clone_status)" >&2
             printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
             return 1
+        else
+            echo "⏳ transient clone failure (attempt $attempt, $charged_attempts/$max_attempts charged, status=$clone_status); retrying in ${this_delay}s ..." >&2
         fi
-        echo "⏳ transient clone failure (attempt $attempt/$max_attempts, status=$clone_status); retrying in ${this_delay}s ..." >&2
         sleep "$this_delay"
         attempt=$((attempt + 1))
     done
