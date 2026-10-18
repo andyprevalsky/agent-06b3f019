@@ -8,6 +8,10 @@ import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { TopRightControls } from '@/components/TopRightControls';
+import { GlobalControlsLayoutProvider } from '@/components/GlobalControlsLayout';
+import { AdminAccountSwitcher } from '@/features/admin-account-switcher/components/AdminAccountSwitcher';
+import { InspectionAccountBadge } from '@/features/terminal/components/InspectionAccountBadge';
 import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context/types';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
@@ -116,36 +120,55 @@ export function PreviewApp() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delayDuration={100}>
         <MemoryRouter>
-          <AgentContext.Provider value={makeContext()}>
-            {phonePreview && (
-              <BrowserStatusBarFullscreen
-                agentId="phone-preview-agent"
-                taskId="browser-preview"
-                browserUrl="about:blank"
-                messages={previewMessages}
-                outputSchema={undefined}
-                browserSessionMetadata={null}
-                stepProgress={{ stepsTaken: 8, totalSteps: 30 }}
-                isDisconnected={false}
-                isWaitingForAuthAssistance={false}
-                isResuming={false}
-                isUserControlling={false}
-                pendingWriteLockApproval={null}
-                onClose={() => window.location.assign('/browser-chip-preview.html')}
-                onResume={() => undefined}
-              />
-            )}
-            <div className="min-h-screen bg-background p-10 text-foreground">
-              <div className="mx-auto max-w-4xl space-y-4">
-                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  Browser status preview
+          <GlobalControlsLayoutProvider>
+            <AgentContext.Provider value={makeContext()}>
+              {phonePreview && (
+                <>
+                  <TopRightControls>
+                    <AdminAccountSwitcher isAdmin ownAccountLabel="+19729777432" />
+                  </TopRightControls>
+                  {new URLSearchParams(window.location.search).has('inspection') && (
+                    <InspectionAccountBadge
+                      context={{
+                        user_id: 'preview-owner',
+                        name: 'Preview owner',
+                        phone: '+15555550101',
+                        email: null,
+                      }}
+                    />
+                  )}
+                </>
+              )}
+              {phonePreview && (
+                <BrowserStatusBarFullscreen
+                  agentId="phone-preview-agent"
+                  taskId="browser-preview"
+                  browserUrl="about:blank"
+                  messages={previewMessages}
+                  outputSchema={undefined}
+                  browserSessionMetadata={null}
+                  stepProgress={{ stepsTaken: 8, totalSteps: 30 }}
+                  isDisconnected={false}
+                  isWaitingForAuthAssistance={false}
+                  isResuming={false}
+                  isUserControlling={false}
+                  pendingWriteLockApproval={null}
+                  onClose={() => window.location.assign('/browser-chip-preview.html')}
+                  onResume={() => undefined}
+                />
+              )}
+              <div className="min-h-screen bg-background p-10 text-foreground">
+                <div className="mx-auto max-w-4xl space-y-4">
+                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Browser status preview
+                  </div>
+                  {!phonePreview && (
+                    <BrowserStatusBar taskId="browser-preview" browserUrl="about:blank" />
+                  )}
                 </div>
-                {!phonePreview && (
-                  <BrowserStatusBar taskId="browser-preview" browserUrl="about:blank" />
-                )}
               </div>
-            </div>
-          </AgentContext.Provider>
+            </AgentContext.Provider>
+          </GlobalControlsLayoutProvider>
         </MemoryRouter>
       </TooltipProvider>
     </QueryClientProvider>

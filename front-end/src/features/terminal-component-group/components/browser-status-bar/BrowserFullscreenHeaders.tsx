@@ -2,9 +2,11 @@
  * [BROWSER_ACTIVE|WAITING|DISCONNECTED|USER] -> existing browser status.
  * [PHONE_WAITING] -> yellow Waiting for phone; [PHONE_AGENT] -> Phone active;
  * [PHONE_USER] -> You have phone control; release restores browser status.
+ * [GLOBAL CONTROLS] -> reserved header row, never over device pixels.
  * Desktop/mobile share this status authority and accessible close control.
  */
 import type { MouseEvent } from 'react';
+import { GlobalControlsSlot } from '@/components/GlobalControlsLayout';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { BrowserControlState } from '../browserControlState';
@@ -63,22 +65,25 @@ export function DesktopFrameHeader({
   phoneStatus?: PhoneHeaderStatus;
 }) {
   return (
-    <div className="flex items-center justify-between border-b border-border p-4">
-      <ActiveIndicator
-        controlState={controlState}
-        isUserControlling={isUserControlling}
-        phoneStatus={phoneStatus}
-      />
-      <div className="flex items-center gap-2">
-        <BrowserProxyLocationChip metadata={browserSessionMetadata} tooltipPosition="bottom" />
-        <button
-          aria-label="Close browser view"
-          onClick={onClose}
-          className="rounded p-2 transition-colors hover:bg-muted"
-        >
-          <X className="h-5 w-5 text-muted-foreground" />
-        </button>
+    <div className="flex shrink-0 flex-col border-b border-border px-4 py-2">
+      <div className="flex items-center justify-between">
+        <ActiveIndicator
+          controlState={controlState}
+          isUserControlling={isUserControlling}
+          phoneStatus={phoneStatus}
+        />
+        <div className="flex items-center gap-2">
+          <BrowserProxyLocationChip metadata={browserSessionMetadata} tooltipPosition="bottom" />
+          <button
+            aria-label="Close browser view"
+            onClick={onClose}
+            className="rounded p-2 transition-colors hover:bg-muted"
+          >
+            <X className="h-5 w-5 text-muted-foreground" />
+          </button>
+        </div>
       </div>
+      <GlobalControlsSlot />
     </div>
   );
 }
@@ -96,19 +101,22 @@ export function MobileFrameHeader({
   phoneStatus?: PhoneHeaderStatus;
 }) {
   return (
-    <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border p-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
-      <ActiveIndicator
-        controlState={controlState}
-        isUserControlling={isUserControlling}
-        phoneStatus={phoneStatus}
-      />
-      <button
-        aria-label="Close browser view"
-        onClick={onClose}
-        className="rounded p-1.5 transition-colors hover:bg-muted"
-      >
-        <X className="h-5 w-5 text-muted-foreground" />
-      </button>
+    <div className="flex flex-shrink-0 flex-col border-b border-border px-3 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
+      <div className="flex items-center justify-between gap-2">
+        <ActiveIndicator
+          controlState={controlState}
+          isUserControlling={isUserControlling}
+          phoneStatus={phoneStatus}
+        />
+        <button
+          aria-label="Close browser view"
+          onClick={onClose}
+          className="rounded p-1.5 transition-colors hover:bg-muted"
+        >
+          <X className="h-5 w-5 text-muted-foreground" />
+        </button>
+      </div>
+      <GlobalControlsSlot />
     </div>
   );
 }

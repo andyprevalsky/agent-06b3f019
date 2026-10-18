@@ -24,7 +24,7 @@ sources:
   - agent b53db629-4b68-4d7a-b763-1777d3b15f45
   - plan:.context/phone-harness/goal5-backend-task.txt
 repro: back-end/src/tests/blackbox/iphone-control.blackbox.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -184,14 +184,32 @@ rather than building per-frame history. Duplicate preparation does not fan out.
 Provider IO remains outside DB transactions. Queue count uses the existing
 bounded per-device index/filter and takes no waiter row locks.
 
-Status remains OPEN for parent-owned Goal 5 visual QA/evidence/review and archive
-reindex. This backend proof does not claim native overlay visual completion or
-new live phone success. No frontend/Python/script/task/runtime edits, direct live
-provider actions, commits or deploys were performed in this task.
+Parent verification completed at checkpoint 05351394c7c7f1295579e314b28781d270c28604.
+The exact unchanged canonical command `scripts/run-bench --local browser-cloud-iphone-settings`
+(run ID phone-connectivity-20261018t2119-r3) returned native PASS in 146.4 seconds:
+Hub a539faa3-74c9-47c0-80b1-d37119c71400, root
+49e6acd8-e821-4121-9a18-ccb035d0b0c9. Task definition SHA256 remained
+711a7f0f0e05db71042792751fbb7e1ad3c347285a943d0789a7cf93059363b8.
+A concurrent authenticated first-party UI observer received actual private,
+no-store PNG bytes (750x1334) with zero phone writes and no browser errors;
+proof and desktop/mobile captures are in .context/phone-harness/goal5-live-view/.
+An initial 409 during custody contention was followed by a successful frame;
+no control transition or model operation was issued by that observer.
+Phone cleanup was clean 2/2 and the owned stack was released. Canonical evidence
+publication verified 42 messages in a fresh browser and the published LLM dump;
+manifest is /opt/cursor/artifacts/rca_evidence/49e6acd8-e821-4121-9a18-ccb035d0b0c9/manifest.json.
+All historical native ERROR/FAIL outcomes remain in the original logical slice.
+
+The full frontend coverage gate passed 168 files, 2832 tests, with 3 existing
+skips, and its production build passed. The actual full-app mobile screenshot
+revealed a separate global account-rail layout issue; that frontend issue has
+its own owning regression and does not alter this custody fix or native PASS.
+This case is FIXED for backend custody. It does not claim iCloud onboarding,
+message synchronization or final frontend pixel verification.
 
 ## Human feedback
 
-User limited this work to Goal 5 backend/provider/owning blackboxes with
+The parent delegated Goal 5 backend/provider/owning blackboxes with
 assertions-first diagrams and normal red/green proof; preserve Freedom/AGENTS,
 Andy-only scope, backend-only key custody and prior Goal 4 PASS. Root/UI workers
 clarified no new view/bounds endpoint, cursor-neutral frames, all-RPC accounting,
