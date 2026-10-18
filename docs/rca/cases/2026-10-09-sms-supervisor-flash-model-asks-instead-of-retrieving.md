@@ -575,3 +575,47 @@ alternate-model comparison or previously unapproved prompt proposal is
 implied by the single canonical PASS.
 
 Private archive SHA256 f27fd21d0981d069c7c4d73faddb00cceee6e9fbb5ce3940d3e1655213b35608 has full457-member read-back and all324 source copies verified; cutoff 2026-10-18T19:21:15.277233+00:00. Later safe receipts and case/scorecard updates are outside that archive. The original31 and resumed403 owning attempts are retained:434 total,346 passed/88 failed. Nested clocks are not double-counted.
+
+### October 18 synced FILL: retrieval and delegation pass, profile country re-asked
+
+The user requested the same real-run process for the second failing benchmark.
+Canonical local run `1792353705-3076059-fill` used synced source
+`fcdbc6fa4de66f425f8a49bbecbfebb46f4d6a98`. The complete FILL task object
+remained SHA256 `6f1bbd62321cc1da406e1d7bc8cda3fc171d0e661112b6908cdfea073bf7ae97`,
+with the original 420-second limit and unchanged input, fixture and evaluators.
+The actual input was `Filled it for me` in the existing Canada eTA thread.
+No response mock, alternate model, decoder or new prompt change was used.
+
+The result was **FAIL**, with 61.3 seconds on the combined task/evaluation/
+cleanup clock. Seven successful grep calls retrieved the Travel docs note.
+Round4 started and committed exactly one application agent whose goal carried
+both required passport/visa values, then sent one supervisor reply. Round5
+accepted attempt_completion. The static search/delegation evaluator scored
+1.0/PASS. This run did not reproduce the prior zero-agent retrieval failure.
+
+The unchanged semantic evaluator scored0.0 because the reply requested a
+current residential address including country, while the available profile
+already contained a country. All six actual nonreaction model requests included
+that country in their system profile context, including the 48-message,
+nine-tool call that emitted the reply. Its collected native send body exactly
+matched the persisted successful send. The actual profile supplied location,
+not a complete verified residential address; this evidence does not establish
+that the remaining address fields were known.
+
+Seven source-bound backend dumps verify actual Qwen3.8-27b calls, with no
+blackbox-response-fixture marker. The failing request, native output and full
+tool history are preserved privately. An independent review confirmed the
+country re-ask against the unchanged evaluator and actual visible context.
+This is an observed failure, not proof of flakiness or model-intelligence
+causality; no controlled model comparison or behavioral fix is claimed.
+
+Canonical cleanup verified both roots and52 owned rows, one actual native
+generation was independently read back TERMINATED, and exact provider
+inventories contained zero browser sessions. Two durable archive references
+and empty terminal/archive outboxes were verified before stack stop. Five of
+six root diagnostics exited0; the historical fixture root's cache diagnostic
+had no events and remains a warning. Canonical stack stop exited0; the observer
+and controller were joined, the owned database was absent, and all186 observed
+process births were absent. Complete descendant capture remains unproved.
+Safe durable results and the continuing full-attempt scorecard record this
+source scope. This is not a full current deploy pass or production acceptance.
