@@ -200,6 +200,24 @@ while True:time.sleep(.01)
          with self.assertRaises(ValueError):
              S["should_stop"](result, False, invalid)
 
+ def test_fly_agent_starts_outside_the_workspace_before_the_campaign(self):
+  # A default `flyctl agent run` started from inside the repo outlived the 100-copy
+  # diagnostic campaign as a workspace writer and kept every controller export pending.
+  with tempfile.TemporaryDirectory()as d:
+   root=Path(d);bin_dir=root/'bin';bin_dir.mkdir();log=root/'flyctl.log'
+   fake=bin_dir/'flyctl';fake.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$PWD" "$*" >> '+str(log)+'\n');fake.chmod(0o700)
+   env=dict(os.environ,PATH=str(bin_dir)+':'+os.environ['PATH'])
+   self.assertEqual(S['start_fly_agent_outside_workspace'](env),0)
+   self.assertEqual(log.read_text(),'/|agent start\n')
+   self.assertIsNone(S['start_fly_agent_outside_workspace'](dict(env,PATH=str(root/'empty'))))
+   order=[];real_popen=subprocess.Popen
+   def popen(*args,**kwargs):
+    order.append(('campaign',kwargs.get('cwd')));return real_popen(*args,**kwargs)
+   module=S['start_fly_agent_outside_workspace'].__globals__
+   with patch.dict(module,start_fly_agent_outside_workspace=lambda env:order.append(('agent','/'))),\
+        patch.object(module['subprocess'],'Popen',popen):
+    with S['owned_parent']([sys.executable,'-c','pass'],root,dict(os.environ),root,'a'*40,1)as(parent,identity):pass
+   self.assertEqual(order,[('agent','/'),('campaign',root)])
  def test_term_during_popen_is_forwarded_after_birth(self):
   with tempfile.TemporaryDirectory()as d:
    root=Path(d);done=root/'cleaned';ready=root/'ready';children=[];original_popen=subprocess.Popen
