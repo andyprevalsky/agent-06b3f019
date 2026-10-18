@@ -62,5 +62,32 @@ except SystemExit as exc:
 else:
     raise AssertionError("missing transcript must fail closed")
 
+# Run the real renderer, offline, with a shared artifact root that must remain
+# untouched. The publisher owns only the per-agent canonical directory.
+import os
+import subprocess
+import tempfile
+from unittest.mock import patch
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    shared = root / "shared"
+    shared.mkdir()
+    sentinel = shared / "last_llm_call.html"
+    sentinel.write_text("unrelated owner's artifact")
+    source = root / "completion_summary.json"
+    source.write_text('{"agent_id":"test-agent","call_site":"completion_summary","messages":[],"output":"complete"}')
+    real_run = subprocess.run
+    def offline_renderer(cmd, **kwargs):
+        env = dict(os.environ, CURSOR_ARTIFACTS_DIR=str(shared))
+        for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_TRACE_ARCHIVE"):
+            env.pop(name, None)
+        return real_run(cmd, **kwargs, env=env)
+    with patch.object(mod, "ARTIFACTS_ROOT", root / "owned"), patch.object(mod.subprocess, "run", offline_renderer):
+        local, url = mod.publish_llm_dump(source, "test-agent")
+    assert sentinel.read_text() == "unrelated owner's artifact", "renderer wrote into shared artifacts root"
+    assert local == root / "owned/test-agent/last_llm_call.html"
+    assert local.is_file() and "file://" not in local.read_text()
+    assert url == ""  # Offline owning-boundary test; canonical live publication separately verifies R2.
+
 print("publish_evidence_links composite projection checks passed")
 PY

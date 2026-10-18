@@ -25,8 +25,11 @@ sources:
   - plan:.context/phone-harness/benchmark-terminal-report-before.log
   - plan:.context/phone-harness/benchmark-terminal-report-after.log
   - plan:.context/phone-harness/benchmark-lifecycle-registered.log
+  - benchmark run 75a7f70a-71c5-4929-87d9-6e772ae450d7
+  - agent b53db629-4b68-4d7a-b763-1777d3b15f45
+  - commit 379cd490cf75ec87fa4cfbbc179f0222c429ee8d
 repro: agents/benchmarks/phone_connectivity_test.py:test_failed_phone_cleanup_drains_owned_collectors_and_preserves_error
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -145,9 +148,68 @@ No 10k-concurrency load claim is made.
 Scope: source-only fix, synthetic owning-boundary proof; the unchanged native
 canonical task was not rerun. Runtime/backend provider recovery and a fresh
 canonical run remain with the parent and sibling owners. Source edits cannot
-reload the original controller. Parent owns archive reindex. User's no-spawn
-instruction prevents an independent subagent RCA review; tests and local diff
-review are the review performed here.
+reload the original controller. Parent owns archive reindex. The delegated
+worker did not spawn a further reviewer; tests and parent diff review are the
+review performed here.
+
+## Unchanged canonical outcome verification — 2026-10-18
+
+The prior OPEN handoff statements above describe the evidence available then;
+the unchanged native outcome gate is now closed. Parent ran the normal command
+`bash scripts/run-bench --local browser-cloud-iphone-settings --run-id phone-connectivity-20261018t2042-r2 --no-dashboard`
+at checkpoint `379cd490cf75ec87fa4cfbbc179f0222c429ee8d`. Its native controller
+exited 0. Native run
+`agents/benchmarks/runs/20261018_204540_75a7f70a-71c5-4929-87d9-6e772ae450d7_browser-cloud-iphone-settings.json`
+records **PASSED**, COMPLETED, score 1, 177.3 seconds, 51 messages, and no failure.
+The FINISHED canonical completion card reports typed `visible_heading` =
+`Paired Computers`; the strict persisted launch/OCR/heading and no-attention
+checks passed. This is actual Rose/cloud-phone evidence, not a replay verdict.
+
+Original trigger: `2026-10-18T20:06:57.416731+00:00`; third-attempt trigger:
+`2026-10-18T20:41:34.224899+00:00`. Hub:
+`75a7f70a-71c5-4929-87d9-6e772ae450d7`; root:
+`b53db629-4b68-4d7a-b763-1777d3b15f45`. The original ERROR and second FAIL
+remain failures; the third PASS does not rewrite either. The original
+controller's finalizer lost its native completed run/ledger row. A source-tagged
+ERROR row was appended to `history/task_attempts.jsonl`, preserving every prior
+byte. Its 457-second duration is explicitly the rounded original report display,
+not an invented exact tenth; timestamp comes from the original local Hub run.
+No token counts were inferred. Backfill provenance:
+`.context/phone-harness/goal4-close-history-backfill.json`.
+
+`tasks.py` does not exist in this benchmark package; the authoritative
+`agents/benchmarks/tasks.json` is byte-identical from `33bf65449502dd377dec57f576f8590bdb091d71`
+through `379cd490cf75ec87fa4cfbbc179f0222c429ee8d`, SHA256
+`711a7f0f0e05db71042792751fbb7e1ad3c347285a943d0789a7cf93059363b8`.
+All six recorded runtime hashes in
+`.context/phone-harness/live-connectivity-retry2-slice.json` match both the pass
+checkpoint and closure-time checkout. Verification receipt:
+`.context/phone-harness/goal4-close-frozen-proof.json`. These are bug fixes under
+unchanged task criteria, not a claim that all runtime files match the buggy revision.
+
+Parent's retry log records cleanup `started=2 completed=2 state=clean`.
+Both task and local-stack receipts are clean, and local-benchmark-owner state is
+`cleanup_verified`. No resource stop acknowledgment substitutes for this proof.
+The real canonical publisher completed; fresh-browser FE verification saw all
+51 messages and retained browser termination/recording checks. The rendered dump
+was published to HTTPS and its recorded readback returned 200. Exact verified
+share/HTTPS links and canonical HTML are retained in
+`/opt/cursor/artifacts/rca_evidence/b53db629-4b68-4d7a-b763-1777d3b15f45/manifest.json`;
+publication log: `.context/phone-harness/live-pass-publication.log`.
+Independent closure readback also returned HTTP 200 for the 39,048-byte HTML;
+`.context/phone-harness/goal4-close-outcome-proof.json` records its hash, native
+PASS/FAIL hashes and three preserved attempt rows without copying signed URLs.
+The second attempt's separately published FAIL remains unchanged.
+
+This closure ran no additional paid benchmark, live phone operation, deploy,
+commit or process intervention. Goal 5 frontend work is independent of this
+Goal 4 proof; it is not included in this result.
+
+The existing failed-cleanup and report-finalizer red/green regressions remain
+the causal proof. The real retry completed its normal terminal publication and
+cleanup. The source-annotated historical ERROR backfill repairs evidence
+coverage only; it does not fabricate a lost native JSON or alter its queued
+report artifact, and later physical recovery never changes that ERROR.
 
 ## Human feedback
 
