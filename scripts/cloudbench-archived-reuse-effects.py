@@ -141,12 +141,12 @@ class NativeAdapter:
         remaining = deadline - time.monotonic()
         need(remaining > 0, "inactive native version observation deadline")
         if threading.current_thread() is not threading.main_thread():
-            return self.request("GET", url, timeout=min(10, remaining))
+            return self.request("GET", url, timeout=min(20, remaining))
         # A fresh interpreter per poll can consume the observation window before
         # HTTP begins. Main-thread GETs use the same API and receipts directly;
         # the alarm bounds startup, body reads, parsing, fsync and result reads.
         with observation_window(deadline):
-            return self.request("GET", url, timeout=min(10, deadline - time.monotonic()), direct=True)
+            return self.request("GET", url, timeout=min(20, deadline - time.monotonic()), direct=True)
 
     def _lease_wire(self, method, url, body=None, headers=None):
         need(method in ("POST", "DELETE") and url.endswith("/lease"), "lease wire operation required")
@@ -208,15 +208,21 @@ def native_wire_window(deadline):
     return _native_window(deadline, NativeWireDeadline, "native lease wire deadline")
 
 
-def wait_inactive(api, url, acknowledged):
+def wait_inactive(api, url, acknowledged, *, timeout=10):
     """Observe the exact inactive incarnation; /wait does not accept created."""
-    deadline = time.monotonic() + 10
+    import math
+
+    need(
+        type(timeout) in (int, float) and math.isfinite(timeout) and 0 < timeout <= 20,
+        "invalid inactive observation timeout",
+    )
+    deadline = time.monotonic() + timeout
     expected_config = config_sha(acknowledged["config"])
     while True:
         remaining = deadline - time.monotonic()
         need(remaining > 0, "inactive native version observation deadline")
         observer = getattr(api, "observe_inactive", None)
-        observed = observer(url, deadline) if observer else api.request("GET", url, timeout=min(10, remaining))
+        observed = observer(url, deadline) if observer else api.request("GET", url, timeout=min(20, remaining))
         need(time.monotonic() <= deadline, "late inactive native version observation")
         if (
             observed.get("id") == acknowledged["id"]

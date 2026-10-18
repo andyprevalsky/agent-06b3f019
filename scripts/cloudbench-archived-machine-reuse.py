@@ -410,7 +410,17 @@ def proof_for(request, row, successor):
     )
 
 
-def claim_native(api, request, row, successor, journal):
+def claim_native(
+    api,
+    request,
+    row,
+    successor,
+    journal,
+    *,
+    read_only=False,
+    acknowledged=None,
+    active=lambda: None,
+):
     """Caller owns API/token; lease and current_version are mandatory, no START/DELETE."""
     proof = proof_for(request, row, successor)
     journal = Path(journal)
@@ -418,30 +428,72 @@ def claim_native(api, request, row, successor, journal):
     exact_or_save(journal / "source-exclusion.json", dict(proof=proof, predecessor=row))
     mid = row["machine_id"]
     url = "/machines/" + mid
+    active()
     with api.lease(mid):
+        active()
         current = api.request("GET", url)
+        active()
         marker = current.get("config", {}).get("metadata", {}).get(MARKER)
         if marker == canonical(proof["native_marker"]).decode():
-            need(current["state"] in ("stopped", "created"), "claimed Machine is not inactive")
+            need(
+                current["state"] in ("stopped", "created"),
+                "claimed Machine is not inactive",
+            )
+            if read_only:
+                need(
+                    isinstance(acknowledged, dict)
+                    and all(
+                        current.get(key) == acknowledged.get(key)
+                        for key in (
+                            "id",
+                            "instance_id",
+                            "config",
+                            "name",
+                            "region",
+                            "created_at",
+                        )
+                    ),
+                    "read-only claim differs from acknowledged incarnation",
+                )
             intent = json.loads(private(journal / "claim-intent.json"))
-            need(config_sha(current["config"]) == intent["config_sha256"], "claimed config drifted after native claim")
+            need(
+                config_sha(current["config"]) == intent["config_sha256"],
+                "claimed config drifted after native claim",
+            )
             exact_or_save(
                 journal / "claim-ack.json",
-                dict(instance_id=current["instance_id"], native_marker_sha256=proof["native_marker_sha256"]),
+                dict(
+                    instance_id=current["instance_id"],
+                    native_marker_sha256=proof["native_marker_sha256"],
+                ),
             )
             return proof
+        need(not read_only, "read-only claim marker not observed; no CAS replay")
         same_source(row, current)
         exact_or_save(journal / "original-native.json", current)
         config = copy.deepcopy(current["config"])
-        config.setdefault("metadata", {})[MARKER] = canonical(proof["native_marker"]).decode()
+        config.setdefault("metadata", {})[MARKER] = canonical(
+            proof["native_marker"]
+        ).decode()
         # Park old startup without launching it; exact old volume stays attached.
         config["init"] = {"cmd": ["sleep", "infinity"]}
-        need(not (journal / "claim-intent.json").exists(), "ambiguous claim update: reconcile only, never rePOST")
+        need(
+            not (journal / "claim-intent.json").exists(),
+            "ambiguous claim update: reconcile only, never rePOST",
+        )
         exact_or_save(
             journal / "claim-intent.json",
-            dict(current_version=current["instance_id"], config_sha256=config_sha(config)),
+            dict(
+                current_version=current["instance_id"], config_sha256=config_sha(config)
+            ),
         )
-        ack = api.request("POST", url, dict(config=config, current_version=current["instance_id"], skip_launch=True))
+        ack = api.request(
+            "POST",
+            url,
+            dict(
+                config=config, current_version=current["instance_id"], skip_launch=True
+            ),
+        )
         need(
             ack.get("id") == mid
             and isinstance(ack.get("instance_id"), str)
@@ -450,7 +502,7 @@ def claim_native(api, request, row, successor, journal):
             and config_sha(ack["config"]) == config_sha(config),
             "claim update ACK mismatch",
         )
-        observed = wait_inactive(api, url, ack)
+        observed = wait_inactive(api, url, ack, timeout=20)
         need(
             observed.get("instance_id") == ack["instance_id"]
             and config_sha(observed["config"]) == config_sha(config)
@@ -459,7 +511,10 @@ def claim_native(api, request, row, successor, journal):
         )
         exact_or_save(
             journal / "claim-ack.json",
-            dict(instance_id=observed["instance_id"], native_marker_sha256=proof["native_marker_sha256"]),
+            dict(
+                instance_id=observed["instance_id"],
+                native_marker_sha256=proof["native_marker_sha256"],
+            ),
         )
     return proof
 
@@ -521,6 +576,389 @@ def selected_request(request_path, request_sha, successor):
     return request, row
 
 
+class ClaimReadCancelled(BaseException):
+    """Cancellation is propagated only after the new owned lease closes."""
+
+
+def claim_read_evidence(request, row, successor, output):
+    """Bind one old claim CAS and its completed lease without inferring success."""
+    import base64
+    import stat
+
+    output = Path(output)
+    journal, wire = output / "archived-reuse-journal", output / "archived-reuse-wire"
+    need(
+        {p.name for p in journal.iterdir()}
+        == {"source-exclusion.json", "original-native.json", "claim-intent.json"},
+        "unknown old claim publication",
+    )
+    members, data, total = {}, {}, 0
+    for root in (journal, wire):
+        need(
+            root.resolve(strict=True) == root and root.is_dir(),
+            "physical old claim root required",
+        )
+        for path in (root, *sorted(root.rglob("*"))):
+            need(len(members) < 256, "old claim member bound exceeded")
+            value = path.lstat()
+            need(
+                path.resolve(strict=True) == path
+                and value.st_uid == os.getuid()
+                and not value.st_mode & 0o077,
+                "private old claim member required",
+            )
+            if stat.S_ISDIR(value.st_mode):
+                members[str(path)] = {
+                    "kind": "directory",
+                    "identity": [
+                        value.st_dev,
+                        value.st_ino,
+                        value.st_mode,
+                        value.st_uid,
+                        value.st_gid,
+                        value.st_nlink,
+                    ],
+                }
+            else:
+                need(
+                    stat.S_ISREG(value.st_mode) and value.st_nlink == 1,
+                    "old claim alias refused",
+                )
+                raw = private(path)
+                total += len(raw)
+                need(
+                    total <= 16 * 1024 * 1024 and len(members) < 256,
+                    "old claim evidence bound exceeded",
+                )
+                members[str(path)] = {
+                    "kind": "file",
+                    "sha256": sha(raw),
+                    "identity": [
+                        value.st_dev,
+                        value.st_ino,
+                        value.st_mode,
+                        value.st_uid,
+                        value.st_gid,
+                        value.st_nlink,
+                        value.st_size,
+                        value.st_mtime_ns,
+                        value.st_ctime_ns,
+                    ],
+                }
+                data[path] = raw
+    proof = proof_for(request, row, successor)
+    need(
+        json.loads(data[journal / "source-exclusion.json"])
+        == {"proof": proof, "predecessor": row},
+        "old claim exclusion differs",
+    )
+    before = json.loads(data[journal / "original-native.json"])
+    same_source(row, before)
+    config = copy.deepcopy(before["config"])
+    config.setdefault("metadata", {})[MARKER] = canonical(
+        proof["native_marker"]
+    ).decode()
+    config["init"] = {"cmd": ["sleep", "infinity"]}
+    need(
+        json.loads(data[journal / "claim-intent.json"])
+        == {
+            "current_version": before["instance_id"],
+            "config_sha256": config_sha(config),
+        },
+        "old claim intent differs",
+    )
+    records = []
+    allowed = {
+        "request.json",
+        "transport-start.json",
+        "http-start.json",
+        "stderr.private.log",
+        "result.json",
+    }
+    for folder in wire.iterdir():
+        need(
+            folder.is_dir() and re.fullmatch("[0-9a-f]{32}", folder.name),
+            "unknown old claim request directory",
+        )
+        paths = list(folder.iterdir())
+        need(
+            all(
+                p.is_file()
+                and (p.name in allowed or re.fullmatch(r"[0-9]{4}-wire\.json", p.name))
+                for p in paths
+            ),
+            "unknown old claim request artifact",
+        )
+        raw_paths = [p for p in paths if p.name.endswith("-wire.json")]
+        need(len(raw_paths) == 1, "old claim raw response missing or repeated")
+        req, raw = (
+            json.loads(data[folder / "request.json"]),
+            json.loads(data[raw_paths[0]]),
+        )
+        body = base64.b64decode(raw["body_b64"], validate=True)
+        need(
+            req["app"] == APP
+            and raw["method"] == req["method"]
+            and raw["path"] == req["path"]
+            and sha(body) == raw["sha256"]
+            and type(raw["status"]) is int
+            and 200 <= raw["status"] < 300
+            and type(raw["monotonic_ns"]) is int,
+            "old claim raw response differs",
+        )
+        value = json.loads(body)
+        if folder / "result.json" in data:
+            need(
+                json.loads(data[folder / "result.json"]) == value,
+                "old claim result differs",
+            )
+        records.append((req, raw, value))
+    need(
+        len(records) == 5 and len({r[1]["monotonic_ns"] for r in records}) == 5,
+        "unknown old claim request count/order",
+    )
+    records.sort(key=lambda r: r[1]["monotonic_ns"])
+    need(
+        [record[1]["status"] for record in records] == [201, 200, 200, 200, 200],
+        "old claim response status vector differs",
+    )
+    lease, prior, update, observed, release = records
+    url = "/machines/" + row["machine_id"]
+    need(
+        [(r[0]["method"], r[0]["path"]) for r in records]
+        == [
+            ("POST", url + "/lease"),
+            ("GET", url),
+            ("POST", url),
+            ("GET", url),
+            ("DELETE", url + "/lease"),
+        ],
+        "old claim has a foreign writer",
+    )
+    nonce = lease[2].get("data", {}).get("nonce")
+    need(
+        isinstance(nonce, str)
+        and nonce
+        and lease[0]["body"]
+        == {"ttl": 180, "description": "archived same-volume successor"}
+        and all(
+            r[0].get("headers", {}).get("fly-machine-lease-nonce") == nonce
+            for r in records[1:]
+        ),
+        "old claim lease differs",
+    )
+    need(
+        prior[0]["body"] is None
+        and observed[0]["body"] is None
+        and release[0]["body"] is None
+        and prior[2] == before
+        and update[0]["body"]
+        == {
+            "config": config,
+            "current_version": before["instance_id"],
+            "skip_launch": True,
+        },
+        "old claim CAS differs",
+    )
+    ack = update[2]
+    need(
+        ack["id"] == row["machine_id"]
+        and isinstance(ack["instance_id"], str)
+        and ack["instance_id"]
+        and ack["instance_id"] != before["instance_id"]
+        and ack["config"] == config
+        and isinstance(observed[2], dict)
+        and observed[2].get("id") == row["machine_id"],
+        "old claim ACK differs",
+    )
+    for path, expected in members.items():
+        if expected["kind"] == "file":
+            need(sha(private(path)) == expected["sha256"], "old claim evidence changed")
+    same_claim_evidence(output, members)
+    return ack, members
+
+
+def same_claim_evidence(output, members, *, published=False):
+    roots = [
+        Path(output) / name
+        for name in ("archived-reuse-journal", "archived-reuse-wire")
+    ]
+    actual = {str(path) for root in roots for path in (root, *root.rglob("*"))}
+    allowed = {str(roots[0] / "claim-ack.json")} if published else set()
+    need(actual == set(members) | allowed, "old claim membership changed")
+    for path, value in members.items():
+        observed = Path(path).lstat()
+        identity = [
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_mode,
+            observed.st_uid,
+            observed.st_gid,
+            observed.st_nlink,
+        ]
+        if value["kind"] == "file":
+            identity += [observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns]
+        need(identity == value["identity"], "old claim member identity changed")
+        if value["kind"] == "file":
+            need(sha(private(path)) == value["sha256"], "old claim input changed")
+
+
+def reconcile_claim_read(api, request, row, successor, output, error, request_sha):
+    """One fresh leased read after a recorded deadline; never resend the CAS."""
+    import math
+    import signal
+    import threading
+    import time
+    import sys
+    import traceback
+
+    deadline_text = os.environ.get("RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC")
+    directory = Path(output) / "archived-reuse-read-reconciliation"
+    directory.mkdir(mode=0o700)
+    save(
+        directory / "original-error.json",
+        dict(
+            error_type=type(error).__name__,
+            error=str(error),
+            traceback="".join(
+                traceback.format_exception(type(error), error, error.__traceback__)
+            ),
+        ),
+    )
+    save(
+        directory / "pending.json",
+        dict(
+            schema="cloudbench-claim-observation-pending-v1",
+            error_type=type(error).__name__,
+            error=str(error),
+            original_failure_retained=True,
+            request_sha256=request_sha,
+            request_context_sha256=sha(
+                canonical(
+                    dict(
+                        harness_ref=request["harness_ref"],
+                        cohort=request["cohort"],
+                        archive_sha256s=[
+                            entry["archive_sha256"] for entry in request["archives"]
+                        ],
+                    )
+                )
+            ),
+            selected_row_sha256=sha(canonical(row)),
+            successor_sha256=sha(canonical(successor)),
+            config_writes=0,
+            original_deadline_monotonic=deadline_text,
+            original_error_sha256=sha(private(directory / "original-error.json")),
+        ),
+    )
+
+    def event(name, receipt):
+        print(
+            json.dumps(
+                dict(
+                    event=name,
+                    receipt=str(receipt),
+                    receipt_sha256=sha(private(receipt)),
+                    original_failure_retained=True,
+                    timely_original_read=False,
+                ),
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    event("CLAIM_OBSERVATION_DEADLINE", directory / "pending.json")
+    cancelled, handlers = [], {}
+
+    def active():
+        if cancelled:
+            raise ClaimReadCancelled("claim read reconciliation cancelled")
+        need(deadline_text is not None, "original claim campaign deadline missing")
+        value = float(deadline_text)
+        need(
+            math.isfinite(value) and time.monotonic() < value,
+            "original claim campaign deadline exhausted",
+        )
+
+    try:
+        ack, members = claim_read_evidence(request, row, successor, output)
+        save(
+            directory / "intent.json",
+            dict(
+                ack_sha256=sha(canonical(ack)),
+                old_membership=members,
+                read_only=True,
+                original_failure_retained=True,
+            ),
+        )
+        need(
+            threading.current_thread() is threading.main_thread(),
+            "owned claim read requires main thread",
+        )
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            handlers[sig] = signal.signal(
+                sig, lambda sig, _frame: cancelled.append(sig)
+            )
+        active()
+        same_claim_evidence(output, members)
+        fresh = NativeAdapter(api.api, directory / "wire")
+        proof = claim_native(
+            fresh,
+            request,
+            row,
+            successor,
+            Path(output) / "archived-reuse-journal",
+            read_only=True,
+            acknowledged=ack,
+            active=active,
+        )
+        active()
+        same_claim_evidence(output, members, published=True)
+        save(
+            directory / "complete.json",
+            dict(
+                status="READ_RECONCILED_AFTER_RECORDED_DEADLINE",
+                original_failure_retained=True,
+                timely_original_read=False,
+                proof_sha256=sha(canonical(proof)),
+                config_writes=0,
+            ),
+        )
+        active()
+        event("READ_RECONCILED_AFTER_RECORDED_DEADLINE", directory / "complete.json")
+    except BaseException as failure:
+        save(
+            directory / "failed.json",
+            dict(
+                error_type=type(failure).__name__,
+                original_failure_retained=True,
+                config_writes=0,
+                cancelled_signals=cancelled,
+            ),
+        )
+        event("CLAIM_READ_RECONCILIATION_FAILED", directory / "failed.json")
+        raise
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+    try:
+        active()
+    except BaseException as failure:
+        save(
+            directory / "failed.json",
+            dict(
+                error_type=type(failure).__name__,
+                original_failure_retained=True,
+                config_writes=0,
+                cancelled_signals=cancelled,
+            ),
+        )
+        event("CLAIM_READ_RECONCILIATION_FAILED", directory / "failed.json")
+        raise
+    return proof
+
+
 def allocate(request_path, request_sha, ordinal, successor, output, token):
     need(successor["ordinal"] == ordinal, "successor ordinal mismatch")
     need(successor.get("harness_ref") is not None, "successor harness pin required")
@@ -529,9 +967,17 @@ def allocate(request_path, request_sha, ordinal, successor, output, token):
         return None
     need(row.get("reservation"), "unreserved candidate cannot be allocated")
     api = NativeAdapter(
-        module("cloudbench-original-volume-capture.py")["Fly"](APP, token), Path(output) / "archived-reuse-wire"
+        module("cloudbench-original-volume-capture.py")["Fly"](APP, token),
+        Path(output) / "archived-reuse-wire",
     )
-    proof = claim_native(api, request, row, successor, Path(output) / "archived-reuse-journal")
+    try:
+        proof = claim_native(
+            api, request, row, successor, Path(output) / "archived-reuse-journal"
+        )
+    except ObservationDeadline as error:
+        proof = reconcile_claim_read(
+            api, request, row, successor, output, error, request_sha
+        )
     exact_or_save(Path(output) / "archived-reuse-proof.json", proof)
     return proof
 

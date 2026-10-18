@@ -256,15 +256,23 @@ class Parked(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             M["protocol"](ref)
+        real_git = M["subprocess"].check_output
+        new_ref = "a" * 40
+
+        def changed_index(command, **kwargs):
+            if command[-1] == new_ref + ":scripts/cloudbench-archived-machine-reuse.py":
+                return original
+            if command[-1] == new_ref + ":scripts/cloudbench-reuse-index.py":
+                return b"foreign index"
+            return real_git(command, **kwargs)
+
         with (
             mock.patch.object(
-                M["subprocess"],
-                "check_output",
-                side_effect=[original, b"foreign index"],
+                M["subprocess"], "check_output", side_effect=changed_index
             ),
             self.assertRaisesRegex(ValueError, "indexed selection protocol"),
         ):
-            M["protocol"](ref)
+            M["protocol"](new_ref)
         legacy = M["subprocess"].check_output(
             [
                 "git",
@@ -285,6 +293,91 @@ class Parked(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             M["protocol"](ref)
+
+    def test_reconciliation_protocol_preserves_exact_old_source_and_binds_helpers(self):
+        old_ref = "c9d4817832720cc2b1bc6a212383973a77baf004"
+        target = ROOT / "scripts/cloudbench-archived-machine-reuse.py"
+        old = M["subprocess"].check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(ROOT),
+                "show",
+                old_ref + ":scripts/cloudbench-archived-machine-reuse.py",
+            ]
+        )
+        # A real new helper/class closure, independent of the active B checkout.
+        new = old.replace(
+            b"def claim_native(api, request, row, successor, journal):",
+            b"def claim_native(api, request, row, successor, journal, *, read_only=False):",
+            1,
+        )
+        new += b"\nclass ClaimReadCancelled(BaseException):\n    pass\ndef claim_read_evidence():\n    return 'bound'\ndef same_claim_evidence():\n    return 'same'\ndef reconcile_claim_read():\n    return claim_read_evidence()\n"
+        real_read, real_git = Path.read_bytes, M["subprocess"].check_output
+
+        def read(path):
+            return new if path == target else real_read(path)
+
+        new_ref = "a" * 40
+
+        def git(command, **kwargs):
+            if command[-1] == new_ref + ":scripts/cloudbench-archived-machine-reuse.py":
+                return new
+            return real_git(command, **kwargs)
+
+        with (
+            mock.patch.object(Path, "read_bytes", read),
+            mock.patch.object(M["subprocess"], "check_output", side_effect=git),
+        ):
+            self.assertEqual(M["protocol"](old_ref), M["U"]["digest"](old))
+
+            # Supply unchanged index bytes for the synthetic source reference.
+            def new_git(command, **kwargs):
+                if command[-1] == new_ref + ":scripts/cloudbench-reuse-index.py":
+                    return (ROOT / "scripts/cloudbench-reuse-index.py").read_bytes()
+                return git(command, **kwargs)
+
+            with mock.patch.object(
+                M["subprocess"], "check_output", side_effect=new_git
+            ):
+                self.assertEqual(M["protocol"](new_ref), M["U"]["digest"](new))
+                changed = new.replace(b"return 'bound'", b"return 'foreign'")
+
+                def changed_git(command, **kwargs):
+                    if (
+                        command[-1]
+                        == new_ref + ":scripts/cloudbench-archived-machine-reuse.py"
+                    ):
+                        return changed
+                    return new_git(command, **kwargs)
+
+                with (
+                    mock.patch.object(
+                        M["subprocess"], "check_output", side_effect=changed_git
+                    ),
+                    self.assertRaises(ValueError),
+                ):
+                    M["protocol"](new_ref)
+                altered = old.replace(
+                    b"with api.lease(mid):", b"with api.foreign(mid):", 1
+                )
+
+                def old_git(command, **kwargs):
+                    if (
+                        command[-1]
+                        == new_ref + ":scripts/cloudbench-archived-machine-reuse.py"
+                    ):
+                        return altered
+                    return new_git(command, **kwargs)
+
+                with (
+                    mock.patch.object(
+                        M["subprocess"], "check_output", side_effect=old_git
+                    ),
+                    self.assertRaises(ValueError),
+                ):
+                    M["protocol"](new_ref)
 
     def test_pre_call_and_pre_config_keep_original_reservation_proof(self):
         result = self.prepare()

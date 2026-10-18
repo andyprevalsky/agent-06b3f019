@@ -490,6 +490,226 @@ class Tests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 H["capacity_demand"](request, machines, protected)
 
+    def claim_deadline_fixture(self, mode="success"):
+        import io
+        import signal
+        import time
+
+        request, machines, successor = fixture()
+        request["task_names"] = json.loads(
+            (Path(__file__).parent / "fixtures/original600-tasks.json").read_bytes()
+        )
+        request["candidates"][0]["reservation"] = {"cohort": request["cohort"]}
+        successor.update(
+            task=request["task_names"][0],
+            campaign_job_id="r001-j0001",
+            campaign_total_jobs=600,
+            campaign_attempt=1,
+        )
+        state = dict(
+            current=copy.deepcopy(machines[0]),
+            posts=0,
+            leases=0,
+            releases=0,
+            faulted=False,
+        )
+        test = self
+
+        class Transport:
+            app = H["APP"]
+
+            def __init__(self, *_args):
+                pass
+
+            def api(self, method, path, body=None, **kwargs):
+                if path.endswith("/lease"):
+                    if method == "POST":
+                        state["leases"] += 1
+                        value = {"data": {"nonce": "nonce-" + str(state["leases"])}}
+                    else:
+                        state["releases"] += 1
+                        if mode == "release-failure" and state["leases"] == 1:
+                            raise ValueError("original lease release unknown")
+                        value = {}
+                elif method == "POST":
+                    state["posts"] += 1
+                    test.assertEqual(state["posts"], 1)
+                    state["current"] = dict(
+                        state["current"],
+                        config=body["config"],
+                        instance_id="claim-ACK",
+                        state="stopped",
+                    )
+                    value = state["current"]
+                else:
+                    test.assertEqual(method, "GET")
+                    value = copy.deepcopy(state["current"])
+                    if state["leases"] == 2:
+                        if mode == "changed-instance":
+                            value["instance_id"] = "later-same-config"
+                        if mode == "changed-config":
+                            value["config"]["extra"] = "foreign"
+                        if mode == "changed-marker":
+                            value["config"]["metadata"][H["MARKER"]] = "foreign"
+                        if mode == "started":
+                            value["state"] = "started"
+                        if mode == "evidence-drift":
+                            original = (
+                                root / "archived-reuse-journal/original-native.json"
+                            )
+                            original.write_bytes(original.read_bytes() + b"\n")
+                        if mode == "cancel":
+                            signal.raise_signal(signal.SIGTERM)
+                        if mode == "expired":
+                            raise H["ObservationDeadline"]("fresh read unknown")
+                status = 201 if method == "POST" and path.endswith("/lease") else 200
+                if (
+                    mode == "lease-200"
+                    and state["leases"] == 1
+                    and path.endswith("/lease")
+                ):
+                    status = 200
+                kwargs["observer"](method, path, status, H["canonical"](value))
+                return copy.deepcopy(value)
+
+        def direct(adapter, directory, method, path, body, timeout, headers, errors):
+            H["NativeAdapter"](adapter.api, directory).perform_wire(
+                dict(
+                    app=adapter.api.app,
+                    method=method,
+                    path=path,
+                    body=body,
+                    timeout=timeout,
+                    headers=headers or {},
+                )
+            )
+
+        original_save = H["_PRIVATE_IO"]["save"]
+
+        def interrupted_save(path, value):
+            original_save(path, value)
+            if mode == "complete-cancel" and Path(path).name == "complete.json":
+                signal.raise_signal(signal.SIGTERM)
+            if (
+                str(path).endswith("-wire.json")
+                and value.get("method") == "GET"
+                and state["posts"] == 1
+                and not state["faulted"]
+            ):
+                state["faulted"] = True
+                raise H["ObservationDeadline"]("inactive native observation deadline")
+
+        original_module = H["module"]
+
+        def modules(name):
+            return (
+                {"Fly": Transport}
+                if name == "cloudbench-original-volume-capture.py"
+                else original_module(name)
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "request.json"
+            raw = H["canonical"](request)
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            deadline = str(
+                time.monotonic() - 1
+                if mode == "expired-deadline"
+                else time.monotonic() + 120
+            )
+            with (
+                mock.patch.dict(H["allocate"].__globals__, module=modules),
+                mock.patch.object(H["NativeAdapter"], "_run_wire", direct),
+                mock.patch.dict(H["_PRIVATE_IO"], save=interrupted_save),
+                mock.patch("sys.stderr", io.StringIO()) as captured,
+                mock.patch.dict(
+                    os.environ, RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC=deadline
+                ),
+            ):
+                if mode == "success":
+                    proof = H["allocate"](
+                        path, H["sha"](raw), 0, successor, root, "fixture"
+                    )
+                    self.assertEqual(proof["machine_id"], machines[0]["id"])
+                    receipt = json.loads(
+                        (
+                            root / "archived-reuse-read-reconciliation/complete.json"
+                        ).read_bytes()
+                    )
+                    self.assertTrue(receipt["original_failure_retained"])
+                    self.assertFalse(receipt["timely_original_read"])
+                else:
+                    with self.assertRaises(
+                        (ValueError, H["ObservationDeadline"], H["ClaimReadCancelled"])
+                    ):
+                        H["allocate"](
+                            path, H["sha"](raw), 0, successor, root, "fixture"
+                        )
+                    self.assertFalse((root / "archived-reuse-proof.json").exists())
+                self.assertEqual(state["posts"], 1)
+                self.assertEqual(
+                    state["leases"],
+                    1
+                    if mode in ("release-failure", "lease-200", "expired-deadline")
+                    else 2,
+                )
+                if mode != "release-failure":
+                    self.assertEqual(
+                        state["releases"],
+                        1 if mode in ("lease-200", "expired-deadline") else 2,
+                    )
+                    pending = root / "archived-reuse-read-reconciliation/pending.json"
+                    pending_value = json.loads(pending.read_bytes())
+                    self.assertTrue(pending_value["original_failure_retained"])
+                    error_path = pending.parent/"original-error.json"
+                    self.assertEqual(pending_value["original_error_sha256"], H["sha"](error_path.read_bytes()))
+                    original_error = json.loads(error_path.read_bytes())
+                    self.assertEqual(original_error["error_type"], "ObservationDeadline")
+                    self.assertIn("claim_native", original_error["traceback"])
+                    self.assertIn("wait_inactive", original_error["traceback"])
+                    self.assertIn('"event": "CLAIM_OBSERVATION_DEADLINE"', captured.getvalue())
+                    self.assertIn('"timely_original_read": false', captured.getvalue())
+                    expected_event = "READ_RECONCILED_AFTER_RECORDED_DEADLINE" if mode == "success" else "CLAIM_READ_RECONCILIATION_FAILED"
+                    self.assertIn('"event": "'+expected_event+'"', captured.getvalue())
+                    previous = dict(state)
+                    with self.assertRaises(FileExistsError):
+                        H["reconcile_claim_read"](
+                            H["NativeAdapter"](Transport(), root / "unused-wire"),
+                            request,
+                            request["candidates"][0],
+                            successor,
+                            root,
+                            H["ObservationDeadline"]("old"),
+                            H["sha"](raw),
+                        )
+                    self.assertEqual(state, previous)
+
+    def test_allocate_deadline_retains_failure_and_reconciles_once_without_cas_replay(
+        self,
+    ):
+        self.claim_deadline_fixture()
+
+    def test_allocate_deadline_refuses_changed_unknown_cancelled_or_unclosed_claim(
+        self,
+    ):
+        for mode in (
+            "changed-instance",
+            "changed-config",
+            "changed-marker",
+            "started",
+            "cancel",
+            "complete-cancel",
+            "expired",
+            "release-failure",
+            "lease-200",
+            "expired-deadline",
+            "evidence-drift",
+        ):
+            with self.subTest(mode=mode):
+                self.claim_deadline_fixture(mode)
+
     def test_native_claim_preserves_id_volume_and_oldname_and_is_idempotent(self):
         request, machines, successor = fixture()
         current = copy.deepcopy(machines[0])
@@ -846,6 +1066,31 @@ class IntegratedControls(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "observation deadline"):
                 H["wait_inactive"](API(), "/machines/" + expected["id"], expected)
         self.assertEqual(calls, [("GET", "/machines/" + expected["id"], 10)])
+
+    def test_claim_observation_uses_twenty_seconds_without_extending_reservation(self):
+        _, machines, _ = fixture()
+        expected = copy.deepcopy(machines[0])
+        calls = []
+
+        class API:
+            def request(self, method, url, body=None, *, timeout=30):
+                calls.append(timeout)
+                return expected
+
+        clock = H["wait_inactive"].__globals__["time"]
+        with mock.patch.object(clock, "monotonic", side_effect=[0, 0, 15]):
+            self.assertEqual(H["wait_inactive"](API(), "/machines/x", expected, timeout=20), expected)
+        self.assertEqual(calls, [20])
+        with mock.patch.object(clock, "monotonic", side_effect=[0, 0, 21]):
+            with self.assertRaisesRegex(ValueError, "late inactive"):
+                H["wait_inactive"](API(), "/machines/x", expected, timeout=20)
+        with mock.patch.object(clock, "monotonic", side_effect=[0, 0, 11]):
+            with self.assertRaisesRegex(ValueError, "late inactive"):
+                H["wait_inactive"](API(), "/machines/x", expected)
+        self.assertEqual(calls, [20, 20, 10])
+        for invalid in (0, -1, 21, float("inf"), float("nan"), True):
+            with self.assertRaisesRegex(ValueError, "invalid inactive"):
+                H["wait_inactive"](API(), "/machines/x", expected, timeout=invalid)
 
     def test_lost_reservation_ack_with_old_visibility_never_reposts(self):
         request, machines, _ = fixture()

@@ -31,17 +31,55 @@ def protocol(ref):
         ]
     )
     names = {"claim_native", "allocate", "proof_for", "campaign_candidate_index"}
+    recovery = {"claim_read_evidence", "same_claim_evidence", "reconcile_claim_read", "ClaimReadCancelled"}
 
     def selected(raw):
         return {
             node.name: ast.dump(node, include_attributes=False)
             for node in ast.parse(raw).body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name in names | {"selected_request"}
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name in names | {"selected_request"} | recovery
         }
 
     current = (HERE / "cloudbench-archived-machine-reuse.py").read_bytes()
     archived_functions, current_functions = selected(source), selected(current)
+    # Exact reviewed pre-reconciliation source remains a distinct protocol.
+    old_source = (
+        current
+        if U["digest"](current)
+        == "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7"
+        else subprocess.check_output(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(HERE.parent),
+                "show",
+                "c9d4817832720cc2b1bc6a212383973a77baf004:scripts/cloudbench-archived-machine-reuse.py",
+            ]
+        )
+    )
+    need(
+        U["digest"](old_source)
+        == "24c948d99fd2ed3dff7ce5f0cf01010e7f139342b99ad4f1ef6f5a3a43b4d7c7",
+        "reviewed old claim protocol changed",
+    )
+    old_functions = selected(old_source)
+    old_protocol = U["digest"](source) == U["digest"](old_source)
+    reference = (
+        old_functions
+        if old_protocol or not recovery.intersection(archived_functions)
+        else current_functions
+    )
+    if recovery.intersection(archived_functions):
+        need(
+            recovery <= set(archived_functions)
+            and recovery <= set(current_functions)
+            and all(
+                archived_functions[name] == current_functions[name] for name in recovery
+            ),
+            "archived claim reconciliation protocol differs",
+        )
     # The original allocator retained the full validated cohort while claiming
     # one row. Accept only those exact reviewed legacy bytes; the effect,
     # publication and index functions must still match the current protocol.
@@ -59,16 +97,19 @@ def protocol(ref):
         == "d868a356e1a0137be6a46150056876728d55e2d622edc8b1c97a6591c73aa725"
     )
     need(
+        old_protocol or legacy_allocator or recovery <= set(archived_functions),
+        "unreviewed historical claim source",
+    )
+    need(
         names <= set(archived_functions)
         and all(
-            archived_functions[name] == current_functions[name]
-            for name in names - {"allocate"}
+            archived_functions[name] == reference[name] for name in names - {"allocate"}
         )
         and (
             (
-                archived_functions["allocate"] == current_functions["allocate"]
+                archived_functions["allocate"] == reference["allocate"]
                 and archived_functions.get("selected_request")
-                == current_functions.get("selected_request")
+                == reference.get("selected_request")
             )
             or legacy_allocator
         ),
