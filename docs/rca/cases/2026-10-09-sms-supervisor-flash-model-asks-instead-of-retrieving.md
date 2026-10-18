@@ -420,3 +420,34 @@ this experiment. The approval request was presented; no answer or new model
 inference is inferred. Original MENU/USE-RETRIEVED-FACTS proposals remain separate
 and unapplied. Helper SHA256 is
 `a0be3bee8cf510f74ec04a222685cb4e7927cf2d14323ed47c4b661ff26894a5`.
+
+### User-requested pickup-right-now wording, October 18 — still failing
+
+The user explicitly requested an immediate-pickup formulation and another stop
+check. Commit d2ded2c18396771790138f7a9bd347dfc0f19e16 changes the paired
+OPEN/CLOSED catalog prompt and inbound to
+`Order me a lok lak for pickup from the ferry building right now`, plus the
+existing owning exact-input literal. All other task fields, fixtures, evaluators,
+budgets, models and deadlines are byte-preserved. The full owning suite passed
+135/135 with no skips or deselection. This approval does not cover the separate
+MENU, USE-RETRIEVED-FACTS or model-comparison proposals.
+
+Fresh canonical CLOSED run 1792347408-2099788-19268 FAILED in 44.5 task seconds;
+the original stage ledger records 83.8 seconds (84.009-second outer monitor).
+All 12 observed backend calls served Qwen. Across rounds 0–9 it executed 16
+successful web searches and three successful greps, then reached the round cap
+without calling attempt_completion or send_user_message. No agent started and
+no authorized budget increased. One runtime limit/error fallback SMS was sent;
+it did not convey closure. The unchanged completion evaluator rejected the run.
+Thus the revised immediate-pickup request still does not produce the correct
+stop. This is observed failed behavior, not a completed causal diagnosis or a
+claim that this PR introduced the loop.
+
+Canonical task cleanup verified zero allocated roots, zero actual native
+workflow generations and zero browser sessions/profiles. The exact owned DB
+and all 158 process births observed from launch were absent after root-reviewed
+canonical stop, which exited zero. The passive observer exited zero. Complete
+descendant capture is explicitly unproved. All 12 backend-emitted model dumps
+and an owned DB dump were preserved privately before stop. Raw content remains
+private. No new runtime prompt, model, schema, decoder or stopping rule was
+applied during this check. The earlier failed attempts remain intact.
