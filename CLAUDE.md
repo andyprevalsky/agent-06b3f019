@@ -95,12 +95,6 @@ AI agent platform.
 ## Sub-agent delegation
 
 - Every agent-created thread title must start with the exact prefix `--ai--`; include it in creation instructions and have the child set and verify its title as soon as it starts, preserving the prefix on later renames.
-- Explicit user default for all sub-agents: **medium reasoning effort and
-  ultrafast speed**. This overrides inherited effort/speed unless the user
-  explicitly requests otherwise. Pass both settings through supported execution
-  controls and verify them; a prompt instruction is not configuration. Prefer
-  managed threads when native sub-agents cannot select or expose speed. Never
-  claim ultrafast was applied when the platform cannot confirm it.
 - Sub-agents must inherit the parent agent's model, reasoning/effort level, and
   speed/service-tier settings. Do not silently substitute a lower-effort model
   or a different speed setting. Use automatic inheritance when supported;
@@ -112,13 +106,14 @@ AI agent platform.
   box's saved defaults, **not** the active parent thread's live settings. Read
   `threads options`, then pass the verified parent model, reasoning effort and
   speed explicitly with `--model`, `--reasoning-effort` and `--speed`. Verify the
-  child's effective settings after launch; never treat a prompt asking for high
-  effort as a configuration change. If a live parent setting cannot be verified,
-  explicitly default the child's reasoning effort to `medium` and speed to
-  `ultrafast` for the unavailable settings. Inherit every setting that can be
+  child's effective settings after launch; a prompt instruction is not
+  configuration. Only for a live parent setting that cannot be verified, fall
+  back to `medium` reasoning effort and the fastest available speed
+  (`ultrafast` on boxes.dev). Inherit every setting that can be
   verified, including the model; do not silently accept catalog defaults. If the
   selected model does not support the required fallback, report that limitation
-  rather than silently substituting another effort, speed, or model.
+  rather than silently substituting another effort, speed, or model. Never
+  claim a setting was applied when the platform cannot confirm it.
   Do not interrupt existing workers merely to inspect or change presentation.
 - Use sub-agents maximally for independent work. Keep the main agent unblocked
   and focused on coordination and the critical path.
