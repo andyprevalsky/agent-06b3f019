@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
-  "snapshot_at_utc": "2026-10-18T20:14:57.382643+00:00",
+  "snapshot_at_utc": "2026-10-18T20:30:11.628799+00:00",
   "original_started_at_utc": "2026-10-12T18:39:09+00:00",
   "original_timing_run": "20261012-183909-2547634",
   "resumed_timing_run": "20261012-234924-2614623",
   "original_attempts": 31,
-  "resumed_attempts": 414,
-  "all_attempt_count": 445,
+  "resumed_attempts": 415,
+  "all_attempt_count": 446,
   "attempt_statuses": {
-    "failed": 92,
+    "failed": 93,
     "passed": 353
   },
   "all_attempts_retained": true,
@@ -5797,12 +5797,25 @@
       "status": "failed",
       "exit_code": 1,
       "log": "logs/sms-fill-form-synced-user-rerun-20261018-200233-3083426.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-fill-defaults-initial-user-rerun",
+      "started_at": "2026-10-18T20:27:43Z",
+      "finished_at": "2026-10-18T20:29:31Z",
+      "started_epoch": 1792355263.9518988,
+      "finished_epoch": 1792355371.2661796,
+      "duration_seconds": 107.3,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sms-fill-defaults-initial-user-rerun-20261018-202743-3348089.log"
     }
   ],
-  "elapsed_wall_seconds": 524148.383,
-  "recorded_stage_union_seconds_not_continuous_CPU": 45779.844,
-  "outside_recorded_stage_intervals_seconds_not_human_idle": 478368.538,
-  "summed_attempt_seconds_overlaps_not_wall": 67229.3,
+  "elapsed_wall_seconds": 525062.6287989616,
+  "recorded_stage_union_seconds_not_continuous_CPU": 45887.15859460831,
+  "outside_recorded_stage_intervals_seconds_not_human_idle": 479175.47020435333,
+  "summed_attempt_seconds_overlaps_not_wall": 67336.6,
   "nested_task_replay_and_outer_monitor_clocks_not_added_as_extra_attempts": true,
   "previous_detailed_wall_interval_accounting": {
     "path": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-time-scorecard.json",

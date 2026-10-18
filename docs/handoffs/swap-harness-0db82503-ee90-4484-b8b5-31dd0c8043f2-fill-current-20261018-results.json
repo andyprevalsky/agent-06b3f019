@@ -87,9 +87,27 @@
   "private_capture": {
     "SMS_dumps_readback_verified": 7,
     "owned_database_dump_bytes": 31683284,
-    "persistent_archive_status": "IN_PROGRESS; full member/hash readback not yet claimed",
+    "persistent_archive_status": "COMPLETE; helper exit 0, full member/hash readback verified",
     "archive_followup_will_preserve_original_run_and_source": true,
-    "raw_dumps_prompts_profile_values_and_environment_not_published": true
+    "raw_dumps_prompts_profile_values_and_environment_not_published": true,
+    "completed_archive_receipt": {
+      "cutoff_utc": "2026-10-18T20:08:24.657058+00:00",
+      "completed_at_utc": "2026-10-18T20:25:31.728030+00:00",
+      "archive_sha256": "3f03c6d2ba33c32283156bc972c6ec47acfa804f81555e203cb01448a66dc3ab",
+      "archive_bytes": 266759819,
+      "members_verified": 4459,
+      "source_paths_verified": 4214,
+      "all_source_copies_match": true,
+      "all_member_readback_sha256_verified": true,
+      "source_bytes_changed_during_capture": false,
+      "raw_evidence_private": true,
+      "receipt_created_after_archive_cutoff": true
+    },
+    "metadata_after_cutoff_excluded": [
+      "reconstructed failing request",
+      "followup scheduling metadata",
+      "user prompt update metadata"
+    ]
   },
   "independent_review": "Observed known-profile-country re-ask supported by unchanged criterion and actual native call input/output; no runtime fix or flakiness/model-intelligence causality claimed.",
   "acceptance_limits": [
