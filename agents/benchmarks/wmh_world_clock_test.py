@@ -860,3 +860,34 @@ def test_a_resumed_agent_without_a_persisted_cursor_recovers_its_world_time(monk
         assert calls == [], 'a persisted cursor is kept without another clock call'
     else:
         assert calls == [] and resumed.simulated_world_time_ms is None
+
+
+@pytest.mark.parametrize('failures', [2, 3])
+def test_a_failed_post_tool_cursor_read_is_retried_before_the_agent_continues(monkeypatch, failures):
+    """PR #1538 review: a failed refresh after a tool let the next consumer read the pre-action time."""
+    calls, sleeps, errors = [], [], []
+
+    async def activity(fn, **kw):
+        calls.append(kw['args'][0])
+        if len(calls) <= failures:
+            raise RuntimeError('WMH clock unavailable')
+        return {'agent_id': 'root', 'time_ms': 2 * DAY}
+
+    m = _patch_workflows(monkeypatch, activity, sleeps)
+    m.workflow.logger = types.SimpleNamespace(error=lambda *a: errors.append(a))
+    wf = _simulated_workflow('root')
+    wf.simulated_world_time_ms = DAY
+
+    async def tool(self, name, args, call_id):
+        return {'success': True}
+
+    monkeypatch.setattr(m.AgentWorkflow, '_execute_tool_once', tool, raising=False)
+    assert asyncio.run(m.AgentWorkflow._execute_tool(wf, 'web_search', {}, 'c1')) == {'success': True}
+    attempts = m.WORLD_CLOCK_REFRESH_ATTEMPTS
+    if failures < attempts:
+        assert calls == ['time'] * (failures + 1) and wf.simulated_world_time_ms == 2 * DAY
+        assert len(sleeps) == failures and not any('could not refresh' in str(e) for e in errors)
+    else:
+        assert calls == ['time'] * attempts and len(sleeps) == attempts - 1
+        assert wf.simulated_world_time_ms == DAY, 'keeps the last acknowledged world time'
+        assert any('could not refresh its world time' in str(e) for e in errors)

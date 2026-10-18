@@ -165,6 +165,11 @@ FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
 # Registration retries a missing world briefly, then the agent fails closed.
 WORLD_CLOCK_REGISTER_ATTEMPTS = 3
 WORLD_CLOCK_REGISTER_RETRY_SECONDS = 2
+# Simulate mode: a failed post-tool cursor read is retried with a short backoff
+# before the next simulated-time consumer, so a transient WMH blip cannot leave
+# the agent on the time from before its last action.
+WORLD_CLOCK_REFRESH_ATTEMPTS = 3
+WORLD_CLOCK_REFRESH_RETRY_SECONDS = 5
 WORLD_CLOCK_UNAVAILABLE_MESSAGE = (
     "Simulated world clock unavailable: no WMH world session acknowledged this agent, "
     "so it cannot start on the world's time. Create the world session before starting the agent."
@@ -3807,8 +3812,31 @@ class AgentWorkflow:
         Outside a WMH world no cursor exists and nothing extra runs.
         """
         result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
-        await _refresh_world_time_cursor(self)
+        await self._refresh_world_time_cursor_after_tool()
         return result
+
+    async def _refresh_world_time_cursor_after_tool(self) -> None:
+        """Simulate mode: re-read the cursor after a tool, retrying a failed read with a bounded backoff.
+
+        Without a cursor (outside a WMH world) nothing runs. When every attempt
+        fails the agent keeps its last acknowledged world time, which never
+        moves backwards, and the failure is logged as an error.
+        """
+        for attempt in range(WORLD_CLOCK_REFRESH_ATTEMPTS):
+            if (
+                type(getattr(self, "simulated_world_time_ms", None)) is not int
+                or getattr(self, "world_model_mode", "real") != "simulate"
+            ):
+                return
+            if attempt:
+                # cutover-class: bounded — at most two 5s pauses after a failed simulated-clock read
+                await workflow.sleep(timedelta(seconds=WORLD_CLOCK_REFRESH_RETRY_SECONDS))
+            if await _refresh_world_time_cursor(self) is not None:
+                return
+        workflow.logger.error(
+            f"[world_clock] Agent {self.agent_id} could not refresh its world time after a tool; "
+            "keeping its last acknowledged world time"
+        )
 
     async def _execute_tool_once(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
         """Execute a tool - supports both new and legacy signatures during migration.
