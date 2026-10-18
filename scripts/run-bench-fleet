@@ -18506,8 +18506,10 @@ for bench in "${BENCHES[@]}"; do
     fi
 
     # Deterministic per-bench workspace → deterministic Temporal queue, so the
-    # autoscaler knows which queue its worker pool must poll.
-    if ! local_ws="$(cloudbench_fleet_workspace_name "$bench" "$$" "$i")"; then
+    # autoscaler knows which queue its worker pool must poll. It is bound to
+    # this fleet's random owner token, never the controller PID: sharded
+    # disposable controllers reuse PIDs across hosts on one shared namespace.
+    if ! local_ws="$(cloudbench_fleet_workspace_name "$bench" "$FLEET_OWNER_TOKEN" "$i")"; then
         echo "❌ [$bench] could not derive an isolated Temporal workspace" >&2
         exit 1
     fi

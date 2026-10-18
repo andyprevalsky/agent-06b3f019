@@ -3185,7 +3185,10 @@ IMESSAGE_RELAY_EXPECTED_MESSAGE="Hi! This is the Rose iMessage send bench."
 # escapes the comma to '\,', which the double-decode + `bash` re-parse mangled,
 # dropping every task after the first).
 TASKS_CSV_B64="$(printf '%s' "$TASKS_CSV" | base64 | tr -d '\n')"
-RUN_WORKSPACE_NAME="${CLOUDBENCH_WORKSPACE_NAME:-cloudbench-$(date -u +%Y%m%d%H%M%S)-$$}"
+# A direct run's workspace becomes its shared Temporal Cloud queue and Steel
+# ownership marker. PID + second repeats across identical disposable hosts, so
+# bind the fallback to a random identity rather than this process.
+RUN_WORKSPACE_NAME="${CLOUDBENCH_WORKSPACE_NAME:-cloudbench-$(date -u +%Y%m%d%H%M%S)-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')}"
 OBSERVED_PEAK_FLY_MACHINES="${CLOUDBENCH_OBSERVED_PEAK_FLY_MACHINES:-1}"
 
 # Estimated Fly machine cost (USD/hour) for this bench's isolated VM, from its

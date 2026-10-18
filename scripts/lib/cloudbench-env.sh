@@ -1008,23 +1008,41 @@ cloudbench_guest_autoscaler_poll_seconds() {  # <concurrent-guests> [calls-per-s
   }'
 }
 
-cloudbench_fleet_workspace_name() {  # <bench-name> <controller-id> <ordinal>
-  # Temporal task queues inherit this workspace name and cap it at 48 chars.
-  # Truncate only the human-readable bench segment: the controller + ordinal
-  # suffix is the isolation boundary and must remain complete for every name.
-  local bench="$1" controller_id="$2" ordinal="$3"
-  local suffix sanitized max_bench_length
-  case "$controller_id:$ordinal" in
-    *[!0-9:]*)
-      echo "FATAL: fleet workspace controller and ordinal must be numeric" >&2
-      return 1
-      ;;
-    :*|*:)
-      echo "FATAL: fleet workspace controller and ordinal must be non-empty" >&2
+cloudbench_fleet_guest_identity() {  # <fleet-owner-token>
+  # Guest identities reach shared services: the Temporal Cloud namespace shared
+  # with production, the guest's queue-scoped stale-workflow termination and its
+  # Steel ownership marker. A controller PID is not globally unique: identical
+  # disposable controllers reuse PIDs and seconds across hosts. Derive the
+  # identity from the fleet's random owner token instead, so exact-owner
+  # recovery re-derives it while the raw ownership token stays out of names.
+  local owner="$1"
+  case "$owner" in
+    *[!0-9a-f]*|'')
+      echo "FATAL: fleet guest identity requires the 32-hex fleet owner token" >&2
       return 1
       ;;
   esac
-  suffix="-$controller_id-$ordinal"
+  [ "${#owner}" -eq 32 ] || {
+    echo "FATAL: fleet guest identity requires the 32-hex fleet owner token" >&2
+    return 1
+  }
+  python3 -c 'import hashlib, sys; print(hashlib.sha256(b"cloudbench-fleet-guest-identity-v1\0" + sys.argv[1].encode()).hexdigest()[:12])' "$owner"
+}
+
+cloudbench_fleet_workspace_name() {  # <bench-name> <fleet-owner-token> <ordinal>
+  # Temporal task queues inherit this workspace name and cap it at 48 chars.
+  # Truncate only the human-readable bench segment: the owner identity +
+  # ordinal suffix is the isolation boundary and must remain complete.
+  local bench="$1" owner="$2" ordinal="$3"
+  local identity suffix sanitized max_bench_length
+  case "$ordinal" in
+    *[!0-9]*|'')
+      echo "FATAL: fleet workspace ordinal must be numeric" >&2
+      return 1
+      ;;
+  esac
+  identity="$(cloudbench_fleet_guest_identity "$owner")" || return 1
+  suffix="-$identity-$ordinal"
   max_bench_length=$((48 - 4 - ${#suffix}))
   [ "$max_bench_length" -ge 1 ] || {
     echo "FATAL: fleet workspace uniqueness suffix exceeds the 48-character limit" >&2
