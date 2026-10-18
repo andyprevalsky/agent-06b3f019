@@ -19,7 +19,11 @@ export class PhoneConnectionPending extends Error {
 function isFresh(session: PhoneHarnessSession): boolean {
   return (
     session.state === 'ready' &&
+    !session.closeRequested &&
+    !session.cleanupComplete &&
     session.control !== null &&
+    session.control.expiresAt !== null &&
+    session.control.expiresAt * 1000 > Date.now() + 10_000 &&
     session.expiresAt !== null &&
     session.expiresAt * 1000 > Date.now() + 10_000
   );
@@ -57,8 +61,15 @@ export async function cleanupPhone(userId: string, clientFactory: PhoneClientFac
     const complete = await stopAndConfirm(candidate.device, clientFactory());
     if (!complete) return { state: 'cleanup_pending' };
     const key = candidate.device.providerStartKey;
-    if (key !== null) await commands.confirmCleanup(candidate.device.id, key);
-    else if (candidate.operation !== null)
+    if (key !== null) {
+      const retained =
+        candidate.operation?.state === 'CONNECTING' &&
+        candidate.lease?.status === 'ACTIVE' &&
+        candidate.lease.releaseRequestedAt === null
+          ? candidate.operation.id
+          : undefined;
+      await commands.confirmCleanup(candidate.device.id, key, retained);
+    } else if (candidate.operation !== null)
       await commands.confirmUnstartedCleanup(candidate.device.id, candidate.operation.id);
     return { state: 'cleanup_complete' };
   } catch (error) {
@@ -86,6 +97,7 @@ export async function ensurePhoneSession(claim: CommandClaim, client: PhoneHarne
       session.expiresAt !== null &&
       session.expiresAt * 1000 <= Date.now() + 10_000)
   ) {
+    await commands.closeSessionForRefresh(device.id, key);
     if (!(receipt?.cleanupComplete === true || (await stopAndConfirm(device, client))))
       throw new PhoneConnectionPending('cleanup_pending');
     await commands.confirmCleanup(device.id, key, claim.command.id);

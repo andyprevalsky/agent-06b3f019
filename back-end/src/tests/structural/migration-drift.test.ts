@@ -294,6 +294,24 @@ function compare(migrations: TableState, schema: TableState): Drift[] {
 // reverse-direction check fails the build on ANY new untracked model/column.
 const KNOWN_NON_PRISMA_TABLES = new Set(['_prisma_migrations', 'spatial_ref_sys']);
 
+// Private phone tables never expose encrypted grants through the Data API.
+// The registered iphone-rls blackbox separately exercises actual PostgreSQL roles.
+const phoneSql = fs
+  .readdirSync(MIGRATIONS_DIR)
+  .filter((name) => name.includes('_iphone_'))
+  .sort()
+  .map((name) => fs.readFileSync(path.join(MIGRATIONS_DIR, name, 'migration.sql'), 'utf8'))
+  .join('\n');
+for (const table of ['IPhoneDevice', 'IPhoneLease', 'IPhoneOperation', 'IPhoneAcquireIntent']) {
+  if (!phoneSql.includes(`ALTER TABLE public."${table}" ENABLE ROW LEVEL SECURITY;`))
+    throw new Error(`Private phone table ${table} has no RLS migration`);
+}
+if (
+  !phoneSql.includes('REVOKE ALL ON TABLE') ||
+  !phoneSql.includes("ARRAY['anon', 'authenticated']")
+)
+  throw new Error('Private phone migrations must revoke client table ACLs');
+
 const drift = compare(buildMigrationState(), parseSchemaPrisma()).filter(
   (d) => !KNOWN_NON_PRISMA_TABLES.has(d.table)
 );

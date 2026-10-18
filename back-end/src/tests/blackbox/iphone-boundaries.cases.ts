@@ -1,3 +1,4 @@
+import { permitted, deadlineElapsed } from '../../domains/iphone/config';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
 
@@ -17,6 +18,54 @@ function assert(value: unknown, message: string): asserts value {
 
 export function registerIPhoneBoundaryTests(context: BoundaryContext): void {
   const { test, request, user, agent, fixture, acquire, action } = context;
+  test('Andy is enabled while deferred accounts and anonymous phone fallback stay disabled', async () => {
+    assert(
+      permitted({ userId: 'c49b4ce3-3489-499d-bfbd-846d04ba6275', phone: null, isAnonymous: true }),
+      'Andy account denied'
+    );
+    assert(
+      !permitted({
+        userId: '8283e892-b0a4-4298-9ef7-b95bcc67e46b',
+        phone: null,
+        isAnonymous: false,
+      }),
+      'Deferred account was enabled'
+    );
+    assert(!permitted(null), 'missing user allowed');
+    assert(deadlineElapsed(new Date(1000), new Date(1000)), 'deadline equality must expire');
+    assert(!deadlineElapsed(new Date(1001), new Date(1000)), 'future deadline expired');
+    assert(deadlineElapsed(null, new Date(1000)), 'missing deadline must expire');
+    assert(
+      !permitted({ userId: 'synthetic', phone: '+19729777432', isAnonymous: true }),
+      'anonymous fallback allowed'
+    );
+    assert(
+      permitted({ userId: 'synthetic', phone: '+19729777432', isAnonymous: false }),
+      'trusted phone fallback denied'
+    );
+  });
+
+  for (const cause of ['deleted', 'terminal'] as const) {
+    test(`${cause} waiters do not inflate queue position behind a live holder`, async () => {
+      const f = await fixture();
+      const agents = await Promise.all([0, 1, 2].map(() => agent(f.userId)));
+      const leases = [];
+      for (const current of agents) leases.push(await acquire(f.userId, current.id));
+      await prisma.agent.update({
+        where: { id: agents[1].id },
+        data: cause === 'deleted' ? { deletedAt: new Date() } : { status: 'COMPLETED' },
+      });
+      const observed = await request(`/leases/${leases[2].id}`, f.userId);
+      const state = observed.data as { lease: { queuePosition: number } };
+      assert(state.lease.queuePosition === 1, 'Dead waiter inflated queue position');
+      const holder = await request(`/leases/${leases[0].id}`, f.userId);
+      assert(
+        (holder.data as { lease: { status: string } }).lease.status === 'ACTIVE',
+        'Queue read released the holder'
+      );
+    });
+  }
+
   test('every lease endpoint requires authentication before validating inputs', async () => {
     for (const [path, method] of [
       ['/leases', 'POST'],

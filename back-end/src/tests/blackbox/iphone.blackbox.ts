@@ -2,7 +2,6 @@
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
-import { permitted, deadlineElapsed } from '../../domains/iphone/config';
 import { registerIPhoneBoundaryTests } from './iphone-boundaries.cases';
 config();
 const BASE = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -15,12 +14,18 @@ function test(name: string, run: () => Promise<void>) {
 function assert(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
 }
-async function request(path: string, userId?: string, method = 'GET', body?: unknown) {
+async function request(
+  path: string,
+  userId?: string,
+  method = 'GET',
+  body?: unknown,
+  apiKey = KEY
+) {
   const response = await fetch(`${BASE}/api/iphone${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
-      ...(userId ? { 'X-API-Key': KEY, 'X-User-Id': userId } : {}),
+      ...(userId ? { 'X-API-Key': apiKey, 'X-User-Id': userId } : {}),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -380,7 +385,24 @@ test('independent phones proceed concurrently; control has exactly one owner', a
   assert(lease.controlOwner === 'agent', 'default control');
   const taken = await action(f.userId, lease.id, 'control', { mode: 'user' });
   assert(taken.status === 200 && taken.data.lease.controlOwner === 'user', 'takeover failed');
-  const returned = await action(f.userId, lease.id, 'control', { mode: 'agent' });
+  const userKey = `rose-phone-control-${randomUUID()}`;
+  await prisma.roseApiKey.create({ data: { userId: f.userId, apiKey: userKey } });
+  await prisma.subscription.create({
+    data: {
+      userId: f.userId,
+      subscriptionTier: 1,
+      stripeSubscriptionId: `fixture-${randomUUID()}`,
+      stripeCustomerId: `fixture-${randomUUID()}`,
+      currentPeriodEnd: new Date(Date.now() + 86_400_000),
+    },
+  });
+  const returned = await request(
+    `/leases/${lease.id}/control`,
+    f.userId,
+    'POST',
+    { mode: 'agent' },
+    userKey
+  );
   assert(
     returned.status === 200 && returned.data.lease.controlOwner === 'agent',
     'handback failed'
@@ -539,28 +561,6 @@ test('rejected auth releases promptly even before heartbeat expiry', async () =>
   });
   await expectStatus(view(f.userId, active.id), 'RELEASED');
   await expectStatus(view(f.userId, waiting.id), 'ACTIVE');
-});
-test('Andy is enabled while deferred accounts and anonymous phone fallback stay disabled', async () => {
-  assert(
-    permitted({ userId: 'c49b4ce3-3489-499d-bfbd-846d04ba6275', phone: null, isAnonymous: true }),
-    'Andy account denied'
-  );
-  assert(
-    !permitted({ userId: '8283e892-b0a4-4298-9ef7-b95bcc67e46b', phone: null, isAnonymous: false }),
-    'Deferred account was enabled'
-  );
-  assert(!permitted(null), 'missing user allowed');
-  assert(deadlineElapsed(new Date(1000), new Date(1000)), 'deadline equality must expire');
-  assert(!deadlineElapsed(new Date(1001), new Date(1000)), 'future deadline expired');
-  assert(deadlineElapsed(null, new Date(1000)), 'missing deadline must expire');
-  assert(
-    !permitted({ userId: 'synthetic', phone: '+19729777432', isAnonymous: true }),
-    'anonymous fallback allowed'
-  );
-  assert(
-    permitted({ userId: 'synthetic', phone: '+19729777432', isAnonymous: false }),
-    'trusted phone fallback denied'
-  );
 });
 test('concurrent identical binds are idempotent; device collision remains denied', async () => {
   const id = await user('+19729777432');

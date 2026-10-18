@@ -1,3 +1,4 @@
+import { viewCases } from './iphone-control.view.cases';
 import { cleanupCases } from './iphone-control.cleanup.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -62,6 +63,7 @@ async function queued(h: Harness, userId: string) {
 }
 export const cases: Case[] = [
   ...cleanupCases,
+  ...viewCases,
   [
     'invalid lease requests and queued input cannot trigger cleanup for a pending phone',
     async (h) => {
@@ -271,6 +273,8 @@ export const cases: Case[] = [
       );
       assert.equal(operation(userAction.data).status, 'SUCCEEDED');
       await h.request(f.userId, `/leases/${f.leaseId}/control`, {
+        actor: 'user',
+        userApiKey: f.userApiKey,
         method: 'POST',
         body: { mode: 'agent' },
       });
@@ -447,7 +451,9 @@ cases.push(
       h.hideReceipt = true;
       const pending = await send(h, f.userId, f.leaseId, id, 'input.tap', { x: 8, y: 9 });
       assert.equal(pending.status, 200);
-      assert.equal(operation(pending.data).status, 'CONNECTING');
+      assert.equal(operation(pending.data).status, 'FAILED');
+      assert.equal(operation(pending.data).errorCode, 'phone_connection_not_ready');
+      assert.equal(object(operation(pending.data).result).outcome, 'rejected');
       assert.equal(h.physicalOperations.length, physical);
       const created = h.calls
         .slice(start)
@@ -457,8 +463,13 @@ cases.push(
       assert.equal(saved.providerStartKey, created[0].idempotencyKey);
       h.hideReceipt = false;
       const resumed = await send(h, f.userId, f.leaseId, id, 'input.tap', { y: 9, x: 8 });
-      assert.equal(operation(resumed.data).status, 'SUCCEEDED');
+      assert.equal(operation(resumed.data).status, 'FAILED');
+      assert.equal(h.physicalOperations.length, physical, 'Failed intent replayed input');
+      const ready = await send(h, f.userId, f.leaseId, randomUUID(), 'input.tap', { x: 8, y: 9 });
+      assert.equal(operation(ready.data).status, 'SUCCEEDED');
       assert.equal(h.physicalOperations.length, physical + 1);
+      const original = await h.request(f.userId, `/leases/${f.leaseId}/operations/${id}`);
+      assert.deepEqual(original.data.operation, pending.data.operation);
       const starts = h.calls
         .slice(start)
         .filter((c) => c.method === 'POST' && c.path === '/sessions');

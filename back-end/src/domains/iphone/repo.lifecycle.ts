@@ -10,7 +10,10 @@ import { databaseNow } from './repo.clock';
 
 export async function closeLease(tx: Transaction, id: string, status: string) {
   const executing = await tx.iPhoneOperation.findFirst({
-    where: { leaseId: id, activeDeviceId: { not: null } },
+    where: {
+      leaseId: id,
+      OR: [{ activeDeviceId: { not: null } }, { state: { in: ['CONNECTING', 'RUNNING'] } }],
+    },
     select: { id: true },
   });
   if (executing !== null) {
@@ -47,6 +50,16 @@ async function reconcileActive(tx: Transaction, lease: IPhoneLease) {
   ) {
     await closeLease(tx, lease.id, 'CANCELLED');
     return;
+  }
+  if (lease.browserTaskId !== null) {
+    const task = await tx.browserSession.findFirst({
+      where: { id: lease.browserTaskId, agentId: lease.agentId, context: { userId: lease.userId } },
+      select: { id: true },
+    });
+    if (task === null) {
+      await closeLease(tx, lease.id, 'CANCELLED');
+      return;
+    }
   }
   const executing = await tx.iPhoneOperation.findUnique({
     where: { activeDeviceId: lease.deviceId },
@@ -96,7 +109,8 @@ async function reconcileActive(tx: Transaction, lease: IPhoneLease) {
       where: { id: lease.id },
       data: { attentionRequestId: null, revision: { increment: 1 } },
     });
-  if (deadlineElapsed(lease.leaseExpiresAt, now)) await closeLease(tx, lease.id, 'EXPIRED');
+  if (lease.controlOwner !== 'user' && deadlineElapsed(lease.leaseExpiresAt, now))
+    await closeLease(tx, lease.id, 'EXPIRED');
 }
 export async function reconcile(tx: Transaction, device: IPhoneDevice, enabled: boolean) {
   if (!enabled) {

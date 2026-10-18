@@ -1,7 +1,7 @@
 /** Browser agent -> durable device FIFO -> provider cleanup -> account iPhone. */
 import * as repo from './repo';
 import { cleanupPhoneIfConfigured, defaultPhoneClient } from './service.operations';
-import type { PhoneClientFactory } from './types.operations';
+import type { PhoneActor, PhoneClientFactory } from './types.operations';
 import {
   IPhoneError,
   type AcquireInput,
@@ -45,7 +45,8 @@ export async function act(
   id: string,
   action: LeaseAction,
   input: ActionInput,
-  clientFactory: PhoneClientFactory = defaultPhoneClient
+  clientFactory: PhoneClientFactory = defaultPhoneClient,
+  actor: PhoneActor = 'agent'
 ) {
   await repo.requireOwnedLease(userId, id);
   await cleanupPhoneIfConfigured(userId, clientFactory);
@@ -57,7 +58,7 @@ export async function act(
       return new IPhoneError(403, 'iPhone device is disabled');
     const lease = await repo.readLease(tx, id, userId);
     if (lease === null) return new IPhoneError(404, 'Lease not found');
-    const error = await repo.mutate(tx, lease, action, input, await repo.databaseNow(tx));
+    const error = await repo.mutate(tx, lease, action, input, await repo.databaseNow(tx), actor);
     if (enabled) await repo.admit(tx, device.id);
     return error ?? repo.view(tx, id);
   });

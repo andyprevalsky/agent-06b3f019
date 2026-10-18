@@ -83,6 +83,9 @@ export class Harness {
   readonly fixtureErrors: string[] = [];
   readonly physicalOperations: Array<{ op: string; kw: Record<string, unknown> }> = [];
   sessionState: 'ready' | 'provisioning' = 'ready';
+  screenBounds: Record<string, unknown> | null = { x: 0, y: 0, w: 390, h: 844, id: 1 };
+  private nextFrame?: Barrier;
+  private nextRead?: Barrier;
   cleanupComplete = false;
   beforeStop?: () => Promise<void>;
   createUnknown = false;
@@ -238,6 +241,12 @@ export class Harness {
           return;
         }
         if (path.endsWith('/frame.png')) {
+          const held = this.nextFrame;
+          this.nextFrame = undefined;
+          if (held !== undefined) {
+            held.enter();
+            await held.settled;
+          }
           res.writeHead(200, { 'Content-Type': 'image/png' });
           res.end(PNG);
           return;
@@ -246,6 +255,14 @@ export class Harness {
           const op = String(body?.op);
           const kw = (body?.kw ?? {}) as Record<string, unknown>;
           this.physicalOperations.push({ op, kw });
+          if (op.startsWith('screen.')) {
+            const held = this.nextRead;
+            this.nextRead = undefined;
+            if (held !== undefined) {
+              held.enter();
+              await held.settled;
+            }
+          }
           if (op.startsWith('input.')) {
             const held = this.nextHold;
             this.nextHold = undefined;
@@ -273,7 +290,12 @@ export class Harness {
             }
           }
           json(200, {
-            result: op === 'screen.text' ? { text: 'Visible screen observation' } : true,
+            result:
+              op === 'screen.bounds'
+                ? this.screenBounds
+                : op === 'screen.text'
+                  ? { text: 'Visible screen observation' }
+                  : true,
           });
           return;
         }
@@ -332,6 +354,20 @@ export class Harness {
     };
   }
 
+  holdRead(): Pick<Barrier, 'entered' | 'release'> {
+    const held = barrier();
+    this.holds.push(held);
+    this.nextRead = held;
+    return held;
+  }
+
+  holdFrame(): Pick<Barrier, 'entered' | 'release'> {
+    const held = barrier();
+    this.holds.push(held);
+    this.nextFrame = held;
+    return held;
+  }
+
   holdOperation(): Pick<Barrier, 'entered' | 'release'> {
     assert.equal(this.nextHold, undefined, 'Only one next-operation hold');
     const held = barrier();
@@ -358,6 +394,8 @@ export class Harness {
     this.beforeStop = undefined;
     this.holds.forEach((held) => held.release());
     this.nextHold = undefined;
+    this.nextFrame = undefined;
+    this.nextRead = undefined;
     this.nextReadiness = undefined;
     this.sessionState = 'ready';
     this.cleanupComplete = false;
@@ -459,6 +497,10 @@ export class Harness {
       await closeServer(this.appServer);
       await closeServer(this.providerServer);
       if (this.users.length > 0) {
+        await prisma.browserSession.deleteMany({
+          where: { context: { userId: { in: this.users } } },
+        });
+        await prisma.browserContext.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.roseApiKey.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.agentAttentionRequest.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.agent.deleteMany({ where: { userId: { in: this.users } } });

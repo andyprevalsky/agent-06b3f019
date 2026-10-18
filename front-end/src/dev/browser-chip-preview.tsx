@@ -1,3 +1,8 @@
+/**
+ * Development preview state: [BROWSER] renders the expandable status chip;
+ * [?phone] renders the real fullscreen view with a phone-action fixture.
+ * Network responses stay outside this fixture and use the normal API client.
+ */
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
@@ -6,6 +11,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context/types';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
+import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
 import type { Message } from '@/lib/api';
 import '@/index.css';
 
@@ -59,6 +65,26 @@ const messages: Message[] = [
   },
 ];
 
+const phonePreview = new URLSearchParams(window.location.search).has('phone');
+const previewMessages: Message[] = phonePreview
+  ? [
+      ...messages,
+      {
+        message_id: 'phone-action',
+        timestamp: '2026-10-18T20:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          toolName: 'spawn_browser_agent',
+          toolStatus: 'IN_PROGRESS',
+          task_id: 'browser-preview',
+          action_type: 'phone',
+          title: 'Using your iPhone',
+        },
+      },
+    ]
+  : messages;
+
 function makeContext(): AgentContextValue {
   return {
     agent: null,
@@ -67,9 +93,9 @@ function makeContext(): AgentContextValue {
     stagePendingAgentCreation: () => undefined,
     reconcilePendingAgentCreation: async () => undefined,
     rollbackPendingAgentCreation: () => false,
-    selectedAgentId: null,
+    selectedAgentId: phonePreview ? 'phone-preview-agent' : null,
     setSelectedAgentId: () => undefined,
-    messages,
+    messages: previewMessages,
     streamingBubbles: new Map(),
     streamingPlan: null,
     streamingAttention: null,
@@ -91,12 +117,32 @@ export function PreviewApp() {
       <TooltipProvider delayDuration={100}>
         <MemoryRouter>
           <AgentContext.Provider value={makeContext()}>
+            {phonePreview && (
+              <BrowserStatusBarFullscreen
+                agentId="phone-preview-agent"
+                taskId="browser-preview"
+                browserUrl="about:blank"
+                messages={previewMessages}
+                outputSchema={undefined}
+                browserSessionMetadata={null}
+                stepProgress={{ stepsTaken: 8, totalSteps: 30 }}
+                isDisconnected={false}
+                isWaitingForAuthAssistance={false}
+                isResuming={false}
+                isUserControlling={false}
+                pendingWriteLockApproval={null}
+                onClose={() => window.location.assign('/browser-chip-preview.html')}
+                onResume={() => undefined}
+              />
+            )}
             <div className="min-h-screen bg-background p-10 text-foreground">
               <div className="mx-auto max-w-4xl space-y-4">
                 <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                   Browser status preview
                 </div>
-                <BrowserStatusBar taskId="browser-preview" browserUrl="about:blank" />
+                {!phonePreview && (
+                  <BrowserStatusBar taskId="browser-preview" browserUrl="about:blank" />
+                )}
               </div>
             </div>
           </AgentContext.Provider>

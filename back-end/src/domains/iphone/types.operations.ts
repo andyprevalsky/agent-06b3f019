@@ -18,5 +18,6 @@ export interface CommandClaim {
   lease: IPhoneLease;
   command: IPhoneOperation;
   execute: boolean;
+  taskBound?: boolean;
 }
 export type PhoneClientFactory = () => PhoneHarnessClient;

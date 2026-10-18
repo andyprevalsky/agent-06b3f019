@@ -1,12 +1,7 @@
 /** Browser/user action -> durable command claim -> one physical operation -> encrypted receipt. */
-import {
-  PhoneHarnessClient,
-  PhoneHarnessError,
-  type PhoneHarnessSession,
-} from '../../providers/phoneHarness';
+import { PhoneHarnessClient, PhoneHarnessError } from '../../providers/phoneHarness';
 import { openPhoneValue } from '../../providers/phoneHarnessCredentials';
 import * as commands from './repo.operations';
-import * as leases from './repo';
 import { IPhoneError, type IPhoneOperation } from './types';
 import type {
   CommandClaim,
@@ -54,7 +49,17 @@ async function runClaim(claim: CommandClaim, input: PhoneCommand, client: PhoneH
     const result = await client.perform(session, input.operation, input.args);
     return await commands.finishCommand(claim, 'SUCCEEDED', result);
   } catch (error) {
-    if (error instanceof PhoneConnectionPending) return null;
+    if (error instanceof PhoneConnectionPending && !started)
+      return commands.finishCommand(
+        claim,
+        'FAILED',
+        {
+          success: false,
+          outcome: 'rejected',
+          error: error.message,
+        },
+        'phone_connection_not_ready'
+      );
     const failure = safeFailure(error, input.operation, started);
     return commands.finishCommand(claim, failure.state, failure.value, failure.code);
   }
@@ -98,26 +103,4 @@ export async function cleanupPhoneIfConfigured(userId: string, clientFactory = d
   return cleanupPhone(userId, clientFactory);
 }
 
-export async function phoneFrame(
-  userId: string,
-  leaseId: string,
-  clientFactory: PhoneClientFactory = defaultPhoneClient
-) {
-  const device = await leases.transaction(async (tx) => {
-    if ((await leases.readLease(tx, leaseId, userId)) === null)
-      throw new IPhoneError(404, 'Lease not found');
-    const owned = await leases.lockedDevice(tx, userId);
-    const lease = await leases.readLease(tx, leaseId, userId);
-    if (!owned.enabled) throw new IPhoneError(403, 'iPhone access denied');
-    if (lease?.status !== 'ACTIVE') throw new IPhoneError(409, 'Phone interaction is not active');
-    return owned.device;
-  });
-  if (device.providerState !== 'READY' || device.providerSessionEncrypted === null)
-    throw new IPhoneError(409, 'Phone view is not ready');
-  const session = openPhoneValue<PhoneHarnessSession>(device.providerSessionEncrypted);
-  try {
-    return await clientFactory().frame(session);
-  } catch {
-    throw new IPhoneError(503, 'Phone view is temporarily unavailable');
-  }
-}
+export { phoneFrame } from './service.view';

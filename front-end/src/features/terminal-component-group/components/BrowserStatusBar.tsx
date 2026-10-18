@@ -29,6 +29,10 @@
  *   - Dispatches to the three presentational variants (Minimized / Expanded /
  *     Fullscreen) based on current state + forceMinimized prop.
  *
+ * PHONE ENTRY: expanded + new owned phone event -> existing fullscreen;
+ * collapsed/force-minimized stay passive. Closed fullscreen does not reopen for
+ * the same event. The phone overlay preserves the mounted fullscreen browser.
+ *
  * AGENT ACTIVITY STATE:
  * [ACTIVE] <-- no pending auth assistance and no disconnect
  *     |
@@ -65,6 +69,7 @@
  */
 
 import { memo } from 'react';
+import { usePhoneFullscreenEntry } from './browser-status-bar/phone/usePhoneFullscreenEntry';
 import { useAgentContext } from '../hooks';
 import { BrowserStatusBarExpanded } from './browser-status-bar/BrowserStatusBarExpanded';
 import { BrowserStatusBarFullscreen } from './browser-status-bar/BrowserStatusBarFullscreen';
@@ -107,7 +112,6 @@ function controlActionFor(
 function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const { taskId, browserUrl, forceMinimized = false } = props;
   const { agent, messages, selectedAgentId } = useAgentContext();
-  const agentId = agent?.agent_id ?? selectedAgentId ?? null;
   const vm = useBrowserStatusBarState(taskId);
   const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(
     vm.readOnly ? null : vm.pendingAuthAssistance,
@@ -116,11 +120,12 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const ui = useBrowserStatusBarUi(
     taskId,
     forceMinimized,
-    agentId,
+    agent?.agent_id ?? selectedAgentId ?? null,
     browserUrl,
     handoffBrowserUrl,
     vm.readOnly,
   );
+  usePhoneFullscreenEntry(taskId, messages, ui, forceMinimized);
   const sharedViewProps = {
     browserUrl: ui.browserUrl,
     browserLive: ui.isLive,
@@ -128,26 +133,26 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
     browserSessionMetadata: vm.browserSessionMetadata,
   };
   const isWaitingForAuthAssistance = vm.pendingAuthAssistance !== null && !ui.hasReconnected;
-  const isDisconnected = vm.isDisconnected && !ui.hasReconnected;
+
   const controlState = presentedControlState(
     ui.isUserControlling,
-    isDisconnected,
+    vm.isDisconnected && !ui.hasReconnected,
     isWaitingForAuthAssistance,
   );
   const handleControlAction = controlActionFor(ui, vm.pendingAuthAssistance, controlState, {
-    isDisconnected,
+    isDisconnected: vm.isDisconnected && !ui.hasReconnected,
   });
 
   if (ui.isFullscreen) {
     return (
       <BrowserStatusBarFullscreen
         readOnly={vm.readOnly}
-        agentId={agentId}
+        agentId={agent?.agent_id ?? selectedAgentId ?? null}
         taskId={taskId}
         {...sharedViewProps}
         messages={messages}
         stepProgress={vm.stepProgress}
-        isDisconnected={isDisconnected}
+        isDisconnected={vm.isDisconnected && !ui.hasReconnected}
         isWaitingForAuthAssistance={isWaitingForAuthAssistance}
         authAssistanceRequest={vm.pendingAuthAssistance?.request}
         isResuming={ui.isResuming}
@@ -178,7 +183,7 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
     <BrowserStatusBarExpanded
       taskId={taskId}
       {...sharedViewProps}
-      isDisconnected={isDisconnected}
+      isDisconnected={vm.isDisconnected && !ui.hasReconnected}
       isWaitingForAuthAssistance={isWaitingForAuthAssistance}
       stepProgress={vm.stepProgress}
       onThumbnailClick={ui.onThumbnailClick}

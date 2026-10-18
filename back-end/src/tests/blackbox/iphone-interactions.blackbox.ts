@@ -12,6 +12,7 @@ async function main() {
   const h = await Harness.start();
   const contexts: string[] = [];
   let passed = 0;
+  let total = 0;
   const task = async () => {
     const f = await h.fixture();
     await h.request(f.userId, `/leases/${f.leaseId}/release`, { method: 'POST' });
@@ -25,6 +26,7 @@ async function main() {
     return { ...f, taskId: browser.id };
   };
   const check = async (name: string, run: () => Promise<void>) => {
+    total++;
     await run();
     passed++;
     process.stdout.write(`PASS ${name}\n`);
@@ -211,6 +213,37 @@ async function main() {
         assert.equal(bad.status, 400);
       }
     });
+    await check(
+      'live frames never expose transient operation IDs or change task cursor history',
+      async () => {
+        const fresh = await task();
+        const ensured = await ensure(fresh.userId, fresh.taskId, randomUUID());
+        const id = ensured.data.lease!.id;
+        const held = h.holdFrame();
+        const frame = h.request(fresh.userId, `/leases/${id}/frame`, { actor: 'user' });
+        try {
+          await held.entered;
+          const state = await h.request(fresh.userId, `/interactions/${fresh.taskId}`);
+          assert.equal(
+            state.data.pendingOperation,
+            null,
+            'Ephemeral frame escaped as a recoverable operation'
+          );
+          assert.equal(state.data.lastOperation, null);
+          assert.equal(state.data.cursor, 0);
+          held.release();
+          assert.equal((await frame).status, 200);
+          assert.equal(
+            await prisma.iPhoneOperation.count({ where: { leaseId: id } }),
+            0,
+            'Frame journal rows accumulated'
+          );
+        } finally {
+          held.release();
+          await frame;
+        }
+      }
+    );
     await check('later observations retain the receipt for an uncertain mutation', async () => {
       const fresh = await task();
       const ensured = await ensure(fresh.userId, fresh.taskId, randomUUID());
@@ -241,7 +274,7 @@ async function main() {
     await h.close();
     await prisma.$disconnect();
   }
-  process.stdout.write(`Passed ${passed}/12 iphone interaction cases\n`);
+  process.stdout.write(`Passed ${passed}/${total} iphone interaction cases\n`);
 }
 main().catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.stack : 'Interaction test failed'}\n`);

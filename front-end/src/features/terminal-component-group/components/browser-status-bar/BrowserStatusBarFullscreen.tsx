@@ -19,6 +19,10 @@
  * [USER_CONTROL] -> interactive iframe + Hand back control on both form factors
  * [READ_ONLY] -> passive iframe and task progress, no agent control actions
  *
+ * PHONE STATE: owned phone activity -> WAITING|ACTIVE overlay above the mounted iframe;
+ * release -> same iframe. Phone owns controls while visible; mobile pane fits portrait
+ * above always-visible progress. READ_ONLY -> frames only, no control/input.
+ *
  * VIEWPORT STATE:
  * [DESKTOP|MOBILE] -> letterbox the 1280x800 content viewport into the leftover
  * pane (Steel chrome is clipped in LiveViewFrame). Never resize the remote
@@ -28,7 +32,6 @@
 
 import { createPortal } from 'react-dom';
 import type { MouseEvent, ReactNode } from 'react';
-import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-mobile';
 import BrowserBorderGlow from '../BrowserBorderGlow';
@@ -36,6 +39,9 @@ import { resolveBrowserBorderGlowTone } from '../browserBorderGlow/resolveTone';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
 import { resolveBrowserControlState, type BrowserControlState } from '../browserControlState';
 import type { Message } from '../../hooks';
+import { phoneActivityKey } from './phone/phoneOverlayState';
+import { usePhoneOverlay, type PhoneOverlayModel } from './phone/usePhoneOverlay';
+import { PhoneOverlay } from './phone/PhoneOverlay';
 import {
   DisconnectedOverlay,
   MobileBrowserControlFooter,
@@ -43,7 +49,11 @@ import {
   WaitingForAssistanceChip,
 } from './BrowserFullscreenOverlays';
 import { TaskProgressSidebar } from './BrowserTaskProgressPanel';
-import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
+import {
+  DesktopFrameHeader,
+  MobileFrameHeader,
+  type PhoneHeaderStatus,
+} from './BrowserFullscreenHeaders';
 import { LiveViewFrame } from './BrowserLiveViewFrame';
 import type {
   BrowserSessionMetadata,
@@ -73,78 +83,6 @@ interface FullscreenProps {
   onResume: () => void;
 }
 
-function ActiveIndicator({
-  controlState,
-  isUserControlling,
-}: {
-  controlState: BrowserControlState;
-  isUserControlling: boolean;
-}) {
-  const label = isUserControlling
-    ? 'You have control'
-    : controlState === 'disconnected'
-      ? 'Disconnected'
-      : controlState === 'waiting'
-        ? 'Waiting for assistance'
-        : 'Active';
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <div
-        className={cn(
-          'h-2 w-2 flex-shrink-0 rounded-full',
-          controlState === 'active' ? 'bg-green-500 animate-pulse' : 'bg-yellow-500',
-        )}
-      />
-      <span className="truncate text-sm font-medium">{label}</span>
-    </div>
-  );
-}
-
-/** Desktop frame header: Active state + proxy chip + close. */
-function DesktopFrameHeader({
-  controlState,
-  browserSessionMetadata,
-  onClose,
-  isUserControlling,
-}: {
-  controlState: BrowserControlState;
-  browserSessionMetadata: BrowserSessionMetadata | null;
-  onClose: (e: MouseEvent) => void;
-  isUserControlling: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between border-b border-border p-4">
-      <ActiveIndicator controlState={controlState} isUserControlling={isUserControlling} />
-      <div className="flex items-center gap-2">
-        <BrowserProxyLocationChip metadata={browserSessionMetadata} tooltipPosition="bottom" />
-        <button onClick={onClose} className="rounded p-2 transition-colors hover:bg-muted">
-          <X className="h-5 w-5 text-muted-foreground" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** Fixed mobile header: Active state + close. */
-function MobileFrameHeader({
-  controlState,
-  onClose,
-  isUserControlling,
-}: {
-  controlState: BrowserControlState;
-  onClose: (e: MouseEvent) => void;
-  isUserControlling: boolean;
-}) {
-  return (
-    <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border p-3">
-      <ActiveIndicator controlState={controlState} isUserControlling={isUserControlling} />
-      <button onClick={onClose} className="rounded p-1.5 transition-colors hover:bg-muted">
-        <X className="h-5 w-5 text-muted-foreground" />
-      </button>
-    </div>
-  );
-}
-
 type PaneProps = Pick<
   FullscreenProps,
   | 'agentId'
@@ -160,6 +98,7 @@ type PaneProps = Pick<
 > & {
   isMobile: boolean;
   controlState: BrowserControlState;
+  phone: PhoneOverlayModel;
 };
 
 /** Live-iframe pane + agent overlays. No header or redundant helper footer. */
@@ -176,6 +115,7 @@ function BrowserPaneBody({
   isMobile,
   onResume,
   readOnly = false,
+  phone,
 }: PaneProps) {
   const glowTone = resolveBrowserBorderGlowTone(messages, taskId);
   return (
@@ -183,23 +123,29 @@ function BrowserPaneBody({
       url={browserUrl}
       live={browserLive}
       title="Browser"
-      interactive={!readOnly && (isUserControlling || controlState === 'waiting')}
+      interactive={!phone.visible && !readOnly && (isUserControlling || controlState === 'waiting')}
       iframeKey={`${taskId}:${browserUrl}`}
-      className={cn('flex min-h-0 flex-col bg-white', isMobile ? 'w-full flex-none' : 'flex-1')}
-      style={isMobile ? { aspectRatio: '8 / 5' } : undefined}
+      className={cn(
+        'flex min-h-0 flex-col bg-white',
+        isMobile && !phone.visible ? 'w-full flex-none' : 'flex-1',
+      )}
+      style={isMobile && !phone.visible ? { aspectRatio: '8 / 5' } : undefined}
+      overlay={<PhoneOverlay phone={phone} readOnly={readOnly} />}
     >
-      {controlState === 'active' && !isUserControlling && <BrowserBorderGlow tone={glowTone} />}
-      {controlState === 'active' && !isUserControlling && (
+      {!phone.visible && controlState === 'active' && !isUserControlling && (
+        <BrowserBorderGlow tone={glowTone} />
+      )}
+      {!phone.visible && controlState === 'active' && !isUserControlling && (
         <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
       )}
-      {!readOnly && !isMobile && controlState === 'active' && (
+      {!phone.visible && !readOnly && !isMobile && controlState === 'active' && (
         <TakeControlChip
           onResume={onResume}
           isResuming={isResuming}
           isUserControlling={isUserControlling}
         />
       )}
-      {!readOnly && !isMobile && controlState === 'waiting' && (
+      {!phone.visible && !readOnly && !isMobile && controlState === 'waiting' && (
         <WaitingForAssistanceChip
           onResume={onResume}
           isResuming={isResuming}
@@ -207,7 +153,7 @@ function BrowserPaneBody({
           isMobile={isMobile}
         />
       )}
-      {!readOnly && !isMobile && controlState === 'disconnected' && (
+      {!phone.visible && !readOnly && !isMobile && controlState === 'disconnected' && (
         <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />
       )}
     </LiveViewFrame>
@@ -219,22 +165,27 @@ function MobileFullscreen({
   controlState,
   pane,
   progressPanel,
+  phoneStatus,
+  phoneVisible,
 }: {
   props: FullscreenProps;
   controlState: BrowserControlState;
   pane: ReactNode;
   progressPanel: ReactNode;
+  phoneVisible: boolean;
+  phoneStatus?: PhoneHeaderStatus;
 }) {
   return createPortal(
     <div className="fixed inset-0 z-50 flex flex-col bg-background">
       <MobileFrameHeader
+        phoneStatus={phoneStatus}
         controlState={controlState}
         isUserControlling={props.isUserControlling}
         onClose={props.onClose}
       />
       <div className="flex min-h-0 flex-1 flex-col">
         {pane}
-        {!props.readOnly && (
+        {!phoneVisible && !props.readOnly && (
           <MobileBrowserControlFooter
             onResume={props.onResume}
             isResuming={props.isResuming}
@@ -243,7 +194,14 @@ function MobileFullscreen({
             isUserControlling={props.isUserControlling}
           />
         )}
-        <div className="min-h-0 flex-1 border-t border-border bg-background">{progressPanel}</div>
+        <div
+          className={cn(
+            'min-h-0 border-t border-border bg-background',
+            phoneVisible ? 'h-[80px] flex-none' : 'flex-1',
+          )}
+        >
+          {progressPanel}
+        </div>
       </div>
     </div>,
     document.body,
@@ -255,17 +213,20 @@ function DesktopFullscreen({
   controlState,
   pane,
   progressPanel,
+  phoneStatus,
 }: {
   props: FullscreenProps;
   controlState: BrowserControlState;
   pane: ReactNode;
   progressPanel: ReactNode;
+  phoneStatus?: PhoneHeaderStatus;
 }) {
   return createPortal(
     <div className="fixed inset-0 z-50 flex flex-row bg-background">
       {progressPanel}
       <div className="flex min-w-0 flex-1 flex-col">
         <DesktopFrameHeader
+          phoneStatus={phoneStatus}
           controlState={controlState}
           browserSessionMetadata={props.browserSessionMetadata}
           isUserControlling={props.isUserControlling}
@@ -280,25 +241,28 @@ function DesktopFullscreen({
 
 export function BrowserStatusBarFullscreen(props: FullscreenProps) {
   const isMobile = useIsMobile();
+  const phone = usePhoneOverlay(
+    props.taskId,
+    phoneActivityKey(props.messages, props.taskId),
+    props.readOnly ?? false,
+  );
+  const phoneStatus = phone.visible
+    ? {
+        label:
+          phone.snapshot.lease.status === 'WAITING'
+            ? 'Waiting for phone'
+            : phone.snapshot.lease.controlOwner === 'user'
+              ? 'You have phone control'
+              : 'Phone active',
+        active: phone.snapshot.lease.status === 'ACTIVE',
+      }
+    : undefined;
   // Confirmed user ownership outranks stale disconnect/auth-assistance signals.
   // Those signals can remain in the message stream while the user is driving.
   const controlState = props.isUserControlling ? 'active' : resolveBrowserControlState(props);
 
   const pane = (
-    <BrowserPaneBody
-      readOnly={props.readOnly}
-      agentId={props.agentId}
-      taskId={props.taskId}
-      browserUrl={props.browserUrl}
-      browserLive={props.browserLive}
-      messages={props.messages}
-      controlState={controlState}
-      authAssistanceRequest={props.authAssistanceRequest}
-      isResuming={props.isResuming}
-      isUserControlling={props.isUserControlling}
-      isMobile={isMobile}
-      onResume={props.onResume}
-    />
+    <BrowserPaneBody {...props} phone={phone} controlState={controlState} isMobile={isMobile} />
   );
 
   const progressPanel = (
@@ -314,6 +278,8 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
 
   return isMobile ? (
     <MobileFullscreen
+      phoneStatus={phoneStatus}
+      phoneVisible={phone.visible}
       props={props}
       controlState={controlState}
       pane={pane}
@@ -321,6 +287,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
     />
   ) : (
     <DesktopFullscreen
+      phoneStatus={phoneStatus}
       props={props}
       controlState={controlState}
       pane={pane}

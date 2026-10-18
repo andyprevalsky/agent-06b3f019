@@ -3,6 +3,7 @@
 import { databaseNow } from './repo.clock';
 export { databaseNow } from './repo.clock';
 import { closeLease, reconcile } from './repo.lifecycle';
+import type { PhoneActor } from './types.operations';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import {
   permitted,
@@ -161,7 +162,8 @@ export async function mutate(
   lease: IPhoneLease,
   action: LeaseAction,
   input: ActionInput,
-  now: Date
+  now: Date,
+  actor: PhoneActor = 'agent'
 ) {
   if (action === 'read') return null;
   if (action === 'release') {
@@ -172,15 +174,29 @@ export async function mutate(
   if (lease.status !== 'ACTIVE') return new IPhoneError(409, 'Lease is not active');
   if (lease.releaseRequestedAt !== null)
     return new IPhoneError(409, 'Phone interaction is finishing');
+  if (
+    action === 'control' &&
+    actor === 'agent' &&
+    lease.controlOwner === 'user' &&
+    input.mode === 'agent'
+  )
+    return new IPhoneError(409, 'Only the user can return phone control');
   if (action === 'control' || action === 'awaiting-auth') {
     const executing = await tx.iPhoneOperation.findFirst({
-      where: { leaseId: lease.id, activeDeviceId: { not: null } },
+      where: {
+        leaseId: lease.id,
+        OR: [{ activeDeviceId: { not: null } }, { state: { in: ['CONNECTING', 'RUNNING'] } }],
+      },
       select: { id: true },
     });
     if (executing !== null)
       return new IPhoneError(409, 'A phone command is still running or unconfirmed');
   }
-  if (lease.attentionRequestId === null && deadlineElapsed(lease.leaseExpiresAt, now)) {
+  if (
+    lease.controlOwner !== 'user' &&
+    lease.attentionRequestId === null &&
+    deadlineElapsed(lease.leaseExpiresAt, now)
+  ) {
     await closeLease(tx, lease.id, 'EXPIRED');
     return new IPhoneError(409, 'Lease expired');
   }
@@ -206,9 +222,10 @@ export async function mutate(
     await tx.iPhoneLease.update({
       where: { id: lease.id },
       data: {
-        ...(action === 'heartbeat'
+        ...(action === 'heartbeat' || (action === 'control' && input.mode === 'agent')
           ? { leaseExpiresAt: new Date(now.getTime() + LEASE_TIMEOUT_MS) }
-          : { controlOwner: input.mode }),
+          : {}),
+        ...(action === 'control' ? { controlOwner: input.mode } : {}),
         revision: { increment: 1 },
       },
     });
@@ -226,6 +243,7 @@ export async function view(tx: Transaction, id: string) {
             deviceId: lease.deviceId,
             status: 'WAITING',
             ticket: { lt: lease.ticket },
+            agent: { deletedAt: null, status: { notIn: [...TERMINAL_AGENT_STATUSES] } },
           },
         }))
       : lease.status === 'ACTIVE'

@@ -94,6 +94,19 @@ function executePhoneOperation(
   );
 }
 
+function leaseAction(action: LeaseAction, clientFactory: PhoneClientFactory): Handler {
+  return (req, userId) => {
+    return service.act(
+      userId,
+      req.params.id,
+      action,
+      actionInput(action, req.body),
+      clientFactory,
+      req.isInternal === true ? 'agent' : 'user'
+    );
+  };
+}
+
 export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory } = {}) {
   const router = Router();
   const clientFactory = options.phoneClient ?? operations.defaultPhoneClient;
@@ -127,6 +140,8 @@ export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory }
   router.post(
     '/leases',
     handle((req, userId) => {
+      if (req.isInternal !== true)
+        throw new IPhoneError(403, 'Use the browser-task interaction route');
       const body = bodyRecord(req.body);
       return service.acquire(
         userId,
@@ -146,12 +161,7 @@ export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory }
     handle((req, userId) => service.act(userId, req.params.id, 'read', {}, clientFactory))
   );
   for (const action of ['heartbeat', 'release', 'awaiting-auth', 'control'] as const) {
-    router.post(
-      `/leases/:id/${action}`,
-      handle((req, userId) =>
-        service.act(userId, req.params.id, action, actionInput(action, req.body), clientFactory)
-      )
-    );
+    router.post(`/leases/:id/${action}`, handle(leaseAction(action, clientFactory)));
   }
   router.post(
     '/leases/:id/operations',
@@ -165,7 +175,9 @@ export function createIPhoneRouter(options: { phoneClient?: PhoneClientFactory }
   );
   router.get(
     '/leases/:id/frame',
-    handle((req, userId) => operations.phoneFrame(userId, req.params.id, clientFactory))
+    handle((req, userId) =>
+      operations.phoneFrame(userId, req.params.id, clientFactory, req.isInternal !== true)
+    )
   );
   return router;
 }

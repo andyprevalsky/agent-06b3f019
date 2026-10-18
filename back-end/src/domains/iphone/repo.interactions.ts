@@ -45,7 +45,8 @@ async function interactionView(tx: Transaction, leaseId: string | null) {
   return {
     ...view,
     lastOperation,
-    pendingOperation: pending?.leaseId === leaseId ? pending : null,
+    pendingOperation:
+      pending?.leaseId === leaseId && pending.operation !== 'screen.frame' ? pending : null,
   };
 }
 

@@ -1,13 +1,12 @@
 /** Per-device command slot. Provider calls happen only after this transaction commits. */
-import { createHash } from '../../providers/crypto';
 import { sealPhoneValue, phoneCommandHash } from '../../providers/phoneHarnessCredentials';
-import type { PhoneHarnessSession } from '../../providers/phoneHarness';
 import * as leases from './repo';
 import { LEASE_TIMEOUT_MS } from './config';
 import { IPhoneError, type Transaction } from './types';
 import type { CommandClaim, PhoneActor, PhoneCommand } from './types.operations';
 
 const READ_OPERATIONS = new Set([
+  'screen.frame',
   'screen.text',
   'screen.text_pixels',
   'screen.bounds',
@@ -28,7 +27,9 @@ export async function claimCommand(
   userId: string,
   leaseId: string,
   input: PhoneCommand,
-  actor: PhoneActor
+  actor: PhoneActor,
+  observation = false,
+  taskBound = false
 ): Promise<CommandClaim> {
   const result = await leases.transaction(async (tx) => {
     if ((await leases.readLease(tx, leaseId, userId)) === null)
@@ -38,6 +39,17 @@ export async function claimCommand(
     const lease = await leases.readLease(tx, leaseId, userId);
     if (lease === null || lease.status !== 'ACTIVE' || lease.releaseRequestedAt !== null)
       return new IPhoneError(409, 'The phone is not reserved for this interaction');
+    if (taskBound) {
+      const task =
+        lease.browserTaskId === null
+          ? null
+          : await tx.browserSession.findFirst({
+              where: { id: lease.browserTaskId, agentId: lease.agentId, context: { userId } },
+              select: { id: true },
+            });
+      if (task === null) return new IPhoneError(404, 'Browser phone interaction not found');
+    }
+    if (observation) actor = lease.controlOwner === 'user' ? 'user' : 'agent';
     if (lease.controlOwner !== actor)
       return new IPhoneError(409, 'Phone control belongs to the other participant');
     const inputHash = phoneCommandHash(input.operation, input.args, actor);
@@ -47,7 +59,7 @@ export async function claimCommand(
     if (existing !== null) {
       if (existing.inputHash !== inputHash)
         return new IPhoneError(409, 'Operation identity cannot be reused with different input');
-      return { device, lease, command: existing, execute: existing.state === 'CONNECTING' };
+      return { device, lease, command: existing, execute: false };
     }
     if (input.expectedCursor !== undefined && input.expectedCursor !== lease.actionCursor)
       return new IPhoneError(
@@ -57,6 +69,11 @@ export async function claimCommand(
     const active = await tx.iPhoneOperation.findUnique({ where: { activeDeviceId: device.id } });
     if (active !== null && !isPhoneRead(input.operation))
       return new IPhoneError(409, 'A previous phone command is still running or unconfirmed');
+    const inFlight = await tx.iPhoneOperation.findFirst({
+      where: { deviceId: device.id, state: { in: ['CONNECTING', 'RUNNING'] } },
+      select: { id: true },
+    });
+    if (inFlight !== null) return new IPhoneError(409, 'A phone request is still running');
     const now = await leases.databaseNow(tx);
     const command = await tx.iPhoneOperation.create({
       data: {
@@ -66,18 +83,19 @@ export async function claimCommand(
         operation: input.operation,
         actor,
         inputHash,
-        cursor: lease.actionCursor + 1,
+        cursor: lease.actionCursor + (observation ? 0 : 1),
         requestEncrypted: sealPhoneValue({ operation: input.operation, args: input.args, actor }),
         activeDeviceId: active === null ? device.id : null,
         providerEpoch: device.providerEpoch,
         deadlineAt: new Date(now.getTime() + 300_000),
       },
     });
-    await tx.iPhoneLease.update({
-      where: { id: leaseId },
-      data: { actionCursor: { increment: 1 }, lastOperationId: command.id },
-    });
-    return { device, lease, command, execute: true };
+    if (!observation)
+      await tx.iPhoneLease.update({
+        where: { id: leaseId },
+        data: { actionCursor: { increment: 1 }, lastOperationId: command.id },
+      });
+    return { device, lease, command, execute: true, taskBound };
   });
   if (result instanceof IPhoneError) throw result;
   return result;
@@ -86,8 +104,7 @@ export async function claimCommand(
 /** Exactly one request may cross from connection recovery into physical execution. */
 export async function beginExecution(claim: CommandClaim): Promise<boolean> {
   return leases.transaction(async (tx) => {
-    await rawLock(tx, claim.device.id);
-    const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: claim.device.id } });
+    const { device, enabled } = await leases.lockedDevice(tx, claim.lease.userId);
     const lease = await tx.iPhoneLease.findUnique({ where: { id: claim.lease.id } });
     if (
       lease === null ||
@@ -95,8 +112,7 @@ export async function beginExecution(claim: CommandClaim): Promise<boolean> {
       lease.releaseRequestedAt !== null ||
       lease.controlOwner !== claim.command.actor ||
       device.providerState === 'CLOSING' ||
-      !device.enabled ||
-      !(await leases.accountPermitted(tx, lease.userId))
+      !enabled
     )
       return false;
     const changed = await tx.iPhoneOperation.updateMany({
@@ -150,37 +166,6 @@ export async function ownedCommand(userId: string, leaseId: string, operationId:
   });
 }
 
-export async function reserveSession(deviceId: string) {
-  return leases.transaction(async (tx) => {
-    await rawLock(tx, deviceId);
-    let device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: deviceId } });
-    if (device.providerStartKey === null) {
-      const key = createHash('sha256').update(`${device.id}:${device.providerEpoch}`).digest('hex');
-      device = await tx.iPhoneDevice.update({
-        where: { id: deviceId },
-        data: { providerStartKey: key, providerState: 'STARTING' },
-      });
-    }
-    return device;
-  });
-}
-
-export async function saveSession(deviceId: string, key: string, session: PhoneHarnessSession) {
-  const encrypted = sealPhoneValue(session);
-  return leases.transaction(async (tx) => {
-    await rawLock(tx, deviceId);
-    const changed = await tx.iPhoneDevice.updateMany({
-      where: { id: deviceId, providerStartKey: key, providerState: { not: 'CLOSING' } },
-      data: {
-        providerSessionId: session.id,
-        providerSessionEncrypted: encrypted,
-        providerState: session.state === 'ready' ? 'READY' : 'STARTING',
-      },
-    });
-    return changed.count === 1;
-  });
-}
-
 export async function cleanupCandidate(userId: string) {
   return leases.transaction(async (tx) => {
     const { device } = await leases.lockedDevice(tx, userId);
@@ -199,7 +184,7 @@ export async function cleanupCandidate(userId: string) {
         where: { deviceId: device.id, state: { in: ['CONNECTING', 'RUNNING'] } },
         select: { id: true },
       });
-      if (owner !== null || inFlight !== null) return null;
+      if ((owner !== null && device.providerState !== 'CLOSING') || inFlight !== null) return null;
       await tx.iPhoneDevice.update({
         where: { id: device.id },
         data: { providerState: 'CLOSING' },
@@ -208,60 +193,14 @@ export async function cleanupCandidate(userId: string) {
     }
     const lease = await tx.iPhoneLease.findUnique({ where: { id: operation.leaseId } });
     const now = await leases.databaseNow(tx);
-    if (lease?.releaseRequestedAt === null && operation.deadlineAt > now) return null;
+    if (
+      device.providerState !== 'CLOSING' &&
+      lease?.releaseRequestedAt === null &&
+      operation.deadlineAt > now
+    )
+      return null;
     await tx.iPhoneDevice.update({ where: { id: device.id }, data: { providerState: 'CLOSING' } });
     return { device, operation, lease };
-  });
-}
-
-export async function confirmCleanup(deviceId: string, key: string, retainedCommandId?: string) {
-  return leases.transaction(async (tx) => {
-    await rawLock(tx, deviceId);
-    const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: deviceId } });
-    if (device.providerStartKey !== key) return false;
-    await tx.iPhoneOperation.updateMany({
-      where: {
-        deviceId,
-        activeDeviceId: deviceId,
-        ...(retainedCommandId === undefined ? {} : { id: { not: retainedCommandId } }),
-      },
-      data: {
-        state: 'UNKNOWN',
-        activeDeviceId: null,
-        completedAt: await leases.databaseNow(tx),
-        errorCode: 'provider_session_ended',
-      },
-    });
-    await tx.iPhoneDevice.update({
-      where: { id: deviceId },
-      data: {
-        providerState: 'IDLE',
-        providerStartKey: null,
-        providerSessionId: null,
-        providerSessionEncrypted: null,
-        providerEpoch: { increment: 1 },
-      },
-    });
-    if (retainedCommandId !== undefined)
-      await tx.iPhoneOperation.updateMany({
-        where: { id: retainedCommandId, deviceId, state: 'CONNECTING' },
-        data: { providerEpoch: device.providerEpoch + 1 },
-      });
-    return true;
-  });
-}
-
-export async function confirmUnstartedCleanup(deviceId: string, operationId: string) {
-  return leases.transaction(async (tx) => {
-    await rawLock(tx, deviceId);
-    const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: deviceId } });
-    if (device.providerStartKey !== null) return false;
-    await tx.iPhoneOperation.updateMany({
-      where: { id: operationId, deviceId, state: 'CONNECTING' },
-      data: { state: 'FAILED', activeDeviceId: null, errorCode: 'cancelled_before_connection' },
-    });
-    await tx.iPhoneDevice.update({ where: { id: deviceId }, data: { providerState: 'IDLE' } });
-    return true;
   });
 }
 
@@ -273,3 +212,11 @@ export async function deviceExists(userId: string) {
     })
   );
 }
+
+export {
+  reserveSession,
+  saveSession,
+  confirmCleanup,
+  confirmUnstartedCleanup,
+  closeSessionForRefresh,
+} from './repo.session';
