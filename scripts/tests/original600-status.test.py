@@ -22,6 +22,24 @@ def write(path,value):
 
 
 class Status(unittest.TestCase):
+    def test_disabled_stop_policy_preserves_threshold_and_failure_accounting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "status.py"
+            source.write_text(M["REMOTE"])
+            scope = runpy.run_path(str(source))
+        jobs = [dict(job_id=str(i), task="fixture", status="failed" if i < 31 else "running", attempts=[dict(attempt=1, status="failed", finished_at=1, infra_failure=True)] if i < 31 else []) for i in range(600)]
+        summary = dict(total_jobs=600, jobs=jobs)
+        startup = dict(proofs=[dict(job_id="32")], unavailable_jobs=0, inspected_logs=1, bytes_read=0)
+        default = scope["project"](summary, startup)
+        disabled = scope["project"](summary, startup, "disabled")
+        self.assertTrue(default["infra_stop_required"])
+        self.assertFalse(disabled["infra_stop_required"])
+        self.assertTrue(disabled["infra_threshold_breached"])
+        self.assertEqual(disabled["combined_infra_affected_jobs"], 32)
+        self.assertEqual({k: v for k, v in default.items() if k not in ("infra_early_stop", "infra_stop_required")}, {k: v for k, v in disabled.items() if k not in ("infra_early_stop", "infra_stop_required")})
+        with self.assertRaises(ValueError):
+            scope["project"](summary, startup, "unknown")
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.root.chmod(0o700)
@@ -74,6 +92,16 @@ class Status(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'source bytes changed'):
             M['bound_source'](self.root,ref,source.name,expected)
 
+
+    def test_status_policy_is_bound_to_config_and_guest_supervisor_identity(self):
+        cfg = json.loads(self.cfg.read_bytes())
+        write(self.cfg, dict(cfg, infra_early_stop="disabled"))
+        value = M["binding"](self.run)
+        self.assertEqual(value["payload"]["infra_early_stop"], "disabled")
+        self.assertEqual(value["payload"]["epoch"], self.epoch)
+        write(self.cfg, dict(cfg, infra_early_stop="unknown"))
+        with self.assertRaisesRegex(ValueError, "early-stop policy"):
+            M["binding"](self.run)
 
     def test_continuation_status_verifies_original_config_and_successor_chain(self):
         original=json.loads(self.cfg.read_bytes())
@@ -142,6 +170,15 @@ class Status(unittest.TestCase):
             self.assertEqual(counts['jobs_with_unknown_terminal_infra'],1)
             self.assertEqual(counts['terminal_attempt_records_with_unknown_infra'],1)
             self.assertFalse(counts['benchmark_success_inferred'])
+            identity_file = repo / '.context/original600-supervisor.fixture.json'
+            original_identity = json.loads(identity_file.read_bytes())
+            write(identity_file, dict(original_identity, infra_early_stop='disabled'))
+            with self.assertRaisesRegex(ValueError, 'early-stop policy mismatch'):
+                scope['guest_status'](payload, repo, 'boot-fixture')
+            disabled = scope['guest_status'](dict(payload, infra_early_stop='disabled'), repo, 'boot-fixture')
+            self.assertEqual(disabled['summary']['infra_early_stop'], 'disabled')
+            self.assertFalse(disabled['summary']['infra_stop_required'])
+            write(identity_file, original_identity)
             for changed in [dict(campaign_id='unrelated'),dict(e2e_started_at_epoch=self.epoch+1),dict(total_jobs=599)]:
                 write(path,dict(summary,**changed))
                 with self.assertRaises(ValueError):scope['guest_status'](payload,repo,'boot-fixture')

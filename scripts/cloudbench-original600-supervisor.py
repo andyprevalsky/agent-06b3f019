@@ -1,4 +1,4 @@
-"""Supervise the original 600-job campaign; stop at 30 unique infrastructure failures."""
+"""Supervise original600 with an explicitly bound infrastructure-stop policy."""
 import fcntl
 import hashlib
 import json
@@ -49,8 +49,10 @@ def fold(summary):
             'cancelled_unique': len(cancelled), 'infra_job_ids': sorted(infra),
             'trigger': len(infra) >= 30, 'records': records}
 
-def should_stop(result, trigger_saved):
-    return result['trigger'] or trigger_saved
+def should_stop(result, trigger_saved, policy='enabled'):
+    if policy not in ('enabled', 'disabled'):
+        raise ValueError('invalid infrastructure early-stop policy')
+    return policy == 'enabled' and (result['trigger'] or trigger_saved)
 
 def birth(pid):
     raw = Path('/proc', str(pid), 'stat').read_text()
@@ -213,9 +215,12 @@ def main():
     campaign = repo/'.context/benchmarks/campaigns'/campaign_id
     if campaign.exists():
         raise ValueError('new campaign destination exists')
+    policy = os.environ.get('CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP', 'enabled')
+    should_stop({'trigger': False}, False, policy)
     env = dict(os.environ, RUN_BENCH_CAMPAIGN_ID=campaign_id)
     destination = repo/'.context/stress200-host'/campaign_id
     destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+    save_once(destination/'infra-early-stop-policy.safe.json', encode(dict(infra_early_stop=policy, source_ref=ref, original_epoch=epoch, task_timeout_seconds=1200, run_timeout_seconds=5400)))
     with owned_parent(args,repo,env,destination,ref,epoch) as (parent,expected_birth):
         if parent.poll() is not None:
             return parent.wait()
@@ -253,7 +258,9 @@ def main():
                     first = next(r for r in result['records'] if r.get('infra_failure') is True and r.get('status') != 'cancelled')
                     print('FIRST_AUTHENTIC_INFRA '+json.dumps({k:first.get(k) for k in ['job_id','task','attempt','log','run_id','task_status']}),flush=True)
                     first_reported = True
-                if should_stop(result, (destination/'first-infra-threshold-trigger.private.json').exists()) and not stopped and parent.poll() is None:
+                if result['trigger'] and not (destination/'infra-threshold-observed.private.json').exists():
+                    save_once(destination/'infra-threshold-observed.private.json', encode(dict(infra_early_stop=policy, summary_sha256=hashlib.sha256(raw).hexdigest(), original_epoch=epoch, observed_epoch=time.time(), **result)))
+                if should_stop(result, (destination/'first-infra-threshold-trigger.private.json').exists(), policy) and not stopped and parent.poll() is None:
                     trigger = {'source_ref':ref,'parent_pid':parent.pid,'parent_birth':expected_birth,
                                'original_epoch':epoch,'original_deadline':original_deadline,
                                'summary_sha256':hashlib.sha256(raw).hexdigest(),

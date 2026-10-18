@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed 30/600 operator threshold; no provider access."""
+"""Original600 threshold accounting and explicit early-stop policy; no provider."""
 import copy, json, os, runpy, signal, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -85,6 +85,121 @@ while True:time.sleep(.01)
     for child in children:
      if child.poll()is None:child.terminate();child.wait(timeout=5)
     for sig,handler in handlers.items():signal.signal(sig,handler)
+ def test_explicit_disabled_policy_runs_past_threshold_without_changing_counts(self):
+     for policy in ("disabled", "enabled"):
+         with self.subTest(policy=policy), tempfile.TemporaryDirectory() as name:
+             repo = Path(name)
+             (repo / "agents").mkdir()
+             tasks_path = Path(__file__).parent / "fixtures/original600-tasks.json"
+             tasks = json.loads(tasks_path.read_bytes())
+             epoch = time.time()
+             ref = "a" * 40
+             script = repo / "run-bench-campaign.py"
+             script.write_text(
+                 "import fcntl,signal,sys,time\nfrom pathlib import Path\np=Path(sys.argv[1]);f=(p/'startup-cohorts/parent.lock').open('w');fcntl.flock(f,fcntl.LOCK_EX)\ndef done(*a):\n (p/'ending').write_text('term');sys.exit(7)\nsignal.signal(signal.SIGTERM,done);(p/'ready').write_text('ready');time.sleep(.6);(p/'ending').write_text('natural')\n"
+             )
+             original_popen = subprocess.Popen
+             children = []
+             campaigns = []
+
+             def spawn(*unused, **kwargs):
+                 cid = kwargs["env"]["RUN_BENCH_CAMPAIGN_ID"]
+                 campaign = repo / ".context/benchmarks/campaigns" / cid
+                 (campaign / "startup-cohorts/c001").mkdir(parents=True)
+                 value = summary(30)
+                 value.update(campaign_id=cid, e2e_started_at_epoch=epoch)
+                 for job, task in zip(value["jobs"], [t for t in tasks for unused in (1, 2, 3)]):
+                     job["task"] = task
+                 (campaign / "summary.json").write_text(json.dumps(value))
+                 (campaign / "startup-cohorts/c001/manifest.json").write_text(
+                     json.dumps(
+                         dict(
+                             cohort_id="c001",
+                             jobs={j["job_id"]: None for j in value["jobs"]},
+                             e2e_deadline_monotonic=time.monotonic() + 5400,
+                         )
+                     )
+                 )
+                 child = original_popen([sys.executable, str(script), str(campaign)], cwd=repo / "agents")
+                 children.append(child)
+                 campaigns.append(campaign)
+                 end = time.monotonic() + 5
+                 while not (campaign / "ready").exists() and time.monotonic() < end:
+                     time.sleep(0.01)
+                 return child
+
+             command = [
+                 "operator",
+                 str(epoch),
+                 "bash",
+                 "scripts/run-bench",
+                 "--concurrency",
+                 "600",
+                 "-k",
+                 "3",
+                 "--retry-infra",
+                 "1",
+                 "--timeout",
+                 "1200",
+                 "--e2e-timeout",
+                 "5400",
+                 "--e2e-started-at",
+                 str(epoch),
+                 "--ref",
+                 "570830dbf17635e13d16a6f03b4d705f6b6443b1",
+                 "--strict-barrier",
+                 *tasks,
+             ]
+             env = dict(
+                 REVIEWED_OPERATOR_ROOT=str(repo),
+                 REVIEWED_OPERATOR_SOURCE_REF=ref,
+                 REVIEWED_OPERATOR_TASKS=str(tasks_path),
+                 REVIEWED_OPERATOR_TASKS_SHA256=__import__("hashlib").sha256(tasks_path.read_bytes()).hexdigest(),
+                 CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP=policy,
+             )
+             handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+             try:
+                 with (
+                     patch.dict(os.environ, env),
+                     patch.object(sys, "argv", command),
+                     patch.object(subprocess, "Popen", side_effect=spawn),
+                     patch.object(subprocess, "check_output", return_value=ref + "\n"),
+                 ):
+                     result = S["main"]()
+                 self.assertEqual(result, 0 if policy == "disabled" else 7)
+                 self.assertEqual(
+                     (campaigns[0] / "ending").read_text(), "natural" if policy == "disabled" else "term"
+                 )
+                 destination = next((repo / ".context/stress200-host").iterdir())
+                 self.assertEqual(
+                     json.loads((destination / "infra-threshold-observed.private.json").read_bytes())["infra_true"],
+                     30,
+                 )
+                 self.assertEqual(
+                     (destination / "infra-threshold-parent-term.safe.json").exists(), policy == "enabled"
+                 )
+                 self.assertEqual(
+                     json.loads((destination / "infra-early-stop-policy.safe.json").read_bytes())[
+                         "infra_early_stop"
+                     ],
+                     policy,
+                 )
+             finally:
+                 for child in children:
+                     if child.poll() is None:
+                         child.terminate()
+                         child.wait(timeout=5)
+                 for sig, handler in handlers.items():
+                     signal.signal(sig, handler)
+
+ def test_disabled_policy_does_not_stop_from_a_saved_trigger(self):
+     result = S["fold"](summary(30))
+     self.assertTrue(S["should_stop"](result, True))
+     self.assertFalse(S["should_stop"](result, True, "disabled"))
+     for invalid in ("", "false", False, None):
+         with self.assertRaises(ValueError):
+             S["should_stop"](result, False, invalid)
+
  def test_term_during_popen_is_forwarded_after_birth(self):
   with tempfile.TemporaryDirectory()as d:
    root=Path(d);done=root/'cleaned';ready=root/'ready';children=[];original_popen=subprocess.Popen

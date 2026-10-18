@@ -90,8 +90,10 @@ for item in v['remote_files']:
  path=root/relative;assert path.parent.resolve()==root/'.git'
  raw=decode_remote_file(item)
  save(path,raw)
-tasks=identity.with_suffix('.tasks.json');save(tasks,(json.dumps(v['tasks'],sort_keys=True)+'\n').encode());env=dict(os.environ,**v['remote_env']);env.update(REVIEWED_OPERATOR_ROOT=str(root),REVIEWED_OPERATOR_SOURCE_REF=v['source_ref'],REVIEWED_OPERATOR_TASKS=str(tasks),REVIEWED_OPERATOR_TASKS_SHA256=hashlib.sha256(tasks.read_bytes()).hexdigest(),REVIEWED_OPERATOR_IDENTITY_PATH=str(identity))
-row=dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth=birth(os.getpid()),machine=os.environ['FLY_MACHINE_ID'],source_ref=v['source_ref'],epoch=v['epoch'])
+policy=v.get('infra_early_stop','enabled');assert policy in ('enabled','disabled')
+assert v['remote_env'].get('CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP','enabled')==policy
+tasks=identity.with_suffix('.tasks.json');save(tasks,(json.dumps(v['tasks'],sort_keys=True)+'\n').encode());env=dict(os.environ,**v['remote_env']);env.update(REVIEWED_OPERATOR_ROOT=str(root),REVIEWED_OPERATOR_SOURCE_REF=v['source_ref'],REVIEWED_OPERATOR_TASKS=str(tasks),REVIEWED_OPERATOR_TASKS_SHA256=hashlib.sha256(tasks.read_bytes()).hexdigest(),REVIEWED_OPERATOR_IDENTITY_PATH=str(identity),CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP=policy)
+row=dict(schema='original600-supervisor-identity-v1',pid=os.getpid(),birth=birth(os.getpid()),machine=os.environ['FLY_MACHINE_ID'],source_ref=v['source_ref'],epoch=v['epoch'],infra_early_stop=policy)
 assert row['pid']>1;save(identity,(json.dumps(row,sort_keys=True)+'\n').encode());print('ORIGINAL600_SUPERVISOR '+json.dumps(row),flush=True)
 os.chdir(root);os.execve(sys.executable,[sys.executable,str(script),str(v['epoch']),*v['campaign_argv']],env)
 '''
@@ -418,6 +420,8 @@ def spawn_gate(command,root,env,stream,out,config_path,config_sha,authority):
 def run(config_path,config_sha,out,*,github_token=None):
  os.umask(0o077);raw=read(config_path);need(sha(raw)==config_sha,'root config bytes changed');v=json.loads(raw)
  need(v['schema']=='original600-controller-runner-v1'and v['allowed']is True,'explicit root operation config required')
+ policy = v.get('infra_early_stop', 'enabled')
+ need(policy in ('enabled', 'disabled'), 'invalid infrastructure early-stop policy')
  root=Path(v['source_root']).resolve(strict=True);ref=v['source_ref'];need(re.fullmatch('[0-9a-f]{40}',ref or''),'UNBOUND final source')
  need(subprocess.check_output(['git','--no-replace-objects','-C',str(root),'rev-parse','HEAD'],text=True).strip()==ref,'source HEAD mismatch')
  validate_source_members(root,ref,v['source_files'])
@@ -428,6 +432,8 @@ def run(config_path,config_sha,out,*,github_token=None):
  auth=dict(authority_template,cleanup_owner_pid=os.getpid(),cleanup_owner_birth=birth(os.getpid()),output_directory=str(out/'export'));authority=out/'authority.private.json';save(authority,auth)
  fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME='cloudbench-warm-t10-ord-85a7e2c',CLOUDBENCH_WARM_VOLUME_NAME='cloudbench_t10_ord_85a7e2c',CLOUDBENCH_REGION='ord',CLOUDBENCH_FRESH_TARGET_REGION='iad',CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE='false',CLOUDBENCH_SNAPSHOT_ID='vs_xA6B3617AO9TaeovZ3OKN42',CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
  remote_env=dict(v.get('remote_env',{}))
+ need(remote_env.get('CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP',policy)==policy,'infrastructure early-stop policy differs')
+ remote_env['CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP']=policy
  for key,value in fixed_env.items():need(remote_env.get(key,value)==value,'original warm/launch option changed: '+key);remote_env[key]=value
  files=[]
  for item in v['remote_files']:
@@ -437,7 +443,7 @@ def run(config_path,config_sha,out,*,github_token=None):
  snapshot_name='.git/cloudbench-warm-snapshot-inventory.cloudbench-warm-t10-ord-85a7e2c.json'
  snapshot=next((i for i in files if i['relative_path']==snapshot_name),None);need(snapshot is not None,'authentic selected warm snapshot inventory required')
  remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']
- identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote=dict(source_ref=ref,supervisor_sha256=v['source_files']['cloudbench-original600-supervisor.py'],identity_name=identity_name,tasks=tasks,epoch=epoch,campaign_argv=argv,remote_env=remote_env,remote_files=files)
+ identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote=dict(source_ref=ref,supervisor_sha256=v['source_files']['cloudbench-original600-supervisor.py'],identity_name=identity_name,tasks=tasks,epoch=epoch,campaign_argv=argv,remote_env=remote_env,remote_files=files,infra_early_stop=policy)
  try:payload,payload_sha,remote_command=launch_handoff(out,remote)
  except ValueError as error:
   if str(error)in('compressed launch payload too large for config transport','launch payload exceeds bounded decoded size'):

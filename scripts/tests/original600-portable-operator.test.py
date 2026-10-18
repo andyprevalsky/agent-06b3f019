@@ -860,6 +860,33 @@ class Portable(unittest.TestCase):
             self.assertEqual(expired['expired_reservation_runs'],[str(root/'expired-admission')])
             self.assertEqual({k:v for k,v in expired.items() if k!='expired_reservation_runs'},legacy)
 
+    def test_sealed_disabled_policy_reaches_actual_guest_supervisor_handoff(self):
+        tasks = json.loads((ROOT / 'scripts/tests/fixtures/original600-tasks.json').read_bytes())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'scripts').mkdir()
+            script = root / 'scripts/cloudbench-original600-supervisor.py'
+            script.write_text("import json,os,sys\nfrom pathlib import Path\np=Path(os.environ['REVIEWED_OPERATOR_IDENTITY_PATH'])\n(p.parent/'handoff.json').write_text(json.dumps(dict(policy=os.environ['CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP'],identity=json.loads(p.read_bytes()),argv=sys.argv[1:])))\n")
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'supervisor handoff fixture'], check=True)
+            ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            epoch = time.time()
+            argv = RUNNER['campaign_argv'](tasks, epoch)
+            remote = dict(source_ref=ref, supervisor_sha256=CLI.digest(script.read_bytes()), epoch=epoch, identity_name='original600-supervisor.fixture.json', tasks=tasks, campaign_argv=argv, remote_files=[], remote_env={'CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP': 'disabled'}, infra_early_stop='disabled')
+            path, digest, command = RUNNER['launch_handoff'](root, remote)
+            command[2] = command[2].replace("Path('/tmp/controller-launch-payload.json.gz')", 'Path(' + repr(str(path)) + ')').replace("root=Path('/tmp/gate/repo')", 'root=Path(' + repr(str(root)) + ')')
+            command[3] = str(path)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=10, env=dict(os.environ, FLY_MACHINE_ID='1'*14, CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP='enabled'))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            receipt = json.loads((root / '.context/handoff.json').read_bytes())
+            self.assertEqual(receipt['policy'], 'disabled')
+            self.assertEqual(receipt['identity']['infra_early_stop'], 'disabled')
+            self.assertEqual(receipt['argv'], [str(epoch), *argv])
+            for flag, expected in (('--timeout', '1200'), ('--e2e-timeout', '5400'), ('--concurrency', '600'), ('-k', '3')):
+                self.assertEqual(argv[argv.index(flag)+1], expected)
+            self.assertEqual(json.loads(gzip.decompress(path.read_bytes()))['infra_early_stop'], 'disabled')
+
     def test_large_launch_payload_uses_a_small_hash_bound_file_command(self):
         with tempfile.TemporaryDirectory() as name:
             root=Path(name)
@@ -1015,6 +1042,8 @@ class Portable(unittest.TestCase):
                 CLI.open_admission(parent,directory,dict(binding,source_ref='b'*40),RUNNER,True)
             with self.assertRaisesRegex(ValueError,'source/inputs/archives'):
                 CLI.open_admission(parent,directory,binding,RUNNER,False)
+            with self.assertRaisesRegex(ValueError, 'source/inputs/archives'):
+                CLI.open_admission(parent, directory, dict(binding, infra_early_stop='disabled'), RUNNER, True)
             private(directory/'controller-launch.intent.json',{'existing_owner':True})
             with self.assertRaisesRegex(ValueError,'already bound'):
                 CLI.open_admission(parent,directory,binding,RUNNER,True)
@@ -1609,6 +1638,12 @@ class Portable(unittest.TestCase):
             result = subprocess.run(args, cwd='/', env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)['status'], 'CHECKED_NOT_LAUNCHED')
+            self.assertEqual(json.loads(result.stdout)['infra_early_stop'], 'enabled')
+            disabled = subprocess.run(args + ['--infra-early-stop', 'disabled'], cwd='/', env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(disabled.returncode, 0, disabled.stderr)
+            self.assertEqual(json.loads(disabled.stdout)['infra_early_stop'], 'disabled')
+            invalid = subprocess.run(args + ['--infra-early-stop', 'false'], cwd='/', env=env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(invalid.returncode, 0)
             self.assertFalse(marker.exists())
             self.assertEqual(list(state.iterdir()), [])
             (inputs/'backend-env').write_text('COMPLETE=fixture\n')
@@ -1770,6 +1805,13 @@ class Portable(unittest.TestCase):
             self.assertEqual(argv[argv.index('--timeout')+1], '1200')
             self.assertEqual(argv[argv.index('--e2e-timeout')+1], '5400')
             self.assertEqual(argv[argv.index('--ref')+1], '570830dbf17635e13d16a6f03b4d705f6b6443b1')
+            self.assertNotIn('infra_early_stop', value)
+            args.infra_early_stop = 'disabled'
+            disabled = directory / 'disabled'
+            disabled.mkdir(mode=0o700)
+            config2 = CLI.prepare(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, disabled, dict(cap, proof_path=str(directory/'capacity-proof.private.json')))
+            self.assertEqual(json.loads(config2.read_bytes())['infra_early_stop'], 'disabled')
+            self.assertEqual(json.loads((disabled/'attempt-start.safe.json').read_bytes())['original_deadline_epoch'], json.loads(config2.read_bytes())['started_at_epoch']+5400)
             cap['ended_epoch'] = time.time()-271
             with self.assertRaisesRegex(ValueError, 'expired'):
                 CLI.prepare(args, ROOT, {}, RUNNER, directory, cap)

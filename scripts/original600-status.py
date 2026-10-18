@@ -217,7 +217,8 @@ def startup_evidence(summary,repo,campaign,payload,reader=evidence_bytes):
             except (OSError,ValueError,TypeError,KeyError,UnicodeError,SyntaxError):unavailable.add(ident)
     return dict(proofs=proofs,unavailable_jobs=len(unavailable),inspected_logs=inspected,bytes_read=16*1024*1024-budget[0])
 
-def project(summary,startup=None):
+def project(summary,startup=None,infra_early_stop="enabled"):
+    if infra_early_stop not in ("enabled","disabled"):raise ValueError("invalid infrastructure early-stop policy")
     jobs=summary['jobs']
     if not isinstance(jobs,list) or type(summary.get('total_jobs')) is not int or summary['total_jobs']!=600 or len(jobs)!=600:
         raise ValueError('invalid original600 canonical jobs')
@@ -245,6 +246,7 @@ def project(summary,startup=None):
                terminal_attempt_records_with_unknown_infra=unknown_attempts,
                jobs_with_unknown_terminal_infra=len(unknown_infra-infra),
                observed_jobs=len(jobs),benchmark_success_inferred=False)
+    value.update(infra_early_stop=infra_early_stop,infra_stop_threshold=30,infra_threshold_breached=len(infra)>=30,infra_stop_required=infra_early_stop=='enabled' and len(infra)>=30)
     for key in ('campaign_id','total_jobs','startup_cohorts','finished_at','started_at'):
         if key in summary:value[key]=summary[key]
     if startup is not None:
@@ -252,7 +254,7 @@ def project(summary,startup=None):
         value.update(startup_evidence_schema='original600-startup-failure-v1',
                      original_startup_infra_affected_jobs=len(roots),
                      combined_infra_affected_jobs=len(infra|roots),infra_stop_threshold=30,
-                     infra_stop_required=len(infra|roots)>=30,
+                     infra_threshold_breached=len(infra|roots)>=30,infra_stop_required=infra_early_stop=='enabled' and len(infra|roots)>=30,
                      original_startup_failure_evidence=startup['proofs'],
                      startup_evidence_unavailable_jobs=startup['unavailable_jobs'],
                      startup_evidence_inspected_logs=startup['inspected_logs'],
@@ -271,6 +273,8 @@ def guest_status(payload,repo,boot_id):
     except FileNotFoundError:return dict(base,status='SUPERVISOR_NOT_PUBLISHED')
     if identity.get('schema')!='original600-supervisor-identity-v1' or identity.get('machine')!=payload['machine'] or identity.get('source_ref')!=payload['source_ref'] or identity.get('epoch')!=payload['epoch']:
         raise ValueError('supervisor source/epoch/Machine mismatch')
+    policy=payload.get('infra_early_stop','enabled')
+    if policy not in ('enabled','disabled') or identity.get('infra_early_stop','enabled')!=policy:raise ValueError('supervisor infrastructure early-stop policy mismatch')
     pid=identity['pid']
     if type(pid)is not int or pid<=1:raise ValueError('unsafe supervisor PID')
     namespace=hashlib.sha256((float(payload['epoch']).hex()+':'+boot_id).encode()).hexdigest()[:24]
@@ -281,9 +285,9 @@ def guest_status(payload,repo,boot_id):
     if summary.get('campaign_id')!=campaign or summary.get('e2e_started_at_epoch')!=payload['epoch']:
         raise ValueError('canonical campaign/original epoch mismatch')
     # Validate the canonical shape before using any job-selected evidence paths.
-    project(summary)
+    project(summary,infra_early_stop=policy)
     startup=startup_evidence(summary,repo,path.parent,payload)
-    return dict(base,status='SUMMARY',summary=project(summary,startup))
+    return dict(base,status='SUMMARY',summary=project(summary,startup,policy))
 
 if __name__=='__main__':
     payload=json.loads(base64.b64decode(sys.argv[1]))
@@ -342,6 +346,8 @@ def binding(run,config=None,agents_env=None):
     config=Path(config).absolute() if config else run.parent/'config.private.json'
     cfg=obj(config);auth=obj(run/'authority.private.json')
     need(cfg.get('schema')=='original600-controller-runner-v1' and cfg.get('allowed') is True,'original run config required')
+    policy = cfg.get('infra_early_stop', 'enabled')
+    need(policy in ('enabled', 'disabled'), 'invalid infrastructure early-stop policy')
     ref=cfg['source_ref'];need(re.fullmatch('[0-9a-f]{40}',ref),'exact source ref required')
     need(auth['source_ref']==ref and auth['app']=='navi-whisper-lux-bench','authority/source mismatch')
     need(Path(auth['output_directory'])==run/'export','authority output directory mismatch')
@@ -352,7 +358,7 @@ def binding(run,config=None,agents_env=None):
     terminal=run/'terminal.json'
     if terminal.exists():
         value=obj(terminal);need(value['source_ref']==ref,'terminal source mismatch')
-        return dict(mode='LOCAL_TERMINAL',terminal=value,run_directory=str(run),source_ref=ref)
+        return dict(mode='LOCAL_TERMINAL',terminal=value,run_directory=str(run),source_ref=ref,infra_early_stop=policy)
     identity_path=run/'controller.identity.json'
     if not identity_path.exists():return dict(mode='CONTROLLER_NOT_PUBLISHED',run_directory=str(run),source_ref=ref)
     identity=obj(identity_path);caller=obj(run/'caller.json')
@@ -372,7 +378,7 @@ def binding(run,config=None,agents_env=None):
     need(digest(read(credential))==auth['env_files']['agents']['sha256'],'selected complete agents input changed')
     return dict(mode='REMOTE',app=auth['app'],machine=mid,source_ref=ref,root=root,
                 agents_env=credential,credential_sha256=auth['env_files']['agents']['sha256'],source_files=cfg['source_files'],
-                payload=dict(machine=mid,source_ref=ref,epoch=caller['epoch'],identity_path=caller['identity_path']))
+                payload=dict(machine=mid,source_ref=ref,epoch=caller['epoch'],identity_path=caller['identity_path'],infra_early_stop=policy))
 
 
 def status_command(payload):

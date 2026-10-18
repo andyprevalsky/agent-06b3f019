@@ -479,6 +479,11 @@ def admission_binding(args, runner):
                 inputs={name:dict(path=str(getattr(args,name)),sha256=digest(runner['read'](getattr(args,name)))) for name in names},
                 archive_runs=[str(path.absolute()) for path in (args.archive_run or [])],
                 excluded_machines=sorted(set(args.reuse_exclude_machine)))
+    policy = getattr(args, 'infra_early_stop', 'enabled')
+    if policy not in ('enabled', 'disabled'):
+        raise ValueError('invalid infrastructure early-stop policy')
+    if policy != 'enabled':
+        binding['infra_early_stop'] = policy
     unused = getattr(args, 'unused_reservation_run', ())
     if unused:
         binding['unused_reservation_runs'] = [str(path.absolute()) for path in unused]
@@ -618,6 +623,9 @@ def reserve_reuse_capacity(api, token, args, runner, directory, snapshot_directo
 
 
 def prepare(args, root, pins, runner, directory, cap, started_at=None, host_operator_provenance=None):
+    policy = getattr(args, 'infra_early_stop', 'enabled')
+    if policy not in ('enabled', 'disabled'):
+        raise ValueError('invalid infrastructure early-stop policy')
     if not 0 <= time.time() - cap['ended_epoch'] < 270 or cap['available_slots_conservative'] < cap.get('new_machine_demand',601):
         raise ValueError('capacity proof expired or insufficient')
     read, save = runner['read'], runner['save']
@@ -671,6 +679,8 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
                                 CLOUDBENCH_GATE_TIMEOUT_S='7200', PYTHONDONTWRITEBYTECODE='1'))
     if host_operator_provenance is not None:
         config['host_operator_provenance']=host_operator_provenance
+    if policy != 'enabled':
+        config['infra_early_stop'] = policy
     save(directory/'config.private.json', config)
     save(directory/'attempt-start.safe.json', dict(scope='original200x3REAL', scheduled_total=600,
          source_ref=args.source_ref, task_ref=runner['TASK_REF'], started_at_epoch=stamp,
@@ -1513,6 +1523,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true', help='perform fresh capacity reads, then allocate and own one original600 controller')
     parser.add_argument('--source-ref', required=True)
+    parser.add_argument('--infra-early-stop', choices=('enabled', 'disabled'), default='enabled', help='Automatic infrastructure threshold stop policy; failure accounting and all time limits remain unchanged')
     for name in ['state-dir', 'facts', 'agents-env', 'backend-env', 'tasks', 'snapshot-inventory', 'warm-deps']:
         parser.add_argument('--'+name, required=True, type=Path)
     parser.add_argument('--archive-run', action='append', type=Path, help='Verified predecessor run directory; preserve IDs/volume using a clean task generation before fresh creation')
@@ -1576,7 +1587,7 @@ def main():
         preparation_plan(args, runner)
     bound = bound_launch_plan(args, runner) if args.resume_bound_launch else None
     if not args.run:
-        print(json.dumps(dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=0)))
+        print(json.dumps(dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, uid=os.geteuid(), provider_calls=0, infra_early_stop=args.infra_early_stop)))
         return 0
     if bound is not None:
         return resume_bound_launch(args, root, runner, bound, github)
