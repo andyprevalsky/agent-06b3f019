@@ -675,7 +675,7 @@ class ExportResume(unittest.TestCase):
             remote["bounded_export"]({"export": lambda _a: (_ for _ in ()).throw(ValueError("controller originals changed during export"))}, args, attempts=3, sync=lambda: None, sleep=lambda _s: None)
 
     def runner_fixture(self, owner_pid=123, owner_birth="runner-owner", gate_pid=987654321, with_pending=True,
-                       log=None):
+                       log=None, owner_live=True):
         """One sharded original600 run directory whose own runner is the bound cleanup owner."""
         log = "GATE_EXPORT_PENDING machine=" + self.mid + "\nGATE_RESULT exit=1\n" if log is None else log
         source = "a252045f5090917bb00e562b72dbacbab8261c66"
@@ -749,10 +749,18 @@ class ExportResume(unittest.TestCase):
         owner = dict(pid=owner_pid, birth=owner_birth, cwd=str(self.root), argv=[
             "/usr/bin/python3", str(runner_path), "--config", str(config), "--config-sha256", digest, "--output", str(self.out)])
         real_runpy = M["runpy"].run_path
+        # The pinned helper's authority shape: it reads the bound cleanup owner's live birth.
+        helper = {"AUTH": authority, "AUTH_SHA": auth_sha,
+                  "LIVE": lambda pid: owner_birth if owner_live and pid == owner_pid else M["R"]["birth"](pid)}
+        exec(compile("def birth(pid):\n    return LIVE(pid)\n\n"
+                     "def authority(path, root, fresh=True):\n"
+                     "    if birth(AUTH['cleanup_owner_pid']) != AUTH['cleanup_owner_birth']:\n"
+                     "        raise ValueError('external cleanup owner must remain live')\n"
+                     "    return AUTH, AUTH_SHA\n", "fixture-disposable-helper", "exec"), helper)
 
         def runpy_path(path, **kwargs):
             if str(path).endswith("cloudbench-disposable-controller.py"):
-                return {"authority": lambda *_a, **_k: (authority, auth_sha)}
+                return {"authority": helper["authority"]}
             return real_runpy(path, **kwargs)
 
         def git(command, **kwargs):
@@ -825,7 +833,7 @@ class ExportResume(unittest.TestCase):
         # gates still waited: no gate.pending.json, no GATE_EXPORT_PENDING, and the run's own helper
         # refuses every action for a dead cleanup owner.
         f = self.runner_fixture(owner_pid=self.dead_pid(), owner_birth="proc-start:fixture:1", with_pending=False,
-                                log="GATE_START fixture\nGATE_STEP_START #1 supervisor\n")
+                                log="GATE_START fixture\nGATE_STEP_START #1 supervisor\n", owner_live=False)
         window = self.dead_window(f)
         args = (f.config, f.digest, self.out, "f" * 40)
         with self.runner_patches(f):
@@ -834,6 +842,11 @@ class ExportResume(unittest.TestCase):
                 M["check"](*args)
             with self.assertRaises((ValueError, FileNotFoundError)):
                 M["check"](*args, cleanup_window=window)
+            (self.out / "gate.pending.json").write_text(json.dumps(f.pending))
+            (self.out / "gate.pending.json").chmod(0o600)
+            with self.assertRaises(FileNotFoundError):  # the pinned helper's own live-owner read of the dead runner
+                M["check"](*args, cleanup_window=window)
+            (self.out / "gate.pending.json").unlink()
             with self.assertRaisesRegex(ValueError, "explicit cleanup window"):
                 M["check"](*args, dead_owner=True)
             value = M["check"](*args, cleanup_window=window, dead_owner=True)
@@ -868,7 +881,7 @@ class ExportResume(unittest.TestCase):
     def test_live_or_reused_runner_birth_never_borrows_a_live_owner(self):
         me = os.getpid()
         f = self.runner_fixture(owner_pid=me, owner_birth=M["R"]["birth"](me), with_pending=False,
-                                log="GATE_START fixture\n")
+                                log="GATE_START fixture\n", owner_live=False)
         args = (f.config, f.digest, self.out, "f" * 40)
         with self.runner_patches(f):
             with self.assertRaisesRegex(ValueError, "runner owner is live"):
@@ -877,7 +890,7 @@ class ExportResume(unittest.TestCase):
         self.temp.cleanup()
         self.setUp()
         f = self.runner_fixture(owner_pid=me, owner_birth="proc-start:fixture:1", with_pending=False,
-                                log="GATE_START fixture\n")
+                                log="GATE_START fixture\n", owner_live=False)
         with self.runner_patches(f):
             value = M["check"](f.config, f.digest, self.out, "f" * 40, cleanup_window=self.dead_window(f),
                                dead_owner=True)
@@ -886,7 +899,7 @@ class ExportResume(unittest.TestCase):
         self.temp.cleanup()
         self.setUp()
         f = self.runner_fixture(owner_pid=self.dead_pid(), owner_birth="proc-start:fixture:1", gate_pid=me,
-                                with_pending=False, log="GATE_START fixture\n")
+                                with_pending=False, log="GATE_START fixture\n", owner_live=False)
         with self.runner_patches(f):
             with self.assertRaisesRegex(ValueError, "gate"):
                 M["check"](f.config, f.digest, self.out, "f" * 40, cleanup_window=self.dead_window(f),

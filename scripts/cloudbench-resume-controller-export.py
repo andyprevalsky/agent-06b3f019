@@ -460,6 +460,24 @@ def dead_owner_proof(caller, window, proc=Path("/proc")):
     )
 
 
+def dead_owner_authority(disposable, path, root, caller):
+    """The pinned helper's own authority check; its live-owner read accepts only the gone recorded runner."""
+    scope = disposable["authority"].__globals__
+    live = scope["birth"]
+
+    def birth(pid):
+        if pid != caller["pid"]:
+            return live(pid)
+        need(process_gone(pid, caller["birth"]) is not None, "runner owner is live; the live runner remains the cleanup owner")
+        return caller["birth"]
+
+    scope["birth"] = birth
+    try:
+        return disposable["authority"](path, root, fresh=False)
+    finally:
+        scope["birth"] = live
+
+
 def normal_state(config, config_sha256, out, *, cleanup_deadline_epoch=None, cleanup_window=None, dead_owner=False):
     """Current normal owner proof; never a retrospective borrower capture."""
     need(
@@ -579,7 +597,10 @@ def normal_tail(
     identity = obj(out / "controller.identity.json")
     authority_path = out / "authority.private.json"
     disposable = runpy.run_path(str(source_root / "scripts/cloudbench-disposable-controller.py"))
-    authority, authority_sha = disposable["authority"](authority_path, source_root, fresh=False)
+    if dead_owner:
+        authority, authority_sha = dead_owner_authority(disposable, authority_path, source_root, caller)
+    else:
+        authority, authority_sha = disposable["authority"](authority_path, source_root, fresh=False)
     need(
         caller["source_ref"] == identity["source_ref"] == cfg["source_ref"]
         and caller["epoch"] == cfg["started_at_epoch"]
