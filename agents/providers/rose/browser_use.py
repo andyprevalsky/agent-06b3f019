@@ -1073,6 +1073,7 @@ def normalize_browser_use_tool_call(
     *,
     thinking: Optional[str] = None,
     validation_context: Optional[Dict[str, Any]] = None,
+    available_actions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Validate one provider-native tool call and return UnifiedAction."""
     name = tool_call.get("name")
@@ -1105,6 +1106,8 @@ def normalize_browser_use_tool_call(
         )
 
     normalized_name = _ACTION_NAME_MAP.get(name, name)
+    if available_actions is not None and normalized_name not in available_actions:
+        raise ValueError("Browser action is not available in this request.")
     # Keep the same lazy-import boundary as build_browser_use_tools; importing
     # browser_tools at providers.rose module load time creates a package cycle.
     from browser_tools.schemas import (
@@ -1255,7 +1258,9 @@ _VALID_ACTIONS = frozenset(
 )
 
 
-def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
+def normalize_browser_use_response(
+    completion: Any, *, available_actions: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Convert a model completion into the agent's UnifiedAction shape.
 
     Mirrors `normalizeBrowserUseResponse` in
@@ -1274,7 +1279,7 @@ def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
             raise ValueError(
                 f"normalize_browser_use_response: Could not extract JSON from completion: {completion[:200]}"
             )
-        return normalize_browser_use_response(parsed)
+        return normalize_browser_use_response(parsed, available_actions=available_actions)
 
     if not isinstance(completion, dict):
         raise ValueError(
@@ -1306,6 +1311,8 @@ def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
         index = params.get("index")
 
     normalized_action = _ACTION_NAME_MAP.get(action_name, action_name)
+    if available_actions is not None and normalized_action not in available_actions:
+        raise ValueError("Browser action is not available in this request.")
     if normalized_action not in _VALID_ACTIONS:
         raise ValueError(
             f'normalize_browser_use_response: Unknown action "{normalized_action}" '

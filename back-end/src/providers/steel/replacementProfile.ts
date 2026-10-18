@@ -1,4 +1,5 @@
 import { prisma } from '../database';
+import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
 import type { BrowserSessionStatus } from '@prisma/client';
 import type { SteelNativeEffect, SteelLifecycleMutation } from './lifecycleClaim';
 import { steel, releaseSteelRemoteSession } from './session';
@@ -77,7 +78,7 @@ export async function finishSteelProfileWriter(
     );
     if (ownsClaim) {
       const released = observed?.id === task.sessionId && observed.status === 'released';
-      await mutate((transaction) =>
+      const changed = await mutate((transaction) =>
         transaction.browserSession.updateMany({
           where: {
             id: task.id,
@@ -92,6 +93,7 @@ export async function finishSteelProfileWriter(
           data: { status: released ? 'PAUSED' : 'ERROR', closedAt: null },
         })
       );
+      if (changed.count === 1) await announceBrowserSessionBinding({ id: task.id });
     }
     throw error;
   }

@@ -2206,21 +2206,21 @@ class RoseClient:
         output_validation_error = None
         action = None
         try:
+            available_tool_names = [tool["name"] for tool in tools]
             if response.tool_calls:
+                # Check the declared action before coordinate/key projections
+                # can replace its name with an internal implementation action.
+                normalize_browser_use_tool_call(
+                    response.tool_calls[0], available_actions=available_tool_names,
+                )
                 action = normalize_browser_use_tool_calls(
                     response.tool_calls,
                     thinking=(response.reasoning or response.content or None),
                 )
             else:
-                action = normalize_browser_use_response(response.content)
-            # Native printable-key batches normalize to input_text; admission
-            # belongs to the actual first provider call, not that derived action.
-            declared_action = (
-                normalize_browser_use_tool_call(response.tool_calls[0]).get("action")
-                if response.tool_calls else action.get("action")
-            )
-            if declared_action not in {tool["name"] for tool in tools}:
-                raise ValueError("Browser action is not available in this request.")
+                action = normalize_browser_use_response(
+                    response.content, available_actions=available_tool_names,
+                )
         except BrowserToolArgsValidationError:
             raise
         except ValueError as normalization_error:

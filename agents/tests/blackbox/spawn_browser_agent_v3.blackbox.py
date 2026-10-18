@@ -28969,6 +28969,8 @@ async def run_all_tests():
         test_notification_source_normalization_and_preview,
     )
     r = BlackboxResult()
+    await r.record_async("park proof requires completed capture and detach", test_parked_proof_requires_capture_and_disconnect)
+    await r.record_async("optional parked observation failure preserves disconnect", test_optional_parked_observer_failure_still_disconnects)
     await r.record_async("capability_validation_preserves_printable_key_batch", test_capability_validation_preserves_printable_key_batch)
     await r.record_async("private_raster_capability_neighbor_controls", test_private_raster_capability_neighbor_controls)
     await r.record_async("disallowed_native_browser_call_is_model_validation", test_disallowed_native_browser_call_is_model_validation)
@@ -31489,3 +31491,40 @@ async def run_all_tests():
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
+
+
+async def test_optional_parked_observer_failure_still_disconnects():
+    from domains.spawn_browser_agent_v3.handler import disconnect_browser_after_passkey_capture
+    for error in (ValueError("native observation unavailable"), OSError("target snapshot unavailable")):
+        events = []
+        async def capture():
+            events.append("captured")
+        def observe():
+            events.append("observed")
+            raise error
+        dom = SimpleNamespace(disconnect=AsyncMock(side_effect=lambda: events.append("disconnected")))
+        try:
+            result = await disconnect_browser_after_passkey_capture(dom, capture, observe_parked_page=observe)
+        except Exception as raised:
+            raise AssertionError("optional parked-page observation aborted owned disconnect") from raised
+        assert result is None
+        assert events == ["captured", "observed", "disconnected"]
+        dom.disconnect.assert_awaited_once()
+
+
+async def test_parked_proof_requires_capture_and_disconnect():
+    from domains.spawn_browser_agent_v3.handler import disconnect_browser_after_passkey_capture
+    snapshot = {"url": "https://owned.test/login", "target_id": "owned-target"}
+    for capture_error, disconnect_error in ((None, None), (ValueError("capture unavailable"), None), (None, OSError("disconnect unavailable"))):
+        capture = AsyncMock(side_effect=capture_error)
+        observe = MagicMock(return_value=snapshot)
+        dom = SimpleNamespace(disconnect=AsyncMock(side_effect=disconnect_error))
+        result = await disconnect_browser_after_passkey_capture(dom, capture, observe_parked_page=observe)
+        assert result is snapshot if capture_error is None and disconnect_error is None else result is None
+        assert observe.call_count == (0 if capture_error else 1)
+        dom.disconnect.assert_awaited_once()
+    dom = SimpleNamespace(disconnect=AsyncMock())
+    control = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await disconnect_browser_after_passkey_capture(dom, AsyncMock(), observe_parked_page=MagicMock(side_effect=control))
+    assert raised.value is control

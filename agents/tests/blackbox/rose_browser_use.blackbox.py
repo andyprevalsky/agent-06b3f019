@@ -2536,6 +2536,8 @@ async def test_completed_browser_output_validation_is_not_transport_or_completio
 async def run_all_tests():
     print("rose_browser_use blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("declared tool admission preserves aliases and batches", test_declared_tool_admission_keeps_aliases_and_batch_semantics)
+    await r.record_async("advertised coordinate-only action remains admissible", test_advertised_coordinate_only_action_is_admitted)
     await r.record_async("completed_browser_output_validation_is_not_transport_or_completion", test_completed_browser_output_validation_is_not_transport_or_completion)
 
     r.record("browser_use_pool_registered", test_browser_use_pool_registered)
@@ -2765,3 +2767,55 @@ async def run_all_tests():
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
+
+
+async def test_advertised_coordinate_only_action_is_admitted():
+    from providers.rose.types import RoseResponse
+    from providers.rose.errors import BrowserModelOutputValidationError
+    from helpers import observability
+    responses = [
+        RoseResponse(tool_calls=[{"id": "coordinate-call", "name": "click_coordinates", "arguments": '{"x": 12, "y": 34}'}]),
+        RoseResponse(content='{"action": [{"click_coordinates": {"x": 12, "y": 34}}]}'),
+    ]
+    client = RoseClient(openrouter_key="offline-unused")
+    with patch.object(observability, "dump_llm_context"):
+        for response in responses:
+            client.collect = AsyncMock(return_value=response)
+            try:
+                result = await client.complete_browser_use(task="Click the visible target", browser_state=_browser_state(), action_history=[], available_actions=["click_coordinates"])
+            except BrowserModelOutputValidationError as error:
+                raise AssertionError("the advertised coordinate-only action was rejected after normalization") from error
+            advertised = client.collect.await_args.kwargs["tools"]
+            assert [tool["name"] for tool in advertised] == ["click_coordinates"]
+            assert result["action"]["action"] == "click"
+            assert result["action"]["coordinates"] == {"x": 12, "y": 34}
+
+
+async def test_declared_tool_admission_keeps_aliases_and_batch_semantics():
+    from providers.rose.types import RoseResponse
+    from providers.rose.errors import BrowserModelOutputValidationError
+    from helpers import observability
+    client = RoseClient(openrouter_key="offline-unused")
+    async def complete(response, available):
+        client.collect = AsyncMock(return_value=response)
+        return await client.complete_browser_use(task="Use the offered action", browser_state=_browser_state(), action_history=[], available_actions=available)
+    with patch.object(observability, "dump_llm_context"):
+        for response in (
+            RoseResponse(tool_calls=[{"id": "hidden", "name": "screenshot", "arguments": "{}"}]),
+            RoseResponse(content='{"action": [{"screenshot": {}}]}'),
+            RoseResponse(tool_calls=[{"id": "unoffered-index", "name": "click", "arguments": '{"index": 3}'}]),
+            RoseResponse(content='{"action": [{"click": {"index": 3}}]}'),
+        ):
+            try:
+                await complete(response, ["click_coordinates"])
+            except BrowserModelOutputValidationError:
+                pass
+            else:
+                raise AssertionError("an action absent from the request grammar was admitted")
+        result = await complete(RoseResponse(tool_calls=[{"id": "nested", "function": {"name": "click_coordinates", "arguments": '{"x": 12, "y": 34}'}}]), ["click_coordinates"])
+        assert result["action"]["coordinates"] == {"x": 12, "y": 34}
+        result = await complete(RoseResponse(content='{"action": [{"done": {"text": "Finished"}}]}'), ["attempt_completion"])
+        assert result["action"]["action"] == "attempt_completion"
+        result = await complete(RoseResponse(tool_calls=[{"id": "key-" + key, "name": "press_key", "arguments": json.dumps({"key": key})} for key in "ab"]), ["press_key"])
+        assert result["action"]["action"] == "input_text"
+        assert result["action"]["params"]["text"] == "ab"

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { __flushBroadcastQueueForTests } from '../../providers/chat/supabaseBroadcast';
 import { prisma } from '../../providers/database';
 import { steel } from '../../providers/steel/session';
 import { recreateSession } from '../../providers/steel/sessionResume';
@@ -75,6 +76,8 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
   let checkpointChange: 'closedAt' | 'profileSource' | undefined;
   let publicationChange: 'closedAt' | 'profileSource' | undefined;
   let externalRequests = 0;
+  let observeBindings = false;
+  const announcements: Record<string, unknown>[] = [];
   let createStarted: (() => void) | undefined;
   let createBarrier: Promise<void> | undefined;
   const resetSource = () => {
@@ -109,7 +112,17 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
       externalRequests++;
       throw new Error('unexpected external request in profile-handoff fixture');
     };
-    globalThis.fetch = unexpectedNative as typeof fetch;
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      if (observeBindings && String(url).endsWith('/realtime/v1/api/broadcast')) {
+        const body = JSON.parse(String(init?.body));
+        for (const message of body.messages) {
+          assert(message.event === 'BROWSER_SESSION', 'unexpected broadcast event');
+          announcements.push(message.payload.record);
+        }
+        return new Response('{}', { status: 200 });
+      }
+      return unexpectedNative();
+    }) as typeof fetch;
     steel.sessions.create = unexpectedNative as typeof steel.sessions.create;
     steel.sessions.release = unexpectedNative as typeof steel.sessions.release;
     prisma.$transaction = (async (callback: (tx: typeof prisma) => Promise<unknown>) =>
@@ -167,7 +180,7 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
       return { count: 1 };
     }) as typeof prisma.toolSideEffect.updateMany;
     prisma.browserSession.findUnique = (async (args: { select?: unknown }) =>
-      args.select ? null : { ...row }) as typeof originals.find;
+      args.select ? (observeBindings ? { ...row, agentId: fixture, debugUrl: null } : null) : { ...row }) as typeof originals.find;
     prisma.browserSession.findFirst = (async () => null) as typeof originals.held;
     prisma.integration.findUnique = (async () => null) as typeof originals.integration;
     prisma.browserProviderProfile.upsert = (async () => ({})) as typeof originals.profile;
@@ -285,6 +298,47 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
         return null;
       },
     };
+    for (const nativeReleased of [false, true]) {
+      resetSource();
+      observeBindings = true;
+      const releaseError = new Error('deliberate exact writer release acknowledgement loss');
+      const beforeCreates = creates;
+      const beforeAnnouncements = announcements.length;
+      const failure = await attempt({ ...dependencies, releaseSession: async (id: string) => {
+        assert(id === sourceId && row.status === 'PAUSED', 'release was not exact claimed writer');
+        releases++;
+        sourceReleased = nativeReleased;
+        throw releaseError;
+      }});
+      await __flushBroadcastQueueForTests();
+      assert(failure === releaseError, 'writer failure was replaced or swallowed');
+      assert(creates === beforeCreates, 'writer release failure created a replacement');
+      assert(row.status === (nativeReleased ? 'PAUSED' : 'ERROR'), 'recovery custody state changed');
+      assert(announcements.length === beforeAnnouncements + 1, 'committed writer failure omitted binding announcement');
+      const notice = announcements[announcements.length - 1];
+      assert(notice.taskId === row.id && notice.sessionId === sourceId && notice.status === row.status && notice.live === false, 'announcement did not project exact persisted failed binding');
+      observeBindings = false;
+      // The entire native/lease store belongs to this in-memory fixture; preserve
+      // the actual failed-custody assertions above before isolating the next case.
+      leases.clear();
+    }
+    for (const concurrentChange of ['closed', 'rebound'] as const) {
+      resetSource();
+      observeBindings = true;
+      const releaseError = new Error('deliberate writer failure after concurrent binding change');
+      const beforeAnnouncements = announcements.length;
+      const failure = await attempt({ ...dependencies, releaseSession: async () => {
+        if (concurrentChange === 'closed') row = { ...row, status: 'CLOSED', closedAt: new Date() };
+        else row = { ...row, sessionId: randomUUID(), status: 'ACTIVE' };
+        throw releaseError;
+      }});
+      await __flushBroadcastQueueForTests();
+      assert(failure === releaseError, 'concurrent writer failure lost original error');
+      assert(announcements.length === beforeAnnouncements, 'failed writer CAS announced another binding');
+      assert(concurrentChange === 'closed' ? row.status === 'CLOSED' : row.sessionId !== sourceId, 'writer error overwrote concurrent binding');
+      observeBindings = false;
+      leases.clear();
+    }
     for (const mode of ['failed', 'uploading', 'revoked', 'read-failed'] as const) {
       resetSource();
       profileMode = mode;

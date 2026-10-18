@@ -494,8 +494,10 @@ async def disconnect_browser_after_passkey_capture(
     if capture_complete and observe_parked_page is not None:
         try:
             observation = observe_parked_page()
-        except (RuntimeError, AttributeError):
-            pass  # Missing native observation is unknown; cleanup must still run.
+        except Exception as error:
+            # Optional observation failure supplies no park proof; disconnect
+            # remains owned here. Cancellation and other control signals escape.
+            logger.warning("Parked browser observation unavailable", error_type=type(error).__name__)
     detached = await _await_bounded_browser_cleanup(
         dom_service.disconnect(),
         timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,

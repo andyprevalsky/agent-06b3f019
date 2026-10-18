@@ -18,6 +18,10 @@ class NativeToolUnit(TypedDict):
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
+def _admission_failure(owner: EvidenceOwner, reason: str) -> dict:
+    return {"version": 1, "admission": reason, "complete": False,
+            "owner_sha256": hashlib.sha256(_json(owner).encode()).hexdigest()}
+
 def legacy_traces(units: list[NativeToolUnit], render) -> list[str]:
     return [f"[{u['tool_name']}] {render(u['tool_name'], u['result'])}" for u in units]
 
@@ -25,14 +29,14 @@ def admit_grep_records(owner: EvidenceOwner, units: list[NativeToolUnit], budget
     """Whole-record admission; omitted match display text never masquerades as records."""
     envelope = {"version": 1, "owner": owner, "units": [], "omitted_tool_units": 0}
     if len(_json(envelope)) > budget:
-        return {"version": 1, "admission": "owner_metadata_omitted", "complete": False}
+        return _admission_failure(owner, "owner_metadata_omitted")
     unique = {}
     call_ids = {}
     for unit in units:
         if unit.get("tool_name") == "grep":
             call_id = unit.get("tool_call_id")
             if not isinstance(call_id, str) or not call_id or (call_id in call_ids and call_ids[call_id] != _json(unit["result"])):
-                return {"version": 1, "admission": "invalid_tool_identity", "complete": False}
+                return _admission_failure(owner, "invalid_tool_identity")
             call_ids[call_id] = _json(unit["result"])
             unique.setdefault(_json(unit['result']), unit)
     pending = []
@@ -70,6 +74,8 @@ def admit_grep_records(owner: EvidenceOwner, units: list[NativeToolUnit], budget
                 entry['matches'].pop(); entry['omitted_matches'] += 1
                 continue
             pending.append((group, records))
+        if entry["unstructured"]:
+            legacy.append((entry, result))
     for group, records in pending:
         for record in records:
             if not isinstance(record, dict):
@@ -85,20 +91,27 @@ def admit_grep_records(owner: EvidenceOwner, units: list[NativeToolUnit], budget
             entry['legacy_text_admission'] = 'incomplete_excerpt'
             entry['unstructured_excerpt'] = excerpt
             while len(_json(envelope)) > budget and excerpt:
-                excerpt = excerpt[:len(excerpt)//2]
+                excerpt = _bounded_explore_parts([text], len(excerpt)//2)
                 entry['unstructured_excerpt'] = excerpt
             if len(_json(envelope)) > budget:
                 entry.pop('unstructured_excerpt', None)
                 entry['legacy_text_admission'] = 'omitted_unstructured'
     # Counter-width changes or unknown-format markers cannot breach the hard cap.
     if len(_json(envelope)) > budget:
-        return {"version": 1, "admission": "metadata_omitted", "complete": False}
+        return _admission_failure(owner, "metadata_omitted")
     return envelope
 
 def render_native_grep(envelope: Any, expected_owner: EvidenceOwner, budget: int = 6000) -> str:
     """Reject foreign/malformed typed transport without falling back to prose."""
     invalid = '[Native grep evidence incomplete: invalid or foreign producer envelope]'
     if not isinstance(envelope, dict) or envelope.get('version') != 1:
+        return invalid[:max(0, budget)]
+    if "admission" in envelope:
+        if (set(envelope) == {"version", "admission", "complete", "owner_sha256"}
+                and envelope.get("complete") is False
+                and envelope.get("admission") in {"owner_metadata_omitted", "invalid_tool_identity", "metadata_omitted"}
+                and envelope.get("owner_sha256") == hashlib.sha256(_json(expected_owner).encode()).hexdigest()):
+            return f"[Native grep evidence incomplete: {envelope['admission']}]"[:max(0, budget)]
         return invalid[:max(0, budget)]
     if envelope.get('owner') != expected_owner:
         return invalid[:max(0, budget)]
