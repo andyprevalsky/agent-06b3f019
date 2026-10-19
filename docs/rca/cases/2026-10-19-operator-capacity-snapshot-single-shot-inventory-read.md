@@ -19,6 +19,7 @@ tags:
   - experiments-ledger
   - scorecard
 sources:
+  - PR #1542
   - benchmark run original600-1792433714160918322 (launch attempt 1, 2026-10-19T18:15:14Z → 18:15:34Z)
 repro: scripts/tests/original600-portable-operator.test.py (test_transient_app_inventory_timeout_is_retried_and_persistent_failure_fails_closed, test_preallocation_abort_ends_the_ledger_entry_and_admission_as_aborted)
 status: fixed
