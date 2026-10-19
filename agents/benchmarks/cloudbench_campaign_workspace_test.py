@@ -163,16 +163,18 @@ def test_campaign_workspace_normal_cli_preserves_original600_shape(tmp_path):
     captured=tmp_path/'argv.json'
     (scripts/'run-bench-campaign.py').write_text("import os,sys,json;json.dump(sys.argv[1:],open(os.environ['FIXTURE_CAPTURE'],'w'))\n")
     argv=['bash',str(scripts/'run-bench'),'--stress-defaults','--strict-barrier','--concurrency','600','-k','3','--retry-infra','1','--timeout','1200','--e2e-timeout','5400','--e2e-started-at','1791410000','--reuse-pool-only','--cold-primary-bootstrap','--ref','5'*40,*tasks]
-    # By default 600 simultaneous copies route to the sharded operator, which
-    # derives its own limits and refuses these legacy flags before any launch.
-    routed=subprocess.run(argv,env={**os.environ,'FIXTURE_CAPTURE':str(captured)},capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
-    assert routed.returncode==2,routed.stdout+routed.stderr
-    assert "600 simultaneous copies exceed one controller's" in routed.stdout+routed.stderr
-    assert '--demo-cache/--stress-defaults are not sharded operator options' in routed.stderr
+    # 600 simultaneous copies exceed one controller's bound. The strict route
+    # refuses --stress-defaults before any launch.
+    strict=subprocess.run(argv,env={**os.environ,'FIXTURE_CAPTURE':str(captured),'RUN_BENCH_SHARDED_ROUTE':'always'},capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert strict.returncode==2,strict.stdout+strict.stderr
+    assert "600 simultaneous copies exceed one controller's" in strict.stdout+strict.stderr
+    assert '--demo-cache/--stress-defaults are not sharded operator options' in strict.stderr
     assert not captured.exists()
-    # The explicit ordinary campaign route keeps the original600 argv shape.
-    result=subprocess.run(argv,env={**os.environ,'FIXTURE_CAPTURE':str(captured),'RUN_BENCH_SHARDED_ROUTE':'never'},capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
+    # Auto routing keeps the ordinary campaign for an option the operator
+    # refuses, naming it in one warning, with the original600 argv shape.
+    result=subprocess.run(argv,env={**os.environ,'FIXTURE_CAPTURE':str(captured)},capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
     assert result.returncode==0,result.stdout+result.stderr
+    assert result.stderr.count('--stress-defaults is not a sharded operator option; using the ordinary fleet path')==1,result.stderr
     args=json.loads(captured.read_text())
     assert [v.removeprefix('--task=') for v in args if v.startswith('--task=')]==tasks
     assert all(v in args for v in ('--stress-defaults','--concurrency=600','--runs=3','--retry-infra=1','--e2e-timeout=5400','--e2e-started-at=1791410000','--forward-arg=--strict-barrier','--forward-arg=--timeout','--forward-arg=1200','--forward-arg=--reuse-pool-only','--forward-arg=--cold-primary-bootstrap','--forward-arg=--ref','--forward-arg='+'5'*40))

@@ -289,21 +289,71 @@ PY
 SH
 wide_names=()
 while IFS= read -r name; do wide_names+=("$name"); done <"$tmp/wide-names"
-# By default fifty simultaneous copies exceed one controller's copy bound and
-# route to the sharded operator as one launch. Its unsupported fleet flag is
-# refused before any controller starts: the slice is never split into smaller
-# ordinary fleets.
+# Fifty simultaneous copies exceed one controller's copy bound. With an option
+# the sharded operator refuses (--autoscale-max), auto routing keeps the whole
+# slice as one ordinary fleet and names the option in one warning.
+: >"$tmp/wide-capture"
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  "$RUN_BENCH" "${wide_names[@]}" --timeout 300 --autoscale-max 2 --strict-barrier --foreground \
+  >"$tmp/wide-fallback.out" 2>&1 || { cat "$tmp/wide-fallback.out" >&2; echo "FAIL: wide fallback route failed" >&2; exit 1; }
+[ "$(grep -c -- "--autoscale-max is not a sharded operator option; using the ordinary fleet path" "$tmp/wide-fallback.out")" -eq 1 ] ||
+  { cat "$tmp/wide-fallback.out" >&2; echo "FAIL: fallback must print exactly one warning naming the option" >&2; exit 1; }
+! grep -Fq "sharded controller operator:" "$tmp/wide-fallback.out" ||
+  { echo "FAIL: a refused option still entered the sharded operator" >&2; exit 1; }
+python3 - "$tmp/wide-names" "$tmp/wide-capture" <<'PY'
+import json
+import sys
+from pathlib import Path
+names = Path(sys.argv[1]).read_text().splitlines()
+calls = [json.loads(line) for line in Path(sys.argv[2]).read_text().splitlines()]
+assert len(calls) == 1, calls
+assert calls[0]["args"] == names + ["--timeout", "300", "--autoscale-max", "2", "--strict-barrier", "--foreground"]
+PY
+# RUN_BENCH_SHARDED_ROUTE=always keeps the strict sharded refusal: nothing starts.
 : >"$tmp/wide-capture"
 wide_status=0
+RUN_BENCH_SHARDED_ROUTE=always \
 RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
 RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   "$RUN_BENCH" "${wide_names[@]}" --timeout 300 --autoscale-max 2 --strict-barrier --foreground \
   >"$tmp/wide-sharded.out" 2>&1 || wide_status=$?
-[ "$wide_status" -eq 2 ] || { cat "$tmp/wide-sharded.out" >&2; echo "FAIL: wide sharded route exit $wide_status" >&2; exit 1; }
+[ "$wide_status" -eq 2 ] || { cat "$tmp/wide-sharded.out" >&2; echo "FAIL: strict sharded route exit $wide_status" >&2; exit 1; }
 grep -Fq "sharded controller operator: 50 simultaneous copies exceed one controller's" "$tmp/wide-sharded.out"
 grep -Fq -- "--autoscale-max is not a sharded operator option" "$tmp/wide-sharded.out"
 [ ! -s "$tmp/wide-capture" ] || { echo "FAIL: refused sharded route started an ordinary fleet" >&2; exit 1; }
+# A plain wide run with only operator options (70 copies, --timeout) still
+# routes to the sharded operator. The operator interpreter is a recorder, so
+# nothing can reach a provider even if every local check passes.
+python3 - "$ROOT_DIR" "$tmp/wide70-names" <<'PY'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from cloudbench_catalog import load_unified_catalog
+names = [task["name"] for task in load_unified_catalog(root / "agents/benchmarks/tasks.json")
+         if task.get("status", "ready") == "ready" and not task.get("production_only")][:70]
+assert len(names) == len(set(names)) == 70
+Path(sys.argv[2]).write_text("\n".join(names) + "\n")
+PY
+wide70_names=()
+while IFS= read -r name; do wide70_names+=("$name"); done <"$tmp/wide70-names"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$RUN_BENCH_WIDE_CAPTURE.operator"\n' >"$tmp/operator-recorder"
+chmod +x "$tmp/operator-recorder"
+: >"$tmp/wide-capture"
+RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST="$tmp/operator-recorder" \
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  "$RUN_BENCH" "${wide70_names[@]}" --timeout 300 >"$tmp/wide70.out" 2>&1 || true
+grep -Fq "sharded controller operator: 70 simultaneous copies exceed one controller's" "$tmp/wide70.out" ||
+  { cat "$tmp/wide70.out" >&2; echo "FAIL: a plain 70-copy run did not route to the sharded operator" >&2; exit 1; }
+! grep -Fq "using the ordinary fleet path" "$tmp/wide70.out" ||
+  { echo "FAIL: operator-only options must not fall back" >&2; exit 1; }
+[ ! -s "$tmp/wide-capture" ] || { echo "FAIL: a sharded route started an ordinary fleet" >&2; exit 1; }
+: >"$tmp/wide-capture"
 # The explicit ordinary fleet path keeps the whole wide slice in one fleet.
 RUN_BENCH_SHARDED_ROUTE=never \
 RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \

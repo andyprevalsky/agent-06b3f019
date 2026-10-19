@@ -531,6 +531,38 @@ print(c["copy_bound"](p["vcpus"],p["memory_mib"]))' "$ROOT_DIR/scripts/cloudbenc
         exit 2
     fi
 fi
+# Auto routing keeps an explicitly requested ordinary-fleet option working:
+# a request the operator would refuse falls back to the ordinary fleet path
+# with one warning. RUN_BENCH_SHARDED_ROUTE=always keeps the strict refusal.
+sharded_refused_option() {
+    [ "$DEMO_CACHE_PROBE" -eq 0 ] || { echo --demo-cache; return; }
+    [ "$STRESS_DEFAULTS" -eq 0 ] || { echo --stress-defaults; return; }
+    if [ "$RETRY_INFRA_EXPLICIT" -eq 1 ] && [ "$RETRY_INFRA" != 1 ]; then echo --retry-infra; return; fi
+    if [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ]; then echo --concurrency; return; fi
+    set -- "${FLEET_ARGS[@]}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --timeout|--ref) shift 2 ;;
+            --strict-barrier|--wait|--foreground) shift ;;
+            *) echo "$1"; return ;;
+        esac
+    done
+    local arg
+    for arg in "${E2E_ARGS[@]}"; do
+        case "$arg" in
+            --e2e-timeout=*) ;;
+            *) echo "${arg%%=*}"; return ;;
+        esac
+    done
+}
+if [ -n "$SHARDED_ROUTE_REASON" ] && [ "$SHARDED_CHECK" -eq 0 ] &&
+    [ "${RUN_BENCH_SHARDED_ROUTE:-auto}" = auto ]; then
+    SHARDED_REFUSED_OPTION="$(sharded_refused_option)"
+    if [ -n "$SHARDED_REFUSED_OPTION" ]; then
+        echo "⚠️  $SHARDED_ROUTE_REASON, but $SHARDED_REFUSED_OPTION is not a sharded operator option; using the ordinary fleet path (RUN_BENCH_SHARDED_ROUTE=always refuses instead)" >&2
+        SHARDED_ROUTE_REASON=""
+    fi
+fi
 if [ -n "$SHARDED_ROUTE_REASON" ]; then
     echo "🧩 sharded controller operator: $SHARDED_ROUTE_REASON"
     [ "$DEMO_CACHE_PROBE" -eq 0 ] && [ "$STRESS_DEFAULTS" -eq 0 ] || {
