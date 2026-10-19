@@ -63,6 +63,8 @@ def test_v39_cleanup_all_uid_writers():
         def __truediv__(self, part): return ProcPath(self.value + '/' + str(part))
         def iterdir(self):
             if self.value == '/proc': return [ProcPath('/proc/' + str(pid)) for pid in rows]
+            # Single-threaded groups: /proc/<pid>/task holds only the leader's tid.
+            if self.value.endswith('/task'): return [self / self.value.split('/')[2]]
             if self.value.endswith('/fd'): return []
             raise AssertionError(self.value)
         def read_text(self):
