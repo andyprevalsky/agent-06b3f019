@@ -409,7 +409,7 @@ test('child lookup loads a persisted compact index and legacy backfill yields pe
   const deleteStart = storeSource.indexOf('export async function deleteRun');
   const deleteBody = storeSource.slice(deleteStart);
   assert.match(deleteBody, /await listRunsStrict\(\)/);
-  const bundleRead = deleteBody.indexOf('getRunBundleStrict(run.run_id)');
+  const bundleRead = deleteBody.indexOf('getRunBundleStrict(run.run_id, run)');
   const tombstone = deleteBody.indexOf("putObject(`visibility/${target.run_id}.json`, 'false')");
   const catalogWrite = deleteBody.indexOf("putObject('index.json'");
   assert.ok(bundleRead >= 0 && tombstone >= 0 && catalogWrite >= 0);

@@ -594,13 +594,20 @@ export async function bindHubLegacyBackfill(stamp?: string): Promise<void> {
   backfillStamps.set(versions, stamp);
 }
 
+/** Version helpers address the production domain; an isolated scope never reaches it. */
+function refuseIsolatedObjectVersion(): void {
+  if (isolatedR2Prefix() !== null)
+    throw new Error('Hub object versions are unavailable in isolated R2');
+}
 /** Physical CAS boundary shared by logical publication and transport qualification. */
 export async function putHubObjectVersion(key: string, data: string): Promise<void> {
+  refuseIsolatedObjectVersion();
   return ownedHubStorageRequest(async (signal) => {
     await writeRemote(key, data, signal);
   });
 }
 export async function getHubObjectVersion(key: string): Promise<string | null> {
+  refuseIsolatedObjectVersion();
   return ownedHubStorageRequest(async (signal) => {
     const value = await readRemoteObject(key, signal);
     return value.raw === null ? null : decodePublication(value.raw);

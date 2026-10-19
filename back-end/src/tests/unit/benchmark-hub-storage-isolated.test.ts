@@ -11,8 +11,10 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import {
+  getHubObjectVersion,
   getObject,
   getObjectStrict,
+  putHubObjectVersion,
   putObject,
   resetHubObjectStorageForTests,
 } from '../../providers/benchmarkHubStorage';
@@ -267,6 +269,16 @@ test('permissive Hub reads refuse foreign isolated object keys', async (t) => {
   const fixture = scope(t);
   await assert.rejects(getObject('../index.json'), /outside the Hub scope/);
   assert.deepEqual(fixture.keys, []);
+});
+
+test('isolated R2 refuses production-prefixed object version helpers before I/O', async (t) => {
+  const fixture = scope(t);
+  await withHubStorageOwnership(async () => {
+    await assert.rejects(putHubObjectVersion('index.json', '[]'), /unavailable in isolated R2/);
+    await assert.rejects(getHubObjectVersion('index.json'), /unavailable in isolated R2/);
+  });
+  assert.deepEqual(fixture.keys, []);
+  assert.equal(fixture.objects.size, 0);
 });
 
 test('invalid isolated configuration refuses during actual module startup', () => {
