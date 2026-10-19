@@ -861,10 +861,10 @@ else: print('origin/fixture')
                 self.assertNotEqual(refused.returncode,0);self.assertIn("dubious ownership",refused.stderr)
                 spec=importlib.util.spec_from_file_location("collector_foreign",ROOT/"scripts/cloudbench-controller-export.py")
                 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-                baseline=subprocess.check_output(["git","-C",str(ROOT),"show","d1a87a9c2c3c1731171f056057729edde8fff396:scripts/cloudbench-controller-export.py"])
-                original={"__name__":"original_collector","__file__":str(ROOT/"scripts/cloudbench-controller-export.py")}
-                exec(compile(baseline,"original-exporter","exec"),original)
-                with self.assertRaises(subprocess.CalledProcessError): original["git"](repo,"rev-parse","HEAD")
+                # The pre-fix exporter helper (d1a87a9c, never merged to main, so absent from fresh clones).
+                def original_git(repo, *args):
+                    return subprocess.check_output(["git", "-C", str(repo), *args]).decode().strip()
+                with self.assertRaises(subprocess.CalledProcessError): original_git(repo,"rev-parse","HEAD")
                 self.assertEqual(module.git(repo,"rev-parse","HEAD"),expected)
                 gate=(ROOT/"scripts/run-cloudbench-controller-gate").read_text()
                 self.assertIn("'safe.directory=/tmp/gate/repo'",gate)
