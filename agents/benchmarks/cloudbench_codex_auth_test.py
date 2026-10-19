@@ -881,8 +881,24 @@ cp "$stage_err" {shlex.quote(str(tmp_path / "stage-errors.private.log"))}
     assert (guest / "fault-fired").exists() == (mode == "later-upload-failure")
 
 
-@pytest.mark.parametrize("label,expected", [("credential-handoff", 143), ("benchmark", 0)])
-def test_explicit_codex_pending_shutdown_survives_successful_child(tmp_path, label, expected):
+@pytest.mark.parametrize(
+    "label,expected,reaped_before_recheck,child_rc",
+    [
+        ("credential-handoff", 143, False, 0),
+        ("benchmark", 0, False, 0),
+        ("credential-handoff", 143, True, 7),
+        ("benchmark", 7, True, 7),
+    ],
+)
+def test_explicit_codex_pending_shutdown_survives_successful_child(
+    tmp_path, label, expected, reaped_before_recheck, child_rc
+):
+    """A TERM in the start window cancels the child once; the pending recheck must not exit.
+
+    reaped_before_recheck holds the driver until the cancelled child has exited
+    and been reaped, which a loaded host can do between the signal and the
+    recheck (the agents coverage flake of 2026-10-18 exited 143 there). Its child
+    exits non-zero so the benchmark label must return that collected status."""
     import shlex
     import signal
     from pathlib import Path
@@ -896,15 +912,25 @@ def test_explicit_codex_pending_shutdown_survives_successful_child(tmp_path, lab
         end = driver.index("\n}\n", begin) + 3
         return driver[begin:end]
 
+    heartbeat = function("run_with_heartbeat")
+    if reaped_before_recheck:
+        recheck = '    ACTIVE_COMMAND_STARTING=0\n    if [ -e "$SHUTDOWN_REQUEST_FILE" ]'
+        assert heartbeat.count(recheck) == 1
+        heartbeat = heartbeat.replace(
+            recheck,
+            '    ACTIVE_COMMAND_STARTING=0\n'
+            '    while kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; do sleep 0.01; done\n'
+            '    if [ -e "$SHUTDOWN_REQUEST_FILE" ]',
+        )
     child = tmp_path / "child.py"
     ready = tmp_path / "ready"
     pidfile = tmp_path / "pid"
     nextstep = tmp_path / "next"
     child.write_text(
-        "import os,signal,sys,time\nfrom pathlib import Path\nsignal.signal(signal.SIGINT,lambda *_:sys.exit(0))\nPath(sys.argv[1]).write_text(str(os.getpid()))\nwhile True:time.sleep(0.01)\n"
+        "import os,signal,sys,time\nfrom pathlib import Path\nsignal.signal(signal.SIGINT,lambda *_:sys.exit(%d))\nPath(sys.argv[1]).write_text(str(os.getpid()))\nwhile True:time.sleep(0.01)\n" % child_rc
     )
     command = 'set -euT\nACTIVE_COMMAND_PID=""\nACTIVE_COMMAND_STARTING=0\nACTIVE_COMMAND_SHUTDOWN_PENDING=0\nACTIVE_COMMAND_SIGNALLED=0\nHEARTBEAT_SLEEP_PID=""\nlog() { :; }\n'
-    command += function("run_with_heartbeat") + function("request_graceful_shutdown")
+    command += heartbeat + function("request_graceful_shutdown")
     command += "trap request_graceful_shutdown TERM\n"
     command += 'trap \'if [ "$BASH_COMMAND" = "ACTIVE_COMMAND_STARTING=0" ]; then trap - DEBUG; printf "%s\\n" "$ACTIVE_COMMAND_PID" > "$PID_FILE"; while [ ! -f "$READY" ]; do sleep 0.01; done; kill -TERM "$$"; fi\' DEBUG\n'
     command += (

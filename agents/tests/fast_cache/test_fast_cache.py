@@ -4479,6 +4479,8 @@ def test_simulated_root_and_gp_cache_isolates_immutable_execution_policy(monkeyp
         ("rose-virtual-public-affordances-v2", "2", "5dd9924e9a1ff4c5"),
         ("rose-outcome-distribution-v1", "1", "650945bf68ee4ba6"),
         ("rose-outcome-distribution-v2", "2", "23feae1291f883f0"),
+        ("rose-outcome-distribution-v3", "3", "3ace77b6b1a3a33c"),
+        ("rose-outcome-distribution-v4", "4", "dc3c757c601515ff"),
     ):
         monkeypatch.setenv("WMH_EXECUTION_POLICY", policy)
         scope = normalize.world_model_cache_scope()
@@ -4496,11 +4498,17 @@ def test_simulated_root_and_gp_cache_isolates_immutable_execution_policy(monkeyp
     monkeypatch.setenv("WMH_EXECUTION_POLICY", "unapproved")
     with pytest.raises(ValueError, match="Unknown WMH execution policy"):
         normalize.world_model_cache_scope()
-    # Real/shadow keys remain byte-identical regardless of configured policy.
-    monkeypatch.delenv("BENCHMARK_WORLD_MODEL_MODE")
-    assert normalize.world_model_cache_scope() == ""
-    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "shadow")
-    assert normalize.world_model_cache_scope() == ""
+    # Real/shadow keys remain byte-identical regardless of configured policy,
+    # including the v4 registration (production never runs in simulate mode).
+    for policy in ("unapproved", "rose-outcome-distribution-v4"):
+        monkeypatch.setenv("WMH_EXECUTION_POLICY", policy)
+        monkeypatch.delenv("BENCHMARK_WORLD_MODEL_MODE")
+        assert normalize.world_model_cache_scope() == ""
+        assert normalize.build_global_key("lookup", "same-request") == (
+            f"fastmode:{normalize.CACHE_KEY_VERSION}:lookup:global:same-request"
+        )
+        monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "shadow")
+        assert normalize.world_model_cache_scope() == ""
 
 
 def test_world_model_policy_cache_identities_match_the_immutable_registry():

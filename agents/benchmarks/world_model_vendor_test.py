@@ -6,15 +6,17 @@ wheel beside the requirements file. Run by the WMH blackbox gate.
 """
 
 import hashlib
-import pytest
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
-WHEEL = "experiential-0.7.158+rose.bf75987e-py3-none-any.whl"
-PIN = "experiential==0.7.158+rose.bf75987e"
+VERSION = "0.7.158+rose.bf75987e.elapsed1"
+WHEEL = f"experiential-{VERSION}-py3-none-any.whl"
+PIN = f"experiential=={VERSION}"
 
 
 def test_world_model_requirements_use_only_the_vendored_wheel():
@@ -27,7 +29,7 @@ def test_world_model_requirements_use_only_the_vendored_wheel():
     digest = hashlib.sha256((vendor / WHEEL).read_bytes()).hexdigest()
     assert f"sha256: {digest}" in (vendor / "SOURCES.txt").read_text(), "vendored bytes differ from SOURCES.txt"
     setup = (ROOT / "scripts/setup-world-model.sh").read_text()
-    assert "dist.version=='0.7.158+rose.bf75987e'" in setup and "vcs_info" not in setup
+    assert f"dist.version=='{VERSION}'" in setup and "vcs_info" not in setup
 
 
 def test_vendored_world_model_wheel_resolves_offline_beside_its_requirements(tmp_path):
@@ -47,13 +49,13 @@ def test_vendored_world_model_wheel_resolves_offline_beside_its_requirements(tmp
             cwd=cwd, capture_output=True, text=True, timeout=120,
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "Would install experiential-0.7.158+rose.bf75987e" in result.stdout, result.stdout
+        assert f"Would install experiential-{VERSION}" in result.stdout, result.stdout
 
 def _native_setup_control(tmp_path, *, override=False, cached=False, missing='', corrupt=False,
-                          sources='valid', version='0.7.158+rose.bf75987e', python_version='3.12',
-                          absent_native=False, mac_hash=False, caller_cwd=None, find_links_base=None):
+                          sources='valid', version=VERSION, python_version='3.12',
+                          absent_native=False, mac_hash=False, caller_cwd=None, find_links_base=None,
+                          uv_home_local=False):
     """Run the actual Bash owner; only installer/native execution is synthetic."""
-    import os
     checkout = tmp_path / 'checkout'
     (checkout / 'scripts').mkdir(parents=True)
     vendor = checkout / 'agents/vendor/world-model'
@@ -119,7 +121,12 @@ if sys.argv[1]=='venv':
     shutil.copy2(os.environ['CONTROL_SHIM'],target/'python')
 ''')
     uv.chmod(0o700)
-    env = {'PATH':str(binaries), 'PYTHONDONTWRITEBYTECODE':'1', 'UV_CALLS':str(calls),
+    home = tmp_path / 'home'
+    if uv_home_local:
+        # A non-interactive shell lacks the user's ~/.local/bin on PATH.
+        (home / '.local/bin').mkdir(parents=True)
+        uv.rename(home / '.local/bin/uv')
+    env = {'PATH':str(binaries), 'HOME':str(home), 'PYTHONDONTWRITEBYTECODE':'1', 'UV_CALLS':str(calls),
            'CONTROL_SHIM':str(shim), 'CONTROL_MISSING':missing, 'CONTROL_VERSION':version,
            'CONTROL_PYTHON_VERSION':python_version}
     if find_links_base:
@@ -169,7 +176,7 @@ def test_native_setup_preserves_valid_override_cache_install_and_version_pins(tm
             assert marker.read_text().strip() == signature
     for mode in ('version','python'):
         result,calls,marker,_ = _native_setup_control(
-            tmp_path / mode, override=True,version='0.7.158' if mode=='version' else '0.7.158+rose.bf75987e',
+            tmp_path / mode, override=True,version='0.7.158+rose.bf75987e' if mode=='version' else VERSION,
             python_version='3.11' if mode=='python' else '3.12')
         assert result.returncode != 0
         assert ('Unexpected experiential version' if mode=='version' else 'Native world model requires Python') in result.stderr
@@ -199,3 +206,32 @@ def test_native_setup_path_independence_preserves_override_and_cached_no_install
                 assert marker.read_text().strip() == signature
             else:
                 assert not marker.exists()
+
+
+def test_native_setup_finds_user_local_uv_when_it_is_not_on_path(tmp_path):
+    """A restored devbox's tool shells had uv only in ~/.local/bin (`uv: command not found`)."""
+    result, calls, marker, signature = _native_setup_control(tmp_path, absent_native=True, uv_home_local=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [c.split()[0] for c in calls] == ["venv", "pip", "pip"]
+    assert marker.read_text().strip() == signature
+
+
+def test_vendored_wheel_contains_every_reviewed_patch():
+    """The wheel is the base pin plus patches/*.patch (scripts/build-world-model-wheel.sh), nothing hidden."""
+    import zipfile
+
+    patches = sorted((ROOT / "agents/vendor/world-model/patches").glob("*.patch"))
+    assert patches, "the patched wheel must keep its reviewed patch source"
+    sources = (ROOT / "agents/vendor/world-model/SOURCES.txt").read_text()
+    build = (ROOT / "scripts/build-world-model-wheel.sh").read_text()
+    assert f'version="{VERSION}"' in build
+    with zipfile.ZipFile(ROOT / "agents/vendor/world-model" / WHEEL) as wheel:
+        for patch in patches:
+            assert patch.name in sources
+            current = None
+            for line in patch.read_text().splitlines():
+                if line.startswith("+++ "):
+                    current = wheel.read(line[4:].split("/", 1)[1]).decode()
+                elif line.startswith("+") and line[1:].strip():
+                    assert line[1:] in current, f"{patch.name}: missing patched line {line[1:]!r}"
+        assert f"Version: {VERSION}" in wheel.read(f"experiential-{VERSION}.dist-info/METADATA").decode()

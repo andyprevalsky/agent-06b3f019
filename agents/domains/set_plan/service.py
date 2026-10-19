@@ -25,6 +25,7 @@ from helpers.attachments import FilePointer
 from helpers.context_scope import is_internal_subagent_message
 from providers.rose.pools import PLANNER_MODEL
 from tools.prompts import TOOL_PROMPTS
+from utils.simulated_clock import world_time_cursor_ms
 from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, TOOL_MODELS
 
 PLANNER_CONTEXT_FULL_TEXT_LIMIT = 6000
@@ -676,6 +677,11 @@ async def run_planner_attempt(
         attempt,  # Fast Mode position step — planner attempt index (deterministic across runs)
         bool(getattr(workflow_instance, "memory_enabled", False)),  # Planner memory (get_memories fork)
     ]
+    # Simulate mode: the agent's last known world time, used if a mid-run world
+    # clock read returns nothing. Absent outside a WMH world (args unchanged).
+    world_cursor = world_time_cursor_ms(workflow_instance)
+    if world_cursor is not None:
+        planner_args.append(world_cursor)
 
     # Schema generation is now done synchronously at workflow startup so the
     # prompt cache prefix is stable from the very first LLM call. The planner

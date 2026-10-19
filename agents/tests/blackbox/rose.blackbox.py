@@ -9109,8 +9109,8 @@ async def test_wmh_response_schema_binds_exact_candidate_call_ids():
     def handler(request):
         body = json.loads(request.content)
         results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
-        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
-        assert results["minItems"] == results["maxItems"] == len(expected_ids)
+        assert results["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
+        assert "maxItems" not in results
         assert body["text"]["format"]["strict"] is False
         from providers.rose.gpt_auth import build_codex_responses_body
         wire_messages, namespace = observed_wire[-1]
@@ -9137,6 +9137,14 @@ async def test_wmh_response_schema_binds_exact_candidate_call_ids():
         except Captured:
             pass
         assert len(seen) == 1
+        packet["candidate_response"]["tool_calls"] = [{"call_id": "different_exact"}]
+        try:
+            await owner._complete_async("Unchanged existing policy.", [types.SimpleNamespace(role="user", content=json.dumps(packet))], max_tokens=16384)
+        except Captured:
+            pass
+        assert len(seen) == 2
+        assert seen[0]["text"]["format"] == seen[1]["text"]["format"], "Candidate ID/count changes must preserve the complete provider schema"
+
 
 
 def test_wmh_candidate_id_schema_preserves_native_json_contract():
@@ -9254,8 +9262,8 @@ async def test_wmh_probability_bounds_reach_provider_schema():
     def handler(request):
         body = json.loads(request.content)
         results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
-        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
-        assert results["minItems"] == results["maxItems"] == len(expected_ids)
+        assert results["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
+        assert "maxItems" not in results
         assert body["text"]["format"]["strict"] is False
         from jsonschema import Draft202012Validator
         probability = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["probability"]

@@ -81,10 +81,13 @@ export function testRegisteredWmhExecutionPolicy(): void {
       codexKeyFromHash('root-goal-hash', { messages: [] }),
     ];
     const real = keySet();
+    // Registered timed policies (v3, v4) must leave production (real/shadow) keys byte-identical.
+    const timedPolicies = ['rose-outcome-distribution-v3', 'rose-outcome-distribution-v4'];
     for (const mode of ['real', 'shadow']) {
       process.env.BENCHMARK_WORLD_MODEL_MODE = mode;
-      for (const { policy } of policies) {
+      for (const policy of [...policies.map(({ policy }) => policy), ...timedPolicies]) {
         process.env.WMH_EXECUTION_POLICY = policy;
+        assert.strictEqual(worldModelCacheScope(), '');
         assert.deepStrictEqual(keySet(), real);
       }
     }
@@ -118,6 +121,11 @@ export function testRegisteredWmhExecutionPolicy(): void {
       );
       assert.strictEqual(new Set(choiceKeys).size, choices.length);
     }
+    process.env.WMH_EXECUTION_POLICY = 'rose-outcome-distribution-v4';
+    assert.strictEqual(
+      worldModelCacheScope(),
+      'sim.rose-archive-v2.policy.rose-outcome-distribution-v4.4.dc3c757c601515ff:'
+    );
     for (const policy of ['unregistered', 'rose-virtual-public-affordances-v3', '__proto__']) {
       process.env.WMH_EXECUTION_POLICY = policy;
       assert.throws(keySet, /Unknown WMH execution policy/);

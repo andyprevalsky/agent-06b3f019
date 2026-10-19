@@ -10,13 +10,13 @@ used. Session locks cover only immutable snapshots, receipts and atomic commits.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
 import json
 import secrets
 import time
 import uuid
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -49,10 +49,12 @@ from benchmarks.wmh_execution_policy import (
 )
 from benchmarks.wmh_outcomes import (
     DISTRIBUTION_PROTOCOLS,
+    OUTCOME_V4_PROTOCOL,
     SCHEDULED_EVENTS_KEY,
-    TIMED_DISTRIBUTION_PROTOCOL,
+    TIMED_PROTOCOLS,
     _pointer,
     apply_state_patch,
+    mark_delivered,
     parse_distribution,
     restore_hidden_events,
     select_outcome,
@@ -268,7 +270,7 @@ class ParallelWorldModel:
         self.capabilities = capabilities or ModelCapabilities(supports_tools=False, maximum_output_tokens=16384)
         self.token_counter = Utf8UpperBoundTokenCounter()
         self.execution_policy = select_execution_policy(execution_policy)
-        self._timed = self.execution_policy.response_protocol == TIMED_DISTRIBUTION_PROTOCOL
+        self._timed = self.execution_policy.response_protocol in TIMED_PROTOCOLS
         self.sample_uniform = sample_uniform or secrets.SystemRandom().random
         if execution_policy != DEFAULT_EXECUTION_POLICY and execution_identity is None:
             raise ValueError("Activated WMH policy requires a verified artifact-bound execution identity")
@@ -612,6 +614,13 @@ class ParallelWorldModel:
                                 base_state=view,
                                 expected_call_ids=tuple(c.call_id for c in candidate.tool_calls),
                                 timed=self._timed,
+                                protocol=self.execution_policy.response_protocol,
+                                at_ms=world_started,
+                                action_category=call.arguments.get("category"),
+                                action_arguments=call.arguments,
+                                reserved_event_ids=frozenset(
+                                    e["id"] for e in hidden if isinstance(e, dict) and isinstance(e.get("id"), str)
+                                ),
                             )
                         except (ValueError, TypeError, KeyError) as exc:
                             raise TextWorldModelProtocolError(str(exc)) from exc
@@ -728,6 +737,7 @@ class ParallelWorldModel:
                         "initial_context_sha256": sha256_json(m.transition.initial_context),
                         "action": preview(m.transition.action.model_dump(mode="json")),
                         "observation": {"content": preview(m.transition.observation.content)},
+                        **({} if m.transition.elapsed_ms is None else {"elapsed_ms": m.transition.elapsed_ms}),
                     }
                     for m in demos
                 ],
@@ -763,6 +773,12 @@ class ParallelWorldModel:
                             state_before, state_after = session.state, merged
                             observation["metadata"]["append_merged_from_revision"] = revision
                             audit["append_merged_from_revision"] = revision
+                        delivered = False
+                        if self.execution_policy.response_protocol == OUTCOME_V4_PROTOCOL and selection:
+                            # The runner, not the model, records that a due event was observed.
+                            state_after, delivered = mark_delivered(
+                                state_after, selection.get("delivered_event_ids"), at_ms=world_started
+                            )
                         observation["metadata"]["committed_revision"] = session.revision + 1
                         step = {
                             "action": deepcopy(action),
@@ -777,7 +793,7 @@ class ParallelWorldModel:
                         )
                         session.history = (*session.history, step)
                         session.state = deepcopy(state_after)
-                        session.additive.append(_adds_new_records(state_patch, state_before))
+                        session.additive.append(not delivered and _adds_new_records(state_patch, state_before))
                         if self._timed:
                             session.clock.commit(actor, started_ms=world_started, elapsed_ms=elapsed)
                         session.revision += 1
@@ -802,6 +818,14 @@ class ParallelWorldModel:
         session = self._clock_session(session_id)
         session.clock.finish(agent_id)
         return {"agent_id": agent_id, "time_ms": session.clock.time_of(agent_id)}
+
+    def clock_hold(self, session_id, agent_id, hold_id):
+        session = self._clock_session(session_id)
+        return {"agent_id": agent_id, "time_ms": session.clock.hold(agent_id, hold_id)}
+
+    def clock_release(self, session_id, agent_id, hold_id, children):
+        session = self._clock_session(session_id)
+        return {"agent_id": agent_id, "time_ms": session.clock.release(agent_id, hold_id, children)}
 
     async def clock_wait(self, session_id, agent_id, wait_id, *, until_ms=None, duration_ms=None, poll_seconds=50):
         session = self._clock_session(session_id)

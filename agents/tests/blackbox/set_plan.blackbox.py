@@ -875,6 +875,48 @@ def _patch_service_workflow(fake_workflow):
     return restore
 
 
+async def test_run_planner_attempt_passes_the_world_cursor_only_in_simulate_mode():
+    """The planner gets the last world-time cursor in simulate mode; real-mode args are unchanged."""
+    from domains.set_plan.service import run_planner_attempt
+
+    captured: list = []
+
+    class _CaptureWorkflow(_FakeWorkflowModule):
+        async def execute_activity(self, fn, *args, **kwargs):
+            captured.append(list(kwargs["args"]))
+            return {"result": {"title": "t", "join": "all", "tasks": []}, "usage": {}}
+
+    cursor = 1_791_000_000_000
+    real = _FakeWFInstance()
+    real.world_model_mode = "real"
+    real.simulated_world_time_ms = cursor  # ignored outside simulate
+    simulated = _FakeWFInstance()
+    simulated.world_model_mode = "simulate"
+    simulated.simulated_world_time_ms = cursor
+    restore = _patch_service_workflow(_CaptureWorkflow())
+    try:
+        for instance in (_FakeWFInstance(), real, simulated):
+            await run_planner_attempt(
+                workflow_instance=instance,
+                messages=[{"role": "user", "content": "goal"}],
+                tools_description="tools",
+                user_context="",
+                response_schema=None,
+                claude_max_token=None,
+                gpt_token=None,
+                gpt_account_id=None,
+                gpt_token_source=None,
+                gpt_token_pool_id=None,
+                user_messages=["goal"],
+                tool_call_id="tc-1",
+                attempt=0,
+            )
+    finally:
+        restore()
+    assert len(captured[0]) == len(captured[1]) == 22 and captured[0] == captured[1]
+    assert captured[2] == captured[0] + [cursor]
+
+
 async def test_run_planner_attempt_redelivers_after_dead_worker():
     """Planner activity must be stealable if the assigned worker dies.
 
@@ -1019,6 +1061,10 @@ async def run_all_tests():
     await r.record_async("handler_retries_emit_event", test_handler_retries_emit_retry_event)
     await r.record_async("handler_fails_after_retries", test_handler_fails_after_all_retries)
     await r.record_async("handler_planner_exception", test_handler_planner_exception_yields_error)
+    await r.record_async(
+        "run_planner_attempt_passes_world_cursor_only_in_simulate",
+        test_run_planner_attempt_passes_the_world_cursor_only_in_simulate_mode,
+    )
     await r.record_async(
         "planner_activity_redelivers_after_dead_worker",
         test_run_planner_attempt_redelivers_after_dead_worker,

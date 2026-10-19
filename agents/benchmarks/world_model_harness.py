@@ -55,7 +55,7 @@ _WMH_REFERENCE_ROOT = _REPO_ROOT / ".context" / "reference" / "world-model-harne
 _DEFAULT_WMH_BUILD_ROOT = _REPO_ROOT / ".context" / "world-model"
 _BENCHMARK_TASKS_FILE = Path(__file__).with_name("tasks.json")
 # Increment whenever cached per-bundle OTel/session output changes independently of archive bytes.
-_WMH_EXPORT_SCHEMA_VERSION = 11
+_WMH_EXPORT_SCHEMA_VERSION = 12
 
 _SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|"
@@ -220,6 +220,17 @@ class CanonicalObservation:
     metadata: JsonObject = field(default_factory=dict)
     artifact_refs: list[str] = field(default_factory=list)
     timestamp_ms: Optional[int] = None
+    # Real measured start of the tool call whose completion is ``timestamp_ms``.
+    # Kept out of the observation text: it is grounding evidence, not output.
+    started_at_ms: Optional[int] = None
+
+    @property
+    def elapsed_ms(self) -> Optional[int]:
+        """Measured time-to-complete (completion minus start), when both real clocks exist."""
+
+        if self.started_at_ms is None or self.timestamp_ms is None or self.timestamp_ms < self.started_at_ms:
+            return None
+        return self.timestamp_ms - self.started_at_ms
 
     def to_output_text(self) -> str:
         payload: JsonObject = {
@@ -1121,6 +1132,12 @@ def _retrieval_state_from_initial_state(initial_state: JsonObject) -> JsonObject
     return {key: value for key, value in initial_state.items() if key != "db_fixture"}
 
 
+def _real_clock_ms(value: Any) -> int | None:
+    """Accept only an explicit nonnegative integer clock; never infer one."""
+
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
 def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: str) -> RoseTransition:
     action_raw = raw.get("action") if isinstance(raw.get("action"), dict) else {}
     observation_raw = raw.get("observation") if isinstance(raw.get("observation"), dict) else {}
@@ -1144,6 +1161,7 @@ def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: st
         timestamp_ms=observation_raw.get("timestamp_ms")
         if isinstance(observation_raw.get("timestamp_ms"), int)
         else None,
+        started_at_ms=_real_clock_ms(observation_raw.get("started_at_ms")),
     )
     return RoseTransition(
         state_before=_maybe_redact(state_raw, redaction_mode),
@@ -1779,6 +1797,11 @@ def _transitions_from_message_fixture(
 
     action_args: dict[tuple[str, str], JsonObject] = {}
     declared_action_keys: set[tuple[str, str]] = set()
+    # Real measured start clocks per call: the tool's own first IN_PROGRESS row,
+    # otherwise the ASSISTANT row that issued the call. The terminal row's clock
+    # is the completion, so the pair is the call's actual time-to-complete.
+    progress_started_ms: dict[tuple[str, str], int] = {}
+    declared_started_ms: dict[tuple[str, str], int] = {}
     for row in messages:
         if str(row.get("role") or "").upper() != "ASSISTANT":
             continue
@@ -1793,6 +1816,9 @@ def _transitions_from_message_fixture(
             call_key = (str(row.get("agentId") or ""), call_id)
             declared_action_keys.add(call_key)
             action_args[call_key] = _assistant_tool_arguments(call)
+            declared_ms = _row_timestamp_ms(row)
+            if declared_ms is not None:
+                declared_started_ms[call_key] = min(declared_ms, declared_started_ms.get(call_key, declared_ms))
 
     # Planned DAG calls do not have an ASSISTANT tool_use row. Their
     # IN_PROGRESS row is the action declaration the parent actually executed;
@@ -1816,6 +1842,9 @@ def _transitions_from_message_fixture(
             continue
         declared_action_keys.add(call_key)
         action_args.setdefault(call_key, _message_fixture_progress_arguments(row, metadata))
+        progress_ms = _row_timestamp_ms(row)
+        if progress_ms is not None:
+            progress_started_ms[call_key] = min(progress_ms, progress_started_ms.get(call_key, progress_ms))
 
     retrieval_state = _retrieval_state_from_initial_state(initial_state)
     root_goal = str(initial_state.get("root_goal") or "")
@@ -1961,6 +1990,7 @@ def _transitions_from_message_fixture(
                     },
                     artifact_refs=["db/end.fixture.json.gz.enc"],
                     timestamp_ms=timestamp_ms,
+                    started_at_ms=progress_started_ms.get(call_key, declared_started_ms.get(call_key)),
                 ),
             )
         )
@@ -2634,6 +2664,11 @@ def transitions_to_otel_spans(
             _otel_attr("wmh.trace.metadata", trace_metadata),
             _otel_attr("rose.root_agent_id", root_agent_id),
         ]
+        if transition.observation.elapsed_ms is not None:
+            # Span clocks below are ordinal pairing slots; the real measured
+            # interval travels as explicit attributes through native ingestion.
+            obs_attrs.append(_otel_attr("rose.tool.started_at_ms", transition.observation.started_at_ms))
+            obs_attrs.append(_otel_attr("rose.tool.completed_at_ms", transition.observation.timestamp_ms))
         if transition.action.agent_id:
             action_attrs.append(_otel_attr("rose.agent_id", transition.action.agent_id))
             obs_attrs.append(_otel_attr("rose.agent_id", transition.action.agent_id))

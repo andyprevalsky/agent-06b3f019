@@ -26,6 +26,7 @@ from helpers.generation_handoff import (
     GenerationHandoffRequested,
 )
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+from helpers.wait_on_world_clock import hold_on_children, release_children
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 from utils.oai_demo import is_oai_demo_mass_agent_task
@@ -339,20 +340,32 @@ class SpawnSubAgentManager(ToolManager):
         )
 
         logger.info(f"⏳ Waiting for sub-agent {child_agent_id} to complete...")
-        while child_agent_id not in workflow_instance.child_results:
-            if await self._reconcile_terminal_child_result(workflow_instance, child_agent_id):
-                break
-            try:
-                await wait_condition_or_generation_handoff(
-                    lambda cid=child_agent_id: cid in workflow_instance.child_results,
-                    workflow_instance,
-                    timeout=timedelta(seconds=30),
-                    workflow_mod=workflow,
-                )
-            except GenerationHandoffRequested:
-                raise
-            except (asyncio.TimeoutError, TimeoutError):
-                continue
+        # Simulate mode: while blocked here the parent holds on its children on
+        # the world clock; on return it receives this child's finish time.
+        hold_id = f"{child_tool_id}:{child_agent_id}"
+        try:
+            await hold_on_children(workflow_instance, hold_id)
+            while child_agent_id not in workflow_instance.child_results:
+                if await self._reconcile_terminal_child_result(workflow_instance, child_agent_id):
+                    break
+                try:
+                    await wait_condition_or_generation_handoff(
+                        lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                        workflow_instance,
+                        timeout=timedelta(seconds=30),
+                        workflow_mod=workflow,
+                    )
+                except GenerationHandoffRequested:
+                    raise
+                except (asyncio.TimeoutError, TimeoutError):
+                    continue
+        except BaseException:  # includes cancellation and GenerationHandoffRequested
+            # Leaving without the result: stop holding (a next generation that
+            # re-enters this wait holds again under the same hold id). The
+            # original exception, including a cancellation, is re-raised.
+            await release_children(workflow_instance, hold_id, [])
+            raise
+        await release_children(workflow_instance, hold_id, [child_agent_id])
 
         child_result = workflow_instance.child_results.get(child_agent_id, {})
         if _child_result_is_failure(child_result):

@@ -7284,6 +7284,7 @@ async def call_planner_llm_activity(
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: int = 0,
     memory_enabled: bool = False,
+    world_time_cursor_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Temporal activity for calling the dedicated planner LLM.
@@ -7371,6 +7372,15 @@ async def call_planner_llm_activity(
         from helpers.world_model_runtime import world_time_ms
 
         world_ms = await world_time_ms(agent_id)
+        if world_ms is None and type(world_time_cursor_ms) is int:
+            # A simulated agent never plans on the real date mid-run: keep its
+            # last known world time when the world clock reads nothing.
+            logger.warning(
+                "[Planner] World clock returned no time; using the agent's last world-time cursor",
+                agent_id=agent_id,
+                world_time_cursor_ms=world_time_cursor_ms,
+            )
+            world_ms = world_time_cursor_ms
         current = datetime.fromtimestamp(world_ms / 1000, timezone.utc) if world_ms is not None else datetime.now(timezone.utc)
         system_prompt += f"\n\nCurrent UTC date: {current.date().isoformat()}."
         prompt_elapsed = time.perf_counter() - prompt_start

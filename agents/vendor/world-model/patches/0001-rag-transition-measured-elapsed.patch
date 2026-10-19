@@ -1,0 +1,221 @@
+--- orig/exp/simulation/engines/text/prompt.py
++++ patched/exp/simulation/engines/text/prompt.py
+@@ -92,6 +92,20 @@
+     """The world model did not return the pinned text-transition JSON contract."""
+ 
+ 
++def format_elapsed(elapsed_ms: int) -> str:
++    """Render a measured duration compactly, e.g. ``850ms``, ``2m 14s`` or ``1h 0m 5s``."""
++    if elapsed_ms < 1000:
++        return f"{elapsed_ms}ms"
++    seconds = elapsed_ms // 1000
++    parts = []
++    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
++        if parts or seconds >= size:
++            parts.append(f"{seconds // size}{unit}")
++            seconds %= size
++    parts.append(f"{seconds}s")
++    return " ".join(parts)
++
++
+ def build_world_model_request(
+     task: TaskCase,
+     *,
+@@ -124,14 +138,17 @@
+         }
+         context_id = "context-" + sha256_json(context)
+         contexts[context_id] = context
+-        examples.append(
+-            {
+-                "transition_id": match.transition.transition_id,
+-                "context_ref": context_id,
+-                "action": match.transition.action.model_dump(mode="json", exclude_none=True),
+-                "observation": match.transition.observation.model_dump(mode="json"),
+-            }
+-        )
++        example: JsonObject = {
++            "transition_id": match.transition.transition_id,
++            "context_ref": context_id,
++            "action": match.transition.action.model_dump(mode="json", exclude_none=True),
++            "observation": match.transition.observation.model_dump(mode="json"),
++        }
++        if match.transition.elapsed_ms is not None:
++            # Real measured time from the source action until its observation completed.
++            example["elapsed_ms"] = match.transition.elapsed_ms
++            example["elapsed"] = format_elapsed(match.transition.elapsed_ms)
++        examples.append(example)
+     evidence: JsonObject = {
+         "task": {
+             "task_id": task.task_id,
+--- orig/exp/simulation/retrieval/contracts.py
++++ patched/exp/simulation/retrieval/contracts.py
+@@ -5,7 +5,14 @@
+ import math
+ from typing import Literal
+ 
+-from pydantic import Field, JsonValue, field_validator, model_validator
++from pydantic import (
++    Field,
++    JsonValue,
++    SerializerFunctionWrapHandler,
++    field_validator,
++    model_serializer,
++    model_validator,
++)
+ 
+ from exp.common.core.artifacts import (
+     ArtifactEnvelope,
+@@ -104,6 +111,18 @@
+     observation: RAGObservation
+     key_text: str = Field(min_length=1)
+     key_sha256: Sha256
++    # Real measured time-to-complete of the source tool call, from its original
++    # source clocks rather than ingestion ordering. Absent for older indexes and
++    # for sources without measured clocks; never estimated.
++    elapsed_ms: int | None = Field(default=None, ge=0)
++
++    @model_serializer(mode="wrap")
++    def _omit_unmeasured_elapsed(self, handler: SerializerFunctionWrapHandler) -> JsonValue:
++        """Keep records without a measurement byte-identical to the pre-duration contract."""
++        data: JsonValue = handler(self)
++        if isinstance(data, dict) and data.get("elapsed_ms") is None:
++            data.pop("elapsed_ms", None)
++        return data
+ 
+ 
+ class RAGVector(ContractModel):
+--- orig/exp/simulation/retrieval/store.py
++++ patched/exp/simulation/retrieval/store.py
+@@ -23,7 +23,11 @@
+     RAGVector,
+     RealTraceSourceIdentity,
+ )
+-from exp.simulation.retrieval.transitions import render_rag_key
++from exp.simulation.retrieval.transitions import (
++    measured_elapsed_ms,
++    render_rag_key,
++    transition_identity_material,
++)
+ 
+ 
+ @dataclass(frozen=True)
+@@ -137,15 +141,16 @@
+             raise ArtifactCorruptionError("RAG transition key differs from its versioned fields")
+         if hashlib.sha256(key_text.encode("utf-8")).hexdigest() != transition.key_sha256:
+             raise ArtifactCorruptionError("RAG transition key hash does not match")
+-        material: JsonValue = {
+-            "action": transition.action.model_dump(mode="json", exclude_none=False),
+-            "action_span_id": transition.action_span_id,
+-            "key_schema_version": index.key_schema_version,
+-            "lineage_id": transition.lineage_id,
+-            "observation": transition.observation.model_dump(mode="json"),
+-            "observation_span_id": transition.observation_span_id,
+-            "trace_id": transition.trace_id,
+-        }
++        material = transition_identity_material(
++            action=transition.action,
++            action_span_id=transition.action_span_id,
++            key_schema_version=index.key_schema_version,
++            lineage_id=transition.lineage_id,
++            observation=transition.observation,
++            observation_span_id=transition.observation_span_id,
++            trace_id=transition.trace_id,
++            elapsed_ms=transition.elapsed_ms,
++        )
+         if stable_id("rag-transition", material) != transition.transition_id:
+             raise ArtifactCorruptionError("RAG transition ID does not match its observed evidence")
+         if len(vector.values) != index.embedding_dimension:
+@@ -213,3 +218,8 @@
+             raise ArtifactCorruptionError("RAG transition names an unknown source span")
+         if observation_span.started_at < action_span.ended_at:
+             raise ArtifactCorruptionError("RAG observation precedes its source action")
++        expected_elapsed = (
++            measured_elapsed_ms(observation_span) if transition.action.kind == "tool_call" else None
++        )
++        if transition.elapsed_ms != expected_elapsed:
++            raise ArtifactCorruptionError("RAG transition duration differs from its source span")
+--- orig/exp/simulation/retrieval/transitions.py
++++ patched/exp/simulation/retrieval/transitions.py
+@@ -20,6 +20,45 @@
+ )
+ 
+ _TOOL_OPERATION = "execute_tool"
++MEASURED_ELAPSED_MS_ATTRIBUTE = "exp.tool.elapsed_ms"
++
++
++def measured_elapsed_ms(span: TraceSpan) -> int | None:
++    """Return a tool result span's explicit measured duration in milliseconds.
++
++    Span start/end clocks may be ingestion ordering slots, so only an explicit
++    nonnegative integer attribute recorded from the original source clocks counts.
++    """
++    value = span.attributes.get(MEASURED_ELAPSED_MS_ATTRIBUTE)
++    if type(value) is int and value >= 0:
++        return value
++    return None
++
++
++def transition_identity_material(
++    *,
++    action: RAGAction,
++    action_span_id: str,
++    key_schema_version: str,
++    lineage_id: str,
++    observation: RAGObservation,
++    observation_span_id: str,
++    trace_id: str,
++    elapsed_ms: int | None,
++) -> JsonValue:
++    """Identity material; a measured duration participates only when present."""
++    material: dict[str, JsonValue] = {
++        "action": action.model_dump(mode="json", exclude_none=False),
++        "action_span_id": action_span_id,
++        "key_schema_version": key_schema_version,
++        "lineage_id": lineage_id,
++        "observation": observation.model_dump(mode="json"),
++        "observation_span_id": observation_span_id,
++        "trace_id": trace_id,
++    }
++    if elapsed_ms is not None:
++        material["elapsed_ms"] = elapsed_ms
++    return material
+ 
+ 
+ def extract_fit_transitions(
+@@ -131,15 +170,19 @@
+             initial_context=trace.initial_context,
+             action=action,
+         )
+-        material: JsonValue = {
+-            "action": action.model_dump(mode="json", exclude_none=False),
+-            "action_span_id": span.span_id,
+-            "key_schema_version": RAG_KEY_SCHEMA_VERSION,
+-            "lineage_id": lineage_id,
+-            "observation": observation.model_dump(mode="json"),
+-            "observation_span_id": observation_span.span_id,
+-            "trace_id": trace.trace_id,
+-        }
++        elapsed_ms = (
++            measured_elapsed_ms(observation_span) if action.kind == "tool_call" else None
++        )
++        material = transition_identity_material(
++            action=action,
++            action_span_id=span.span_id,
++            key_schema_version=RAG_KEY_SCHEMA_VERSION,
++            lineage_id=lineage_id,
++            observation=observation,
++            observation_span_id=observation_span.span_id,
++            trace_id=trace.trace_id,
++            elapsed_ms=elapsed_ms,
++        )
+         transitions.append(
+             RAGTransition(
+                 transition_id=stable_id("rag-transition", material),
+@@ -154,6 +197,7 @@
+                 observation=observation,
+                 key_text=key_text,
+                 key_sha256=hashlib.sha256(key_text.encode("utf-8")).hexdigest(),
++                elapsed_ms=elapsed_ms,
+             )
+         )
+     return transitions

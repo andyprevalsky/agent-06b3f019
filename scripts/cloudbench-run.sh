@@ -283,7 +283,9 @@ request_graceful_shutdown() {
     local signal_rc=0 signal_ignored_mask="unreadable" signal_caught_mask="unreadable" signal_process_group="unreadable"
     ACTIVE_COMMAND_SHUTDOWN_PENDING=1
     log "guest shutdown requested; draining benchmark root before stack teardown"
-    if [ -n "$ACTIVE_COMMAND_PID" ] && kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; then
+    # An already-cancelled command may exit (and be reaped) before a repeated
+    # request; run_with_heartbeat still owns its wait and exit status.
+    if [ -n "$ACTIVE_COMMAND_PID" ] && { [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ] || kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; }; then
         if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
             ACTIVE_COMMAND_SIGNALLED=1
             # Bash defers traps while a foreground `sleep` is running. The
@@ -339,7 +341,7 @@ fi
 source "$SEED_BUDGET_LIB"
 
 run_with_heartbeat() {
-    local label="$1" command_pid interval command_rc=0
+    local label="$1" command_pid interval command_rc=0 command_collected=0
     shift
     interval="${CLOUDBENCH_HEARTBEAT_SECONDS:-30}"
     # A background job launched with job control disabled inherits SIGINT as
@@ -366,15 +368,15 @@ run_with_heartbeat() {
             # Signals are ignored after the one canonical cancellation above,
             # so this wait cannot be shortened into premature stack teardown.
             wait "$command_pid" 2>/dev/null || command_rc=$?
+            command_collected=1
             break
         fi
         if kill -0 "$command_pid" 2>/dev/null; then
             log "$label heartbeat (pid=$command_pid)"
         fi
     done
-    if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
-        wait "$command_pid" 2>/dev/null || command_rc=$?
-    fi
+    # A signalled child reaped before the loop still has a saved status.
+    [ "$command_collected" = 1 ] || wait "$command_pid" 2>/dev/null || command_rc=$?
     if [ "$label" = benchmark ]; then
         ACTIVE_COMMAND_PID=""
     else
