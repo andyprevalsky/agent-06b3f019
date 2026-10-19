@@ -12,7 +12,7 @@ def function(name):
  return re.search(r'^'+re.escape(name)+r'\(\).*?^}\n',text,re.M|re.S).group()
 class Cross(unittest.TestCase):
  def run_case(self,kind='machine',legacy=False,corrupt=False,malformed=False,latch=False,forced=False,never=False):
-  body=''.join(function(name)for name in ('fleet_registry_remove_if_empty','fleet_disposable_registry_policy','fleet_pid_matches_start','registry_owner_alive','fleet_registry_cleanup_state','reconcile_stale_fleet_registries','stale_registry_only_waits_for_provider_detach'))
+  body=''.join(function(name)for name in ('fleet_registry_remove_if_empty','fleet_disposable_registry_policy','fleet_pid_matches_start','registry_owner_alive','fleet_registry_cleanup_state','reconcile_stale_fleet_registries_full','reconcile_stale_fleet_registries','stale_registry_only_waits_for_provider_detach'))
   if os.environ.get('CLOUDBENCH_TEST_OLD_CROSS_SOURCE'):body+=function('fleet_reap_registry_record')
   body+=r'''
 FLY(){
