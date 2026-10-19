@@ -19278,6 +19278,8 @@ def test_alternate_warm_donor_cannot_borrow_legacy_snapshot_proof(tmp_path: Path
         "no_delta",
         "peer_refreshed",
         "peer_stale",
+        "peer_foreign_ref",
+        "peer_patched",
     ],
 )
 def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, scenario: str) -> None:
@@ -19306,7 +19308,9 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
     base = git("rev-parse", "HEAD")
     guest = tmp_path / "warm"
     subprocess.run(["git", "clone", "-q", str(repo), str(guest)], check=True)
-    if scenario != "no_delta":
+    # Peer reuse requires an unpatched request for the peer's exact source ref.
+    unpatched = scenario in ("no_delta", "peer_refreshed", "peer_stale", "peer_foreign_ref")
+    if not unpatched:
         (repo / "agents/requirements.txt").write_text("temporalio[grpc]>=1.18.1\n")
         (repo / "scripts/branch-only-helper.txt").write_text("same source as task guests\n")
         git("add", ".")
@@ -19347,9 +19351,12 @@ ensure_app() {{ echo ensure >> "$CALLS"; }}
 acquire_app_environment_lock() {{
     echo lock >> "$CALLS"
     # A queued controller's peer finishes the same refresh while it waits.
-    if [ "$SCENARIO" = peer_refreshed ]; then
+    case "$SCENARIO" in peer_refreshed|peer_foreign_ref|peer_patched)
         printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$(date +%s)" snap-peer > "$WARM_DEPS_STATE_FILE"
-    fi
+        peer_ref="$EXPECTED_REF"
+        [ "$SCENARIO" != peer_foreign_ref ] || peer_ref=0000000000000000000000000000000000000000
+        printf '%s %s\n' "$peer_ref" snap-peer > "$WARM_DEPS_STATE_FILE.ref"
+    esac
 }}
 release_app_environment_lock() {{ :; }}
 resolve_machine_id() {{ echo warm-fixture; }}
@@ -19389,6 +19396,7 @@ if [ "$SCENARIO" = peer_stale ]; then
     printf '%s %s %s %s\n' "$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" \
         "$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${{CLOUDBENCH_PYTHON_MANIFESTS[@]}}")" \
         "$(date +%s)" snap-peer > "$WARM_DEPS_STATE_FILE"
+    printf '%s snap-peer\n' "$BENCH_REF" > "$WARM_DEPS_STATE_FILE.ref"
     python3 -c 'import os, sys; os.utime(sys.argv[1], (1, 1))' "$WARM_DEPS_STATE_FILE"
 fi
 {peer_helper}
@@ -19402,20 +19410,22 @@ fi
         "BUILT_REQUIREMENTS": str(built),
         "METADATA_ARGS": str(tmp_path / "metadata-args"),
     }
-    if scenario not in ("direct", "no_delta"):
+    if scenario != "direct" and not unpatched:
         env.update(
             CLOUDBENCH_LOCAL_PATCH_SOURCE=str(patch),
             CLOUDBENCH_LOCAL_PATCH_SHA256=("0" * 64 if scenario == "bad_digest" else digest),
         )
     result = subprocess.run(["bash", "-c", script], cwd=repo, env=env, text=True, capture_output=True, timeout=20)
-    success = scenario in ("pinned", "direct", "no_delta", "peer_refreshed", "peer_stale")
+    success = scenario in ("pinned", "direct", "no_delta", "peer_refreshed", "peer_stale", "peer_foreign_ref", "peer_patched")
     assert (result.returncode == 0) == success, result.stdout + result.stderr
     if scenario == "peer_refreshed":
         assert "reusing snapshot snap-peer" in result.stdout
         assert calls.read_text().splitlines() == ["ensure", "lock"]
         assert not built.exists(), "a peer's exact proof must not trigger another install"
         assert (common / "cloudbench-warm-deps.fp").read_text().split()[3] == "snap-peer"
+        assert (common / "cloudbench-warm-deps.fp.ref").read_text().split() == [base, "snap-peer"]
     elif success:
+        assert "reusing snapshot" not in result.stdout
         assert built.read_bytes() == (repo / "agents/requirements.txt").read_bytes()
         assert (common / "cloudbench-warm-deps.fp").read_text().split()[3] == "snap-exact"
         assert calls.read_text().splitlines()[-4:] == ["stopped", "snapshot", "metadata", "parked"]
@@ -19424,8 +19434,13 @@ fi
         assert metadata_args[3:5] == (common / "cloudbench-warm-deps.fp").read_text().split()[:2]
         assert metadata_args[-1] == "snap-exact"
         assert subprocess.check_output(["git", "-C", str(guest), "rev-parse", "HEAD"], text=True).strip() == base
-        if scenario != "no_delta":
+        if not unpatched:
             assert (guest / "scripts/branch-only-helper.txt").read_text() == "same source as task guests\n"
+        receipt = common / "cloudbench-warm-deps.fp.ref"
+        if scenario in ("pinned", "direct", "peer_patched"):
+            assert not receipt.exists(), "a patched snapshot must not claim the exact-ref receipt"
+        else:
+            assert receipt.read_text().split() == [base, "snap-exact"]
     else:
         assert not built.exists(), "invalid source must not install dependencies"
         assert not (common / "cloudbench-warm-deps.fp").exists()

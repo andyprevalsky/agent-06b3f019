@@ -42,6 +42,19 @@ class ProtectionUnion(unittest.TestCase):
         result = m.combine([('raw', raw)])
         self.assertEqual(result['machines'], ['22222222222222', self.MID])
 
+    def test_durable_json_claim_and_outgoing_handoff_are_exclusions(self):
+        import json
+        claim = json.dumps(dict(machine_id=self.MID, volume_id=self.VOL, state='PENDING',
+                                target=dict(pool_name='p')), sort_keys=True, separators=(',', ':'))+'\n'
+        hold = json.dumps(dict(volume_id='vol_outgoing1'))+'\n'
+        raw = {'git-common/cloudbench-pool-claims/'+self.MID: claim,
+               'git-common/cloudbench-cold-handoffs/outgoing/33333333333333': hold}
+        result = m.combine([('raw', raw)])
+        self.assertEqual(result['machines'], ['33333333333333', self.MID])
+        self.assertEqual(result['volumes'], [self.VOL, 'vol_outgoing1'])
+        with self.assertRaises(ValueError):
+            m.combine([('raw', {'git-common/cloudbench-pool-claims/'+self.MID: '{"machine_id": '})])
+
     def test_missing_or_unrecognized_source_refuses_and_latch_protects(self):
         with self.assertRaises(ValueError):m.combine([('unknown', {})])
         x={'owners':[dict(cleanup_policy='reap', latches={'recovery-lock':True}, clones=[dict(recorded_id=self.MID)])]}

@@ -2941,11 +2941,19 @@ class RunBenchShardedRouting(unittest.TestCase):
                 (('--concurrency', '39', '--retry-infra', '1'), 'admits all 40 copies'),
                 (('--e2e-started-at', '1'), 'owns its admission clock'),
             ]
+            # The strict route refuses every unsupported option before any launch.
+            fx.env['RUN_BENCH_SHARDED_ROUTE'] = 'always'
             for extra, message in refusals:
                 with self.subTest(message=message):
                     result, ops, fleets = fx.run(*names, *extra)
                     self.assertEqual((result.returncode, ops, fleets), (2, [], []), result.stderr)
                     self.assertIn(message, result.stderr)
+            fx.env.pop('RUN_BENCH_SHARDED_ROUTE')
+            # Auto routing keeps an ordinary-fleet option on the ordinary fleet,
+            # naming it in one warning; the operator never starts.
+            result, ops, fleets = fx.run(*names, '--sim-on', names[0])
+            self.assertEqual((result.returncode, ops, len(fleets)), (0, [], 1), result.stderr)
+            self.assertEqual(result.stderr.count('--sim-on is not a sharded operator option; using the ordinary fleet path'), 1)
             (fx.root/'agents/benchmarks/tasks.json').write_bytes((fx.root/'agents/benchmarks/tasks.json').read_bytes() + b' ')
             result, ops, fleets = fx.run(*names)
             self.assertEqual((result.returncode, ops), (2, []))

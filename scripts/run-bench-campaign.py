@@ -1676,21 +1676,30 @@ def main() -> int:
                 current_cohort = pending[0]["_cohort"] if pending else None
                 if current_cohort:
                     if not current_cohort.get("_cleanup_tickets_prepared"):
-                        common = subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()
-                        reserve_root = Path(common) / "cloudbench-fleet-ownership"
-                        reserve_root.mkdir(mode=0o700, exist_ok=True)
-                        policy = stress_environment if stress_environment is not None else os.environ
-                        cleanup_ticket_command(root, "prepare", current_cohort,
-                            "--manifest", str(current_cohort["_directory"] / "manifest.json"),
-                            "--reserve-root", str(reserve_root),
-                            "--parent-pid", str(os.getpid()), "--parent-start", cleanup_parent_birth,
-                            "--preferred", policy.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512"),
-                            "--minimum", policy.get("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "32"),
-                            "--headroom", policy.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256"),
-                            "--canary-script", str(root / "scripts/cloudbench-infra-canary-preflight.py"),
-                            "--canary-lock", policy.get("FLEET_INFRA_CANARY_LOCK", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock")),
-                            "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
-                        current_cohort["_cleanup_tickets_prepared"] = True
+                        try:
+                            common = subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()
+                            reserve_root = Path(common) / "cloudbench-fleet-ownership"
+                            reserve_root.mkdir(mode=0o700, exist_ok=True)
+                            policy = stress_environment if stress_environment is not None else os.environ
+                            cleanup_ticket_command(root, "prepare", current_cohort,
+                                "--manifest", str(current_cohort["_directory"] / "manifest.json"),
+                                "--reserve-root", str(reserve_root),
+                                "--parent-pid", str(os.getpid()), "--parent-start", cleanup_parent_birth,
+                                "--preferred", policy.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512"),
+                                "--minimum", policy.get("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "32"),
+                                "--headroom", policy.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256"),
+                                "--canary-script", str(root / "scripts/cloudbench-infra-canary-preflight.py"),
+                                "--canary-lock", policy.get("FLEET_INFRA_CANARY_LOCK", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock")),
+                                "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
+                            current_cohort["_cleanup_tickets_prepared"] = True
+                        except (OSError, ValueError, subprocess.SubprocessError):
+                            # End through normal summary/Hub finalization, never a traceback.
+                            first_failure = first_failure or 1
+                            barrier_failure = True
+                            state["cleanup_ticket_failure"] = "prepare"
+                            abort_startup_cohort(current_cohort, "cleanup ticket preparation failed before child admission")
+                            write_json_atomic(summary_path, state)
+                            continue
                     current_cohort["status"] = "waiting"
                     publish_external_barrier(current_cohort, "waiting")
                     if inventory_directory is not None:
@@ -1981,10 +1990,21 @@ def main() -> int:
                 job["status"] = "running"
                 active[process.pid] = job
                 if strict_start:
-                    cleanup_ticket_command(root, "assign", job["_cohort"],
-                        "--job", str(job["job_id"]), "--owner-pid", str(process.pid),
-                        "--owner-start", cleanup_identity_module.birth(process.pid),
-                        "--generation", str(job.get("attempt", 1)))
+                    try:
+                        cleanup_ticket_command(root, "assign", job["_cohort"],
+                            "--job", str(job["job_id"]), "--owner-pid", str(process.pid),
+                            "--owner-start", cleanup_identity_module.birth(process.pid),
+                            "--generation", str(job.get("attempt", 1)))
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        # The unassigned child cannot claim cleanup authority.
+                        # Cancel it through its owned TERM teardown; the normal
+                        # join path reaps it while the campaign finalizes failed.
+                        first_failure = first_failure or 1
+                        barrier_failure = True
+                        job["cleanup_ticket_assignment_failed"] = True
+                        state["cleanup_ticket_failure"] = "assign"
+                        abort_startup_cohort(job["_cohort"], "cleanup ticket assignment failed")
+                        terminate_owned_children({process.pid: job})
                 if strict_start and not job.get("_independent_retry"):
                     current_cohort["_manifest"]["jobs"][str(job["job_id"])] = (
                         process.pid

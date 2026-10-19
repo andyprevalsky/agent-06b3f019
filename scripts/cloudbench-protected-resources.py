@@ -57,6 +57,13 @@ def combine(sources):
         elif data and all(isinstance(k, str) and k.startswith('git-common/')
                           and isinstance(v, str) for k, v in data.items()):
             def fields(raw):
+                if raw.lstrip().startswith('{'):
+                    # durable_handoff_json writers (explicit-idle PENDING claim,
+                    # imported worker claim) record JSON, not key=value lines.
+                    result = json.loads(raw)
+                    if not isinstance(result, dict):
+                        raise ValueError('malformed protection record')
+                    return result
                 result = {}
                 for line in raw.splitlines():
                     if not line:

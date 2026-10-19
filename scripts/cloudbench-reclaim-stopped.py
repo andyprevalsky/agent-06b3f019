@@ -144,8 +144,8 @@ def volumes_of(row):
 
 
 def local_pool_members(root):
-    """Machine IDs indexed (cloudbench-pools/*.ids) or claimed (cloudbench-pool-claims/<id>)
-    by this host's git-common pools. An unreadable index fails closed: no reclaim at all."""
+    """Machine IDs indexed (cloudbench-pools/*.ids, cloudbench-worker-pools/<pool>) or claimed
+    (cloudbench-pool-claims/<id>) by this host's git-common pools. An unreadable index fails closed: no reclaim at all."""
     try:
         common = Path(subprocess.check_output(['git', '-C', str(root), 'rev-parse', '--path-format=absolute',
                                                '--git-common-dir'], text=True, timeout=10).strip())
@@ -160,6 +160,17 @@ def local_pool_members(root):
         if os.path.lexists(claims):
             need(claims.is_dir(), 'pool claims is not a directory')
             members.update(entry.name for entry in claims.iterdir() if MACHINE_ID.fullmatch(entry.name))
+        # Imported workers leave the claim directory but stay members of the
+        # worker-pool ledger written by cloudbench-worker-reuse.py import_packet.
+        worker_pools = common / 'cloudbench-worker-pools'
+        if os.path.lexists(worker_pools):
+            need(worker_pools.is_dir(), 'worker pool index is not a directory')
+            for ledger in sorted(worker_pools.iterdir()):
+                if ledger.name.endswith(('.deps', '.lock')):
+                    continue
+                rows = [row for row in ledger.read_text().splitlines() if row.strip()]
+                need(all(MACHINE_ID.fullmatch(row) for row in rows), 'malformed worker pool ledger')
+                members.update(rows)
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError, ValueError) as error:
         raise ValueError('pool membership index unavailable; refusing reclaim') from error
     return members

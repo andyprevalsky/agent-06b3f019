@@ -2918,6 +2918,10 @@ peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-epoch>
     [ "${written:-0}" -ge "$since" ] || return 1
     read -r s_node s_py s_epoch s_snap < "$WARM_DEPS_STATE_FILE" || return 1
     [ "$s_node" = "$EXPECTED_NODE_FP" ] && [ "$s_py" = "$EXPECTED_PY_FP" ] && [ -n "$s_snap" ] || return 1
+    # Reuse only an unpatched peer snapshot of this exact source ref: a patched
+    # producer leaves no receipt, and a patched request refreshes its own tree.
+    [ -z "${REFRESH_PATCH_FILE:-}" ] || return 1
+    [ "$(cat "$WARM_DEPS_STATE_FILE.ref" 2>/dev/null)" = "$EXPECTED_REF $s_snap" ] || return 1
     vol="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
 import json, os, sys
 for m in json.load(sys.stdin) or []:

@@ -55,7 +55,7 @@ class ReconciliationFixture:
             self.callsite=source[start:end]
         if campaign:
             inventory=(ROOT/'scripts/lib/cloudbench-inventory.sh').read_text()
-            self.functions += function(inventory,'machines_snapshot_identity')+function(inventory,'inventory_index_healthy')+function(inventory,'refresh_machines_snapshot_after')
+            self.functions += function(inventory,'machines_snapshot_identity')+function(inventory,'inventory_index_healthy')+function(inventory,'inventory_borrowed_generation_wait_seconds')+function(inventory,'refresh_machines_snapshot_after')
             index=self.root/'inventory';index.mkdir()
             self.index=index
             self.publish('.generation-before',0)

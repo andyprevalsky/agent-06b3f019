@@ -45,6 +45,16 @@ class CampaignTickets(unittest.TestCase):
                 "cloudbench-provider-limits.json",
             ):
                 shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+            if mode in ("ticket-prepare-fail", "ticket-assign-fail"):
+                # Fail only the campaign parent's in-process call, as a raced
+                # child exit or a ticket refusal would, keeping child CLIs real.
+                action = mode.split("-")[1]
+                with (scripts / "cloudbench-cleanup-tickets.py").open("a") as helper:
+                    helper.write("\n_fixture_original_" + action + " = " + action + "\n"
+                                 "def " + action + "(args):\n"
+                                 "    if __name__ == 'cleanup_parent_identity':\n"
+                                 "        raise ValueError('fixture cleanup ticket " + action + " refusal')\n"
+                                 "    return _fixture_original_" + action + "(args)\n")
             if "external" in mode:
                 # External modes join the actual per-fleet barrier helper.
                 shutil.copyfile(ROOT / "scripts/cloudbench-campaign-barrier.py", scripts / "cloudbench-campaign-barrier.py")
@@ -449,6 +459,19 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 self.assertEqual(events.count("PROVIDER_BOUNDARY:0"), 6)
                 self.assertLess(events.index("PROVIDER_BOUNDARY:1"), events.index("TASK_START"))
                 return
+            if mode in ("ticket-prepare-fail", "ticket-assign-fail"):
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr + details)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(len(summaries), 1)
+                summary = json.loads(summaries[0].read_text())
+                self.assertEqual(summary["status"], "failed")
+                self.assertEqual(summary["cleanup_ticket_failure"], mode.split("-")[1])
+                self.assertIn("finished_at", summary)
+                self.assertTrue(all(job["status"] in ("failed", "cancelled") for job in summary["jobs"]), summary["jobs"])
+                if mode == "ticket-prepare-fail":
+                    self.assertNotIn("TASK_START", events)
+                    self.assertNotIn("CANARY_ENTER", events)
+                return
             if mode not in ("pass", "fresh", "explicit") or old:
                 self.assertNotEqual(
                     result.returncode, 0, result.stdout + result.stderr + details
@@ -773,6 +796,12 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
 
     def test_child_rejects_changed_cohort_receipt(self):
         self.campaign_fixture(mode="tamper")
+
+    def test_cleanup_ticket_prepare_failure_finalizes_failed_summary(self):
+        self.campaign_fixture("ticket-prepare-fail")
+
+    def test_cleanup_ticket_assign_failure_joins_child_and_finalizes_failed(self):
+        self.campaign_fixture("ticket-assign-fail")
 
     def test_failed_parent_canary_never_forks_task_workers(self):
         self.campaign_fixture(mode="fail")

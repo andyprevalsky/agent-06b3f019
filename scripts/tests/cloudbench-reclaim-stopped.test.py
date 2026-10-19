@@ -288,6 +288,27 @@ class Reclaim(unittest.TestCase):
         (claims / f'{2:014x}').write_text('owner=x\n')
         self.assertEqual(H['local_pool_members'](repo), {f'{2:014x}'})
 
+    def test_imported_worker_pool_ledger_members_are_protected(self):
+        repo = self.root / 'repo'
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        pools = repo / '.git/cloudbench-worker-pools'
+        pools.mkdir()
+        (pools / 'workers').write_text(f'{7:014x}\n{8:014x}\n')
+        (pools / 'workers.deps').write_text('{"role":"worker"}\n')
+        (pools / 'workers.lock').write_text('')
+        members = H['local_pool_members'](repo)
+        self.assertEqual(members, {f'{7:014x}', f'{8:014x}'})
+        targets, kept = H['plan']([task(i) for i in range(9)], members, None)
+        self.assertEqual(len(targets), 7)
+        self.assertEqual(kept, {'explicitly-protected': 2})
+        (pools / 'broken').write_text('not-a-machine\n')
+        with self.assertRaisesRegex(ValueError, 'refusing reclaim'):
+            H['local_pool_members'](repo)
+        (pools / 'broken').unlink()
+        (pools / 'unreadable').mkdir()
+        with self.assertRaisesRegex(ValueError, 'refusing reclaim'):
+            H['local_pool_members'](repo)
+
     def test_invalid_inventory_refuses(self):
         with self.assertRaisesRegex(ValueError, 'duplicate'):
             H['inventory']([task(0), task(0)])

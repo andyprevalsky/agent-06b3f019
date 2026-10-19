@@ -162,6 +162,26 @@ def test_every_structural_suite_runs_in_test_sh_and_deploy():
     assert sorted(ran) == expected, f"{STRUCTURAL_GATE} ran {ran}, expected every suite {expected}"
 
 
+def missing_test_sh_suite_paths(test_sh: str, repo_root: Path) -> list[str]:
+    """scripts/tests paths named by run_suite/bg_suite lines that do not exist."""
+    import re
+
+    lines = [line for line in test_sh.splitlines() if re.match(r"\s*(run_suite|bg_suite) ", line)]
+    paths = {m for line in lines for m in re.findall(r"scripts/tests/[A-Za-z0-9_./-]+\.(?:py|sh|ts|js|mjs)\b", line)}
+    return sorted(path for path in paths if not (repo_root / path).is_file())
+
+
+def test_every_test_sh_suite_path_exists():
+    """A run_suite naming a missing file fails every run instead of testing anything."""
+    repo_root = AGENTS_ROOT.parent
+    test_sh = (repo_root / "scripts" / "test.sh").read_text()
+    assert missing_test_sh_suite_paths('  run_suite "X" python3 scripts/tests/absent-fixture.test.py\n', repo_root) == [
+        "scripts/tests/absent-fixture.test.py"
+    ]
+    missing = missing_test_sh_suite_paths(test_sh, repo_root)
+    assert not missing, f"scripts/test.sh registers missing suite files: {missing}"
+
+
 async def run_all_tests():
     print("structural-test-registration tests:")
     r = BlackboxResult()
@@ -170,6 +190,7 @@ async def run_all_tests():
     r.record(
         "every_structural_suite_runs_in_test_sh_and_deploy", test_every_structural_suite_runs_in_test_sh_and_deploy
     )
+    r.record("every_test_sh_suite_path_exists", test_every_test_sh_suite_path_exists)
     return r.all_passed
 
 
