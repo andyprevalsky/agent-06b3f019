@@ -2760,7 +2760,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2863,7 +2863,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2957,7 +2957,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3045,7 +3045,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3139,7 +3139,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3224,7 +3224,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3313,7 +3313,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3424,7 +3424,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3518,7 +3518,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3606,7 +3606,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3702,7 +3702,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3805,7 +3805,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3894,7 +3894,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3982,7 +3982,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -4072,7 +4072,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -4161,7 +4161,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -4251,7 +4251,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -4358,7 +4358,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -4449,7 +4449,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -4561,6 +4561,7 @@
     },
     "tool_count_scope": "root",
     "tags": [
+      "daily",
       "browser",
       "auth",
       "browser-auth",
@@ -4732,6 +4733,7 @@
     },
     "tool_count_scope": "root",
     "tags": [
+      "daily",
       "browser",
       "auth",
       "browser-auth",
@@ -4897,6 +4899,7 @@
     },
     "tool_count_scope": "root",
     "tags": [
+      "daily",
       "browser",
       "auth",
       "browser-auth",
@@ -5061,6 +5064,7 @@
     },
     "tool_count_scope": "root",
     "tags": [
+      "daily",
       "browser",
       "auth",
       "browser-auth",
@@ -5232,6 +5236,7 @@
     },
     "tool_count_scope": "root",
     "tags": [
+      "daily",
       "browser",
       "auth",
       "browser-auth",
@@ -5397,6 +5402,7 @@
     },
     "tool_count_scope": "root",
     "tags": [
+      "daily",
       "browser",
       "auth",
       "browser-auth",
@@ -5583,7 +5589,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -5683,6 +5689,7 @@
     },
     "tool_count_scope": "root",
     "tags": [
+      "daily",
       "browser",
       "auth",
       "browser-auth",
@@ -5862,7 +5869,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -5961,7 +5968,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -6062,7 +6069,7 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth"],
+    "tags": ["daily", "browser", "auth", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
