@@ -10,7 +10,8 @@ class VolumeNotFound(Exception):
     pass
 
 # A received rate-limit/transient refusal of a GET had no provider effect, so the
-# read alone is repeated. Writes, transport loss and every other status stay terminal.
+# read alone is repeated; a received 429 on DELETE is likewise repeated. Other writes,
+# transport loss and every other status stay terminal.
 TRANSIENT_READ_STATUSES=frozenset({429,500,502,503,504})
 READ_ATTEMPTS=6
 
@@ -224,8 +225,17 @@ def cleanup_workspace(a,auth_sha,path,directory,api):
     intent_path=directory/'machine-create.intent.json'
     if intent_path.exists():
         intent=json.loads(read(intent_path));need(intent['authority_sha256']==auth_sha and intent['workspace_sha256']==hashlib.sha256(read(path)).hexdigest(),'wrong Machine creation intent')
-        rows=api('GET','/machines');need(isinstance(rows,list),'complete inventory required')
-        need(all(m.get('name')!=intent['name'] and all(x.get('volume')!=v['volume_id']for x in (m.get('config')or{}).get('mounts',[]))for m in rows),'Machine allocation exists or is ambiguous; seal/export required')
+        # Identities only: full rows carry every Machine's config (~200 KB each), and a sharded
+        # inventory outran the 20 s read before the Volume was released. Summary rows omit
+        # config, so the mount check reads only the candidate Machines in full: a Machine that
+        # mounts this Volume holds its attachment (or is the intended name).
+        rows=api('GET','/machines?summary=true');need(isinstance(rows,list) and all(isinstance(m,dict)for m in rows),'complete inventory required')
+        def mounts(m):return any(x.get('volume')==v['volume_id']for x in (m.get('config')or{}).get('mounts',[]))
+        attached=(native or{}).get('attached_machine_id')
+        candidates=[m['id']for m in rows if m.get('name')==intent['name'] or m.get('id')==attached]
+        if attached is not None and attached not in candidates:candidates.append(attached)
+        details=[api('GET','/machines/'+mid)for mid in candidates]
+        need(all(m.get('name')!=intent['name'] and not mounts(m)for m in rows+[d for d in details if d is not None]),'Machine allocation exists or is ambiguous; seal/export required')
     if native is None:
         save(directory/'disposable-controller.release.json',dict(machine_id=None,volume_id=v['volume_id'],volume_disposition='ABSENT',no_live_machine_observed=True,command_history_verified=False));return
     need(native.get('attached_machine_id')is None and native.get('state')in('created','pending_destroy','destroyed'),'workspace not provably detached')
@@ -278,8 +288,13 @@ def main():
                 try:return attempt(method,path,body,status)
                 except Exception as error:
                     delay=None
-                    if method=='GET' and status and status[-1]in TRANSIENT_READ_STATUSES and isinstance(error,scope['CaptureFailure']):
-                        failures+=1;delay=read_retry_delay(failures,status[-1],read_limit())
+                    # A fully received 429 on DELETE is a refusal with no provider effect; without a
+                    # retry the once-only deletion intent would block teardown forever. Transport loss,
+                    # deadlines and 5xx stay terminal: those DELETEs may have been applied.
+                    received=status[-1]if status else None
+                    refused=(method=='GET' and received in TRANSIENT_READ_STATUSES)or(method=='DELETE' and received==429)
+                    if refused and isinstance(error,scope['CaptureFailure']):
+                        failures+=1;delay=read_retry_delay(failures,received,read_limit())
                     if delay is None:raise
                 time.sleep(delay)
         def attempt(method,path,body,status):

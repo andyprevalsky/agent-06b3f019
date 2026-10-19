@@ -277,6 +277,69 @@ class Coordination(unittest.TestCase):
         self.assertEqual([r['error'] for r in record['retries']], ['Deadline'])
         self.assertTrue((world.shards[0]['out'] / 'global-abort.json').exists())
 
+    def test_internal_failure_after_runners_started_aborts_terminates_and_joins_every_runner(self):
+        # A later spawn, journal save or decision write raising must not orphan already-started
+        # runners at the strict barrier with their disposable controllers allocated.
+        class SpawnFailed(Exception):
+            pass
+
+        def failing_spawn(world):
+            def spawn(shard):
+                if shard['index'] == 2:
+                    raise SpawnFailed('provider refused the third controller')
+                return world.spawn(shard)
+            return spawn
+
+        def failing_save(original):
+            calls = []
+            def save(path, value):
+                calls.append(path)
+                if len(calls) == 1:  # the journal write right after every runner started
+                    raise OSError('journal disk full')
+                return original(path, value)
+            return save
+
+        def failing_write_once(original):
+            def write_once(path, value):
+                if path.name == 'global-abort.json' and value['reason'].startswith('shard'):
+                    raise OSError('decision delivery failed')
+                return original(path, value)
+            return write_once
+
+        g = C['coordinate'].__globals__
+        cases = [('spawn', SpawnFailed, lambda w: dict(), failing_spawn, {0, 1}),
+                 ('save', OSError, lambda w: dict(save=failing_save(g['save'])), None, {0, 1, 2}),
+                 ('write_once', OSError, lambda w: dict(write_once=failing_write_once(g['write_once'])), None,
+                  {0, 1, 2})]
+        for name, error, patches, spawn_factory, started in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
+                scripts = [{0: ('waiting', 0, None)}, {0: ('waiting', 0, None)},
+                           {0: ('failed', 0, None)} if name == 'write_once' else {0: ('waiting', 0, None)}]
+                world = World(root, scripts)
+                for runner in world.runners.values():
+                    runner.wait = lambda r=runner: r.code if r.code is not None else (
+                        143 if r.signals else self.fail('join before TERM'))
+                    runner.tick(0)
+                spawn = spawn_factory(world) if spawn_factory else world.spawn
+                original = dict(g)
+                try:
+                    g.update(patches(world))
+                    with self.assertRaises(error):
+                        C['coordinate'](world.shards, spawn, Path(root) / 'coordination.json', sleep=world.sleep,
+                                        clock=lambda: float(world.n), poll_seconds=0, scheduled_total=9)
+                finally:
+                    g.update(save=original['save'], write_once=original['write_once'])
+                for i in started:
+                    self.assertEqual(world.runners[i].signals, [signal.SIGTERM])
+                    self.assertTrue((world.shards[i]['out'] / 'global-abort.json').exists())
+                    self.assertFalse((world.shards[i]['out'] / 'global-release.json').exists())
+                for i in set(world.runners) - started:
+                    self.assertEqual(world.runners[i].signals, [])
+                journal = json.loads((Path(root) / 'coordination.json').read_text())
+                self.assertIn('coordinator failed', journal['terminate_reason'])
+                self.assertEqual(set(journal['exit_codes']), {str(i) for i in started})
+                self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
     def test_runner_spawns_are_staggered(self):
         scripts = [{0: ('ready', 0, None), 5: ('released', 0, 0)} for _ in range(3)]
         world = World(self.tmp.name, scripts)

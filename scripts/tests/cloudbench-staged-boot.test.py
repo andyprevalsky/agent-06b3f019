@@ -55,7 +55,7 @@ class Tests(unittest.TestCase):
   self.assertFalse(any(m=='POST'for m,p in self.calls))
  def test_automatic_activation_refuses_before_start(self):
   self.native['config']['disable_machine_autostart']=False
-  with self.assertRaisesRegex(AssertionError,'autostart'):self.launch()
+  with self.assertRaisesRegex(ValueError,'autostart'):self.launch()
   self.assertFalse(any(m=='POST'for m,p in self.calls))
  def test_sftp_failure_no_retry_no_dispatch(self):
   with self.assertRaisesRegex(ValueError,'no retry'):self.launch('sftp')

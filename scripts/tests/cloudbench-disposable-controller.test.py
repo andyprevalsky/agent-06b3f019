@@ -50,10 +50,15 @@ class FakeAPI:
         pending = self.refusals.get((method, path))
         if pending:
             raise sys.modules['disposable_controller_test_boundary'].Refused(pending.pop(0))
-        if method == 'GET' and path in ('/machines', '/machines?summary=true'):
+        if method == 'GET' and path == '/machines':
             return copy.deepcopy(self.machines)
+        if method == 'GET' and path == '/machines?summary=true':
+            # Fly's summary rows omit config (mounts included).
+            return [{k: v for k, v in m.items() if k != 'config'} for m in copy.deepcopy(self.machines)]
         if method == 'GET' and path == '/machines/' + MID:
             return copy.deepcopy(self.machine)
+        if method == 'GET' and path.startswith('/machines/') and '?' not in path:
+            return copy.deepcopy(next((m for m in self.machines if m['id'] == path.split('/')[2]), None))
         if method == 'GET' and path == '/volumes/' + VID:
             if self.volume['state'] == 'waiting_for_detach':
                 if self.detach_reads <= 0:
@@ -521,12 +526,15 @@ class DisposableController(ControllerFixture):
         with self.assertRaisesRegex(ValueError, 'allocation exists or is ambiguous'):
             self.entry('cleanup-workspace')
         self.api.machines.pop()
+        # A Machine that mounts this Volume holds its attachment; summary rows omit config,
+        # so the mount is found from that candidate's full read.
         self.api.machines.append(dict(id='foreign-host', name='foreign-controller',
                                      config=dict(mounts=[dict(volume=VID)])))
+        self.api.volume['attached_machine_id'] = 'foreign-host'
         with self.assertRaisesRegex(ValueError, 'allocation exists or is ambiguous'):
             self.entry('cleanup-workspace')
+        self.assertIn(('GET', '/machines/foreign-host', None), self.api.calls)
         self.api.machines.pop()
-        self.api.volume['attached_machine_id'] = 'foreign-host'
         with self.assertRaisesRegex(ValueError, 'not provably detached'):
             self.entry('cleanup-workspace')
         self.assertFalse(any(c[0] == 'DELETE' for c in self.api.calls))
@@ -540,6 +548,47 @@ class DisposableController(ControllerFixture):
         (self.out / 'disposable-controller.release.json').unlink()
         self.entry('cleanup-workspace')
         self.assertEqual([c[1] for c in self.api.calls if c[0] == 'DELETE'], ['/volumes/' + VID])
+
+    def test_partial_allocation_cleanup_reads_summary_and_only_candidate_details(self):
+        # A full GET /machines carries every sharded guest's config (~200 KB each) and outran
+        # the 20 s read before the detached workspace Volume was released.
+        self.entry('create-intent', '--name', 'disposable-controller', '--image', IMAGE)
+        self.api.machines += [dict(id='guest%03d' % i, name='guest-%03d' % i,
+                                   config=dict(mounts=[dict(volume='vol_guest%03d' % i)])) for i in range(50)]
+        self.entry('cleanup-workspace')
+        reads = [c[1] for c in self.api.calls if c[0] == 'GET' and c[1].startswith('/machines')]
+        self.assertEqual(reads, ['/machines?summary=true'])
+        self.assertEqual([c[1] for c in self.api.calls if c[0] == 'DELETE'], ['/volumes/' + VID])
+        self.assertTrue((self.out / 'disposable-controller.release.json').exists())
+
+    def test_rate_limited_delete_is_retried_inside_the_call_and_other_failures_are_not(self):
+        # The once-only intent is written before DELETE: a received 429 (no provider effect)
+        # must not leave the Volume or controller permanently undeleted.
+        self.api.refusals[('DELETE', '/volumes/' + VID)] = [429, 429]
+        clock = FakeClock()
+        with clock.patched():
+            self.entry('cleanup-workspace')
+        self.assertEqual([c[1] for c in self.api.calls if c[0] == 'DELETE'], ['/volumes/' + VID] * 3)
+        self.assertEqual(len(clock.sleeps), 2)
+        self.assertEqual(json.loads((self.out / 'disposable-controller.release.json').read_text())['volume_disposition'],
+                         'pending_destroy')
+        # A sealed controller's Machine DELETE gets the same bounded refusal retry.
+        self.setUp()
+        self.seal()
+        self.export()
+        self.api.refusals[('DELETE', '/machines/' + MID + '?kill=true')] = [429]
+        with clock.patched():
+            self.entry('cleanup')
+        self.assertEqual([c[1] for c in self.api.calls if c[0] == 'DELETE'],
+                         ['/machines/' + MID + '?kill=true'] * 2 + ['/volumes/' + VID])
+        # 5xx on DELETE may have been applied: one request, never repeated.
+        for status in (500, 503):
+            self.setUp()
+            self.api.refusals[('DELETE', '/volumes/' + VID)] = [status]
+            with self.subTest(status=status), clock.patched(), \
+                    self.assertRaisesRegex(ValueError, 'workspace deletion pending'):
+                self.entry('cleanup-workspace')
+            self.assertEqual([c[1] for c in self.api.calls if c[0] == 'DELETE'], ['/volumes/' + VID])
 
     def test_sibling_controller_slots_admit_k_controllers_from_one_snapshot(self):
         # One measured snapshot (4 objects, limit 7) admits K=3 controllers only

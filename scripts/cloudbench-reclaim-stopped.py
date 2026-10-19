@@ -12,9 +12,14 @@ this command destroys exact stopped task Machines and their attached Volumes.
                      confirm gone -> DELETE each attached Volume -> confirm
 
 Never targets: non-stopped Machines, warm donors or any name other than
-`cloudbench-<hex>`, Machines carrying controller/WHM/protected metadata,
-this host's indexed pool members, explicit --protect-machine/--protect-file
-IDs, or the Machine running this command.
+`cloudbench-<hex>`, Machines carrying controller/WHM/protected or archived-reuse
+(retained successor / parked or held reservation) metadata, the fixed native
+worker baseline, this host's indexed or claimed pool members, other hosts'
+pool members (--other-host-pools-file, or an explicit --no-other-host-pools
+attestation), explicit --protect-machine/--protect-file Machines, names or
+Volumes (including `cloudbench-protected-resources.py` union output), or the
+Machine running this command. Any unreadable protection source refuses the
+whole command before a provider call.
 """
 from __future__ import annotations
 
@@ -35,7 +40,10 @@ STATES = {'started', 'starting', 'stopping', 'replacing', 'updating', 'created',
 TASK_NAME = re.compile(r'cloudbench-[0-9a-f]{16,40}')
 MACHINE_ID = re.compile(r'[0-9a-f]{8,32}')
 VOLUME_ID = re.compile(r'vol_[0-9a-z]{8,40}')
-PROTECTED_METADATA_PREFIXES = ('whm_deploy', 'rose_controller', 'cloudbench_protected', 'polar')
+# `cloudbench_archived_reuse` marks retained archived-reuse successors and their
+# parked/held reservations (scripts/cloudbench-archived-machine-reuse.py MARKER).
+PROTECTED_METADATA_PREFIXES = ('whm_deploy', 'rose_controller', 'cloudbench_protected', 'polar',
+                               'cloudbench_archived_reuse')
 GONE_VOLUME_STATES = {'destroyed', 'pending_destroy', 'destroying'}
 CALL_CAP_SECONDS = 30
 
@@ -136,29 +144,85 @@ def volumes_of(row):
 
 
 def local_pool_members(root):
-    """Machine IDs indexed by this host's workspace pools (git-common cloudbench-pools/*.ids)."""
+    """Machine IDs indexed (cloudbench-pools/*.ids) or claimed (cloudbench-pool-claims/<id>)
+    by this host's git-common pools. An unreadable index fails closed: no reclaim at all."""
     try:
-        common = subprocess.check_output(['git', '-C', str(root), 'rev-parse', '--path-format=absolute',
-                                          '--git-common-dir'], text=True, timeout=10).strip()
-    except (OSError, subprocess.SubprocessError):
-        return set()
-    members = set()
-    pools = Path(common) / 'cloudbench-pools'
-    for index in sorted(pools.glob('*.ids')) if pools.is_dir() else []:
-        members.update(token for token in index.read_text().split() if MACHINE_ID.fullmatch(token))
+        common = Path(subprocess.check_output(['git', '-C', str(root), 'rev-parse', '--path-format=absolute',
+                                               '--git-common-dir'], text=True, timeout=10).strip())
+        need(common.is_absolute() and common.is_dir(), 'git common directory missing')
+        members = set()
+        pools = common / 'cloudbench-pools'
+        if os.path.lexists(pools):
+            need(pools.is_dir(), 'pool index is not a directory')
+            for index in sorted(pools.glob('*.ids')):
+                members.update(ids_from(index.read_text()))
+        claims = common / 'cloudbench-pool-claims'
+        if os.path.lexists(claims):
+            need(claims.is_dir(), 'pool claims is not a directory')
+            members.update(entry.name for entry in claims.iterdir() if MACHINE_ID.fullmatch(entry.name))
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError, ValueError) as error:
+        raise ValueError('pool membership index unavailable; refusing reclaim') from error
     return members
 
 
-def classify(row, protected_ids, self_id):
+def ids_from(text):
+    """Whitespace Machine-ID tokens, a JSON ID array, or a protected-resources union document."""
+    stripped = text.lstrip()
+    if not stripped.startswith(('[', '{')):
+        return {token for token in text.split() if MACHINE_ID.fullmatch(token)}
+    return protection_from_json(json.loads(text))['machines']
+
+
+def protection_from_json(value):
+    if isinstance(value, list):
+        value = dict(machines=value)
+    need(isinstance(value, dict) and any(k in value for k in ('machines', 'names', 'volumes')),
+         'unsupported protection document')
+    result = {}
+    for key, pattern in (('machines', MACHINE_ID), ('names', None), ('volumes', VOLUME_ID)):
+        items = value.get(key) or []
+        need(isinstance(items, list) and all(isinstance(v, str) and v and (pattern is None or pattern.fullmatch(v))
+                                             for v in items), 'invalid protected ' + key)
+        result[key] = set(items)
+    return result
+
+
+def empty_protection():
+    return dict(machines=set(), names=set(), volumes=set())
+
+
+def merge(*parts):
+    out = empty_protection()
+    for part in parts:
+        for key in out:
+            out[key] |= set(part.get(key) or ())
+    return out
+
+
+def fixed_native_worker():
+    """The sha-pinned fixed native worker baseline (machine/name/volume); unreadable fails closed."""
+    try:
+        guard = runpy.run_path(str(Path(__file__).resolve().parent / 'cloudbench-fixed-native-worker-guard.py'))
+        base = guard['baseline']()
+    except Exception as error:
+        raise ValueError('fixed native worker baseline unavailable; refusing reclaim') from error
+    return protection_from_json(dict(machines=[base['machine']], names=[base['name']], volumes=[base['volume']]))
+
+
+def classify(row, protected, self_id):
     """Return None when the row is a reclaim target, else the protection reason."""
+    if not isinstance(protected, dict):
+        protected = merge(dict(machines=protected))
     if row['id'] == self_id:
         return 'running-this-command'
-    if row['id'] in protected_ids:
+    if row['id'] in protected['machines'] or row.get('name') in protected['names']:
         return 'explicitly-protected'
     if row.get('state') != 'stopped':
         return 'not-stopped'
     if not TASK_NAME.fullmatch(row.get('name') or ''):
         return 'not-a-task-machine-name'
+    if row.get('config') is not None and set(volumes_of(row)) & protected['volumes']:
+        return 'explicitly-protected'
     metadata = (row.get('config') or {}).get('metadata') or {}
     if any(str(key).startswith(PROTECTED_METADATA_PREFIXES) for key in metadata):
         return 'protected-metadata'
@@ -323,12 +387,17 @@ def run(api, app, output, protected_ids, *, execute=False, workers=8, seconds=18
 
 def protected_from(args):
     ids = set(args.protect_machine or [])
-    for path in args.protect_file or []:
-        text = Path(path).read_text()
-        values = json.loads(text) if text.lstrip().startswith('[') else text.split()
-        ids.update(values)
     need(all(isinstance(v, str) and MACHINE_ID.fullmatch(v) for v in ids), 'invalid protected Machine ID')
-    return ids
+    parts = [dict(machines=ids)]
+    for path in list(args.protect_file or []) + list(args.other_host_pools_file or []):
+        text = Path(path).read_text()
+        if text.lstrip().startswith(('[', '{')):
+            parts.append(protection_from_json(json.loads(text)))
+        else:
+            tokens = text.split()
+            need(all(MACHINE_ID.fullmatch(v) for v in tokens), 'invalid protected Machine ID')
+            parts.append(dict(machines=set(tokens)))
+    return merge(*parts)
 
 
 def main():
@@ -339,13 +408,20 @@ def main():
     parser.add_argument('--protect-machine', action='append', default=[])
     parser.add_argument('--protect-file', action='append', default=[], type=Path,
                         help='JSON array or whitespace-separated Machine IDs to keep')
+    parser.add_argument('--other-host-pools-file', action='append', default=[], type=Path,
+                        help="another host's pool index/claims (IDs, JSON array or protected-resources union)")
+    parser.add_argument('--no-other-host-pools', action='store_true',
+                        help='attest that no other host indexes or claims pool members in this app')
     parser.add_argument('--max-targets', type=int, help='reclaim at most N targets (first in list order)')
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--timeout', type=int, default=1800)
     args = parser.parse_args()
     need(re.fullmatch('[a-z0-9][a-z0-9-]{0,62}', args.app), 'explicit valid app required')
     need(args.max_targets is None or args.max_targets >= 1, 'invalid --max-targets')
-    protected = protected_from(args) | local_pool_members(Path(__file__).resolve().parents[1])
+    need(bool(args.other_host_pools_file) != bool(args.no_other_host_pools),
+         "other hosts' pool members are invisible here: pass --other-host-pools-file or --no-other-host-pools")
+    protected = merge(protected_from(args), fixed_native_worker(),
+                      dict(machines=local_pool_members(Path(__file__).resolve().parents[1])))
     helper = runpy.run_path(str(Path(__file__).resolve().parent / 'cloudbench-original-volume-capture.py'))
     api = helper['Fly'](args.app, helper['resolve_token']({'workspace': os.getcwd()}))
     self_id = os.environ.get('FLY_MACHINE_ID') if os.environ.get('FLY_APP_NAME') == args.app else None

@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -80,8 +82,30 @@ class StaticServiceObservationTests(unittest.TestCase):
                 native = copy.deepcopy(self.native)
                 target = native["config"] if level == "config" else native["config"]["services"][0]
                 target[key] = value
-                with self.assertRaises(AssertionError):
+                with self.assertRaisesRegex(ValueError, "untouched"):
                     self.validate(native)
+
+    def test_policy_refusal_survives_python_optimize(self):
+        guard = os.environ.get("ROSE_OBSERVATION_GUARD_UNDER_TEST",
+                               str(ROOT / "scripts/cloudbench-static-service-observation.py"))
+        program = ("import json,runpy,sys\n"
+                   "check=runpy.run_path(sys.argv[1])['validate_observation_services']\n"
+                   "try:\n check(json.loads(sys.argv[2]))\n"
+                   "except ValueError as error:\n print('REFUSED', error); sys.exit(3)\n"
+                   "print('ADMITTED')\n")
+        refused = [{"autostart": False}, {"disable_machine_autostart": False},
+                   {"services": [dict(self.native["config"]["services"][0], autostart=True)]},
+                   {"services": [dict(self.native["config"]["services"][0], internal_port=8012)]}]
+        env = dict(os.environ, PYTHONOPTIMIZE="1")
+        for config in refused + [self.native["config"]]:
+            with self.subTest(config=config):
+                result = subprocess.run([sys.executable, "-c", program, guard, json.dumps(config)],
+                                        capture_output=True, text=True, env=env, timeout=60)
+                if config is self.native["config"]:
+                    self.assertEqual((result.returncode, result.stdout.strip()), (0, "ADMITTED"), result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+                    self.assertIn("untouched", result.stdout)
 
     def test_canonical_identity_and_inert_init_remain_required(self):
         for field, value in (("state", "started"), ("instance_id", "changed")):

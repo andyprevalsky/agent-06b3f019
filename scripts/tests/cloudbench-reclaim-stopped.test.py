@@ -83,7 +83,7 @@ class Reclaim(unittest.TestCase):
         binary.write_text('#!/bin/sh\nexit 0\n')
         binary.chmod(0o700)
 
-    def cli(self, fake, *args, env=None):
+    def cli(self, fake, *args, env=None, attest=True):
         self.addCleanup(fake.server.server_close)
         self.addCleanup(fake.server.shutdown)
         env = dict(os.environ, PATH=str(self.root) + ':' + os.environ['PATH'],
@@ -91,7 +91,8 @@ class Reclaim(unittest.TestCase):
                    FLY_BENCH_API_TOKEN='fixture-token-with-at-least20chars', **(env or {}))
         env.pop('FLY_APP_NAME', None)
         result = subprocess.run(['bash', str(ROOT / 'scripts/run-bench'), 'reclaim-stopped', '--app', 'fixture',
-                                 '--out-dir', str(self.root / 'out'), *args],
+                                 '--out-dir', str(self.root / 'out'),
+                                 *(['--no-other-host-pools'] if attest else []), *args],
                                 env=env, capture_output=True, text=True, timeout=60)
         return result, (json.loads(result.stdout) if result.stdout.strip() else None)
 
@@ -236,6 +237,56 @@ class Reclaim(unittest.TestCase):
         targets, kept = H['plan']([task(i) for i in range(5)], members, None)
         self.assertEqual(len(targets), 3)
         self.assertEqual(kept, {'explicitly-protected': 2})
+
+    def test_retained_reserved_fixed_and_foreign_pool_machines_are_never_deleted(self):
+        base = json.loads((ROOT / 'scripts/cloudbench-fixed-native-worker-baseline.json').read_text())
+        fixed = dict(task(20), id=base['machine'], instance_id='inst-fixed', name=base['name'])
+        fixed['config']['mounts'] = [dict(volume=base['volume'], path='/data')]
+        rows = [task(0),
+                task(1, metadata={'cloudbench_archived_reuse': '{"role":"retained-successor"}'}),
+                task(2, metadata={'cloudbench_archived_reuse': '{"reservation":"parked"}'}),
+                fixed, task(3), task(4), task(5), task(6)]
+        foreign = self.root / 'other-host.ids'
+        foreign.write_text(f'{3:014x}\n')
+        union = self.root / 'union.json'
+        union.write_text(json.dumps(dict(schema='cloudbench-protected-resource-union-v1', machines=[],
+                                         names=[f'cloudbench-{4:024x}'], volumes=[f'vol_{5:016x}'])))
+        fake = FakeFly(rows)
+        result, summary = self.cli(fake, '--execute', '--other-host-pools-file', str(foreign),
+                                   '--protect-file', str(union), attest=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(summary['results'], {'RECLAIMED': 2})
+        self.assertEqual(sorted(p for p in fake.deletes() if '/machines/' in p),
+                         [f'/v1/apps/fixture/machines/{i:014x}' for i in (0, 6)])
+        self.assertEqual(summary['kept'], {'protected-metadata': 2, 'explicitly-protected': 4})
+
+    def test_undeclared_other_host_pools_refuse_before_provider_call(self):
+        fake = FakeFly([task(0)])
+        result, summary = self.cli(fake, '--execute', attest=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('other hosts', result.stderr)
+        self.assertEqual(fake.events, [])
+
+    def test_pool_index_read_failure_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, 'refusing reclaim'):
+            H['local_pool_members'](self.root / 'not-a-repo')
+        repo = self.root / 'repo'
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        (repo / '.git/cloudbench-pools').mkdir()
+        (repo / '.git/cloudbench-pools/ws.ids').mkdir()  # unreadable index entry
+        with self.assertRaisesRegex(ValueError, 'refusing reclaim'):
+            H['local_pool_members'](repo)
+        with patch.dict(H['fixed_native_worker'].__globals__, __file__=str(self.root / 'x/y.py')):
+            with self.assertRaisesRegex(ValueError, 'refusing reclaim'):
+                H['fixed_native_worker']()
+
+    def test_local_pool_claims_are_protected(self):
+        repo = self.root / 'repo'
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        claims = repo / '.git/cloudbench-pool-claims'
+        (claims / '.locks').mkdir(parents=True)
+        (claims / f'{2:014x}').write_text('owner=x\n')
+        self.assertEqual(H['local_pool_members'](repo), {f'{2:014x}'})
 
     def test_invalid_inventory_refuses(self):
         with self.assertRaisesRegex(ValueError, 'duplicate'):

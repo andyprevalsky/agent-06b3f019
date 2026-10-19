@@ -606,7 +606,7 @@ def normal_tail(
         and caller["epoch"] == cfg["started_at_epoch"]
         and type(caller["epoch"]) in (int, float)
         and 0 < caller["epoch"] <= time.time()
-        and caller["task_ref"] == runner["TASK_REF"]
+        and caller["task_ref"] == runner["shard_task_ref"](cfg.get("shard"))
         and caller["deadline"] == caller["epoch"] + 5400
         and caller["authority_sha256"] == identity["authority_sha256"] == authority_sha
         and authority["cleanup_owner_pid"] == caller["pid"]

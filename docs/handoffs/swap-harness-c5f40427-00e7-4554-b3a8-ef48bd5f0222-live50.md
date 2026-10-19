@@ -10,6 +10,8 @@ Normal hooks were retained. No migration-time execution tests were run: this che
 
 ## Exact original ignored source files
 
+These copies are not in the current tree; they remain at their original paths in commit `ff1940fe9` (`git show ff1940fe9:<path>`).
+
 ```json
 [
   {

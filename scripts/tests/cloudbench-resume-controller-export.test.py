@@ -675,8 +675,11 @@ class ExportResume(unittest.TestCase):
             remote["bounded_export"]({"export": lambda _a: (_ for _ in ()).throw(ValueError("controller originals changed during export"))}, args, attempts=3, sync=lambda: None, sleep=lambda _s: None)
 
     def runner_fixture(self, owner_pid=123, owner_birth="runner-owner", gate_pid=987654321, with_pending=True,
-                       log=None, owner_live=True):
-        """One sharded original600 run directory whose own runner is the bound cleanup owner."""
+                       log=None, owner_live=True, task_ref=None, caller_task_ref=None):
+        """One sharded original600 run directory whose own runner is the bound cleanup owner.
+
+        ``task_ref`` binds the shard's own pushed task source; ``caller_task_ref`` overrides
+        the caller record's value to model a caller that disagrees with its shard."""
         log = "GATE_EXPORT_PENDING machine=" + self.mid + "\nGATE_RESULT exit=1\n" if log is None else log
         source = "a252045f5090917bb00e562b72dbacbab8261c66"
         epoch = time.time() - 100
@@ -709,6 +712,10 @@ class ExportResume(unittest.TestCase):
         shard = dict(index=0, count=20, tasks=names, tasks_sha256=M["sha"](("\n".join(names) + "\n").encode()),
                      task_indexes=[3, 10, 199], runs=3, group_run_id="campaign-group-fixture", group_total=600,
                      group_started_at=epoch)
+        if task_ref is not None:
+            shard["task_ref"] = task_ref
+        caller["task_ref"] = runner["shard_task_ref"](shard) if caller_task_ref is None else caller_task_ref
+        write(self.out / "caller.json", caller)
         sources = {name: M["sha"]((ROOT / "scripts" / name).read_bytes())
                    for name in ("cloudbench-original600-supervisor.py", "cloudbench-original600-runner.py")}
         config = write(self.root / "shard.config.json", dict(
@@ -800,6 +807,26 @@ class ExportResume(unittest.TestCase):
             metadata.chmod(0o600); metadata.write_bytes(b'{"snapshot": "changed"}\n')
             with self.assertRaisesRegex(ValueError, "inline remote file differs"):
                 M["check"](config, digest, self.out, "f" * 40)
+
+    def test_shard_bound_task_ref_is_the_expected_caller_task_ref(self):
+        # The runner records caller.json task_ref=shard_task_ref(shard); a shard that binds its
+        # own pushed ref must verify, and a caller that kept the historical pin must not.
+        pin = runpy.run_path(str(ROOT / "scripts/cloudbench-original600-runner.py"))["TASK_REF"]
+        for caller_task_ref, accepted in ((None, True), (pin, False)):
+            with self.subTest(accepted=accepted):
+                self.setUp()
+                f = self.runner_fixture(task_ref="b" * 40, caller_task_ref=caller_task_ref)
+                with (
+                    mock.patch.dict(M["B"], source_identity=lambda *_a: {}, process_identity=lambda _pid: f.owner),
+                    mock.patch.object(M["runpy"], "run_path", side_effect=f.runpy_path),
+                    mock.patch.object(M["subprocess"], "check_output", side_effect=f.git),
+                ):
+                    if accepted:
+                        value = M["check"](f.config, f.digest, self.out, "f" * 40)
+                        self.assertEqual(value["binding"]["capture_kind"], "normal-current-owner")
+                    else:
+                        with self.assertRaisesRegex(ValueError, "normal authority/caller differs"):
+                            M["check"](f.config, f.digest, self.out, "f" * 40)
 
     def dead_pid(self):
         child = subprocess.Popen(["true"])

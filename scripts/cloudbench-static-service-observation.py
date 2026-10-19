@@ -9,22 +9,27 @@ import json
 from pathlib import Path
 import runpy
 
+def _need(value, message):
+    """Explicit policy check; unlike assert it is not stripped by -O/PYTHONOPTIMIZE."""
+    if not value:
+        raise ValueError(message)
+
 def validate_observation_services(config):
     """Only the observed static proxy listener, without any activation controls."""
     services=config.get('services',[])
-    assert isinstance(services,list) and len(services)<=1,'unsupported service list; untouched'
+    _need(isinstance(services,list) and len(services)<=1,'unsupported service list; untouched')
     if 'disable_machine_autostart' in config:
-        assert config['disable_machine_autostart'] is True,'legacy autostart conflict or ambiguity; untouched'
-    assert not any(key in config for key in ('autostart','auto_start_machines','auto_stop_machines')),'unknown top-level activation control; untouched'
+        _need(config['disable_machine_autostart'] is True,'legacy autostart conflict or ambiguity; untouched')
+    _need(not any(key in config for key in ('autostart','auto_start_machines','auto_stop_machines')),'unknown top-level activation control; untouched')
     for service in services:
         allowed={'protocol','internal_port','ports','force_instance_key','autostart','autostop','min_machines_running'}
-        assert isinstance(service,dict) and set(service)<=allowed,'unknown service schema; untouched'
-        assert service.get('protocol')=='tcp' and type(service.get('internal_port'))is int and service['internal_port']==8011,'unsupported listener; untouched'
-        assert service.get('ports')==[{'handlers':['http','tls'],'port':443}],'unsupported public port; untouched'
-        assert service.get('force_instance_key') is None,'forced instance routing unsupported; untouched'
-        if 'autostart' in service:assert service['autostart'] is False,'service autostart enabled or ambiguous; untouched'
-        if 'autostop' in service:assert service['autostop'] is False or service['autostop']=='off','service autostop enabled or ambiguous; untouched'
-        if 'min_machines_running' in service:assert type(service['min_machines_running'])is int and service['min_machines_running']==0,'service minimum may activate machine; untouched'
+        _need(isinstance(service,dict) and set(service)<=allowed,'unknown service schema; untouched')
+        _need(service.get('protocol')=='tcp' and type(service.get('internal_port'))is int and service['internal_port']==8011,'unsupported listener; untouched')
+        _need(service.get('ports')==[{'handlers':['http','tls'],'port':443}],'unsupported public port; untouched')
+        _need(service.get('force_instance_key') is None,'forced instance routing unsupported; untouched')
+        if 'autostart' in service:_need(service['autostart'] is False,'service autostart enabled or ambiguous; untouched')
+        if 'autostop' in service:_need(service['autostop'] is False or service['autostop']=='off','service autostop enabled or ambiguous; untouched')
+        if 'min_machines_running' in service:_need(type(service['min_machines_running'])is int and service['min_machines_running']==0,'service minimum may activate machine; untouched')
 
 def validate_observation_native(machine, original, before, after, volume):
     """Apply canonical cold identity checks before the service-only predicate."""

@@ -254,6 +254,29 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
         record['finished_at'] = clock()
         save(journal, record)
         return record
+    except BaseException as error:
+        # An internal failure after runners started (spawn, journal write, decision delivery)
+        # gets the operator-signal guarantee: abort every barrier, TERM every runner, join all.
+        reason = 'coordinator failed: ' + type(error).__name__
+        for shard in shards:
+            target = Path(shard['out'])
+            try:
+                if target.is_dir() and not (target / 'global-release.json').exists():
+                    write_once(target / 'global-abort.json', dict(release_id=release_id, reason=reason))
+            except OSError:
+                pass
+        for process in runners.values():
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)  # runner forwards TERM to its own supervisor only
+        codes = {str(i): p.wait() for i, p in runners.items()}
+        record.update(aborted_at=record['aborted_at'] or clock(), abort_reason=record['abort_reason'] or reason,
+                      terminated_at=record['terminated_at'] or clock(),
+                      terminate_reason=record['terminate_reason'] or reason, exit_codes=codes, finished_at=clock())
+        try:
+            save(journal, record)
+        except OSError:
+            pass
+        raise
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)

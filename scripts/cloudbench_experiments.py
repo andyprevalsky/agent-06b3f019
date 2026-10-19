@@ -56,6 +56,35 @@ def _scalar(value):
     return str(value)[:300]
 
 
+# Identity and clocks the scorecard numbers and orders experiments by.
+CORE_FIELDS = ("schema", "event", "id", "recorded_at", "goal", "triggered_at", "ended_at")
+
+
+def _encode(entry: dict) -> bytes:
+    return (json.dumps(entry, sort_keys=True, allow_nan=False) + "\n").encode()
+
+
+def _fitted_line(entry: dict) -> bytes | None:
+    """One complete JSON line within MAX_LINE_BYTES, never a byte-cut partial line.
+
+    Optional fields are dropped (outcome, notes, then the largest remaining
+    non-core field) until the line fits; core identity fields are never dropped.
+    """
+    raw = _encode(entry)
+    for key in ("outcome", "notes"):
+        if len(raw) <= MAX_LINE_BYTES:
+            return raw
+        entry.pop(key, None)
+        raw = _encode(entry)
+    while len(raw) > MAX_LINE_BYTES:
+        optional = [k for k in entry if k not in CORE_FIELDS]
+        if not optional:
+            return None
+        entry.pop(max(optional, key=lambda k: (len(_encode({k: entry[k]})), k)))
+        raw = _encode(entry)
+    return raw
+
+
 def read(path: Path | None) -> list[dict]:
     """Every well-formed ledger line, in append order; malformed lines are skipped."""
     if path is None:
@@ -91,11 +120,9 @@ def record(event: str, experiment_id: str, *, ledger: Path | None = None, root=N
         entry = {"schema": SCHEMA, "event": event, "id": str(experiment_id)[:200],
                  "recorded_at": round(time.time(), 3)}
         entry.update({k: _scalar(v) for k, v in fields.items() if v is not None})
-        raw = (json.dumps(entry, sort_keys=True, allow_nan=False) + "\n").encode()
-        if len(raw) > MAX_LINE_BYTES:
-            for key in ("outcome", "notes"):
-                entry.pop(key, None)
-            raw = (json.dumps(entry, sort_keys=True, allow_nan=False) + "\n").encode()[:MAX_LINE_BYTES]
+        raw = _fitted_line(entry)
+        if raw is None:
+            raise ValueError("experiment entry cannot fit one atomic ledger line")
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:

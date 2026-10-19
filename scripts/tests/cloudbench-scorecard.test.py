@@ -380,6 +380,29 @@ class ExperimentsLedger(unittest.TestCase):
             rate = LEDGER["launch_rate"](g1, T0 + 43200)
             self.assertEqual((rate["launches"], round(rate["days"], 2), round(rate["per_day"], 1)), (2, 0.5, 4.0))
 
+    def test_oversized_entry_drops_optional_fields_and_never_writes_partial_line(self):
+        with tempfile.TemporaryDirectory() as name:
+            ledger = Path(name) / "l.jsonl"
+            bulky = {f"field_{i:02d}": "y" * 300 for i in range(20)}
+            first = LEDGER["record"]("launch", "big", ledger=ledger, goal="g", triggered_at=T0,
+                                     notes="n" * 300, outcome="o" * 300, **bulky)
+            self.assertIsNotNone(first)
+            LEDGER["record"]("end", "big", ledger=ledger, goal="g", ended_at=T0 + 5)
+            raw = ledger.read_bytes()
+            self.assertTrue(raw.endswith(b"\n"))
+            lines = raw.splitlines()
+            self.assertEqual(len(lines), 2, "the next append stays on its own line")
+            self.assertTrue(all(len(line) + 1 <= LEDGER["MAX_LINE_BYTES"] for line in lines))
+            entries = LEDGER["read"](ledger)
+            self.assertEqual([(e["event"], e["id"]) for e in entries], [("launch", "big"), ("end", "big")])
+            launch = entries[0]
+            self.assertEqual((launch["goal"], launch["triggered_at"]), ("g", T0))
+            self.assertNotIn("notes", launch)
+            self.assertNotIn("outcome", launch)
+            self.assertTrue(any(key.startswith("field_") for key in launch), "only enough optional fields are dropped")
+            g = LEDGER["experiments"](entries, "g")
+            self.assertEqual((len(g), g[0]["number"], g[0]["end"]["ended_at"]), (1, 1, T0 + 5))
+
     def test_concurrent_processes_append_complete_lines(self):
         with tempfile.TemporaryDirectory() as name:
             ledger = Path(name) / "l.jsonl"

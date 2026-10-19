@@ -1178,6 +1178,68 @@ unset -f boot_update_with_capacity_recovery _with_timeout sleep
 unset CLOUDBENCH_BOOT_UPDATE_ATTEMPTS CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS \
   CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS
 
+# A shared mutation lease is joined only after _with_timeout reports ordinary
+# completion or its 124 timeout path (both write join-native). 128+signal can be
+# an interruption without a proven child handle: the lease must stay fenced.
+boot_release_source="$(awk '
+  /^release_boot_config_update_slot\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$boot_release_source" ] || fail "missing production boot config slot release"
+(
+eval "$boot_update_source"
+eval "$boot_release_source"
+APP=fixture-app
+MUTATION_OWNER_PID_START=fixture-start
+CLOUDBENCH_RUNTIME_SCRIPT_ROOT=/fixture
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=1
+CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS=0
+sleep() { :; }
+cloudbench_mutation_admission() { printf '%s\n' "$2" >> "$TMP_ROOT/boot-lease-events"; }
+for boot_case in 0:0:1:released 1:1:1:released 124:1:1:released 143:1:0:retained 130:1:0:retained; do
+  IFS=: read -r boot_native_rc boot_expect_rc boot_expect_joined boot_expect_release <<EOF_CASE
+$boot_case
+EOF_CASE
+  : > "$TMP_ROOT/boot-lease-events"
+  _with_timeout() { return "$boot_native_rc"; }
+  BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+  BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+  boot_update_rc=0
+  boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update || boot_update_rc=$?
+  [ "$boot_update_rc" = "$boot_expect_rc" ] ||
+    fail "boot update wrapper rc $boot_native_rc returned $boot_update_rc"
+  [ "$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED" = "$boot_expect_joined" ] ||
+    fail "boot update wrapper rc $boot_native_rc marked joined=$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED"
+  release_rc=0
+  release_boot_config_update_slot || release_rc=$?
+  if [ "$boot_expect_release" = released ]; then
+    [ "$release_rc" = 0 ] && [ -z "$BOOT_CONFIG_UPDATE_SLOT" ] &&
+      grep -qx release "$TMP_ROOT/boot-lease-events" ||
+      fail "joined boot update lease (rc $boot_native_rc) was not released"
+  else
+    [ "$release_rc" != 0 ] && [ "$BOOT_CONFIG_UPDATE_SLOT" = fixture-lease ] &&
+      ! grep -qx release "$TMP_ROOT/boot-lease-events" ||
+      fail "unjoined boot update lease (rc $boot_native_rc) was released"
+  fi
+done
+# An unjoined interruption stays fenced even if a later retry joins.
+boot_update_calls=0
+_with_timeout() { boot_update_calls=$((boot_update_calls + 1)); [ "$boot_update_calls" != 1 ] || return 143; return 0; }
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2
+BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update ||
+  fail "boot update retry after an interrupted attempt did not complete"
+[ "$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED" = 0 ] ||
+  fail "a later joined retry cleared an earlier unjoined boot update"
+if grep -Eq '^[[:space:]]*BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1[[:space:]]*$' "$ROOT_DIR/scripts/run-bench-cloud"; then
+  fail "boot config update call site marks the native lease joined unconditionally"
+fi
+)
+
 # The resize optimization only changes pool admission. A real large-primary
 # task keeps its 8GB request, while the default path still forks a separate
 # large Machine when the opt-in is absent.
