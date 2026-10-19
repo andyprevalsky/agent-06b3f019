@@ -38,7 +38,12 @@ export async function runSavedCredential(
     )
       throw new Error('phone_credential_binding_required');
     await beforeExecute?.();
-    const password = await prepareSavedPassword(claim, binding);
+    const realm =
+      verdict.credentialRealm ??
+      (binding.state.expectedGoogleIdentity === undefined ? 'apple' : undefined);
+    if (realm === undefined || (realm !== 'apple' && realm !== 'google'))
+      throw new Error('phone_credential_binding_required');
+    const password = await prepareSavedPassword(claim, binding, realm);
     started = true;
     await client.perform(session, 'input.tap', { x, y });
     await client.perform(session, 'input.text', { s: password, keystrokes: false });
@@ -97,6 +102,7 @@ async function verifySavedBinding(
     const verdict = await verifier({
       agentId: claim.lease.agentId,
       expectedAppleIdentity: binding.state.expectedAppleIdentity!,
+      expectedGoogleIdentity: binding.state.expectedGoogleIdentity,
       evidence: binding.evidence,
       bounds: binding.bounds,
     });

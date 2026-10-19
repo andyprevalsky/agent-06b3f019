@@ -1,3 +1,4 @@
+import { gmailCases } from './iphone-control.gmail.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -11,6 +12,7 @@ import {
   type SetupDto,
 } from './iphone-control.setup-fixtures';
 export const settingsCases: Case[] = [
+  ...gmailCases,
   [
     'Contacts synchronization requires explicit On evidence, not populated names',
     async (h) => {

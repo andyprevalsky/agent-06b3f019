@@ -1,5 +1,5 @@
 /** Bounded last-observed configuration facts; never perpetual device attestation. */
-export const SETUP_REQUIREMENTS_VERSION = 3;
+export const SETUP_REQUIREMENTS_VERSION = 4;
 export const SETUP_TARGETS = [
   'apple_account',
   'icloud_messages',
@@ -8,6 +8,7 @@ export const SETUP_TARGETS = [
   'imessage',
   'receive_address',
   'portrait_lock',
+  'gmail',
   'runtime',
 ] as const;
 export type SetupTarget = (typeof SETUP_TARGETS)[number];
@@ -43,6 +44,7 @@ export function proofCurrent(
     workflowId?: string;
     providerEpoch: number;
     expectedPhone: string | null;
+    expectedGoogleIdentity?: string;
     floorAt?: string;
     floorCursor?: number;
     now?: Date;
@@ -83,7 +85,10 @@ export function verificationDto(
   const configurationReady =
     CONFIG_TARGETS.every(
       (target) => checks[target].current && checks[target].status === 'confirmed'
-    ) && context.expectedPhone !== null;
+    ) &&
+    context.expectedPhone !== null &&
+    context.expectedGoogleIdentity !== undefined &&
+    context.expectedGoogleIdentity !== '';
   const runtime =
     value?.requirementsVersion === SETUP_REQUIREMENTS_VERSION ? value.checks.runtime : undefined;
   const currentRuntime =

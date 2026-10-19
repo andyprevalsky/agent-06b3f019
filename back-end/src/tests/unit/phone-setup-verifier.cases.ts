@@ -97,6 +97,9 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
         ...input,
         verificationTarget,
         expectedReceiveAddress: '+19729777432',
+        ...(verificationTarget === 'gmail'
+          ? { expectedGoogleIdentity: 'google@example.invalid' }
+          : {}),
       });
       assert.equal(check.status, 'confirmed');
       assert.equal(captured?.messages[0].content, settingsPurpose(verificationTarget));
@@ -104,12 +107,24 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
         expectedAppleIdentity: input.expectedAppleIdentity,
         observations: input.evidence,
         expectedReceiveAddress: '+19729777432',
+        ...(verificationTarget === 'gmail'
+          ? { expectedGoogleIdentity: 'google@example.invalid' }
+          : {}),
       });
       assert.ok(
         settingsPurpose(verificationTarget).includes(
           'visual state not explicitly represented must remain unknown'
         )
       );
+      if (verificationTarget === 'gmail') {
+        assert.ok(settingsPurpose(verificationTarget).includes('remembered or disabled accounts'));
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'unknown without active signed-in Gmail context'
+          )
+        );
+        assert.ok(settingsPurpose(verificationTarget).includes('future Google sign-in challenge'));
+      }
       if (verificationTarget === 'icloud_contacts') {
         assert.ok(
           settingsPurpose(verificationTarget).includes(

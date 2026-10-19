@@ -39,6 +39,7 @@ export async function syntheticConfiguration(userId: string, leaseId: string) {
       floorAt: new Date().toISOString(),
     };
   state.expectedPhone = '+19729777432';
+  state.expectedGoogleIdentity ??= 'fixture-google@example.invalid';
   if (state.verification === undefined)
     state.verification = {
       requirementsVersion: SETUP_REQUIREMENTS_VERSION,

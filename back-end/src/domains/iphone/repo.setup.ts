@@ -21,6 +21,7 @@ export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneL
     workflowId: state.attempt?.workflowId,
     providerEpoch: device.providerEpoch,
     expectedPhone: state.expectedPhone ?? null,
+    expectedGoogleIdentity: state.expectedGoogleIdentity,
     floorAt: state.attempt?.floorAt,
     floorCursor: state.attempt?.floorCursor,
   });
@@ -36,6 +37,9 @@ export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneL
     revision: active ? state.attempt!.revision : state.claimRevision,
     profileRevision: state.profileRevision,
     identityVerified: state.verified?.profileRevision === state.profileRevision,
+    ...(active && state.expectedGoogleIdentity !== undefined
+      ? { expectedGoogleAccountIdentifier: state.expectedGoogleIdentity }
+      : {}),
     verification: {
       ...verification,
       ...(active && state.expectedPhone !== undefined && state.expectedPhone !== null

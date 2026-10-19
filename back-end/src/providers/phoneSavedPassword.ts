@@ -12,9 +12,11 @@ const APPLE_HOSTS = new Set([
 export async function selectedPassword(
   tx: Prisma.TransactionClient,
   userId: string,
-  identity: string
+  identity: string,
+  realm: 'apple' | 'google' = 'apple'
 ) {
-  const origins = [...APPLE_HOSTS].flatMap((host) =>
+  const hosts = realm === 'apple' ? APPLE_HOSTS : new Set(['accounts.google.com', 'google.com']);
+  const origins = [...hosts].flatMap((host) =>
     ['https://', 'http://', ''].flatMap((scheme) => [
       { origin: { equals: `${scheme}${host}`, mode: 'insensitive' as const } },
       { origin: { startsWith: `${scheme}${host}/`, mode: 'insensitive' as const } },
@@ -30,8 +32,12 @@ export async function selectedPassword(
     take: 33,
   });
   if (rows.length > 32) throw new Error('phone_credential_unavailable');
-  const apple = rows.filter((r) => APPLE_HOSTS.has(hostnameFromRealmInput(r.origin)));
-  const options = resolvePasswordOptions('apple.com', apple, false).filter((r) => !r.disabled);
+  const apple = rows.filter((r) => hosts.has(hostnameFromRealmInput(r.origin)));
+  const options = resolvePasswordOptions(
+    realm === 'apple' ? 'apple.com' : 'google.com',
+    apple,
+    false
+  ).filter((r) => !r.disabled);
   // BrowserPassword envelopes share the browser/payment key domain, not backend phone/Plaid.
   const key = process.env.PAYMENT_DECRYPTION_KEY;
   if (key === undefined || key === '' || !options.length)

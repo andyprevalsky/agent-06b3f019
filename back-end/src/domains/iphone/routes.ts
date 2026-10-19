@@ -195,7 +195,7 @@ export function createIPhoneRouter(options: IPhoneRouterOptions = {}) {
     handle((req, userId) => {
       if (req.isInternal !== true) throw new IPhoneError(403, 'Internal API key required');
       const body = profileBody(req.body);
-      return configureSetup(userId, body.revision, body.identity);
+      return configureSetup(userId, body.revision, body.identity, body.googleIdentity);
     })
   );
   router.post(

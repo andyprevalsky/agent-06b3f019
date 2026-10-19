@@ -14,6 +14,7 @@ const context = {
   workflowId: 'generation',
   providerEpoch: 2,
   expectedPhone: '+19729777432',
+  expectedGoogleIdentity: 'google@example.invalid',
   floorAt: new Date(now.getTime() - 1000).toISOString(),
   floorCursor: 0,
   now,
@@ -107,7 +108,7 @@ test('upgraded envelope cannot revive prior requirements-version proofs', () => 
 test('Contacts sync is a required version-three startup setting', () => {
   const state = fixture();
   const result = verificationDto(state, context);
-  assert.equal(result.requirementsVersion, 3);
+  assert.equal(result.requirementsVersion, SETUP_REQUIREMENTS_VERSION);
   assert.ok(Object.hasOwn(result.checks, 'icloud_contacts'), 'Required Contacts sync check absent');
   assert.equal(result.configurationReady, true);
   const legacy = fixture();
@@ -119,5 +120,20 @@ test('Contacts sync is a required version-three startup setting', () => {
     verificationDto(state, context).configurationReady,
     false,
     'Other settings must not substitute for Contacts synchronization'
+  );
+});
+
+test('Gmail installed and correct Google account is required by version-four startup', () => {
+  const state = fixture();
+  assert.equal(verificationDto(state, context).requirementsVersion, 4);
+  delete (state.checks as Record<string, unknown>).gmail;
+  assert.equal(verificationDto(state, context).configurationReady, false);
+});
+
+test('configuration cannot be ready without server-configured Google identity even with confirmed facts', () => {
+  assert.equal(
+    verificationDto(fixture(), { ...context, expectedGoogleIdentity: undefined })
+      .configurationReady,
+    false
   );
 });

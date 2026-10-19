@@ -25,6 +25,7 @@ export interface SetupState {
   profileRevision: number;
   claimRevision: number;
   expectedAppleIdentity?: string;
+  expectedGoogleIdentity?: string;
   attempt?: SetupAttempt;
   verified?: { at: string; profileRevision: number };
   verification?: SetupChecks;
@@ -43,6 +44,10 @@ export function setupState(encrypted: string | null): SetupState {
       value.profileRevision < 0 ||
       !Number.isSafeInteger(value.claimRevision) ||
       value.claimRevision < 0 ||
+      (value.expectedGoogleIdentity !== undefined &&
+        (typeof value.expectedGoogleIdentity !== 'string' ||
+          value.expectedGoogleIdentity.trim() === '' ||
+          value.expectedGoogleIdentity.length > 512)) ||
       (value.expectedAppleIdentity !== undefined &&
         (typeof value.expectedAppleIdentity !== 'string' ||
           value.expectedAppleIdentity.length > 512)) ||

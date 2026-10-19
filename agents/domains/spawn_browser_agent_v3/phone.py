@@ -35,8 +35,8 @@ In mode=operation, set operation to the wire name and args to its arguments:
   into the focused field; tap the field first and verify afterward.
 - input.keys: {"combo": "enter"}; nav.home: {} presses the Home button.
 - credentials.fill_saved: {} asks the backend to use the shared saved-password
-  store for the server-verified current app/account. Initial binding supports
-  Apple Account setup only. Supply no password, credential ref/ID, account, realm,
+  store for the server-verified current app/account. Supported bindings are Apple Account and Google sign-in
+  for the server-configured intended identity. Supply no password, credential ref/ID, account, realm,
   or coordinates. The worker/model never reads or types the saved secret.
 Before credentials.fill_saved obtain fresh screen.text. The backend obtains
 trusted bounds and independently verifies the current form/account binding.
@@ -122,7 +122,7 @@ After fresh observations, use mode=setup, action=verify with evidenceOperationId
 containing 1..8 successful current broker observation IDs and verificationTarget:
 apple_account (the default when omitted), icloud_messages, icloud_keychain,
 icloud_contacts,
-imessage, receive_address, portrait_lock, or runtime. Verify iCloud Messages sync and iCloud
+imessage, receive_address, portrait_lock, gmail, or runtime. Verify iCloud Messages sync and iCloud
 Keychain sync separately. iMessage activation/sign-in is separate from iCloud
 Messages sync; neither one proves the other. For icloud_contacts, configure
 iCloud Contacts sync and verify explicit enabled control state; populated
@@ -133,6 +133,27 @@ receiving, not merely listed. For portrait_lock, use the observed Control Center
 UI to enable the OS Portrait Orientation Lock and verify explicit enabled control
 state or OS confirmation. A portrait frame alone, portrait dimensions, or a lock
 label without its enabled state is not proof. Keep ambiguous evidence unknown.
+For Gmail boot setup, use only the active server expectedGoogleAccountIdentifier;
+the Apple Account identifier is not the Google account. If Gmail is absent,
+install Gmail through the observed App Store UI, then open it and sign in to
+that intended Google account. Preserve an already matching signed-in account;
+do not sign out or switch an unrelated account without authorization. Ordinary
+installation and navigation are autonomous; purchases, new terms, unsupported
+capabilities, or transport failures are not authentication-attention reasons.
+Use matching masked native AutoFill when usable. If no matching usable native
+suggestion exists, use credentials.fill_saved once with empty args after fresh
+screen.text; the backend verifies the actual Google form and separately configured Google identity.
+Never supply a realm, account, credential ref or secret. Missing or ambiguous
+credentials mean use protected native attention only when genuinely blocked;
+stale binding means observe again, and UNKNOWN means status-only, never replay.
+When a password or user-only verification still blocks Google sign-in after
+saved-credential unavailability or rejection, use the existing protected native attention path.
+Use verificationTarget=gmail with fresh broker observations of the installed
+Gmail app signed in to the intended account. App installation alone, an account
+suggestion, a sign-in form, or an account label without signed-in context is not
+proof. Gmail setup proof is separate from actual browser device approval: match
+and approve only the current authorized browser challenge, then verify browser
+continuation. Do not claim device approval from Gmail setup or installation.
 Supply no phone/account override, OCR text, verdict,
 proof status, attempt/revision/epoch or routing IDs.
 Labels alone or an address appearing in a list do not prove an enabled toggle

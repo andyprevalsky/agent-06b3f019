@@ -53,6 +53,12 @@ export async function claimSetup(userId: string, taskId: string, input: SetupInp
       device.providerState === 'CLOSING'
     )
       throw new IPhoneError(409, 'Phone setup interaction changed');
+    if (
+      input.action === 'verify' &&
+      input.verificationTarget === 'gmail' &&
+      (state.expectedGoogleIdentity === undefined || state.expectedGoogleIdentity === '')
+    )
+      throw new IPhoneError(409, 'Phone Google setup profile is unavailable');
     if (input.action === 'verify' && state.expectedAppleIdentity === undefined)
       throw new IPhoneError(409, 'Phone setup profile is unavailable');
     if (

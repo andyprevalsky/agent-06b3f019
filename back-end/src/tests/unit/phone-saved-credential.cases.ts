@@ -7,7 +7,11 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
   const mock = t.mock;
   let captured: CompletionOptions | undefined;
   let actual = 'saved-binding-model';
-  let response = { allowed: true, x: 50, y: 70 };
+  let response: { allowed: boolean; x: number; y: number; credentialRealm?: string } = {
+    allowed: true,
+    x: 50,
+    y: 70,
+  };
   await mock.module('../../providers/rose', {
     namedExports: {
       StructuredOutputAccumulator,
@@ -81,6 +85,34 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
       assert.equal(replay.y, undefined);
     }
   }
+  response = { allowed: true, x: 50, y: 70, credentialRealm: 'google' };
+  const google = await verifyPhoneCredential({
+    ...input,
+    expectedGoogleIdentity: 'google@example.invalid',
+  });
+  assert.equal(google.credentialRealm, 'google');
+  assert.equal(
+    JSON.parse(captured!.messages[1].content as string).expectedGoogleIdentity,
+    'google@example.invalid'
+  );
+  assert.equal(
+    (await verifyPhoneCredential(input)).allowed,
+    false,
+    'Google realm cannot use missing Google profile or Apple identity'
+  );
+  response = { allowed: true, x: 50, y: 70, credentialRealm: 'apple' };
+  assert.equal(
+    (await verifyPhoneCredential({ ...input, expectedGoogleIdentity: 'google@example.invalid' }))
+      .credentialRealm,
+    'apple'
+  );
+  response = { allowed: true, x: 50, y: 70, credentialRealm: 'unknown' };
+  assert.equal(
+    (await verifyPhoneCredential({ ...input, expectedGoogleIdentity: 'google@example.invalid' }))
+      .allowed,
+    false,
+    'Ambiguous realm must not select a credential'
+  );
   response = { allowed: true, x: 50, y: 70 };
   actual = 'gpt-5.6-luna-foundry';
   const foundry = await verifyPhoneCredential(input);

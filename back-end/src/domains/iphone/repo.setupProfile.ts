@@ -4,7 +4,12 @@ import { setupState, sealSetup, SETUP_OPERATIONS } from '../../providers/phoneSe
 import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
 import { isNativePhoneAttention } from '../../providers/nativePhoneAttention';
 
-export async function configureSetup(userId: string, expectedRevision: number, identity: string) {
+export async function configureSetup(
+  userId: string,
+  expectedRevision: number,
+  identity: string,
+  googleIdentity?: string
+) {
   return leases.transaction(async (tx) => {
     const [device] = await tx.$queryRaw<
       IPhoneDevice[]
@@ -49,6 +54,13 @@ export async function configureSetup(userId: string, expectedRevision: number, i
       profileRevision: state.profileRevision + 1,
       claimRevision: state.claimRevision,
       expectedAppleIdentity: identity,
+      ...((googleIdentity ?? state.expectedGoogleIdentity) !== undefined
+        ? { expectedGoogleIdentity: googleIdentity ?? state.expectedGoogleIdentity }
+        : {}),
+      ...(state.expectedAppleIdentity === identity && state.verified
+        ? { verified: { ...state.verified, profileRevision: state.profileRevision + 1 } }
+        : {}),
+      ...(state.verification ? { verification: state.verification } : {}),
     };
     await tx.iPhoneDevice.update({
       where: { id: device.id },

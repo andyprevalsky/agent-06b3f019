@@ -44,16 +44,7 @@ export async function writeSetupOutcome(
     if (target === 'apple_account' && result?.identityConfirmed === true)
       state.verified = { at: now.toISOString(), profileRevision: state.profileRevision };
   }
-  const ready = verificationDto(state.verification, {
-    attemptId: state.attempt!.id,
-    profileRevision: state.profileRevision,
-    workflowId: state.attempt!.workflowId,
-    providerEpoch: device.providerEpoch,
-    expectedPhone: state.expectedPhone ?? null,
-    floorAt: state.attempt!.floorAt,
-    floorCursor: state.attempt!.floorCursor,
-    now,
-  }).configurationReady;
+  const ready = currentConfigurationReady(device, state, now);
   const phase =
     input.action === 'defer'
       ? 'deferred'
@@ -100,4 +91,18 @@ function outcomeReason(input: SetupInput, result: SetupVerificationResult | null
         ? 'verification_unconfirmed'
         : 'verification_unavailable')
   );
+}
+
+function currentConfigurationReady(device: IPhoneDevice, state: SetupState, now: Date) {
+  return verificationDto(state.verification, {
+    attemptId: state.attempt!.id,
+    profileRevision: state.profileRevision,
+    workflowId: state.attempt!.workflowId,
+    providerEpoch: device.providerEpoch,
+    expectedPhone: state.expectedPhone ?? null,
+    expectedGoogleIdentity: state.expectedGoogleIdentity,
+    floorAt: state.attempt!.floorAt,
+    floorCursor: state.attempt!.floorCursor,
+    now,
+  }).configurationReady;
 }

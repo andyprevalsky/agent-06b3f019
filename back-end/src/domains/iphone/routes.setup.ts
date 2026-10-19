@@ -22,10 +22,13 @@ function keys(body: Record<string, unknown>, allowed: string[]) {
 }
 export function profileBody(value: unknown) {
   const body = object(value);
-  keys(body, ['expectedProfileRevision', 'expectedAppleIdentity']);
+  keys(body, ['expectedProfileRevision', 'expectedAppleIdentity', 'expectedGoogleIdentity']);
   return {
     revision: integer(body.expectedProfileRevision),
     identity: text(body.expectedAppleIdentity),
+    ...(body.expectedGoogleIdentity === undefined
+      ? {}
+      : { googleIdentity: text(body.expectedGoogleIdentity) }),
   };
 }
 export function setupBody(value: unknown): SetupInput {

@@ -12,6 +12,7 @@ export interface SetupEvidence {
 export interface SetupVerificationInput {
   agentId: string;
   expectedAppleIdentity: string;
+  expectedGoogleIdentity?: string;
   evidence: SetupEvidence[];
   verificationTarget?: SetupTarget;
   expectedReceiveAddress?: string | null;
@@ -49,6 +50,9 @@ export const verifyPhoneSetup: SetupVerifier = async (input) => {
         content: JSON.stringify({
           expectedAppleIdentity: input.expectedAppleIdentity,
           observations: input.evidence,
+          ...(target === 'gmail'
+            ? { expectedGoogleIdentity: input.expectedGoogleIdentity ?? null }
+            : {}),
           ...(target !== 'apple_account'
             ? { expectedReceiveAddress: input.expectedReceiveAddress ?? null }
             : {}),

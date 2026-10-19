@@ -19,7 +19,7 @@ export const verifierUsage = {
   totalTokens: 105,
   totalCostCents: 1,
 };
-export async function freshSetup(h: Harness) {
+export async function freshSetup(h: Harness, configureGoogle = true) {
   const f = await fixture(h);
   await prisma.iPhoneDevice.update({
     where: { id: f.deviceId },
@@ -30,7 +30,11 @@ export async function freshSetup(h: Harness) {
     (
       await h.request(f.userId, '/device/setup-profile', {
         method: 'PUT',
-        body: { expectedProfileRevision: 0, expectedAppleIdentity: identity },
+        body: {
+          expectedProfileRevision: 0,
+          expectedAppleIdentity: identity,
+          ...(configureGoogle ? { expectedGoogleIdentity: `google-${identity}` } : {}),
+        },
       })
     ).status,
     200
@@ -65,7 +69,8 @@ export async function proveSettings(
   f: SetupFixture,
   includeIdentity = true,
   includePortrait = true,
-  includeContacts = true
+  includeContacts = true,
+  includeGmail = true
 ) {
   const prior = h.setupVerifier;
   h.setupVerifier = async () => ({
@@ -81,6 +86,7 @@ export async function proveSettings(
       'imessage',
       'receive_address',
       ...(includePortrait ? ['portrait_lock'] : []),
+      ...(includeGmail ? ['gmail'] : []),
       ...(includeIdentity ? ['apple_account'] : []),
     ]) {
       h.observationResult = {

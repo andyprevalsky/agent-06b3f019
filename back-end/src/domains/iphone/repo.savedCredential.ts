@@ -77,7 +77,8 @@ export async function savedBinding(
 }
 export async function prepareSavedPassword(
   claim: CommandClaim,
-  binding: Awaited<ReturnType<typeof savedBinding>>
+  binding: Awaited<ReturnType<typeof savedBinding>>,
+  credentialRealm: 'apple' | 'google' = 'apple'
 ) {
   return leases.transaction(async (tx) => {
     const { device, enabled } = await leases.lockedDevice(tx, claim.lease.userId);
@@ -93,6 +94,8 @@ export async function prepareSavedPassword(
       lease.actionCursor !== claim.command.cursor ||
       device.providerEpoch !== claim.command.providerEpoch ||
       state.profileRevision !== binding.state.profileRevision ||
+      state.expectedAppleIdentity !== binding.state.expectedAppleIdentity ||
+      state.expectedGoogleIdentity !== binding.state.expectedGoogleIdentity ||
       state.attempt?.revision !== binding.state.attempt?.revision ||
       privacyState(device.privateInputEncrypted).active
     )
@@ -106,7 +109,11 @@ export async function prepareSavedPassword(
       device.providerState === 'CLOSING'
     )
       throw new IPhoneError(409, 'phone_credential_binding_required');
-    const password = await selectedPassword(tx, lease.userId, state.expectedAppleIdentity!);
+    const identity =
+      credentialRealm === 'apple' ? state.expectedAppleIdentity : state.expectedGoogleIdentity;
+    if (identity === undefined || identity === '')
+      throw new IPhoneError(409, 'phone_credential_binding_required');
+    const password = await selectedPassword(tx, lease.userId, identity, credentialRealm);
     await tx.iPhoneDevice.update({
       where: { id: device.id },
       data: { privateInputEncrypted: rememberPrivate(device.privateInputEncrypted, password) },

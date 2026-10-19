@@ -1,3 +1,4 @@
+import { googleCredentialCases } from './iphone-control.google-credential.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -5,10 +6,11 @@ import { useSavedPaymentFixture, encryptSavedFixture } from './iphone-control.sa
 import { freshSetup, observe } from './iphone-control.setup-fixtures';
 import type { Case } from './iphone-control.cases';
 export const savedCredentialCases: Case[] = [
+  ...googleCredentialCases,
   [
     'saved credential uses owner shared store once, masks provider echo and preserves redaction',
     async (h) => {
-      const f = await freshSetup(h);
+      const f = await freshSetup(h, false);
       const restorePayment = useSavedPaymentFixture();
       const secret = `unregistered-saved-${randomUUID()}`;
       const unrelated = Array.from({ length: 33 }, (_, index) => ({
@@ -111,10 +113,10 @@ for (const mode of [
   savedCredentialCases.push([
     `saved credential ${mode} fails closed without replay or secret echo`,
     async (h) => {
-      const f = await freshSetup(h);
+      const f = await freshSetup(h, false);
       const restorePayment = useSavedPaymentFixture();
       const secret = `private-fixture-${randomUUID()}`;
-      const other = mode === 'foreign' ? await freshSetup(h) : null;
+      const other = mode === 'foreign' ? await freshSetup(h, false) : null;
       const row =
         mode === 'missing'
           ? null

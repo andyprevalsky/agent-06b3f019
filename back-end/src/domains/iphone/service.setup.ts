@@ -30,6 +30,7 @@ export async function submitSetup(
           evidence: claim.evidence,
           verificationTarget: input.verificationTarget,
           expectedReceiveAddress: claim.state.expectedPhone ?? null,
+          expectedGoogleIdentity: claim.state.expectedGoogleIdentity,
         });
         const billed = await billSetup(
           claim,
