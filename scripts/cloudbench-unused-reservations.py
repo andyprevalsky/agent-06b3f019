@@ -191,7 +191,8 @@ def closed_run(outer, inputs):
 
 
 # Reviewed inventory publishers with an identical generation layout; the second
-# only extracts the startup-init predicates into shared helpers.
+# only extracts the startup-init predicates into shared helpers (identical for
+# well-formed Fly machine configs).
 INVENTORY_PRODUCER_SHA256S = frozenset(
     {
         "f8c22753a9498de5cd9e6c01f672556f8ee3caf6ea13415dd49b73bac8b03163",
@@ -261,12 +262,12 @@ def inventory_pointer_members(manifest, config):
 
 # Reviewed collectors whose cleanup-reserve exclusion semantics are identical; the
 # second only adds pre-snapshot flushing and bounded strict snapshot repetition, the
-# third lets a still-exiting writer use that same bounded settle.
+# third drains exiting writers (all threads) within a bounded window first.
 RESERVE_COLLECTOR_SHA256S = frozenset(
     {
         "ff7681d3eefde5df2c678cb0f900b66cb2427cf39180c0ed9a5c28e7dd721c1b",
         "8a004d2f194f90229fd4e96306866c3c91502d434b3b535e2f44eddaee3daf19",
-        "a1710a683614345b8d9908ac3e811c8a773813b9b9968d78862a71b7b4ce7ad3",
+        "87b52cfc31b70d582ed274e184c0b7a6b50267639e2019e21a1e8ead251a55ff",
     }
 )
 
