@@ -1,4 +1,8 @@
-import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
+import {
+  BenchmarkHubConflictError,
+  BenchmarkHubInvalidRecordError,
+  BenchmarkHubUnavailableError,
+} from './benchmarkHubErrors';
 /**
  * Benchmark Hub run storage — uploaded benchmark run bundles + a run index.
  *
@@ -314,9 +318,10 @@ async function storeRun(
   const runId = String(bundle.run_id ?? '');
   // Same allowlist as getRunBundle: the id becomes a filename in the local-dir
   // fallback, so anything outside it (e.g. "../../x") must never reach putObject.
-  if (!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error('bundle.run_id required (safe charset)');
+  if (!/^[A-Za-z0-9._-]+$/.test(runId))
+    throw new BenchmarkHubInvalidRecordError('bundle.run_id required (safe charset)');
   if (bundle.tasks !== undefined && !Array.isArray(bundle.tasks)) {
-    throw new Error('Invalid Benchmark Hub run bundle');
+    throw new BenchmarkHubInvalidRecordError('Invalid Benchmark Hub run bundle');
   }
   // Every stored bundle carries a task list, so readers need no shape fallback.
   const tasks = (bundle.tasks ?? []) as Array<Record<string, unknown>>;
@@ -508,14 +513,14 @@ function applyQueuedPut(put: QueuedPut, cycle: PutCycle): HubRunSummary | null {
   const existing = cycle.index.find((run) => run.run_id === runId);
   if (existing?.run_group || summary.run_group) {
     if ((existing && !existing.run_group) || (existing?.run_group && !summary.run_group)) {
-      throw new Error('Benchmark Hub group ID collides with a physical run');
+      throw new BenchmarkHubConflictError('Benchmark Hub group ID collides with a physical run');
     }
     if (
       existing?.run_group &&
       (JSON.stringify(existing.run_group.members) !== JSON.stringify(summary.run_group!.members) ||
         existing.timestamp !== summary.timestamp)
     ) {
-      throw new Error('Benchmark Hub group schedule changed');
+      throw new BenchmarkHubConflictError('Benchmark Hub group schedule changed');
     }
     if (summary.run_group) {
       const scheduled = new Map(
@@ -530,13 +535,15 @@ function applyQueuedPut(put: QueuedPut, cycle: PutCycle): HubRunSummary | null {
           child.tasks[0]?.name !== member.name ||
           summary.run_group.members.length !== child.group_total
         ) {
-          throw new Error('Existing Benchmark Hub child differs from its group schedule');
+          throw new BenchmarkHubConflictError(
+            'Existing Benchmark Hub child differs from its group schedule'
+          );
         }
       }
     }
   }
   if (!summary.run_group && cycle.index.some((run) => run.group_run_id === runId)) {
-    throw new Error('Benchmark Hub group ID collides with a physical run');
+    throw new BenchmarkHubConflictError('Benchmark Hub group ID collides with a physical run');
   }
   if (existing?.group_run_id) {
     for (const field of HUB_GROUP_FIELDS) {
@@ -544,7 +551,7 @@ function applyQueuedPut(put: QueuedPut, cycle: PutCycle): HubRunSummary | null {
         summary[field] !== undefined &&
         summary[field] !== (field === 'group_attempt' ? (existing[field] ?? 1) : existing[field])
       ) {
-        throw new Error('Benchmark Hub group membership changed');
+        throw new BenchmarkHubConflictError('Benchmark Hub group membership changed');
       }
     }
     Object.assign(summary, runGroupFields({ ...existing, run_id: runId }));
@@ -552,7 +559,7 @@ function applyQueuedPut(put: QueuedPut, cycle: PutCycle): HubRunSummary | null {
   if (summary.group_run_id) {
     const owner = cycle.index.find((run) => run.run_id === summary.group_run_id);
     if (owner && !owner.run_group)
-      throw new Error('Benchmark Hub group ID collides with a physical run');
+      throw new BenchmarkHubConflictError('Benchmark Hub group ID collides with a physical run');
     validateGroupAttempt(summary, cycle.index, existing);
     if (owner?.run_group) {
       const member = owner.run_group.members.find(
@@ -565,7 +572,7 @@ function applyQueuedPut(put: QueuedPut, cycle: PutCycle): HubRunSummary | null {
         tasks[0]?.name !== member.name ||
         owner.run_group.members.length !== summary.group_total
       ) {
-        throw new Error('Benchmark Hub group member differs from its schedule');
+        throw new BenchmarkHubConflictError('Benchmark Hub group member differs from its schedule');
       }
     }
     summary.tasks = tasks.map((task) => ({

@@ -39,6 +39,7 @@ const ownership = require(
 const {
   BenchmarkHubUnavailableError,
   BenchmarkHubInvalidRecordError,
+  BenchmarkHubConflictError,
 } = require(
   path.join(sourceRoot, "back-end/src/providers/benchmarkHubErrors.ts"),
 );
@@ -153,6 +154,7 @@ function owningBoundary() {
     HUB_SQL_TIMEOUT_MS: ownership.HUB_SQL_TIMEOUT_MS,
     BenchmarkHubUnavailableError,
     BenchmarkHubInvalidRecordError,
+    BenchmarkHubConflictError,
     prisma: {
       $transaction: (operation: (value: unknown) => unknown) =>
         operation({ $executeRaw: async () => {} }),
@@ -941,6 +943,60 @@ test(
 );
 
 test(
+  "an unpublished final operator group fails fast with its Hub receipt",
+  { timeout: 90_000 },
+  async (t) => {
+    const boundary = owningBoundary();
+    const api = await apiBoundary(boundary);
+    t.after(() => api.close());
+    const fixture = fixtureRoot("operator-final-conflict");
+    const group = "original600-operator-conflict";
+    const shards = (tasks: string[]) =>
+      tasks.map((task, index) => ({
+        tasks: [task],
+        runs: 1,
+        task_indexes: [index],
+      }));
+    const registered = await operatorShardGroup(fixture, api, {
+      group,
+      started_at: 1792433798.1,
+      shards: shards(["demo-fleet-alpha", "demo-fleet-beta"]),
+    });
+    assert.equal(registered.result.registered, true, registered.log);
+    // The terminal schedule names a different member than the stored one.
+    const began = Date.now();
+    const final = await operatorShardGroup(fixture, api, {
+      group,
+      started_at: 1792433798.1,
+      shards: shards(["demo-fleet-alpha", "demo-fleet-gamma"]),
+      scheduled_total: 2,
+      summaries: [],
+      coordination: {
+        exit_codes: { "0": 0, "1": 0 },
+        abort_reason: null,
+        terminate_reason: null,
+      },
+    });
+    const elapsed = (Date.now() - began) / 1000;
+    assert.equal(final.result.hub_group_final_published, false);
+    assert.match(
+      final.result.hub_group_final_error,
+      /benchmark Hub upload failed: HTTP Error 409; response_metadata=/,
+    );
+    assert.equal(
+      final.result.hub_group_final_log,
+      path.join(fixture.root, "hub-group/hub-group-publication.private.log"),
+    );
+    assert.doesNotMatch(final.log, /failed transiently/);
+    assert.ok(elapsed < 15, `conflict took ${elapsed}s:\n${final.log}`);
+    assert.deepEqual(
+      api.rejections.map((rejection) => rejection.error),
+      ["Benchmark Hub group schedule changed"],
+    );
+  },
+);
+
+test(
   "a deterministic Hub record rejection fails fast instead of consuming the terminal window",
   { timeout: 90_000 },
   async (t) => {
@@ -1218,9 +1274,10 @@ for (const physicalKind of ["plain", "member"] as const) {
         }) + "\n",
         { mode: 0o600 },
       );
+      // A permanent conflict, not a retryable server error.
       assert.equal(
         rejected.status,
-        500,
+        409,
         "reserved group IDs cannot become physical runs",
       );
       assert.match(rejected.body.error, /collides/);

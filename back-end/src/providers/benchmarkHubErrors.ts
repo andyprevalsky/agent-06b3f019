@@ -19,3 +19,13 @@ export class BenchmarkHubInvalidRecordError extends Error {
     this.name = 'BenchmarkHubInvalidRecordError';
   }
 }
+
+/** An upload that conflicts with the stored group/run state; replaying it cannot succeed. */
+export class BenchmarkHubConflictError extends Error {
+  readonly statusCode = 409;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'BenchmarkHubConflictError';
+  }
+}

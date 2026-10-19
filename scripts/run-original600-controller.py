@@ -1284,10 +1284,13 @@ def publish_final_shard_group(root, directory, args, runner, group_id, started_a
                               coordination):
     """The operator's terminal Hub group from every joined shard summary and the coordination record.
 
-    An unpublished group always carries its reason: the refusal, or the publisher's last log line.
+    Once reached, an unpublished group always carries its reason: the refusal, or the last line this
+    final publication appended to the publisher log (with its Hub request id).
     """
     outcomes = {job['job_id']: dict(status=job.get('status'), controller_exit_code=job.get('controller_exit_code'))
                 for summary in summaries if summary for job in summary.get('jobs') or []}
+    log = directory / 'hub-group' / 'hub-group-publication.private.log'
+    offset = log.stat().st_size if log.is_file() else 0  # the schedule registration shares this log
     try:
         published = publish_shard_group(
             root, directory, args, runner, group_id, started_at, group_shards, outcomes,
@@ -1298,10 +1301,15 @@ def publish_final_shard_group(root, directory, args, runner, group_id, started_a
         return dict(hub_group_final_published=False, hub_group_final_error=f'{type(error).__name__}: {error}'[:500])
     if published:
         return dict(hub_group_final_published=True)
-    log = directory / 'hub-group' / 'hub-group-publication.private.log'
-    lines = [line for line in (log.read_text(errors='replace') if log.is_file() else '').splitlines() if line.strip()]
-    return dict(hub_group_final_published=False, hub_group_final_log=str(log),
-                hub_group_final_error=(lines[-1] if lines else 'publisher exited without output')[:500])
+    lines = []
+    if log.is_file():
+        with open(log, 'rb') as stream:
+            stream.seek(offset)
+            lines = [line for line in stream.read().decode(errors='replace').splitlines() if line.strip()]
+    last = lines[-1] if lines else ''
+    reason = last if last and not last.startswith('📤') else ' '.join(
+        ['final publication was not acknowledged'] + (['after: ' + last] if last else []))
+    return dict(hub_group_final_published=False, hub_group_final_log=str(log), hub_group_final_error=reason[:500])
 
 
 def hub_interpreter(args):

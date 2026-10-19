@@ -1,5 +1,6 @@
 /** Physical retry ownership and logical-member projection under the Hub index lock. */
 import type { HubRunAttempt, HubRunSummary } from './benchmarkHubTypes';
+import { BenchmarkHubConflictError } from './benchmarkHubErrors';
 
 export function groupAttempt(run: HubRunSummary): number {
   return run.group_attempt ?? 1;
@@ -21,7 +22,9 @@ export function validateGroupAttempt(
     peers.some((run) => groupAttempt(run) === attempt) ||
     (attempt === 1 && peers.length > 0 && !existing)
   ) {
-    throw new Error('Benchmark Hub group member already belongs to another run');
+    throw new BenchmarkHubConflictError(
+      'Benchmark Hub group member already belongs to another run'
+    );
   }
   if (existing || attempt === 1) return;
   const previous = peers.find((run) => groupAttempt(run) === attempt - 1);
@@ -44,7 +47,7 @@ export function validateGroupAttempt(
     previous.group_timestamp !== summary.group_timestamp ||
     previous.group_total !== summary.group_total
   ) {
-    throw new Error(
+    throw new BenchmarkHubConflictError(
       'Benchmark Hub retry requires a contiguous released infrastructure-error attempt with unchanged membership'
     );
   }
