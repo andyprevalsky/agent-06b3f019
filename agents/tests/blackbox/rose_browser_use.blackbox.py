@@ -2899,8 +2899,10 @@ async def test_native_autofill_preference_reaches_actual_enabled_request():
                 await h._call_browser_use_with_rotation(rose_client=RoseClient(openrouter_key="synthetic"), task="Continue my authorized Apple Account sign-in", dynamic_system_context="Original context", turn_messages=[], browser_state=_browser_state(), action_entries=[], config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="enabled", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task", phone_observation=state)
             prompt = json.dumps(captured[-1]["messages"])
             assert "try an already available native AutoFill suggestion" in prompt
-            assert "unavailable," in prompt and "rejected, or requires user presence" in prompt
+            assert "credentials.fill_saved" in prompt and "phone_credential_unavailable" in prompt
             assert "Never reveal, extract, copy, or transcribe" in prompt
+            assert "Supply no password, credential ref/ID, account, realm," in prompt
+            assert "Before credentials.fill_saved obtain fresh screen.text." in prompt
             assert screen in prompt
     finally:
         teardown_mock()
@@ -2912,6 +2914,7 @@ async def test_native_autofill_real_model_synthetic_controls():
     from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
     scenarios = {
         "available": "Apple Account synthetic@example.invalid. Password field is masked. A matching native AutoFill suggestion for synthetic@example.invalid is already visible: Use Saved Password button at center (100, 200).",
+        "server_available": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
         "missing": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
         "presence": "Apple Account synthetic@example.invalid. Saved password selected. Face ID authentication required to use this saved password. Only the account owner can approve Face ID. No alternative autonomous approval is available.",
         "rejected": "Apple Account synthetic@example.invalid. The matching saved password was already selected once using native AutoFill. Apple Account rejected it: Incorrect password. Password is still required to continue.",
@@ -2919,6 +2922,8 @@ async def test_native_autofill_real_model_synthetic_controls():
     async def decide(name, screen):
         state = {"enabled": True, "interaction": {"cursor": 3, "lease": {"id": "synthetic-lease", "status": "ACTIVE", "controlOwner": "agent"}, "setup": {"attemptId": "synthetic-attempt", "revision": 1, "state": "in_progress", "expectedAccountIdentifier": "synthetic@example.invalid"}, "lastOperation": {"id": "synthetic-read", "operation": "screen.text", "status": "SUCCEEDED", "result": [{"text": screen, "source": "pixels", "confidence": 1, "x": 50, "y": 180, "w": 100, "h": 40}]}}}
         history = []
+        if name == "missing":
+            history.append({"action": "phone credentials.fill_saved args={}", "result": {"success": False, "error": "phone_credential_unavailable", "operation": {"operation": "credentials.fill_saved", "status": "FAILED", "errorCode": "phone_credential_unavailable", "result": None}}})
         for observation_round in range(3):
             result = await RoseClient().complete_browser_use(task="Continue my authorized Apple Account sign-in. Use my already available matching saved credential if possible; ask me for the protected step only when needed.", browser_state={**_browser_state(), "phone": state}, dynamic_system_context=PHONE_GUIDANCE, action_history=history, available_actions=["phone", "request_user_assistance_for_authentication"], include_screenshot=False, call_site="test-native-autofill-" + name, deadline_s=90, skip_cache_write=True)
             chosen = result.get("action", {})
@@ -2934,7 +2939,9 @@ async def test_native_autofill_real_model_synthetic_controls():
         action = result.get("action", {})
         params = action.get("params", {})
         assert not (action.get("action") == "phone" and params.get("operation") == "input.text"), (name, action)
-        if name == "available":
+        if name == "server_available":
+            assert action.get("action") == "phone" and params.get("operation") == "credentials.fill_saved" and params.get("args") == {}, (name, action)
+        elif name == "available":
             assert action.get("action") == "phone" and params.get("operation") == "input.tap", (name, action)
             assert params.get("args") == {"x": 100, "y": 200}, (name, action)
         else:

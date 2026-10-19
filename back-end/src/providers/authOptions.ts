@@ -195,7 +195,7 @@ async function resolveCookieBundles(
   return cookieBundles;
 }
 
-function resolvePasswordOptions(
+export function resolvePasswordOptions(
   realm: string,
   passwordsAll: Awaited<ReturnType<typeof repo.findBrowserPasswords>>,
   hideSavedBrowserAuth: boolean

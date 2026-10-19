@@ -1,3 +1,5 @@
+import { runSavedCredential } from './service.savedCredential';
+import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 /** Browser/user action -> durable command claim -> one physical operation -> encrypted receipt. */
 import { PhoneHarnessClient, PhoneHarnessError } from '../../providers/phoneHarness';
 import { operationPrivacy } from './repo.privacy';
@@ -79,8 +81,22 @@ export async function performPhoneCommand(
   leaseId: string,
   input: PhoneCommand,
   actor: PhoneActor,
-  clientFactory: PhoneClientFactory = defaultPhoneClient
+  clientFactory: PhoneClientFactory = defaultPhoneClient,
+  credentialVerifier?: CredentialVerifier,
+  beforeSavedExecute?: () => Promise<void>
 ) {
+  if (
+    input.operation === 'credentials.fill_saved' &&
+    (actor !== 'agent' ||
+      Object.keys(input.args).length !== 0 ||
+      input.expectedCursor === undefined ||
+      input.setupAttemptId === undefined ||
+      input.setupRevision === undefined)
+  )
+    throw new IPhoneError(
+      400,
+      'Saved credential operation requires empty args and current setup context'
+    );
   const claim = await commands.claimCommand(userId, leaseId, input, actor);
   let command = claim.command;
   if (claim.execute) {
@@ -93,7 +109,9 @@ export async function performPhoneCommand(
       return { operation: await publicOperation(command) };
     }
     command =
-      (await runClaim(claim, input, client)) ??
+      (await (input.operation === 'credentials.fill_saved'
+        ? runSavedCredential(claim, client, credentialVerifier, beforeSavedExecute)
+        : runClaim(claim, input, client))) ??
       (await commands.ownedCommand(userId, leaseId, input.operationId)) ??
       command;
   }

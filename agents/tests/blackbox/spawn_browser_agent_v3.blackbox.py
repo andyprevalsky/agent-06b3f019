@@ -30151,6 +30151,8 @@ async def run_all_tests():
     await r.record_async("phone_setup_actions_recovery_and_heartbeat", test_phone_setup_actions_recovery_and_heartbeat)
     await r.record_async("phone_setup_failclosed_and_safe_errors", test_phone_setup_failclosed_and_safe_errors)
     await r.record_async("phone_setup_pending_receipt_and_ready_private_ref", test_phone_setup_pending_receipt_and_ready_private_ref)
+    await r.record_async("phone_saved_credential_wire_and_unknown_receipt", test_phone_saved_credential_wire_and_unknown_receipt)
+    await r.record_async("phone_saved_credential_rejects_model_secret_routing_args", test_phone_saved_credential_rejects_model_secret_routing_args)
     await r.record_async("phone_durable_http_contract", test_phone_durable_http_contract)
     await r.record_async("phone_denied_before_dom_and_private_binding", test_phone_denied_before_dom_and_private_binding)
     await r.record_async("phone_reattach_reacquire_and_stale_cursor", test_phone_reattach_reacquire_and_stale_cursor)
@@ -30702,10 +30704,6 @@ async def test_native_phone_auth_actual_activity_before_browser_recovery():
     assert not result.get("success"), "A handoff must not claim task or login completion"
 
 
-if __name__ == "__main__":
-    asyncio.run(run_all_tests())
-
-
 async def test_native_phone_auth_cancellation_preserves_exact_pending_request():
     await _exercise_native_phone_auth_manager(cancel=True)
 
@@ -30953,3 +30951,77 @@ async def test_phone_auth_retain_uses_only_seen_owned_lease():
         await phone.retain_phone_for_auth(_fake_config(), "user", "task", "attention", snapshot={"enabled": True, "interaction": {"lease": {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}}})
     observe.assert_not_awaited()
     assert calls == [("POST", "/api/iphone/leases/lease/awaiting-auth", {"attentionRequestId": "attention"})]
+
+
+async def test_phone_saved_credential_wire_and_unknown_receipt():
+    """Real Python HTTP boundary, synthetic broker only; never a saved secret."""
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    calls, posts = [], []
+    lease = {"id": "saved-lease", "status": "ACTIVE", "browserTaskId": "saved-task"}
+    setup = {"attemptId": "saved-attempt", "revision": 4, "state": "in_progress"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 8, "setup": setup}}
+    outcome = "filled"
+    receipt = None
+    def backend(request):
+        nonlocal receipt
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json={"lease": lease, "cursor": 99, "setup": {**setup, "revision": 99}})
+        if request.url.path.endswith("/operations"):
+            posts.append(body)
+            assert body["operation"] == "credentials.fill_saved" and body["args"] == {}
+            assert body["expectedCursor"] == 8 and body["setupAttemptId"] == "saved-attempt" and body["setupRevision"] == 4
+            receipt = {"operation": {"id": body["operationId"], "operation": "credentials.fill_saved", "status": "UNKNOWN" if outcome == "unknown" else "FAILED" if outcome == "unavailable" else "SUCCEEDED", "errorCode": "phone_credential_unavailable" if outcome == "unavailable" else None, "result": {"success": True, "private": True, "credentialStatus": "filled"} if outcome == "filled" else None}}
+            if outcome == "unknown":
+                raise httpx.ReadTimeout("SYNTHETIC-PRIVATE-ERROR-CANARY", request=request)
+            return httpx.Response(200, json=receipt)
+        if request.method == "GET" and "/operations/" in request.url.path:
+            assert request.url.path.endswith(receipt["operation"]["id"])
+            return httpx.Response(200, json=receipt)
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={})
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        kwargs = dict(config=_fake_config(), user_id="synthetic-user", agent_id="agent", task_id="saved-task", decision_id="stable-fill", snapshot=snapshot, client=client)
+        for outcome in ("filled", "filled", "unavailable", "unknown"):
+            kwargs["decision_id"] = "stable-" + outcome
+            before = len(posts)
+            result = await execute_phone({"mode": "operation", "operation": "credentials.fill_saved", "args": {}}, **kwargs)
+            assert len(posts) == before + 1
+            assert "SYNTHETIC-PRIVATE-ERROR-CANARY" not in json.dumps(result)
+            if outcome == "unknown":
+                assert not result["success"] and result["operation"]["status"] == "UNKNOWN"
+            elif outcome == "unavailable":
+                assert not result["success"] and result["operation"]["errorCode"] == "phone_credential_unavailable"
+            else:
+                assert result["operation"]["result"]["credentialStatus"] == "filled"
+        assert posts[0] == posts[1], "Same logical intent changed its submitted command identity"
+        assert len({body["operationId"] for body in posts}) == 3
+        assert not any("auth-assistance" in path for _, path, _ in calls)
+
+
+async def test_phone_saved_credential_rejects_model_secret_routing_args():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    mutations = []
+    def backend(request):
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json={"lease": {"id": "lease", "status": "ACTIVE"}})
+        mutations.append(request.url.path)
+        return httpx.Response(200, json={"operation": {"status": "SUCCEEDED"}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        for name in ("password", "credentialId", "credentialRef", "realm", "account", "x"):
+            result = await execute_phone({"mode": "operation", "operation": "credentials.fill_saved", "args": {name: "SYNTHETIC-CANARY"}}, config=_fake_config(), user_id="u", agent_id="a", task_id="t", decision_id="d", snapshot={"enabled": True, "interaction": {"cursor": 0}}, client=client)
+            assert not result["success"], "Model supplied credential/routing arguments reached execution"
+            assert "SYNTHETIC-CANARY" not in json.dumps(result)
+        assert mutations == [], "Invalid saved-credential arguments reached physical command submission"
+
+
+if __name__ == "__main__":
+    asyncio.run(run_all_tests())

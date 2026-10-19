@@ -1,3 +1,4 @@
+import { phoneVerifierPricing } from './phoneVerifierPricing';
 /** Fixed identity purpose; observations are server-loaded data, never instructions. */
 import { createStreamingCompletion, StructuredOutputAccumulator } from './rose';
 import { getModelPricing } from './modelPricing';
@@ -87,11 +88,8 @@ export const verifyPhoneSetup: SetupVerifier = async (input) => {
     completionTokens < 0
   )
     throw new Error('Phone setup verification returned invalid usage');
-  const pricing =
-    model.endsWith('-gpt') || model.endsWith('-claude')
-      ? { prompt: '0', completion: '0' }
-      : await getModelPricing(model);
-  if (pricing === null) throw new Error('Phone setup model pricing unavailable');
+  const pricing = await phoneVerifierPricing(model, getModelPricing);
+  if (pricing === null) throw new Error('phone_verifier_pricing_unavailable');
   const totalCostCents = Math.ceil(
     (promptTokens * Number(pricing.prompt) + completionTokens * Number(pricing.completion)) * 100
   );

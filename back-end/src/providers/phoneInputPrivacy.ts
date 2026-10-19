@@ -59,6 +59,19 @@ export function privateResult(
   encrypted: string | null
 ): unknown {
   const privacy = privacyState(encrypted);
+  if (command.operation === 'credentials.fill_saved')
+    return {
+      success: command.state === 'SUCCEEDED',
+      private: true,
+      credentialStatus:
+        command.state === 'SUCCEEDED'
+          ? 'filled'
+          : command.state === 'UNKNOWN'
+            ? 'unknown'
+            : ['CONNECTING', 'RUNNING'].includes(command.state)
+              ? 'pending'
+              : 'unavailable',
+    };
   if (command.actor === 'user' && command.operation === 'input.text')
     return { success: command.state === 'SUCCEEDED', private: true };
   if (isModelMedia(command.operation)) return { private: true };

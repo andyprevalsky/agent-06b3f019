@@ -1,3 +1,4 @@
+import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 import { profileBody, setupBody } from './routes.setup';
 import { configureSetup, submitSetup } from './service.setup';
 import type { SetupVerifier } from '../../providers/phoneSetupVerifier';
@@ -72,7 +73,9 @@ function handle(handler: Handler, status = 200) {
 function executePhoneOperation(
   req: HybridAuthRequest,
   userId: string,
-  clientFactory: PhoneClientFactory
+  clientFactory: PhoneClientFactory,
+  credentialVerifier?: CredentialVerifier,
+  beforeSavedExecute?: () => Promise<void>
 ) {
   const body = bodyRecord(req.body);
   const args = body.args === undefined ? {} : bodyRecord(body.args);
@@ -110,7 +113,9 @@ function executePhoneOperation(
         : {}),
     },
     req.isInternal === true ? 'agent' : 'user',
-    clientFactory
+    clientFactory,
+    credentialVerifier,
+    beforeSavedExecute
   );
 }
 
@@ -157,9 +162,26 @@ function ensurePhoneInteraction(
     clientFactory
   );
 }
-export function createIPhoneRouter(
-  options: { phoneClient?: PhoneClientFactory; setupVerifier?: SetupVerifier } = {}
-) {
+interface IPhoneRouterOptions {
+  phoneClient?: PhoneClientFactory;
+  setupVerifier?: SetupVerifier;
+  credentialVerifier?: CredentialVerifier;
+  beforeSavedExecute?: () => Promise<void>;
+}
+function phoneOperationHandler(
+  clientFactory: PhoneClientFactory,
+  options: IPhoneRouterOptions
+): Handler {
+  return (req, userId) =>
+    executePhoneOperation(
+      req,
+      userId,
+      clientFactory,
+      options.credentialVerifier,
+      options.beforeSavedExecute
+    );
+}
+export function createIPhoneRouter(options: IPhoneRouterOptions = {}) {
   const router = Router();
   const clientFactory = options.phoneClient ?? operations.defaultPhoneClient;
   router.use(asyncHandler(hybridAuth));
@@ -216,10 +238,7 @@ export function createIPhoneRouter(
   for (const action of ['heartbeat', 'release', 'awaiting-auth', 'control'] as const) {
     router.post(`/leases/:id/${action}`, handle(leaseAction(action, clientFactory)));
   }
-  router.post(
-    '/leases/:id/operations',
-    handle((req, userId) => executePhoneOperation(req, userId, clientFactory))
-  );
+  router.post('/leases/:id/operations', handle(phoneOperationHandler(clientFactory, options)));
   router.get(
     '/leases/:id/operations/:operationId',
     handle((req, userId) =>

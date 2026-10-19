@@ -6,7 +6,11 @@ import type { SetupClaim } from './repo.setupCommand';
 import type { SetupVerificationResult } from '../../providers/phoneSetupVerifier';
 import * as leases from './repo';
 
-export async function billSetup(claim: SetupClaim, result: SetupVerificationResult) {
+export async function billSetup(
+  claim: Pick<SetupClaim, 'command' | 'lease'>,
+  result: Pick<SetupVerificationResult, 'usage'>,
+  toolName = 'phone_setup_identity'
+) {
   return leases.transaction((tx) =>
     tx.toolUsage.upsert({
       where: { operationKey: `iphone-setup:${claim.command.id}` },
@@ -14,12 +18,12 @@ export async function billSetup(claim: SetupClaim, result: SetupVerificationResu
         operationKey: `iphone-setup:${claim.command.id}`,
         userId: claim.lease.userId,
         agentId: claim.lease.agentId,
-        toolName: 'phone_setup_identity',
+        toolName,
         totalCostCents: Math.ceil(result.usage.totalCostCents),
         usageItems: [
           {
             type: 'llm',
-            call_site: 'phone_setup_identity',
+            call_site: toolName,
             provider: result.usage.model,
             model: result.usage.model,
             tokens_in: result.usage.promptTokens,

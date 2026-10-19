@@ -34,6 +34,12 @@ In mode=operation, set operation to the wire name and args to its arguments:
 - input.text: {"s": "text", "delay": 0.03, "keystrokes": false} types
   into the focused field; tap the field first and verify afterward.
 - input.keys: {"combo": "enter"}; nav.home: {} presses the Home button.
+- credentials.fill_saved: {} asks the backend to use the shared saved-password
+  store for the server-verified current app/account. Initial binding supports
+  Apple Account setup only. Supply no password, credential ref/ID, account, realm,
+  or coordinates. The worker/model never reads or types the saved secret.
+Before credentials.fill_saved obtain fresh screen.text. The backend obtains
+trusted bounds and independently verifies the current form/account binding.
 The live host decides which operations are supported. An unsupported response
 is a capability limit; do not repeat it or assume back/current-app/tree exists.
 Queue/lease timeout is a tool outcome, not a request for user attention. Pending
@@ -46,11 +52,21 @@ matching account before requesting password help, keeping the password masked.
 Use ordinary observed UI taps; do not open Passwords details or search the vault.
 Never reveal, extract, copy, or transcribe a saved password into observations,
 model messages, tool arguments, or logs. A blank password field alone does not
-prove that no saved credential exists. If the matching suggestion is unavailable,
-rejected, or requires user presence, request the protected user step rather than
-retrying a rejected credential or bypassing biometric/device authentication.
+prove that no saved credential exists. If no matching usable native suggestion
+is available, use credentials.fill_saved once with empty args and the actual
+observed setup context BEFORE requesting password assistance. Native AutoFill
+and the backend saved-password catalog are separate: an empty native suggestion
+list does not mean the backend has no saved credential. Do not skip this secure
+backend attempt merely because the current screen asks for a password. A filled receipt is only a
+private acknowledgment, not sign-in proof; observe and verify. A
+phone_credential_unavailable receipt means request the protected user step if an
+actual critical password screen blocks progress. Binding/stale errors mean
+observe again, never supply a secret or blindly retry. UNKNOWN means inspect
+status/receipts, never replay. If a credential was rejected or user presence is
+required, request the protected step rather than retrying the rejected credential
+or bypassing biometric/device authentication.
 A filled masked field alone is not sign-in proof: observe and verify the result.
-If a password,
+If a password still blocks after saved-credential unavailability/rejection, or a
 user-only verification code, device passcode, or user-presence authentication
 (biometrics/trusted-device approval) blocks progress, call
 request_user_assistance_for_authentication with targetKind="iphone" and the
@@ -64,7 +80,8 @@ command did not execute; never replay it blindly. Navigate Apple Account sign-in
 autonomously when compatible with the user's goal. The owned active setup context
 may provide expectedAccountIdentifier: it is authorized nonsecret personal data
 and may be typed normally. Passwords may be supplied by masked native AutoFill
-without exposing their value; otherwise use the protected user form only.
+or backend credentials.fill_saved without exposing their value; otherwise use
+the protected user form only.
 Honor actual user restrictions: mode=setup, action=defer, reasonCode=user_constraint
 records a deferral for this task only, then continue permitted work. For an actual
 setup blocker use action=block with reasonCode=unsupported,
@@ -185,6 +202,8 @@ async def execute_phone(
         params = validate_browser_tool_args("phone", params)
     except ValueError:
         return {"success": False, "error": "Invalid phone arguments"}
+    if params["mode"] == "operation" and params.get("operation") == "credentials.fill_saved" and params.get("args", {}) != {}:
+        return {"success": False, "error": "Saved credential fill accepts no model arguments"}
     view = (snapshot or {}).get("interaction") or {}
     path = f"interactions/{quote(task_id, safe='')}"
     if params["mode"] == "setup":

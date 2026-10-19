@@ -80,6 +80,13 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
     text = '{"identityConfirmed":"true"}';
     assert.equal((await verifyPhoneSetup(input)).identityConfirmed, false);
     text = '{"identityConfirmed":true}';
+    actual = 'gpt-5.6-luna-foundry';
+    assert.equal(
+      (await verifyPhoneSetup(input)).usage.totalCostCents,
+      0,
+      'Canonical funded Foundry user-facing policy must apply'
+    );
+    actual = 'actual-identity-model';
     hasUsage = false;
     await assert.rejects(verifyPhoneSetup(input));
     hasUsage = true;

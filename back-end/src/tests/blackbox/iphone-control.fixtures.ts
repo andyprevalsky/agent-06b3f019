@@ -1,3 +1,4 @@
+import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 import userSettingsRouter from '../../domains/user-settings/routes';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { SetupVerifier } from '../../providers/phoneSetupVerifier';
@@ -85,6 +86,8 @@ export class Harness {
   private readonly transportPrefix = `/phone-fixture-${randomUUID()}`;
   readonly calls: ProviderCall[] = [];
   clientCreations = 0;
+  beforeSavedExecute: (() => Promise<void>) | undefined;
+  credentialVerifier: CredentialVerifier = async () => ({ allowed: false });
   readonly fixtureErrors: string[] = [];
   readonly physicalOperations: Array<{ op: string; kw: Record<string, unknown> }> = [];
   sessionState: 'ready' | 'provisioning' = 'ready';
@@ -339,6 +342,10 @@ export class Harness {
       '/api/iphone',
       createIPhoneRouter({
         setupVerifier: (input) => this.setupVerifier(input),
+        credentialVerifier: (input) => this.credentialVerifier(input),
+        beforeSavedExecute: async () => {
+          await this.beforeSavedExecute?.();
+        },
         phoneClient: () => {
           this.clientCreations++;
           return new PhoneHarnessClient({
@@ -430,6 +437,8 @@ export class Harness {
   }
 
   resetControls(): void {
+    this.physicalOperations.length = 0;
+    this.beforeSavedExecute = undefined;
     this.beforeStop = undefined;
     this.holds.forEach((held) => held.release());
     this.nextHold = undefined;
