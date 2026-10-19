@@ -40,7 +40,11 @@ type UserIdentityRecord = {
 };
 
 type UserIdentityModel<T extends UserIdentityRecord> = {
-  upsert(args: { where: { userId: string }; create: T; update: Omit<T, 'id'> }): Promise<unknown>;
+  upsert(args: {
+    where: { userId: string };
+    create: T;
+    update: Partial<Omit<T, 'id'>>;
+  }): Promise<unknown>;
 };
 
 export type LocalUserModel = UserIdentityModel<RemoteUserRecord>;
@@ -68,7 +72,8 @@ export type ScopedRemoteUserModel = {
 
 async function syncUserRecordsByIdentity<T extends UserIdentityRecord>(
   localUser: UserIdentityModel<T>,
-  users: readonly T[]
+  users: readonly T[],
+  preserveExisting = false
 ): Promise<number> {
   for (const user of users) {
     const { id: remoteId, ...rest } = user;
@@ -76,7 +81,7 @@ async function syncUserRecordsByIdentity<T extends UserIdentityRecord>(
     await localUser.upsert({
       where: { userId: user.userId },
       create: user,
-      update: rest,
+      update: preserveExisting ? {} : rest,
     });
   }
   return users.length;
@@ -102,14 +107,15 @@ export async function syncWaitlistAccounts(
 export async function syncUserRecord(
   remoteUser: RemoteUserModel,
   localUser: LocalUserModel,
-  userId: string
+  userId: string,
+  preserveExisting = false
 ): Promise<number> {
   const user = await remoteUser.findUnique({
     where: { userId },
     select: REMOTE_USER_SELECT,
   });
   if (!user) return 0;
-  return syncUserRecordsByIdentity(localUser, [user]);
+  return syncUserRecordsByIdentity(localUser, [user], preserveExisting);
 }
 
 /** Prisma unique `where` for a P2002 `meta.target` list. */

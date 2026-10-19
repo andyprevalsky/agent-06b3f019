@@ -3,7 +3,13 @@
 import assert from 'node:assert/strict';
 
 import { createStreamingCompletion } from '../../providers/rose';
-import { foundryComplete, orderedFoundryDeployments } from '../../providers/rose/foundry';
+import {
+  FOUNDRY_REGION_ENV_NAMES,
+  __resetFoundryCooldowns,
+  foundryComplete,
+  foundryRegions,
+  foundryRoutePlan,
+} from '../../providers/rose/foundry';
 import { buildCodexResponsesBody, openAiApiKeyComplete } from '../../providers/rose/gptAuth';
 import { RosePaymentRequiredError, RoseRateLimitError } from '../../providers/rose/errors';
 import { POOL_REGISTRY } from '../../providers/rose/pools';
@@ -14,18 +20,20 @@ const sse = (text: string): string =>
   `data: ${JSON.stringify({ type: 'response.completed', response: { usage: { input_tokens: 3, output_tokens: 1 } } })}\n\n` +
   'data: [DONE]\n\n';
 
+/** Region-1 deployment order for a route key (the tests configure only region 1). */
+const orderedFoundryDeployments = (model: string, routeKey: string): string[] =>
+  foundryRoutePlan(foundryRegions(), model, routeKey).map(({ deployment }) => deployment);
+
 async function main(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const originalEnv = Object.fromEntries(
-    [
-      'AZURE_FOUNDRY_ENDPOINT',
-      'AZURE_FOUNDRY_API_KEY',
-      'AZURE_FOUNDRY_DEPLOYMENTS',
-      'GPT_API_KEY',
-      'ANTHROPIC_API_KEY',
-      'OPENROUTER_API_KEY',
-    ].map((key) => [key, process.env[key]])
+    [...FOUNDRY_REGION_ENV_NAMES, 'GPT_API_KEY', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY'].map(
+      (key) => [key, process.env[key]]
+    )
   );
+  // Region 1 only: a developer .env may configure AZURE_FOUNDRY_*_2.._9.
+  for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
+  __resetFoundryCooldowns();
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-key';
   process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol,gpt-6-sol-b';

@@ -2372,3 +2372,177 @@ def test_retirement_joins_actual_writer_beyond_original_ten_second_window(tmp_pa
         assert observed == (True, 1, True, True), (observed, repr(error))
         assert session.revision == 0 and not session.receipts
     asyncio.run(run())
+
+
+def _measured_source_fixture(tmp_path):
+    """Two real calls: one with measured clocks (2m 14s), one exported without clocks."""
+    source = _source_fixture(tmp_path)
+    otel = next((source / "otel").iterdir())
+    spans = [json.loads(line) for line in otel.read_text().splitlines()]
+    for span in spans:
+        if span["spanId"] == "obs-1":
+            span["attributes"] += [
+                {"key": "rose.tool.started_at_ms", "value": {"intValue": "1787537754364"}},
+                {"key": "rose.tool.completed_at_ms", "value": {"intValue": str(1787537754364 + 134_000)}},
+            ]
+    otel.write_text("\n".join(json.dumps(s) for s in spans) + "\n")
+    return source
+
+
+def test_demo_renders_the_real_measured_tool_duration_not_the_ingest_ordinals(tmp_path):
+    from exp.common.core.artifacts import canonical_json_bytes
+    from exp.simulation.engines.text.prompt import build_world_model_request
+    from exp.simulation.retrieval import RAGMatch, RAGTransition
+
+    from benchmarks.build_experiential_world_model import build
+    from benchmarks.serve_experiential_world_model import load_native
+
+    digest = "a" * 64
+    build(_measured_source_fixture(tmp_path), tmp_path / "native", "rose-test", "rose-1-ultra", digest)
+    _, retriever = load_native(tmp_path / "native", "rose-test", "rose-1-ultra", digest)
+    by_span = {t.action_span_id: t for t in retriever.loaded.transitions}
+    # Ingest rewrites span clocks to microsecond ordinals; the measured duration survives.
+    assert by_span["action-1"].elapsed_ms == 134_000
+    assert by_span["action-2"].elapsed_ms is None
+    # An unmeasured record keeps the pre-duration wire shape, so older corpora load unchanged.
+    unmeasured = canonical_json_bytes(by_span["action-2"])
+    assert b"elapsed" not in unmeasured
+    assert RAGTransition.model_validate_json(unmeasured) == by_span["action-2"]
+
+    task = _task_for_request()
+    request = build_world_model_request(
+        task,
+        visible_messages=(),
+        candidate_response=action_from_canonical(action(3)),
+        grounded_examples=tuple(RAGMatch(transition=t, score=1.0) for t in (by_span["action-1"], by_span["action-2"])),
+        maximum_output_tokens=1024,
+    )
+    examples = {e["transition_id"]: e for e in json.loads(request.messages[1].content)["grounded_examples"]}
+    measured = examples[by_span["action-1"].transition_id]
+    assert measured["elapsed"] == "2m 14s" and measured["elapsed_ms"] == 134_000
+    assert set(measured) >= {"action", "observation", "elapsed"}
+    assert not {"elapsed", "elapsed_ms"} & set(examples[by_span["action-2"].transition_id])
+
+
+def _task_for_request():
+    from exp.common.tasks import TaskCase
+
+    from benchmarks.experiential_world_model import canonical_tool_schema
+
+    return TaskCase(
+        task_id="task-duration",
+        lineage_group_id="lineage-current",
+        partition="held_out",
+        instruction="Research",
+        initial_context={},
+        tools=(canonical_tool_schema(action(3)["name"]),),
+        workload_weight=1,
+        source_trace_ids=("current",),
+    )
+
+
+def test_served_world_model_request_shows_each_demo_real_duration():
+    """The actual serving path, not only the builder, places the duration beside each demo."""
+    from exp.simulation.retrieval import RAGMatch, RAGTransition
+
+    def demo(n, elapsed_ms):
+        return RAGMatch(transition=RAGTransition(
+            transition_id=f"example-{n}", trace_id="trace", lineage_id=f"lineage-{n}",
+            action_span_id=f"action-{n}", observation_span_id=f"obs-{n}", task="Research",
+            initial_context={},
+            action={"kind": "tool_call", "tool_name": "rose.browser.spawn_browser_agent", "tool_arguments": {}},
+            observation={"kind": "tool_result", "content": "done"},
+            key_text="Research", key_sha256="a" * 64, elapsed_ms=elapsed_ms), score=1.0)
+
+    class Examples:
+        def retrieve(self, query):
+            return (demo(1, 134_000), demo(2, 850), demo(3, 3_605_000), demo(4, None))
+
+    async def run():
+        requests = []
+
+        async def complete(request):
+            requests.append(request)
+            return reply(request, {})
+
+        model = ParallelWorldModel(complete, Examples())
+        session = model.new_session("Research", {}, "root")
+        await model.step(session.id, action(1), "inv")
+        evidence = json.loads(requests[0].messages[1].content)
+        rendered = {e["transition_id"]: e.get("elapsed") for e in evidence["grounded_examples"]}
+        assert rendered == {"example-1": "2m 14s", "example-2": "850ms", "example-3": "1h 0m 5s", "example-4": None}
+
+
+def test_v4_send_samples_a_concrete_reply_that_is_delivered_when_world_time_reaches_it():
+    """Runs 13/18: replies were deferred as placeholders and never sampled or delivered."""
+    from benchmarks.wmh_outcome_policy_v4_test import outcome, reply_event, send_distribution, world
+
+    hour = 3_600_000
+
+    async def run():
+        seen = []
+
+        async def complete(request):
+            evidence = json.loads(request.messages[1].content)
+            call = evidence["candidate_response"]["tool_calls"][0]
+            at = call["arguments"]["timestamp_ms"]
+            events = evidence["environment_state"]["structured"]["scheduled_events"]
+            seen.append((at, [e["id"] for e in events]))
+            due = [e["id"] for e in events if e["available_at_ms"] <= at and "delivered_at_ms" not in e]
+            if len(seen) == 1:
+                payload = send_distribution(event=reply_event(at=at + 2 * hour))
+            else:
+                payload = {
+                    "schema": "rose.wmh_timed_outcome_distribution.v4",
+                    "base_rates": [],
+                    "outcomes": [
+                        outcome(
+                            "inbox", 1.0, delivered=due, elapsed=2 * hour,
+                            content="1 new reply from Dana Lee" if due else "No new replies",
+                        )
+                    ],
+                }
+            for item in payload["outcomes"]:
+                item["tool_results"][0]["call_id"] = call["call_id"]
+            return json.dumps(payload)
+
+        model = distribution_model(complete, policy="rose-outcome-distribution-v4", sample_uniform=lambda: 0.01)
+        session = model.new_session("Pitch Dana", world(), "root")
+        sent = await model.step(session.id, _timed_action(1), "send")
+        assert sent["metadata"]["outcome_selection"]["selected_outcome_id"] == "delivered_reply_later"
+        assert sent["metadata"]["outcome_selection"]["base_rate_results"] == {"cold_reply": True}
+        early = await model.step(session.id, _timed_action(2), "check-early")
+        late = await model.step(session.id, _timed_action(3), "check-late")
+        assert seen[1][1] == [] and seen[2][1] == ["evt-reply-1"]
+        assert early["content"] == "No new replies" and late["content"] == "1 new reply from Dana Lee"
+        assert late["metadata"]["outcome_selection"]["delivered_event_ids"] == ["evt-reply-1"]
+        [event] = session.state["structured"]["scheduled_events"]
+        assert event["delivered_at_ms"] == late["metadata"]["world_time_ms"] >= event["available_at_ms"]
+        assert event["available_at_ms"] == seen[0][0] + 2 * hour
+        # Sampled at the send (elapsed 30 s); hidden at +30 s, delivered once the clock passed +2 h.
+        assert seen[1][0] < event["available_at_ms"] <= seen[2][0]
+
+    asyncio.run(run())
+
+
+def test_v4_placeholder_reply_is_rejected_and_never_commits():
+    from exp.simulation.engines.text.prompt import TextWorldModelProtocolError
+
+    from benchmarks.wmh_outcome_policy_v4_test import send_distribution, world
+
+    async def run():
+        async def complete(request):
+            call = json.loads(request.messages[1].content)["candidate_response"]["tool_calls"][0]
+            payload = send_distribution(event={"available_at_ms": call["arguments"]["timestamp_ms"] + 1,
+                                               "description": "Investor may respond; no response guaranteed"})
+            for item in payload["outcomes"]:
+                item["tool_results"][0]["call_id"] = call["call_id"]
+            return json.dumps(payload)
+
+        model = distribution_model(complete, policy="rose-outcome-distribution-v4", sample_uniform=lambda: 0.01)
+        session = model.new_session("Pitch Dana", world(), "root")
+        with pytest.raises(TextWorldModelProtocolError):
+            await model.step(session.id, _timed_action(1), "send")
+        assert session.revision == 0 and session.state["structured"]["scheduled_events"] == []
+
+    asyncio.run(run())

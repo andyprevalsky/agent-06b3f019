@@ -309,7 +309,7 @@ async function assertSteelSameProfileReplacementState(
     startUrl: null,
     proxyRotationCount: 4,
     status: 'ACTIVE',
-    closedAt: null,
+    closedAt: null as Date | null,
     context: { userId: 'offline-user' },
   };
   type Effect = {

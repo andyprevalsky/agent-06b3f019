@@ -81,7 +81,7 @@ def test_foundry_original_body_read_failure_matches_observer_off(monkeypatch):
             ttft_timeout_s=2,idle_timeout_s=2)]
     errors=[]
     for observer in [None, lambda row: None]:
-        foundry._cooldown_until.clear();foundry._auth_cooldown_until=0
+        foundry._cooldown_until.clear();foundry._auth_cooldown_until.clear()
         token=FAILURE_OBSERVER.set(observer)
         try:
             with pytest.raises(Exception) as error: asyncio.run(call())
@@ -117,7 +117,7 @@ def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypa
     from pathlib import Path
     tasks=json.loads((Path(owner.__file__).parents[1]/'benchmarks/tasks.json').read_text())
     demo=next(t['prompt'] for t in tasks if t['name']=='demo-fleet-alpha')
-    monkeypatch.setattr(owner.workflow, 'logger', SimpleNamespace(info=lambda *a,**k:None, warning=lambda *a,**k:None))
+    monkeypatch.setattr(owner.workflow, 'logger', SimpleNamespace(info=lambda *a,**k:None, warning=lambda *a,**k:None, error=lambda *a,**k:None))
     async def noop(*args, **kwargs): return None
     resolved_seen = False
     async def activity(fn, *args, **kwargs):

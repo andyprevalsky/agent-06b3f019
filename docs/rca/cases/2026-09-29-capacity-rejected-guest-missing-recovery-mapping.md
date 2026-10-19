@@ -146,3 +146,164 @@ above five percent. Do not change the harness to make results pass.
 ## Reusable lesson
 
 Map provider-rejected pre-proxy starts into exact recovery without treating the mapping as guest cleanup proof.
+
+
+## October 15 follow-up: exact mapping predicate still unknown
+
+One actual canonical recovery of V41 owner
+`7d6a3cfb993d437e9e2f958391ae8e4e` joined with exit 1 in 16.789 seconds.
+Its source/boot/owner/nonce-bound acknowledgement retained the registry and
+runtime-evidence latch; the shared audit remained incomplete. The exact
+720-byte original log, SHA256
+`26bbdc23014fe887311ca3c5116a72223a6ef6532aa0dfda68f084c8c58270e7`,
+first failed at inline Python line 378 with
+`ValueError: missing stale-owner status proxy mapping`. No canonical recovery
+was repeated for this investigation, and no provider release is claimed.
+
+The original source is commit `82b849eee20f9527426beb4f540d02553d83dc80`.
+The planner block is unchanged in the inspected current source. This observed
+failure is before runtime collection or provider teardown. A nonregular or
+missing `status-proxy.port` enters the existing rejected-start exception only
+with a nonempty bounded regular boot-start log, no accepted-start/run/worker
+runtime markers, and a regular empty worker ledger. The traceback does not
+identify which mapped output or which of those predicates failed. The existing
+retained owner projection binds the exact Machine and volume but records only
+a controller-log hash, not those file states. The author also confirmed the
+required metadata was not retained locally.
+
+The registered native-free four-case
+`test_capacity_rejected_guest_without_proxy_remains_mapped_for_exact_recovery`
+selection passed unchanged in 1.35 seconds: the valid rejected-start fixture
+maps preferred port zero while accepted-start, allocated-worker and missing-log
+fixtures refuse. These passing controls are not a causal RED/GREEN for the
+actual October 15 failure. No runtime patch, latch removal, evidence shortcut or
+benchmark reclassification is justified yet. The next missing operand is the
+source-bound actual output mapping and exact six-file existence/type/size
+projection. The private first discriminator is
+`.context/stress600-root/i42-j0038-recovery-mapping/first-discriminator.safe.json`
+SHA256 `50f909875e7ae7cc5b5b109307d2495576c6b7f8728a82e11551f1ac0a6908ce`.
+
+Archive searches used `exact stale-owner runtime evidence incomplete` and
+`recover-stale-owner cancellation sealed result pending`. This case is a
+symptom-relative lead; the new failure has not established the same cause as
+September 29. The rejected-start exception already exists in the October source.
+The actual predicate and canonical recovery outcome remain open.
+
+
+### Same-day operand closure: pre-config startup phase
+
+A separately authorized read-only custody captured the exact output operands:
+index SHA256 `ce4966c15f37f4a7faaa23494563bef45c9cbd070d38ee9867b0047e325f5140`.
+All eight captured originals were byte/SHA checked locally. Both
+`status-proxy.port` and `cloudbench-boot-start.log` were positively absent.
+The worker ledger was regular and empty, accepted-start/run/worker runtime
+markers were absent, pending and owner JSON matched the exact Machine/run token,
+and the original child exit was 125. Thus the missing boot-start log is now an
+identified failing mapping predicate; it is no longer an undifferentiated file
+evidence gap. The original controller log SHA256
+`16a63fb5e9cce1b637e1c3e5bc9e7ecef62639b70fdd1598f7d96559f7d2daea`
+also reports boot configuration failure before barrier release and no guest
+cleanup owed. Frozen source emits that cleanup message only after observing
+`boot-config-unapplied`; the marker's current actual bytes and the native
+configuration were not captured and remain unknown.
+
+The native-free replay through the actual production planner fails at the same
+inline line 378. It uses the existing synthetic exact-owner fixture, the
+captured pre-start state tuple, and a source-derived positive unapplied marker
+(explicitly not a copied current receipt). This is a local RED for the planner's
+unsupported pre-config phase. It is not a complete cleanup proof or a GREEN.
+Runtime ownership is persisted before boot config, but the no-proxy exception
+expects a post-config start log that an earlier rejection cannot produce.
+
+Merely permitting preferred port zero is insufficient: the existing startup
+archive also needs original lifecycle and guest-shutdown receipts, both absent
+in the actual capture; pool prestart recovery requires pool-only stopped guests;
+and Machine-only retirement requires an already sealed full bundle with no
+pending transfer. A supported fix needs phase-exact original capture and current
+native identity proof, preserving zero credit and the canonical reaper. No
+production edit, latch clearing, command repetition or provider call was made.
+The local replay and proof are retained in
+`.context/stress600-root/i42-j0038-recovery-mapping/operand-bound-RED.safe.json`,
+SHA256 `eb5205c124a4a1d729c40fe453a89114461871e7f69e7b403737765836b73499`.
+The new mechanism has a RED; its fix/GREEN and actual recovery outcome remain
+open. This update does not reclassify any benchmark result.
+
+
+### Additive pre-config evidence candidate, outcome pending
+
+With the exact unapplied marker additionally captured (15 bytes, SHA256
+`a3e4865f04c9e8cb475998ce3f962b6ce81ead63feb364294c24a0722e6411dd`),
+and one exact current native read confirming the source-created `sleep infinity`
+command with no run token, the parent assigned a phase-specific evidence repair.
+The startup archive helper now has an explicit candidate pre-config identity,
+local original archive and verification path. Its generic post-config identity
+and eligible path retain their original lifecycle/guest-ACK requirement.
+
+The permanent original-state test fails on the prior helper at its real missing
+lifecycle boundary; its fixture transparently calls the former identity when the
+additive phase method is absent. The unchanged original-state assertion passes
+with the candidate. Nine pre-config cases plus ten existing exec delivery cases
+pass in 0.401 seconds. Missing/foreign evidence, accepted start, changed versions
+or config, allocated workers, linked originals and unsafe archives remain
+refusals. The helper seals complete source-owned local originals with the
+existing bounded tar/SHA mechanism; it does not generate a guest ACK, lifecycle,
+start log or run result. No native pair supplied means evidence-only. Typed
+pre-config evidence verification additionally requires matching before/after
+native records for the exact ID/name/version/full inert config and original
+volume. The caller still owns fresh, source-bound native reads.
+
+The component leaves pending ownership and the runtime latch unchanged and
+always reports zero task credit and native release false. The fleet integration
+owner must consume this typed phase separately after re-verification; the
+original planner replay is still RED until that integration is complete. No
+actual capture, handoff, resource release or unchanged benchmark outcome was
+performed by this local proof. The finite candidate packet is author checkout
+`.context/rca-preconfig-archive/component-review.v2.safe.json`, SHA256
+`080c11c36bd123b69cb82e5117810c742a70866f82f5e3fd63c85f65977b76af`.
+Parent/peer integration review and actual guarded recovery remain pending.
+
+
+### Pre-config candidate review corrections: durable consumption and aggregate bound
+
+The fleet integration reviewer identified that initial verification against the
+entire current source set cannot be repeated after legitimate consumption:
+pending is unlinked and normal recovery changes clone/audit/batch records.
+The owning partial-recovery fixture first reproduced that failure. The successor
+adds an exclusive, private, file-and-parent-fsynced phase receipt before any fleet
+consumer may change pending. Archive-only revalidation independently checks the
+original failed controller/125/marker/ownership/provenance/audit bytes and the
+historical inert native pair; it does not require sanctioned mutable records to
+remain unchanged. Optional fresh native inputs must still match the original
+instance and config. Every mutation continues to require fresh caller-owned
+native/ownership guards; historical receipt verification is not current release
+proof. The helper never consumes pending itself.
+
+The parent also found that summing the aggregate byte ceiling after all reads
+could exceed memory before refusal. A permanent small fixture first proved the
+overflow file was read, then passed after each lstat was checked against the
+remaining aggregate ceiling before reading. Archive/source-set and native
+identity negatives remain fail-closed. The final focused command runs 22 tests,
+all passing in 0.566 seconds. It includes the original unsupported-phase test,
+actual phase-consumption/retry regression, aggregate no-overread regression,
+accepted/foreign/missing/stale/tampered evidence inverses and the ten existing
+exec delivery controls. No provider, guest, service or load call ran.
+
+Final helper/test candidate packet:
+author `.context/rca-preconfig-archive/component-review.final.safe.json`, SHA256
+`f676a3a80d01859fa7d5f514e9e29a33ae11fb02a5bdd151325969055ebb09db`;
+consumer contract SHA256
+`1925becd7e0ba9a9078ff989f9ca04e234e0bc71e8cb18a629c6de6fadcb35b4`.
+The author owns the separate whole-owner PRECONFIG fleet integration. Source
+review, normal checkpoint and actual canonical recovery remain pending. The
+original V41 result and all earlier erroneous physical-denominator abort flags
+remain unchanged and unqualified; no benchmark credit is granted by this repair.
+
+
+The final helper/test component was independently accepted after 22 registered
+controls passed in 0.530 seconds (parent receipt SHA256
+`03078a6f2ee01ff062c447e776f091855486e76623d5084ce9a8e1fe2dba5b74`).
+Its normal two-path checkpoint is commit
+`41d1e8b2e` in the author checkout; no fleet integration files were included.
+The shared Git window was released immediately. This closes the local helper
+component, not the historical recovery, native release or exact benchmark
+outcome; the separate fleet integration owner retains those pending stages.

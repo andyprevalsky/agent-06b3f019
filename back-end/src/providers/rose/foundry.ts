@@ -1,4 +1,16 @@
-/** Microsoft Foundry GPT Responses fallback. Deployment names may differ from model IDs. */
+/**
+ * Microsoft Foundry GPT Responses fallback. Deployment names may differ from model IDs.
+ *
+ * The unsuffixed AZURE_FOUNDRY_ENDPOINT / _API_KEY / _DEPLOYMENTS variables are
+ * region 1. AZURE_FOUNDRY_ENDPOINT_<n> / AZURE_FOUNDRY_API_KEY_<n> /
+ * AZURE_FOUNDRY_DEPLOYMENTS_<n> (n = 2..9) add further Azure resources, normally
+ * in other regions; a region needs both endpoint and key. Each route key ranks
+ * regions by rendezvous hashing: one agent keeps a stable primary region (and its
+ * prompt cache) while agents spread evenly, and a failing region's traffic spreads
+ * over all remaining regions. Pre-content 429s, in-stream rate limits, 5xx and
+ * transport errors try the next region; cooldowns are per (region, deployment).
+ * Mirrors agents/providers/rose/foundry.py.
+ */
 
 import { createHash } from 'node:crypto';
 
@@ -26,34 +38,180 @@ import type {
 
 const log = createLogger('Rose');
 
+/** Keyed by `${endpoint}\n${deployment}`. */
 const cooldownUntil = new Map<string, number>();
-let authCooldownUntil = 0;
+/** Keyed by region endpoint: one key belongs to one Azure resource. */
+const authCooldownUntil = new Map<string, number>();
+
+const REGION_SLOTS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const suffix = (slot: number): string => (slot === 1 ? '' : `_${slot}`);
+
+export const FOUNDRY_REGION_ENV_NAMES: readonly string[] = REGION_SLOTS.flatMap((slot) =>
+  ['ENDPOINT', 'API_KEY', 'DEPLOYMENTS'].map((name) => `AZURE_FOUNDRY_${name}${suffix(slot)}`)
+);
+
+/** `URL.canParse` needs Node 18.17; engines allow 18.0, so parse inside try/catch. */
+function hostnameOf(endpoint: string): string {
+  try {
+    return new URL(endpoint).hostname;
+  } catch {
+    return '';
+  }
+}
+
+/** One Azure resource. The key is a private field, so JSON/inspect never render it. */
+export class FoundryRegion {
+  readonly #apiKey: string;
+  readonly host: string;
+
+  constructor(
+    readonly slot: number,
+    readonly endpoint: string,
+    apiKey: string,
+    readonly deployments: readonly string[]
+  ) {
+    this.#apiKey = apiKey;
+    this.host = hostnameOf(endpoint);
+  }
+
+  apiKey(): string {
+    return this.#apiKey;
+  }
+
+  toString(): string {
+    return `FoundryRegion(${this.slot}, ${this.host})`;
+  }
+}
+
+function configuredNames(variable: string): string[] {
+  return (process.env[variable] ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+/** Configured regions in slot order; the endpoint drops a trailing `/openai/v1`. */
+export function foundryRegions(): FoundryRegion[] {
+  const regions: FoundryRegion[] = [];
+  for (const slot of REGION_SLOTS) {
+    const endpoint = process.env[`AZURE_FOUNDRY_ENDPOINT${suffix(slot)}`]?.trim();
+    const apiKey = process.env[`AZURE_FOUNDRY_API_KEY${suffix(slot)}`]?.trim();
+    if (!endpoint || !apiKey) continue;
+    regions.push(
+      new FoundryRegion(
+        slot,
+        endpoint.replace(/\/+$/, '').replace(/\/openai\/v1$/, ''),
+        apiKey,
+        configuredNames(`AZURE_FOUNDRY_DEPLOYMENTS${suffix(slot)}`)
+      )
+    );
+  }
+  return regions;
+}
+
+/** `${slot}\n${endpoint}` pairs already warned about, so a bad optional slot logs once. */
+const warnedInsecureRegions = new Set<string>();
+
+/**
+ * Configured regions that routing may use: HTTPS endpoints only. A non-HTTPS
+ * optional region (slot 2..9) is dropped with one warning naming its env slot,
+ * so a typo there cannot stop the healthy regions. A non-HTTPS region 1, or a
+ * configuration with no HTTPS region left, stays a whole-config error.
+ * Mirrors `_routable_regions` in agents/providers/rose/foundry.py.
+ */
+function routableRegions(): FoundryRegion[] {
+  const configured = foundryRegions();
+  const usable = configured.filter((region) => region.endpoint.startsWith('https://'));
+  const insecure = configured.filter((region) => !region.endpoint.startsWith('https://'));
+  if (insecure.length && (insecure[0].slot === 1 || !usable.length))
+    throw new RoseInvalidRequest(`AZURE_FOUNDRY_ENDPOINT${suffix(insecure[0].slot)} must be HTTPS`);
+  for (const region of insecure) {
+    const key = `${region.slot}\n${region.endpoint}`;
+    if (warnedInsecureRegions.has(key)) continue;
+    warnedInsecureRegions.add(key);
+    log.warn('foundry.region_not_https', {
+      env: `AZURE_FOUNDRY_ENDPOINT${suffix(region.slot)}`,
+      region_slot: region.slot,
+    });
+  }
+  return usable;
+}
 
 export function foundryConfigured(poolSpec: PoolSpec): boolean {
-  return Boolean(
-    poolSpec.foundryEnabled &&
-    Date.now() >= authCooldownUntil &&
-    process.env.AZURE_FOUNDRY_ENDPOINT?.trim() &&
-    process.env.AZURE_FOUNDRY_API_KEY?.trim()
+  if (!poolSpec.foundryEnabled) return false;
+  let regions: FoundryRegion[];
+  try {
+    regions = routableRegions();
+  } catch (error) {
+    // Routing rejects this configuration; let foundryComplete surface that error.
+    if (error instanceof RoseInvalidRequest) return true;
+    throw error;
+  }
+  const now = Date.now();
+  return regions.some(
+    (region) =>
+      now >= (authCooldownUntil.get(region.endpoint) ?? 0) &&
+      regionDeployments(region, poolSpec.gptAuthModel).length > 0
   );
+}
+
+const matching = (configured: readonly string[], model: string): string[] =>
+  configured.filter((name) => name === model || name.startsWith(`${model}-`));
+
+function rotated(names: string[], routeKey: string): string[] {
+  if (!names.length) return [];
+  const start =
+    parseInt(createHash('sha256').update(routeKey).digest('hex').slice(0, 8), 16) % names.length;
+  return [...names.slice(start), ...names.slice(0, start)];
 }
 
 /**
  * Deployments serving `model`: configured names equal to it or prefixed
- * `<model>-`. AZURE_FOUNDRY_DEPLOYMENTS is shared by every Foundry pool, so one
- * pool's deployments never receive another pool's model; without a matching
- * name, Foundry's deploymentless inference serves the model id.
+ * `<model>-`. A region's deployment list is shared by every Foundry pool, so one
+ * pool's deployments never receive another pool's model. Without a matching
+ * name, region 1 uses Foundry's deploymentless inference for the model id; other
+ * regions serve only the names they list, so a new resource holding only GPT-6
+ * Sol never receives Luna traffic that would fail there with DeploymentNotFound.
  */
-export function orderedFoundryDeployments(model: string, routeKey: string): string[] {
-  const configured = (process.env.AZURE_FOUNDRY_DEPLOYMENTS ?? '')
-    .split(',')
-    .map((name) => name.trim())
-    .filter(Boolean);
-  const matching = configured.filter((name) => name === model || name.startsWith(`${model}-`));
-  const names = matching.length ? matching : [model];
-  const start =
-    parseInt(createHash('sha256').update(routeKey).digest('hex').slice(0, 8), 16) % names.length;
-  return [...names.slice(start), ...names.slice(0, start)];
+function regionDeployments(region: FoundryRegion, model: string): string[] {
+  const names = matching(region.deployments, model);
+  return region.slot === 1 && !names.length ? [model] : names;
+}
+
+function rendezvousWeight(routeKey: string, region: FoundryRegion): bigint {
+  return BigInt(
+    `0x${createHash('sha256').update(`${routeKey}\n${region.endpoint}`).digest('hex').slice(0, 16)}`
+  );
+}
+
+/** Every (region, deployment) to try, primary region first, for this route key. */
+export function foundryRoutePlan(
+  regions: FoundryRegion[],
+  model: string,
+  routeKey: string
+): Array<{ region: FoundryRegion; deployment: string }> {
+  const weights = new Map(regions.map((region) => [region, rendezvousWeight(routeKey, region)]));
+  return regions
+    .filter((region) => regionDeployments(region, model).length > 0)
+    .sort((a, b) => {
+      const wa = weights.get(a) ?? 0n;
+      const wb = weights.get(b) ?? 0n;
+      if (wa !== wb) return wa > wb ? -1 : 1;
+      return a.slot - b.slot;
+    })
+    .flatMap((region) =>
+      rotated(regionDeployments(region, model), routeKey).map((deployment) => ({
+        region,
+        deployment,
+      }))
+    );
+}
+
+/** Test hook: forget every rate-limit and auth cooldown and every once-only warning. */
+export function __resetFoundryCooldowns(): void {
+  cooldownUntil.clear();
+  authCooldownUntil.clear();
+  warnedInsecureRegions.clear();
 }
 
 function cooldownMs(headers: Headers): number {
@@ -80,14 +238,51 @@ export interface FoundryOptions {
   abortSignal?: AbortSignal;
 }
 
-export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<RoseStreamChunk> {
-  const endpoint = process.env.AZURE_FOUNDRY_ENDPOINT?.trim();
-  const apiKey = process.env.AZURE_FOUNDRY_API_KEY?.trim();
-  if (!endpoint || !apiKey) throw new RoseAuthError('Foundry endpoint or key missing');
-  let lastError: RoseError = new RoseServerError('No usable Foundry deployment');
+/** Classify a non-200 Foundry response and record the cooldown it implies. */
+function recordHttpFailure(
+  status: number,
+  region: FoundryRegion,
+  deployment: string,
+  headers: Headers
+): RoseError {
+  if (status === 429) {
+    cooldownUntil.set(`${region.endpoint}\n${deployment}`, Date.now() + cooldownMs(headers));
+    return new RoseRateLimitError(`Foundry deployment ${deployment} rate limited`, status);
+  }
+  if (status === 401 || status === 403) {
+    // A key belongs to one Azure resource; other regions keep serving.
+    authCooldownUntil.set(region.endpoint, Date.now() + 300_000);
+    return new RoseAuthError(`Foundry authentication failed (${status})`, status);
+  }
+  if (status === 400)
+    return new RoseInvalidRequest('Foundry rejected the Responses request', status);
+  return new RoseServerError(`Foundry deployment ${deployment} returned ${status}`, status);
+}
 
-  for (const deployment of orderedFoundryDeployments(opts.poolSpec.gptAuthModel, opts.routeKey)) {
-    if (Date.now() < (cooldownUntil.get(deployment) ?? 0)) continue;
+export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<RoseStreamChunk> {
+  const model = opts.poolSpec.gptAuthModel;
+  const regions = routableRegions();
+  if (!regions.length) throw new RoseAuthError('Foundry endpoint or key missing');
+  let lastError: RoseError | null = null;
+  let skippedCooling = false;
+  let attempt = 0;
+
+  for (const { region, deployment } of foundryRoutePlan(regions, model, opts.routeKey)) {
+    const now = Date.now();
+    if (now < (authCooldownUntil.get(region.endpoint) ?? 0)) continue;
+    const cooldownKey = `${region.endpoint}\n${deployment}`;
+    if (now < (cooldownUntil.get(cooldownKey) ?? 0)) {
+      skippedCooling = true;
+      continue;
+    }
+    attempt++;
+    // Region identity only; the key is never part of any log event.
+    const where = {
+      request_id: opts.requestId,
+      region: region.host,
+      region_slot: region.slot,
+      deployment,
+    };
     const body = buildCodexResponsesBody({
       poolSpec: opts.poolSpec,
       modelOverride: deployment,
@@ -105,8 +300,8 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
     let response;
     try {
       response = await postFoundryResponsesStream({
-        endpoint,
-        apiKey,
+        endpoint: region.endpoint,
+        apiKey: region.apiKey(),
         body,
         requestId: opts.requestId,
         callSite: opts.callSite,
@@ -114,40 +309,30 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
       });
     } catch (err) {
       if (opts.abortSignal?.aborted) throw err;
-      lastError = new RoseServerError(
-        `Foundry transport failed: ${err instanceof Error ? err.name : 'unknown'}`
-      );
+      const errorType = err instanceof Error ? err.name : 'unknown';
+      lastError = new RoseServerError(`Foundry transport failed: ${errorType}`);
+      log.warn('foundry.transport_failed', { ...where, error_type: errorType });
       continue;
     }
 
     if (response.status !== 200) {
       const status = response.status;
-      if (status === 429) {
-        cooldownUntil.set(deployment, Date.now() + cooldownMs(response.headers));
-        lastError = new RoseRateLimitError(`Foundry deployment ${deployment} rate limited`, status);
-      } else if (status === 401 || status === 403) {
-        authCooldownUntil = Date.now() + 300_000;
-        lastError = new RoseAuthError(`Foundry authentication failed (${status})`, status);
-      } else if (status === 400) {
-        lastError = new RoseInvalidRequest('Foundry rejected the Responses request', status);
-      } else {
-        lastError = new RoseServerError(
-          `Foundry deployment ${deployment} returned ${status}`,
-          status
-        );
-      }
-      if ([400, 401, 403].includes(status)) break;
+      lastError = recordHttpFailure(status, region, deployment, response.headers);
+      log.warn('foundry.attempt_failed', { ...where, status });
+      // A request-shape error applies to every region and deployment.
+      if (status === 400) break;
       continue;
     }
     if (!response.body) {
       lastError = new RoseServerError('Foundry returned an empty stream');
+      log.warn('foundry.stream_failed', { ...where, error_type: lastError.name });
       continue;
     }
     let buffered: RoseStreamChunk | null = null;
     let yieldedVisible = false;
     try {
       for await (const chunk of parseResponsesSSE(response.body, {
-        actualModel: `${opts.poolSpec.gptAuthModel}-foundry`,
+        actualModel: `${model}-foundry`,
         poolName: 'foundry',
         requestId: opts.requestId,
       })) {
@@ -162,6 +347,7 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
         yieldedVisible = true;
         yield chunk;
       }
+      log.info('foundry.served', { ...where, attempt });
       return;
     } catch (err) {
       if (yieldedVisible || opts.abortSignal?.aborted) throw err;
@@ -172,11 +358,18 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
               `Foundry stream failed: ${err instanceof Error ? err.name : 'unknown'}`
             );
       if (lastError instanceof RoseRateLimitError) {
-        cooldownUntil.set(deployment, Date.now() + cooldownMs(response.headers));
+        cooldownUntil.set(cooldownKey, Date.now() + cooldownMs(response.headers));
       }
+      log.warn('foundry.stream_failed', { ...where, error_type: lastError.name });
+      // An in-stream request-shape rejection is the same everywhere.
+      if (lastError instanceof RoseInvalidRequest) break;
     }
   }
-  throw lastError;
+  if (lastError) throw lastError;
+  // Every candidate is cooling; let the waterfall move on without a request.
+  if (skippedCooling)
+    throw new RoseRateLimitError('Every Foundry region and deployment is cooling down');
+  throw new RoseServerError('No usable Foundry deployment');
 }
 
 /** Foundry request for one completion: the pool's GPT model and the caller's routing identity. */

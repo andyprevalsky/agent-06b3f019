@@ -5,6 +5,7 @@ import * as fs from 'node:fs/promises';
 import path from 'path';
 import { randomUUID } from 'node:crypto';
 import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
+import { isolatedObjectKey, isolatedR2Prefix } from './benchmarkHubIsolatedScope';
 import {
   parseOverlay,
   mergeCatalog,
@@ -59,7 +60,39 @@ const LOCAL_DIR = isolatedRunId
   : LOCAL_HUB_ROOT;
 let s3Client: S3Client | null = null;
 
+async function writeIsolated(
+  prefix: string,
+  key: string,
+  data: string,
+  signal?: AbortSignal
+): Promise<void> {
+  const versions = hubStorageVersions();
+  const physical = `${prefix}/${key}`;
+  // Preserve the first observation; failed CAS never refreshes or retries.
+  if (versions && !versions.has(physical)) await readRemoteObject(key, signal, prefix);
+  const expected = versions
+    ? versions.get(physical)
+    : (await readRemoteObject(key, signal, prefix)).etag;
+  if (expected === undefined) throw new Error('Benchmark Hub write has no object observation');
+  assertHubStorageOwnership();
+  const response = await getS3Client().send(
+    new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
+      Key: physical,
+      Body: encodePublication(data),
+      ContentType: 'application/json',
+      ...(expected === null ? { IfNoneMatch: '*' } : { IfMatch: expected }),
+    }),
+    { abortSignal: signal }
+  );
+  assertHubStorageOwnership();
+  if (!response.ETag) throw new Error('Benchmark Hub write returned no ETag');
+  versions?.set(physical, response.ETag);
+  remoteCache.delete(physical);
+}
+
 function r2Configured(): boolean {
+  if (isolatedR2Prefix() !== null) return true;
   // Local workspaces have production R2 credentials available for trace
   // diagnostics, but Benchmark Hub writes must stay worktree-local. Otherwise
   // independent test databases race through one production index and local
@@ -184,7 +217,7 @@ async function catalog(signal?: AbortSignal, mutable = false): Promise<OverlayCa
 }
 /** Called only after the owning store has validated every selected publication. */
 export async function beginHubPublications(ids: string[]): Promise<void> {
-  if (!r2Configured()) return;
+  if (!r2Configured() || isolatedR2Prefix() !== null) return;
   if (!EPOCH || !WRITES_ENABLED)
     throw new BenchmarkHubUnavailableError(
       'Hub publication is paused pending storage epoch activation'
@@ -194,6 +227,11 @@ export async function beginHubPublications(ids: string[]): Promise<void> {
 export async function putObject(key: string, data: string): Promise<void> {
   await ownedHubStorageRequest(async (signal) => {
     if (r2Configured()) {
+      const isolated = isolatedObjectKey(key);
+      if (isolated !== null) {
+        await writeIsolated(isolated, key, data, signal);
+        return;
+      }
       if (!EPOCH || !WRITES_ENABLED)
         throw new BenchmarkHubUnavailableError(
           'Hub publication is paused pending storage epoch activation'
@@ -349,6 +387,11 @@ async function committedAgentPair(signal?: AbortSignal) {
 export async function getObjectStrict(key: string): Promise<string | null> {
   return ownedHubStorageRequest(async (signal) => {
     if (r2Configured()) {
+      const isolated = isolatedObjectKey(key);
+      if (isolated !== null) {
+        const value = await readRemoteObject(key, signal, isolated);
+        return value.raw === null ? null : decodePublication(value.raw);
+      }
       if (!EPOCH) return (await readRemoteObject(key, signal)).raw;
       if (key === 'index.json') {
         const value = await catalog(signal);
@@ -500,6 +543,8 @@ export async function getObjectStrict(key: string): Promise<string | null> {
 }
 
 export async function getObject(key: string): Promise<string | null> {
+  // Isolated reads distinguish confirmed absence from storage/scope failures.
+  if (process.env.BENCHMARK_HUB_STORAGE === 'r2-isolated') return getObjectStrict(key);
   try {
     return await getObjectStrict(key);
   } catch (error) {
@@ -520,14 +565,14 @@ export function resetHubObjectStorageForTests(): void {
 }
 
 export function hubOverlayEnabled(): boolean {
-  return Boolean(EPOCH && r2Configured());
+  return Boolean(EPOCH && r2Configured() && isolatedR2Prefix() === null);
 }
 export function hubWritesEnabled(): boolean {
-  return !r2Configured() || Boolean(EPOCH && WRITES_ENABLED);
+  return !r2Configured() || isolatedR2Prefix() !== null || Boolean(EPOCH && WRITES_ENABLED);
 }
 
 export function hubStorageDomain(): string {
-  return EPOCH ? KEY_PREFIX : LEGACY_PREFIX;
+  return isolatedR2Prefix() ?? (EPOCH ? KEY_PREFIX : LEGACY_PREFIX);
 }
 
 /** Compact provenance for a cold legacy scan; no new-domain ACK depends on it. */
@@ -549,13 +594,20 @@ export async function bindHubLegacyBackfill(stamp?: string): Promise<void> {
   backfillStamps.set(versions, stamp);
 }
 
+/** Version helpers address the production domain; an isolated scope never reaches it. */
+function refuseIsolatedObjectVersion(): void {
+  if (isolatedR2Prefix() !== null)
+    throw new Error('Hub object versions are unavailable in isolated R2');
+}
 /** Physical CAS boundary shared by logical publication and transport qualification. */
 export async function putHubObjectVersion(key: string, data: string): Promise<void> {
+  refuseIsolatedObjectVersion();
   return ownedHubStorageRequest(async (signal) => {
     await writeRemote(key, data, signal);
   });
 }
 export async function getHubObjectVersion(key: string): Promise<string | null> {
+  refuseIsolatedObjectVersion();
   return ownedHubStorageRequest(async (signal) => {
     const value = await readRemoteObject(key, signal);
     return value.raw === null ? null : decodePublication(value.raw);

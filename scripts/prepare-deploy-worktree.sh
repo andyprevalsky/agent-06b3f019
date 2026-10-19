@@ -213,6 +213,10 @@ ensure_dependencies() {
     # rooted in the deploy worktree before the generic workspace verifier.
     if [ ! -d node_modules ]; then
       echo "📦 Installing deploy-worktree root dependencies..."
+      # No root lockfile is committed. Reuse the source workspace's verified
+      # resolved tree when manifests match, instead of re-resolving the live
+      # registry (which crashed npm's arborist on 2026-10-12).
+      python3 scripts/lib/seed_root_npm_lockfile.py "$target" "$source_workspace"
       npm install --no-audit --no-fund
     fi
     local workspaces=(back-end front-end)

@@ -12,10 +12,34 @@ fetch_lock_kind=""
 fetch_lock_fd=""
 fetch_lock_path="$REPO_DIR/.git/cloudbench-fetch.lock"
 
+# Retained physical Volumes may bootstrap only inside the authenticated, private
+# fresh-generation mount. This is not a fresh-physical-volume declaration.
+fresh_checkout_admitted="${CLOUDBENCH_FRESH_VOLUME:-0}"
+if [ "${CLOUDBENCH_STORAGE_MODE:-}" = retained-volume-fresh-generation ]; then
+    python3 "$(dirname "${BASH_SOURCE[0]}")/cloudbench-isolated-generation.py" \
+        --data-root "${CLOUDBENCH_DATA_DIR:-/data}" --verify-checkout "$REPO_DIR" "$REF" || exit 1
+    fresh_checkout_admitted=1
+fi
+
+# The explicit cold-primary policy is consumed by the driver's FIRST fetch.
+# Its later normal git-sync deliberately does not repeat this empty check.
+case "${CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT:-0}" in 0|1) ;; *) exit 1 ;; esac
+if [ "${CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT:-0}" = 1 ]; then
+    if [ "$fresh_checkout_admitted" != 1 ] \
+        || ! [[ "$REF" =~ ^[0-9a-f]{40}$ ]] \
+        || [ -L "$REPO_DIR" ] \
+        || ! python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); sys.exit(p.resolve() != p.absolute())' "$REPO_DIR" \
+        || { [ -e "$REPO_DIR" ] && { [ ! -d "$REPO_DIR" ] \
+             || [ -n "$(find "$REPO_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; }; }; then
+        echo "[cloudbench] FATAL: cold-primary first checkout requires an exact ref and absent or empty unlinked destination" >&2
+        exit 1
+    fi
+fi
+
 # Empty Fly volumes carry no Git metadata. Only an explicit REAL-primary
 # handoff may initialize a blank checkout; retained non-Git data stays intact.
 if [ ! -d "$REPO_DIR/.git" ]; then
-    [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] || {
+    [ "$fresh_checkout_admitted" = 1 ] || {
         echo "[cloudbench] FATAL: checkout missing and fresh-volume bootstrap was not requested" >&2
         exit 1
     }
@@ -189,7 +213,7 @@ stage_started="$(date +%s)"
 fetch_args=(--no-tags --no-auto-gc)
 if git_cmd rev-parse --verify HEAD >/dev/null 2>&1; then
     fetch_args+=(--negotiation-tip=HEAD)
-elif [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
+elif [ "$fresh_checkout_admitted" = 1 ]; then
     # A fresh REAL volume needs the complete requested source, not historical
     # benchmark checkouts. Retained volumes keep their existing history above.
     fetch_args+=(--depth=1)

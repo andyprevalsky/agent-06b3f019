@@ -1,0 +1,103 @@
+{
+  "base_git_sha": "87032ebe60b9187f7086c5067258ebe7c4cfa0e3",
+  "source_pr": 1506,
+  "source_pr_head": "ecaed61aab753da5f8c11e1c2c17565513198410",
+  "source_fix_commit": "49b5470f7",
+  "source_registration_commit": "6d0caee0e",
+  "patch": ".context/tamy-resumed/steel-profile-order-rca/pr1506-complete-integration.patch",
+  "patch_sha256": "03fdec4d834045da695aefbcd44762aca40c5924c8f7f66aa5282d716ecdeabc",
+  "files": [
+    {
+      "path": "back-end/src/providers/steel/sessionResume.ts",
+      "before_sha256": "039b9796b666ab0ae4e91544b83e11611a9e34d2c2545ff86a5be429c918f671",
+      "after_sha256": "f38a1138bad89f3899f300774f2f4fa340458c4ac395eb84232e325802f76463",
+      "patch_lines": 51
+    },
+    {
+      "path": "back-end/src/providers/browser/index.ts",
+      "before_sha256": "993e0296ee69200cc5a58e464066d009cca3729cd1f9f004674bb42873a170bd",
+      "after_sha256": "7dce7c0300c703801615f9c0dee1128658e82001a96c6e4508292404fb4f1ca2",
+      "patch_lines": 46
+    },
+    {
+      "path": "back-end/src/tests/blackbox/browser-provider.helpers.ts",
+      "before_sha256": "d3a46bc0197ba45471e624df453cf8354b9dbe6f26dc3f3760ff007c099904f3",
+      "after_sha256": "c2fd396716880b299dd5816e981de84241ddeecbc356eab7aafe687e174f331f",
+      "patch_lines": 121
+    },
+    {
+      "path": "back-end/src/tests/unit/steel-session-startup-failure.test.ts",
+      "before_sha256": "771901ed92a587258613da3c76e29a9ca8e5dfd9888926241d858bd77d73f05c",
+      "after_sha256": "ccf39bc9e7566e2f8e99a087679d77eb05eb09e1061e6666748aa6fa913c5f33",
+      "patch_lines": 172
+    },
+    {
+      "path": "back-end/src/tests/blackbox/browser-provider.blackbox.ts",
+      "before_sha256": "6b9ddebfde6968876f5f251db11764635466759688b399e49dd57965f4157101",
+      "after_sha256": "54933b7f9184289cec2edfe612e990822df48843bb0d183da6bc213bad7b4c28",
+      "patch_lines": 25
+    },
+    {
+      "path": "back-end/src/tests/blackbox/browser-provider-rotation.support.ts",
+      "before_sha256": "0909a1761834dc37490bff45125a739c3557db0369fd0c694172097238349db3",
+      "after_sha256": "3e6ee45914d6f135753807edf235f15c79a0b663c5108f7fbef1569283ace4f0",
+      "patch_lines": 14
+    }
+  ],
+  "created_at": "2026-10-14T18:36:32.152825+00:00",
+  "p2_source_overlap": [],
+  "scope": "Reuse existing PR1506 provider lifecycle correction and additive owning regressions while preserving task validation transport",
+  "not_applied": false,
+  "attempts_and_backoff_caps_unchanged": true,
+  "no_schema_prompt_model_catalog_timeout_or_environment_change": true,
+  "proof": {
+    "original_owning": {
+      "passed": 9,
+      "failed": 5,
+      "exit": 1
+    },
+    "candidate_owning": {
+      "passed": 14,
+      "failed": 0,
+      "exit": 0
+    },
+    "existing_steel_fingerprint": {
+      "passed": 13,
+      "failed": 0,
+      "exit": 0
+    },
+    "full_typescript": "PASS",
+    "six_file_eslint": "PASS",
+    "six_file_prettier": "PASS",
+    "git_apply_check": "PASS",
+    "runtime_not_applied": false,
+    "official_reference_urls": [
+      "https://docs.steel.dev/overview/profiles-api/overview",
+      "https://docs.steel.dev/overview/sessions-api/configuration"
+    ],
+    "golden_reference_read": "hermes-agent/tools/browser_tool.py::_BrowserSessionBackend.ensure_healthy",
+    "risk": "Same-profile replacement must positively release source first; if later creation fails, its exact old binding stays CLOSED with profile preserved. The old session is unavailable during replacement; no claim of exclusive release mutex. CAS protects any changed replacement owner."
+  },
+  "proof_logs_sha256": {
+    ".context/tamy-resumed/steel-profile-order-rca/pr1506-owning-green-console.log": "0ad4823f9e0f133a8b7811886f54f7c7ebd4634b87485480108b25b4fb857f79",
+    ".context/tamy-resumed/steel-profile-order-rca/pr1506-owning-red-console.log": "98b181ce54c5f7aa7a68dc2082b36605e2c8de41a6baf24a4aebba4356c0a7f7",
+    ".context/tamy-resumed/steel-profile-order-rca/full-typescript-hoisted-console.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".context/tamy-resumed/steel-profile-order-rca/four-file-eslint-console.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".context/tamy-resumed/steel-profile-order-rca/final-six-file-typescript-console.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".context/tamy-resumed/steel-profile-order-rca/registration-eslint-console.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".context/tamy-resumed/steel-profile-order-rca/registration-format-console.log": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20",
+    ".context/tamy-resumed/steel-profile-order-rca/full-typescript-console.log": "be015a5eae9a755d320e4915fe51adda7942afbbdd826ac8e11e0b54c49ad6c1",
+    ".context/tamy-resumed/steel-profile-order-rca/four-file-format-console.log": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20",
+    ".context/tamy-resumed/steel-profile-order-rca/current-steel-fingerprint-console.log": "4e251e6a0a99ccafc22180039ec575401531a8c8c025ef23c4318806f9d8bf69"
+  },
+  "applied_at_utc": "2026-10-14T18:39:50.121295+00:00",
+  "non_author_bounded_review": {
+    "reviewer": "steel_integration_review",
+    "snapshot_sha256": "03fdec4d834045da695aefbcd44762aca40c5924c8f7f66aa5282d716ecdeabc",
+    "blocking_findings": 0,
+    "P2_overlaps": [],
+    "limit": "Source review plus scratch tests; live owning coverage still required.",
+    "caveat": "Existing profile configuration validation runs after early release; a disabled-profile configuration can therefore close the exact source before reporting that existing error."
+  },
+  "ten_thousand_agents": "One bounded exact source release and one indexed conditional update per affected browser; no new shared lock or polling loop."
+}

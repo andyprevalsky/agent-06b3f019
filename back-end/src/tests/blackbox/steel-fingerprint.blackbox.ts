@@ -17,9 +17,9 @@ import {
 } from '../../providers/steel/session';
 import { STEEL_CDP_TIMEOUT_MESSAGE } from '../../providers/steel/sessionConnection';
 import { recreateSession } from '../../providers/steel/sessionResume';
-import { testSavedUrlNavigationAlwaysClosesBrowser } from './steel-fingerprint.saved-url.behavior';
 import type { FingerprintData } from '../../providers/steel/types';
 import {
+  testSavedUrlNavigationAlwaysClosesBrowser,
   testConnectionErrorRetriesOnReplacement,
   testRawCdpFailureClassification,
   withReleasedFixtureLifecycleClaim,
@@ -122,14 +122,6 @@ function testFingerprintScriptDoesNotReferenceBackendLogger(): void {
     !script.includes('console.'),
     'fingerprint script should not write page-console logs; use backend central logging around injection instead'
   );
-}
-
-async function testFingerprintTimezoneFormatUsesUserLocation(): Promise<void> {
-  await runTimezoneFormatUsesUserLocation(makeFingerprint);
-}
-
-async function testWorkerHardwareConcurrencyMatchesPage(): Promise<void> {
-  await runWorkerHardwareConcurrencyMatchesPage(makeFingerprint);
 }
 
 function testProxySettingsDropCityFallsBackToStateLevel(): void {
@@ -569,11 +561,11 @@ async function main(): Promise<void> {
     },
     {
       name: 'fingerprint timezone format uses user location not host TZ',
-      fn: testFingerprintTimezoneFormatUsesUserLocation,
+      fn: () => runTimezoneFormatUsesUserLocation(makeFingerprint),
     },
     {
       name: 'Worker hardwareConcurrency matches page spoof (FCaptcha mismatch)',
-      fn: testWorkerHardwareConcurrencyMatchesPage,
+      fn: () => runWorkerHardwareConcurrencyMatchesPage(makeFingerprint),
     },
     {
       name: 'proxy settings drop unsupported city and fall back to country+state',

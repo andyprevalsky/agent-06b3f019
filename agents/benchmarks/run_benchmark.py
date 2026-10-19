@@ -50,7 +50,7 @@ import unicodedata
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
@@ -348,6 +348,7 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     DOORDASH_FOOD_PLAN_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
     "agent-payment-setup-resume",
+    "sms-supervisor-fill-form-searches-then-delegates",
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
@@ -7073,7 +7074,7 @@ async def _capture_task_failure_evidence(
         if seal_error:
             errors.append(seal_error)
     try:
-        logs = await collect_logs(agent_id, data, start_time)
+        logs = await collect_logs(agent_id, data, start_time, backend_url=base_url)
     except Exception as exc:
         errors.append(f"logs: {type(exc).__name__}: {exc}")
         logs = {}
@@ -14155,6 +14156,7 @@ async def run_single_task(
     checkpoint_tree_out: Path | None = None,
     on_agent_created: Optional[Callable[[str, str], None]] = None,
     on_task_evaluated: Optional[Callable[[TaskResult], None | Awaitable[None]]] = None,
+    other_task_roots: Callable[[], set[str]] | None = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
@@ -14173,7 +14175,14 @@ async def run_single_task(
     if task.runner == "sms":
         from benchmarks.sms_runner import build_deps_from_module, run_sms_task
 
-        return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__]))
+        if resolve_live_fixtures(getattr(task, "environment", None)):
+            with _benchmark_run_user_scope(_run_user_id_override_for_task(task, base_url)):
+                manifests = await _apply_live_fixtures(task, base_url)
+                try:
+                    return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__], other_task_roots, on_agent_created, task.name))
+                finally:
+                    await _restore_live_fixture_scenarios_async(manifests)
+        return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__], other_task_roots, on_agent_created, task.name))
     if _effective_harness(task) == "codex":
         if not await _check_codex_harness_credentials(base_url):
             print(f"  ⚠ Codex harness credentials unavailable at task dispatch — skipping: {task.name}")
@@ -14942,9 +14951,9 @@ async def _run_single_task_as_run_user(
                 passed = False
                 failure_reason = evaluator_reason
 
-        # Collect prod logs for diagnostics
-        print("    Collecting prod logs...")
-        logs = await collect_logs(agent_id, data, start_time)
+        # Collect diagnostic logs; prod log APIs only for prod-backed runs.
+        print("    Collecting logs...")
+        logs = await collect_logs(agent_id, data, start_time, backend_url=base_url)
         logs = _native_world_retirement_diagnostics(task, logs)
         if declared_evaluator_results:
             logs["declared_evaluators"] = declared_evaluator_results
@@ -15803,6 +15812,35 @@ def _docker_daemon_ping(timeout_seconds: float = 1.0) -> bool:
         return False
 
 
+STALE_WORKFLOW_COUNT_ATTEMPTS = 3
+
+
+async def _count_stale_workflows(client, namespace: str, query: str, *, sleep=asyncio.sleep) -> int:
+    """Count running workflows with a bounded, jittered ResourceExhausted backoff.
+
+    CountWorkflowExecutions spends the namespace's shared Visibility API budget,
+    which production workers use too. The SDK's high-level count retries five
+    times in quick succession; at fleet width that multiplies every throttled
+    startup. Make at most three attempts and spread them instead.
+    """
+    from temporalio.api.workflowservice.v1 import CountWorkflowExecutionsRequest
+    from temporalio.service import RPCError, RPCStatusCode
+
+    for attempt in range(1, STALE_WORKFLOW_COUNT_ATTEMPTS + 1):
+        try:
+            response = await client.workflow_service.count_workflow_executions(
+                CountWorkflowExecutionsRequest(namespace=namespace, query=query),
+                retry=False,
+                timeout=timedelta(seconds=5),
+            )
+            return response.count
+        except RPCError as error:
+            if error.status != RPCStatusCode.RESOURCE_EXHAUSTED or attempt == STALE_WORKFLOW_COUNT_ATTEMPTS:
+                raise
+            await sleep(random.uniform(1.0, 2.0**attempt))
+    raise AssertionError("unreachable")
+
+
 async def _terminate_stale_workflows():
     """Terminate all running Temporal workflows on the local task queue.
 
@@ -15852,7 +15890,7 @@ async def _terminate_stale_workflows():
         )
 
         query = f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"'
-        count = (await client.count_workflows(query)).count
+        count = await _count_stale_workflows(client, config.temporal.namespace, query)
         if count == 0:
             print(f"  ✅ No stale workflows on {task_queue}")
             return
@@ -16453,7 +16491,7 @@ async def main_async(args):
         print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s ({note})")
 
     # Start Fly.io log streaming
-    fly_status = await start_fly_log_collector()
+    fly_status = await start_fly_log_collector(backend_url=base_url)
     print(f"  📡 {fly_status}")
     is_private_realtime = "localhost" not in base_url and "127.0.0.1" not in base_url
     realtime_started = False
@@ -16636,15 +16674,28 @@ async def main_async(args):
         assert token is not None
         _entered_task_futures.add(token)
         _admitted_tasks[token] = task
+        registered_roots: set[str] = set()
 
         def remember_agent(task_name: str, agent_id: str) -> None:
             # Creation can run in a child task; retain the admitted owner.
             # Cleanup owns every root, including composite or interrupted runs.
             _remember_live_agent(task_name, agent_id)
+            if agent_id:
+                registered_roots.add(agent_id)
             custody = _task_root_custody.get()
             role = next((root["role"] for root in (custody or {}).get("roots", []) if root["root_agent_id"] == agent_id), None)
             if agent_id and role != "fixture_first_run":
                 _admitted_agent_ids.setdefault(token, agent_id)
+
+        def retire_verified_sms_roots(receipt: dict | None) -> None:
+            if not isinstance(receipt, dict) or receipt.get("verified") is not True:
+                return
+            retired = set(receipt.get("owned_agent_ids", receipt.get("root_agent_ids", []))) & registered_roots
+            kept = [aid for aid in _live_task_agent_ids.get(task.name, []) if aid not in retired]
+            if kept:
+                _live_task_agent_ids[task.name] = kept
+            else:
+                _live_task_agent_ids.pop(task.name, None)
 
         async def evaluated(result: TaskResult) -> None:
             from benchmarks.outcome_publication import prepare, wait_for_publication
@@ -16662,12 +16713,23 @@ async def main_async(args):
             await wait_for_publication(pending)
 
         try:
+            sms_options = {}
+            if getattr(task, "runner", "agent") == "sms":
+                sms_options["other_task_roots"] = lambda: {aid for ids in _live_task_agent_ids.values()
+                                                          for aid in ids if aid not in registered_roots}
             result = await run_single_task(
-                base_url, task, on_agent_created=remember_agent, on_task_evaluated=evaluated, **kwargs
+                base_url, task, on_agent_created=remember_agent, on_task_evaluated=evaluated,
+                **sms_options, **kwargs
             )
+            metadata = getattr(result, "stop_metadata", None)
+            if isinstance(metadata, dict) and metadata.get("runner") == "sms":
+                retire_verified_sms_roots(metadata.get("owned_cleanup_receipt"))
             if token not in _evaluated_task_results:
                 await evaluated(result)
             return result
+        except asyncio.CancelledError as exc:
+            retire_verified_sms_roots(getattr(exc, "owned_cleanup_receipt", None))
+            raise
         finally:
             _admitted_tasks.pop(token, None)
             _admitted_agent_ids.pop(token, None)

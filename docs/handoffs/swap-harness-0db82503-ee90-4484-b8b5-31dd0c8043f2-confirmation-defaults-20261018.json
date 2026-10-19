@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "at_utc": "2026-10-18T20:26:23.241990+00:00",
+  "user_authorized_exact_system_rule": "- for details you want to double check with the user, make them extremely easy to parse, and include the defaults that you are assuming",
+  "changed_runtime_file": "back-end/src/providers/smsSupervisor/contextBuilder.ts",
+  "patch_sha256": "bb8a0b018da4837cba89157816c7b47e24b73e5da20d622d60a170e0f12b1aaf",
+  "replay": "Original 48-message decision context; only the authorized system rule added; no diagnostic why-question",
+  "same_model": "qwen-3.8-27b",
+  "elapsed_seconds": 2.565,
+  "generated_tools": [
+    "send_user_message"
+  ],
+  "generated_reply_summary": "Asked for passport-exact legal name, home address including country, and occupation. Did not state the assumed country default.",
+  "new_instruction_followed_in_this_sample": false,
+  "tools_dispatched": 0,
+  "full_benchmark_run": false,
+  "full_benchmark_pass_claimed": false,
+  "existing_prompt_layering_check_exit": 0,
+  "raw_context_and_reply_private": true
+}

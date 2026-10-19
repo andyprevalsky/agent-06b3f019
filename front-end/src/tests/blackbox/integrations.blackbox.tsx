@@ -10,28 +10,12 @@ import { Toaster } from '@/components/ui/toaster';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import { useMessagesSync } from '@/features/integrations/hooks/useMessagesSync';
 import type { IntegrationHandlers } from '@/features/integration-handlers-context';
+import { mockTerminalHookSession as mockSession } from './terminal-hooks.fixtures';
 
 const API_BASE = 'http://localhost:3001/api';
 
 function sectionFor(name: string): HTMLElement {
   return screen.getByText(name).closest<HTMLElement>('.rounded-lg')!;
-}
-
-/**
- * Sets up a fully-signed-in session in localStorage so useAuth resolves
- * as authenticated with isFullySignedIn = true.
- */
-function mockSession() {
-  const session = {
-    access_token: 'test-token',
-    refresh_token: 'test-refresh',
-    expires_in: 3600,
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
-    token_type: 'bearer',
-    user: { id: 'test-user', is_anonymous: false },
-  };
-  localStorage.setItem('rose-session', JSON.stringify(session));
-  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
 }
 
 /**
@@ -273,7 +257,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('WhatsApp')).toBeInTheDocument();
       });
 
-      const whatsAppRow = screen.getByText('WhatsApp').closest('div.px-4')!;
+      const whatsAppRow = screen.getByText('WhatsApp').closest<HTMLElement>('div.px-4')!;
       expect(within(whatsAppRow as HTMLElement).getByText('Synced')).toBeInTheDocument();
       // Connected state replaces the Desktop-Only download affordance.
       expect(
@@ -458,7 +442,7 @@ describe('Integrations page', () => {
       });
 
       // WhatsApp pairs only in the Mac app, so on web it reads "Desktop Only".
-      const whatsAppRow = screen.getByText('WhatsApp').closest('div.px-4')!;
+      const whatsAppRow = screen.getByText('WhatsApp').closest<HTMLElement>('div.px-4')!;
       expect(within(whatsAppRow as HTMLElement).getByText('Desktop Only')).toBeInTheDocument();
       expect(within(whatsAppRow as HTMLElement).getByText('Download for Mac')).toBeInTheDocument();
     });

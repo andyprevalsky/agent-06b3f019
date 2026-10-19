@@ -1665,10 +1665,10 @@ def test_build_anthropic_body_identity_and_cache_block():
     assert body["model"] == spec.claude_auth_model
     assert body["max_tokens"] == 128
     assert body["stream"] is True
-    sys = body["system"]
-    assert sys[0]["text"].startswith("You are a Claude agent")
+    system_blocks = body["system"]
+    assert system_blocks[0]["text"].startswith("You are a Claude agent")
     # Without boundary, all system text is in one static block with global scope
-    cached_blocks = [b for b in sys if "cache_control" in b]
+    cached_blocks = [b for b in system_blocks if "cache_control" in b]
     assert len(cached_blocks) == 1
     assert cached_blocks[0]["cache_control"] == {"type": "ephemeral", "scope": "global"}
 
@@ -1834,11 +1834,11 @@ def test_build_anthropic_body_static_dynamic_split():
         max_tokens=128,
         skip_cache_write=False,
     )
-    sys = body["system"]
+    system_blocks = body["system"]
     # identity + disclaimer + static (cached) + dynamic (no cache)
-    assert len(sys) == 4
-    static_block = sys[2]
-    dynamic_block = sys[3]
+    assert len(system_blocks) == 4
+    static_block = system_blocks[2]
+    dynamic_block = system_blocks[3]
     assert static_block["text"] == "static instructions"
     assert static_block["cache_control"] == {"type": "ephemeral", "scope": "global"}
     assert dynamic_block["text"] == "Current time: April 28"
@@ -1867,9 +1867,9 @@ def test_build_anthropic_body_multi_boundary_system_blocks_are_cached():
         skip_cache_write=False,
     )
 
-    sys = body["system"]
-    assert [b["text"] for b in sys[2:]] == ["static instructions", "user context", "phase prompt"]
-    assert all(b["cache_control"] == {"type": "ephemeral", "scope": "global"} for b in sys[2:])
+    system_blocks = body["system"]
+    assert [b["text"] for b in system_blocks[2:]] == ["static instructions", "user context", "phase prompt"]
+    assert all(b["cache_control"] == {"type": "ephemeral", "scope": "global"} for b in system_blocks[2:])
     assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in json.dumps(body)
 
 
@@ -5344,7 +5344,7 @@ async def test_cerebras_and_foundry_raw_tls_failures_become_route_errors():
     with (
         patch.object(foundry, "httpx", module_httpx),
         patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
         patch.object(foundry, "_cooldown_until", {}),
     ):
         try:
@@ -6494,7 +6494,7 @@ async def test_client_foundry_stream_exit_closes_http_owner():
             patch("providers.rose.client._openai_api_key", return_value=""),
             patch("providers.rose.client._cerebras_api_key", return_value=""),
             patch("providers.rose.client.load_config", lambda: SimpleNamespace(anthropic=SimpleNamespace(api_key=""))),
-            patch.object(foundry, "_auth_cooldown_until", 0.0),
+            patch.object(foundry, "_auth_cooldown_until", {}),
             patch.object(foundry, "_cooldown_until", {}),
             patch.dict(
                 os.environ,
@@ -6597,6 +6597,193 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
 
 
+async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
+    """A rate-limited Azure region hands the Ultra call to another region, not OpenRouter.
+
+    Only when every configured region is cooling does the waterfall continue.
+    """
+    import providers.rose.foundry as foundry
+
+    regions = {
+        "a-4989-resource.openai.azure.com": ("", "key-1"),
+        "rose-eastus2.openai.azure.com": ("_2", "key-2"),
+        "rose-swedencentral.openai.azure.com": ("_3", "key-3"),
+    }
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"region ok"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    openrouter_sse = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "openrouter ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    attempted: list[str] = []
+    limited: set[str] = set()
+
+    def handler(req):
+        host = req.url.host
+        if host in regions:
+            assert req.headers["api-key"] == regions[host][1], "region used another region's key"
+            attempted.append(host)
+            if host in limited:
+                return httpx.Response(429, headers={"retry-after": "30"})
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        if host == "openrouter.ai":
+            attempted.append("openrouter")
+            return httpx.Response(200, text=openrouter_sse, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    env = {"GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}
+    for host, (suffix, key) in regions.items():
+        env[f"AZURE_FOUNDRY_ENDPOINT{suffix}"] = f"https://{host}"
+        env[f"AZURE_FOUNDRY_API_KEY{suffix}"] = key
+        env[f"AZURE_FOUNDRY_DEPLOYMENTS{suffix}"] = "gpt-6-sol"
+
+    async def run(agent_id: str) -> list:
+        return await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                agent_id=agent_id,
+                dump_context=False,
+                _exclude_anthropic_family=True,
+                call_site="test-foundry-region-failover",
+            )
+        )
+
+    set_mock_handler(handler)
+    with (
+        patch.dict(os.environ, env),
+        patch.object(foundry, "_cooldown_until", {}),
+        patch.object(foundry, "_auth_cooldown_until", {}),
+    ):
+        agent_id = "agent-region-failover"
+        plan = [r.host for r, _ in foundry._route_plan(foundry.foundry_regions(), "gpt-6-sol", agent_id)]
+        assert sorted(plan) == sorted(regions)
+        limited.add(plan[0])
+        chunks = await run(agent_id)
+        assert attempted == plan[:2], attempted
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6-sol-foundry"
+        assert any(c.kind == "content" and c.data.get("text") == "region ok" for c in chunks)
+
+        attempted.clear()
+        limited.update(regions)
+        chunks = await run(agent_id)
+        assert attempted == plan[1:] + ["openrouter"], attempted
+        assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
+
+
+async def test_client_foundry_skips_non_https_optional_region_and_keeps_serving():
+    """A typo (``http://``) in one optional Foundry slot must not stop Foundry.
+
+    Before 2026-10-19 one non-HTTPS optional region made every Foundry request
+    raise ``RoseInvalidRequest`` while ``foundry_configured`` stayed true, so
+    every Ultra call left Azure credit for OpenRouter. The bad slot is skipped
+    with one warning naming it; a non-HTTPS region 1 still rejects the config.
+    """
+    import providers.rose.foundry as foundry
+    from structlog.testing import capture_logs
+
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"region ok"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    attempted: list[str] = []
+
+    def handler(req):
+        if req.url.host.endswith(".openai.azure.com"):
+            attempted.append(f"{req.url.scheme}://{req.url.host}")
+        if req.url.host == "a-4989-resource.openai.azure.com" and req.url.scheme == "https":
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    env = {name: "" for name in foundry.FOUNDRY_REGION_ENV_NAMES}
+    env.update(
+        {
+            "GPT_API_KEY": "",
+            "ANTHROPIC_API_KEY": "",
+            "CEREBRAS_API_KEY": "",
+            "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY": "key-1",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+            "AZURE_FOUNDRY_ENDPOINT_7": "http://typo-region.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY_7": "key-7",
+            "AZURE_FOUNDRY_DEPLOYMENTS_7": "gpt-6-sol",
+        }
+    )
+
+    async def run() -> list:
+        return await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                agent_id="agent-insecure-optional-region",
+                dump_context=False,
+                _exclude_anthropic_family=True,
+                call_site="test-foundry-insecure-optional-region",
+            )
+        )
+
+    set_mock_handler(handler)
+    with (
+        patch.dict(os.environ, env),
+        patch.object(foundry, "_cooldown_until", {}),
+        patch.object(foundry, "_auth_cooldown_until", {}),
+        patch.object(foundry, "_warned_insecure_regions", set()),
+    ):
+        with capture_logs() as logs:
+            assert foundry.foundry_configured(get_pool("rose-1-ultra"))
+            for _ in range(2):
+                chunks = await run()
+                assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6-sol-foundry"
+                assert any(c.kind == "content" and c.data.get("text") == "region ok" for c in chunks)
+        assert attempted == ["https://a-4989-resource.openai.azure.com"] * 2, attempted
+        warnings = [entry for entry in logs if entry["event"] == "rose.foundry.region_not_https"]
+        assert [entry["env"] for entry in warnings] == ["AZURE_FOUNDRY_ENDPOINT_7"], warnings
+
+        # A non-HTTPS region 1 is still a whole-configuration error.
+        os.environ["AZURE_FOUNDRY_ENDPOINT"] = "http://a-4989-resource.openai.azure.com"
+        attempted.clear()
+        try:
+            await _drain(
+                foundry.foundry_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort="high",
+                    provider_fast_mode=False,
+                    request_id="req-insecure-primary",
+                    route_key="agent-insecure-primary",
+                    agent_id="agent-insecure-primary",
+                    call_site="test",
+                    cache_namespace=None,
+                    ttft_timeout_s=2,
+                    idle_timeout_s=2,
+                )
+            )
+        except RoseInvalidRequest as exc:
+            assert "AZURE_FOUNDRY_ENDPOINT must be HTTPS" in str(exc)
+        else:
+            raise AssertionError("non-HTTPS region 1 must reject the configuration")
+        assert attempted == [], attempted
+
+
 async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
     """Azure credit serves the world model ahead of OpenRouter, on the WMH model.
 
@@ -6624,7 +6811,7 @@ async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
 
     set_mock_handler(handler)
     with (
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
         patch.object(foundry, "_cooldown_until", {}),
         patch.dict(
             os.environ,
@@ -6697,7 +6884,7 @@ async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_tr
         "ANTHROPIC_API_KEY": "",
     }
     usages = []
-    with patch.object(foundry, "_auth_cooldown_until", 0.0), patch.object(foundry, "_cooldown_until", {}), \
+    with patch.object(foundry, "_auth_cooldown_until", {}), patch.object(foundry, "_cooldown_until", {}), \
             patch.dict(os.environ, env):
         for pool, details in (
             ("rose-wmh-gpt61", {"cached_tokens": 900, "cache_write_tokens": 0}),
@@ -8947,7 +9134,7 @@ async def test_wmh_native_response_model_reaches_foundry_http():
         raise Captured()
 
     env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline-test", "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol"}
-    with patch.object(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda key, default=None: env.get(key, default))), patch.object(foundry, "_auth_cooldown_until", 0.), patch.object(foundry, "_cooldown_until", {}):
+    with patch.object(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda key, default=None: env.get(key, default))), patch.object(foundry, "_auth_cooldown_until", {}), patch.object(foundry, "_cooldown_until", {}):
         rose = RoseClient(openrouter_key="offline-test")
         for json_mode in (False, True):
             owner = RoseWMHProvider(pool="rose-1-ultra", client=rose, user_id="offline", protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=json_mode, prefer_azure=True)
@@ -9037,7 +9224,7 @@ async def test_wmh_foundry_preserves_requested_output_budget():
     def callback(request):
         captured.append(json.loads(request.content))
         raise Captured()
-    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(callback), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.):
+    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(callback), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", {}):
         owner = RoseWMHProvider(pool="rose-1-flash", client=RoseClient(openrouter_key="offline"), protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=True, prefer_azure=True, user_id="offline")
         owner._streams = None
         owner._lease_auth = AsyncMock(return_value=(None, None))
@@ -9122,7 +9309,7 @@ async def test_funded_openai_preserves_requested_output_budget():
         raise Captured()
     env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(get_pool("rose-1-ultra"))}
     module_httpx = types.SimpleNamespace(AsyncClient=lambda **kw: real(transport=httpx.MockTransport(foundry_callback), trust_env=False), Timeout=httpx.Timeout, Headers=httpx.Headers, TransportError=httpx.TransportError)
-    with patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_auth_cooldown_until", 0.), patch.object(foundry, "_cooldown_until", {}):
+    with patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_auth_cooldown_until", {}), patch.object(foundry, "_cooldown_until", {}):
         try:
             async for _ in foundry.foundry_complete(pool_spec=get_pool("rose-1-ultra"), messages=messages, response_format=None, tools=None, context_tools=None, tool_choice=None, temperature=None, effort=None, provider_fast_mode=True, request_id="same-offline-request", route_key="same", agent_id=None, call_site="test", cache_namespace="same-offline-cache", ttft_timeout_s=90, idle_timeout_s=120):
                 pass
@@ -9153,8 +9340,8 @@ async def test_wmh_response_schema_binds_exact_candidate_call_ids():
     def handler(request):
         body = json.loads(request.content)
         results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
-        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
-        assert results["minItems"] == results["maxItems"] == len(expected_ids)
+        assert results["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
+        assert "maxItems" not in results
         assert body["text"]["format"]["strict"] is False
         from providers.rose.gpt_auth import build_codex_responses_body
         wire_messages, namespace = observed_wire[-1]
@@ -9166,7 +9353,7 @@ async def test_wmh_response_schema_binds_exact_candidate_call_ids():
         raise Captured()
     real = httpx.AsyncClient
     env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(get_pool("rose-1-flash"))}
-    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.):
+    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", {}):
         owner = RoseWMHProvider(pool="rose-1-flash", client=RoseClient(openrouter_key="offline"), protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=True, prefer_azure=True, user_id="offline")
         owner._streams = None
         original_wire = owner._wire_messages
@@ -9181,6 +9368,14 @@ async def test_wmh_response_schema_binds_exact_candidate_call_ids():
         except Captured:
             pass
         assert len(seen) == 1
+        packet["candidate_response"]["tool_calls"] = [{"call_id": "different_exact"}]
+        try:
+            await owner._complete_async("Unchanged existing policy.", [types.SimpleNamespace(role="user", content=json.dumps(packet))], max_tokens=16384)
+        except Captured:
+            pass
+        assert len(seen) == 2
+        assert seen[0]["text"]["format"] == seen[1]["text"]["format"], "Candidate ID/count changes must preserve the complete provider schema"
+
 
 
 def test_wmh_candidate_id_schema_preserves_native_json_contract():
@@ -9256,7 +9451,7 @@ async def test_public_responses_uses_existing_larger_limit_stage():
         env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(pool)}
         module_httpx = types.SimpleNamespace(AsyncClient=lambda **kw: real(transport=httpx.MockTransport(callback), trust_env=False), Timeout=httpx.Timeout, Headers=httpx.Headers, TransportError=httpx.TransportError)
         async with real(transport=httpx.MockTransport(callback), trust_env=False) as mock_client:
-            with patch.object(transport, "get_streaming_http_client", return_value=mock_client), patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.), patch.object(client, "_openai_api_key", return_value="offline-key" if route == "funded" else ""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "_gpt_api_key_on_cooldown", AsyncMock(return_value=False)), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))):
+            with patch.object(transport, "get_streaming_http_client", return_value=mock_client), patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", {}), patch.object(client, "_openai_api_key", return_value="offline-key" if route == "funded" else ""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "_gpt_api_key_on_cooldown", AsyncMock(return_value=False)), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))):
                 response = await RoseClient(openrouter_key="offline").collect(pool="rose-1-ultra", messages=[{"role": "user", "content": "Unchanged synthetic fixture."}], max_tokens=16384, result_required=True, dump_context=False, prefer_azure=route == "foundry")
         assert [body["max_output_tokens"] for body in requests] == [16384, 32000]
         assert requests[0]["model"] == requests[1]["model"]
@@ -9298,8 +9493,8 @@ async def test_wmh_probability_bounds_reach_provider_schema():
     def handler(request):
         body = json.loads(request.content)
         results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
-        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
-        assert results["minItems"] == results["maxItems"] == len(expected_ids)
+        assert results["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
+        assert "maxItems" not in results
         assert body["text"]["format"]["strict"] is False
         from jsonschema import Draft202012Validator
         probability = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["probability"]
@@ -9320,7 +9515,7 @@ async def test_wmh_probability_bounds_reach_provider_schema():
         raise Captured()
     real = httpx.AsyncClient
     env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(get_pool("rose-1-flash"))}
-    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.):
+    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", {}):
         owner = RoseWMHProvider(pool="rose-1-flash", client=RoseClient(openrouter_key="offline"), protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=True, prefer_azure=True, user_id="offline")
         owner._streams = None
         original_wire = owner._wire_messages
@@ -9843,6 +10038,14 @@ async def run_all_tests():
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",
         test_client_foundry_server_error_falls_through_to_openrouter,
+    )
+    await r.record_async(
+        "client_foundry_region_rate_limit_fails_over_before_openrouter",
+        test_client_foundry_region_rate_limit_fails_over_before_openrouter,
+    )
+    await r.record_async(
+        "client_foundry_skips_non_https_optional_region",
+        test_client_foundry_skips_non_https_optional_region_and_keeps_serving,
     )
     await r.record_async(
         "client_foundry_luna_backs_mini_and_speed_pools",

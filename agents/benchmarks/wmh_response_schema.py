@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, create_model
 
 from benchmarks.wmh_outcomes import (
     DISTRIBUTION_PROTOCOL, DISTRIBUTION_SCHEMA, TIMED_DISTRIBUTION_PROTOCOL,
-    TIMED_DISTRIBUTION_SCHEMA, MAXIMUM_ELAPSED_MS,
+    TIMED_DISTRIBUTION_SCHEMA, MAXIMUM_ELAPSED_MS, OUTCOME_V4_PROTOCOL, OUTCOME_V4_SCHEMA,
 )
 
 
@@ -61,6 +61,17 @@ class TimedOutcome(Outcome):
     elapsed_ms: Annotated[int, Field(ge=0, le=MAXIMUM_ELAPSED_MS)]
 
 
+class BaseRateDeclaration(_Contract):
+    key: str
+    given: Union[str, None]
+    deviation_reason: Union[str, None]
+
+
+class V4Outcome(TimedOutcome):
+    base_rate_results: dict[str, bool]
+    delivered_event_ids: list[str]
+
+
 class OutcomeDistribution(_Contract):
     schema: Literal[DISTRIBUTION_SCHEMA]
     outcomes: Annotated[list[Outcome], Field(min_length=1, max_length=6)]
@@ -69,6 +80,12 @@ class OutcomeDistribution(_Contract):
 class TimedOutcomeDistribution(_Contract):
     schema: Literal[TIMED_DISTRIBUTION_SCHEMA]
     outcomes: Annotated[list[TimedOutcome], Field(min_length=1, max_length=6)]
+
+
+class V4OutcomeDistribution(_Contract):
+    schema: Literal[OUTCOME_V4_SCHEMA]
+    base_rates: list[BaseRateDeclaration]
+    outcomes: Annotated[list[V4Outcome], Field(min_length=1, max_length=6)]
 
 
 class NativeTransition(_Contract):
@@ -97,16 +114,12 @@ def response_model_for_protocol(
     model = {
         DISTRIBUTION_PROTOCOL: OutcomeDistribution,
         TIMED_DISTRIBUTION_PROTOCOL: TimedOutcomeDistribution,
+        OUTCOME_V4_PROTOCOL: V4OutcomeDistribution,
         "text-world-model-v3": NativeTransition,
     }.get(protocol)
     if (model is None or not expected_call_ids or not isinstance(expected_call_ids, tuple)
             or any(not isinstance(value, str) or not value for value in expected_call_ids)):
         return model
-
-    result_model = create_model(
-        "CandidateToolResult", __base__=ToolResult,
-        call_id=(Literal[expected_call_ids], ...),
-    )
 
     def ordered_call_ids(cls, results):
         if tuple(result.call_id for result in results) != expected_call_ids:
@@ -114,14 +127,15 @@ def response_model_for_protocol(
         return results
 
     results_field = (
-        Annotated[list[result_model], Field(min_length=len(expected_call_ids), max_length=len(expected_call_ids))],
+        list[ToolResult],
         ...,
     )
     validators = {"ordered_call_ids": field_validator("tool_results")(ordered_call_ids)}
     if model is NativeTransition:
         return create_model("CandidateNativeTransition", __base__=model,
-                            __validators__=validators, tool_results=results_field)
-    outcome = TimedOutcome if model is TimedOutcomeDistribution else Outcome
+                            __validators__=validators,
+                            tool_results=(Annotated[list[ToolResult], Field(min_length=1)], ...))
+    outcome = {TimedOutcomeDistribution: TimedOutcome, V4OutcomeDistribution: V4Outcome}.get(model, Outcome)
     outcome_model = create_model("Candidate" + outcome.__name__, __base__=outcome,
                                  __validators__=validators, tool_results=results_field)
     return create_model("Candidate" + model.__name__, __base__=model,

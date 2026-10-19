@@ -309,11 +309,13 @@ def test_actual_provider_retry_metadata_reaches_whm_owner_and_is_inactive_elsewh
     monkeypatch.setattr(
         foundry.httpx, "AsyncClient", lambda **kwargs: original_client(**kwargs, transport=httpx.MockTransport(respond))
     )
+    for name in foundry.FOUNDRY_REGION_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "https://offline.invalid")
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "private-lease-marker")
-    monkeypatch.setattr(foundry, "_ordered_deployments", lambda *_: ["offline-deployment"])
+    monkeypatch.setattr(foundry, "_region_deployments", lambda *_: ["offline-deployment"])
     monkeypatch.setattr(foundry, "_cooldown_until", {})
-    monkeypatch.setattr(foundry, "_auth_cooldown_until", 0.0)
+    monkeypatch.setattr(foundry, "_auth_cooldown_until", {})
     monkeypatch.setattr(cerebras, "_cooldown_scope", lambda *_: (("", "offline", "offline"), ""))
     monkeypatch.setattr(cerebras, "_cerebras_on_cooldown", AsyncMock(return_value=False))
     monkeypatch.setattr(cerebras, "_mark_cerebras_cooldown", AsyncMock())
@@ -414,9 +416,11 @@ def test_actual_rose_failure_retains_foundry_retry_floor_on_terminal_waterfall(m
         foundry.httpx, "AsyncClient", lambda **kw: original(**kw, transport=httpx.MockTransport(respond))
     )
     monkeypatch.setattr(foundry, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
-    monkeypatch.setattr(foundry, "_ordered_deployments", lambda *_: ["offline-deployment"])
+    monkeypatch.setattr(foundry, "_region_deployments", lambda *_: ["offline-deployment"])
     monkeypatch.setattr(foundry, "_cooldown_until", {})
-    monkeypatch.setattr(foundry, "_auth_cooldown_until", 0.0)
+    monkeypatch.setattr(foundry, "_auth_cooldown_until", {})
+    for name in foundry.FOUNDRY_REGION_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "https://offline.invalid")
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "private-lease-marker")
     monkeypatch.setattr(rose, "_openai_api_key", lambda: "")
@@ -1007,8 +1011,11 @@ def test_rejected_distribution_capture_keeps_exact_bytes_private_and_validation_
         assert sent_model.__name__ == "CandidateTimedOutcomeDistribution"
         from providers.rose.schema import build_openai_response_format
         result_schema = build_openai_response_format(sent_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
-        assert result_schema["items"]["properties"]["call_id"]["const"] == "call-1"
-        assert result_schema["minItems"] == result_schema["maxItems"] == 1
+        assert result_schema["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
+        assert "maxItems" not in result_schema
+        from benchmarks.wmh_response_schema import response_model_for_protocol
+        other_model = response_model_for_protocol(TIMED_DISTRIBUTION_PROTOCOL, expected_call_ids=("other-A", "other-B"))
+        assert build_openai_response_format(other_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"] == result_schema
         assert detail["rejected_response"] == {
             "content": rejected,
             "actual_model": "offline-model",
@@ -1098,8 +1105,11 @@ def test_rejected_prediction_captures_actual_streamed_wire_request_without_auth(
         sent = client.collect.await_args.kwargs
         from providers.rose.schema import build_openai_response_format
         result_schema = build_openai_response_format(sent["response_model"])["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
-        assert result_schema["items"]["properties"]["call_id"]["const"] == "wire-call"
-        assert result_schema["minItems"] == result_schema["maxItems"] == 1
+        assert result_schema["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
+        assert "maxItems" not in result_schema
+        from benchmarks.wmh_response_schema import response_model_for_protocol
+        other_model = response_model_for_protocol(TIMED_DISTRIBUTION_PROTOCOL, expected_call_ids=("other-A", "other-B"))
+        assert build_openai_response_format(other_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"] == result_schema
         assert capture["request"] == {
             "pool": "rose-1-flash",
             "messages": sent["messages"],

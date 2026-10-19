@@ -1,0 +1,13 @@
+{
+  "approval_id": "native-schema-1473",
+  "user_message": "if this preserecs the behaviorr we already dervied correctly in Rose.complete, then this is fine",
+  "condition": "Preserve established Rose.complete behavior",
+  "condition_result": "Owning offline assertions and adversarial read-only review pass for native tool selection, forced choice, explicit tools/[], plain models and all Anthropic waterfall entry points; Python provider source unchanged. Live gates remain pending.",
+  "original_proposal_sha256": "f46f31cd2eadb5ee03b53e0d493a316d393f339a4b3e51b46f52cf0d6ed8b55d",
+  "compatibility_followup": "Internal metadata threads unchanged Anthropic schemas across existing entry points; no additional LLM-visible schema/text/model definition is changed.",
+  "applied_patch_sha256": "d1a874f2c3c9ec287fe367d2514d7f9acd3ac3fbe249b1870129abd9d91fd1a0",
+  "applied_base": "8420726856fcc228818e1e3455fad25099bec499",
+  "timestamp_utc": "2026-10-13T01:50:33.030759+00:00",
+  "gates_fresh_required": true,
+  "production_verified": false
+}

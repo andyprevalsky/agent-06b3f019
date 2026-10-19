@@ -1,0 +1,121 @@
+[
+  {
+    "original_path": "/tmp/4cb-pytest.sh",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/4cb-pytest.sh",
+    "sha256": "d2810b67b9ff8237a21e90b82de170f0a6ae4c959b3b74722acbed08ed8687b0",
+    "bytes": 3862
+  },
+  {
+    "original_path": "/tmp/ac-transfers.ts",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/ac-transfers.ts",
+    "sha256": "63e5c2b1838ab39ae5f191359c56bd39033bfce83c6741321ea0943783d68af4",
+    "bytes": 1123
+  },
+  {
+    "original_path": "/tmp/bb_head.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/bb_head.py",
+    "sha256": "3d38946a8bc6578df99c8639a9e9fbf3f29482a54ff5f206e5400f895da82a2a",
+    "bytes": 910123
+  },
+  {
+    "original_path": "/tmp/cci_head.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/cci_head.py",
+    "sha256": "8df7d81538459ff79d0237b221cfaaa9f836d4f1a5914654e17fcb9393bf5573",
+    "bytes": 66919
+  },
+  {
+    "original_path": "/tmp/ccre_fix2.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/ccre_fix2.py",
+    "sha256": "ebd9700b676db7a27c428e949785bc8652b6f6357492f909a8ab4f0f946b8c69",
+    "bytes": 13165
+  },
+  {
+    "original_path": "/tmp/ccre_fixed.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/ccre_fixed.py",
+    "sha256": "6e7f234fedfffa0eb79b3009120c381befeb561cb909eb86e7f646c0eefe51f7",
+    "bytes": 12884
+  },
+  {
+    "original_path": "/tmp/ccre_head.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/ccre_head.py",
+    "sha256": "814f214db3adf005e8d10d01f5adf0ae4332da0e680db68b6be17896026d477f",
+    "bytes": 12344
+  },
+  {
+    "original_path": "/tmp/ccre_new_backup.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/ccre_new_backup.py",
+    "sha256": "814f214db3adf005e8d10d01f5adf0ae4332da0e680db68b6be17896026d477f",
+    "bytes": 12344
+  },
+  {
+    "original_path": "/tmp/deploy-detect.sh",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/deploy-detect.sh",
+    "sha256": "88ee40159e7f91eb933a94e32b2da264a9cdca2badf2bd190e69d11a3dae1794",
+    "bytes": 2804
+  },
+  {
+    "original_path": "/tmp/deploy-env.sh",
+    "preserved_in": "authoritative managed env and old box until verified new env; never committed",
+    "classification": "credential/runtime environment"
+  },
+  {
+    "original_path": "/tmp/g4status.sh",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/g4status.sh",
+    "sha256": "12234d8cc9317adba53b0a385771aa653013a4fa36b22375e3ac171dd826dd09",
+    "bytes": 587
+  },
+  {
+    "original_path": "/tmp/old-scd.sh",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/old-scd.sh",
+    "sha256": "6ee2ffb70afb1b3bbf5646706f7624cf581d12cadba7c0f72eb568856231780f",
+    "bytes": 23340
+  },
+  {
+    "original_path": "/tmp/old_bb.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/old_bb.py",
+    "sha256": "b21080d23b1b690f7a8a1cad36f1c357b03e7e7dc7ab9cd42b14bdd806679996",
+    "bytes": 909784
+  },
+  {
+    "original_path": "/tmp/rb.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/rb.py",
+    "sha256": "f68a532d5c981e7a700e4b47c1c16856c3dd8f7f66f30b29249419b9ec6b401a",
+    "bytes": 732132
+  },
+  {
+    "original_path": "/tmp/rb_head.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/rb_head.py",
+    "sha256": "88c5b3540c9ea1a360aa499cc58da22281069506ba2026a267503992498c0a9f",
+    "bytes": 733164
+  },
+  {
+    "original_path": "/tmp/rbc_head.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/rbc_head.py",
+    "sha256": "bd53a5568708223f43ada9e42889e847aee3b979e077b37edd696e5bc41b9c3e",
+    "bytes": 48523
+  },
+  {
+    "original_path": "/tmp/run_one.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/run_one.py",
+    "sha256": "6b6fe532fd6a974f69a3f2c2f35f279f511709765e461da69fea39b9c4d641b2",
+    "bytes": 419
+  },
+  {
+    "original_path": "/tmp/step4cb.sh",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/step4cb.sh",
+    "sha256": "72e4706ffc5d99350290fe729cfe4481f5210314f3deb01e6e7771059497ecd1",
+    "bytes": 5107
+  },
+  {
+    "original_path": "/tmp/svfmt.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/svfmt.py",
+    "sha256": "5dbda8d13194c71edb42cf2e582ae4aafeb93b1ca1ab3df5208c01fac5af9ef3",
+    "bytes": 322
+  },
+  {
+    "original_path": "/tmp/x.py",
+    "checkpoint_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-tmp/x.py",
+    "sha256": "c5a39c1946091f59181b1ea47f607c4ac95174cc8ae7f47f853bcc83086a9f42",
+    "bytes": 38857
+  }
+]

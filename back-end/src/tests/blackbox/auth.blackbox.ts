@@ -47,6 +47,7 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import { retryWithBackoff } from '../../providers/retry';
+import { phoneOwnershipCases } from './auth-phone-ownership.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -2620,6 +2621,15 @@ async function runAll() {
       name: 'POST /verify-otp -- seeded existing DB user (no Supabase)',
       fn: testVerifyOtp_seededExistingDbUser,
     },
+    ...phoneOwnershipCases({
+      baseUrl: BASE_URL,
+      seedOtp: SEED_OTP,
+      request,
+      uniqueFakePhone,
+      canSeedAuthFlow,
+      seedTwilioVerifyCheck,
+      seedSupabaseAdminCreate,
+    }),
   ];
 
   console.log(

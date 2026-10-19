@@ -544,6 +544,7 @@ their assertions or test counts:
 `bash scripts/tests/descend-command.test.sh`,
 `bash scripts/tests/auto-rca-workflow.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
+`python3 scripts/tests/cloudbench-provider-capacity.test.py`,
 `bash scripts/tests/campaign-hub-grouping.test.sh`,
 `bash scripts/tests/cloudbench-fetch-ref.test.sh`,
 `python3 scripts/tests/verify-successful-llm-queries.test.py`,
@@ -554,6 +555,16 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
 `python3 scripts/tests/cloudbench-bootstrap-recovery.test.py`,
+`python3 scripts/tests/cloudbench-staged-boot.test.py`,
+`python3 scripts/tests/cloudbench-static-service-observation.test.py`,
+`python3 scripts/tests/cloudbench-scorecard.test.py`,
+`python3 scripts/tests/cloudbench-explicit-idle-admission.test.py`,
+`python3 scripts/tests/cloudbench-fixed-native-worker.test.py`,
+`python3 scripts/tests/cloudbench-protected-resources.test.py`,
+`python3 scripts/tests/cloudbench-pool-run-token.test.py`,
+`python3 scripts/tests/cloudbench-live-primary-return.test.py`,
+`python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py`,
+`python3 scripts/tests/cloudbench-maintenance-env.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
@@ -593,7 +604,7 @@ and Prisma freshness, immutable read-only cache receipts, explicit DEMO replay
 admission, task-only read-only guards, genuine replay hits, ordinary flag-off
 behavior and pooled/worker handoff. It calls the owning controls through
 the supported scripts; it adds no paid fleet stage. Explicit cold/cached startup
-experiments use `/benchmark` and CLAUDE.md's commands, without replacing deploy
+experiments use `/benchmark` and its Operations Runbook commands, without replacing deploy
 smoke outcomes. The mass-demo `-k 50 --concurrency 50 --strict-barrier` diagnostic
 means 50 controllers and 2,500 first-level children; task replay has zero LIVE proof
 credit and its unchanged declared judges may make provider calls. Ordinary
@@ -648,8 +659,9 @@ seconds, then follow each job log's exact printed fleet-monitor handle through
 controller exit and owned teardown. The campaign directory itself is not a
 fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
 
-During deploy benchmarks, follow CLAUDE.md's "Monitor every cloud launch"
-instructions and the exact metrics command in the printed controller log.
+During deploy benchmarks, follow the "Monitor every cloud launch"
+instructions in the Operations Runbook in `agents/benchmarks/README.md` and
+the exact metrics command in the printed controller log.
 Poll every 30 seconds, check the printed controller exit marker on every poll,
 and observe through owned-resource release. Early task PASS/FAIL and stale cards
 are distinct from controller exit and cleanup. The existing live-results gate

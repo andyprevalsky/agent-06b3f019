@@ -12,25 +12,27 @@ function assert(condition: unknown, message: string): asserts condition {
 
 /** Real lifecycle/custody code; native and database effects are wholly in-memory. */
 export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): Promise<void> {
-  const originals = {
-    find: prisma.browserSession.findUnique,
-    update: prisma.browserSession.updateMany,
-    held: prisma.browserSession.findFirst,
-    integration: prisma.integration.findUnique,
-    profile: prisma.browserProviderProfile.upsert,
-    context: prisma.browserContext.update,
-    query: prisma.$queryRaw,
-    transaction: prisma.$transaction,
-    effectCreate: prisma.toolSideEffect.create,
-    effectFind: prisma.toolSideEffect.findUnique,
-    effectList: prisma.toolSideEffect.findMany,
-    effectUpdate: prisma.toolSideEffect.updateMany,
-    nativeCreate: steel.sessions.create,
-    nativeRead: steel.sessions.retrieve,
-    nativeRelease: steel.sessions.release,
-    fetch: globalThis.fetch,
-    workspace: process.env.CONDUCTOR_WORKSPACE_NAME,
-  };
+  // Every patched provider/database entry point is restored after the fixture.
+  const patched: Array<[object, string]> = [
+    [prisma.browserSession, 'findUnique'],
+    [prisma.browserSession, 'updateMany'],
+    [prisma.browserSession, 'findFirst'],
+    [prisma.integration, 'findUnique'],
+    [prisma.browserProviderProfile, 'upsert'],
+    [prisma.browserContext, 'update'],
+    [prisma, '$queryRaw'],
+    [prisma, '$transaction'],
+    [prisma.toolSideEffect, 'create'],
+    [prisma.toolSideEffect, 'findUnique'],
+    [prisma.toolSideEffect, 'findMany'],
+    [prisma.toolSideEffect, 'updateMany'],
+    [steel.sessions, 'create'],
+    [steel.sessions, 'retrieve'],
+    [steel.sessions, 'release'],
+    [globalThis, 'fetch'],
+  ];
+  const originals = patched.map(([target, key]) => Reflect.get(target, key) as unknown);
+  const workspace = process.env.CONDUCTOR_WORKSPACE_NAME;
   const fixture = randomUUID();
   const sourceId = randomUUID();
   const profileId = randomUUID();
@@ -180,11 +182,16 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
       return { count: 1 };
     }) as typeof prisma.toolSideEffect.updateMany;
     prisma.browserSession.findUnique = (async (args: { select?: unknown }) =>
-      args.select ? (observeBindings ? { ...row, agentId: fixture, debugUrl: null } : null) : { ...row }) as typeof originals.find;
-    prisma.browserSession.findFirst = (async () => null) as typeof originals.held;
-    prisma.integration.findUnique = (async () => null) as typeof originals.integration;
-    prisma.browserProviderProfile.upsert = (async () => ({})) as typeof originals.profile;
-    prisma.browserContext.update = (async () => ({})) as typeof originals.context;
+      args.select
+        ? observeBindings
+          ? { ...row, agentId: fixture, debugUrl: null }
+          : null
+        : { ...row }) as typeof prisma.browserSession.findUnique;
+    prisma.browserSession.findFirst = (async () => null) as typeof prisma.browserSession.findFirst;
+    prisma.integration.findUnique = (async () => null) as typeof prisma.integration.findUnique;
+    prisma.browserProviderProfile.upsert =
+      (async () => ({})) as typeof prisma.browserProviderProfile.upsert;
+    prisma.browserContext.update = (async () => ({})) as typeof prisma.browserContext.update;
     prisma.browserSession.updateMany = (async (args: {
       where: Record<string, unknown>;
       data: Record<string, unknown>;
@@ -202,7 +209,7 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
       if (!custodyAvailable || !matches(args.where)) return { count: 0 };
       row = { ...row, ...args.data };
       return { count: 1 };
-    }) as typeof originals.update;
+    }) as typeof prisma.browserSession.updateMany;
     const inspectSession = async (id: string) => {
       if (id !== sourceId && !candidates.has(id))
         throw Object.assign(new Error('native fixture session absent'), {
@@ -304,19 +311,37 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
       const releaseError = new Error('deliberate exact writer release acknowledgement loss');
       const beforeCreates = creates;
       const beforeAnnouncements = announcements.length;
-      const failure = await attempt({ ...dependencies, releaseSession: async (id: string) => {
-        assert(id === sourceId && row.status === 'PAUSED', 'release was not exact claimed writer');
-        releases++;
-        sourceReleased = nativeReleased;
-        throw releaseError;
-      }});
+      const failure = await attempt({
+        ...dependencies,
+        releaseSession: async (id: string) => {
+          assert(
+            id === sourceId && row.status === 'PAUSED',
+            'release was not exact claimed writer'
+          );
+          releases++;
+          sourceReleased = nativeReleased;
+          throw releaseError;
+        },
+      });
       await __flushBroadcastQueueForTests();
       assert(failure === releaseError, 'writer failure was replaced or swallowed');
       assert(creates === beforeCreates, 'writer release failure created a replacement');
-      assert(row.status === (nativeReleased ? 'PAUSED' : 'ERROR'), 'recovery custody state changed');
-      assert(announcements.length === beforeAnnouncements + 1, 'committed writer failure omitted binding announcement');
+      assert(
+        row.status === (nativeReleased ? 'PAUSED' : 'ERROR'),
+        'recovery custody state changed'
+      );
+      assert(
+        announcements.length === beforeAnnouncements + 1,
+        'committed writer failure omitted binding announcement'
+      );
       const notice = announcements[announcements.length - 1];
-      assert(notice.taskId === row.id && notice.sessionId === sourceId && notice.status === row.status && notice.live === false, 'announcement did not project exact persisted failed binding');
+      assert(
+        notice.taskId === row.id &&
+          notice.sessionId === sourceId &&
+          notice.status === row.status &&
+          notice.live === false,
+        'announcement did not project exact persisted failed binding'
+      );
       observeBindings = false;
       // The entire native/lease store belongs to this in-memory fixture; preserve
       // the actual failed-custody assertions above before isolating the next case.
@@ -327,15 +352,25 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
       observeBindings = true;
       const releaseError = new Error('deliberate writer failure after concurrent binding change');
       const beforeAnnouncements = announcements.length;
-      const failure = await attempt({ ...dependencies, releaseSession: async () => {
-        if (concurrentChange === 'closed') row = { ...row, status: 'CLOSED', closedAt: new Date() };
-        else row = { ...row, sessionId: randomUUID(), status: 'ACTIVE' };
-        throw releaseError;
-      }});
+      const failure = await attempt({
+        ...dependencies,
+        releaseSession: async () => {
+          if (concurrentChange === 'closed')
+            row = { ...row, status: 'CLOSED', closedAt: new Date() };
+          else row = { ...row, sessionId: randomUUID(), status: 'ACTIVE' };
+          throw releaseError;
+        },
+      });
       await __flushBroadcastQueueForTests();
       assert(failure === releaseError, 'concurrent writer failure lost original error');
-      assert(announcements.length === beforeAnnouncements, 'failed writer CAS announced another binding');
-      assert(concurrentChange === 'closed' ? row.status === 'CLOSED' : row.sessionId !== sourceId, 'writer error overwrote concurrent binding');
+      assert(
+        announcements.length === beforeAnnouncements,
+        'failed writer CAS announced another binding'
+      );
+      assert(
+        concurrentChange === 'closed' ? row.status === 'CLOSED' : row.sessionId !== sourceId,
+        'writer error overwrote concurrent binding'
+      );
       observeBindings = false;
       leases.clear();
     }
@@ -561,29 +596,15 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
     );
     continueCreate();
     assert((await first) === undefined, 'exclusive owner could not finish replacement');
+
     assert(
       [...intents.values()].every((intent) => intent.status !== 'PENDING'),
       'completed fixture stranded candidate custody'
     );
     assert(externalRequests === 0, 'fixture performed external provider/database traffic');
   } finally {
-    globalThis.fetch = originals.fetch;
-    steel.sessions.create = originals.nativeCreate;
-    steel.sessions.retrieve = originals.nativeRead;
-    steel.sessions.release = originals.nativeRelease;
-    prisma.$queryRaw = originals.query;
-    prisma.$transaction = originals.transaction;
-    prisma.toolSideEffect.create = originals.effectCreate;
-    prisma.toolSideEffect.findUnique = originals.effectFind;
-    prisma.toolSideEffect.findMany = originals.effectList;
-    prisma.toolSideEffect.updateMany = originals.effectUpdate;
-    prisma.browserSession.findUnique = originals.find;
-    prisma.browserSession.updateMany = originals.update;
-    prisma.browserSession.findFirst = originals.held;
-    prisma.integration.findUnique = originals.integration;
-    prisma.browserProviderProfile.upsert = originals.profile;
-    prisma.browserContext.update = originals.context;
-    if (originals.workspace === undefined) delete process.env.CONDUCTOR_WORKSPACE_NAME;
-    else process.env.CONDUCTOR_WORKSPACE_NAME = originals.workspace;
+    patched.forEach(([target, key], index) => Reflect.set(target, key, originals[index]));
+    if (workspace === undefined) delete process.env.CONDUCTOR_WORKSPACE_NAME;
+    else process.env.CONDUCTOR_WORKSPACE_NAME = workspace;
   }
 }

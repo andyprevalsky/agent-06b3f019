@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "timestamp_utc": "2026-10-18T20:14:57.381322+00:00",
+  "source_git_sha": "fcdbc6fa4de66f425f8a49bbecbfebb46f4d6a98",
+  "main_integrated": "c7fc3b3d2a282a93ee4d482fef813fe0c4148fdc",
+  "canonical_stack_run_id": "1792353705-3076059-fill",
+  "canonical_benchmark_run_id": "aec8c2b2-dc5a-4c1b-ba38-7959198de115",
+  "task": "sms-supervisor-fill-form-searches-then-delegates",
+  "task_sha256": "6f1bbd62321cc1da406e1d7bc8cda3fc171d0e661112b6908cdfea073bf7ae97",
+  "task_definition_unchanged": true,
+  "input": "Filled it for me",
+  "input_context": "Existing Canada eTA SMS thread; synthetic Travel docs note; existing canonical profile fixture",
+  "timeout_seconds": 420,
+  "command": [
+    "scripts/run-bench",
+    "--local",
+    "sms-supervisor-fill-form-searches-then-delegates",
+    "--run-id",
+    "1792353705-3076059-fill",
+    "--keep-services"
+  ],
+  "real_model_responses": true,
+  "SMS_model": "rose-labs/rose-1-flash",
+  "actual_SMS_model_calls": 7,
+  "actual_SMS_models": [
+    "qwen-3.8-27b",
+    "qwen-3.8-27b",
+    "qwen-3.8-27b",
+    "qwen-3.8-27b",
+    "qwen-3.8-27b",
+    "qwen-3.8-27b",
+    "qwen-3.8-27b"
+  ],
+  "response_mock_used": false,
+  "outbound_SMS_transport": "canonical fake Surge intercept; actual model reply retained privately",
+  "web_search_fixture": "unchanged canonical canada.ca eTA fixture",
+  "outcome": {
+    "passed": false,
+    "status": "FAILED",
+    "static_search_delegate_evaluator": {
+      "score": 1.0,
+      "passed": true
+    },
+    "no_known_fact_reask_evaluator": {
+      "score": 0.0,
+      "passed": false,
+      "reason": "Requested current residential address including country, while a country was already present in supplied profile context."
+    },
+    "all_six_nonreaction_calls_contained_profile_country": true,
+    "other_residential_address_fields_proven_known": false
+  },
+  "actual_actions": {
+    "grep_calls": 7,
+    "Travel_docs_retrieved": true,
+    "required_passport_and_visa_values_in_started_goal": true,
+    "new_agents_started": 1,
+    "outbound_supervisor_messages": 1,
+    "start_commit_round": 4,
+    "send_round": 4,
+    "accepted_completion_round": 5,
+    "round_cap_reached": false,
+    "final_message_summary": "Says Travel docs were found and the official application agent is starting; asks for passport-exact legal name, current residential address including country, and confirmation of a displayed email; promises approval before the CAD7 payment. Full message remains private."
+  },
+  "timing": {
+    "combined_task_evaluation_cleanup_seconds": 61.3,
+    "owning_stage_seconds": 95.6,
+    "outer_controller_monitor_seconds": 96.46900606155396,
+    "nested_clocks_not_added_as_independent_attempts": true
+  },
+  "cleanup": {
+    "canonical_verified": true,
+    "cleanup_root_count": 2,
+    "owned_agent_rows": 52,
+    "new_actual_native_generations": 1,
+    "actual_native_terminal_status": "TERMINATED",
+    "exact_positive_browser_sessions": 0,
+    "durable_archive_references": 2,
+    "terminal_and_archive_outboxes_empty_before_stop": true,
+    "canonical_stack_stop_exit": 0,
+    "owned_database_absent": true,
+    "observed_process_births_absent": 186,
+    "complete_descendant_capture_proved": false,
+    "diagnostics_exit_zero": 5,
+    "diagnostics_total": 6,
+    "diagnostic_warning": "Historical fixture-root cache diagnostic had no events; not converted into a PASS."
+  },
+  "private_capture": {
+    "SMS_dumps_readback_verified": 7,
+    "owned_database_dump_bytes": 31683284,
+    "persistent_archive_status": "COMPLETE; helper exit 0, full member/hash readback verified",
+    "archive_followup_will_preserve_original_run_and_source": true,
+    "raw_dumps_prompts_profile_values_and_environment_not_published": true,
+    "completed_archive_receipt": {
+      "cutoff_utc": "2026-10-18T20:08:24.657058+00:00",
+      "completed_at_utc": "2026-10-18T20:25:31.728030+00:00",
+      "archive_sha256": "3f03c6d2ba33c32283156bc972c6ec47acfa804f81555e203cb01448a66dc3ab",
+      "archive_bytes": 266759819,
+      "members_verified": 4459,
+      "source_paths_verified": 4214,
+      "all_source_copies_match": true,
+      "all_member_readback_sha256_verified": true,
+      "source_bytes_changed_during_capture": false,
+      "raw_evidence_private": true,
+      "receipt_created_after_archive_cutoff": true
+    },
+    "metadata_after_cutoff_excluded": [
+      "reconstructed failing request",
+      "followup scheduling metadata",
+      "user prompt update metadata"
+    ]
+  },
+  "independent_review": "Observed known-profile-country re-ask supported by unchanged criterion and actual native call input/output; no runtime fix or flakiness/model-intelligence causality claimed.",
+  "acceptance_limits": [
+    "Static retrieval/delegation succeeded in this run; the prior zero-agent failure was not reproduced here.",
+    "Overall task FAIL is retained; no evaluator, prompt, decoder, schema, model or timeout was changed.",
+    "No new behavior fix or deploy acceptance claimed. Existing closing-instruction approval remains in effect for its exact diff.",
+    "Full current deployment gates, capped-history completion reliability, bounded exact-HEAD review, merge and production verification remain outstanding."
+  ],
+  "recorded_cost_estimate_usd": 0.0,
+  "provider_and_infrastructure_cost_coverage_complete": false,
+  "stage_attempt_retained": {
+    "schema_version": 1,
+    "run_id": "20261012-234924-2614623",
+    "stage": "sms-fill-form-synced-user-rerun",
+    "started_at": "2026-10-18T20:02:33Z",
+    "finished_at": "2026-10-18T20:04:08Z",
+    "started_epoch": 1792353753.023012,
+    "finished_epoch": 1792353848.6173773,
+    "duration_seconds": 95.6,
+    "status": "failed",
+    "exit_code": 1,
+    "log": "logs/sms-fill-form-synced-user-rerun-20261018-200233-3083426.log"
+  },
+  "PR_merged": false,
+  "production_deployed": false
+}

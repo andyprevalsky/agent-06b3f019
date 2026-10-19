@@ -276,9 +276,11 @@ describe('integrations/api', () => {
         }),
       );
       await createLinkedInSyncAgentApi();
-      expect(body.goal).toMatch(/LinkedIn/);
-      expect(body.source).toBe('MAC_APP');
-      expect(body.price_limit_cents).toBe(500);
+      expect(body).toMatchObject({
+        goal: expect.stringMatching(/LinkedIn/),
+        source: 'MAC_APP',
+        price_limit_cents: 500,
+      });
     });
 
     it('throws payload error on non-OK', async () => {

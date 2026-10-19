@@ -1,0 +1,13 @@
+{
+  "originalBox": "c2fe16bb-7143-4625-b182-b1c22064ad61",
+  "originalHarness": "codex",
+  "replacementBox": "current devbox (hostname boxes; instance id not exposed by dvb-onbox whoami)",
+  "replacementThread": "https://boxes.dev/thread/thr_de7ad7c8ee81450ca84a6fd78b0fe806",
+  "harness": "claude",
+  "checkpointSha": "0bc688442e6a1de1772984176b292f9cbadf133d",
+  "handoffPath": "docs/handoffs/swap-harness-c2fe16bb-7143-4625-b182-b1c22064ad61.md",
+  "resumedAtUtc": "2026-10-18T03:26:22Z",
+  "verified": {"bundle": "git bundle verify OK", "checksums": "sha256 -c OK (bundle, untracked tar)"},
+  "firstContinuationAction": "Messaged coordinator ph798148z0ek3p1adb1qpv4kxd8ggn8n (status: delivered) requesting new thread IDs of Original600 root, WHM and Gmail peers, to then request root's frozen 87e514c0092e28 P+owner-proof source handoff.",
+  "result": "delivered; awaiting coordinator reply. No paid launches, no admission, no deployment until the source handoff is verified."
+}

@@ -230,6 +230,29 @@ reconnect controls. Original registration RED and reviewed-source compatibility
 receipts remain preserved. The parent independently confirmed source phases;
 this source qualification supplies no benchmark credit or original release proof.
 
+### October 13 coverage command source registration
+
+PR1473 changed only `front-end/package.json` within the recovery recipe:
+`test:coverage` now runs the actual app TypeScript check before unchanged
+Vitest coverage. The complete structural gate on `56e1e7133` rejected that
+unregistered recipe in its bootstrap, forensic and benchmark controls.
+
+An independent reviewer who did not author the manifest change compared all
+21 checkout inputs, 15 injected controls and three boot controls against the
+reviewed `508042952` source. Both `before-stack-launch` and
+`agent-network-index-bootstrap` remain unchanged and never invoke the coverage
+script. The existing native recipe helper produced fingerprint
+`d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda`.
+The append-only registration in `a8793a97a` preserves every older approval,
+phase predicate, ownership check and original receipt requirement.
+
+Fresh unchanged canonical scopes passed after committed registration:
+quiesced forensic 15 tests, bootstrap recovery 27 tests, and benchmark
+live-results 572 tests with four existing canonical skips. All three exact
+stage owners were absent at completion. Earlier failed results remain
+preserved. This qualifies the two existing early phases; it grants no
+benchmark acceptance credit or authority for a later execution phase.
+
 ### October 13 native cleanup receipt recipe registration
 
 Adding stable native identity to the local stack receipt writer in PR #1503
@@ -323,6 +346,24 @@ and provider cleanup. Final source/input qualification, review and merge remain
 pending. These new results do not grant a historical failed source or a
 pre-service-only canary benchmark credit.
 
+### October 14 reviewed source composition on PR1473
+
+Integrating main `9e36c9f1f` with the preserved PR1473 coverage command derives
+fingerprint `a6a1b58b4d679a971332ace36d66333549c62eb87c13e7209aa92a662b671933`.
+Two source audits used the existing native recipe helper without writing capture
+review markers. A reviewer who did not author the coverage prefix independently
+countersigned all 40 inputs: 39 match reviewed `c1606f37`, while the sole changed
+`front-end/package.json` is byte-identical to the independently reviewed `d4f0e43f`
+manifest. That manifest checks app TypeScript before unchanged Vitest coverage;
+neither authorized early phase invokes it.
+
+The append-only registration preserves every older entry and authorizes only
+`before-stack-launch` and `agent-network-index-bootstrap`. No validator, phase,
+receipt requirement, provider call or benchmark acceptance predicate changes.
+Private source hashes and the non-author countersign remain with the continuation
+archive. Source qualification supplies no benchmark credit; fresh canonical
+recovery gates remain necessary for the integrated runtime.
+
 ### October 15 cleanup-producer source qualification
 
 Source `f00cc265119f9df7136ec2e334872a22808a4283` changed the required-seed
@@ -414,6 +455,26 @@ The same bootstrap case then passed in 2.260 seconds. The complete unchanged boo
 Private evidence is under `.context/auth-deploy/repair-final-2a798af/bootstrap-recovery-rca/`: `actual-41-binding-vector.json`, `changed-bindings-unelided.diff`, `root-independent-finite-recipe-review.json`, `candidate-freeze.json`, `full-bootstrap-proof.json` and the single-case logs. Forensic proof is `.context/auth-deploy/repair-next-primary/forensic-policy-2a798-rca/final-proof.json`. An initial RCA telemetry command used unsupported `stage=reproduce` and failed; its shell nevertheless continued the baseline, an execution-order mistake retained in the record. The corrected actual `reproduce-diagnose` event was written afterward without backdating. No prior timing hook is claimed.
 
 These are private mechanism and source-policy results only. All original Group 3 failures, native outcomes, deadlines, model/task definitions and resource evidence remain immutable. Fresh integrated canonical verification is still required; no historical failure, native authentication task, paid replay, deployment or full Group 3 pass is inferred. Human instruction remains approval only at deployment and fixing actual failures rather than waiving them.
+
+### October 15 PR1473 source composition after current main integration
+
+The integrated source at `cea52afef` combines reviewed main cleanup with the
+previously reviewed PR1473 frontend coverage command. A non-author reconstructed
+all 40 executable bindings independently. Relative to reviewed `2fc56aea`, 39
+match exactly; only the entire frontend package manifest differs, and it is
+byte-identical to the reviewed `a6a1b58b` manifest. Relative to `a6a1b58b`, 39
+match and the sole changed entire `run.sh` matches `2fc56aea`. Phase and provenance
+validators remain byte-identical across both reviewed parents.
+
+The finite composite fingerprint
+`c6039c4e1d631c58df5999dbc5b9fc645e1984af337802ab32117465471b63dd`
+is independently countersigned only for `before-stack-launch` and
+`agent-network-index-bootstrap`. No later phase, wildcard, validator or receipt
+exception is added. The original three unregistered-source gate failures remain
+failed; fresh owning checks are required after this registration. The private
+audit retains the complete binding comparisons and independent reconstruction;
+its 121 archived files passed hash read-back. This source registration grants no
+benchmark acceptance credit.
 
 ### October 17 source-policy recurrence and browser-preflight phase closure
 

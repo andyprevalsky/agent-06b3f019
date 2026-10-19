@@ -15,7 +15,7 @@ sha256_file() {
     fi
 }
 # Authenticate the pinned vendor bytes before any native environment mutation.
-wheel_name="experiential-0.7.158+rose.bf75987e-py3-none-any.whl"
+wheel_name="experiential-0.7.158+rose.bf75987e.elapsed1-py3-none-any.whl"
 vendor="$repo_root/agents/vendor/world-model"
 expected_digest=""
 wheel_records=0
@@ -40,6 +40,18 @@ esac
     echo "Native wheel SHA-256 differs from SOURCES.txt" >&2
     exit 1
 }
+# Non-interactive shells often lack the user's uv install dir on PATH.
+uv() {
+    local candidate
+    for candidate in "$(type -P uv || true)" "$repo_root/agents/venv/bin/uv" "${HOME:+$HOME/.local/bin/uv}" "${HOME:+$HOME/.cargo/bin/uv}"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            "$candidate" "$@"
+            return
+        fi
+    done
+    echo "Native simulator setup requires uv: run 'agents/venv/bin/python -m pip install uv' (scripts/cloud-build.sh does this)" >&2
+    return 127
+}
 write_signature=false
 if [ -n "${WMH_NATIVE_PYTHON:-}" ]; then
     native_python="$WMH_NATIVE_PYTHON"
@@ -59,8 +71,8 @@ fi
 import importlib.metadata,sys
 assert sys.version_info >= (3,12), 'Native world model requires Python >=3.12'
 dist=importlib.metadata.distribution('experiential')
-# The vendored wheel's local label pins upstream commit bf75987e (see agents/vendor/world-model/SOURCES.txt).
-assert dist.version=='0.7.158+rose.bf75987e', 'Unexpected experiential version'
+# The vendored wheel's local label pins upstream commit bf75987e plus the reviewed patches (see agents/vendor/world-model/SOURCES.txt).
+assert dist.version=='0.7.158+rose.bf75987e.elapsed1', 'Unexpected experiential version'
 import fastapi, uvicorn
 PY
 if [ "$write_signature" = true ]; then

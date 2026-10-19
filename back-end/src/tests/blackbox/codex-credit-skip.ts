@@ -78,6 +78,23 @@ export function detectCodexCreditExhaustion(output: string, events: unknown[]): 
  * success sentinel AND every credential path is out of credits/quota. A run
  * that produced CODEX_E2B_DONE can never skip — success always wins.
  */
+/** The OAuth-revocation text that blocks a funding skip, for failure messages (null when none). */
+export function codexOauthRevocationSignal(output: string, events: unknown[]): string | null {
+  const haystacks: string[] = [output];
+  for (const event of events) {
+    const typed = event as { message?: unknown; reason?: unknown; error?: unknown };
+    const nestedError = (typed?.error as { message?: unknown } | null | undefined)?.message;
+    for (const field of [typed?.message, typed?.reason, typed?.error, nestedError]) {
+      if (typeof field === 'string' && field) haystacks.push(field);
+    }
+  }
+  for (const haystack of haystacks) {
+    const match = CODEX_OAUTH_REVOCATION_PATTERN.exec(haystack);
+    if (match) return haystack.slice(Math.max(0, match.index - 160), match.index + 200);
+  }
+  return null;
+}
+
 export function codexSmokeCreditSkipReason(output: string, events: unknown[]): string | null {
   if (output.includes('CODEX_E2B_DONE')) return null;
   // A revoked OAuth token needs reauthentication even if the fallback key is

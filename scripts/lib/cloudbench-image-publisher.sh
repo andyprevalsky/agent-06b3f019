@@ -112,17 +112,74 @@ cloudbench_image_verify_handoff() {
         --out-file "$completion.handoff.json" "${arguments[@]}"
 }
 
+# flyctl bounds only Depot builder provisioning (5 minutes); its BuildKit solve
+# and status stream have no deadline. When that stream stops delivering, the
+# remote builder can keep working (and publishing) while this client prints
+# nothing until the remote side closes the connection: 973 seconds in the
+# 2026-10-12 trial. Healthy publications never went quiet for longer than the
+# 81-second layer export, and every flyctl-internal silent wait is bounded at
+# 300 seconds, so a longer silence ends the attempt for the caller's retry.
+cloudbench_image_publish_idle_seconds() {
+    local value="${CLOUDBENCH_IMAGE_PUBLISH_IDLE_SECONDS:-360}"
+    case "$value" in
+        '' | *[!0-9]* | 0*)
+            echo "CLOUDBENCH_IMAGE_PUBLISH_IDLE_SECONDS must be a positive integer" >&2
+            return 2
+            ;;
+    esac
+    printf '%s\n' "$value"
+}
+
+cloudbench_image_publish_job_running() {
+    local job
+    while read -r job; do
+        [ "$job" != "$1" ] || return 0
+    done < <(jobs -pr)
+    return 1
+}
+
+# Run the publisher with its complete output in the private log. Return its
+# status, or 124 after it produced no output for the bound and its exact
+# process tree was terminated. Cancellation of the caller still owns this tree.
+cloudbench_image_publish_watched() {
+    local log="$1" idle child size observed="" progress_at
+    shift
+    idle="$(cloudbench_image_publish_idle_seconds)" || return $?
+    if ! declare -F cloudbench_terminate_tree_and_wait >/dev/null; then
+        source "$(dirname "${BASH_SOURCE[0]}")/cloudbench-env.sh" || return 2
+    fi
+    cloudbench_image_publish_child "$@" >"$log" 2>&1 &
+    child=$!
+    progress_at=$SECONDS
+    while cloudbench_image_publish_job_running "$child"; do
+        size="$(wc -c <"$log")" || size="$observed"
+        if [ "$size" != "$observed" ]; then
+            observed="$size"
+            progress_at=$SECONDS
+        elif [ $((SECONDS - progress_at)) -ge "$idle" ]; then
+            echo "Image publisher produced no output for ${idle}s; ending this attempt for the normal retry." >&2
+            cloudbench_terminate_tree_and_wait 30 "$child" || return 70
+            wait "$child" 2>/dev/null || true
+            echo "Image publisher produced no output for ${idle}s; ending this attempt for the normal retry." >>"$log"
+            return 124
+        fi
+        command sleep 1
+    done
+    wait "$child"
+}
+
 cloudbench_image_publish() {
     local client status=0 log resolve_log warning="" resolved=0 handoff_failed=0
     client="${IMAGE_PUBLISHER_CLIENT:-}"
     [ -n "$client" ] || client="$(cloudbench_image_publisher_client)" || return $?
     if [ -n "${CLOUDBENCH_IMAGE_COMPLETION_FILE:-}" ]; then
+        cloudbench_image_publish_idle_seconds >/dev/null || return $?
         log="$(mktemp "${CLOUDBENCH_IMAGE_COMPLETION_FILE%.json}.XXXXXX")" || return $?
         mv "$log" "$log.private.log" || { rm -f "$log"; return 1; }
         log="$log.private.log"
         chmod 600 "$log"
         echo "Private image publisher log: $log"
-        if cloudbench_image_publish_child "$client" "$@" >"$log" 2>&1; then
+        if cloudbench_image_publish_watched "$log" "$client" "$@"; then
             status=0
         else
             status=$?

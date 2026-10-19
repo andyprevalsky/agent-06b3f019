@@ -19,7 +19,14 @@ fi
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "$FLY_API_TOKEN" ] || exit 1
 export FLY_API_TOKEN
-FLY() { flyctl "$@"; }
+FLY() {
+    if [ "$#" = 5 ] && [ "$1" = machines ] && [ "$2" = list ] \
+        && [ "$3" = -a ] && [ "$4" = "$APP" ] && [ "$5" = --json ]; then
+        python3 -S "$SOURCE/cloudbench-campaign-machines.py" "$APP" "$SNAPSHOT_REFRESH_TIMEOUT"
+    else
+        flyctl "$@"
+    fi
+}
 SNAPSHOT_LOOP_PID=""
 finish() {
     local status=$?

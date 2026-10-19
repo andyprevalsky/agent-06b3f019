@@ -283,7 +283,9 @@ request_graceful_shutdown() {
     local signal_rc=0 signal_ignored_mask="unreadable" signal_caught_mask="unreadable" signal_process_group="unreadable"
     ACTIVE_COMMAND_SHUTDOWN_PENDING=1
     log "guest shutdown requested; draining benchmark root before stack teardown"
-    if [ -n "$ACTIVE_COMMAND_PID" ] && kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; then
+    # An already-cancelled command may exit (and be reaped) before a repeated
+    # request; run_with_heartbeat still owns its wait and exit status.
+    if [ -n "$ACTIVE_COMMAND_PID" ] && { [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ] || kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; }; then
         if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
             ACTIVE_COMMAND_SIGNALLED=1
             # Bash defers traps while a foreground `sleep` is running. The
@@ -339,7 +341,7 @@ fi
 source "$SEED_BUDGET_LIB"
 
 run_with_heartbeat() {
-    local label="$1" command_pid interval command_rc=0
+    local label="$1" command_pid interval command_rc=0 command_collected=0
     shift
     interval="${CLOUDBENCH_HEARTBEAT_SECONDS:-30}"
     # A background job launched with job control disabled inherits SIGINT as
@@ -366,15 +368,15 @@ run_with_heartbeat() {
             # Signals are ignored after the one canonical cancellation above,
             # so this wait cannot be shortened into premature stack teardown.
             wait "$command_pid" 2>/dev/null || command_rc=$?
+            command_collected=1
             break
         fi
         if kill -0 "$command_pid" 2>/dev/null; then
             log "$label heartbeat (pid=$command_pid)"
         fi
     done
-    if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
-        wait "$command_pid" 2>/dev/null || command_rc=$?
-    fi
+    # A signalled child reaped before the loop still has a saved status.
+    [ "$command_collected" = 1 ] || wait "$command_pid" 2>/dev/null || command_rc=$?
     if [ "$label" = benchmark ]; then
         ACTIVE_COMMAND_PID=""
     else
@@ -690,9 +692,9 @@ if [ -n "${CLOUDBENCH_CODEX_AUTH_SHA256:-}" ]; then
 fi
 
 # ── 0. Sanity: the volume + repo checkout must exist (created at box setup) ──
-if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; then
+if [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ] || { [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; }; then
     [ "$BENCH_SIMULATE" = 0 ] && [ -n "$REF" ] || { log "FATAL: fresh checkout requires an exact REAL task ref"; finish 1; }
-    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+    if ! CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT="${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not bootstrap requested ref on fresh storage"
         finish 1
     fi
@@ -722,7 +724,7 @@ step git_sync
 # box provisioning), so a plain fetch/checkout/reset needs NO token handling here.
 if [ -n "$REF" ]; then
     log "git-syncing + verifying $REPO_DIR → $REF"
-    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+    if ! CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT=0 CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not verify requested ref $REF"
         finish 1
     fi
@@ -733,7 +735,15 @@ unset CLOUDBENCH_GITHUB_TOKEN_B64
 # reset --hard does not remove untracked files created by an earlier uploaded
 # worktree patch. Remove only non-ignored untracked files; dependency/cache trees
 # are ignored and remain warm.
-if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -ffd 2>&1 | sed 's/^/   /'; then
+clean_exclusions=()
+if [ -e "$REPO_DIR/.cloudbench-deps-overlays" ] || [ -L "$REPO_DIR/.cloudbench-deps-overlays" ]; then
+    if ! bash "$SYNC_DEPS_SCRIPT" --verify-overlay-cache "$DEPS_DIR" "$REPO_DIR"; then
+        log "FATAL: invalid dependency overlay cache before worktree cleanup"
+        finish 1
+    fi
+    clean_exclusions=(-e '/.cloudbench-deps-overlays/')
+fi
+if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -ffd "${clean_exclusions[@]}" 2>&1 | sed 's/^/   /'; then
     log "FATAL: could not remove stale untracked worktree files"
     finish 1
 fi
@@ -852,6 +862,8 @@ chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || finish 1
 cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || finish 1
+cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
+    "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}" || finish 1
 cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
@@ -1102,6 +1114,12 @@ fi
 if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${TASK_WORKER_ENV[@]}")
 fi
+case "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}" in
+    ''|*[!0-9]*|0) ;;
+    # Controller-budgeted queue observation: N guests share the Temporal
+    # namespace's Visibility API budget with production workers.
+    *) STACK_ENV+=("AUTOSCALER_POLL_INTERVAL_SECONDS=$CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS") ;;
+esac
 if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
     # The probe executes no benchmark task. One Temporal worker proves stack
     # readiness without starting eight idle Python processes on a 4 GB guest

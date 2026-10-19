@@ -1,0 +1,92 @@
+{
+  "accepted": true,
+  "actual_recipe_path": "/home/boxes/rose/.context/stress600-root/hub-composed-actual-recipe.safe.json",
+  "actual_recipe_sha256": "294280aefa7d20895c6ab15535760bff7add7f4c066a1db9898d795adc69ddc1",
+  "approved_policy_delta": {
+    "32d40d2ad48903bbe0ccb958684529c9c2cb2dc48a96c2644e08f8795495f9fc": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ]
+  },
+  "fences_preserved": [
+    "Exact owned local Hub identity/lifecycle and actual requested run_id in served card.",
+    "All original30 attempts/2s HTTP/0.2s wait; task/profile/nativefloors/quotas/cleanup unchanged.",
+    "Actual600 distinct runpairs in one600member strictcohort still required for acceptance."
+  ],
+  "independent_review_control": {
+    "deselected": 1037,
+    "log_sha256": "fbd889eca2c32f9cb1cb6a63316ea67630dbfcf7033e496a7f4ab2444c3a0fb0",
+    "passed": 1,
+    "seconds": 1.4
+  },
+  "independent_review_path": "/home/boxes/rose-benchmark-infra-candidate/.context/hub-visibility-independent-e5.safe.json",
+  "independent_review_sha256": "856546017e346443a2147f42f80b5b589b62347ee7682be41c3f9428f6c205ac",
+  "limitations": [
+    "This approves the two pre-service source phases; actual600 execution/nativecapacity/RSS/billing/release remain unproven.",
+    "Historical3snapshotpublication failures retainunknown innercause; no timeout increase or speculative helper patch.",
+    "Source-only busy-index control and measuredCPUpressure do not prove sole historical rootcause."
+  ],
+  "merged_approved_fixture_ref": "c36fc8da037cb06018a119cbb9e2fc38897054a2",
+  "no_extra_phase_or_bypass": true,
+  "observed_epoch": 1791943546.299353,
+  "only_changed_runtime_binding": [
+    "scripts/run-bench-fleet"
+  ],
+  "pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "producer_controls": {
+    "causal_red": {
+      "failed": 1,
+      "seconds": 1.58
+    },
+    "composed_registered_private_source_family": {
+      "log_sha256": "fbec0a238e89926a52bcdc6eea99757062dcbaf33ad2883ef741dcd117923488",
+      "passed": 71,
+      "seconds": 21.81
+    },
+    "existing_real_hub_lifecycle": {
+      "passed": 4,
+      "seconds": 3.48
+    },
+    "focused_green": {
+      "passed": 2,
+      "seconds": 4.81
+    }
+  },
+  "provider_calls_during_review": 0,
+  "reviewed_runtime_component_ref": "e5bed7ea47f15b694584cbd07b164bc299901183",
+  "reviewer": "root with independent source review by existing deploy agent",
+  "runtime_base_ref": "347311777bae811aa35071994d322bf95ad34f4f",
+  "schema": "root-full600-exact-hub-source-review-v1",
+  "source_bindings": {
+    "back-end/package.json": "2b466d4362ccb48ae00a7d3f043ce49f3ed423a27c7bcbe6a207b7c3da72d2d1",
+    "back-end/scripts/apply-local-workflow-ddl.sh": "b349eb7350578aca283969360749e094b6f78b4b64b9707d74ac13ab47d96f36",
+    "back-end/scripts/ensure-agent-network-grep-indexes.ts": "653de4f229b9ea3bb71f8f6d2cc5de113d63e37e85899efb239f559d42edd709",
+    "back-end/scripts/ensure-fast-mode-cache-schema.ts": "085230371c95de56845ceb3bd4eef4948144cfab31231d4e06ac527320463f8f",
+    "front-end/package.json": "ac5d4c244d39877641ed9753cb18511ba958df94d0887d574ca189207c75a3c1",
+    "package.json": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
+    "scripts/cloudbench-campaign-mutation.py": "a0452d635ce446f4fd178f510081772fd0435e9ad1ccff5c14462c8adbd2bafc",
+    "scripts/cloudbench-guest-recovery.py": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
+    "scripts/cloudbench-port-lease.py": "183116af91e2044a91c3d497d4229db78caa8c867af408a3448fb15c58b021e1",
+    "scripts/cloudbench-run.sh": "55d4faec82afa676ecd6dde64dc5685508bc0f3c4ad42e466709b1a95a53635f",
+    "scripts/cloudbench-script-snapshot.py": "fc6fabcdf8724d28d5bedbf5c87019ca92d930beafbf817b489cc405d186bfbd",
+    "scripts/cloudbench-status-server.py": "6901d035b4b0ac76fff8faafa0fa015e69671c12ea3793d423277e79d05eadc3",
+    "scripts/ensure-workspace-dependencies.sh": "c5c13af190c43ec8dc88f743ed481c8c1121ad390c68bdfa9e98b89eb3970cb1",
+    "scripts/lib/fast-mode-cache-schema.sh": "154637d61a8728bbfb3dfe286b5202c9e89f5fdee8a2b168ffb76e715612590a",
+    "scripts/lib/local-pg-image.sh": "a5a3b3f57eaa4fc2fe1c2a32b65c830bd2a4d619bc2ec040608e2d02b23bb889",
+    "scripts/lib/ngrok-tunnel.sh": "d53a51a4e43e956ccd36f997fcfa15ffef2bcb9d33e3533e8c1673eda11e561e",
+    "scripts/lib/run-context.sh": "0be5db39d87319d11e3d2afc4ccea97581f46754021bee0f3020939788a0d22a",
+    "scripts/lib/run-process-cleanup.sh": "ecc491254ef4e0e7b1712215757045ddf797ca3414c2185e55e09e346690a338",
+    "scripts/lib/run-service-readiness.sh": "3b8a264ea7a785219faea9fcd1cf2ab37a53060a37951f95d4c0a00688d819b6",
+    "scripts/lib/seed-cache.sh": "87a4b83a73c58f67513b2e3402eeb27005a7c9bf7ef78dae039aa4161244e65e",
+    "scripts/lib/workspace-env.sh": "ea649a1212dab724c16f3da995c796ff099caa5dabbcb106c6a359260b5bc9d2",
+    "scripts/run-bench-campaign.py": "ae4af6d784c7ff735c1ba9596738037c5d4a4d40168a8e2cd35b558ec0670916",
+    "scripts/run-bench-cloud": "279aa310b9dda8e9ecdca5e1370657cb03f58790685b01cbb359c84b9facbabe",
+    "scripts/run-bench-fleet": "8d198611ebe2fcc603d096d291ab079e2fec436a2fff0f099444ff7265661f55",
+    "scripts/run.sh": "dc24bbb33bd7913e7f206ae2a148f09f387399cc3e9fbd7bfbaf97c7ebc676cc"
+  },
+  "source_fingerprint": "32d40d2ad48903bbe0ccb958684529c9c2cb2dc48a96c2644e08f8795495f9fc",
+  "source_ref": "8eafffddb437ab85eabd25e71c5eb471bdd0f4a2"
+}

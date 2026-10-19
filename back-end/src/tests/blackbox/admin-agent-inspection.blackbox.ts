@@ -60,12 +60,15 @@ async function main(): Promise<void> {
   const ownerUserId = `inspection-owner-${randomUUID()}`;
   const outsiderUserId = `inspection-outsider-${randomUUID()}`;
   const agentId = randomUUID();
+  // User.phone is unique: a per-run number keeps concurrent runs on a shared
+  // local database from colliding.
+  const ownerPhone = `+1555${String(Math.floor(Math.random() * 10_000_000)).padStart(7, '0')}`;
 
   await prisma.user.create({
     data: {
       userId: ownerUserId,
       name: 'Ada Lovelace',
-      phone: '+15555550101',
+      phone: ownerPhone,
       email: 'ada@example.com',
     },
   });
@@ -87,7 +90,7 @@ async function main(): Promise<void> {
     const context = readDetail(admin.data).inspection_context;
     if (context?.user_id !== ownerUserId) throw new Error('admin response omitted owner user id');
     if (context.name !== 'Ada Lovelace') throw new Error('admin response omitted owner name');
-    if (context.phone !== '+15555550101') throw new Error('admin response omitted owner phone');
+    if (context.phone !== ownerPhone) throw new Error('admin response omitted owner phone');
     if (context.email !== 'ada@example.com') throw new Error('admin response omitted owner email');
 
     const owner = await request(agentId, ownerUserId);

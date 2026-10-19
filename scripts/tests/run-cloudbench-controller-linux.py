@@ -276,6 +276,9 @@ def main() -> int:
             "outcome_publication",
             "seed_cache_path",
             "cloudbench_campaign_inventory_test",
+            "cloudbench_campaign_workspace_test",
+            "cloudbench_worker_qualification_test",
+            "cloudbench_worker_evidence_test",
             "cloudbench_dependency_sync_test",
         )
     ]

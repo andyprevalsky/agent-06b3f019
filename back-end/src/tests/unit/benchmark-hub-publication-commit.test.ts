@@ -399,3 +399,39 @@ test('600-member group deletion commits one catalog CAS and a failed commit leav
   );
   assert.deepEqual(coldRead(f.objects, []).catalog, []);
 });
+
+test('legacy zero-task group member with a non-array task list is still deletable', async (t) => {
+  const f = await fixture(t);
+  f.seed(['peer']);
+  // Pre-2026-10 writers stored a non-array task list verbatim and cataloged zero tasks.
+  const legacyBody = {
+    run_id: 'legacy-empty',
+    timestamp: '2026-09-01T00:00:00Z',
+    group_run_id: 'legacy-group',
+    tasks: { invalid: true },
+  };
+  const peer = { ...bundle('peer'), group_run_id: 'legacy-group' };
+  f.objects.set(legacy + 'runs/legacy-empty.json', JSON.stringify(legacyBody));
+  f.objects.set(legacy + 'runs/peer.json', JSON.stringify(peer));
+  f.objects.set(
+    legacy + 'index.json',
+    JSON.stringify([
+      { ...peer, live: false },
+      { ...legacyBody, tasks: [], live: false },
+      row('unrelated'),
+    ])
+  );
+  f.objects.set(legacy + 'runs/unrelated.json', JSON.stringify(bundle('unrelated')));
+  // A strict read without the zero-task summary still refuses the malformed body.
+  await assert.rejects(f.store.getRunBundleStrict('legacy-empty'), /Invalid Benchmark Hub run/);
+  assert.equal(await f.store.deleteRun('legacy-group'), true);
+  f.store._resetForTests();
+  assert.deepEqual(
+    (await f.store.listRunsStrict()).map((r) => r.run_id),
+    ['unrelated']
+  );
+  assert.deepEqual(
+    coldRead(f.objects, []).catalog.map((r: { run_id: string }) => r.run_id),
+    ['unrelated']
+  );
+});

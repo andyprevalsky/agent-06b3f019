@@ -8,6 +8,7 @@ classification: test-bug
 problem_class: fixture-environment-data-mismatch
 first_bad_boundary: Extracted Bash recovery functions execute under nounset without their controller bootstrap variables
 symptoms:
+  - "GIT_COMMON_DIR: unbound variable"
   - "FLEET_OWNER_PID_START: unbound variable"
   - "ROOT_DIR: unbound variable"
   - test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths times out
@@ -17,6 +18,7 @@ tags:
   - ownership
   - recovery
 sources:
+  - PR #1525, October 16 mixed-shape claim fixture recurrence
   - PR #1299
   - commit 50e6a8196a27cf84023c4c08493547bc133976c9
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
@@ -91,6 +93,10 @@ Local evidence: `.context/acceptance/lifecycle-tests.log`,
 The user requested completion of the existing PR and explicitly instructed
 that work continue without repeated permission questions.
 
+For the October 16 recurrence, preserve the original shape assertions and real
+admission guards, record subsequent failures, and do not attribute fixture
+failures to the original REAL600 run.
+
 ## Reusable lesson
 
 When testing extracted shell functions, reproduce the controller bootstrap
@@ -142,3 +148,40 @@ deadlines, recovery functions, and deploy registration are unchanged. No
 benchmark definition, model, prompt, evaluator, or production code changed.
 The repair supplies missing fixture data instead of adding a production
 exception; it has no runtime or 10,000-agent cost.
+
+## October 16 recurrence: mixed-shape claim omitted its Gitcommon
+
+After the independently recorded clone-admission fixture repair, the same full
+environment suite reached its mixed-shape pool replay and failed with
+`GIT_COMMON_DIR: unbound variable`. The current `claim_pool_machine` checks
+outgoing handoff exclusions before choosing a candidate, but the extracted
+fixture had never initialized that controller root. It also omitted the current
+reuse-proof path and verification helpers. These missing dependencies prevented
+the intended large/small Machine selection assertions from running.
+
+The unchanged registered command used Python 3.11.9 on PATH:
+
+```bash
+PATH="/home/boxes/rose/agents/venv/bin:$PATH" bash scripts/tests/cloudbench-env.test.sh
+```
+
+The RED receipt is
+`.context/pr1525-continuation/worktree-symlink-rca/env-fixture-missing-common-red.json`
+(exit 1, test SHA256
+`f8ee267f3e40a33ee3b1e6bcdfb24c38e28c4310839acdaaa51f98c4b33660d8`).
+The fixture now supplies a private temporary Gitcommon and extracts the actual
+proof-path and proof-verification helpers. Its empty common contains no outgoing
+handoff or reuse-proof record; the production guards execute with their normal
+semantics. Original large/small claim assertions remain unchanged.
+
+The full command then passed, with
+`All cloud benchmark environment checks passed.` The GREEN receipt is
+`env-fixture-pinned-green.json` in the same directory (exit 0, test SHA256
+`ad52ba01f17b1d59f20e31763a528c580f72b2c755b338edd31e4520bced6da6`).
+The stdout SHA256 is
+`9b5fe4706d2180d690cc09289872155fa74693307af7cdf6781e3fd749eb7dca`;
+raw stdout/stderr and the exact fixture diff are retained beside the receipts.
+Only the shell test changed. No production code, timeout, assertion or native
+operation changed. This is test-only dependency drift, not an original600 cause
+or qualification result. Archive search for `GIT_COMMON_DIR unbound variable`
+identified this existing bootstrap case, so the recurrence is appended here.

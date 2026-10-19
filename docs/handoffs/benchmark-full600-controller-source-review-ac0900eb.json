@@ -1,0 +1,58 @@
+{
+  "schema": "finite-borrowed-parent-inventory-source-review-v1",
+  "reviewed": true,
+  "reviewer": "Benchmark Infra root",
+  "source_ref": "aa9cf88824f429f6ecd6befd7ba830b3bfa3b2d5",
+  "source_review_fingerprint": "ac0900ebfd53787c910f42db3665f866ea946ebc4874f6db91594e57154d2dad",
+  "pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "actual_recipe": {
+    "ref": "aa9cf88824f429f6ecd6befd7ba830b3bfa3b2d5",
+    "recipe_sha256": "67849901bae039e52073efea5719dcdbbdefbcfeb9aa95b21333b8846c916141",
+    "fingerprint": "ac0900ebfd53787c910f42db3665f866ea946ebc4874f6db91594e57154d2dad"
+  },
+  "actual_recipe_receipt_sha256": "bfd430226ebd0f56f7077c1b58dfb5d1ce692fa2f69daeb9f2ff616aeb189ddc",
+  "root_review_sha256": "ba8d6469d22194fb853d22a037c44cd9ca40606bc161cef38afb5d0aaa683ac0",
+  "root_review": {
+    "source_ref": "aa9cf88824f429f6ecd6befd7ba830b3bfa3b2d5",
+    "base": "82b849eee20f9527426beb4f540d02553d83dc80",
+    "component_packet_sha256": "350a377ca94820b178d6a8cf8e211d40f43c939321b34dee9c38c5c4bbd95c02",
+    "observed_epoch": 1792097370.3366964,
+    "scope": "SCOPED_ACCEPT_BORROWED_PARENT_FEED",
+    "all29_git_materialized_pairs_verified": true,
+    "all_evidence_hashes_verified": true,
+    "standalone_body_exact_unchanged": true,
+    "independent_source_review": "a5e8b046acdd564294de5e36c5b8993456c629e9defb61664c8cf7594f449263",
+    "actual_recipe": {
+      "ref": "aa9cf88824f429f6ecd6befd7ba830b3bfa3b2d5",
+      "recipe_sha256": "67849901bae039e52073efea5719dcdbbdefbcfeb9aa95b21333b8846c916141",
+      "fingerprint": "ac0900ebfd53787c910f42db3665f866ea946ebc4874f6db91594e57154d2dad"
+    },
+    "approved_native_phases": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "owning_red_green": "same permanent test original82b FAIL9.82s -> repaired28PASS15.46s; standalone3PASS2.66s, producer evidence hash verified, no duplicate fresh tests claimed",
+    "archive": "normal root archive validate PASS; exact candidate case frontmatter unchanged; candidate full sparse checkout validate not claimed",
+    "historical_writer": "UNKNOWN",
+    "unchanged600_outcome": "PENDING",
+    "independent_org_quota_blocker": true,
+    "guest_source_unchanged": true,
+    "provider_calls": 0
+  },
+  "independent_final_source_review_sha256": "0aa83c346cf617772be5037d9885a73179208f7aa259bb394b9c1c2f9dded574",
+  "runtime_scope": {
+    "native25_changed_input": "scripts/run-bench-fleet: forward existing absolute clone-name lookup deadline to borrowed refresh",
+    "explicit_extra_source": "scripts/lib/cloudbench-inventory.sh borrowed-only stable healthy newer parent-generation wait; SHA256 af68b44183cb056c2dbbcb6be5c8e353e2380a12bc5cb683492cabd0e99d9945",
+    "unchanged_inputs": "Boot, DB, index, recovery, guest and app executable inputs retain prior reviewed bytes; standalone refresh body unchanged"
+  },
+  "limits": [
+    "Exact ac0900 fingerprint and these two existing phases only; retain 36b and every prior approval.",
+    "Borrowed wait keeps original refresh bound and caller absolute deadline, owner/birth/token checks and 75 semantics; no task/profile/timeout/TTL/acceptance weakening.",
+    "Actual28 producer/consumer controls plus3 standalone controls and unchanged permanent RED/GREEN qualify their scope only; original600 outcome remains pending.",
+    "Historical V41 native writer and independent provider organization quota remain separate unresolved operands.",
+    "No phase/guard/schema expansion, provider operation, paid retry or production environment change is authorized by this finite source review."
+  ]
+}

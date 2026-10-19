@@ -54,6 +54,7 @@ import {
   type CompletionChunk,
 } from '../../providers/rose';
 import { buildAnthropicBody, claudeAuthComplete } from '../../providers/rose/claudeAuth';
+import { FOUNDRY_REGION_ENV_NAMES } from '../../providers/rose/foundry';
 import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
 import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCerebrasRoute';
 import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
@@ -776,9 +777,10 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
   }
 
   const send = extracted.tools.find((tool) => tool.name === 'send_user_message');
-  const sendArgs = (
-    (send?.input_schema as Record<string, unknown>).properties as Record<string, unknown>
-  ).arguments as { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  const sendArgs = send?.input_schema as {
+    properties: Record<string, Record<string, unknown>>;
+    required?: string[];
+  };
   const replyTarget = sendArgs.properties.reply_to_message_id;
   assertEqual(replyTarget.type, 'string', 'native reply target remains a string');
   assert(
@@ -793,9 +795,13 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
 
   // Collapsing the union must not drop the model-facing field documentation.
   const startAgent = extracted.tools.find((tool) => tool.name === 'start_new_agent');
-  const startAgentArgs = (
-    (startAgent?.input_schema as Record<string, unknown>).properties as Record<string, unknown>
-  ).arguments as { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  // Parameters are flat, as in every Python tool model: the `arguments`
+  // wrapper of the response envelope must not reach the native tool schema.
+  const startAgentArgs = startAgent?.input_schema as {
+    properties: Record<string, Record<string, unknown>>;
+    required?: string[];
+  };
+  assert(!('arguments' in startAgentArgs.properties), 'native tool parameters must be flat');
   const budget = startAgentArgs.properties;
   assert(
     typeof budget.budget_dollars.description === 'string' &&
@@ -999,8 +1005,9 @@ async function testAnthropic_nullableRelaxationPreservesNonNullableRequired() {
   } as Parameters<typeof extractToolsFromResponseFormat>[0]);
   assert(extracted !== null, 'probe envelope must lift to a native tool');
 
-  const root = extracted.tools[0].input_schema as JsonSchemaNode;
-  const schema = root.properties?.arguments as JsonSchemaNode;
+  // `{ tool, arguments }` variants lift to flat native parameters.
+  const schema = extracted.tools[0].input_schema as JsonSchemaNode;
+  assert(!('arguments' in (schema.properties ?? {})), 'arguments wrapper must be flattened');
   assertEqual(
     JSON.stringify(schema.properties?.budget_dollars),
     '{"type":"number"}',
@@ -1911,6 +1918,8 @@ async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() 
   await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-test-key';
   process.env.ANTHROPIC_API_KEY = '';
+  // Region 1 only: a developer .env may configure AZURE_FOUNDRY_*_2.._9.
+  for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
   process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
@@ -1947,9 +1956,7 @@ async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() 
     restoreFetch();
     delete process.env.GPT_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.AZURE_FOUNDRY_ENDPOINT;
-    delete process.env.AZURE_FOUNDRY_API_KEY;
-    delete process.env.AZURE_FOUNDRY_DEPLOYMENTS;
+    for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
     await __resetGptApiKeyCooldown();
   }
 }

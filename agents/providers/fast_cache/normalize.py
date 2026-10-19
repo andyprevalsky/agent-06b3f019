@@ -787,6 +787,7 @@ WMH_POLICY_CACHE_IDENTITIES: dict[str, tuple[str, str]] = {
     "rose-outcome-distribution-v1": ("1", "650945bf68ee4ba6"),
     "rose-outcome-distribution-v2": ("2", "23feae1291f883f0"),
     "rose-outcome-distribution-v3": ("3", "3ace77b6b1a3a33c"),
+    "rose-outcome-distribution-v4": ("4", "dc3c757c601515ff"),
 }
 
 

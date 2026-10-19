@@ -24,6 +24,7 @@ from tools.web_search.config import (
     ACTIVITY_TIMEOUT_SECONDS,
     COST_CENTS_PER_QUERY,
     DEFAULT_MAX_TOKENS,
+    EXA_COST_CENTS_PER_QUERY,
     QUERY_DISPLAY_MAX_LENGTH,
     RETRY_BACKOFF_COEFFICIENT,
     RETRY_INITIAL_INTERVAL_SECONDS,
@@ -38,6 +39,18 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 FAST_CACHE_HIT_FIELD = "_fast_cache_hit"
 
+# Billed providers by SearchResult.provider. The keyless DDGS fallback is free;
+# results without a provider field predate multi-provider search (Parallel).
+_BILLED_PROVIDERS = {
+    "parallel-ai": (COST_CENTS_PER_QUERY, "Parallel AI Search"),
+    "exa": (EXA_COST_CENTS_PER_QUERY, "Exa Search"),
+}
+
+
+def _service_billing(result: Any) -> Optional[tuple[float, str]]:
+    provider = result.get("provider", "parallel-ai") if isinstance(result, dict) else "parallel-ai"
+    return _BILLED_PROVIDERS.get(provider)
+
 
 def _safe_time() -> float:
     """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
@@ -48,7 +61,7 @@ def _safe_time() -> float:
 
 
 class WebSearchManager(ToolManager):
-    """Manager for web search operations using Parallel AI's search capability."""
+    """Manager for web search operations (Parallel AI, then Exa, then keyless DDGS)."""
 
     tool_name = "web_search"
     read_only = True  # Research phase tool
@@ -138,7 +151,8 @@ class WebSearchManager(ToolManager):
             simulated = isinstance(result, dict) and bool(result.get("world_model_simulated"))
             if cache_hit:
                 result = {k: v for k, v in result.items() if k != FAST_CACHE_HIT_FIELD}
-            total_cost_cents = 0 if cache_hit or simulated else COST_CENTS_PER_QUERY
+            billing = None if cache_hit or simulated else _service_billing(result)
+            total_cost_cents = billing[0] if billing else 0
 
             message = format_tool_message(
                 params=tool_call, result=result, time_elapsed=elapsed_time, cost_cents=total_cost_cents
@@ -162,11 +176,7 @@ class WebSearchManager(ToolManager):
                 "result": result,
                 "usage": {
                     "llm": [],
-                    "service": (
-                        []
-                        if cache_hit or simulated
-                        else [{"cost_cents": total_cost_cents, "provider": "Parallel AI Search"}]
-                    ),
+                    "service": [{"cost_cents": billing[0], "provider": billing[1]}] if billing else [],
                 },
             }
 
@@ -302,9 +312,7 @@ async def web_search_activity(
         if stored is None:
             # Fast Mode read miss: soft-complete instead of live Parallel AI.
             # Restricted to exact-match fast_cache:on bench trees (mass-agent OAi).
-            if not await fast_cache_client.soft_complete_allowed_for_agent(
-                agent_id, fast_mode_goal
-            ):
+            if not await fast_cache_client.soft_complete_allowed_for_agent(agent_id, fast_mode_goal):
                 logger.info(
                     "fast_cache.web_search_miss_live",
                     key=cache_key,
@@ -314,10 +322,7 @@ async def web_search_activity(
             else:
                 logger.info("fast_cache.web_search_soft_complete", key=cache_key, query=query[:120])
                 return {
-                    "answer": (
-                        "Fast Mode cache miss for this web search. Returning without a "
-                        "live provider call."
-                    ),
+                    "answer": ("Fast Mode cache miss for this web search. Returning without a live provider call."),
                     "sources": [],
                     "query": query,
                     "provider": "fast-mode-soft-complete",

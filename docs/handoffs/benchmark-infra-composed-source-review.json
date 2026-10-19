@@ -1,0 +1,90 @@
+{
+  "schema": "benchmark-infra-independent-composed-source-review-v1",
+  "ref": "64f97bb63c36626d86516762dac3057d9ad7a7e5",
+  "source_fingerprint": "481f3dc3a58354c2a70c4f0e10f9bf76e845348c44210fc0d63126ef9ba64e5d",
+  "native_recipe_sha256": "ade71b448ad787562c747b17b513527f512d2aff0c92861fd4de6dfc05c33d13",
+  "actual_canonical_packed_input_validation": true,
+  "offline_fixture_not_provider_allocation": true,
+  "static_matches_canonical": true,
+  "bound_inputs": {
+    "checkout": {
+      "scripts/run-bench-cloud": "c42714c766b7d67367cf5712eae69642f3fecee930d3256fce6b0d1eeeaf7677",
+      "scripts/run-bench-fleet": "29e1ecdeb56dd627c67768981d55c0bf143b13d02efd034d26721cbf30307ca7",
+      "scripts/cloudbench-run.sh": "4f26fca65143cd91f59e2281343a7e987008eaf88de083a7002d27769162fb84",
+      "scripts/cloudbench-guest-recovery.py": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
+      "scripts/cloudbench-status-server.py": "6901d035b4b0ac76fff8faafa0fa015e69671c12ea3793d423277e79d05eadc3",
+      "scripts/run.sh": "dc24bbb33bd7913e7f206ae2a148f09f387399cc3e9fbd7bfbaf97c7ebc676cc",
+      "scripts/ensure-workspace-dependencies.sh": "c5c13af190c43ec8dc88f743ed481c8c1121ad390c68bdfa9e98b89eb3970cb1",
+      "scripts/lib/run-process-cleanup.sh": "2f90195d2015851e7070fb917347b9c3091afefd4aaf99d8ac56113b772e8cf0",
+      "scripts/lib/workspace-env.sh": "ea649a1212dab724c16f3da995c796ff099caa5dabbcb106c6a359260b5bc9d2",
+      "scripts/lib/ngrok-tunnel.sh": "d53a51a4e43e956ccd36f997fcfa15ffef2bcb9d33e3533e8c1673eda11e561e",
+      "scripts/lib/run-context.sh": "0be5db39d87319d11e3d2afc4ccea97581f46754021bee0f3020939788a0d22a",
+      "scripts/lib/run-service-readiness.sh": "3b8a264ea7a785219faea9fcd1cf2ab37a53060a37951f95d4c0a00688d819b6",
+      "scripts/lib/seed-cache.sh": "87a4b83a73c58f67513b2e3402eeb27005a7c9bf7ef78dae039aa4161244e65e",
+      "scripts/lib/fast-mode-cache-schema.sh": "154637d61a8728bbfb3dfe286b5202c9e89f5fdee8a2b168ffb76e715612590a",
+      "scripts/lib/local-pg-image.sh": "a5a3b3f57eaa4fc2fe1c2a32b65c830bd2a4d619bc2ec040608e2d02b23bb889",
+      "back-end/scripts/apply-local-workflow-ddl.sh": "b349eb7350578aca283969360749e094b6f78b4b64b9707d74ac13ab47d96f36",
+      "back-end/scripts/ensure-agent-network-grep-indexes.ts": "653de4f229b9ea3bb71f8f6d2cc5de113d63e37e85899efb239f559d42edd709",
+      "back-end/scripts/ensure-fast-mode-cache-schema.ts": "085230371c95de56845ceb3bd4eef4948144cfab31231d4e06ac527320463f8f",
+      "package.json": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
+      "back-end/package.json": "2b466d4362ccb48ae00a7d3f043ce49f3ed423a27c7bcbe6a207b7c3da72d2d1",
+      "front-end/package.json": "ac5d4c244d39877641ed9753cb18511ba958df94d0887d574ca189207c75a3c1"
+    },
+    "injected_controls": {
+      "scripts/cloudbench-benchmark-target.py": "8feb3e1e50e1fac0987bb5f09377e56bfdb0a269a5340b8e7826a852fd70e3cb",
+      "scripts/cloudbench-codex-auth.py": "62487ab6731a5f3109f758b24e4df642fe4657a9a488e1ac383792db13b4319d",
+      "scripts/cloudbench-current-run-artifact.py": "c89207b4235c9f36677e8637c645be529c1066c08b21e0b57e2a8acbb91e9ed1",
+      "scripts/lib/cloudbench-env.sh": "c1ae9594ab91707cfbab01dc6a039ecb382584070093bb527b4a3369c940e867",
+      "scripts/cloudbench-exact-session-cleanup.py": "0d467373baecd51c4156ea3f19965c1c973619e3e1ed208f01a25bfb3663d46e",
+      "scripts/cloudbench_execution_provenance.py": "7a7b13fe02546a20dfda816b2657984cdd94554cc2112567b9812b5efd145bd7",
+      "scripts/cloudbench-fetch-ref.sh": "cbe1dbcd7a9f663c6900650a08cd22df4e0ae52176ff8f5740836a725f2f2002",
+      "scripts/cloudbench-guest-recovery.py": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
+      "scripts/cloudbench-install-ngrok.sh": "a7ab1af892bf80a17e376fb0b3375b83616ae41e74377fe632e8bfe0436437a3",
+      "scripts/cloudbench-prepare-patch.sh": "6eee3196b3ce4b343e1f060f0b4c19b96ffb43503c8fd109c8864fff27468191",
+      "scripts/cloudbench-run.sh": "4f26fca65143cd91f59e2281343a7e987008eaf88de083a7002d27769162fb84",
+      "scripts/lib/cloudbench-seed-budget.sh": "39755cfc54558195892276a0398e35afb5261a3d57fcf1ff1f982ee598581611",
+      "scripts/cloudbench-sync-deps.sh": "2d135dbf419e1b6f283e3fdc6583aa97892a725eacf4e6451e29ecfd1deaef62",
+      "scripts/cloudbench-sync-prisma-client.sh": "55f20355603c81e6f9f0b403ed4803cd80487f8c63eb8fc9c7316034a66f07a9",
+      "scripts/cloudbench_catalog.py": "dd6accde96ca7e9168205131cd9f60791181d353d27743285285a7f206d0c265"
+    },
+    "boot_controls": {
+      "cloudbench-boot.sh": "9a20374020125945c74ed4a14d106af9b0718c87406b686d4acbfb01500f21b8",
+      "cloudbench-boot-payload.py": "a113476bcea06aac290418c9b39e4b996bdd1bbee91cb00a8d5f4a1d28a11594",
+      "cloudbench-status-server.py": "6901d035b4b0ac76fff8faafa0fa015e69671c12ea3793d423277e79d05eadc3"
+    }
+  },
+  "input_count": 39,
+  "reviewer_thread": "ph71gtg4ntdz4sd4xkzp8qqn2n8g7nss",
+  "utc": "2026-10-13T00:52:48.180952+00:00",
+  "reviewer_did_not_author_component_runtime_changes": true,
+  "baseline_ref": "7133565ba85531db4e0d25498d9a7a22d491291a",
+  "baseline_source_fingerprint": "9cef403be81636cdd2c4e897dab32e611097b9ad9e4a33ae1cc3f2060cf897af",
+  "unchanged_bound_inputs": 37,
+  "changed_bound_inputs": [
+    "scripts/run-bench-cloud",
+    "scripts/run-bench-fleet"
+  ],
+  "reviewed_controller_diff_sha256": "640fe654ac498c20b44d9d83fc7880116ddbaf57cdb318493c9424cd1fe82732",
+  "approved_phases": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "phase_reason": "All 37 guest boot, packed driver/recovery, stack, dependency, database/index and service-boundary controls are byte-identical to the committed independently reviewed main recipe. The two changed bound controller files preserve original execution provenance, exact native ownership, recovery barriers and service logs; changes are donor snapshot identity/reuse, image attempt publication tags, absent-evidence diagnostics and parent-feed admission under the unchanged 300-second clock. No controller change injects guest code or changes the pre-stack/index-to-public-tunnel interval. Both phase assertions remain conditioned on exact original capture, absence/ACK requirements and source hash binding.",
+  "component_refs": {
+    "capture": "7d535c0440fb22543dc50818a6423d502e22742e",
+    "hub": "c8dc3e98d1da98d93b2feab2f1c3f098cb98f4ad",
+    "inventory": "c47ca03838ac9830cddab05aecc357cd0639a607"
+  },
+  "independent_checks": {
+    "post_canary": "18 passed,43 deselected,8.76s",
+    "capture": "43 passed,884 deselected,29.97s",
+    "canonical_source_binding": "native_recipe verifies packed controls and matches static fingerprint; offline only"
+  },
+  "not_certified": [
+    "native allocation",
+    "paid deployment smoke",
+    "production outcome",
+    "LIVE50 credit"
+  ],
+  "original_trial_credit": 0
+}

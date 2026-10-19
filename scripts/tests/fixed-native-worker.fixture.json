@@ -1,0 +1,126 @@
+{
+  "config": {
+    "env": {
+      "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY": "sanitized-test-value",
+      "BENCHMARK_FAST_MODE_CACHE": "sanitized-test-value",
+      "BENCHMARK_FRONTEND_URL": "sanitized-test-value",
+      "BENCHMARK_HUB_PARENT_RUN_ID": "sanitized-test-value",
+      "BENCHMARK_PEAK_FLY_MACHINES": "sanitized-test-value",
+      "BENCHMARK_REPORT_FRONTEND_URL": "sanitized-test-value",
+      "BENCHMARK_VM_USD_PER_HOUR": "sanitized-test-value",
+      "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS": "sanitized-test-value",
+      "BENCH_DASHPORT": "sanitized-test-value",
+      "BENCH_MAX_CONCURRENCY": "sanitized-test-value",
+      "BENCH_SIMULATE": "sanitized-test-value",
+      "BENCH_TASKS_B64": "sanitized-test-value",
+      "CLOUDBENCH_BARRIER_TOKEN": "sanitized-test-value",
+      "CLOUDBENCH_BENCHMARK_TARGET_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_BOOT": "sanitized-test-value",
+      "CLOUDBENCH_BOOT_PAYLOAD_FILE": "sanitized-test-value",
+      "CLOUDBENCH_BOOT_PAYLOAD_SHA256": "sanitized-test-value",
+      "CLOUDBENCH_CATALOG_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_CODEX_AUTH_HELPER": "sanitized-test-value",
+      "CLOUDBENCH_CODEX_AUTH_MACHINE_ID": "sanitized-test-value",
+      "CLOUDBENCH_CODEX_AUTH_SHA256": "sanitized-test-value",
+      "CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_ENV_HELPER": "sanitized-test-value",
+      "CLOUDBENCH_EXACT_SESSION_CLEANUP_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_EXECUTION_PROVENANCE_FILE": "sanitized-test-value",
+      "CLOUDBENCH_EXECUTION_PROVENANCE_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_FAST_CACHE_READ_ONLY": "sanitized-test-value",
+      "CLOUDBENCH_FETCH_REF_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS": "sanitized-test-value",
+      "CLOUDBENCH_FRESH_VOLUME": "sanitized-test-value",
+      "CLOUDBENCH_GITHUB_TOKEN_B64": "sanitized-test-value",
+      "CLOUDBENCH_GUEST_RECOVERY_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_INFRA_PROBE": "sanitized-test-value",
+      "CLOUDBENCH_NGROK_INSTALL_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_PREPARE_PATCH_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE": "sanitized-test-value",
+      "CLOUDBENCH_RUN_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_RUN_TOKEN": "sanitized-test-value",
+      "CLOUDBENCH_SEED_BUDGET_LIB": "sanitized-test-value",
+      "CLOUDBENCH_START_BARRIER": "sanitized-test-value",
+      "CLOUDBENCH_START_BARRIER_WAIT_SECONDS": "sanitized-test-value",
+      "CLOUDBENCH_STATUS_PORT": "sanitized-test-value",
+      "CLOUDBENCH_STATUS_SERVER_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_SYNC_DEPS_SCRIPT": "sanitized-test-value",
+      "CLOUDBENCH_SYNC_PRISMA_SCRIPT": "sanitized-test-value",
+      "CODEX_AUTH_PATH": "sanitized-test-value",
+      "CONDUCTOR_WORKSPACE_NAME": "sanitized-test-value",
+      "LOCAL_PATCH_B64": "sanitized-test-value",
+      "LOCAL_PATCH_COMPRESSION": "sanitized-test-value",
+      "LOCAL_PATCH_FILE": "sanitized-test-value",
+      "LOCAL_PATCH_SHA256": "sanitized-test-value",
+      "LOCAL_PATCH_TRANSPORT_SHA256": "sanitized-test-value",
+      "REF": "sanitized-test-value",
+      "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "sanitized-test-value",
+      "WMH_MODEL_NAME": "sanitized-test-value"
+    },
+    "files": [
+      {
+        "guest_path": "/cloudbench-status-server.py",
+        "raw_value": "c2FuaXRpemVk"
+      },
+      {
+        "guest_path": "/cloudbench-boot.sh",
+        "raw_value": "c2FuaXRpemVk"
+      },
+      {
+        "guest_path": "/cloudbench-boot-payload.py",
+        "raw_value": "c2FuaXRpemVk"
+      },
+      {
+        "guest_path": "/cloudbench-boot-payload.json.gz",
+        "raw_value": "c2FuaXRpemVk"
+      }
+    ],
+    "guest": {
+      "cpu_kind": "performance",
+      "cpus": 1,
+      "memory_mb": 2048
+    },
+    "image": "registry.fly.io/navi-whisper-lux-bench:cloudbench-warm-20261013-185541-910685@sha256:c9e5a26607181680d9b4c3d35eafe002b2bdc3858cb896feb501eb9ad67ece14",
+    "init": {
+      "cmd": [
+        "sleep",
+        "infinity"
+      ]
+    },
+    "mounts": [
+      {
+        "encrypted": true,
+        "name": "cloudbench_t10_ord_85a7e2c",
+        "path": "/data",
+        "size_gb": 40,
+        "volume": "vol_4m3mkl5kdj5dqodv"
+      }
+    ],
+    "restart": {
+      "policy": "no"
+    },
+    "services": [
+      {
+        "force_instance_key": null,
+        "internal_port": 8011,
+        "ports": [
+          {
+            "handlers": [
+              "http",
+              "tls"
+            ],
+            "port": 443
+          }
+        ],
+        "protocol": "tcp"
+      }
+    ]
+  },
+  "id": "86549d6aed9358",
+  "image_ref": {
+    "digest": "sha256:c9e5a26607181680d9b4c3d35eafe002b2bdc3858cb896feb501eb9ad67ece14"
+  },
+  "instance_id": "sanitized-instance",
+  "name": "cloudbench-e03fbdfdd76444ca8bdfce47",
+  "state": "stopped"
+}

@@ -104,6 +104,11 @@ GATES = (
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
     Gate("auto-rca-workflow", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
+    Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
+    Gate(
+        "benchmark-provider-capacity",
+        ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
+    ),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate(
@@ -172,8 +177,41 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-prestack-recovery.test.py"),
     ),
     Gate(
+        "cloudbench-explicit-idle-admission",
+        ("python3", "scripts/tests/cloudbench-explicit-idle-admission.test.py"),
+    ),
+    Gate(
+        "cloudbench-fixed-native-worker",
+        ("python3", "scripts/tests/cloudbench-fixed-native-worker.test.py"),
+    ),
+    Gate(
+        "cloudbench-protected-resources",
+        ("python3", "scripts/tests/cloudbench-protected-resources.test.py"),
+    ),
+    Gate(
+        "cloudbench-pool-run-token",
+        ("python3", "scripts/tests/cloudbench-pool-run-token.test.py"),
+    ),
+    Gate(
+        "cloudbench-live-primary-return",
+        ("python3", "scripts/tests/cloudbench-live-primary-return.test.py"),
+    ),
+    Gate(
+        "cloudbench-primary-exact-shape-reuse",
+        ("python3", "scripts/tests/cloudbench-primary-exact-shape-reuse.test.py"),
+    ),
+    Gate(
+        "cloudbench-maintenance-env",
+        ("python3", "scripts/tests/cloudbench-maintenance-env.test.py"),
+    ),
+    Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
+    Gate(
         "cloudbench-bootstrap-recovery",
         ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"),
+    ),
+    Gate(
+        "cloudbench-static-service-observation",
+        ("python3", "scripts/tests/cloudbench-static-service-observation.test.py"),
     ),
     Gate(
         "wait-for-code-review",

@@ -43,6 +43,7 @@
 
 import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
+import { phoneFormCases } from './sms-webhook.phone-forms.case';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -50,8 +51,7 @@ const CASE_CONCURRENCY = Number(
   process.env.BLACKBOX_TEST_CASE_CONCURRENCY ?? process.env.CONTRACT_TEST_CASE_CONCURRENCY ?? 30
 );
 
-// Direct Prisma client for assigning a phone number to a User so the webhook
-// hits the "known phone" branch.
+// Direct Prisma client: assigns phones to Users so the webhook hits known-phone paths.
 const prisma = new PrismaClient();
 
 // ==================== TEST INFRASTRUCTURE ====================
@@ -443,13 +443,7 @@ function uniqueSmsPhone(): string {
  */
 async function provisionUserWithPhone(phone: string): Promise<string> {
   const userId = `bb-sms-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
-  await prisma.user.create({
-    data: {
-      userId,
-      phone,
-      isAnonymous: true,
-    },
-  });
+  await prisma.user.create({ data: { userId, phone, isAnonymous: true } });
   return userId;
 }
 
@@ -733,6 +727,7 @@ async function runAll() {
       name: 'coverage -- /clear from known phone clears SmsSession',
       fn: testCoverage_clearCommandFromKnownPhone,
     },
+    ...phoneFormCases({ postInbound, uniqueSmsPhone }),
     {
       name: 'coverage -- code-like approval routes to supervisor',
       fn: testCoverage_codeLikeApprovalRoutesToSupervisor,

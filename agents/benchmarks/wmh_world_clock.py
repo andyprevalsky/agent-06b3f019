@@ -5,7 +5,11 @@
     shared time = min(running agents' times ∪ waiting agents' deadlines)
 
 A parent idle on live children (it has not acted since spawning them) is
-excluded from shared time and resumes at the latest child's finish; a parent
+excluded from shared time; each finished child moves it to at least that
+child's finish, so it resumes at the latest child's finish. A parent acting
+beside its children moves to a child's finish only when it receives that
+child's result. A parent blocked in a call awaiting child results (hold ..
+release) holds on its children like an idle one, even if it acted before; a parent
 that keeps acting beside its children holds shared time like any agent. When every included agent waits, shared
 time is the earliest deadline, so the earliest waiter always wakes (no
 deadlock). Model thinking takes no world time. Updates are heap-backed:
@@ -28,6 +32,8 @@ class _Agent:
     acted: bool = False
     live_children: set = field(default_factory=set)
     acting: bool = True
+    # Open calls in which this agent is blocked awaiting its children's results.
+    holds: set = field(default_factory=set)
     children_finish_ms: int = 0
     version: int = 0
     event: asyncio.Event | None = None
@@ -44,8 +50,13 @@ class WorldClock:
     # -- state ---------------------------------------------------------------
 
     @staticmethod
+    def _holding(agent: _Agent) -> bool:
+        """Idle on live children, or blocked in a call awaiting their results."""
+        return bool(agent.live_children) and (not agent.acting or bool(agent.holds)) and agent.deadline_ms is None
+
+    @staticmethod
     def _key(agent: _Agent) -> int | None:
-        if agent.done or (agent.live_children and not agent.acting and agent.deadline_ms is None):
+        if agent.done or WorldClock._holding(agent):
             return None
         return agent.deadline_ms if agent.deadline_ms is not None else agent.time_ms
 
@@ -148,10 +159,43 @@ class WorldClock:
             parent = self._agents[agent.parent]
             parent.live_children.discard(agent_id)
             parent.children_finish_ms = max(parent.children_finish_ms, agent.time_ms)
-            if not parent.live_children:
+            if not parent.acting:
+                # A parent idle on its children resumes at their finish. An
+                # acting parent keeps its own time until it receives the result.
                 parent.time_ms = max(parent.time_ms, parent.children_finish_ms)
             self._touch(agent.parent)
         self._release()
+
+    def hold(self, agent_id: str, hold_id: str) -> int:
+        """The agent is blocked in a call awaiting its children's results; idempotent per hold_id."""
+        self.register(agent_id)
+        agent = self._agents[agent_id]
+        if hold_id not in agent.holds:
+            agent.holds.add(hold_id)
+            self._touch(agent_id)
+            self._release()
+        return agent.time_ms
+
+    def release(self, agent_id: str, hold_id: str, children) -> int:
+        """The awaiting call returned with these children's results: receive them and resume acting."""
+        self.register(agent_id)
+        agent = self._agents[agent_id]
+        agent.holds.discard(hold_id)
+        if not agent.holds:
+            agent.acting = True
+        return self.receive(agent_id, children)
+
+    def receive(self, agent_id: str, children) -> int:
+        """The agent receives finished children's results: it moves to their finish."""
+        self.register(agent_id)
+        agent = self._agents[agent_id]
+        for child_id in children:
+            child = self._agents.get(child_id)
+            if child is not None and child.done and child.parent == agent_id:
+                agent.time_ms = max(agent.time_ms, child.time_ms)
+        self._touch(agent_id)
+        self._release()
+        return agent.time_ms
 
     async def wait(
         self,
@@ -196,7 +240,7 @@ class WorldClock:
         def state(agent: _Agent) -> str:
             if agent.done:
                 return "done"
-            if agent.live_children and not agent.acting and agent.deadline_ms is None:
+            if WorldClock._holding(agent):
                 return "waiting_on_children"
             return "waiting" if agent.deadline_ms is not None else "running"
 

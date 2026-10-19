@@ -18,6 +18,7 @@ import {
 } from './errors';
 import { CHAT_TIMEOUT_MS, clearsChatStallGuard } from './cerebrasRoute';
 import { parseOpenAISSE } from './streaming';
+import { openAiChatToolChoice, openAiChatTools } from './toolContract';
 import { postOpenRouterStream } from './transport';
 import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
@@ -85,6 +86,7 @@ export function buildOpenRouterFastChatBody(
   options: CompletionOptions,
   requestId: string
 ): Record<string, unknown> {
+  const tools = openAiChatTools(options.tools);
   return {
     model: OPENROUTER_FAST_CHAT_MODEL,
     messages: normalizeOpenAiToolCalls(options.messages),
@@ -99,8 +101,10 @@ export function buildOpenRouterFastChatBody(
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),
-    ...(options.tools ? { tools: options.tools } : {}),
-    ...(options.tool_choice !== undefined ? { tool_choice: options.tool_choice } : {}),
+    ...(tools ? { tools } : {}),
+    ...(tools && options.tool_choice !== undefined
+      ? { tool_choice: openAiChatToolChoice(options.tool_choice, OPENROUTER_FAST_CHAT_MODEL) }
+      : {}),
   };
 }
 
