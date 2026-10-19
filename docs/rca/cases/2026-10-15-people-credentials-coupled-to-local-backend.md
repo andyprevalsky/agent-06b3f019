@@ -10,15 +10,22 @@ first_bad_boundary: The worker selected BACKEND_API_URL as the credential author
 symptoms:
   - LANTERN_NOT_CONNECTED
   - Local broker used instead of configured central authority
+  - 'Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED'
+  - 'GET /api/integrations/lantern-people/credentials/token -> 404'
+  - 27 of 27 lantern-people jobs hit the 300s backstop in a cloud sharded run
 tags:
   - lantern
   - credential-broker
   - isolated-workers
+  - benchmark-stacks
 sources:
   - commit c6117542139ec0256f47de02a53e68a321d8e26a
   - task .context/lantern-broker-rca-c611/.context/broker-rca/red-checkpoint.json
   - task .context/lantern-broker-rca-c611/.context/broker-rca/proposal.json
-repro: cd agents && python scripts/run_blackbox_tests.py people-search
+  - task original600-1792433794419199295
+  - agent 8580b4d6-9124-44ce-9f7e-d3a26fd6b7eb
+  - agent c2a7b71b-31d0-42cd-abfe-7ed98ebd3920
+repro: cd agents && python scripts/run_blackbox_tests.py people-search; bash scripts/tests/cloudbench-env.test.sh; scripts/run-bench --local lantern-people-discovery
 status: fixed
 ---
 
@@ -64,10 +71,70 @@ configuring and propagating the broker origin and a compatible machine key, and
 activating the intended server-side grant. These local tests do not assert that
 those operational prerequisites have been completed.
 
+## Recurrence 2026-10-19: benchmark stacks never activated the broker
+
+In cloud sharded run original600-1792433794419199295 (source f9c01f05c), all 27
+lantern-people discovery, enrichment and pagination jobs ended PAUSED at the 300s
+wall-clock backstop (the scorecard's 28th backstop was a grep-agent-trajectories
+job from a separate cluster), with $0.08 metered LLM cost for 36 jobs. This was not a
+stall. Every one of 117 people_search results across the 27 jobs was
+`Lantern People: LANTERN_NOT_CONNECTED`, with zero successes. The agent
+re-spawned explore agents and each verifier pass took 80-110s until the
+backstop. The guest agents/back-end env files set none of PEOPLE_API_TOKEN,
+PEOPLE_CREDENTIAL_BROKER_URL or LANTERN_PEOPLE_SHARED_USER_ID. The
+worker therefore asked the guest's own backend
+(`GET /api/integrations/lantern-people/credentials/token -> 404`), and that
+backend's canonical seed deliberately has no lantern_people row. Production
+held the CONNECTED grant for the benchmark user. Its last refresh, one minute
+before the last recorded local pass on 2026-10-16, is consistent with that pass
+reaching the central broker; its run record was not retained, so the exact
+credential path of those passes is unverified.
+
+Why the earlier fix did not hold: it added an optional broker with a blank
+default and left "operational broker activation" pending. Production worker
+plans bind the broker origin, but `run.sh --benchmark`, which both
+`run-bench --local` and every cloud guest launch, never did. No regression
+asserted that a benchmark stack's worker has a credential authority.
+
+Repro: `scripts/run-bench --local lantern-people-discovery` on unchanged
+origin/main 7441b41f4 failed (Timeout after 333s, 3x LANTERN_NOT_CONNECTED,
+agent 8580b4d6-9124-44ce-9f7e-d3a26fd6b7eb). The new owning case in
+`scripts/tests/cloudbench-env.test.sh` executes run.sh's actual fragment and
+failed before the fix.
+
+Fix: in benchmark mode, run.sh exports PEOPLE_CREDENTIAL_BROKER_URL as the same
+central origin that production worker plans bind, through
+`cloudbench_people_credential_broker_default`, unless a broker or bearer is
+configured in the environment or agents/.env. Ordinary dev stacks are unchanged.
+The identical command then passed in 82s with one successful people_search
+(agent c2a7b71b-31d0-42cd-abfe-7ed98ebd3920). The regression passed five
+consecutive unchanged runs and is run by /deploy whenever scripts/run.sh or the
+cloudbench env helper changes.
+
+Scale and blast radius: each people_search makes one machine-authenticated GET
+to the central broker, the same call production workers make. Refresh stays
+single-owner under the existing server-side claim fence, so benchmark width does
+not add refreshes. During a refresh window concurrent callers receive the
+existing 503 LANTERN_REFRESH_IN_PROGRESS. A failed refresh still fences the one
+production grant until a human reconnects; benchmarks now share that grant with
+production workers rather than adding a second lineage.
+
+Still open: the tasks declare no credential dependency (`secrets: []`) and no
+runner preflight checks it, so a missing credential still costs the full
+backstop as an agent failure instead of failing fast as configuration. Adding
+that needs a reviewed task-definition and runner change.
+
+Golden reference: claude-code-src/src/utils/auth.ts:1447 (single locked
+refresher), codex/codex-rs/app-server/src/external_auth.rs:85 (refresh delegated
+to the grant owner), hermes-agent/hermes_cli/auth_codex.py:172 (refresh written
+back to the one root store), and openclaw/src/gateway/worker-environments/credential-broker.ts:29
+(workers receive only short-lived credentials). The fix converges on that shared
+pattern: one owner holds the grant and workers get short-lived tokens.
+
 ## Human feedback
 
 None recorded.
 
 ## Reusable lesson
 
-Represent credential authority separately from application routing when isolated workers must share one durable refresh lineage.
+Represent credential authority separately from application routing, and make every isolated launcher, benchmark stacks included, bind that authority rather than leaving it blank.

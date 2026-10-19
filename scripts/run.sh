@@ -63,6 +63,21 @@ BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
 # path already exports BENCHMARK_ISOLATED_RUN; re-exporting here is idempotent.
 export BENCHMARK_MODE BENCHMARK_ISOLATED_RUN
 
+# People credential authority.
+# Local isolated and cloud benchmark stacks give the worker their own backend,
+# whose seeded database never holds a rotating Lantern grant. Point the worker
+# at the central broker, as production workers are, unless a broker or bearer
+# is configured explicitly.
+if $BENCHMARK_MODE; then
+    _people_broker="$(cloudbench_people_credential_broker_default "$SCRIPT_DIR/../agents/.env")"
+    if [ -n "$_people_broker" ]; then
+        export PEOPLE_CREDENTIAL_BROKER_URL="$_people_broker"
+        echo "🔑 People credentials: central broker $_people_broker"
+    fi
+    unset _people_broker
+fi
+# End people credential authority.
+
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
 IS_MAC=false
 [ "$(uname)" = "Darwin" ] && IS_MAC=true
