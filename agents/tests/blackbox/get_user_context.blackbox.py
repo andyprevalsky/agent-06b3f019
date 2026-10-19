@@ -1027,16 +1027,15 @@ async def test_readable_inbox_scope_transport_and_formatter():
     def formatted(rows):
         return _format_user_context([], {}, [], [], integrations=rows)
     result = formatted(integrations)
-    assert "gmail: configured@example.test" in result
-    assert "Configured OTP inboxes: none" in result, "connected flag must not hide an explicitly empty readable set"
+    assert "gmail" not in result, "an unreadable Gmail is not a connected integration"
     integrations[0]["readableInboxEmails"] = ["readable@example.test"]
     result = formatted(integrations)
-    assert "Configured OTP inboxes: readable@example.test" in result
-    assert "Configured OTP inboxes: configured@example.test" not in result
+    assert "- gmail: readable@example.test" in result, "Gmail lists exactly the readable inboxes"
+    assert "configured@example.test" not in result
     del integrations[0]["readableInboxEmails"]
-    assert "Configured OTP inboxes:" not in formatted(integrations), "legacy absent is unknown, not empty"
+    assert "- gmail: configured@example.test" in formatted(integrations), "legacy absent keeps the configured listing"
     integrations[0]["readableInboxEmails"] = None
-    assert "Configured OTP inboxes:" not in formatted(integrations)
+    assert "- gmail: configured@example.test" in formatted(integrations)
     assert domains == []
 
 
