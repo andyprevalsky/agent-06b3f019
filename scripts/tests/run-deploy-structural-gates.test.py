@@ -620,6 +620,7 @@ elif args[:2]==['machine','run']:
     import subprocess
     uploaded=dict(arg.split('=',1) for i,arg in enumerate(args) if i and args[i-1]=='--file-local')
     subprocess.run(['bash','-n',uploaded['/tmp/gate.sh']],check=True)
+    if os.environ.get('GATE_TEST_SCRIPT_COPY'): Path(os.environ['GATE_TEST_SCRIPT_COPY']).write_bytes(Path(uploaded['/tmp/gate.sh']).read_bytes())
     if os.environ.get('GATE_TEST_VOLUME_FAULT')=='machine-failed': print('provider refused VM');raise SystemExit(6)
 
     if os.environ.get('GATE_TEST_EXPORT')=='1':
@@ -883,6 +884,35 @@ else: print('origin/fixture')
         self.assertIn("GATE_WORKSPACE_VOLUME_ID=vol_fixture123",run)
         self.assertFalse(any(row[:2] in (["machine","destroy"],["volumes","destroy"]) for row in calls))
         self.assertIn("GATE_WORKSPACE_VOLUME_RETAINED",result.stdout+result.stderr)
+
+    def test_root_workspace_custody_leaves_repo_context_writable_by_runtime_user(self):
+        # The generated guest script hands /tmp/gate to the runtime user and then
+        # records workspace custody as root. The runtime's first controller step
+        # writes its supervisor files under repo/.context, so custody must not
+        # leave that directory root-owned (polar70 post-deploy step-1 EACCES).
+        with tempfile.TemporaryDirectory(prefix="gate-custody-uid-") as temporary:
+            base=Path(temporary);copy=base/"gate.sh"
+            with patch.dict(os.environ,{"GATE_TEST_SCRIPT_COPY":str(copy)}):
+                result,_=self._run(retain="1",size="50",export="1",workspace="80")
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            script=copy.read_text()
+            self.assertLess(script.index("chown -R rose:rose /tmp/gate"),script.index("<<'PY_WORKSPACE_CUSTODY'\n"))
+            code=script.split("<<'PY_WORKSPACE_CUSTODY'\n",1)[1].split("\nPY_WORKSPACE_CUSTODY",1)[0]
+            repo=base/"gate/repo";repo.mkdir(parents=True)
+            owner=base/"workspace.json"
+            owner.write_text(json.dumps(dict(volume_id="vol_fixture123",source_ref="a"*40,app="navi-whisper-lux-bench",mount_path="/tmp/gate")))
+            code=code.replace("/tmp/controller-host-workspace.json",str(owner)).replace("/tmp/gate/repo",str(repo))
+            import hashlib
+            env=["GATE_WORKSPACE_VOLUME_SHA256="+hashlib.sha256(owner.read_bytes()).hexdigest(),"GATE_WORKSPACE_VOLUME_ID=vol_fixture123","GATE_REF="+"a"*40,"FLY_APP_NAME=navi-whisper-lux-bench"]
+            try:
+                subprocess.run(["sudo","-n","env",*env,sys.executable,"-I","-B","-c",code],check=True,timeout=30)
+                custody=(repo/".context/controller-workspace-volume").stat()
+                self.assertEqual((custody.st_uid,custody.st_mode&0o777),(0,0o700))
+                supervisor=repo/".context/original600-supervisor.fixture.tasks.json"
+                supervisor.write_text("[]\n")
+                self.assertEqual(supervisor.stat().st_uid,os.getuid())
+            finally:
+                subprocess.run(["sudo","-n","chown","-R",str(os.getuid())+":"+str(os.getgid()),str(base)],check=True)
 
     def test_workspace_volume_changed_original_owner_refuses_export_and_retains(self):
         for fault in ("exchanged-owner","missing-owner"):

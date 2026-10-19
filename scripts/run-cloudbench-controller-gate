@@ -431,7 +431,14 @@ from pathlib import Path
 with os.fdopen(os.open('/tmp/controller-host-workspace.json',os.O_RDONLY|os.O_NOFOLLOW),'rb') as source: raw=source.read()
 value=json.loads(raw)
 if hashlib.sha256(raw).hexdigest()!=os.environ['GATE_WORKSPACE_VOLUME_SHA256'] or value['volume_id']!=os.environ['GATE_WORKSPACE_VOLUME_ID'] or value['source_ref']!=os.environ['GATE_REF'] or value['app']!=os.environ['FLY_APP_NAME'] or value['mount_path']!='/tmp/gate': raise SystemExit('workspace ownership binding refused')
-parent=Path('/tmp/gate/repo/.context/controller-workspace-volume');parent.mkdir(mode=0o700,parents=True)
+# Runs as root after /tmp/gate was handed to the runtime user, whose controller
+# writes its supervisor files under repo/.context: only the custody directory stays root's.
+repo=Path('/tmp/gate/repo');context=repo/'.context'
+try: context.mkdir()
+except FileExistsError: pass
+if not context.is_dir() or context.is_symlink(): raise SystemExit('workspace context must be a directory')
+owner=repo.stat();os.chown(context,owner.st_uid,owner.st_gid,follow_symlinks=False)
+parent=context/'controller-workspace-volume';parent.mkdir(mode=0o700)
 fd=os.open(parent/'ownership.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 with os.fdopen(fd,'wb') as output: output.write(raw);output.flush();os.fsync(output.fileno())
 fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
