@@ -60,8 +60,10 @@ class BoundRecipeLoaderTest(unittest.TestCase):
             recovery.git_blob(Path(meta["workspace_root"]), ref, "scripts/run-bench-fleet")
             return ref, "recipe", "fingerprint"
 
-        saved = recovery.git_blob, recovery.native_recipe
+        saved = recovery.git_blob, recovery.native_recipe, recovery._bound_optional_executables
+        # The fake root is not a Git checkout, so its tree has no optional helper.
         recovery.git_blob, recovery.native_recipe = loader, native
+        recovery._bound_optional_executables = lambda root, at: ()
         try:
             root = Path(tempfile.gettempdir()).resolve()
             expected = {
@@ -78,7 +80,7 @@ class BoundRecipeLoaderTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 recovery.bound_recipe({"workspace_root": str(root)}, {}, changed)
         finally:
-            recovery.git_blob, recovery.native_recipe = saved
+            recovery.git_blob, recovery.native_recipe, recovery._bound_optional_executables = saved
 
 
 class PrestackRecoveryTest(unittest.TestCase):
