@@ -1362,8 +1362,10 @@ def preallocation_abort(ledger, root, directory, runner, goal, error):
     except Exception as receipt_error:  # the ledger end below still closes the experiment
         print(json.dumps(dict(status='PREALLOCATION_ABORT_RECEIPT_WARNING', error=type(receipt_error).__name__)),
               file=sys.stderr, flush=True)
-    ledger['record']('end', directory.name, root=root, goal=goal, ended_at=ended, state='ABORTED',
-                     abort_reason=reason, outcome=dict(allocated=False))
+    if ledger['record']('end', directory.name, root=root, goal=goal, ended_at=ended, state='ABORTED',
+                        abort_reason=reason, outcome=dict(allocated=False)) is None:
+        print(json.dumps(dict(status='PREALLOCATION_ABORT_LEDGER_WARNING', experiment=directory.name)),
+              file=sys.stderr, flush=True)
 
 
 def sharded_run(args, root, pins, runner, github, plan, guest_env=None):

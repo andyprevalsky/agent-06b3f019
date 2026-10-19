@@ -471,8 +471,10 @@ def publish_campaign_group(
         print(
             "Warning: campaign Hub schedule publication is pending; child results and cleanup retain their owners"
         )
-    elif not live and not completed:
+    elif not completed:
         print(
+            "Warning: campaign Hub schedule acknowledgement was not verified; publication remains pending"
+            if live else
             "Warning: campaign Hub terminal acknowledgement was not verified; publication remains pending"
         )
     return completed

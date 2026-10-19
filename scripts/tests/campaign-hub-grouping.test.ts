@@ -1079,6 +1079,48 @@ except ValueError as error:
       refused,
       /campaign group status 'completed' is not a Hub group status/,
     );
+    // A live schedule whose publisher exits 0 without the exact
+    // acknowledgement is reported as pending, never silently dropped.
+    const silentRoot = path.join(workRoot, "silent-live-publisher");
+    mkdirSync(path.join(silentRoot, "agents/benchmarks"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    writeFileSync(
+      path.join(silentRoot, "agents/benchmarks/hub_upload.py"),
+      "raise SystemExit(0)\n",
+    );
+    const silent = spawn(
+      path.join(project, "agents/venv/bin/python"),
+      [
+        "-c",
+        `import runpy, sys
+from pathlib import Path
+campaign = runpy.run_path(sys.argv[1])
+root = Path(sys.argv[2])
+state = campaign["campaign_group_state"]("silent-group", 1792433798.1, [{"job_id": "r001-j0001", "task": "demo", "run": 1}], status="running")
+directory = root / "campaign"
+directory.mkdir(mode=0o700)
+print("completed=%s" % campaign["publish_campaign_group"](root, directory, state, live=True, stop_requested=lambda: False))
+`,
+        path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+        silentRoot,
+      ],
+      {
+        env: { ...process.env, BENCHMARK_HUB_API_KEY: "fixture-key" },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let silentOutput = "";
+    silent.stdout!.on("data", (chunk) => (silentOutput += chunk.toString()));
+    silent.stderr!.on("data", (chunk) => (silentOutput += chunk.toString()));
+    await once(silent, "close");
+    assert.equal(silent.exitCode, 0, silentOutput);
+    assert.match(silentOutput, /completed=False/);
+    assert.match(
+      silentOutput,
+      /campaign Hub schedule acknowledgement was not verified; publication remains pending/,
+    );
   },
 );
 

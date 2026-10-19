@@ -2650,6 +2650,15 @@ class Sharded(unittest.TestCase):
             self.assertEqual(card['history'][0]['state'], 'ABORTED')
             self.assertEqual(self.audits, [], 'nothing was allocated, so there is nothing to audit')
 
+    def test_preallocation_abort_reports_an_unrecorded_ledger_end(self):
+        with tempfile.TemporaryDirectory() as name:
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                CLI.preallocation_abort({'record': lambda *a, **k: None}, ROOT, Path(name), RUNNER, 'goal',
+                                        OSError('fixture'))
+            warning = json.loads(stderr.getvalue().strip().splitlines()[-1])
+            self.assertEqual(warning, {'status': 'PREALLOCATION_ABORT_LEDGER_WARNING', 'experiment': Path(name).name})
+
     def test_sharded_run_refuses_a_hub_interpreter_without_agents_dependencies(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
