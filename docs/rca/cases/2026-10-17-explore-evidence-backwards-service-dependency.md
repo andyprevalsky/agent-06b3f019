@@ -142,3 +142,7 @@ Freedom and protected instructions/services remain untouched.
 Place shared pure evidence and rendering below their callers, and run the complete
 architecture gate after joining a component into the source tree; passing behavior
 tests cannot certify import ownership or an acyclic integration graph.
+
+## Outcome (2026-10-19)
+
+The typed explore grep-evidence change this case concerns was dropped before deploy at the user's direction: its motivating cause (2026-10-15 minted-signup) was never proven, and the explorer keeps main's existing grep evidence path.

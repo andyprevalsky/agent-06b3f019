@@ -39,7 +39,6 @@ from helpers.activity_heartbeat import heartbeat_resume_details
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
-from utils.explore_evidence import _bounded_explore_parts, admit_grep_records, legacy_traces
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import get_explore_agent_tools
 
@@ -175,6 +174,35 @@ def _fallback_trace_text(item: Any) -> str:
     return raw
 
 
+def _bounded_explore_parts(parts: List[str], budget: int) -> str:
+    """Share the payload budget across results so late evidence stays visible."""
+    if not parts or budget <= 0:
+        return ""
+    separator = "\n\n"
+    separator_cost = len(separator) * (len(parts) - 1)
+    if separator_cost >= budget:
+        return parts[-1][:budget]
+    available = budget - separator_cost
+    lo, hi = 0, max(len(part) for part in parts)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if sum(min(len(part), mid) for part in parts) <= available:
+            lo = mid
+        else:
+            hi = mid - 1
+    cap = lo
+    marker = "\n[...truncated...]\n"
+    excerpts: List[str] = []
+    for part in parts:
+        if len(part) <= cap:
+            excerpts.append(part)
+        elif cap > len(marker) + 2:
+            head = (cap - len(marker)) // 2
+            tail = cap - len(marker) - head
+            excerpts.append(part[:head] + marker + part[-tail:])
+        else:
+            excerpts.append(part[:cap])
+    return separator.join(excerpts)
 
 
 def compile_explore_wrap_up(
@@ -509,8 +537,7 @@ async def spawn_explore_agent_activity(
     explore_cache_sequence_id = f"agent:{agent_id}:task:{explore_task_key}:call:explore_agent"
 
     # Collect raw tool call results for callers that need evidence
-    tool_evidence_units = []
-    evidence_owner = {"agent_id": agent_id, "user_id": user_id, "task_id": task_id, "parent_tool_call_id": init_tool_call_id}
+    tool_call_results: List[str] = []
     # The local summary is fetched by a trusted backend activity before this
     # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
     # lookup can complete without a redundant grep solely to satisfy the guard.
@@ -527,11 +554,8 @@ async def spawn_explore_agent_activity(
     resume_details: Dict[str, Any] = {}
 
     def _heartbeat_payload() -> Dict[str, Any]:
-        tool_call_results = legacy_traces(tool_evidence_units, _render_explore_tool_result)
         compiled = compile_explore_wrap_up("", tool_call_results)
         resume_details.update(result=compiled, tool_call_results=list(tool_call_results[-8:]))
-        if any(unit["tool_name"] == "grep" for unit in tool_evidence_units):
-            resume_details["native_grep_evidence"] = admit_grep_records(evidence_owner, tool_evidence_units)
         return dict(resume_details)
 
     async def _heartbeat_loop() -> None:
@@ -840,7 +864,7 @@ async def spawn_explore_agent_activity(
 
         # Keep readable tool evidence for heartbeat, completion fallback, and
         # wait_for's out-of-band condition evaluator.
-        tool_evidence_units.append({"tool_name": tool_name, "tool_call_id": tool_call_id, "result": json.loads(json.dumps(actual_result, default=str))})
+        tool_call_results.append(f"[{tool_name}] {result_str}")
         activity.heartbeat(_heartbeat_payload())
 
         return {"success": True, "message": result_str}
@@ -1007,7 +1031,6 @@ async def spawn_explore_agent_activity(
     # but leaves result empty, the parent receives no evidence. Synthesize a
     # payload from accumulated tool results so the parent always has grounded data
     # to act on instead of hallucinating or re-spawning sub-agents.
-    tool_call_results = legacy_traces(tool_evidence_units, _render_explore_tool_result)
     final_response = compile_explore_wrap_up(
         result.get("final_response", "") or "",
         tool_call_results,
@@ -1061,6 +1084,5 @@ async def spawn_explore_agent_activity(
         "accumulated_usage": accumulated_usage,
         "llm_iteration_usage": llm_iteration_usage,
         "tool_call_results": tool_call_results,
-        **({"native_grep_evidence": admit_grep_records(evidence_owner, tool_evidence_units)} if any(unit["tool_name"] == "grep" for unit in tool_evidence_units) else {}),
     }
     return result_payload
