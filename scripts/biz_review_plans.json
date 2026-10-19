@@ -1,0 +1,8 @@
+{
+  "_comment": "Flat subscriptions, prorated per week. Compute tokens (Codex/Claude) are not stored with tiers in the DB; plans confirmed by Andy 2026-10-19.",
+  "plans": [
+    {"group": "LLM inference", "provider": "Codex", "plan": "Pro", "monthlyUsd": 500, "accounts": 5, "since": "2026-05-05"},
+    {"group": "LLM inference", "provider": "Claude", "plan": "Max", "monthlyUsd": 200, "accounts": 2, "since": "2026-01-01"},
+    {"group": "Browsers & sandboxes", "provider": "boxes.dev", "plan": "Pro seat", "monthlyUsd": 99, "accounts": 1, "since": "2026-01-01"}
+  ]
+}
