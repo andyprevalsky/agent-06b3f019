@@ -3320,6 +3320,16 @@ for m in json.load(sys.stdin) or []:
     NEW_SNAP="$CREATED_SNAPSHOT_ID"
     printf '%s %s %s %s\n' "$RECORDED_NODE_FP" "$RECORDED_PY_FP" "$SNAP_START_EPOCH" \
         "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE"
+    printf '%s %s\n' "$EXPECTED_WMH_REF" "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE.ref.$$" \
+        && mv -f "$WARM_DEPS_STATE_FILE.ref.$$" "$WARM_DEPS_STATE_FILE.ref"
+    # Fleets rehydrate the donor proof from its Machine metadata, not this
+    # checkout's file: without publishing, every SIM clone keeps forking the
+    # previous snapshot (and its previous WMH model).
+    if ! cloudbench_publish_warm_deps_state "$APP" "$maintenance_mid" "$VOL_ID" \
+        "$RECORDED_NODE_FP" "$RECORDED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP"; then
+        echo "❌ WMH snapshot $NEW_SNAP was cut but its donor proof was not published; fleets would keep the previous model" >&2
+        exit 1
+    fi
     echo "✅ WMH model snapshot published for fleet clones: $NEW_SNAP"
 
     # EXIT trap parks the already-stopped source machine.

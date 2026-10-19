@@ -163,6 +163,13 @@ class WorldModelLaunch(unittest.TestCase):
         fragment = fragment[:fragment.rfind("    # Legacy")]
         self.assertNotIn("update_world_model_for_simulation", fragment)
         self.assertIn("create_volume_snapshot_exact", refresh[refresh.index('BUILD_CMD="$NATIVE_REFRESH_CMD"'):])
+        # Fleets rehydrate the donor proof from Machine metadata (observed
+        # 2026-10-19: a refreshed WMH snapshot was never forked because only the
+        # local state file named it). Publication must name the new snapshot
+        # and fail the refresh when it cannot be published.
+        publication = refresh[refresh.index('create_volume_snapshot_exact "$VOL_ID"'):]
+        self.assertRegex(publication, r'if ! cloudbench_publish_warm_deps_state "\$APP" "\$maintenance_mid" "\$VOL_ID" \\\n\s+"\$RECORDED_NODE_FP" "\$RECORDED_PY_FP" "\$SNAP_START_EPOCH" "\$NEW_SNAP"; then\n[^\n]*\n\s+exit 1')
+        self.assertIn('printf \'%s %s\\n\' "$EXPECTED_WMH_REF" "$NEW_SNAP"', publication)
         fake_python = (
             "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\n"
             "argv=sys.argv[1:]\n"
