@@ -83,6 +83,14 @@ test('same-millisecond later custody floor invalidates prior proof by monotonic 
 });
 
 test('portrait lock is a required version-two boot setting, not inferred from portrait dimensions', () => {
+  const current = fixture();
+  assert.equal(verificationDto(current, context).configurationReady, true);
+  delete current.checks.portrait_lock;
+  assert.equal(
+    verificationDto(current, context).configurationReady,
+    false,
+    'Removing only portrait lock must invalidate boot readiness'
+  );
   const old = fixture();
   old.requirementsVersion = 1;
   const result = verificationDto(old, context);

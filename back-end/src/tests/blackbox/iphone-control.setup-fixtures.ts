@@ -60,7 +60,12 @@ export function setupPost(h: Harness, f: SetupFixture, body: Record<string, unkn
 }
 
 /** Prove explicit settings through the real route; caller may leave identity for its own assertions. */
-export async function proveSettings(h: Harness, f: SetupFixture, includeIdentity = true) {
+export async function proveSettings(
+  h: Harness,
+  f: SetupFixture,
+  includeIdentity = true,
+  includePortrait = true
+) {
   const prior = h.setupVerifier;
   h.setupVerifier = async () => ({
     identityConfirmed: true,
@@ -73,7 +78,7 @@ export async function proveSettings(h: Harness, f: SetupFixture, includeIdentity
       'icloud_keychain',
       'imessage',
       'receive_address',
-      'portrait_lock',
+      ...(includePortrait ? ['portrait_lock'] : []),
       ...(includeIdentity ? ['apple_account'] : []),
     ]) {
       h.observationResult = {

@@ -15,7 +15,13 @@ export const settingsCases: Case[] = [
     'portrait lock accepts explicit enabled proof but dimensions alone remain unknown',
     async (h) => {
       const f = await freshSetup(h);
-      let status: 'confirmed' | 'unknown' = 'unknown';
+      await proveSettings(h, f, true, false);
+      assert.notEqual(
+        f.setup.state,
+        'ready',
+        'All other settings cannot substitute for portrait lock'
+      );
+      let status: 'confirmed' | 'disabled' | 'unknown' = 'unknown';
       h.setupVerifier = async (input) => {
         assert.equal(input.verificationTarget, 'portrait_lock');
         return { identityConfirmed: false, status, usage: verifierUsage };
@@ -49,7 +55,19 @@ export const settingsCases: Case[] = [
         f.setup as SetupDto & { verification: { checks: { portrait_lock: { status: string } } } }
       ).verification.checks.portrait_lock;
       assert.equal(check.status, 'confirmed');
-      assert.notEqual(f.setup.state, 'ready', 'Portrait lock alone cannot prove all settings');
+      assert.equal(
+        f.setup.state,
+        'ready',
+        'Explicit portrait lock completes the otherwise verified boot settings'
+      );
+      status = 'disabled';
+      h.observationResult = { text: 'Portrait Orientation Lock: Off' };
+      await submit();
+      assert.notEqual(f.setup.state, 'ready', 'Disabled portrait lock retained boot readiness');
+      status = 'unknown';
+      h.observationResult = { text: 'Portrait screen', width: 750, height: 1334 };
+      await submit();
+      assert.notEqual(f.setup.state, 'ready', 'Unknown portrait lock retained boot readiness');
     },
   ],
 
