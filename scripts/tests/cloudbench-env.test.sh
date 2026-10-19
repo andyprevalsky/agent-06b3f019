@@ -425,6 +425,296 @@ class WorldModelLaunch(unittest.TestCase):
             self.assertTrue("Native world model requires Python" in result.stderr
                             or "PackageNotFoundError" in result.stderr, result.stderr)
 
+FAKE_FLY = r'''
+import json, os, sys
+state_path = os.environ["FLY_STATE"]
+state = json.load(open(state_path))
+args = sys.argv[1:]
+state["calls"].append(args)
+def save():
+    json.dump(state, open(state_path, "w"))
+def value(flag):
+    return args[args.index(flag) + 1]
+verb = " ".join(args[:2])
+if verb in ("machines list", "machine list"):
+    print(json.dumps(state["machines"])); save(); sys.exit(0)
+if verb in ("volumes list", "volume list"):
+    print(json.dumps(state["volumes"])); save(); sys.exit(0)
+if verb == "volumes create":
+    if state.get("fail") == "volume_create":
+        save(); sys.exit(1)
+    row = {"id": "vol_build1", "name": args[2], "state": "created", "size_gb": int(value("--size")),
+           "snapshot_id": value("--snapshot-id")}
+    state["volumes"].append(row); save(); print(json.dumps(row)); sys.exit(0)
+if verb == "machine run":
+    if os.path.exists(os.environ["LEDGER_PATH"]):
+        state["ledger_at_machine_run"] = open(os.environ["LEDGER_PATH"]).read()
+    row = {"id": state.get("new_mid", "b0110000000001"), "name": value("--name"), "state": "started",
+           "volume": value("--volume").split(":")[0]}
+    state["machines"].append(row); save()
+    if state.get("fail") == "machine_run_ambiguous":
+        sys.exit(1)
+    print("Machine ID: " + row["id"]); sys.exit(0)
+if verb == "machine destroy":
+    state["machines"] = [m for m in state["machines"] if m["id"] != args[-3]]
+    save(); sys.exit(0)
+if verb == "volumes destroy":
+    vid = args[2]
+    if any(m.get("volume") == vid for m in state["machines"]):
+        save(); sys.exit(1)
+    for v in state["volumes"]:
+        if v["id"] == vid and not state.get("stuck_volume"):
+            v["state"] = "pending_destroy"
+    save(); sys.exit(0)
+save(); sys.exit(9)
+'''
+
+lifecycle = re.search(r"^# Begin WMH build lifecycle\.\n.*?^# End WMH build lifecycle\.\n", source, re.M | re.S)
+lifecycle = lifecycle.group(0) if lifecycle else ""
+build_mode = source[source.index('if [ "$MODE" = "build-wmh" ]; then'):source.index("# MODE: run (default)")]
+DONOR = "d0e0000000000001"
+
+class NativeWorldModelBuild(unittest.TestCase):
+    """--build-wmh: owned ephemeral big machine, native build, cache publication, teardown."""
+
+    def fly(self, scratch, **overrides):
+        state = {"calls": [], "machines": [{"id": DONOR, "name": "cloudbench-warm", "state": "stopped",
+                 "volume": "vol_donor", "config": {"image": "registry.fly.io/bench:warm",
+                 "mounts": [{"volume": "vol_donor", "path": "/data"}]}}],
+                 "volumes": [{"id": "vol_donor", "name": "cloudbench_data", "state": "created"}]}
+        state.update(overrides)
+        (scratch / "fly.json").write_text(json.dumps(state))
+        (scratch / "fake_fly.py").write_text(FAKE_FLY)
+        return scratch / "fly.json"
+
+    def lifecycle(self, scratch, script, values=None, **state):
+        self.assertTrue(lifecycle)
+        path = self.fly(scratch, **state)
+        ledger = scratch / "owned-resources.env"
+        prefix = (f'APP=navi-whisper-lux-bench; REGION=iad; REMOTE_REPO=/data/repo; REMOTE_UV_PYTHON=/data/uv-python\n'
+                  f'FLY() {{ python3 {scratch / "fake_fly.py"} "$@"; }}\n')
+        suffix = (f'\nWMH_BUILD_LEDGER={ledger}; WMH_BUILD_DONOR_MID={DONOR}; WMH_BUILD_DONOR_VOLUME=vol_donor\n'
+                  'WMH_BUILD_RELEASE_SLEEP_SECONDS=0; WMH_BUILD_RELEASE_ATTEMPTS=3\n')
+        result = run(prefix + lifecycle + suffix + script,
+                     {"FLY_STATE": str(path), "LEDGER_PATH": str(ledger), **(values or {})})
+        return result, json.loads(path.read_text()), (ledger.read_text() if ledger.exists() else "")
+
+    def test_owned_machine_is_big_sleeps_forever_and_is_released(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-owned-") as temporary:
+            result, fly, ledger = self.lifecycle(Path(temporary), (
+                'wmh_build_validate || exit 2\n'
+                'wmh_build_create_resources 20261019000000_abcd snap_proven registry.fly.io/bench:warm || exit 1\n'
+                'wmh_build_teardown'))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            create = next(c for c in fly["calls"] if c[:2] == ["volumes", "create"])
+            self.assertEqual(create[create.index("--snapshot-id") + 1], "snap_proven")
+            self.assertEqual(create[create.index("--size") + 1], "80")
+            machine = next(c for c in fly["calls"] if c[:2] == ["machine", "run"])
+            self.assertEqual(machine[2], "registry.fly.io/bench:warm")
+            self.assertEqual(machine[machine.index("--vm-size") + 1], "performance-8x")
+            self.assertEqual(machine[machine.index("--vm-memory") + 1], "65536")
+            self.assertEqual(machine[machine.index("--volume") + 1], "vol_build1:/data")
+            self.assertEqual(machine[-2:], ["sleep", "infinity"])
+            # Exact IDs are durable before the next allocation uses them.
+            self.assertIn("volume_id=vol_build1\nmachine_name=wmhb-20261019000000-abcd\n", fly["ledger_at_machine_run"])
+            self.assertIn("machine_id=b0110000000001\nmachine_released=destroyed\nvolume_released=pending_destroy\n", ledger)
+            self.assertEqual([m["id"] for m in fly["machines"]], [DONOR])
+            self.assertEqual({v["id"]: v["state"] for v in fly["volumes"]},
+                             {"vol_donor": "created", "vol_build1": "pending_destroy"})
+            touched = [c for c in fly["calls"] if c[:2] not in (["machines", "list"], ["volumes", "list"])]
+            self.assertFalse([c for c in touched if DONOR in c or "vol_donor" in c])
+
+    def test_shape_overrides_and_minimum_volume(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-shape-") as temporary:
+            values = {"WMH_BUILD_VM_SIZE": "performance-16x", "WMH_BUILD_VM_MEMORY_MB": "131072",
+                      "WMH_BUILD_VOLUME_GB": "120"}
+            result, fly, _ = self.lifecycle(Path(temporary), (
+                'wmh_build_validate || exit 2\nwmh_build_create_resources 1_a snap registry/img || exit 1'), values)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            machine = next(c for c in fly["calls"] if c[:2] == ["machine", "run"])
+            create = next(c for c in fly["calls"] if c[:2] == ["volumes", "create"])
+            self.assertEqual((machine[machine.index("--vm-size") + 1], machine[machine.index("--vm-memory") + 1],
+                              create[create.index("--size") + 1]), ("performance-16x", "131072", "120"))
+            for key, bad in (("WMH_BUILD_VOLUME_GB", "40"), ("WMH_BUILD_VM_MEMORY_MB", "64g"),
+                             ("WMH_FULL_CACHE_NAME", "x;id"), ("WMH_EXPORT_CACHE_NAME", "../x"),
+                             ("WMH_ENGINE", "legacy")):
+                with self.subTest(key=key):
+                    rejected, fly, _ = self.lifecycle(Path(temporary), "wmh_build_validate", {key: bad})
+                    self.assertEqual(rejected.returncode, 2, rejected.stderr)
+
+    def test_failed_or_ambiguous_creation_is_torn_down_by_exact_name(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-ambiguous-") as temporary:
+            result, fly, ledger = self.lifecycle(Path(temporary), (
+                'wmh_build_create_resources 1_a snap registry/img && exit 9\nwmh_build_teardown'),
+                fail="machine_run_ambiguous")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual([m["id"] for m in fly["machines"]], [DONOR])
+            self.assertIn("machine_id=b0110000000001\n", ledger)
+            self.assertIn("volume_released=pending_destroy", ledger)
+        with tempfile.TemporaryDirectory(prefix="wmh-build-stuck-") as temporary:
+            result, fly, ledger = self.lifecycle(Path(temporary), (
+                'wmh_build_create_resources 1_a snap registry/img\nwmh_build_teardown'), stuck_volume=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("NOT proven released", result.stderr)
+            self.assertNotIn("volume_released", ledger)
+
+    def test_donor_identity_is_never_adopted_or_destroyed(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-donor-") as temporary:
+            result, fly, ledger = self.lifecycle(Path(temporary), (
+                'wmh_build_create_resources 1_a snap registry/img && exit 9\nwmh_build_teardown'), new_mid=DONOR)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(f"machine_id={DONOR}", ledger)
+            self.assertFalse([c for c in fly["calls"] if c[:2] == ["machine", "destroy"] and DONOR in c])
+            self.assertIn("refusing to operate on the shared donor", result.stderr)
+
+    def test_mode_tears_down_owned_resources_on_failure_and_signal(self):
+        stubs = ('git() { echo 0123456789abcdef0123456789abcdef01234567; }\n'
+                 'validate_wmh_rose_pool_at_ref() { :; }; ensure_app() { :; }; verify_app_environment() { :; }\n'
+                 f'resolve_machine_id() {{ echo {DONOR}; }}; _machines_json() {{ FLY machines list --json; }}\n'
+                 'warm_source_fetch_ref() { echo "fetch $1" >> "$TRACE"; }; ssh_exec() { echo "exec $1" >> "$TRACE"; return 1; }\n')
+        for name, ready in (("failure", "return 1"), ("term", "kill -TERM $$; :")):
+            with self.subTest(exit=name), tempfile.TemporaryDirectory(prefix="wmh-build-mode-") as temporary:
+                scratch = Path(temporary)
+                state = scratch / "warm-deps.fp"
+                state.write_text("node py 1 snap_proven\n")
+                trace = scratch / "trace"
+                result, fly, _ = self.lifecycle(scratch, stubs
+                    + f'require_machine_ready() {{ echo "ready $1" >> "$TRACE"; {ready}; }}\n'
+                    + f'MODE=build-wmh; BENCH_REF=HEAD; ROOT_DIR={scratch}; WARM_DEPS_STATE_FILE={state}\n'
+                    + 'WMH_BUILD_LEDGER=""\n' + build_mode, {"TRACE": str(trace)})
+                self.assertEqual(result.returncode, 1 if name == "failure" else 143, result.stdout + result.stderr)
+                ledger = next((scratch / ".context/wmh-build").glob("*/owned-resources.env")).read_text()
+                self.assertIn("machine_released=destroyed", ledger)
+                self.assertIn("volume_released=pending_destroy", ledger)
+                self.assertEqual([m["id"] for m in fly["machines"]], [DONOR])
+                self.assertEqual(trace.read_text().split(), ["ready", "b0110000000001"])
+
+    def test_mode_only_targets_the_owned_machine(self):
+        self.assertIn("trap wmh_build_exit EXIT", build_mode)
+        self.assertIn("trap 'exit 143' TERM", build_mode)
+        self.assertIn("trap 'exit 130' INT", build_mode)
+        for forbidden in ("inject_secrets", "prepare_warm_source", "park_warm_source", "start_machine",
+                          "stop_machine", "create_volume_snapshot_exact", "machines exec"):
+            self.assertNotIn(forbidden, build_mode)
+        targets = re.findall(r'\b(?:ssh_exec|ssh_read|warm_source_fetch_ref|require_machine_ready|wmh_build_poll) "\$([A-Z_]+)"',
+                             build_mode)
+        targets += re.findall(r'--machine "\$([A-Z_]+)"', build_mode)
+        self.assertGreaterEqual(len(targets), 6)
+        self.assertEqual(set(targets), {"WMH_BUILD_MID"})
+        # The documented publication path is the supported CLI, not a hand-built machine.
+        for doc in ("CLAUDE.md", ".claude/skills/instantiate-whm/SKILL.md"):
+            self.assertIn("bash scripts/run-bench-cloud --build-wmh", (root / doc).read_text())
+
+    def remote(self, scratch, values, python_mode):
+        repo, data = scratch / "data/repo", scratch / "data"
+        python = repo / "agents/venv/bin/python"
+        python.parent.mkdir(parents=True)
+        (repo / "scripts").mkdir()
+        (repo / "agents/.env").write_text("R2=1\n")
+        calls = scratch / "calls.jsonl"
+        python.write_text(
+            "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\nargv=sys.argv[1:]\n"
+            "keys=('WMH_BUILD_DIR','WMH_ENGINE','WMH_ROSE_POOL','WMH_EXECUTION_POLICY','WMH_GEPA_BUDGET',"
+            "'WMH_MAX_BUNDLES','WMH_CONFORMANCE_EXAMPLES','WMH_REQUIRE_CONFORMANCE','UV_PYTHON_INSTALL_DIR','HOME')\n"
+            "open(os.environ['CALLS'],'a').write(json.dumps({'argv':argv,'env':{k:os.environ.get(k) for k in keys}})+'\\n')\n"
+            "mode=os.environ['PY_MODE']\n"
+            "if 'status' in argv:\n"
+            "    if mode=='absent': print('no cache published for '+argv[-1]); sys.exit(1)\n"
+            "    if mode=='unreadable': print('Traceback: R2 403'); sys.exit(1)\n"
+            "    sys.exit(0)\n"
+            "if '-c' in argv:\n"
+            "    if mode=='build-fails': sys.exit(5)\n"
+            "    root=Path(os.environ.get('WMH_BUILD_DIR') or argv[3]); (root/'models/rose-archive').mkdir(parents=True,exist_ok=True)\n"
+            "    (root/'models/rose-archive/experiential.json').write_text('{}'); (root/'build.manifest.json').write_text('{}')\n"
+            "if argv[:4]==['-m','pip','install','--quiet']:\n"
+            "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755)\n")
+        python.chmod(0o755)
+        (repo / "scripts/setup-world-model.sh").write_text(
+            "printf '{\"argv\":[\"setup\"],\"env\":{\"UV_PYTHON_INSTALL_DIR\":\"%s\"}}\\n' \"$UV_PYTHON_INSTALL_DIR\" >> \"$CALLS\"\n")
+        script = scratch / "wmh-build.sh"
+        generated = run(lifecycle + f'\nREMOTE_REPO={repo}; REMOTE_UV_PYTHON={data}/uv-python\n'
+                        f'WMH_BUILD_REMOTE_ROOT={data}/wmhb; WMH_BUILD_REMOTE_DIR={data}/wmhb/native; '
+                        f'WMH_BUILD_REMOTE_PID={data}/wmh-build.pid\nwmh_build_remote_script', values)
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        script.write_text(generated.stdout)
+        result = subprocess.run(["bash", "-c", "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; }\n"
+                                 "source " + str(script)], env={"PATH": os.environ["PATH"], "CALLS": str(calls),
+                                 "PY_MODE": python_mode}, text=True, capture_output=True)
+        records = [json.loads(line) for line in calls.read_text().splitlines()]
+        return result, records, data
+
+    def test_remote_build_pulls_full_cache_builds_and_publishes_both_caches(self):
+        values = {"WMH_CACHE_NAME": "serving-custom", "WMH_FULL_CACHE_NAME": "full-custom"}
+        for mode in ("published", "absent", "unreadable", "build-fails"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="wmh-build-remote-") as temporary:
+                result, records, data = self.remote(Path(temporary), values, mode)
+                ok = mode in ("published", "absent")
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual("::WMH-BUILD-DONE::" in result.stdout, ok)
+                self.assertEqual("::WMH-BUILD-FAILED::" in result.stdout, not ok)
+                built = str(data / "wmhb/native")
+                argvs = [r["argv"] for r in records]
+                self.assertEqual(argvs[0], ["-m", "pip", "install", "--quiet", "uv"])
+                self.assertEqual(records[1], {"argv": ["setup"], "env": {"UV_PYTHON_INSTALL_DIR": str(data / "uv-python")}})
+                cache = ["-u", "-m", "benchmarks.wmh_build_cache"]
+                self.assertEqual(argvs[2], cache + ["status", "--name", "full-custom"])
+                pulled = cache + ["pull", "--build-dir", built, "--name", "full-custom", "--force"]
+                self.assertEqual(pulled in argvs, mode in ("published", "build-fails"))
+                pushes = [a for a in argvs if a[3:4] == ["push"]]
+                if not ok:
+                    self.assertEqual(pushes, [])
+                    continue
+                update = next(r for r in records if "-c" in r["argv"])
+                self.assertIn("update_world_model_for_simulation", update["argv"][2])
+                self.assertEqual({k: update["env"][k] for k in ("WMH_BUILD_DIR", "WMH_ENGINE", "WMH_GEPA_BUDGET",
+                                 "WMH_MAX_BUNDLES", "WMH_CONFORMANCE_EXAMPLES", "WMH_REQUIRE_CONFORMANCE",
+                                 "UV_PYTHON_INSTALL_DIR", "HOME")},
+                                 {"WMH_BUILD_DIR": built, "WMH_ENGINE": "experiential", "WMH_GEPA_BUDGET": "0",
+                                  "WMH_MAX_BUNDLES": "0", "WMH_CONFORMANCE_EXAMPLES": "100",
+                                  "WMH_REQUIRE_CONFORMANCE": "1", "UV_PYTHON_INSTALL_DIR": str(data / "uv-python"),
+                                  "HOME": "/home/rose"})
+                self.assertEqual(pushes, [cache + ["push", "--serving-only", "--build-dir", built, "--name", "serving-custom"],
+                                          cache + ["push", "--build-dir", built, "--name", "full-custom"]])
+
+    def test_remote_export_cache_runs_only_the_native_step(self):
+        with tempfile.TemporaryDirectory(prefix="wmh-build-export-") as temporary:
+            result, records, data = self.remote(Path(temporary), {"WMH_EXPORT_CACHE_NAME": "rose-archive-export",
+                                                                  "WMH_ROSE_POOL": ""}, "published")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            built = str(data / "wmhb/native")
+            argvs = [r["argv"] for r in records]
+            cache = ["-u", "-m", "benchmarks.wmh_build_cache"]
+            self.assertEqual(argvs[2], cache + ["pull", "--build-dir", built, "--name", "rose-archive-export", "--force"])
+            native = records[3]
+            self.assertIn("build_native", native["argv"][2])
+            self.assertNotIn("update_world_model_for_simulation", native["argv"][2])
+            self.assertEqual(native["argv"][3:], [built, "rose-archive", "rose-wmh-gpt61"])
+            self.assertEqual((native["env"]["WMH_ENGINE"], native["env"]["WMH_ROSE_POOL"],
+                              native["env"]["WMH_EXECUTION_POLICY"]),
+                             ("experiential", "rose-wmh-gpt61", "rose-outcome-distribution-v4"))
+            self.assertEqual(argvs[4:], [cache + ["push", "--serving-only", "--build-dir", built, "--name", "rose-archive-serving"],
+                                         cache + ["push", "--build-dir", built, "--name", "rose-archive-native"]])
+
+    def test_poll_reports_progress_completion_failure_death_and_timeout(self):
+        cases = {
+            "done": (["[wmh-build] step one", "::WMH-LOG-END:: 1 alive", "[wmh-build] step one\n[wmh-build] push\n::WMH-BUILD-DONE::\n::WMH-LOG-END:: 3 dead"], 0, "push"),
+            "failed": (["boom\n::WMH-BUILD-FAILED:: rc=5\n::WMH-LOG-END:: 2 dead"], 1, "on-box WMH build failed"),
+            "died": (["partial\n::WMH-LOG-END:: 1 dead"] * 3, 1, "without a completion marker"),
+            "timeout": (["::WMH-LOG-END:: 0 alive"] * 50, 1, "timed out"),
+        }
+        for name, (responses, rc, text) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory(prefix="wmh-build-poll-") as temporary:
+                scratch = Path(temporary)
+                for index, response in enumerate(responses):
+                    (scratch / str(index)).write_text(response)
+                fake = ('ssh_read() { local n; n=$(cat "$S/n" 2>/dev/null || echo 0); echo $((n + 1)) > "$S/n"; '
+                        '[ "$1" = b0110000000001 ] || return 1; cat "$S/$n"; }\nmachine_state() { echo started; }\n')
+                values = {"S": str(scratch), "WMH_BUILD_POLL_SECONDS": "0.05" if name == "timeout" else "0",
+                          "WMH_BUILD_TIMEOUT_SECONDS": "1" if name == "timeout" else "60"}
+                result = run(lifecycle + fake + "wmh_build_poll b0110000000001", values)
+                self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
+                self.assertIn(text, result.stdout + result.stderr)
+
 unittest.main(argv=[sys.argv[0]], verbosity=1)
 PY
 

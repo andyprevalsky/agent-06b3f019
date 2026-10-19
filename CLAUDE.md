@@ -834,10 +834,12 @@ Rebuild and push only on user request. The full run procedure is the
 Cloud SIM guests serve the same native model by default (`WMH_ENGINE=experiential`,
 `rose-archive`, `rose-wmh-gpt61`, `rose-outcome-distribution-v4`; set
 `WMH_ENGINE=legacy` for the old model). Publish it to the fleet donor in three
-steps: build natively on a big owned machine →
-`python -m benchmarks.wmh_build_cache push --serving-only --name rose-archive-serving --build-dir <dir>`
-→ `bash scripts/run-bench-cloud --refresh-wmh` (restores that cache and the native
-venv on the donor volume, then snapshots it; the 2 GB donor never builds). Then run
+steps: `bash scripts/run-bench-cloud --build-wmh` (builds natively on an owned,
+ledgered big machine forked from the donor snapshot, pushes the
+`rose-archive-serving` serving-only and `rose-archive-native` full caches, then
+destroys the machine and volume) → `bash scripts/run-bench-cloud --refresh-wmh`
+(restores that cache and the native venv on the donor volume, then snapshots it;
+the 2 GB donor never builds). Then run
 `scripts/run-bench <task> --sim-on <task>`. Guests fail clearly if the native
 pointer or venv is missing; they never build or install at run time.
 

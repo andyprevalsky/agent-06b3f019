@@ -216,10 +216,17 @@ manifest last, so a reader never sees a partial upload.
 `WMH_EXECUTION_POLICY=rose-outcome-distribution-v4`; exported values override
 them, and `WMH_ENGINE=legacy` selects the old model. To publish a new model:
 
-1. Build the native model on a big machine you own (never on the 2 GB donor).
-2. `python -m benchmarks.wmh_build_cache push --serving-only --name rose-archive-serving --build-dir <dir>`
-   uploads only what serving reads (`experiential/`, `models/`,
-   `build.manifest.json`, `conformance*.json`, `prediction*.json`).
+1. `bash scripts/run-bench-cloud --build-wmh` forks the donor's proven snapshot
+   onto an owned, ledgered `performance-8x`/64 GB machine with an 80 GB volume
+   (`WMH_BUILD_VM_SIZE`, `WMH_BUILD_VM_MEMORY_MB`, `WMH_BUILD_VOLUME_GB`), pulls
+   the full cache `WMH_FULL_CACHE_NAME` (default `rose-archive-native`) so only
+   new bundles export, builds, pushes the serving-only cache `WMH_CACHE_NAME`
+   (only `experiential/`, `models/`, `build.manifest.json`, `conformance*.json`,
+   `prediction*.json`) and the full cache, then destroys the machine and volume
+   (ledger under `.context/wmh-build/`). `WMH_EXPORT_CACHE_NAME=<cache>` runs
+   only the native step on that pulled export. `WMH_BUILD_TIMEOUT_SECONDS`
+   (default 14400) bounds the detached on-box job.
+2. Never build on the 2 GB donor; `--build-wmh` never starts or changes it.
 3. `bash scripts/run-bench-cloud --refresh-wmh` restores that cache onto the
    donor's `/data/world-model`, creates the native venv (with uv and its Python
    on the volume), checks `models/rose-archive/experiential.json`, then
