@@ -23,6 +23,8 @@ M = runpy.run_path(
 )
 H = M["H"]
 OLD = runpy.run_path(str(ROOT / "scripts/tests/cloudbench-archived-owner-stop.test.py"))
+# Revision whose readiness helper produced the recognized inventory pointers.
+INVENTORY_PRODUCER_REF = "62421522f"
 
 
 def write(path, value):
@@ -321,7 +323,12 @@ class Unused(unittest.TestCase):
         self.members[generation + "/admission-machines.json"] = b"[]\n"
         self.members[generation + "/machines/" + self.mid] = b"state=stopped\n"
         self.members[generation + "/names/cloudbench-fixture"] = (self.mid + "\n").encode()
-        source = (ROOT / "scripts/cloudbench-machine-readiness.py").read_bytes()
+        # A sealed archive carries the producer that wrote it. The recognized
+        # pointer producer is the 62421522f readiness helper, not HEAD's copy.
+        source = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", INVENTORY_PRODUCER_REF + ":scripts/cloudbench-machine-readiness.py"]
+        )
+        self.assertEqual(H["sha"](source), M["INVENTORY_PRODUCER_SHA256"])
         self.members["source/scripts/cloudbench-machine-readiness.py"] = source
         config_path = self.outer / "launch-1/config.private.json"
         config = json.loads(config_path.read_bytes())
