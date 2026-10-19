@@ -475,7 +475,7 @@ def test_failed_recording_batch_still_publishes_later_files():
             assert all(source.exists() for _, source, _, _ in entries)
 
 
-def test_closed_recording_archive_owner(mode: str):
+def test_closed_recording_archive_owner(mode: str, *, workers: int = 4):
     """Native producer/encryption/HTTP proofs in an isolated credential-free child."""
     fixture = Path(__file__).with_name("_recording_archive_closed_fixture.py")
     with tempfile.TemporaryDirectory(prefix="rose-closed-archive-owner-") as temporary:
@@ -499,7 +499,7 @@ def test_closed_recording_archive_owner(mode: str):
             if name in os.environ:
                 env[name] = os.environ[name]
         completed = subprocess.run(
-            [sys.executable, str(fixture), str(AGENTS.parent), mode],
+            [sys.executable, str(fixture), str(AGENTS.parent), mode, str(workers)],
             cwd=root,
             env=env,
             capture_output=True,
@@ -507,10 +507,20 @@ def test_closed_recording_archive_owner(mode: str):
         )
         artifact_dir = os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR")
         if artifact_dir:
-            retained = Path(artifact_dir) / "closed-recording-archive" / f"{mode}.private.log"
+            label = mode if workers == 4 else f"{mode}-workers-{workers}"
+            retained = Path(artifact_dir) / "closed-recording-archive" / f"{label}.private.log"
             retained.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             retained.write_bytes(completed.stdout + completed.stderr)
             retained.chmod(0o600)
+        if workers == 5:
+            controls = [
+                json.loads(line.split(" ", 1)[1])
+                for line in completed.stdout.decode().splitlines()
+                if line.startswith("CONCURRENCY_CONTROL ")
+            ]
+            assert len(controls) == 1 and controls[0] == {"distinct_paths": 71, "attempts": 71, "client_peak": 5}
+            assert completed.returncode != 0 and b"unchanged4workers must retain all70 files and original publisher" in completed.stderr
+            return
         assert completed.returncode == 0, f"closed recording archive {mode} child failed; private diagnostics retained"
         reports = [json.loads(line) for line in completed.stdout.decode().splitlines() if line.startswith("{")]
         assert len(reports) == 1 and reports[0]["models_tasks_provider_calls"] == 0
@@ -547,6 +557,10 @@ async def run_all_tests():
     result.record(
         "recording_archive_worker_exit_has_no_serial_publication_tail",
         test_recording_archive_worker_exit_has_no_serial_publication_tail,
+    )
+    result.record(
+        "closed_recording_archive_rejects_five_client_requests",
+        lambda: test_closed_recording_archive_owner("backlog", workers=5),
     )
     return result.summary()
 

@@ -5,10 +5,13 @@
         │             user's own email + password into the sign-in form the agent left
         │             open ─► POST /api/auth-assistance/:id/complete (the live view's
         │             "Done" button)
+        ├─ approve_app ─► approve in a separate device browser ─► check the
+        │                 agent's original browser is still live ─► complete
         └─ decline ─► POST /api/attention-requests/:id/reject
 
-The password typed here is the one only the user knows; the fixture never offers
-it to the agent, so a session under it proves the user (not the agent) signed in.
+For sign_in, the password typed here is the one only the user knows. For
+approve_app, the agent enters its saved password and this helper only acts on
+the user's device; it never attaches to or changes the agent's login page.
 """
 
 from __future__ import annotations
@@ -60,14 +63,11 @@ async def _live_cdp_url(base_url: str, headers: dict, task_id: str) -> str:
             params={"validateLive": "true"},
         )
     if response.status_code != 200:
-        raise AuthAssistanceUserError(
-            f"browser session lookup failed {response.status_code}: {response.text[:200]}"
-        )
+        raise AuthAssistanceUserError(f"browser session lookup failed {response.status_code}: {response.text[:200]}")
     info = response.json()
     if info.get("same_session_available") is not True:
         raise AuthAssistanceUserError(
-            "the agent's browser was not left running for the user: "
-            f"{info.get('same_session_unavailable_reason')}"
+            f"the agent's browser was not left running for the user: {info.get('same_session_unavailable_reason')}"
         )
     ws_url = info.get("ws_url")
     if not isinstance(ws_url, str) or not ws_url:
@@ -134,9 +134,7 @@ async def sign_in_as_user(
     if not request_id or not task_id:
         raise AuthAssistanceUserError("sign-in-help request is missing its id or browser task id")
     cdp_url = await _live_cdp_url(base_url, headers, task_id)
-    landed = await _type_credentials(
-        cdp_url, str(credentials["email"]), str(credentials["password"]), sign_in_url
-    )
+    landed = await _type_credentials(cdp_url, str(credentials["email"]), str(credentials["password"]), sign_in_url)
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
             f"{base_url.rstrip('/')}/api/auth-assistance/{request_id}/complete", headers=headers, json={}
@@ -146,6 +144,67 @@ async def sign_in_as_user(
             f"completing the sign-in-help request failed {response.status_code}: {response.text[:200]}"
         )
     return landed
+
+
+async def _approve_on_device(device_url: str, expected_number: Optional[str]) -> None:
+    """A separate browser represents the user's phone/app, with no login cookies."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context()
+            page = await context.new_page()
+            response = await page.goto(device_url, wait_until="domcontentloaded", timeout=SIGN_IN_FORM_TIMEOUT_MS)
+            if response is None or not response.ok:
+                status = response.status if response is not None else "no response"
+                raise AuthAssistanceUserError(f"the approval app did not open successfully ({status})")
+            if expected_number is not None:
+                await page.get_by_label("Sign-in number", exact=True).fill(expected_number)
+            await page.get_by_role("button", name="Approve sign-in", exact=True).click()
+            await page.locator("[data-app-approval-status='approved']").wait_for(
+                state="visible", timeout=SIGN_IN_FORM_TIMEOUT_MS
+            )
+        except AuthAssistanceUserError:
+            raise
+        except Exception as exc:
+            # Playwright errors can include the secret device URL. Keep it out
+            # of benchmark logs, while retaining the exception for diagnosis.
+            raise AuthAssistanceUserError("the approval app did not confirm the sign-in acknowledgment") from exc
+        finally:
+            await browser.close()
+
+
+async def approve_app_as_user(
+    base_url: str,
+    headers: dict,
+    request: dict,
+    task_id: str,
+    app_approval: dict,
+) -> None:
+    """Approve the challenge on the user's device before resuming the same browser."""
+    request_id = str(request.get("id") or "")
+    if not request_id or not task_id:
+        raise AuthAssistanceUserError("app-approval request is missing its id or browser task id")
+    device_url = app_approval.get("deviceUrl")
+    if not isinstance(device_url, str) or not device_url:
+        raise AuthAssistanceUserError("the site manifest carries no approval app URL")
+    expected_number = app_approval.get("expectedNumber")
+    if expected_number is not None:
+        expected_number = str(expected_number)
+        if len(expected_number) != 2 or not expected_number.isascii() or not expected_number.isdigit():
+            raise AuthAssistanceUserError("the approval app number must be two digits")
+
+    original_cdp_url = await _live_cdp_url(base_url, headers, task_id)
+    await _approve_on_device(device_url, expected_number)
+    if await _live_cdp_url(base_url, headers, task_id) != original_cdp_url:
+        raise AuthAssistanceUserError("the browser session changed while the user approved in the app")
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            f"{base_url.rstrip('/')}/api/auth-assistance/{request_id}/complete", headers=headers, json={}
+        )
+    if response.status_code != 200:
+        raise AuthAssistanceUserError(f"completing the app-approval request failed {response.status_code}")
 
 
 async def decline(base_url: str, headers: dict, request: dict) -> None:

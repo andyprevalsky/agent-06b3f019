@@ -1,4 +1,5 @@
 import type SteelSDK from 'steel-sdk';
+import type { Prisma } from '@prisma/client';
 import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
@@ -35,7 +36,16 @@ import {
 } from './sessionIdentity';
 import { steelCdpConnectionUrl } from './urls';
 import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
-import { prepareWritableSteelProfileHandoff } from './sessionProfileHandoff';
+import {
+  withSteelLifecycleClaim,
+  type SteelNativeEffect,
+  type SteelLifecycleMutation,
+} from './lifecycleClaim';
+import { prepareSteelCandidateCleanup, settleSteelCandidateCleanup } from './candidateCleanup';
+import {
+  finishSteelProfileWriter,
+  type SteelReplacementProfileDependencies,
+} from './replacementProfile';
 
 function hasValue(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
@@ -156,7 +166,11 @@ export interface RecreatedSteelSession {
   previousSessionReleased: boolean;
 }
 
-export interface SteelSessionReplacementDependencies {
+export interface SteelSessionReplacementDependencies extends SteelReplacementProfileDependencies {
+  withLifecycleClaim?: typeof withSteelLifecycleClaim;
+  prepareCandidateCleanup?: typeof prepareSteelCandidateCleanup;
+  settleCandidateCleanup?: typeof settleSteelCandidateCleanup;
+  resolveCandidateCustody?: (sessionId: string) => Promise<boolean>;
   createSession: (input: SteelSDK.SessionCreateParams) => Promise<{
     id: string;
     debugUrl: string;
@@ -182,23 +196,121 @@ const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
   },
 };
 
+type SteelReplacementOptions = {
+  forceManagedRotation: boolean;
+  forceFreshProfile?: boolean;
+  keepValidationConnection?: boolean;
+};
+
 export async function recreateSession(
   taskId: string,
-  options: {
-    forceManagedRotation: boolean;
-    forceFreshProfile?: boolean;
-    keepValidationConnection?: boolean;
-  },
+  options: SteelReplacementOptions,
   dependencies: SteelSessionReplacementDependencies = defaultReplacementDependencies
+): Promise<RecreatedSteelSession> {
+  const claim = dependencies.withLifecycleClaim ?? withSteelLifecycleClaim;
+  // A replacement is handed off only once every enclosing claim settles. If a
+  // claim rejects after publication, close the unreturned validation transport
+  // and forward that claim's original error.
+  let produced: RecreatedSteelSession | undefined;
+  const replacement = claim(
+    taskId,
+    async (assertTask, runTaskNative, mutateTask, resolveTaskCustody) => {
+      const row = await prisma.browserSession.findUnique({
+        where: { id: taskId },
+        include: { context: true },
+      });
+      if (row === null) throw new Error(`Browser task not found: ${taskId}`);
+      const recordedProfileId = options.forceFreshProfile
+        ? null
+        : reusableSteelRecordedProfileId(row);
+      const persistedProfileId =
+        recordedProfileId ??
+        (options.forceFreshProfile ? null : await getProviderProfile(row.contextId, 'steel'));
+      const boundProfile =
+        recordedProfileId !== null
+          ? {
+              profileId: recordedProfileId,
+              profileSource: row.providerProfileSource ?? 'session_bound',
+              persistProfile: row.providerProfilePersist ?? true,
+            }
+          : undefined;
+      const profile = resolveSteelProfileForSession(
+        options.forceFreshProfile ? null : row.agentId,
+        persistedProfileId,
+        null,
+        boundProfile
+      );
+      const run = async (
+        assertProfile?: () => Promise<void>,
+        runProfileNative?: SteelNativeEffect,
+        mutateProfile?: SteelLifecycleMutation,
+        resolveProfileCustody?: import('./lifecycleClaim').SteelNativeCustodyResolver
+      ) =>
+        (produced = await recreateSessionWithinClaim(
+          taskId,
+          options,
+          {
+            ...dependencies,
+            resolveCandidateCustody: resolveTaskCustody
+              ? async (id) => {
+                  const inspect = () =>
+                    (
+                      dependencies.inspectSession ??
+                      ((nativeId: string) => steel.sessions.retrieve(nativeId))
+                    )(id);
+                  const release = () =>
+                    (dependencies.releaseSession ?? releaseSteelRemoteSession)(id);
+                  if (resolveProfileCustody && !(await resolveProfileCustody(id, inspect, release)))
+                    return false;
+                  return resolveTaskCustody(id, inspect, release);
+                }
+              : dependencies.resolveCandidateCustody,
+            mutateLifecycle: mutateTask
+              ? (callback) =>
+                  mutateTask((transaction) =>
+                    mutateProfile ? mutateProfile(callback, transaction) : callback(transaction)
+                  )
+              : dependencies.mutateLifecycle,
+            runOwnedNative: async (id, effect, callback) => {
+              const native = () =>
+                runProfileNative ? runProfileNative(id, effect, callback) : callback();
+              return runTaskNative ? runTaskNative(id, effect, native) : native();
+            },
+            verifyLifecycleOwnership: async () => {
+              await assertTask?.();
+              await assertProfile?.();
+            },
+          },
+          { row, recordedProfileId, profile }
+        ));
+      return profile.profileId ? claim(`profile:${profile.profileId}`, run) : run();
+    }
+  );
+  try {
+    return await replacement;
+  } catch (error) {
+    await produced?.validationBrowser?.close().catch(() => {});
+    throw error;
+  }
+}
+
+type SteelReplacementSnapshot = {
+  row: Prisma.BrowserSessionGetPayload<{ include: { context: true } }>;
+  recordedProfileId: string | null;
+  profile: ReturnType<typeof resolveSteelProfileForSession>;
+};
+
+async function recreateSessionWithinClaim(
+  taskId: string,
+  options: SteelReplacementOptions,
+  dependencies: SteelSessionReplacementDependencies,
+  snapshot: SteelReplacementSnapshot
 ): Promise<RecreatedSteelSession> {
   const operation = options.forceManagedRotation ? 'Rotating' : 'Resuming';
   log.info(`${operation} browser task ${taskId} on Steel...`);
-  const oldSession = await prisma.browserSession.findUnique({
-    where: { id: taskId },
-    include: { context: true },
-  });
-
-  if (oldSession === null) throw new Error(`Browser task not found: ${taskId}`);
+  const oldSession = snapshot.row;
+  const steelRecordedProfileId = snapshot.recordedProfileId;
+  const profile = snapshot.profile;
 
   const previousProvider: BrowserProviderName =
     oldSession.provider === 'kernel'
@@ -220,88 +332,99 @@ export async function recreateSession(
     : baseGeo;
   log.info(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
   const userAgent = await fingerprintUserAgent(oldSession.context.userId);
-  const steelRecordedProfileId = options.forceFreshProfile
-    ? null
-    : reusableSteelRecordedProfileId(oldSession);
-  const persistedProfileId =
-    steelRecordedProfileId ??
-    (options.forceFreshProfile ? null : await getProviderProfile(oldSession.contextId, 'steel'));
-  const boundProfile =
-    steelRecordedProfileId !== null
-      ? {
-          profileId: steelRecordedProfileId,
-          profileSource: oldSession.providerProfileSource ?? 'session_bound',
-          persistProfile: oldSession.providerProfilePersist ?? true,
-        }
-      : undefined;
-  const handoffLease = await prepareWritableSteelProfileHandoff(
-    oldSession,
-    boundProfile,
-    dependencies.releaseSession ?? releaseSteelRemoteSession
-  );
-  const previousSessionReleased = handoffLease !== null;
-  let validationBrowserForHandoff: Browser | undefined;
-  try {
-    let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
+  let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
 
-    let lastError: Error | null = null;
-    let attemptsMade = 0;
-    let consecutiveCdpTimeouts = 0;
+  let lastError: Error | null = null;
+  let attemptsMade = 0;
+  let consecutiveCdpTimeouts = 0;
+  const finishWriter =
+    oldSession.provider === 'steel' &&
+    steelRecordedProfileId !== null &&
+    oldSession.providerProfilePersist;
+  let writerReleased = false;
+  if (finishWriter) {
+    await finishSteelProfileWriter(
+      { ...oldSession, providerProfileId: steelRecordedProfileId },
+      dependencies
+    );
+    writerReleased = true;
+  }
+  try {
     for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
-      await handoffLease?.assertOwned();
       attemptsMade = attempt;
       log.info(`  Steel session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
       let createdSessionId: string | null = null;
+      let createAcknowledged = false;
       let committed = false;
       let attemptCdpTimedOut = false;
       let validationBrowser: Browser | undefined;
       try {
-        if (handoffLease !== null && boundProfile !== undefined) {
-          const profile = await (
+        if (writerReleased && steelRecordedProfileId !== null) {
+          await dependencies.verifyLifecycleOwnership?.();
+          const persistedProfile = await (
             dependencies.retrieveProfile ??
             ((id: string) =>
               steel.get<unknown, { status: string }>(`/v1/profiles/${encodeURIComponent(id)}`))
-          )(boundProfile.profileId);
-          if (profile.status === 'FAILED') {
+          )(steelRecordedProfileId);
+          await dependencies.verifyLifecycleOwnership?.();
+          if (persistedProfile.status === 'FAILED') {
             throw new SteelProfileFailedError(
-              `Steel profile ${boundProfile.profileId} failed to persist`
+              `Steel profile ${steelRecordedProfileId} failed to persist`
             );
           }
-          if (profile.status !== 'READY') {
+          if (persistedProfile.status !== 'READY') {
             throw new Error(
-              `Steel profile ${boundProfile.profileId} is not ready (${profile.status})`
+              `Steel profile ${steelRecordedProfileId} is not ready (${persistedProfile.status})`
             );
           }
-          await handoffLease.assertOwned();
         }
         const proxySettings = buildSteelProxySettings(
           proxyGeo,
           dropProxyCity,
           options.forceManagedRotation
         );
-        const profile = resolveSteelProfileForSession(
-          options.forceFreshProfile ? null : oldSession.agentId,
-          persistedProfileId,
-          null,
-          boundProfile
+        await dependencies.verifyLifecycleOwnership?.();
+        const requestedSessionId = newOwnedSteelSessionId();
+        await (dependencies.prepareCandidateCleanup ?? prepareSteelCandidateCleanup)(
+          taskId,
+          requestedSessionId,
+          profile.profileId
         );
-        const session = await dependencies.createSession({
-          sessionId: newOwnedSteelSessionId(),
-          profileId: profile.profileId,
-          persistProfile: profile.persistProfile,
-          userAgent:
-            userAgent !== undefined && envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
-              ? userAgent
-              : undefined,
-          useProxy: proxySettings.config,
-          solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true),
-          debugConfig: { systemCursor: false },
-          stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
-          timeout: steelSessionTimeoutMs(),
-          dimensions: { width: 1288, height: 891 },
-        });
+        createdSessionId = requestedSessionId;
+        registerInFlightSteelSession(requestedSessionId);
+        const create = () =>
+          dependencies.createSession({
+            sessionId: requestedSessionId,
+            profileId: profile.profileId,
+            persistProfile: profile.persistProfile,
+            userAgent:
+              userAgent !== undefined && envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
+                ? userAgent
+                : undefined,
+            useProxy: proxySettings.config,
+            solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true),
+            debugConfig: { systemCursor: false },
+            stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
+            timeout: steelSessionTimeoutMs(),
+            dimensions: { width: 1288, height: 891 },
+          });
+        const session = dependencies.runOwnedNative
+          ? await dependencies.runOwnedNative(requestedSessionId, 'create', create)
+          : await create();
+        createAcknowledged = true;
+        // Capture the acknowledged allocation before any fallible bookkeeping.
         createdSessionId = session.id;
         registerInFlightSteelSession(session.id);
+        if (session.id !== requestedSessionId) {
+          await (dependencies.prepareCandidateCleanup ?? prepareSteelCandidateCleanup)(
+            taskId,
+            session.id,
+            profile.profileId
+          );
+          // Never adopt a provider ID outside the client-selected ownership
+          // contract, or discharge the requested ID merely from a different echo.
+          throw new Error('Steel returned a different session ID than requested');
+        }
 
         if (profile.profileId !== undefined && session.profileId !== profile.profileId) {
           throw new Error(
@@ -327,45 +450,57 @@ export async function recreateSession(
           await validationBrowser?.close().catch(() => {});
           validationBrowser = undefined;
         }
-        validationBrowserForHandoff = validationBrowser;
         if (validationFailure !== null) {
           attemptCdpTimedOut = validationFailure === STEEL_CDP_TIMEOUT_MESSAGE;
           throw new Error(`Session validation failed on attempt ${attempt}: ${validationFailure}`);
         }
 
         await navigateToSavedUrl(wsUrl, savedUrl, connectSteelBrowser, validationBrowser);
-        await handoffLease?.assertOwned();
-        const replaced = await prisma.browserSession.updateMany({
-          where: {
-            id: taskId,
-            sessionId: oldSession.sessionId,
-            ...(handoffLease !== null
-              ? {
-                  status: 'PAUSED',
-                  closedAt: null,
-                  provider: 'steel',
-                  providerProfileId: oldSession.providerProfileId,
-                  providerProfileSource: oldSession.providerProfileSource,
-                  providerProfilePersist: oldSession.providerProfilePersist,
-                }
-              : {}),
-          },
-          data: {
-            sessionId: session.id,
-            debugUrl,
-            wsUrl,
-            status: 'ACTIVE',
-            closedAt: null,
-            provider: 'steel',
-            kernelProxySource: null,
-            providerProfileId: session.profileId ?? profile.profileId ?? null,
-            providerProfileSource: profile.profileSource,
-            providerProfilePersist: profile.persistProfile,
-            ...(options.forceManagedRotation ? { proxyTier: 'residential' } : {}),
-          },
-        });
+        await dependencies.verifyLifecycleOwnership?.();
+        const mutate: SteelLifecycleMutation =
+          dependencies.mutateLifecycle ?? (async (callback) => callback(prisma));
+        const replaced = await mutate((transaction) =>
+          transaction.browserSession.updateMany({
+            where: {
+              id: taskId,
+              sessionId: oldSession.sessionId,
+              provider: oldSession.provider,
+              providerProfileId: oldSession.providerProfileId,
+              providerProfileSource: oldSession.providerProfileSource,
+              providerProfilePersist: oldSession.providerProfilePersist,
+              ...(writerReleased
+                ? { status: 'PAUSED' as const, closedAt: null }
+                : oldSession.status
+                  ? { status: oldSession.status, closedAt: oldSession.closedAt }
+                  : {}),
+            },
+            data: {
+              sessionId: session.id,
+              debugUrl,
+              wsUrl,
+              status: 'ACTIVE',
+              closedAt: null,
+              provider: 'steel',
+              kernelProxySource: null,
+              providerProfileId: session.profileId ?? profile.profileId ?? null,
+              providerProfileSource: profile.profileSource,
+              providerProfilePersist: profile.persistProfile,
+              ...(options.forceManagedRotation ? { proxyTier: 'residential' } : {}),
+            },
+          })
+        );
         if (replaced.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
         committed = true;
+        await (dependencies.settleCandidateCleanup ?? settleSteelCandidateCleanup)(
+          session.id,
+          'COMMITTED'
+        ).catch((error: unknown) => {
+          log.error('Committed Steel candidate cleanup bookkeeping remains pending', {
+            taskId,
+            sessionId: session.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
         unregisterInFlightSteelSession(session.id);
         await announceBrowserSessionBinding({ id: taskId });
 
@@ -388,6 +523,7 @@ export async function recreateSession(
         log.info(`Task moved to Steel session ${session.id}`);
         return {
           ...(validationBrowser ? { validationBrowser } : {}),
+          previousSessionReleased: writerReleased,
           debugUrl,
           sessionId: session.id,
           wsUrl,
@@ -399,21 +535,69 @@ export async function recreateSession(
           profileSource: profile.profileSource,
           previousSessionId: oldSession.sessionId,
           previousProvider,
-          previousSessionReleased,
         };
       } catch (error) {
+        // An unreturned validation connection is never retained by the caller.
         await validationBrowser?.close().catch(() => {});
-        validationBrowserForHandoff = undefined;
+        validationBrowser = undefined;
+        if (committed) throw error;
+        const createStatus =
+          (error as { status?: number; statusCode?: number }).status ??
+          (error as { statusCode?: number }).statusCode;
+        if (
+          !createAcknowledged &&
+          ((error as { steelNativeRequestNotIssued?: boolean }).steelNativeRequestNotIssued ===
+            true ||
+            (createStatus !== undefined &&
+              createStatus >= 400 &&
+              createStatus < 500 &&
+              createStatus !== 408)) &&
+          createdSessionId !== null
+        ) {
+          await (dependencies.settleCandidateCleanup ?? settleSteelCandidateCleanup)(
+            createdSessionId,
+            'RELEASED'
+          );
+          unregisterInFlightSteelSession(createdSessionId);
+          createdSessionId = null;
+        }
+        if (!createAcknowledged && createdSessionId !== null) {
+          // Transport/5xx/408 failure can precede allocation. A release 404
+          // cannot discharge this intent; exact native reconciliation owns it.
+          const resolved = await dependencies.resolveCandidateCustody?.(createdSessionId);
+          if (resolved !== true) throw new SteelSessionCleanupError(createdSessionId, error);
+          await (dependencies.settleCandidateCleanup ?? settleSteelCandidateCleanup)(
+            createdSessionId,
+            'RELEASED'
+          );
+          unregisterInFlightSteelSession(createdSessionId);
+          createdSessionId = null;
+        }
         if (!committed && createdSessionId !== null) {
           const uncommittedSessionId = createdSessionId;
           try {
-            await (dependencies.releaseSession ?? releaseSteelRemoteSession)(uncommittedSessionId);
+            const release = () =>
+              (dependencies.releaseSession ?? releaseSteelRemoteSession)(uncommittedSessionId);
+            await (dependencies.runOwnedNative
+              ? dependencies.runOwnedNative(uncommittedSessionId, 'release', release)
+              : release());
+            const terminal = await (
+              dependencies.inspectSession ?? ((id: string) => steel.sessions.retrieve(id))
+            )(uncommittedSessionId);
+            if (terminal.id !== uncommittedSessionId || terminal.status !== 'released') {
+              throw new Error('Owned Steel candidate release remains unconfirmed');
+            }
+            await (dependencies.settleCandidateCleanup ?? settleSteelCandidateCleanup)(
+              uncommittedSessionId,
+              'RELEASED'
+            );
+            unregisterInFlightSteelSession(uncommittedSessionId);
             createdSessionId = null;
           } catch (releaseError) {
+            registerInFlightSteelSession(uncommittedSessionId);
             throw new SteelSessionCleanupError(uncommittedSessionId, releaseError);
           }
         }
-        await handoffLease?.assertOwned();
         if (error instanceof ConcurrentSessionReplacementError) throw error;
         if (error instanceof SteelProfileFailedError) throw error;
 
@@ -449,26 +633,20 @@ export async function recreateSession(
     throw new Error(
       `Failed to create Steel replacement after ${attemptsMade} attempts: ${lastError?.message}`
     );
-  } finally {
-    await handoffLease?.release().catch(async (error: unknown) => {
-      await validationBrowserForHandoff?.close().catch(() => {});
-      throw error;
-    });
+  } catch (error) {
+    // Confirmed source release retains the PAUSED full-profile recovery binding.
+    // Uncertain release is recorded as ERROR by finishSteelProfileWriter.
+    // Never write after losing the lifecycle owner or a concurrent close.
+    if (writerReleased) await announceBrowserSessionBinding({ id: taskId });
+    throw error;
   }
 }
 
 export async function resumeSession(
   taskId: string,
-  options: {
-    forceFreshProfile?: boolean;
-    keepValidationConnection?: boolean;
-  } = {}
+  options: Omit<SteelReplacementOptions, 'forceManagedRotation'> = {}
 ): Promise<RecreatedSteelSession> {
-  return recreateSession(taskId, {
-    forceManagedRotation: false,
-    forceFreshProfile: options.forceFreshProfile,
-    keepValidationConnection: options.keepValidationConnection,
-  });
+  return recreateSession(taskId, { ...options, forceManagedRotation: false });
 }
 
 export async function rotateSession(

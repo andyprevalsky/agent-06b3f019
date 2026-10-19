@@ -781,6 +781,11 @@ def build_auth_options_prompt_section(
     passwords = auth_options.get("passwords") or []
     email_otp = auth_options.get("email_otp") or auth_options.get("emailOtp") or {}
     minted = auth_options.get("minted")
+    # Inboxes and phones whose one-time codes the runtime delivers to the agent.
+    readable = {str(value).lower() for value in auth_options.get("readable_identifiers") or []}
+
+    def _reachable(identifier: Any) -> str:
+        return " (codes sent here reach you automatically)" if str(identifier).lower() in readable else ""
 
     lines: List[str] = [f"# Auth Options for {realm}"]
 
@@ -829,6 +834,15 @@ def build_auth_options_prompt_section(
             credential_id = pwd.get("id") or (matched or {}).get("id") or ref
             display_origin = origin_for_ref or "saved password"
 
+            if pwd.get("browserSource") == "agent_passwordless":
+                # A minted identity's account on a code- or link-only site: no password to type.
+                credential_refs_by_secret_ref[str(username)] = {"kind": "password", "id": str(credential_id)}
+                lines.append(
+                    f"  - {display_origin} | {username}{_reachable(username)} | no password (sign in with a code "
+                    f"or link sent to it) | {_disabled_label(pwd)}"
+                )
+                continue
+
             if not encrypted:
                 unavailable_password_count += 1
                 lines.append(
@@ -842,7 +856,10 @@ def build_auth_options_prompt_section(
                 password_origins[ref] = origin_for_ref
             credential_refs_by_secret_ref[ref] = {"kind": "password", "id": str(credential_id)}
 
-            lines.append(f"  - {display_origin} | {username} | ref: {secret_placeholder(ref)} | {_disabled_label(pwd)}")
+            lines.append(
+                f"  - {display_origin} | {username}{_reachable(username)} | ref: {secret_placeholder(ref)} "
+                f"| {_disabled_label(pwd)}"
+            )
         if unavailable_password_count:
             lines.append(
                 f"  - {unavailable_password_count} saved password(s) were omitted as refs because this session "
@@ -865,6 +882,7 @@ def build_auth_options_prompt_section(
     else:
         lines.append("- Passkey: none")
 
+    accounts_end = len(lines)
     available = bool(email_otp.get("available"))
     connected = email_otp.get("connected_emails") or email_otp.get("connectedEmails") or []
     match = email_otp.get("match_for_site_account") or email_otp.get("matchForSiteAccount")
@@ -922,6 +940,14 @@ def build_auth_options_prompt_section(
     else:
         lines.append("- Minted account: none")
 
+    # What exists for this site, apart from the identities codes reach.
+    lines = [
+        lines[0],
+        "- Accounts for this site:",
+        *[f"  {line}" for line in lines[1:accounts_end]],
+        "- Identities you can use (codes sent to these reach you automatically):",
+        *[f"  {line}" for line in lines[accounts_end:]],
+    ]
     return "\n".join(lines), ref_to_encrypted, password_origins, credential_refs_by_secret_ref
 
 

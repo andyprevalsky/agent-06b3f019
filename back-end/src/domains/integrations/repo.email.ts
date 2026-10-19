@@ -171,18 +171,6 @@ export async function findAvailableGmailEmails(userId: string) {
   });
 }
 
-export async function findMintedAccountEmails(userId: string) {
-  const rows = await prisma.mintedAccount.findMany({
-    where: {
-      userId,
-      disabledAt: null,
-      accountLabel: { contains: '@' },
-    },
-    select: { accountLabel: true },
-  });
-  return [...new Set(rows.map((row) => row.accountLabel).filter((email) => email !== ''))];
-}
-
 export async function updateEmailCredentialToken(
   credentialId: string,
   data: {

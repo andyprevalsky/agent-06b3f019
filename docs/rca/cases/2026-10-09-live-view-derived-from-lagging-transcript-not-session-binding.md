@@ -142,3 +142,70 @@ None recorded.
 
 Bind a live view to the backend's authoritative resource binding, not to the
 last URL an event log happened to announce — the event log lags every swap.
+
+
+### 2026-10-18 recurrence: failed Steel writer handoff omitted the binding announcement
+
+Exact CDF `cdf0aeda05c62d90ab825340ee955e6ee97ee68d` review cycle 2
+comment `4305395318` exposed a missing failure branch of the same authoritative
+binding publication contract. `finishSteelProfileWriter` commits the exact
+writer to PAUSED, and an unacknowledged native release can then commit ERROR
+(or retain PAUSED when native released evidence is available). The helper
+rethrows the release error. Its caller invoked that helper before its outer
+try, with `writerReleased` still false, so the failure never reached the
+existing announcement. A subscriber could retain the old ACTIVE binding.
+This is a local, reproduced publication omission, not evidence that it caused
+the concurrent minted-SMS benchmark failure.
+
+The repair is at the failure-state mutation owner, not a new recovery path:
+retain the result of its existing ownership-fenced, exact-binding updateMany;
+only when that CAS changes one row, call the existing
+`announceBrowserSessionBinding` before rethrowing the identical release error.
+The announcement reads the persisted row and is already best effort. Lost
+ownership and a concurrent close or rebound do not satisfy the CAS and do not
+produce this notification. Native inspection/release, lifecycle ownership,
+retry bounds, task/session identities, and the caller are unchanged. This
+extends the prior push contract to its missed error path; it does not add a
+poll, status, provider retry, or transcript workaround.
+
+The existing registered
+`testWritableSteelProfileHandoffRetainsRecoveryCustody` owner was extended with
+real recreateSession, lifecycle and mutation code. External database/native
+edges remain in memory; the actual notification builder and broadcast queue
+run through a mocked fetch transport, and socket/DNS access is denied before
+imports. Two release failures require one exact persisted ERROR/PAUSED binding
+notification, the original exception object, and no replacement creation.
+Concurrent CLOSED and rebound rows require no overwrite or notification. All
+64 original assertion-call text multiplicities remain; the owner now has 74.
+The same permanent test bytes on unchanged CDF fail with
+`committed writer failure omitted binding announcement`; the private candidate
+passes the full existing owner and its controls, normally joined, with the
+owner's unexpected external-request counter still zero.
+
+The selected owning command uses the verification workspace's installed tsx
+loader to execute only the exported registered owner in a private physical
+CDF source copy, with its pre-import network denial and secretless test
+configuration. It does not execute the full registrar, backend coverage,
+provider smoke, or a native benchmark. The initial loader path incorrectly
+assumed tsx was installed below back-end/node_modules; that setup failure
+occurred before test entry and is retained separately. The corrected same-owner
+baseline and candidate commands and logs are bound in
+`.context/auth-deploy/repair-next-primary/steel-writer-announcement-cdf-rca/final-proof.json`
+(SHA256 `1c91a791b53d67826d60e25394613906ca46d2b433d1744dcd4507923ef6f890`).
+Runtime patch SHA256 is
+`816353d2bdabd8fe9e11bf25fa6d5cefed65d1133777dea3ba74a620fad0ca24`;
+regression patch SHA256 is
+`8a8f7e29da2f0a1465f86fa146a2e849806b833d39dce8b0c63fce66dbbec9bb`.
+
+Two canonical searches were run against all 942 CDF cases using
+`finishSteelProfileWriter announcement release ERROR` and
+`BROWSER_SESSION stale binding PAUSED source release`, followed by the exact
+symbol search. This case and the October 14 writable-profile handoff case were
+read in full, including Solution and Human feedback. The latter is a related
+ownership repair; this recurrence appends here because the violated contract
+is publication after an authoritative binding state change. These searches
+followed the initial review-driven source triage and owning reproduction,
+rather than preceding the hypothesis; that ordering gap is retained, not
+backdated. No new human feedback was recorded. Central composition, canonical
+archive validation, full gates, and deployment remain with ROOT; the private
+patch has not been adopted or pushed.

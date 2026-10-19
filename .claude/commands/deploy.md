@@ -528,6 +528,7 @@ their assertions or test counts:
 `bash scripts/tests/canonical-seed-whatsapp-content.test.sh`,
 `bash scripts/tests/seed-memory-ratchet.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
+`bash scripts/tests/check-prompt-human-approval.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
 `bash scripts/tests/check-llm-trajectory-injection-approval.test.sh`,
 `bash scripts/tests/approval-format.test.sh`,

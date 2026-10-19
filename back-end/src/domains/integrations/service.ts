@@ -39,7 +39,8 @@ import {
 } from '../../providers/gptCredentials';
 import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
-import { fetchPrimitiveMessagesSince, primitiveDomain } from '../../providers/primitive';
+import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
+import { findReadableInboxes } from '../../providers/authOptionsStore';
 import { archiveJson } from '../../providers/traceArchive';
 import {
   clearConnectionNeedsReconnectFromIntegrationRecovery,
@@ -246,31 +247,10 @@ export async function deleteIntegration(userId: string, name: string) {
 
 /* c8 ignore start -- fetchEmailsSince and sendEmail require real Gmail OAuth credentials and gmailSync/gmailParser services */
 export async function fetchEmailsSince(userId: string, since: Date, limit: number) {
-  const integrations = await repo.findGmailIntegrationsWithCredentials(userId);
-  const allCredentials = integrations
-    .flatMap((i) => i.emailCredentials)
-    .filter(
-      (c) =>
-        c.refreshToken !== null &&
-        c.refreshToken !== undefined &&
-        c.refreshToken !== '' &&
-        c.accessToken !== null &&
-        c.accessToken !== undefined &&
-        c.accessToken !== ''
-    );
-  // A connected inbox on our own mail domain is read through the mail provider
-  // that hosts it, not through Gmail: it has no Google token to read with.
-  const ownDomain = `@${primitiveDomain().toLowerCase()}`;
-  const ownDomainInboxes = allCredentials
-    .map((credential) => credential.email?.toLowerCase() ?? '')
-    .filter((email) => email.endsWith(ownDomain));
-  const gmailCredentials = allCredentials.filter(
-    (credential) => !(credential.email?.toLowerCase() ?? '').endsWith(ownDomain)
-  );
-  const mintedInboxEmails = [
-    ...new Set([...(await repo.findMintedAccountEmails(userId)), ...ownDomainInboxes]),
-  ];
-  if (allCredentials.length === 0 && mintedInboxEmails.length === 0) {
+  const { gmailCredentials, primitiveInboxEmails: mintedInboxEmails } =
+    await findReadableInboxes(userId);
+  if (gmailCredentials.length === 0 && mintedInboxEmails.length === 0) {
+    const integrations = await repo.findGmailIntegrationsWithCredentials(userId);
     if (integrations.length === 0) throw new GmailNotConnectedError();
     throw new GmailCredentialsNotFoundError();
   }

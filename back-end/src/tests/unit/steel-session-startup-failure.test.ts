@@ -20,6 +20,10 @@ import { createSteelRecoverySession } from '../../providers/steel/sessionRecover
 import { recreateSession } from '../../providers/steel/sessionResume';
 import { prisma } from '../../providers/database';
 import {
+  fixtureCandidateCleanup,
+  withReleasedFixtureLifecycleClaim,
+} from '../blackbox/steel-fingerprint.connection-retry.behavior';
+import {
   isSteelProvisioningOutage,
   isSteelSessionValidationFailure,
   shouldSkipSteelLegs,
@@ -44,6 +48,14 @@ function fakeBrowser(): Browser {
     close: async () => {},
   } as unknown as Browser;
 }
+
+// The profile writer is verified natively before its exact source is released.
+const recordedWriter = async (id: string) => ({
+  id,
+  profileId: 'offline-profile',
+  persistProfile: true,
+  status: 'live',
+});
 
 const STARTUP_FAILED = 'Steel reported session s-1 failed (startup_failed)';
 const replacementFailure = (cause: string) =>
@@ -104,6 +116,9 @@ async function main(): Promise<void> {
             'offline-task',
             { forceManagedRotation: true },
             {
+              ...fixtureCandidateCleanup,
+              withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+              inspectSession: recordedWriter,
               retrieveProfile: async (profileId) => {
                 assert.strictEqual(profileId, 'offline-profile');
                 assert.strictEqual(released, true);
@@ -170,8 +185,10 @@ async function main(): Promise<void> {
       prisma.browserProviderProfile.findUnique = (async () => ({
         profileId: 'offline-context-profile',
       })) as typeof profile;
-      prisma.browserSession.updateMany = (async () => {
+      const writtenStatuses: unknown[] = [];
+      prisma.browserSession.updateMany = (async (args: unknown) => {
         writes++;
+        writtenStatuses.push((args as { data: { status: unknown } }).data.status);
         return { count: mode === 'changed-source' ? 0 : 1 };
       }) as typeof update;
       try {
@@ -181,6 +198,9 @@ async function main(): Promise<void> {
               'offline-task',
               { forceManagedRotation: true },
               {
+                ...fixtureCandidateCleanup,
+                withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+                inspectSession: recordedWriter,
                 createSession: async () => {
                   creates++;
                   throw Object.assign(new Error('offline terminal sentinel'), { status: 429 });
@@ -198,7 +218,7 @@ async function main(): Promise<void> {
           mode === 'release-failure'
             ? /offline release refused/
             : mode === 'changed-source'
-              ? /changed before Steel profile handoff/
+              ? /Steel profile writer changed before replacement claim/
               : /offline terminal sentinel/
         );
         assert.strictEqual(releases, mode === 'release-failure' ? 1 : 0);
@@ -206,7 +226,19 @@ async function main(): Promise<void> {
           creates,
           mode === 'release-failure' || mode === 'changed-source' ? 0 : 1
         );
-        assert.strictEqual(writes, mode === 'release-failure' || mode === 'changed-source' ? 1 : 0);
+        // An unconfirmed source release retains ERROR custody after the PAUSED claim.
+        assert.deepStrictEqual(
+          writtenStatuses,
+          mode === 'release-failure'
+            ? ['PAUSED', 'ERROR']
+            : mode === 'changed-source'
+              ? ['PAUSED']
+              : []
+        );
+        assert.strictEqual(
+          writes,
+          mode === 'release-failure' ? 2 : mode === 'changed-source' ? 1 : 0
+        );
       } finally {
         prisma.browserSession.findUnique = find;
         prisma.integration.findUnique = fingerprint;

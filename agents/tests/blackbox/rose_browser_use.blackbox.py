@@ -331,7 +331,10 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "  - 4. Email OTP" in prompt
     assert "  - 5. SMS OTP" in prompt
     assert "  - 6. Guest/anonymous completion, if viable" in prompt
-    assert "- If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.\n" in prompt
+    assert (
+        "- If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.\n"
+        in prompt
+    )
     assert "  - 7. Minted account\n" in prompt
     assert "  - 8. request_user_assistance_for_authentication" in prompt
     assert "OTP codes from email or SMS are automatically injected" in prompt
@@ -348,21 +351,19 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
 
 
 def test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_recovery():
-    """Cement: the auth handoff lands the user on the sign-in form, so they never navigate."""
-    rule = (
-        "leave the site's sign-in form (username/password or code entry) open and visible, "
-        "so the user can sign in without navigating."
-    )
+    """A handoff preserves the current auth step, including an accepted-password challenge."""
+    blocked_step = "leave the auth step you are blocked on open and visible"
     for disable_recover in ("", "1"):
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": disable_recover}):
             (auth_help,) = build_browser_use_tools(["request_user_assistance_for_authentication"])
             prompt = build_browser_use_system_prompt(
                 ["request_user_assistance_for_authentication", "recover_from_challenge"]
             )
-        assert rule in auth_help["description"], f"tool description missing rule (disable={disable_recover!r})"
-        assert f"- Before calling request_user_assistance_for_authentication, {rule}" in prompt, (
-            f"system prompt missing rule (disable={disable_recover!r})"
-        )
+        assert blocked_step in auth_help["description"], f"tool description missing rule (disable={disable_recover!r})"
+        assert blocked_step in prompt, f"system prompt missing rule (disable={disable_recover!r})"
+        # A pending approval is the blocked step; sending the agent back to a password form cancels it.
+        assert "username/password or code entry" not in auth_help["description"]
+        assert "username/password or code entry" not in prompt
 
 
 def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
@@ -2444,9 +2445,62 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
 # =====================================================================
 
 
+
+async def test_completed_browser_output_validation_is_not_transport_or_completion():
+    from providers.rose.errors import BrowserModelOutputValidationError, RoseStallError
+    from providers.rose.types import RoseResponse
+    from browser_tools.schemas import BrowserToolArgsValidationError
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from helpers import observability
+    client = RoseClient(openrouter_key="offline-fake")
+    kwargs = dict(task="Read the visible heading", browser_state=_browser_state(), action_history=[], available_actions=["wait", "request_user_assistance_for_authentication"])
+    outputs = []
+    with patch.object(observability, "dump_llm_context", side_effect=lambda **kw: outputs.append(kw)):
+        for content in ("The page is finished.", '{"action": []}'):
+            response = RoseResponse(content=content, actual_model="offline-model", request_id="actual-response", usage={"prompt_tokens": 7, "completion_tokens": 3})
+            client.collect = AsyncMock(return_value=response)
+            try:
+                await client.complete_browser_use(**kwargs)
+                raise AssertionError("invalid output must not be accepted as completion")
+            except BrowserModelOutputValidationError as error:
+                assert error.response is response and error.response.usage == response.usage
+            assert outputs[-1]["output"]["content"] == content
+            assert outputs[-1]["output"]["request_id"] == "actual-response"
+            assert outputs[-1]["config"]["tool_choice"] == "auto"
+        with patch.object(observability, "dump_llm_context", side_effect=OSError("offline capture failure")):
+            response = RoseResponse(content="Invalid completed answer", request_id="actual-failed-capture")
+            client.collect = AsyncMock(return_value=response)
+            try:
+                await client.complete_browser_use(**kwargs)
+                raise AssertionError("capture failure must not accept invalid output")
+            except BrowserModelOutputValidationError as error:
+                assert error.response is response
+        for original in (RoseStallError("empty stream"), ValueError("unrelated transport wrapper"), asyncio.CancelledError(), WorkflowGenerationSealed("sealed")):
+            client.collect = AsyncMock(side_effect=original)
+            try:
+                await client.complete_browser_use(**kwargs)
+                raise AssertionError("expected original transport/control error")
+            except BaseException as error:
+                assert error is original and not isinstance(error, BrowserModelOutputValidationError)
+        typed = RoseResponse(tool_calls=[{"id": "real-tool", "name": "wait", "arguments": '{"time_ms": "not-a-number"}'}])
+        client.collect = AsyncMock(return_value=typed)
+        try:
+            await client.complete_browser_use(**kwargs)
+            raise AssertionError("invalid typed arguments must retain existing error")
+        except BrowserToolArgsValidationError:
+            pass
+        for response in (RoseResponse(content='{"action": [{"wait": {"time_ms": 1}}]}'), RoseResponse(tool_calls=[{"id": "real-wait", "name": "wait", "arguments": '{"time_ms": 1}'}])):
+            client.collect = AsyncMock(return_value=response)
+            result = await client.complete_browser_use(**kwargs)
+            assert result["action"]["action"] == "wait"
+
+
 async def run_all_tests():
     print("rose_browser_use blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("declared tool admission preserves aliases and batches", test_declared_tool_admission_keeps_aliases_and_batch_semantics)
+    await r.record_async("advertised coordinate-only action remains admissible", test_advertised_coordinate_only_action_is_admitted)
+    await r.record_async("completed_browser_output_validation_is_not_transport_or_completion", test_completed_browser_output_validation_is_not_transport_or_completion)
 
     r.record("browser_use_pool_registered", test_browser_use_pool_registered)
 
@@ -2675,3 +2729,55 @@ async def run_all_tests():
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
+
+
+async def test_advertised_coordinate_only_action_is_admitted():
+    from providers.rose.types import RoseResponse
+    from providers.rose.errors import BrowserModelOutputValidationError
+    from helpers import observability
+    responses = [
+        RoseResponse(tool_calls=[{"id": "coordinate-call", "name": "click_coordinates", "arguments": '{"x": 12, "y": 34}'}]),
+        RoseResponse(content='{"action": [{"click_coordinates": {"x": 12, "y": 34}}]}'),
+    ]
+    client = RoseClient(openrouter_key="offline-unused")
+    with patch.object(observability, "dump_llm_context"):
+        for response in responses:
+            client.collect = AsyncMock(return_value=response)
+            try:
+                result = await client.complete_browser_use(task="Click the visible target", browser_state=_browser_state(), action_history=[], available_actions=["click_coordinates"])
+            except BrowserModelOutputValidationError as error:
+                raise AssertionError("the advertised coordinate-only action was rejected after normalization") from error
+            advertised = client.collect.await_args.kwargs["tools"]
+            assert [tool["name"] for tool in advertised] == ["click_coordinates"]
+            assert result["action"]["action"] == "click"
+            assert result["action"]["coordinates"] == {"x": 12, "y": 34}
+
+
+async def test_declared_tool_admission_keeps_aliases_and_batch_semantics():
+    from providers.rose.types import RoseResponse
+    from providers.rose.errors import BrowserModelOutputValidationError
+    from helpers import observability
+    client = RoseClient(openrouter_key="offline-unused")
+    async def complete(response, available):
+        client.collect = AsyncMock(return_value=response)
+        return await client.complete_browser_use(task="Use the offered action", browser_state=_browser_state(), action_history=[], available_actions=available)
+    with patch.object(observability, "dump_llm_context"):
+        for response in (
+            RoseResponse(tool_calls=[{"id": "hidden", "name": "screenshot", "arguments": "{}"}]),
+            RoseResponse(content='{"action": [{"screenshot": {}}]}'),
+            RoseResponse(tool_calls=[{"id": "unoffered-index", "name": "click", "arguments": '{"index": 3}'}]),
+            RoseResponse(content='{"action": [{"click": {"index": 3}}]}'),
+        ):
+            try:
+                await complete(response, ["click_coordinates"])
+            except BrowserModelOutputValidationError:
+                pass
+            else:
+                raise AssertionError("an action absent from the request grammar was admitted")
+        result = await complete(RoseResponse(tool_calls=[{"id": "nested", "function": {"name": "click_coordinates", "arguments": '{"x": 12, "y": 34}'}}]), ["click_coordinates"])
+        assert result["action"]["coordinates"] == {"x": 12, "y": 34}
+        result = await complete(RoseResponse(content='{"action": [{"done": {"text": "Finished"}}]}'), ["attempt_completion"])
+        assert result["action"]["action"] == "attempt_completion"
+        result = await complete(RoseResponse(tool_calls=[{"id": "key-" + key, "name": "press_key", "arguments": json.dumps({"key": key})} for key in "ab"]), ["press_key"])
+        assert result["action"]["action"] == "input_text"
+        assert result["action"]["params"]["text"] == "ab"

@@ -511,6 +511,13 @@ def _format_user_context(
                 primary = config.get("connectedEmail") if isinstance(config, dict) else None
                 if isinstance(primary, str) and primary and primary not in emails:
                     emails.insert(0, primary)
+            # Gmail is connected only for the inboxes the runtime can read; an
+            # inbox that needs reconnecting is not an available integration.
+            readable = integ.get("readableInboxEmails")
+            if name.lower() == "gmail" and isinstance(readable, list):
+                emails = [email for email in readable if isinstance(email, str) and email]
+                if not emails:
+                    continue
             # Include if CONNECTED, or if it has email credentials (Gmail can send even if sync failed)
             if status == "CONNECTED" or emails:
                 if emails:

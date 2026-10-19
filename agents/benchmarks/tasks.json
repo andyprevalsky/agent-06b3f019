@@ -3302,6 +3302,117 @@
     "source": ["user-request:auth-critical-path-e2e"]
   },
   {
+    "name": "browser-auth-password-app-approval",
+    "title": "Hosted Sign-In: Password Then App Approval",
+    "description": "A saved password leads to a number-matching approval on the user's separate device; the agent must request that action, keep the browser session, verify sign-in and finish the task.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "password_app_approval",
+        "user_response": "approve_app"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free synthetic test site served by the local backend and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. One saved password belongs to the same Rose user that owns the task. After accepting it, the site explains that the user must approve a numbered sign-in request in the Rose Authenticator app on another device. When the agent raises auth_assistance, the harness plays the user in a separate browser context on the helper-only device page, selects the matching number and approves. The task browser must preserve its pending challenge and verify the resulting authenticated account before returning the member number. This models app approval without contacting Google or a real device."
+    },
+    "evaluators": [
+      {
+        "id": "password-app-approval-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "Exactly one authentication assistance request is raised",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "password-app-approval-outcome",
+        "method": "static_check",
+        "criteria": [
+          "One saved password creates a pending second-factor challenge",
+          "One app approval precedes completion of that challenge",
+          "The authenticated session uses password_app_approval",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password_app_approval",
+            "deliverable_contains_member_number": true,
+            "trail": [
+              { "kind": "password", "outcome": "pending" },
+              { "kind": "second_factor", "outcome": "pending" },
+              { "kind": "app_approval", "outcome": "approved" },
+              { "kind": "second_factor", "outcome": "signed_in" }
+            ],
+            "counts": [
+              { "kind": "password", "min": 1, "max": 1 },
+              { "kind": "second_factor", "min": 2, "max": 2 },
+              { "kind": "app_approval", "min": 1, "max": 1 }
+            ]
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:auth-critical-path-e2e",
+      "user-request:app-approval-2fa"
+    ]
+  },
+  {
     "name": "browser-auth-account-locked",
     "title": "Hosted Sign-In: Locked Account",
     "description": "The saved login's account is locked; the browser agent must stop trying and ask the user for sign-in help.",

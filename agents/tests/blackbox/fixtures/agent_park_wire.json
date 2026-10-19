@@ -1,0 +1,21 @@
+{
+  "agent": {
+    "agent_id": "agent-1",
+    "parent_agent_id": null,
+    "parent_goal": null,
+    "status": "PAUSED",
+    "tool_tokens_in": 0,
+    "tool_tokens_out": 0,
+    "tool_cost_cents": 0,
+    "structured_output": null,
+    "failure_context": null,
+    "verifier": null,
+    "tools": []
+  },
+  "messages": [],
+  "pagination": {
+    "has_more": false,
+    "oldest_timestamp": null
+  },
+  "inspection_context": null
+}

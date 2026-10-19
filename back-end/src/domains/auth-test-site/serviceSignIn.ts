@@ -19,6 +19,7 @@ import { primitiveDomain, sendPrimitiveEmail } from '../../providers/primitive';
 import { createLogger } from '../../providers/logger';
 import {
   AUTH_TEST_SITE_NAME,
+  APP_APPROVAL_CHALLENGE_TTL_MS,
   SIGN_IN_CODE_TTL_MS,
   SIGN_IN_EMAIL_SENDER_LOCAL_PART,
 } from './config';
@@ -209,6 +210,24 @@ export async function signInWithPassword(
     const outcome = await issueEmailCode(site, email, 'second_factor', 'verification');
     recordAttempt(site, 'second_factor', email, outcome, null);
     return { ok: 'second_factor' };
+  }
+  if (site.behavior.secondFactor === 'app_approval') {
+    recordAttempt(site, 'password', email, 'pending', null);
+    const nowMs = Date.now();
+    site.appApprovals = site.appApprovals
+      .filter((challenge) => !challenge.consumed && challenge.expiresAtMs > nowMs)
+      .slice(-15);
+    const token = randomBytes(24).toString('base64url');
+    site.appApprovals.push({
+      token,
+      email,
+      number: site.appApprovalNumber,
+      expiresAtMs: nowMs + APP_APPROVAL_CHALLENGE_TTL_MS,
+      approvedAt: null,
+      consumed: false,
+    });
+    recordAttempt(site, 'second_factor', email, 'pending', null);
+    return { ok: 'app_approval', challengeToken: token };
   }
   recordAttempt(site, 'password', email, 'signed_in', null);
   return { ok: true, token: startSession(site, email, 'password') };

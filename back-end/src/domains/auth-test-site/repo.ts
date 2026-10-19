@@ -1,4 +1,5 @@
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
+import { saveMintedPasswordlessLogin } from '../../providers/mintedAccountPassword';
 import {
   AUTH_TEST_SITE_BASE_PATH,
   AUTH_TEST_SITE_REALM_PREFIX,
@@ -81,6 +82,24 @@ export async function upsertSavedPassword(params: {
     select: { id: true },
   });
   return row.id;
+}
+
+/** Records the passwordless login production saves after a minted sign-in. */
+export async function recordMintedPasswordlessLogin(params: {
+  userId: string;
+  origin: string;
+  username: string;
+  nowMs: number;
+}): Promise<void> {
+  await runTransactionWithRetry((tx) => saveMintedPasswordlessLogin(tx, params));
+}
+
+export async function findSavedPasswordId(userId: string, origin: string, username: string) {
+  const row = await prisma.browserPassword.findUnique({
+    where: { userId_origin_username: { userId, origin, username } },
+    select: { id: true },
+  });
+  return row?.id ?? null;
 }
 
 export async function findSavedPasswordStates(ids: string[]) {

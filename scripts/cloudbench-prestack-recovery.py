@@ -278,18 +278,42 @@ def git_blob(root: Path, ref: str, path: str) -> bytes:
     return result.stdout
 
 
-def recipe_paths(blob) -> tuple[str, ...]:
+def _bound_optional_executables(root: Path, ref: str) -> tuple[str, ...]:
+    """Bind the optional browser helper by Git ref when that source commits it."""
+    path = "scripts/ensure-playwright-browsers.py"
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-tree", "-z", ref, "--", path],
+        capture_output=True, timeout=15,
+    )
+    if result.returncode:
+        raise ValueError("bound optional executable lookup failed")
+    if not result.stdout:
+        return ()
+    rows = result.stdout.split(b"\0")
+    if len(rows) != 2 or rows[-1] or b"\t" not in rows[0]:
+        raise ValueError("unsafe optional executable tree entry")
+    metadata, name = rows[0].split(b"\t", 1)
+    mode, kind, _oid = metadata.split()
+    if name != path.encode() or mode not in (b"100644", b"100755") or kind != b"blob":
+        raise ValueError("optional executable must be a regular committed blob")
+    return (path,)
+
+
+def recipe_paths(blob, root: Path | None = None, ref: str | None = None) -> tuple[str, ...]:
     # Historical captures retain their original checkout binding and fingerprint.
     # A source that can delegate native mutations must bind that authority and
     # both identity providers, including the parent that mints feed identity.
+    paths = RECIPE_PATHS
     if b"cloudbench-campaign-mutation.py" in blob("scripts/run-bench-fleet"):
-        return RECIPE_PATHS + (
+        paths += (
             "scripts/cloudbench-campaign-mutation.py",
             "scripts/cloudbench-script-snapshot.py",
             "scripts/run-bench-campaign.py",
             "scripts/cloudbench-port-lease.py",
         )
-    return RECIPE_PATHS
+    if root is not None and ref is not None:
+        paths += _bound_optional_executables(root, ref)
+    return paths
 
 
 def native_recipe(meta: dict[str, str], config: dict) -> tuple[str, str, str]:
@@ -339,7 +363,7 @@ def native_recipe(meta: dict[str, str], config: dict) -> tuple[str, str, str]:
     def blob(path: str) -> bytes:
         return git_blob(root, ref, path)
 
-    expected = {path: sha(blob(path)) for path in recipe_paths(blob)}
+    expected = {path: sha(blob(path)) for path in recipe_paths(blob, root, ref)}
     injected = {}
     for item in config.get("files", []):
         if (
@@ -467,7 +491,7 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
     def blob(path: str) -> bytes:
         return git_blob(root, ref, path)
 
-    expected = {path: sha(blob(path)) for path in recipe_paths(blob)}
+    expected = {path: sha(blob(path)) for path in recipe_paths(blob, root, ref)}
     if (
         provenance.get("git_head") != ref
         or provenance.get("git_exit_code") != 0

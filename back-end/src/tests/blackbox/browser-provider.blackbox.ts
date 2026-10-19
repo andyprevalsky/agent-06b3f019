@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import nodeAssert from 'node:assert/strict';
+import { assertSteelProfileReplacementLifecycle } from './browser-provider.steel-profile-lifecycle.support';
 import { createSessionWithContextUsingDependencies } from '../../providers/browser';
 import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { selectedBrowserProvider } from '../../providers/browser/config';
@@ -47,6 +48,10 @@ const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
+  [
+    'Steel first-profile replacement preserves its full binding and the source on failure',
+    assertSteelProfileReplacementLifecycle,
+  ],
   [
     'Steel same-profile rotation releases before attachment and avoids duplicate cleanup',
     () => assertSteelSameProfileReplacement(false),

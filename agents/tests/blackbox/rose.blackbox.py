@@ -3209,6 +3209,50 @@ def test_build_codex_responses_body_contract():
     assert max_effort_body["reasoning"]["effort"] == "xhigh"
 
 
+    # Exercise the actual root-system producer, including its final boundary.
+    from utils.prompts import build_system_prompt, MAIN_SYSTEM_PROMPT
+    from utils.tool_schemas import create_agent_action_model, EXECUTE_PHASE_TOOLS
+
+    native_tools = build_anthropic_tools_from_response_model(create_agent_action_model(EXECUTE_PHASE_TOOLS))
+    literal_data = "keep __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ as user/tool data"
+    history = [
+        {"role": "user", "content": literal_data},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_boundary_data", "function": {"name": "spawn_agent", "arguments": {"goal": literal_data}}}]},
+        {"role": "tool", "tool_call_id": "call_boundary_data", "content": literal_data},
+    ]
+    fields = {"fields": [{"name": "observed_value", "type": "str", "required": True, "description": "Grounded fixture value."}]}
+    def produced(context="Fixture user context A", phase="EXECUTE", schema=fields):
+        return build_system_prompt(phase=phase, enabled_tools=EXECUTE_PHASE_TOOLS, user_context_section=context, response_schema=schema)
+    def wire(system, namespace="serializer-owner"):
+        return build_codex_responses_body(pool_spec=pool, messages=[{"role": "system", "content": system}, *history], tools=native_tools, cache_namespace=namespace, request_id="boundary-owner")
+    raw_system = produced()
+    native_body = wire(raw_system)
+    # Data and tool protocol survive system-only serialization unchanged.
+    reference = wire("plain system")
+    assert native_body["input"] == reference["input"]
+    assert native_body["tools"] == reference["tools"]
+    assert native_body["input"][0]["content"][0]["text"] == literal_data
+    assert any(row.get("call_id") == "call_boundary_data" and row.get("output") == literal_data for row in native_body["input"])
+    assert native_body["prompt_cache_key"] == wire(produced(context="Fixture user context B"))["prompt_cache_key"]
+    assert native_body["prompt_cache_key"] == wire(produced(phase="PLAN", schema=None))["prompt_cache_key"]
+    assert native_body["prompt_cache_key"] != wire(raw_system, namespace="other-owner")["prompt_cache_key"]
+    assert native_body["prompt_cache_key"] != wire(raw_system.replace(MAIN_SYSTEM_PROMPT.strip(), "different static rules", 1))["prompt_cache_key"]
+    sections = [MAIN_SYSTEM_PROMPT.strip(), "# User Context", "# Current Phase", "# Required Output Schema", "observed_value"]
+    positions = [native_body["instructions"].index(section) for section in sections]
+    assert positions == sorted(positions)
+    assert "Grounded fixture value." in native_body["instructions"]
+    inline = "ordinary __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ prose\r\nkeep\u2028Unicode separator"
+    assert wire(inline)["instructions"] == inline
+    assert wire("first\r\nline\n" + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + "second\u2028section")["instructions"] == "first\r\nline\n\nsecond\u2028section"
+    assert wire("first\n \t__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ \t\r\nsecond")["instructions"] == "first\n\nsecond"
+    multiple = build_codex_responses_body(pool_spec=pool, messages=[{"role": "system", "content": raw_system}, {"role": "system", "content": "extra system section"}, *history], tools=native_tools, request_id="multiple-system-owner")
+    assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in multiple["instructions"]
+    assert multiple["instructions"].endswith("extra system section")
+    assert multiple["input"] == native_body["input"]
+    for system_variant in (raw_system, raw_system.rstrip(), SYSTEM_PROMPT_DYNAMIC_BOUNDARY + raw_system):
+        assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in wire(system_variant)["instructions"], "reserved system-only boundary reached provider instructions"
+
+
 def test_codex_cache_scope_uses_canonical_session_headers():
     """Every Codex affinity header must select the provider cache session."""
     scope = "rose:7c4fd924ea17566d159427d8"

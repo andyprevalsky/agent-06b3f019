@@ -26,6 +26,7 @@ TASK_SCENARIOS = {
     "browser-auth-passkey-rejected-password": "passkey_rejected",
     "browser-auth-saved-password-retry": "password_retry",
     "browser-auth-password-email-2fa": "password_email_2fa",
+    "browser-auth-password-app-approval": "password_app_approval",
     "browser-auth-account-locked": "account_locked",
     "browser-auth-minted-email-otp": "minted_otp",
     "browser-auth-code-never-arrives": "code_never_arrives",
@@ -60,6 +61,15 @@ SAVED = ["jordan.ellis.abc@example.com", "jordan.e.abc@example.com", "j.ellis.ab
 MINTED = "rose-agent-7@mail.example.test"
 INBOX = "jordan.ellis@inbox.example"
 MEMBER_NUMBER = "RS-12345678"
+MINTED_PHONE = "+15555550142"
+# A minted account is the passwordless login a minted sign-in records, not Minted.
+MINTED_ACCOUNT_LOGINS = {
+    "minted_otp": MINTED,
+    "code_never_arrives": MINTED,
+    "expired_code": MINTED,
+    "magic_link": MINTED,
+    "minted_sms_otp": MINTED_PHONE,
+}
 
 
 def _manifest(scenario: str, **overrides) -> dict:
@@ -67,8 +77,10 @@ def _manifest(scenario: str, **overrides) -> dict:
     from benchmarks.auth_test_site import NO_SESSION_SCENARIOS, SCENARIO_LADDERS
 
     passwords, minted_offered, passkeys, sessions = SCENARIO_LADDERS[scenario]
-    saved = list(SAVED[:passwords])
-    minted = MINTED if minted_offered else None
+    minted_login = MINTED_ACCOUNT_LOGINS.get(scenario)
+    saved = [minted_login] if minted_login else list(SAVED[:passwords])
+    offered = MINTED if minted_offered else None
+    minted = MINTED if minted_offered or minted_login else None
     reachable = scenario not in NO_SESSION_SCENARIOS
     manifest = {
         "siteId": "abc123",
@@ -77,16 +89,23 @@ def _manifest(scenario: str, **overrides) -> dict:
         "entryUrl": "https://rose-x.ngrok.app/api/rose-shop/abc123/?authRealm=rose-shop-abc123",
         "savedPasswordUsernames": saved,
         "mintedEmail": minted,
-        "mintedPhone": "+15555550142" if minted_offered else None,
+        "mintedPhone": MINTED_PHONE if minted else None,
         "expectedSignInEmail": INBOX if scenario == "email_otp" else (MINTED if scenario == "minted_otp" else None),
         "expectedMemberNumber": MEMBER_NUMBER if reachable else None,
         "namedAccountEmail": SAVED[1] if scenario == "named_account" else None,
         "userSignIn": {"email": SAVED[0], "password": "only-the-user-knows"} if scenario == "user_signs_in" else None,
+        "appApprovalUser": {
+            "deviceUrl": "https://rose-x.ngrok.app/device?secret=stand-in-user-only",
+            "expectedNumber": "42",
+            "challengeLifetimeSeconds": 300,
+        }
+        if scenario == "password_app_approval"
+        else None,
         "savedSession": {"saved_session": "valid", "stale_session": "expired", "all_fail": "expired"}.get(scenario),
         "savedBrowserAuthHidden": False,
         "authOptionsPreview": {
             "passwordUsernames": list(saved),
-            "mintedEmail": minted,
+            "mintedEmail": offered,
             "passkeyCount": passkeys,
             "cookieBundleCount": sessions,
             "emailOtpInboxes": [INBOX] if scenario == "email_otp" else [],
@@ -149,7 +168,9 @@ def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() ->
     from benchmarks.long_horizon import load_raw_catalog
 
     hosted = {raw["name"] for raw in load_raw_catalog() if "auth_test_site" in (raw.get("environment") or {})}
-    assert hosted == set(TASK_SCENARIOS), f"catalog and test disagree on hosted auth tasks: {hosted ^ set(TASK_SCENARIOS)}"
+    assert hosted == set(TASK_SCENARIOS), (
+        f"catalog and test disagree on hosted auth tasks: {hosted ^ set(TASK_SCENARIOS)}"
+    )
     for name, scenario in TASK_SCENARIOS.items():
         task = get_task_by_name(name)
         assert task.group == "daily" and task.status == "ready", name
@@ -165,8 +186,24 @@ def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() ->
     for prompt in PROMPTS:
         lowered = prompt.lower()
         for hint in (
-            "password", "minted", "code", "otp", "assist", "help", "retry", "passkey", "session",
-            "sign in", "sign-in", "log in", "login", "guest", "link", "text", "sms", "saved",
+            "password",
+            "minted",
+            "code",
+            "otp",
+            "assist",
+            "help",
+            "retry",
+            "passkey",
+            "session",
+            "sign in",
+            "sign-in",
+            "log in",
+            "login",
+            "guest",
+            "link",
+            "text",
+            "sms",
+            "saved",
         ):
             assert hint not in lowered, f"prompt leaks the expected auth branch via {hint!r}: {prompt!r}"
 
@@ -177,6 +214,7 @@ def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() ->
         "browser-auth-signup-fails-purchase-assistance",
         "browser-auth-assistance-user-signs-in",
         "browser-auth-assistance-declined",
+        "browser-auth-password-app-approval",
     ):
         assert get_task_by_name(name).expected_attention_kind == "auth_assistance", name
     assert _outcome_check("browser-auth-saved-password-retry")["require_all_saved_passwords_attempted"] is True
@@ -313,24 +351,30 @@ def test_catalog_rejects_inconsistent_hosted_auth_contracts() -> None:
     rejects(lambda raw: outcome(raw).update(counts=[{"kind": "password"}]), "min and/or max")
     rejects(lambda raw: outcome(raw).update(orders={"count": "one"}), "integer count")
     rejects(lambda raw: outcome(raw).update(surprise=True), "unknown keys")
-    rejects(lambda raw: raw["environment"]["auth_test_site"].update(user_response="shrug"), "user_response must be one of")
+    rejects(
+        lambda raw: raw["environment"]["auth_test_site"].update(user_response="shrug"), "user_response must be one of"
+    )
     rejects(
         lambda raw: raw["environment"]["auth_test_site"].update(user_response="sign_in"),
         "the user knows a working password",
+    )
+    rejects(
+        lambda raw: raw["environment"]["auth_test_site"].update(user_response="approve_app"),
+        "needs scenario password_app_approval",
     )
     rejects(
         lambda raw: raw["environment"]["auth_test_site"].update(first_run_prompt="Sign in again."),
         "first_run_prompt must contain",
     )
 
-    minted = copy.deepcopy(_task_raw("browser-auth-minted-email-otp"))
+    minted = copy.deepcopy(_task_raw("browser-auth-minted-signup"))
     outcome(minted)["require_all_saved_passwords_attempted"] = True
     try:
         validate_task_contract(minted)
     except ValueError as exc:
         assert "saved-password scenario" in str(exc)
     else:
-        raise AssertionError("minted_otp accepted a saved-password requirement")
+        raise AssertionError("signup accepted a saved-password requirement")
 
     orphan = copy.deepcopy(base)
     orphan["environment"].pop("auth_test_site")
@@ -366,7 +410,9 @@ def test_manifest_preflight_fails_closed_before_an_agent_exists() -> None:
     rejects("all_fail", "minted account alongside", **preview("all_fail", mintedEmail=MINTED))
     rejects("all_fail", "0 passkeys, expected 1", **preview("all_fail", passkeyCount=0))
     rejects("saved_session", "0 saved sessions, expected 1", **preview("saved_session", cookieBundleCount=0))
-    rejects("minted_otp", "auth options would offer minted account", **preview("minted_otp", mintedEmail=None))
+    rejects("signup", "auth options would offer minted account", **preview("signup", mintedEmail=None))
+    # A recorded minted login hides Minted; offering it too is the stale state.
+    rejects("minted_otp", "minted account alongside", **preview("minted_otp", mintedEmail=MINTED))
     rejects("minted_sms_otp", "needs a minted phone number", mintedPhone=None)
     rejects("email_otp", "must list the connected inbox", **preview("email_otp", emailOtpInboxes=[]))
     rejects("all_fail", "must not have a reachable member account", expectedSignInEmail=SAVED[0])
@@ -377,6 +423,23 @@ def test_manifest_preflight_fails_closed_before_an_agent_exists() -> None:
     else:
         raise AssertionError("a manifest for another scenario was accepted")
     rejects("minted_otp", "missing siteId/entryUrl", entryUrl="")
+    rejects("password_app_approval", "deviceUrl", appApprovalUser=None)
+    rejects("password_app_approval", "deviceUrl", appApprovalUser={"expectedNumber": "42"})
+    for number in (None, "7", "abc", 123):
+        rejects(
+            "password_app_approval",
+            "two-digit expectedNumber",
+            appApprovalUser={**_manifest("password_app_approval")["appApprovalUser"], "expectedNumber": number},
+        )
+    for lifetime in (None, 0, -1, True, "300"):
+        rejects(
+            "password_app_approval",
+            "positive challengeLifetimeSeconds",
+            appApprovalUser={
+                **_manifest("password_app_approval")["appApprovalUser"],
+                "challengeLifetimeSeconds": lifetime,
+            },
+        )
 
 
 def test_outcome_check_grades_the_sites_own_records() -> None:
@@ -447,14 +510,17 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
         _attempt("password", SAVED[2], "rejected", "wrong_password"),
     ]
     rejected = {
+        "browser_page_observation": {"phase": "park_time", "path": "/login/methods"},
         "manifest": _manifest("all_fail", mintedEmail=MINTED),
         "report": {"attempts": ladder, "sessions": [], "lastPagePath": "/login/methods"},
     }
     ok, detail = evaluate_outcome(all_fail, rejected, "")
     assert ok, detail
 
-    def all_fail_with(**report) -> tuple[bool, str]:
-        return evaluate_outcome(all_fail, {**rejected, "report": {**rejected["report"], **report}}, "")
+    def all_fail_with(*, parked_path="/login/methods", **report) -> tuple[bool, str]:
+        return evaluate_outcome(all_fail, {**rejected,
+            "browser_page_observation": {"phase": "park_time", "path": parked_path},
+            "report": {**rejected["report"], **report}}, "")
 
     ok, detail = all_fail_with(attempts=ladder[:4])
     assert not ok and SAVED[1] in detail
@@ -464,7 +530,7 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
     assert not ok and "passkey:rejected was tried before the rung above it" in detail, detail
     ok, detail = all_fail_with(attempts=[*ladder, _attempt("signup", MINTED, "rejected", "signup_unavailable")])
     assert not ok and "minted identity was used" in detail, detail
-    ok, detail = all_fail_with(lastPagePath="/account")
+    ok, detail = all_fail_with(parked_path="/account")
     assert not ok and "not on the sign-in form" in detail, detail
 
     minted = _outcome_check("browser-auth-minted-email-otp")
@@ -484,8 +550,61 @@ def test_outcome_check_grades_the_sites_own_records() -> None:
 
     ok, detail = evaluate_outcome(retry, None, MEMBER_NUMBER)
     assert not ok and "not captured" in detail
-    ok, detail = evaluate_outcome(retry, {"manifest": _manifest("password_retry"), "report_error": "404"}, MEMBER_NUMBER)
+    ok, detail = evaluate_outcome(
+        retry, {"manifest": _manifest("password_retry"), "report_error": "404"}, MEMBER_NUMBER
+    )
     assert not ok and "report unavailable: 404" in detail
+
+
+def test_app_approval_outcome_requires_ordered_device_ack_and_sign_in() -> None:
+    """A user acknowledgment alone cannot replace the site's authenticated result."""
+    from benchmarks.auth_test_site import evaluate_outcome, resolve_goal
+
+    name = "browser-auth-password-app-approval"
+    check = _outcome_check(name)
+    manifest = _manifest("password_app_approval")
+    attempts = [
+        _attempt("password", SAVED[0], "pending"),
+        _attempt("second_factor", SAVED[0], "pending"),
+        _attempt("app_approval", SAVED[0], "approved"),
+        _attempt("second_factor", SAVED[0], "signed_in"),
+    ]
+    report = {
+        "signInEmail": SAVED[0],
+        "attempts": attempts,
+        "sessions": [_session(SAVED[0], "password_app_approval")],
+    }
+
+    def evaluate(answer=MEMBER_NUMBER, **changes):
+        return evaluate_outcome(check, {"manifest": manifest, "report": {**report, **changes}}, answer)
+
+    ok, detail = evaluate()
+    assert ok, detail
+    fast_attempts = [{**item, "at": f"2026-10-01T00:00:0{index}.000Z"} for index, item in enumerate(attempts)]
+    ok, detail = evaluate(attempts=fast_attempts)
+    assert ok, f"the challenge opening and completing are not duplicate submits: {detail}"
+    for missing_index in range(4):
+        ok, detail = evaluate(attempts=[item for index, item in enumerate(attempts) if index != missing_index])
+        assert not ok, f"missing event {missing_index} passed: {detail}"
+    ok, detail = evaluate(attempts=[attempts[0], attempts[1], attempts[3], attempts[2]])
+    assert not ok and "expected order" in detail, detail
+    for duplicate_index in (0, 2, 3):
+        duplicate = _attempt(attempts[duplicate_index]["kind"], SAVED[0], attempts[duplicate_index]["outcome"])
+        ok, detail = evaluate(attempts=[*attempts, duplicate])
+        assert not ok and "time(s)" in detail, detail
+    ok, detail = evaluate(sessions=[])
+    assert not ok and "Never signed in" in detail, detail
+    ok, detail = evaluate(sessions=[_session(SAVED[0], "password")])
+    assert not ok and "expected password_app_approval" in detail, detail
+    ok, detail = evaluate(answer="I approved the sign-in.")
+    assert not ok and MEMBER_NUMBER in detail, detail
+
+    # Only the ordinary site URL enters the agent's task. The approval page and
+    # expected number belong to the stand-in user, who acts on another device.
+    goal = resolve_goal(_task_raw(name)["prompt"], manifest)
+    assert manifest["entryUrl"] in goal
+    assert manifest["appApprovalUser"]["deviceUrl"] not in goal
+    assert "stand-in-user-only" not in goal
 
 
 async def test_goal_placeholder_resolves_per_lane_and_fails_closed() -> None:
@@ -579,14 +698,20 @@ async def test_runner_seeds_grades_and_deletes_the_site() -> None:
     previous_frontend = os.environ.get("BENCHMARK_FRONTEND_URL")
     os.environ["BENCHMARK_FRONTEND_URL"] = "https://rose-x.ngrok.app/"
     try:
-        with _FakeBackend("password_retry", _retry_report()) as backend, patch.object(
-            rb, "_api_headers", fake_headers
-        ), patch.object(rb, "_current_benchmark_user_id", lambda: "user-1"):
+        with (
+            _FakeBackend("password_retry", _retry_report()) as backend,
+            patch.object(rb, "_api_headers", fake_headers),
+            patch.object(rb, "_current_benchmark_user_id", lambda: "user-1"),
+        ):
             manifest = await rb._apply_auth_test_site(task, backend.base_url)
             assert manifest is not None and auth_test_site.active_manifest() == manifest
             method, path, body, sent_headers = backend.requests[0]
             assert (method, path) == ("POST", "/api/rose-shop/fixtures")
-            assert body == {"userId": "user-1", "scenario": "password_retry", "publicBaseUrl": "https://rose-x.ngrok.app"}
+            assert body == {
+                "userId": "user-1",
+                "scenario": "password_retry",
+                "publicBaseUrl": "https://rose-x.ngrok.app",
+            }
             assert sent_headers.get("x-api-key") == "fixture-key"
             assert manifest["entryUrl"] in rb._benchmark_goal_for_task(task, backend.base_url)
 
@@ -670,9 +795,7 @@ def test_outcome_check_fails_a_form_that_reached_the_site_twice() -> None:
         .replace("+00:00", "Z")
     )
     report["attempts"].insert(1, echo)
-    ok, detail = evaluate_outcome(
-        retry, {"manifest": _manifest("password_retry"), "report": report}, MEMBER_NUMBER
-    )
+    ok, detail = evaluate_outcome(retry, {"manifest": _manifest("password_retry"), "report": report}, MEMBER_NUMBER)
     assert not ok and "reached the site twice 4.3s apart" in detail, detail
 
     # The same login tried again a full agent step later is a retry, not an echo.
@@ -681,9 +804,7 @@ def test_outcome_check_fails_a_form_that_reached_the_site_twice() -> None:
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
-    ok, detail = evaluate_outcome(
-        retry, {"manifest": _manifest("password_retry"), "report": report}, MEMBER_NUMBER
-    )
+    ok, detail = evaluate_outcome(retry, {"manifest": _manifest("password_retry"), "report": report}, MEMBER_NUMBER)
     assert ok, detail
 
 
@@ -692,7 +813,13 @@ def test_outcome_check_grades_orders_accounts_and_second_runs() -> None:
 
     key = _outcome_check("browser-auth-signup-purchase")
     account = {"email": MINTED, "memberNumber": MEMBER_NUMBER, "origin": "signup", "verified": True}
-    order = {"orderNumber": "ORD-10000001", "email": MINTED, "totalCents": 2123, "purchaseId": "p1", "itemIds": ["canvas-tote"]}
+    order = {
+        "orderNumber": "ORD-10000001",
+        "email": MINTED,
+        "totalCents": 2123,
+        "purchaseId": "p1",
+        "itemIds": ["canvas-tote"],
+    }
     bought = {
         "signInEmail": MINTED,
         "attempts": [
@@ -720,8 +847,14 @@ def test_outcome_check_grades_orders_accounts_and_second_runs() -> None:
     assert not ok and "ORD-10000001" in detail, detail
 
     guest = _outcome_check("browser-auth-guest-purchase")
-    guest_report = {"attempts": [_attempt("guest", "", "started"), _attempt("order", "", "placed")], "sessions": [], "orders": [{**order, "email": None}]}
-    ok, detail = evaluate_outcome(guest, {"manifest": _manifest("guest_purchase"), "report": guest_report}, "ORD-10000001")
+    guest_report = {
+        "attempts": [_attempt("guest", "", "started"), _attempt("order", "", "placed")],
+        "sessions": [],
+        "orders": [{**order, "email": None}],
+    }
+    ok, detail = evaluate_outcome(
+        guest, {"manifest": _manifest("guest_purchase"), "report": guest_report}, "ORD-10000001"
+    )
     assert ok, detail
     signed_up = {**guest_report, "attempts": [_attempt("signup", MINTED, "pending"), *guest_report["attempts"]]}
     ok, detail = evaluate_outcome(guest, {"manifest": _manifest("guest_purchase"), "report": signed_up}, "ORD-10000001")
@@ -765,12 +898,16 @@ def test_outcome_check_grades_orders_accounts_and_second_runs() -> None:
         "attempts": [_attempt("password", SAVED[0], "signed_in"), _attempt("password", SAVED[1], "signed_in")],
         "sessions": [_session(SAVED[0], "password"), _session(SAVED[1], "password")],
     }
-    ok, detail = evaluate_outcome(named, {"manifest": _manifest("named_account"), "report": wrong_account}, MEMBER_NUMBER)
+    ok, detail = evaluate_outcome(
+        named, {"manifest": _manifest("named_account"), "report": wrong_account}, MEMBER_NUMBER
+    )
     assert not ok and "wrong account" in detail, detail
 
     never_arrives = _outcome_check("browser-auth-code-never-arrives")
     one_request = {"attempts": [_attempt("code_request", MINTED, "code_withheld")], "sessions": []}
-    ok, detail = evaluate_outcome(never_arrives, {"manifest": _manifest("code_never_arrives"), "report": one_request}, "")
+    ok, detail = evaluate_outcome(
+        never_arrives, {"manifest": _manifest("code_never_arrives"), "report": one_request}, ""
+    )
     assert not ok and "1 time(s)" in detail, detail
 
 
@@ -814,11 +951,13 @@ async def test_goal_names_the_account_and_first_run_precedes_the_graded_run() ->
     previous_frontend = os.environ.get("BENCHMARK_FRONTEND_URL")
     os.environ["BENCHMARK_FRONTEND_URL"] = "https://rose-x.ngrok.app/"
     try:
-        with _FakeBackend("created_account_reused", {}) as backend, patch.object(
-            rb, "_api_headers", fake_headers
-        ), patch.object(rb, "_current_benchmark_user_id", lambda: "user-1"), patch.object(
-            rb, "create_agent", fake_create_agent
-        ), patch.object(rb, "poll_agent", fake_poll_agent):
+        with (
+            _FakeBackend("created_account_reused", {}) as backend,
+            patch.object(rb, "_api_headers", fake_headers),
+            patch.object(rb, "_current_benchmark_user_id", lambda: "user-1"),
+            patch.object(rb, "create_agent", fake_create_agent),
+            patch.object(rb, "poll_agent", fake_poll_agent),
+        ):
             manifest = await rb._apply_auth_test_site(task, backend.base_url)
             assert manifest is not None and manifest["firstRunAgentId"] == "first-run-agent"
             assert len(created_goals) == 1 and created_goals[0].startswith("Create an account for me at https://")
@@ -827,7 +966,9 @@ async def test_goal_names_the_account_and_first_run_precedes_the_graded_run() ->
                 ("POST", "/api/rose-shop/fixtures/abc123/mark"),
             ], backend.requests
             assert backend.requests[1][2] == {"label": "graded-run"}
-            assert rb._benchmark_goal_for_task(task, backend.base_url).startswith("Tell me my member number for https://")
+            assert rb._benchmark_goal_for_task(task, backend.base_url).startswith(
+                "Tell me my member number for https://"
+            )
             await rb._release_auth_test_site(backend.base_url, manifest)
 
             first_run_status["value"] = "FAILED"
@@ -873,8 +1014,10 @@ async def test_lane_after_a_connected_inbox_waits_out_the_cached_user_context() 
     manifest = _manifest("email_otp")
     manifest["authOptionsPreview"] = {**manifest.get("authOptionsPreview", {}), "emailOtpInboxes": ["a@mail.example"]}
     plain = _manifest("password_retry")
-    with patch.object(rb.asyncio, "sleep", fake_sleep), patch.object(rb, "_api_headers", fake_headers), patch.object(
-        auth_test_site, "delete_site", fake_delete
+    with (
+        patch.object(rb.asyncio, "sleep", fake_sleep),
+        patch.object(rb, "_api_headers", fake_headers),
+        patch.object(auth_test_site, "delete_site", fake_delete),
     ):
         rb._connected_inbox_released_at = None
         await rb._release_auth_test_site("http://localhost:1", plain)
@@ -925,7 +1068,9 @@ async def test_stand_in_user_signs_in_or_declines_a_sign_in_help_request() -> No
 
     async def fake_sign_in(base_url, headers, req, task_id, credentials, sign_in_url=None):
         # The stand-in knows the site's sign-in page: the agent may have left a code page open.
-        assert sign_in_url == "https://rose-x.ngrok.app/api/rose-shop/abc123/login?authRealm=rose-shop-abc123", sign_in_url
+        assert sign_in_url == "https://rose-x.ngrok.app/api/rose-shop/abc123/login?authRealm=rose-shop-abc123", (
+            sign_in_url
+        )
         calls.append(("sign_in", req["id"], task_id, credentials["email"], credentials["password"]))
         return "https://site/account"
 
@@ -939,16 +1084,17 @@ async def test_stand_in_user_signs_in_or_declines_a_sign_in_help_request() -> No
         calls.append(("mark", site_id, label))
 
     try:
-        with patch.object(rb, "_api_headers", fake_headers), patch.object(
-            auth_assistance_user, "sign_in_as_user", fake_sign_in
-        ), patch.object(auth_assistance_user, "decline", fake_decline), patch.object(
-            auth_test_site, "mark_run", fake_mark
-        ), patch.object(rb, "get_agent", fake_get_agent), patch.object(rb.asyncio, "sleep", no_sleep):
+        with (
+            patch.object(rb, "_api_headers", fake_headers),
+            patch.object(auth_assistance_user, "sign_in_as_user", fake_sign_in),
+            patch.object(auth_assistance_user, "decline", fake_decline),
+            patch.object(auth_test_site, "mark_run", fake_mark),
+            patch.object(rb, "get_agent", fake_get_agent),
+            patch.object(rb.asyncio, "sleep", no_sleep),
+        ):
             auth_test_site.set_active_manifest(_manifest("user_signs_in"))
             await rb._respond_as_user_to_auth_assistance("http://localhost:1", "agent-1", request, "sign_in")
-            assert calls == [
-                ("sign_in", "req-12345678", "browser-task-1", SAVED[0], "only-the-user-knows")
-            ], calls
+            assert calls == [("sign_in", "req-12345678", "browser-task-1", SAVED[0], "only-the-user-knows")], calls
             assert polls["count"] == 2, "the stand-in waits for the agent's message instead of failing"
 
             calls.clear()
@@ -966,9 +1112,215 @@ async def test_stand_in_user_signs_in_or_declines_a_sign_in_help_request() -> No
         auth_test_site.set_active_manifest(None)
 
 
+async def test_stand_in_user_approves_on_separate_device_before_resuming() -> None:
+    """The helper acknowledges in an isolated app, without entering any password."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    import httpx
+
+    from benchmarks import auth_assistance_user as user
+
+    calls: list[tuple] = []
+    failure = {"value": None}
+
+    async def goto(url, **kwargs):
+        calls.append(("device", url))
+        return SimpleNamespace(
+            ok=failure["value"] != "device_http", status=503 if failure["value"] == "device_http" else 200
+        )
+
+    async def fill(number):
+        calls.append(("number", number))
+
+    async def click():
+        calls.append(("approve",))
+
+    async def wait_for(**kwargs):
+        calls.append(("ack",))
+        if failure["value"] == "ack":
+            raise RuntimeError("no acknowledgment at secret-device-url")
+
+    page = MagicMock()
+    page.goto = AsyncMock(side_effect=goto)
+    page.get_by_label.return_value.fill = AsyncMock(side_effect=fill)
+    page.get_by_role.return_value.click = AsyncMock(side_effect=click)
+    page.locator.return_value.wait_for = AsyncMock(side_effect=wait_for)
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+    chromium = SimpleNamespace(launch=AsyncMock(return_value=browser), connect_over_cdp=AsyncMock())
+    playwright_context = MagicMock()
+    playwright_context.__aenter__ = AsyncMock(return_value=SimpleNamespace(chromium=chromium))
+    playwright_context.__aexit__ = AsyncMock(return_value=None)
+    lookup = {"count": 0}
+
+    def handle(request):
+        assert request.headers["X-User-Id"] == "user-1"
+        if request.method == "GET":
+            assert request.url.path == "/api/browser-session/task/browser-1"
+            assert request.url.params["validateLive"] == "true"
+            lookup["count"] += 1
+            calls.append(("live", lookup["count"]))
+            if failure["value"] == "lookup_http":
+                return httpx.Response(502, text="unavailable")
+            available = not (failure["value"] == "retired" and lookup["count"] == 2)
+            changed = failure["value"] == "changed" and lookup["count"] == 2
+            return httpx.Response(
+                200,
+                json={
+                    "same_session_available": available,
+                    "ws_url": "ws://browser.invalid/changed" if changed else "ws://browser.invalid/original",
+                },
+            )
+        assert request.method == "POST" and request.url.path == "/api/auth-assistance/request-1/complete"
+        assert json.loads(request.content) == {}
+        calls.append(("complete", "request-1"))
+        return httpx.Response(503 if failure["value"] == "complete_http" else 200, json={})
+
+    real_client = httpx.AsyncClient
+
+    def client(**kwargs):
+        return real_client(transport=httpx.MockTransport(handle), **kwargs)
+
+    request = {"id": "request-1"}
+    app = {"deviceUrl": "https://device.invalid/secret-device-url", "expectedNumber": "42"}
+    headers = {"X-User-Id": "user-1"}
+    with (
+        patch("playwright.async_api.async_playwright", return_value=playwright_context),
+        patch.object(user.httpx, "AsyncClient", client),
+        patch.object(user, "_type_credentials", AsyncMock(side_effect=AssertionError("user must not type a password"))),
+    ):
+        await user.approve_app_as_user("http://backend.invalid/", headers, request, "browser-1", app)
+        assert calls == [
+            ("live", 1),
+            ("device", app["deviceUrl"]),
+            ("number", "42"),
+            ("approve",),
+            ("ack",),
+            ("live", 2),
+            ("complete", "request-1"),
+        ], calls
+        chromium.launch.assert_awaited_once_with(headless=True)
+        chromium.connect_over_cdp.assert_not_awaited()
+        browser.new_context.assert_awaited_once_with()
+        browser.close.assert_awaited_once()
+        page.get_by_label.assert_called_once_with("Sign-in number", exact=True)
+        page.get_by_role.assert_called_once_with("button", name="Approve sign-in", exact=True)
+        page.locator.assert_called_once_with("[data-app-approval-status='approved']")
+
+        # The same driver can acknowledge an app that requires no matching number.
+        calls.clear()
+        lookup["count"] = 0
+        await user.approve_app_as_user(
+            "http://backend.invalid", headers, request, "browser-1", {"deviceUrl": app["deviceUrl"]}
+        )
+        assert not any(call[0] == "number" for call in calls), calls
+        assert calls[-1] == ("complete", "request-1")
+
+        for fault, expected in (
+            ("lookup_http", "lookup failed 502"),
+            ("device_http", "open successfully (503)"),
+            ("ack", "did not confirm"),
+            ("retired", "not left running"),
+            ("changed", "session changed"),
+            ("complete_http", "request failed 503"),
+        ):
+            calls.clear()
+            lookup["count"] = 0
+            failure["value"] = fault
+            try:
+                await user.approve_app_as_user("http://backend.invalid", headers, request, "browser-1", app)
+            except user.AuthAssistanceUserError as exc:
+                assert expected in str(exc), (fault, str(exc))
+                assert "secret-device-url" not in str(exc)
+            else:
+                raise AssertionError(f"app approval ignored {fault}")
+            if fault != "complete_http":
+                assert not any(call[0] == "complete" for call in calls), (fault, calls)
+
+        failure["value"] = None
+        for bad_request, task_id, bad_app, expected in (
+            ({}, "browser-1", app, "missing its id"),
+            (request, "", app, "browser task id"),
+            (request, "browser-1", {}, "no approval app URL"),
+            (request, "browser-1", {**app, "expectedNumber": "wrong"}, "two digits"),
+        ):
+            calls.clear()
+            try:
+                await user.approve_app_as_user("http://backend.invalid", headers, bad_request, task_id, bad_app)
+            except user.AuthAssistanceUserError as exc:
+                assert expected in str(exc), str(exc)
+            else:
+                raise AssertionError("app approval accepted incomplete inputs")
+            assert calls == [], "input validation must precede browser/device work"
+
+
+async def test_runner_routes_app_approval_to_the_real_auth_request() -> None:
+    from unittest.mock import AsyncMock
+
+    from benchmarks import auth_assistance_user, auth_test_site
+    from benchmarks import run_benchmark as rb
+
+    request = {"id": "request-2", "metadata": {"requestUserAuthentication": {"requestId": "request-2"}}}
+    announcement = {"metadata": {"requestUserAuthentication": {"requestId": "request-2", "taskId": "browser-2"}}}
+    app = {"deviceUrl": "https://device.invalid/secret", "expectedNumber": "42"}
+    headers = {"X-User-Id": "user-1"}
+    approve = AsyncMock()
+    try:
+        auth_test_site.set_active_manifest({"appApprovalUser": app})
+        with (
+            patch.object(rb, "_api_headers", AsyncMock(return_value=headers)),
+            patch.object(rb, "get_agent", AsyncMock(return_value={"messages": [announcement]})),
+            patch.object(auth_assistance_user, "approve_app_as_user", approve),
+            patch.object(
+                auth_assistance_user, "sign_in_as_user", AsyncMock(side_effect=AssertionError("no user password"))
+            ),
+        ):
+            await rb._respond_as_user_to_auth_assistance("http://backend.invalid", "agent-2", request, "approve_app")
+            approve.assert_awaited_once_with("http://backend.invalid", headers, request, "browser-2", app)
+
+            approve.reset_mock()
+            for bad_request, manifest, expected in (
+                ({"id": "wrong-kind"}, {"appApprovalUser": app}, "requires an auth-assistance request"),
+                (request, {}, "no approval app"),
+            ):
+                auth_test_site.set_active_manifest(manifest)
+                try:
+                    await rb._respond_as_user_to_auth_assistance(
+                        "http://backend.invalid", "agent-2", bad_request, "approve_app"
+                    )
+                except RuntimeError as exc:
+                    assert expected in str(exc), str(exc)
+                else:
+                    raise AssertionError("the runner acknowledged without a usable real request/manifest")
+            approve.assert_not_awaited()
+    finally:
+        auth_test_site.set_active_manifest(None)
+
+
+
+
+async def test_park_time_native_observation_survives_activity_manager_and_hydration():
+    from auth_park_measurement_fixture import run_pipeline
+    await run_pipeline()
+
+async def test_root_park_measurement_uses_real_workflow_state_owner():
+    from auth_park_measurement_fixture import run_pipeline
+    for mode in ('no_bus', 'bus'):
+        await run_pipeline(workflow_root_mode=mode)
+
+async def test_unrelated_tasks_do_not_acquire_park_measurement_judge_inputs():
+    from auth_park_measurement_fixture import check_unrelated_task_measurement_input_absence
+    await check_unrelated_task_measurement_input_absence()
+
 async def run_all_tests():
     print("auth-test-site-benchmark blackbox tests:")
     runner = BlackboxResult()
+    await runner.record_async("root_park_measurement_uses_real_workflow_state_owner", test_root_park_measurement_uses_real_workflow_state_owner)
+    await runner.record_async(
+        "unrelated_tasks_do_not_acquire_park_measurement_judge_inputs",
+        test_unrelated_tasks_do_not_acquire_park_measurement_judge_inputs,
+    )
     runner.record(
         "daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts",
         test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts,
@@ -996,6 +1348,10 @@ async def run_all_tests():
     runner.record(
         "outcome_check_grades_the_sites_own_records",
         test_outcome_check_grades_the_sites_own_records,
+    )
+    runner.record(
+        "app_approval_outcome_requires_ordered_device_ack_and_sign_in",
+        test_app_approval_outcome_requires_ordered_device_ack_and_sign_in,
     )
     await runner.record_async(
         "goal_placeholder_resolves_per_lane_and_fails_closed",
@@ -1029,4 +1385,13 @@ async def run_all_tests():
         "stand_in_user_signs_in_or_declines_a_sign_in_help_request",
         test_stand_in_user_signs_in_or_declines_a_sign_in_help_request,
     )
+    await runner.record_async(
+        "stand_in_user_approves_on_separate_device_before_resuming",
+        test_stand_in_user_approves_on_separate_device_before_resuming,
+    )
+    await runner.record_async(
+        "runner_routes_app_approval_to_the_real_auth_request",
+        test_runner_routes_app_approval_to_the_real_auth_request,
+    )
+    await runner.record_async("park_time_native_observation_survives_activity_manager_and_hydration", test_park_time_native_observation_survives_activity_manager_and_hydration)
     return runner.all_passed

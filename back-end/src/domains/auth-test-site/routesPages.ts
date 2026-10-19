@@ -51,12 +51,14 @@ import {
   sendPage,
   sessionOf,
   setSessionCookie,
+  setAppApprovalCookie,
   siteOf,
   type SiteRequest,
 } from './routesShared';
 import { signInMethodsRouter } from './routesSignInMethods';
 import { signUpRouter } from './routesSignUp';
 import { shopRouter } from './routesShop';
+import { appApprovalRouter } from './routesAppApproval';
 import type { RejectionReason } from './types';
 
 export const pagesRouter = Router();
@@ -168,6 +170,11 @@ pagesRouter.post(
       );
       return;
     }
+    if (result.ok === 'app_approval') {
+      setAppApprovalCookie(res, site, result.challengeToken);
+      res.redirect(303, `${siteUrl(site, '/login/approve')}${nextQuery(next)}`);
+      return;
+    }
     const error = passwordError(result.reason);
     sendPage(
       res,
@@ -253,5 +260,6 @@ pagesRouter.post('/:siteId/logout', (req: Request, res: Response) => {
 });
 
 pagesRouter.use(signInMethodsRouter);
+pagesRouter.use(appApprovalRouter);
 pagesRouter.use(signUpRouter);
 pagesRouter.use(shopRouter);

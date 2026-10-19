@@ -96,6 +96,7 @@ FLAGGED="$(
               f == "agents/helpers/messages.py" ||
               f == "agents/domains/spawn_agent/service.py" ||
               f == "agents/domains/spawn_agent/repo.py" ||
+              f == "agents/domains/spawn_browser_agent_v3/handler.py" ||
               f == "agents/domains/spawn_browser_agent_v3/repo.py" ||
               f == "agents/domains/spawn_claude_code_agent/repo.py" ||
               f == "agents/domains/call_phone_number/repo.py")

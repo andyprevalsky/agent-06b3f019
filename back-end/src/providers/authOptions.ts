@@ -80,7 +80,7 @@ export async function getAuthOptions(
       repo.findPasskeys(userId, realm),
       repo.findMintedAccount(userId, realm),
       repo.findAgentIdentity(userId),
-      repo.findReadableInboxEmails(userId),
+      repo.findReadableInboxes(userId),
     ]);
 
   const hideSavedBrowserAuth = benchmarkSavedBrowserAuthDisabled();
@@ -97,7 +97,7 @@ export async function getAuthOptions(
   // A code a site emails to one of the user's connected inboxes is read by the
   // one-time-code poller and handed to the agent, so those inboxes are a real
   // sign-in path and the agent has to know which addresses they are.
-  const emailOtpEmails = hideSavedBrowserAuth ? [] : readableInboxes;
+  const emailOtpEmails = hideSavedBrowserAuth ? [] : readableInboxes.userInboxEmails;
   const emailOtpAvailable = emailOtpEmails.length > 0;
   const enabledSteelSession =
     steelAuth !== null && steelAuth.disabledAt === null && !hideSavedBrowserAuth;
@@ -145,6 +145,16 @@ export async function getAuthOptions(
       connected_emails: emailOtpEmails,
       match_for_site_account: null,
     },
+    // The same inboxes the one-time-code poller reads, plus the agent's phone.
+    readable_identifiers: [
+      ...new Set([
+        ...emailOtpEmails,
+        ...readableInboxes.mintedInboxEmails,
+        ...(mintedIdentity?.phoneProvider === 'agentphone' && mintedIdentity.phone
+          ? [mintedIdentity.phone]
+          : []),
+      ]),
+    ],
     minted:
       shouldExposeMinted && mintedAccount !== null
         ? {

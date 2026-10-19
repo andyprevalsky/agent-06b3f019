@@ -371,9 +371,18 @@ def _build_instructions(messages: List[Dict[str, Any]]) -> Optional[str]:
     text = _build_system_text(messages)
     if not text:
         return None
-    if SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in text:
+    # The system producer's final delimiter can lose its surrounding newline.
+    # Match reserved lines only; inline prose and non-system data stay intact.
+    sections = [[]]
+    for line in text.split("\n"):
+        if line.strip(" \t\r") == SYSTEM_PROMPT_DYNAMIC_BOUNDARY.strip():
+            sections.append([])
+        else:
+            sections[-1].append(line)
+    if len(sections) == 1:
         return text
-    return "\n\n".join(part.strip() for part in text.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) if part.strip()) or None
+    parts = ["\n".join(section) for section in sections]
+    return "\n\n".join(part.strip() for part in parts if part.strip()) or None
 
 
 def _build_static_cache_scope(messages: List[Dict[str, Any]]) -> Optional[str]:
