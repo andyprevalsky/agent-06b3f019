@@ -6,9 +6,9 @@ No callback means no response inspection or routing/timing behavior change.
 
 import hashlib
 import json
+import math
 import time
 import uuid
-import math
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime

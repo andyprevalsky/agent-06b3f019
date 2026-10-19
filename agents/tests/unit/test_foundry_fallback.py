@@ -588,6 +588,37 @@ def test_model_listed_only_by_another_region_never_routes_to_region_one(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_unpinned_sol_pool_uses_any_sol_deployment_and_pinned_pool_does_not(monkeypatch):
+    """GPT-6 Sol and GPT-6.1 Sol stand in for each other unless a pool pins its Foundry model."""
+    _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
+    ultra = foundry.foundry_models(get_pool("rose-1-ultra"))
+    assert ultra == ("gpt-6-sol", "gpt-6.1-sol")
+    assert foundry.foundry_models(get_pool("rose-wmh-gpt61")) == ("gpt-6.1-sol",)
+    assert foundry.foundry_models(get_pool("rose-1-oss")) == ("DeepSeek-V3.2",)
+    plans = {
+        f"agent-{i}": [(r.endpoint, d) for r, d in foundry._route_plan(foundry.foundry_regions(), ultra, f"agent-{i}")]
+        for i in range(200)
+    }
+    assert all(sorted(plan) == [(_R1, "gpt-6-sol"), (_R2, "gpt-6.1-sol")] for plan in plans.values())
+    assert 0.35 < sum(plan[0][0] == _R2 for plan in plans.values()) / len(plans) < 0.65
+    for i in range(50):
+        assert _plan_regions(f"agent-{i}", foundry.foundry_models(get_pool("rose-wmh-gpt61"))) == [_R2]
+
+    # A region-1 429 moves ultra to the GPT-6.1 deployment, reported as the model that served.
+    requests = _install_regions(
+        monkeypatch,
+        lambda region, _d: httpx.Response(429, headers={"retry-after": "5"}) if region == _R1 else _ok(),
+        regions=(_R1, _R2),
+    )
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
+    route_key = next(key for key, plan in plans.items() if plan[0][0] == _R1)
+    chunks = [chunk async for chunk in _call_with(route_key)]
+    assert requests == [(_R1, "gpt-6-sol"), (_R2, "gpt-6.1-sol")]
+    assert chunks[0].data["actual_model"] == "gpt-6.1-sol-foundry"
+
+
+@pytest.mark.asyncio
 async def test_non_https_optional_region_is_skipped_and_primary_still_rejects(monkeypatch):
     """A typo in one optional slot must not stop the healthy regions (mirrors foundry.ts)."""
     monkeypatch.setattr(foundry, "_warned_insecure_regions", set())
