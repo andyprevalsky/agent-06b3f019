@@ -187,6 +187,27 @@ def create_app(name, model, usage=None, close_provider=None, *, identity=None):
     def clock_finish(model_name: str, scope: str, agent_id: str, payload: dict):
         return clock_call(model_name, scope, lambda session_id: model.clock_finish(session_id, agent_id))
 
+    def hold_id_of(payload):
+        hold_id = payload.get("hold_id")
+        if not isinstance(hold_id, str) or not hold_id:
+            raise HTTPException(422, "hold_id must be a non-empty string")
+        return hold_id
+
+    @app.post("/world_models/{model_name}/scopes/{scope}/clock/agents/{agent_id}/hold")
+    def clock_hold(model_name: str, scope: str, agent_id: str, payload: dict):
+        hold_id = hold_id_of(payload)
+        return clock_call(model_name, scope, lambda session_id: model.clock_hold(session_id, agent_id, hold_id))
+
+    @app.post("/world_models/{model_name}/scopes/{scope}/clock/agents/{agent_id}/release")
+    def clock_release(model_name: str, scope: str, agent_id: str, payload: dict):
+        hold_id = hold_id_of(payload)
+        children = payload.get("children", [])
+        if not isinstance(children, list) or not all(isinstance(child, str) and child for child in children):
+            raise HTTPException(422, "children must be a list of agent ids")
+        return clock_call(
+            model_name, scope, lambda session_id: model.clock_release(session_id, agent_id, hold_id, children)
+        )
+
     @app.post("/world_models/{model_name}/scopes/{scope}/clock/agents/{agent_id}/wait")
     async def clock_wait(model_name: str, scope: str, agent_id: str, payload: dict):
         # Long-poll: returns resumed=false after the poll so callers re-poll

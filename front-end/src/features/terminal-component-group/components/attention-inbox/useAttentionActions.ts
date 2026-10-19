@@ -104,17 +104,11 @@ function skipActionSpec(requests: AttentionRequest[], requestId: string): Action
   };
 }
 
-export function useAttentionActions({
-  requests,
-  responses,
-  clearResponse,
-  refetch,
-  setIsOpen,
-}: UseAttentionActionsArgs): UseAttentionActionsResult {
-  const [actionRequestId, setActionRequestId] = useState<string | null>(null);
-  const { toast } = useToast();
-  const { loading, run } = useActionRunner(clearResponse, refetch, setIsOpen, toast);
-
+function createRespondHandler(
+  requests: AttentionRequest[],
+  responses: Record<string, string>,
+  run: (spec: ActionSpec) => Promise<void>,
+): UseAttentionActionsResult['handleRespond'] {
   const handleRespond = (requestId: string, overrideResponse?: string) => {
     const request = requests.find((item) => item.id === requestId);
     const isAuthAssistance = request ? getAuthAssistanceMetadata(request) !== null : false;
@@ -148,6 +142,21 @@ export function useAttentionActions({
       clearInput: !overrideResponse,
     });
   };
+  return handleRespond;
+}
+
+export function useAttentionActions({
+  requests,
+  responses,
+  clearResponse,
+  refetch,
+  setIsOpen,
+}: UseAttentionActionsArgs): UseAttentionActionsResult {
+  const [actionRequestId, setActionRequestId] = useState<string | null>(null);
+  const { toast } = useToast();
+  const { loading, run } = useActionRunner(clearResponse, refetch, setIsOpen, toast);
+
+  const handleRespond = createRespondHandler(requests, responses, run);
 
   const handleSkip = (requestId: string) => {
     void run(skipActionSpec(requests, requestId));

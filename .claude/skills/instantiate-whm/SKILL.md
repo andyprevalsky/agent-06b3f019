@@ -22,10 +22,22 @@ October 2026.
    the world model falls back to its archive-grounded retrieval. Never ship an
    unsourced number, and label weak sources (vendor data, heuristics) as weak.
    `benchmarks/wmh_context_insertion.py` rejects examples without sources.
-2. **Examples, not enforcement.** Researched distributions are inserted as a
-   reference section (`structured.outcome_distribution_examples` plus one
-   scratchpad note); the world model reasons from them about the current state.
-   Do not force outcomes or probabilities in the runner.
+2. **The user's base rates are the default.** The canonical keyed set
+   (`agents/benchmarks/fixtures/wmh/fundraiser-base-rates.json`, the user's exact
+   values) is inserted by default as `structured.base_rates`. Under policy
+   `rose-outcome-distribution-v4` a distribution that declares a matching key
+   must branch on that result at the listed rate (within 0.03) or state a
+   concrete deviation reason. A rate with structured `applies_to` (exact canonical
+   category, tool and send argument, e.g. `message.message_transport_send` with
+   `to_email`) and a satisfied `precondition` must be declared by that call;
+   browser-agent sends are covered by effect: v4 outcomes append each send or form
+   submission to `structured.outreach` (`id`, `counterparty`, `channel`, `kind`,
+   `warm`), and a record to a counterparty without a delivered reply must
+   declare the rate whose `applies_to_outreach.warm` matches.
+   Researched distributions remain optional reference
+   examples (`--examples`); the 12-entry
+   `assets/fundraiser-examples-researched.json` is not the user's set (runs
+   13-18 used it by mistake). Do not force outcomes in the runner.
 3. **Per-run overrides only.** Never edit the catalog task, its prompt, its
    evaluators or its timeout to make a trajectory progress (CLAUDE.md rule 25).
    World state goes through `--wmh-initial-state-file`.
@@ -59,8 +71,13 @@ October 2026.
   `BEGIN READ ONLY`. Never print credentials.
 - The network tab is built only from connected sources (Gmail, email,
   LinkedIn, WhatsApp, Telegram, Mac-app iMessage) or a VCF import; nothing
-  backfills it. Whatever is absent is simulated, and the starting state must
-  say so without inventing prior correspondence, interest or money.
+  backfills it. Keep two things apart: records absent from those sources are
+  not history (never invent prior correspondence, interest or money), while the
+  results of the run's own actions (research findings consistent with the
+  fixture, replies, meetings, passes) are simulated. Insertion adds a labeled
+  `structured.network.derived_warmth` packet (message counts, contact frequency,
+  investor-like email domains; `source_verified: false`) so research can infer
+  realistic warm candidates.
 - Small, session-constant context (a network up to ~15k tokens) can ride in
   the seed state: it lands in the cached system evidence (section 5).
 - The account snapshot copies only the latest 10,000 messages across all
@@ -97,17 +114,26 @@ workflow (± one percentage point, others rebalance proportionally, Copy exports
 the edits). Sanity-check the whole funnel: research says ~250 cold pitches yield
 ~5 meetings and well under one commitment; successful seeds need warm intros.
 
-## 4. Insert the examples
+## 4. Insert the base rates (and optional examples)
 
 ```bash
 cd agents && source venv/bin/activate
 python -m benchmarks.wmh_context_insertion --task <catalog task> \
-  --examples examples.json --out run-state.json
+  [--base-state prepared-state.json] [--base-rates rates.json] [--examples examples.json] \
+  --out run-state.json
 ```
 
-`examples.json` is a list of `{action, outcomes: [{outcome, probability}],
-sources[, applies_when, typical_time]}`. Validation enforces sources, sums and
-one example per action. Keep the file and the run-state with the run's evidence.
+The default `--base-rates` is the user's canonical set; `--base-state` starts
+from a prepared state (for example one carrying the static network) instead of
+the catalog seed, which stays unchanged. `examples.json` is a list of `{action,
+outcomes: [{outcome, probability}], sources[, applies_when, typical_time]}`.
+Keep the inputs and the run-state with the run's evidence.
+
+DEMO cache: `rose-outcome-distribution-v4` has its own simulate-mode cache scope
+(`sim.<model>.policy.rose-outcome-distribution-v4.4.<sha16>`) and effective
+system prompt, and inserted base rates/warmth change the session evidence, so
+no v1-v3 DEMO entry or WMH response is replayed under v4. Expect cold DEMO
+caches on the first v4 run; do not copy or rekey older entries.
 
 ## 5. Provider, cache and infrastructure facts
 
@@ -144,7 +170,7 @@ one example per action. Keep the file and the run-state with the run's evidence.
   devbox OOM watcher spares it; keep `MemAvailable` above ~1.1 GB. Serve the WMH
   externally: `run.sh`'s 600 s readiness bound is shorter than the load.
   Stop it by TERM to the exact owner PID only.
-- **World clock** (policy `rose-outcome-distribution-v3`, the scripts' default):
+- **World clock** (policies `rose-outcome-distribution-v3` and `-v4`; v4 is the scripts' default):
   one clock per world starting at the seed's `as_of_utc`, which every seeded
   world must pin (ISO UTC). Simulated agents see that world date in their
   planner prompt and `wait_for`, never today's wall-clock date. Each action runs at
@@ -154,6 +180,11 @@ one example per action. Keep the file and the run-state with the run's evidence.
   (`agents/benchmarks/wmh_world_clock.py`): an agent resumes once every other
   agent has passed its deadline, and the clock jumps when all agents wait.
   Agents register at start and finish before signalling their parent.
+  Under v4 a later result is sampled at action time: the outcome where it
+  happens appends a concrete event (`id`, `kind`, `channel`, `from`, `content`,
+  `observable_via`, `base_rate_key`); placeholders are rejected. A due event
+  must be reported by the next action whose category it lists, and the runner
+  stamps its `delivered_at_ms`.
   Inspect it at `GET /world_models/<name>/scopes/<root agent>/clock`.
 - **Native concurrency** (already in code): conflicted predictions take the
   commit turn oldest-first; predictions that only add new records merge
@@ -201,6 +232,9 @@ the state contradicts them.
 
 - Metrics: `python3 scripts/measure.py --session-dir <root>/native-predictions/<session> <wmh-serve.log>`.
 - Committed steps: `scripts/session-outcomes.py <root> <session>`.
+- Warm metrics (computed, never hand-written): `python -m benchmarks.wmh_warm_metrics
+  --initial-state run-state.json --retirement <root>/native-retirements/<session>.json`
+  reports historical warm leads followed up and new warm leads separately.
 - FE link: `python scripts/publish_evidence_links.py --run-json <run.json> --agent-id <root agent>`
   with the agents env loaded; cite only links it verified in a fresh browser.
 - Then ask the user multiple-choice questions for the next run (rates,

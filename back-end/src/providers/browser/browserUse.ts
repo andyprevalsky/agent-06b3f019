@@ -4,6 +4,7 @@ import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
+import { request } from './browserUseClient';
 import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
 import { benchmarkIsolatedBrowserProfilesEnabled } from './benchmarkProfileIsolation';
@@ -12,7 +13,6 @@ import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 import {
-  BrowserProviderRateLimitError,
   type BrowserProviderResumeSession,
   type BrowserProviderSession,
   type BrowserSessionHealth,
@@ -20,44 +20,9 @@ import {
 } from './types';
 
 const log = createLogger('BrowserUse');
-const DEFAULT_API_URL = 'https://api.browser-use.com/api/v4';
-const REQUEST_TIMEOUT_MS = 15_000;
 const profileCreationByContext = new Map<string, Promise<{ id: string; source: string }>>();
 const benchmarkProfilesByAgent = new Map<string, Promise<string>>();
 const initialStorageHashes = new Map<string, string>();
-
-function apiKey(): string {
-  const key = process.env.BROWSER_USE_API_KEY?.trim();
-  if (!key) throw new Error('BROWSER_USE_API_KEY is required for Browser Use sessions');
-  return key;
-}
-
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const base = (process.env.BROWSER_USE_API_BASE_URL ?? DEFAULT_API_URL).replace(/\/$/, '');
-    const response = await fetch(`${base}${path}`, {
-      ...init,
-      headers: {
-        'X-Browser-Use-API-Key': apiKey(),
-        'Content-Type': 'application/json',
-        ...init.headers,
-      },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const detail = (await response.text()).slice(0, 500);
-      if (response.status === 429) {
-        throw new BrowserProviderRateLimitError('browser-use', `Browser Use HTTP 429: ${detail}`);
-      }
-      throw new Error(`Browser Use HTTP ${response.status}: ${detail}`);
-    }
-    return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
 
 type BrowserUseSession = {
   id: string;
@@ -152,7 +117,9 @@ async function profileForContext(
 async function createUserProfile(contextId: string): Promise<{ id: string; source: string }> {
   const existing = await getProviderProfile(contextId, 'browser-use');
   if (existing) return { id: existing, source: 'user_persistent' };
-  const context = await prisma.browserContext.findUniqueOrThrow({ where: { id: contextId } });
+  const context = await prisma.browserContext.findUniqueOrThrow({
+    where: { id: contextId },
+  });
   const created = await request<{ id: string }>('/profiles', {
     method: 'POST',
     body: JSON.stringify({ userId: context.userId }),
@@ -160,9 +127,9 @@ async function createUserProfile(contextId: string): Promise<{ id: string; sourc
   try {
     await rememberProviderProfile(contextId, 'browser-use', created.id);
   } catch (error) {
-    await request(`/profiles/${encodeURIComponent(created.id)}`, { method: 'DELETE' }).catch(
-      () => {}
-    );
+    await request(`/profiles/${encodeURIComponent(created.id)}`, {
+      method: 'DELETE',
+    }).catch(() => {});
     throw error;
   }
   return { id: created.id, source: 'new_user_persistent' };
@@ -174,7 +141,9 @@ export async function cleanupBenchmarkBrowserUseProfiles(): Promise<void> {
   const results = await Promise.allSettled(
     profiles.map(async (pending) => {
       const id = await pending;
-      await request(`/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await request(`/profiles/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
     })
   );
   for (const result of results) {
@@ -388,13 +357,18 @@ export async function closeBrowserUseSession(
   if (releaseError) throw releaseError;
 }
 
-async function replaceSession(taskId: string): Promise<
+async function replaceSession(
+  taskId: string,
+  options: { keepValidationConnection?: boolean } = {}
+): Promise<
   BrowserProviderResumeSession & {
     previousSessionId: string;
     previousProvider: 'browser-use' | 'kernel' | 'steel';
   }
 > {
-  const old = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
+  const old = await prisma.browserSession.findUniqueOrThrow({
+    where: { id: taskId },
+  });
   // Browser Use writes persistent profile state asynchronously after stop.
   // Reusing the profile while the old browser is still active loses fresh login state.
   if (old.provider === 'browser-use' && old.status === 'ACTIVE') {
@@ -413,6 +387,7 @@ async function replaceSession(taskId: string): Promise<
     : DEFAULT_GEOLOCATION;
   const profile = await profileForContext(old.contextId, old.agentId);
   const { session, browser } = await createRemote(location, profile.id);
+  let handedOff = false;
   try {
     await rememberInitialStorage(session.id, browser);
     const replaced = await prisma.browserSession.updateMany({
@@ -437,7 +412,10 @@ async function replaceSession(taskId: string): Promise<
       try {
         const context = browser.contexts()[0];
         const page = context.pages()[0] ?? (await context.newPage());
-        await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+        await page.goto(savedUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 10_000,
+        });
       } catch (error) {
         // The replacement row is already committed; the worker can retry
         // navigation after attaching to the returned CDP URL.
@@ -447,7 +425,9 @@ async function replaceSession(taskId: string): Promise<
         });
       }
     }
+    handedOff = true;
     return {
+      ...(options.keepValidationConnection ? { validationBrowser: browser } : {}),
       provider: 'browser-use',
       debugUrl: session.liveUrl!,
       sessionId: session.id,
@@ -465,7 +445,7 @@ async function replaceSession(taskId: string): Promise<
     await releaseBrowserUseRemoteSession(session.id).catch(() => {});
     throw error;
   } finally {
-    await browser.close().catch(() => {});
+    if (!options.keepValidationConnection || !handedOff) await browser.close().catch(() => {});
   }
 }
 
@@ -516,10 +496,18 @@ export async function listBrowserUseSessionFiles(sessionId: string): Promise<Bro
   do {
     const params = new URLSearchParams({ limit: '100' });
     if (cursor) params.set('cursor', cursor);
-    const page = await request<{ files: Download[]; hasMore: boolean; nextCursor: string | null }>(
-      `/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`
+    const page = await request<{
+      files: Download[];
+      hasMore: boolean;
+      nextCursor: string | null;
+    }>(`/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`);
+    files.push(
+      ...page.files.map(({ path, size, lastModified }) => ({
+        path,
+        size,
+        lastModified,
+      }))
     );
-    files.push(...page.files.map(({ path, size, lastModified }) => ({ path, size, lastModified })));
     cursor = page.hasMore ? page.nextCursor : null;
   } while (cursor);
   return files;
@@ -530,13 +518,17 @@ export async function readBrowserUseSessionFile(sessionId: string, path: string)
   let cursor: string | null = null;
   do {
     if (cursor) params.set('cursor', cursor);
-    const page = await request<{ files: Download[]; hasMore: boolean; nextCursor: string | null }>(
-      `/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`
-    );
+    const page = await request<{
+      files: Download[];
+      hasMore: boolean;
+      nextCursor: string | null;
+    }>(`/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`);
     const found = page.files.find((file) => file.path === path);
     if (found) {
       if (!found.url) throw new Error(`Browser Use download URL unavailable: ${path}`);
-      const response = await fetch(found.url, { signal: AbortSignal.timeout(60_000) });
+      const response = await fetch(found.url, {
+        signal: AbortSignal.timeout(60_000),
+      });
       if (!response.ok) throw new Error(`Browser Use download failed: HTTP ${response.status}`);
       return Buffer.from(await response.arrayBuffer());
     }
@@ -579,7 +571,10 @@ export async function uploadBrowserUseSessionFile(
       downloadPath: '/tmp/downloads',
       eventsEnabled: true,
     });
-    await page.goto('https://example.com', { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    await page.goto('https://example.com', {
+      waitUntil: 'domcontentloaded',
+      timeout: 20_000,
+    });
     // Chrome may auto-rename a repeated download. Give this upload a unique
     // remote filename so verification can only read the bytes just written.
     const dot = filename.lastIndexOf('.');
@@ -616,7 +611,10 @@ export async function uploadBrowserUseSessionFile(
       selector: '#browser-use-upload-check',
     });
     if (!input.nodeId) throw new Error('Browser Use upload verification input unavailable');
-    await cdp.send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: [path] });
+    await cdp.send('DOM.setFileInputFiles', {
+      nodeId: input.nodeId,
+      files: [path],
+    });
     const uploaded = await page.evaluate(`new Promise((resolve, reject) => {
       const file = document.querySelector('#browser-use-upload-check').files[0];
       const reader = new FileReader();

@@ -1011,8 +1011,11 @@ def test_rejected_distribution_capture_keeps_exact_bytes_private_and_validation_
         assert sent_model.__name__ == "CandidateTimedOutcomeDistribution"
         from providers.rose.schema import build_openai_response_format
         result_schema = build_openai_response_format(sent_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
-        assert result_schema["items"]["properties"]["call_id"]["const"] == "call-1"
-        assert result_schema["minItems"] == result_schema["maxItems"] == 1
+        assert result_schema["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
+        assert "maxItems" not in result_schema
+        from benchmarks.wmh_response_schema import response_model_for_protocol
+        other_model = response_model_for_protocol(TIMED_DISTRIBUTION_PROTOCOL, expected_call_ids=("other-A", "other-B"))
+        assert build_openai_response_format(other_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"] == result_schema
         assert detail["rejected_response"] == {
             "content": rejected,
             "actual_model": "offline-model",
@@ -1102,8 +1105,11 @@ def test_rejected_prediction_captures_actual_streamed_wire_request_without_auth(
         sent = client.collect.await_args.kwargs
         from providers.rose.schema import build_openai_response_format
         result_schema = build_openai_response_format(sent["response_model"])["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
-        assert result_schema["items"]["properties"]["call_id"]["const"] == "wire-call"
-        assert result_schema["minItems"] == result_schema["maxItems"] == 1
+        assert result_schema["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
+        assert "maxItems" not in result_schema
+        from benchmarks.wmh_response_schema import response_model_for_protocol
+        other_model = response_model_for_protocol(TIMED_DISTRIBUTION_PROTOCOL, expected_call_ids=("other-A", "other-B"))
+        assert build_openai_response_format(other_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"] == result_schema
         assert capture["request"] == {
             "pool": "rose-1-flash",
             "messages": sent["messages"],

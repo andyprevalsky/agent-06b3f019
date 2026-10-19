@@ -1056,6 +1056,25 @@ def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
     _run_owned_benchmark_commands(commands, cwd=repo_root)
 
 
+def test_sms_runner_scoring_contract_is_in_permanent_gate():
+    """The SMS benchmark scoring/seed contract (agents/benchmarks/sms_runner_test.py).
+
+    It pins what lets an SMS benchmark fail a spamming or questionnaire-only
+    supervisor, including the fill-form task's search-only proof values. It was
+    previously only text-checked by a structural gate and never executed.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(repo_root / "agents/benchmarks/sms_runner_test.py")],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -1581,6 +1600,27 @@ def test_ci_should_fail_on_skipped_required_task():
 
     assert _ci_should_fail({"failed": 0, "skipped": 1}) is True
     assert _ci_should_fail({"failed": 0}) is False
+
+
+def test_ci_permits_only_the_opt_in_agentcard_release_skip():
+    """The AgentCard sandbox release stall is a deploy-approved SKIP only behind its exact flag."""
+    from benchmarks.results import TaskResult
+    from benchmarks.run_benchmark import AGENTCARD_RELEASE_SKIP_REASON, _ci_should_fail
+
+    def skipped(reason: str) -> TaskResult:
+        return TaskResult(name="agent-payment-abandonment", passed=False, agent_id="agent-123",
+                          status="SKIPPED", progress_score=0, duration_seconds=1, cost_cents=0,
+                          message_count=0, failure_reason=reason)
+
+    summary = {"failed": 0, "skipped": 1}
+    stall = skipped(f"{AGENTCARD_RELEASE_SKIP_REASON}: owt_1 consumed")
+    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
+        assert _ci_should_fail(summary, [stall]) is False
+        assert _ci_should_fail(summary, [skipped("Cloud cleanup failed: payment: TimeoutError")]) is True
+        assert _ci_should_fail({"failed": 1, "skipped": 1}, [stall]) is True
+    for value in ("", "0", "true"):
+        with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": value}):
+            assert _ci_should_fail(summary, [stall]) is True
 
 
 def test_outreach_batch_has_timeout_floor():
@@ -4982,6 +5022,10 @@ async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
             timeout_seconds=0,
             poll_interval_seconds=0,
         )
+
+
+
+
 
 
 async def test_abandonment_timeout_names_the_unreleased_agentcard_transfer():
@@ -12525,12 +12569,25 @@ async def test_declared_judge_without_verdict_is_judge_unavailable_error():
 
     sms_task = SimpleNamespace(
         name="sms-judge-unavailable",
+        timeout_seconds=420,
         prompt="Reply to the user.",
         evaluators=[
             {"id": "sms-judge", "method": "single_turn_llm_judge", "criteria": ["Reply."], "pass_threshold": 1.0}
         ],
     )
-    deps = SimpleNamespace(is_local_base_url=lambda _: True, benchmark_user_id=lambda: "test-user")
+    user_profile = {
+        "userId": "test-user",
+        **dict.fromkeys((
+            "name", "email", "phone", "deliveryRecipientName", "addressLine1", "addressLine2",
+            "city", "state", "postalCode", "country", "systemName",
+        )),
+    }
+    deps = SimpleNamespace(
+        is_local_base_url=lambda _: True,
+        benchmark_user_id=lambda: "test-user",
+        run_sql=lambda _: json.dumps(user_profile),
+        sql_literal=lambda value: "'" + str(value).replace("'", "''") + "'",
+    )
     sms_results = {}
     for label, verdict_from_invocation in (("unavailable", None), ("recovered", 2)):
         with _scripted_judge_provider(verdict_from_invocation=verdict_from_invocation) as probe:
@@ -12632,7 +12689,7 @@ async def test_sms_runner_harness_error_has_explicit_error_outcome():
         stack.enter_context(patch.object(sms, "_live_agent_ids", side_effect=RuntimeError("database unavailable")))
         stack.enter_context(patch.object(sms, "_cleanup"))
         stack.enter_context(patch.object(sms, "_apply_web_search_fixture"))
-        result = await sms.run_sms_task("http://127.0.0.1:32001", SimpleNamespace(name="sms-error"), deps)
+        result = await sms.run_sms_task("http://127.0.0.1:32001", SimpleNamespace(name="sms-error", timeout_seconds=420), deps)
     assert result.passed is False
     assert result.benchmark_status == "ERROR", result.benchmark_status
 
@@ -22817,6 +22874,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_boot_terminal_runtime_evidence_is_in_permanent_gate", "boot_terminal_runtime_evidence_permanent_gate"),
         ("test_cloudbench_codex_auth_is_in_permanent_gate", "cloudbench_codex_auth_permanent_gate"),
         ("test_cloudbench_pool_vm_shapes_are_in_permanent_gate", "cloudbench_pool_vm_shapes_permanent_gate"),
+        ("test_sms_runner_scoring_contract_is_in_permanent_gate", "sms_runner_scoring_contract_permanent_gate"),
         ("test_live_query_proof_rejects_zero_spend_tasks_before_provisioning", "live_query_proof_zero_spend_admission"),
         ("test_successful_llm_evidence_is_in_permanent_gate", "successful_llm_evidence_permanent_gate"),
     ]
@@ -23395,7 +23453,6 @@ async def run_all_tests():
     await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown)
     await r.record_async("agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict)
     await r.record_async("agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict)
-    r.record("ci_permits_only_opt_in_agentcard_release_skip", test_ci_permits_only_the_opt_in_agentcard_release_skip)
     r.record(
         "agentcard_release_policy_rejects_incomplete_foreign_state",
         test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state,
@@ -23532,6 +23589,7 @@ async def run_all_tests():
             ("boot_terminal_runtime_evidence_permanent_gate", test_boot_terminal_runtime_evidence_is_in_permanent_gate),
             ("cloudbench_codex_auth_permanent_gate", test_cloudbench_codex_auth_is_in_permanent_gate),
             ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
+            ("sms_runner_scoring_contract_permanent_gate", test_sms_runner_scoring_contract_is_in_permanent_gate),
             (
                 "live_query_proof_zero_spend_admission",
                 test_live_query_proof_rejects_zero_spend_tasks_before_provisioning,
@@ -23650,6 +23708,7 @@ async def run_all_tests():
     )
     r.record("read_process_env_var_portable", test_read_process_env_var_uses_portable_process_environ)
     r.record("ci_fails_on_skipped", test_ci_should_fail_on_skipped_required_task)
+    r.record("ci_permits_only_opt_in_agentcard_release_skip", test_ci_permits_only_the_opt_in_agentcard_release_skip)
     r.record("outreach_batch_timeout_floor", test_outreach_batch_has_timeout_floor)
     r.record("timeout_default_uses_task_config", test_timeout_default_uses_task_config_when_history_is_missing)
     r.record("timeout_default_respects_floor", test_timeout_default_respects_explicit_floor)

@@ -79,6 +79,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+    from helpers.wait_on_world_clock import _read_world_time_ms, _refresh_world_time_cursor
     from helpers.world_model_runtime import world_clock_activity
     from loop.dag_executor import (
         TaskDAG,
@@ -160,6 +161,19 @@ CLOUD_AGENT_IN_PROGRESS_TITLES = {
     STARTING_REASONING_TITLE,
 }
 FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
+# Simulate mode: the runner creates the world session before the root starts.
+# Registration retries a missing world briefly, then the agent fails closed.
+WORLD_CLOCK_REGISTER_ATTEMPTS = 3
+WORLD_CLOCK_REGISTER_RETRY_SECONDS = 2
+# Simulate mode: a failed post-tool cursor read is retried with a short backoff
+# before the next simulated-time consumer, so a transient WMH blip cannot leave
+# the agent on the time from before its last action.
+WORLD_CLOCK_REFRESH_ATTEMPTS = 3
+WORLD_CLOCK_REFRESH_RETRY_SECONDS = 5
+WORLD_CLOCK_UNAVAILABLE_MESSAGE = (
+    "Simulated world clock unavailable: no WMH world session acknowledged this agent, "
+    "so it cannot start on the world's time. Create the world session before starting the agent."
+)
 # Reserved responses emitted by auth completion and gate-resolution providers.
 ATTENTION_CONTROL_RESPONSES = frozenset(
     {REJECTION_SENTINEL, "__AUTH_ASSISTANCE_COMPLETED__", "RESOLVED", "SOURCE_CONNECTED", "SUBSCRIPTION_ACTIVE"}
@@ -748,6 +762,8 @@ class AgentWorkflow:
         # Simulate-mode logical clock: seconds of wall-clock wait that wait_for /
         # wait_seconds skipped (utils/simulated_clock.py). Always 0 in real mode.
         self.simulated_clock_offset_seconds: int = 0
+        # Simulate mode: this agent's time on its world's shared clock (epoch ms).
+        self.simulated_world_time_ms: Optional[int] = None
         self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
         self.verifier: Optional[Dict] = None
@@ -955,6 +971,8 @@ class AgentWorkflow:
         self._resume_progress = float(_number("progress"))
         # A simulated agent keeps reading world time after continue-as-new.
         self.simulated_clock_offset_seconds = int(_number("simulated_clock_offset_seconds"))
+        world_cursor = state.get("simulated_world_time_ms")
+        self.simulated_world_time_ms = world_cursor if type(world_cursor) is int else None
         self.token_count = int(_number("token_count"))
         self.tokens_in = int(_number("tokens_in"))
         self.tokens_out = int(_number("tokens_out"))
@@ -1256,6 +1274,7 @@ class AgentWorkflow:
             "prior_status_message": self._resume_status_message,
             "progress": self._resume_progress,
             "simulated_clock_offset_seconds": self.simulated_clock_offset_seconds,
+            "simulated_world_time_ms": self.simulated_world_time_ms,
             "token_count": self.token_count,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
@@ -1856,6 +1875,7 @@ class AgentWorkflow:
         self.world_model_mode = world_model_mode if world_model_mode in {"simulate", "shadow"} else "real"
         self.memory_enabled = bool(memory_enabled)
         self.simulated_clock_offset_seconds = 0
+        self.simulated_world_time_ms = None
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.compute_token_lineage_key = f"agent:{agent_id}"
@@ -1936,8 +1956,10 @@ class AgentWorkflow:
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
 
         if not self._deployment_resume:
-            await self._world_clock_event("register")
+            await self._register_on_world_clock()
             await self._advance_cloud_agent_lifecycle(PREPARING_CLOUD_AGENT_TITLE, "IN_PROGRESS")
+        else:
+            await self._recover_world_time_cursor()
 
         # Post an early heartbeat so external monitors (FE tree, benchmark
         # stall detector) see the agent is alive while init activities run.
@@ -2290,6 +2312,16 @@ class AgentWorkflow:
                     message="Parent agent ended; orphaned sub-agent stopped.",
                 )
                 return {"status": "failed", "reason": "orphaned", "goal": self.goal}
+
+        if self._world_clock_missing():
+            # Simulate mode never starts or plans on the real date: the runner
+            # creates the WMH world session before starting the root.
+            await self._mark_failed(
+                context=context or [],
+                reason="world_clock_unavailable",
+                message=WORLD_CLOCK_UNAVAILABLE_MESSAGE,
+            )
+            return {"status": "failed", "reason": "world_clock_unavailable", "goal": self.goal}
 
         # =====================================================================
         # Tool lists from centralized source of truth
@@ -3771,6 +3803,42 @@ class AgentWorkflow:
             raise
 
     async def _execute_tool(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
+        """Execute a tool, then (simulate mode) re-read this agent's world-time cursor.
+
+        A simulated action advances the agent on its world clock by the WMH's
+        predicted duration, and a call that delivered a child's result has
+        moved this agent to that child's finish, so the next "now" it sees is
+        the world's.
+        Outside a WMH world no cursor exists and nothing extra runs.
+        """
+        result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        await self._refresh_world_time_cursor_after_tool()
+        return result
+
+    async def _refresh_world_time_cursor_after_tool(self) -> None:
+        """Simulate mode: re-read the cursor after a tool, retrying a failed read with a bounded backoff.
+
+        Without a cursor (outside a WMH world) nothing runs. When every attempt
+        fails the agent keeps its last acknowledged world time, which never
+        moves backwards, and the failure is logged as an error.
+        """
+        for attempt in range(WORLD_CLOCK_REFRESH_ATTEMPTS):
+            if (
+                type(getattr(self, "simulated_world_time_ms", None)) is not int
+                or getattr(self, "world_model_mode", "real") != "simulate"
+            ):
+                return
+            if attempt:
+                # cutover-class: bounded — at most two 5s pauses after a failed simulated-clock read
+                await workflow.sleep(timedelta(seconds=WORLD_CLOCK_REFRESH_RETRY_SECONDS))
+            if await _refresh_world_time_cursor(self) is not None:
+                return
+        workflow.logger.error(
+            f"[world_clock] Agent {self.agent_id} could not refresh its world time after a tool; "
+            "keeping its last acknowledged world time"
+        )
+
+    async def _execute_tool_once(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
         """Execute a tool - supports both new and legacy signatures during migration.
 
         Every error return path MUST first emit a paired TOOL event via
@@ -5405,6 +5473,40 @@ class AgentWorkflow:
             "steps_taken": steps_taken,
         }
 
+    async def _register_on_world_clock(self) -> None:
+        """Simulate mode: register on the world clock, retrying a missing world a bounded number of times."""
+        for attempt in range(WORLD_CLOCK_REGISTER_ATTEMPTS):
+            if attempt:
+                # cutover-class: bounded — at most two 2s pauses before the agent fails closed
+                await workflow.sleep(timedelta(seconds=WORLD_CLOCK_REGISTER_RETRY_SECONDS))
+            await self._world_clock_event("register")
+            if self.world_model_mode != "simulate" or "register" in self._world_clock_events:
+                return
+
+    async def _recover_world_time_cursor(self) -> None:
+        """Simulate mode: a resumed agent whose continuation state lacks a cursor re-reads its world time.
+
+        State persisted before the cursor existed has none, and without it the
+        resumed agent would plan on the real date. Outside simulate mode, or
+        with a persisted cursor, nothing runs.
+        """
+        if self.world_model_mode != "simulate" or type(self.simulated_world_time_ms) is int:
+            return
+        time_ms = await _read_world_time_ms(self)
+        if time_ms is None:
+            workflow.logger.error(f"[world_clock] Resumed agent {self.agent_id} could not recover its world time")
+            return
+        self.simulated_world_time_ms = time_ms
+        self.simulated_clock_offset_seconds = time_ms // 1000 - int(workflow.now().timestamp())
+
+    def _world_clock_missing(self) -> bool:
+        """True when a simulated agent has no acknowledged world time to start from."""
+        return (
+            self.world_model_mode == "simulate"
+            and not self._deployment_resume
+            and type(getattr(self, "simulated_world_time_ms", None)) is not int
+        )
+
     async def _world_clock_event(self, operation: str) -> None:
         """Simulate mode: register or finish this agent on its world's shared clock.
 
@@ -5437,9 +5539,11 @@ class AgentWorkflow:
         if isinstance(result, dict) and type(result.get("time_ms")) is int:
             self._world_clock_events.add(operation)
         if operation == "register" and isinstance(result, dict) and type(result.get("time_ms")) is int:
-            # This agent's own clock reads world time from its first step: the
-            # world starts at its pinned scenario date, not today's date.
+            # This agent's "now" is its world-time cursor from its first step: a
+            # child starts at its parent's world time and the world starts at
+            # its pinned scenario date, not today's date.
             self.simulated_clock_offset_seconds = result["time_ms"] // 1000 - int(workflow.now().timestamp())
+            self.simulated_world_time_ms = result["time_ms"]
 
     async def _mark_failed(
         self,

@@ -66,6 +66,36 @@ unnecessary campaign resets. Integrate and verify main before binding the final
 After merging runner changes, make fixture inputs and result shapes match the
 real call boundary before trusting their behavioral assertions.
 
+## October 18 SMS dispatch integration recurrence
+
+Syncing PR1473 with main `c7fc3b3d2a282a93ee4d482fef813fe0c4148fdc`
+made the existing SMS custody fixture reject the task before either committed-root
+callback ran. Main deliberately shallow-copies the catalog task and resets six
+native ownership fields for each execution; the older fixture instead asserted
+`actual is task`. The first bad boundary was that fixture assertion, not the
+production callback or cleanup path. This is the same stale-fixture problem class.
+
+Archive searches used `on_agent_created custody sms dispatch unexpected keyword`
+and `SMS runner cleanup root callback forwarding`. The full canonical benchmark
+blackbox domain failed its SMS owning check. The identical isolated command,
+`cd agents && python -m pytest benchmarks/sms_runner_test.py -q`, then reproduced
+one failure and 134 passes on `a0ff098e011aa97399d5c323d457cb52f0e8cf99`.
+
+Correct the existing fixture to require a distinct execution object, unchanged
+task configuration, six fresh ownership fields and an untouched caller template.
+Keep both duplicate committed-root observations and the exact single callback
+assertion. The same isolated command passed all 135 tests in 2.31 seconds after
+the correction. An independent review confirmed that no production code changed
+and callback forwarding and deduplication assertions remain intact. This removes
+an obsolete fixture assumption without changing runtime complexity at 10,000 agents.
+
+The test stays in `sms_runner_test.py`, invoked by the existing permanent
+`sms_runner_scoring_contract_permanent_gate` inside the agents benchmark blackbox
+domain. The failed full-domain attempt is retained; only its failed SMS subset
+was rerun. This proves the integration fixture correction, not a fresh canonical
+SMS benchmark, full deploy pass or production acceptance. Private before/after
+logs remain under `.context/tamy-resumed/sync-main-20261018/`.
+
 ## October 2 integration recurrence: cleanup context import
 
 A later pinned-main merge replaced the imported `ContextVar` alias with the

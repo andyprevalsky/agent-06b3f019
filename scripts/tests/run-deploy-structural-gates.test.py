@@ -55,6 +55,18 @@ class StructuralGateDocumentationTests(unittest.TestCase):
     real coverage while still looking tidy. Pin both directions instead.
     """
 
+    def test_frontend_coverage_requires_app_typecheck_before_vitest(self) -> None:
+        package = json.loads((ROOT / "front-end" / "package.json").read_text())
+        command = package["scripts"]["test:coverage"]
+        self.assertRegex(
+            command,
+            r"^tsc --noEmit -p tsconfig\.app\.json\s*&&\s*vitest run --coverage(?:\s|$)",
+            "coverage must typecheck the app project before running Vitest",
+        )
+        app_config = (ROOT / "front-end" / "tsconfig.app.json").read_text()
+        self.assertRegex(app_config, r'"include"\s*:\s*\[\s*"src"')
+        self.assertTrue((ROOT / "front-end" / "src").is_dir())
+
     def test_clone_recovery_is_registered(self) -> None:
         self.assertIn(
             "bash scripts/tests/deploy-agent-clone-recovery.test.sh",

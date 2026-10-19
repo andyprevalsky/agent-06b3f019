@@ -52,9 +52,9 @@ const replacementFailure = (cause: string) =>
   );
 
 async function main(): Promise<void> {
-  for (const retryFailedReplacement of [false, true]) {
-    await test(`successful same-profile rebind ${retryFailedReplacement ? 'from retained PAUSED custody' : 'without duplicate release'}`, () =>
-      assertSteelSameProfileReplacement(retryFailedReplacement));
+  for (const retryClosed of [false, true]) {
+    await test(`successful same-profile rebind ${retryClosed ? 'from PAUSED recovery custody' : 'without duplicate release'}`, () =>
+      assertSteelSameProfileReplacement(retryClosed));
   }
   await test('same-profile replacement releases its uploading source before attaching it', async () => {
     const originalFind = prisma.browserSession.findUnique;
@@ -94,7 +94,7 @@ async function main(): Promise<void> {
         status: 'PAUSED',
         closedAt: null,
       });
-      assert.strictEqual(released, false, 'provider release must follow durable resumable custody');
+      assert.strictEqual(released, false);
       return { count: 1 };
     }) as typeof originalUpdate;
     try {
@@ -104,6 +104,11 @@ async function main(): Promise<void> {
             'offline-task',
             { forceManagedRotation: true },
             {
+              retrieveProfile: async (profileId) => {
+                assert.strictEqual(profileId, 'offline-profile');
+                assert.strictEqual(released, true);
+                return { status: 'READY' };
+              },
               createSession: async () => {
                 creates++;
                 if (!released)
@@ -115,11 +120,6 @@ async function main(): Promise<void> {
               releaseSession: async (id) => {
                 assert.strictEqual(id, 'offline-source');
                 released = true;
-              },
-              retrieveProfile: async (id) => {
-                assert.strictEqual(id, 'offline-profile');
-                assert.strictEqual(released, true, 'profile readiness follows source release');
-                return { status: 'READY' };
               },
               validateConnection: async () => {
                 throw new Error('unexpected validation');
@@ -206,7 +206,7 @@ async function main(): Promise<void> {
           creates,
           mode === 'release-failure' || mode === 'changed-source' ? 0 : 1
         );
-        assert.strictEqual(writes, mode === 'changed-source' || mode === 'release-failure' ? 1 : 0);
+        assert.strictEqual(writes, mode === 'release-failure' || mode === 'changed-source' ? 1 : 0);
       } finally {
         prisma.browserSession.findUnique = find;
         prisma.integration.findUnique = fingerprint;

@@ -371,9 +371,6 @@ export async function injectUserData(
   log.info(`  [1/9] DB fetch complete (${Date.now() - startTime}ms)`);
 
   if (!dbSession?.wsUrl) {
-    if (options?.browser) {
-      await options.browser.close().catch(() => {});
-    }
     throw new Error('No WebSocket URL found for session');
   }
 
@@ -441,9 +438,6 @@ export async function injectUserData(
       },
     });
     if (cookies.length === 0) {
-      if (options?.browser) {
-        await options.browser.close().catch(() => {});
-      }
       throw new Error(
         `Cookie bundle ${authSource.id} was selected for ${authRealm} but contains no cookie rows`
       );

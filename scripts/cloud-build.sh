@@ -179,6 +179,8 @@ JS_PID=$!
     else
         echo "✅ agents venv already provisioned"
     fi
+    # scripts/setup-world-model.sh builds the native WMH env with uv.
+    command -v uv >/dev/null || [ -x agents/venv/bin/uv ] || agents/venv/bin/python -m pip install -q uv
 ) >"$PY_LOG" 2>&1 &
 PY_PID=$!
 

@@ -1,3 +1,5 @@
+import { canonicalPhone } from './phoneAccountLookup';
+
 export interface JwtUserSnapshot {
   phone: string | null;
 }
@@ -38,10 +40,6 @@ export class PhoneAccountExistsError extends Error {
   }
 }
 
-function hasPhone(phone: string | null): phone is string {
-  return phone !== null && phone.trim() !== '';
-}
-
 async function syncExistingPhone(
   store: JwtUserStore,
   input: JwtUserInput,
@@ -50,11 +48,14 @@ async function syncExistingPhone(
   if (input.phone === null || input.phone === existing.phone) return;
   // Never move a phone onto this account while another account owns it; the
   // user stays signed in, the phone simply is not copied.
-  if (hasPhone(input.phone)) {
-    const ownerId = await store.findPhoneOwner(input.phone);
-    if (ownerId !== null && ownerId !== input.userId) return;
+  const ownerId = await store.findPhoneOwner(input.phone);
+  if (ownerId !== null && ownerId !== input.userId) return;
+  try {
+    await store.updatePhone(input.userId, input.phone);
+  } catch (error) {
+    // Another account claimed the phone after the owner check (unique index).
+    if (!store.isUniqueViolation(error)) throw error;
   }
-  await store.updatePhone(input.userId, input.phone);
 }
 
 /**
@@ -68,16 +69,19 @@ async function syncExistingPhone(
  *
  * One phone maps to one account: a new user whose token phone is already owned
  * by a different account is rejected with PhoneAccountExistsError instead of
- * being created. Tokens without a phone (anonymous sessions) are unaffected.
+ * being created, including when a concurrent request wins the unique phone
+ * index. Tokens without a phone (anonymous sessions) store a NULL phone.
  */
-export async function syncJwtUser(store: JwtUserStore, input: JwtUserInput): Promise<boolean> {
+export async function syncJwtUser(store: JwtUserStore, tokenInput: JwtUserInput): Promise<boolean> {
+  // Stored phones are canonical `+digits`; a blank token phone is stored as NULL.
+  const input: JwtUserInput = { ...tokenInput, phone: canonicalPhone(tokenInput.phone) };
   const existing = await store.findUser(input.userId);
   if (existing !== null) {
     await syncExistingPhone(store, input, existing);
     return false;
   }
 
-  if (hasPhone(input.phone)) {
+  if (input.phone !== null) {
     const ownerId = await store.findPhoneOwner(input.phone);
     if (ownerId !== null && ownerId !== input.userId) {
       throw new PhoneAccountExistsError();
@@ -91,8 +95,16 @@ export async function syncJwtUser(store: JwtUserStore, input: JwtUserInput): Pro
     if (!store.isUniqueViolation(error)) throw error;
 
     const racedUser = await store.findUser(input.userId);
-    if (racedUser === null) throw error;
-    await syncExistingPhone(store, input, racedUser);
-    return false;
+    if (racedUser !== null) {
+      await syncExistingPhone(store, input, racedUser);
+      return false;
+    }
+    // A concurrent request created a different account for this phone between
+    // the owner check and the insert; the unique phone index refused this one.
+    if (input.phone !== null) {
+      const ownerId = await store.findPhoneOwner(input.phone);
+      if (ownerId !== null && ownerId !== input.userId) throw new PhoneAccountExistsError();
+    }
+    throw error;
   }
 }

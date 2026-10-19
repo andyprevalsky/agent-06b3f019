@@ -1,0 +1,106 @@
+{
+  "at": "2026-10-15T19:18:21.700037+00:00",
+  "product_head": "839485ff8b27db9f3cc6bc7d03feb61ecf2b7da0",
+  "original_timing_run": "20261012-234924-2614623",
+  "backend": {
+    "actual_source_head": "839485ff8b27db9f3cc6bc7d03feb61ecf2b7da0",
+    "exit": 0,
+    "blackbox_passed": 200,
+    "blackbox_failed": 0,
+    "unit_files_passed": 272,
+    "unit_files_failed": 0,
+    "coverage": {
+      "lines": {
+        "total": 116558,
+        "covered": 104543,
+        "skipped": 0,
+        "pct": 89.69
+      },
+      "statements": {
+        "total": 116558,
+        "covered": 104543,
+        "skipped": 0,
+        "pct": 89.69
+      },
+      "functions": {
+        "total": 10853,
+        "covered": 10062,
+        "skipped": 0,
+        "pct": 92.71
+      },
+      "branches": {
+        "total": 31721,
+        "covered": 25749,
+        "skipped": 0,
+        "pct": 81.17
+      },
+      "branchesTrue": {
+        "total": 0,
+        "covered": 0,
+        "skipped": 0,
+        "pct": 100
+      }
+    },
+    "current_treasury": "One exact own card CLOSED; exact transfer reclaimed in full; pool-debit proof; zero new pending",
+    "old_treasury_liability": "One historical owned sandbox mint return unproved; old OVERDUE fail retained; no waiver applied"
+  },
+  "agents": {
+    "actual_full_source": "cea52afefa5b5d28c768343d6f7c1d93f9c12960",
+    "exit": 0,
+    "blackbox": 110,
+    "cache": 184,
+    "units": 134,
+    "coverage_percent": 82.03785024854551,
+    "qualification": "Only subsequent Rose assertion layout, finite source registration, RCA and handoff docs changed; product runtime unchanged. Fresh config owning structural gates46PASS."
+  },
+  "static": {
+    "backend_lint_types_structural_exit": 0,
+    "changed_Rose_test_lint_exit": 0,
+    "deploy_structural_passed": 46,
+    "deploy_structural_exit": 0
+  },
+  "focused_live": {
+    "actual_head": "839485ff8b27db9f3cc6bc7d03feb61ecf2b7da0",
+    "probes_passed": 3,
+    "exit": 0,
+    "seconds": 21.706313133239746,
+    "observed_births_absent": 61,
+    "complete_descendant_capture_claimed": false,
+    "Anthropic_warn_only_retained": true
+  },
+  "frontend": {
+    "recorded_at": "2026-10-15T18:51:53.241696+00:00",
+    "current_head": "cea52afefa5b5d28c768343d6f7c1d93f9c12960",
+    "prior_full_FE_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "tracked_coverage_build_static_inputs_compared": 1192,
+    "changed_input_paths": [],
+    "exact_tracked_inputs_equal": true,
+    "semantic_runner_excluded_from_coverage_scope": [
+      "front-end/scripts/run-semantic-tests.sh"
+    ],
+    "fresh_semantic_runner_owner_still_required": true,
+    "untracked_root_lockfile": "Excluded: not committed in either source, npm run does not install dependencies; prior failed comparison retained separately",
+    "dependency_reinstallation_since_prior": "None; existing pinned toolchain/install reused",
+    "prior_results_qualified_not_newly_rerun": true
+  },
+  "factory_runtime_boundary_finished_at": "2026-10-15T19:16:17.074050Z",
+  "pending_prompt_changes": "UNAPPLIED",
+  "remaining_runtime_lanes": [
+    "SMS3 on integrated runtime",
+    "semantic UI and latency",
+    "mandatory real E2B smoke",
+    "full Pre-Deploy smoke",
+    "AgentCard4 sandbox lifecycle"
+  ],
+  "earlier_failures_preserved": true,
+  "raw_values_private": true,
+  "all_deploy_gates_green": false,
+  "ready_to_close": false,
+  "input_hashes": {
+    ".context/tamy-resumed/integrated-backend-839485ff8/coverage-result.json": "4ee536e327ab1110b4c7ec6374b7eb74805dbbcd03eea9fe8fa22b811257a9e7",
+    ".context/tamy-resumed/integrated-backend-839485ff8/sealed-current-coverage/blackbox-run/summary.json": "32ffad0c03d65c256d04c5378ba36f3706560872d15c31296eaa433aab20c430",
+    ".context/tamy-resumed/integrated-backend-839485ff8/sealed-current-coverage/coverage-summary.json": "b7d678902a7ad96e1a2873df720c1bcd469b6b28561695aed92e027de34089a6",
+    ".context/tamy-resumed/integrated-live-839/focused-live/result.json": "0e5bffc500345b50df746245bffbd0ad7686f153959874cf93b293206d918b1b",
+    ".context/tamy-resumed/integrated-static-839/safe-summary.json": "d8b3bd0f34c691f3b3f806d0fc0e6b8421cdf55cb9cada1c5a2a9ac456aa1acc"
+  }
+}

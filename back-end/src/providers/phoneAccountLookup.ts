@@ -3,9 +3,10 @@ import type { Prisma } from '@prisma/client';
 /**
  * Canonical ordering for resolving a phone number to ONE account.
  *
- * User.phone is not unique, so a phone can match several rows. Every phone
- * lookup must pick the same row: the oldest account, with userId as a stable
- * tie-breaker. Without an ORDER BY, Postgres returns whichever row the plan
+ * User.phone is unique, but legacy rows may hold the same number in both its
+ * `+digits` and bare `digits` forms, so a lookup can still match two rows.
+ * Every phone lookup must pick the same row: the oldest account, with userId
+ * as a stable tie-breaker. Without an ORDER BY, Postgres returns whichever row the plan
  * reaches first, so OTP login could land on a different account over time.
  */
 export const OLDEST_ACCOUNT_FIRST: Prisma.UserOrderByWithRelationInput[] = [
@@ -38,4 +39,22 @@ export function phoneLookupVariants(phone: string): [string, string] | null {
 export function phoneOwnerWhere(phone: string): Prisma.UserWhereInput {
   const variants = phoneLookupVariants(phone);
   return variants === null ? { phone } : { phone: { in: variants } };
+}
+
+/**
+ * The form every User.phone writer stores: `+digits`, or null when the input
+ * is missing or has no digits. Anonymous tokens carry `phone: ''`; storing
+ * that verbatim would make every anonymous account collide on the unique
+ * User.phone index, so a blank phone is always stored as NULL.
+ */
+export function canonicalPhone(phone: string | null | undefined): string | null {
+  if (phone === null || phone === undefined) return null;
+  return phoneLookupVariants(phone)?.[0] ?? null;
+}
+
+/** Prisma unique-constraint violation (P2002), e.g. two writers racing on one phone. */
+export function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002'
+  );
 }

@@ -23,12 +23,14 @@ export interface InsertMessagePayload {
 /**
  * Typed TOOL message payload with discriminated union on toolName.
  */
-export interface ToolMessagePayload<T extends ToolMessageMetadata = ToolMessageMetadata> {
+export interface ToolMessagePayload<
+  T extends ToolMessageMetadata = ToolMessageMetadata,
+> extends InsertMessagePayload {
   id: string;
   timestamp: string;
   text: string;
   role: 'TOOL';
-  metadata: T;
+  metadata: T & MessageMetadata;
 }
 
 // -----------------------------------------------------------------------------

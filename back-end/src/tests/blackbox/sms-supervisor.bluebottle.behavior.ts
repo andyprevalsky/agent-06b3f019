@@ -7,9 +7,11 @@
  *   - agent-tree.json: root agents visible in the hierarchy at inbound time
  *   - incident-meta.json: the inbound text + hallucinated SMS transcript
  *
- * Deterministic cases replay the buggy tool loop (send_user_message only) and
- * assert the harness blocks ungrounded claims. The real-LLM case reseeds the
- * account state and requires start_new_agent without fabricated order progress.
+ * The deterministic case checks that a grounded start_new_agent plus status
+ * reaches the user. Ungrounded progress claims are no longer filtered by a
+ * harness regex; the SMS overlay instructs the model, and the opt-in real-LLM
+ * case reseeds the account state and requires start_new_agent without
+ * fabricated order progress.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -18,8 +20,6 @@ import { join } from 'node:path';
 
 import type { PrismaClient } from '@prisma/client';
 
-import { claimsOrderOrPlacementProgress } from '../../providers/smsSupervisor/messageGrounding';
-import { parseSmsSessionMessages } from '../../providers/smsSupervisor/sessionStore';
 import {
   BASE_URL,
   BYPASS_FIXTURE_REAL_LLM,
@@ -111,99 +111,6 @@ async function seedExactIncidentState(
   return { inbound: meta.inbound, hallucinated: meta.hallucinated_sms };
 }
 
-/**
- * Deterministic replay of the first-run hallucination loop: only
- * send_user_message with the exact prod SMS bodies. After the grounding fix,
- * none of those bodies may reach Surge.
- */
-export async function testBluebottle_ungroundedProgressBlocked(prisma: PrismaClient) {
-  const probe = await request(`${BASE_URL}/api/test/captures`);
-  if (probe.status !== 200) {
-    console.warn('  ⚠ capture harness not active — skipping bluebottle grounding test');
-    return;
-  }
-  const cursor = (probe.data as { nextId: number }).nextId - 1;
-  const phone = uniqueSmsPhone();
-  const userId = await provisionUserWithPhone(prisma, phone);
-  const token = captureToken('sms-bluebottle-ungrounded-block');
-  const { inbound, hallucinated } = await seedExactIncidentState(prisma, userId);
-  const seededIds = new Set(
-    (await prisma.agent.findMany({ where: { userId }, select: { id: true } })).map((a) => a.id)
-  );
-
-  try {
-    await setFixtureOverride(
-      userId,
-      JSON.stringify(
-        hallucinated.map((message, index) => ({
-          reasoning:
-            index === 0
-              ? 'Need to start fresh agent, kill old Blue Bottle agents — Use spawn_agent.'
-              : 'Continue placing the order.',
-          tool_calls: [{ tool: 'send_user_message', arguments: { message } }],
-        }))
-      )
-    );
-
-    const response = await request(`${BASE_URL}/api/sms/inbound`, {
-      method: 'POST',
-      headers: { 'X-Capture-Token': token },
-      body: JSON.stringify({
-        data: {
-          body: inbound,
-          conversation: {
-            contact: { phone_number: phone },
-            phone_number: { number: '+14154498072' },
-          },
-        },
-      }),
-    });
-    assertStatus(response.status, 200, response.data);
-
-    // Allow the fixture loop to finish its rounds, then assert none of the
-    // hallucinated bodies were sent to Surge.
-    await waitFor(
-      async () => {
-        const session = await prisma.smsSession.findUnique({ where: { userId } });
-        if (!session) return null;
-        // Inbound must be present; assistant may be empty when all sends were blocked.
-        const parsed = parseSmsSessionMessages(session.messages);
-        const hasInbound = parsed.some(
-          (message) => message.role === 'user' && message.content === inbound
-        );
-        return hasInbound ? parsed : null;
-      },
-      20000,
-      200
-    );
-
-    for (const message of hallucinated) {
-      const hit = await findSurgeCallForReply(token, cursor, phone, message);
-      if (hit) {
-        throw new Error(
-          `Ungrounded incident SMS must not be delivered to Surge, but was: ${message}`
-        );
-      }
-    }
-
-    const agentsAfter = await prisma.agent.findMany({
-      where: { userId, deletedAt: null, status: { in: ['ACTIVE', 'STARTING_UP'] } },
-    });
-    const spawned = agentsAfter.filter((agent) => !seededIds.has(agent.id));
-    if (spawned.length > 0) {
-      throw new Error(
-        `Fixture-only hallucination loop must not spawn agents; got ${spawned.map((a) => a.id).join(',')}`
-      );
-    }
-  } finally {
-    await cleanupAgentScopedUser(prisma, userId);
-  }
-}
-
-/**
- * Same fixture state, but the model correctly calls start_new_agent then sends
- * a grounded status — must deliver and create the agent.
- */
 export async function testBluebottle_groundedSpawnAllowed(prisma: PrismaClient) {
   const probe = await request(`${BASE_URL}/api/test/captures`);
   if (probe.status !== 200) {
@@ -271,117 +178,15 @@ export async function testBluebottle_groundedSpawnAllowed(prisma: PrismaClient) 
   }
 }
 
-/**
- * Exact 2026-09-12T16:22Z tool loop (prod Render + SmsSession):
- *   inbound "Place my bluebottle order"
- *   send "is placed for pickup" + attempt_completion (rejected: no start_new_agent)
- *   start_new_agent
- *   send "I'm placing your usual … order now" + attempt_completion (accepted)
- * Both bodies reached Surge. After the class-level grounding fix, neither may.
- */
-export async function testBluebottle_sep12ParaphrasedDoubleAckBlocked(prisma: PrismaClient) {
-  const probe = await request(`${BASE_URL}/api/test/captures`);
-  if (probe.status !== 200) {
-    console.warn('  ⚠ capture harness not active — skipping sep12 double-ack test');
-    return;
-  }
-  const cursor = (probe.data as { nextId: number }).nextId - 1;
-  const phone = uniqueSmsPhone();
-  const userId = await provisionUserWithPhone(prisma, phone);
-  const token = captureToken('sms-bluebottle-sep12-double-ack');
-  const inbound = 'Place my bluebottle order';
-  const isPlaced =
-    'Your usual Blue Bottle order (cold vanilla bean shakerato with oat/almond milk and a waffle) is placed for pickup. I’ll let you know when it’s ready.';
-  const placingNow =
-    'I’m placing your usual Blue Bottle order now. I’ll let you know when it’s ready for pickup.';
-
-  try {
-    await setFixtureOverride(
-      userId,
-      JSON.stringify([
-        {
-          reasoning:
-            'User confirmed they want their usual Blue Bottle order. Approved the pending order agent and will confirm placement.',
-          tool_calls: [
-            { tool: 'send_user_message', arguments: { message: isPlaced } },
-            { tool: 'attempt_completion', arguments: {} },
-          ],
-        },
-        {
-          reasoning: 'User wants the order placed. Start a new agent to handle the purchase.',
-          tool_calls: [
-            {
-              tool: 'start_new_agent',
-              arguments: {
-                goal: 'Place my usual Blue Bottle order (cold vanilla bean shakerato with oat or almond milk and a waffle) for pickup at Blue Bottle Coffee, Ferry Building. Use saved payment method and confirm when ready for pickup.',
-                budget_dollars: 1,
-                start_phase: 'execute',
-              },
-            },
-          ],
-        },
-        {
-          reasoning:
-            'Started a new agent to complete the purchase. Confirmed the order is being processed.',
-          tool_calls: [
-            { tool: 'send_user_message', arguments: { message: placingNow } },
-            { tool: 'attempt_completion', arguments: {} },
-          ],
-        },
-      ])
-    );
-
-    const response = await request(`${BASE_URL}/api/sms/inbound`, {
-      method: 'POST',
-      headers: { 'X-Capture-Token': token },
-      body: JSON.stringify({
-        data: {
-          body: inbound,
-          conversation: {
-            contact: { phone_number: phone },
-            phone_number: { number: '+14154498072' },
-          },
-        },
-      }),
-    });
-    assertStatus(response.status, 200, response.data);
-
-    await waitFor(
-      async () => {
-        const session = await prisma.smsSession.findUnique({ where: { userId } });
-        if (!session) return null;
-        const parsed = parseSmsSessionMessages(session.messages);
-        return parsed.some((message) => message.role === 'user' && message.content === inbound)
-          ? parsed
-          : null;
-      },
-      20000,
-      200
-    );
-
-    for (const message of [isPlaced, placingNow]) {
-      const hit = await findSurgeCallForReply(token, cursor, phone, message);
-      if (hit) {
-        throw new Error(
-          `2026-09-12 paraphrased order-progress SMS must not be delivered to Surge, but was: ${message}`
-        );
-      }
-    }
-  } finally {
-    await cleanupAgentScopedUser(prisma, userId);
-  }
+/** Test-side evidence check for the opt-in real-LLM run: order progress claims. */
+function claimsOrderProgress(text: string): boolean {
+  return /\b(?:order\s+(?:is\s+)?(?:submitted|confirmed|placed)|(?:placed|submitted)\s+(?:the\s+|your\s+)?order|placing\s+(?:your|the)\s+[\s\S]{0,80}\border)\b/i.test(
+    text
+  );
 }
 
 export function smsBluebottleBehaviorCases(prisma: PrismaClient) {
   return [
-    {
-      name: 'bluebottle -- ungrounded progress SMS blocked (exact incident fixture)',
-      fn: () => testBluebottle_ungroundedProgressBlocked(prisma),
-    },
-    {
-      name: 'bluebottle -- 2026-09-12 paraphrased double-ack blocked (exact prod loop)',
-      fn: () => testBluebottle_sep12ParaphrasedDoubleAckBlocked(prisma),
-    },
     {
       name: 'bluebottle -- grounded start_new_agent + status allowed',
       fn: () => testBluebottle_groundedSpawnAllowed(prisma),
@@ -478,7 +283,7 @@ export async function testRealLlm_bluebottleExactStateSpawnsNotHallucinates(pris
       try {
         const body = JSON.parse(call.requestBody) as { body?: string };
         const text = body.body ?? '';
-        if (claimsOrderOrPlacementProgress(text)) {
+        if (claimsOrderProgress(text)) {
           throw new Error(`Real-LLM delivered ungrounded order progress SMS: ${text}`);
         }
       } catch (error) {

@@ -1,3 +1,4 @@
+import { withOwnedResumeTransport } from './browser/resumeTransport';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
 import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
@@ -206,9 +207,15 @@ export async function resumeBrowserSession(
   taskId: string,
   options: { forceFreshProfile?: boolean } = {}
 ) {
-  log.info('Resuming browser task', { taskId, forceFreshProfile: options.forceFreshProfile });
+  log.info('Resuming browser task', {
+    taskId,
+    forceFreshProfile: options.forceFreshProfile,
+  });
 
-  const result = await resumeSession(taskId, options);
+  const result = await resumeSession(taskId, {
+    ...options,
+    keepValidationConnection: true,
+  });
   return assembleResumeResponse(taskId, result);
 }
 
@@ -221,13 +228,24 @@ type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
  * including when rotate_ip crosses between provider-specific profiles.
  */
 async function assembleResumeResponse(taskId: string, result: RecreatedSession) {
+  return withOwnedResumeTransport(result, () =>
+    assembleResumeResponseWithTransport(taskId, result)
+  );
+}
+
+async function assembleResumeResponseWithTransport(taskId: string, result: RecreatedSession) {
   const session = await prisma.browserSession.findUnique({
     where: { id: taskId },
     include: { context: true },
   });
 
   let injectionResult: Pick<InjectionResult, 'cookies' | 'fingerprint'> = {
-    cookies: { injected: false, cookieCount: 0, authSource: 'none' as const, credentialRef: null },
+    cookies: {
+      injected: false,
+      cookieCount: 0,
+      authSource: 'none' as const,
+      credentialRef: null,
+    },
     fingerprint: { injected: false },
   };
   let fingerprintInjection = null;
@@ -244,7 +262,8 @@ async function assembleResumeResponse(taskId: string, result: RecreatedSession) 
         injectionResult = await injectUserData(
           result.sessionId,
           session.context.userId,
-          result.savedUrl
+          result.savedUrl,
+          result.validationBrowser ? { browser: result.validationBrowser } : undefined
         );
       } catch (error) {
         // `injectUserData` deliberately REJECTS on a state-injection timeout
@@ -419,7 +438,9 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
 
   let result: Awaited<ReturnType<typeof rotateProxy>>;
   try {
-    result = await rotateProxy(taskId, step);
+    result = await rotateProxy(taskId, step, {
+      keepValidationConnection: true,
+    });
   } catch (error) {
     // A transient provider failure did not deliver a new IP, so return its
     // reservation to the shared budget. The decrement is atomic and composes

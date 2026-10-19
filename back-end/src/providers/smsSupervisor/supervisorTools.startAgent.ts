@@ -79,12 +79,20 @@ export async function commitStartNewAgent(
   op: { kind: 'start_new_agent'; args: StartNewAgentArgs; provisionalId: string },
   userId: string,
   channel: SupervisorChannel = 'SMS',
-  attachments: readonly FilePointer[] = []
+  attachments: readonly FilePointer[] = [],
+  onAgentAllocated?: (agentId: string) => void
 ): Promise<ToolResult> {
   const { args, provisionalId } = op;
   const { goal, budget_dollars } = args;
   const priceLimitCents = budget_dollars ? Math.round(budget_dollars * 100) : 100;
   const startPhase: StartPhase = args.start_phase ?? 'plan';
+  const reportAllocation = (agentId: string): void => {
+    try {
+      onAgentAllocated?.(agentId);
+    } catch (error) {
+      log.warn('SMS allocation audit failed', { agentId, error: String(error) });
+    }
+  };
 
   log.info('Starting new agent', {
     phase: 'start',
@@ -155,6 +163,7 @@ export async function commitStartNewAgent(
 
       return newAgent;
     });
+    reportAllocation(agent.id);
   } catch (error) {
     // P2002 = unique constraint violation. Means this provisional ID was
     // already created — a previous commit fired (the seq gate normally
@@ -174,16 +183,18 @@ export async function commitStartNewAgent(
         where: { id: provisionalId },
         select: {
           id: true,
+          userId: true,
           temporalWorkflowId: true,
           status: true,
           fastModeCacheEnabled: true,
           memoryEnabled: true,
         },
       });
-      if (!existing) {
+      if (!existing || existing.userId !== userId) {
         log.error('start_new_agent P2002 without a committed agent row', { provisionalId });
         throw error;
       }
+      reportAllocation(existing.id);
       // The row existing is not the same as the agent RUNNING. If the previous
       // attempt committed the transaction and died before the workflow start,
       // the agent sits in STARTING_UP with no temporalWorkflowId forever. Fall

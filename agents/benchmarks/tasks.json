@@ -9075,7 +9075,7 @@
     "name": "sms-supervisor-open-spawns-agent",
     "title": "SMS Supervisor: Open \u2192 Spawn Then Stop",
     "description": "The restaurant is open. One text must produce one reply, one spawned agent, and then silence -- the agent reports its own lifecycle from there.",
-    "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "prompt": "SMS 1: \"Order me a lok lak for pickup from the ferry building right now\"",
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": [],
@@ -9096,7 +9096,7 @@
       "turn_timeout_seconds": 120,
       "turns": [
         {
-          "inbound": "Order me a lum lok Togo from the ferry building asap",
+          "inbound": "Order me a lok lak for pickup from the ferry building right now",
           "min_outbound": 1,
           "max_outbound": 1,
           "allow_spend": true
@@ -9147,7 +9147,7 @@
     "name": "sms-supervisor-closed-no-spawn",
     "title": "SMS Supervisor: Closed \u2192 Answer, Spawn Nothing",
     "description": "The restaurant is temporarily closed and not accepting orders. The supervisor must say so and stop \u2014 no agent started, no budget raised.",
-    "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "prompt": "SMS 1: \"Order me a lok lak for pickup from the ferry building right now\"",
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": [],
@@ -9168,14 +9168,14 @@
       "turn_timeout_seconds": 120,
       "turns": [
         {
-          "inbound": "Order me a lum lok Togo from the ferry building asap",
+          "inbound": "Order me a lok lak for pickup from the ferry building right now",
           "min_outbound": 1,
           "max_outbound": 1,
           "allow_spend": false
         }
       ],
       "web_search_fixture": {
-        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. TEMPORARILY CLOSED \u2014 closed for kitchen renovations through August 15. Not accepting orders. Online ordering is disabled.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Le\u00f1a. Shop 24, ground floor. This vendor is temporarily closed for renovations and is not taking pickup or delivery orders at this time.\n\n**Se\u00f1or Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
+        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. TEMPORARILY CLOSED \u2014 closed for kitchen renovations with no reopening date announced. Not accepting orders. Online ordering is disabled.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Le\u00f1a. Shop 24, ground floor. This vendor is temporarily closed for renovations and is not taking pickup or delivery orders at this time.\n\n**Se\u00f1or Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
       }
     },
     "environment": {
@@ -9221,6 +9221,266 @@
     ],
     "deploy_category": "sms",
     "deploy_canary": true
+  },
+  {
+    "name": "sms-supervisor-fill-form-searches-then-delegates",
+    "title": "SMS Supervisor: Fill My Form → Search, Then Start an Agent",
+    "description": "Replays a prod WhatsApp thread (2026-10-07) where the user asked Rose to fill out her Canada eTA and the supervisor texted an 8-item questionnaire (including email and phone it already had) instead of looking anything up. The prod state at that turn is reproduced: the full 30-message thread, the completed 50-child agent tree with its recent activity, and the pending Walmart sign-in request. The answers are in the user's synced Travel docs note. The supervisor must find them by searching, start one agent to do the application with what it found, and not ask the user for anything the note or profile already contains.",
+    "prompt": "SMS 1: \"Filled it for me\"",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "sms",
+      "regression"
+    ],
+    "group": "daily",
+    "price_limit_cents": 25,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "status": "ready",
+    "runner": "sms",
+    "bench": "pipeline-e2e",
+    "sms_script": {
+      "seed_messages": [
+        {
+          "role": "assistant",
+          "content": "Started: \"Find the current population of Tokyo and New York City. You MUST use spawn_general_purpose_agent exactly twice (once per city). Each general-purpose agent must use explore-agent web research and MUST NOT use a browser agent, Claude Code, or code sandbox, returning only the numeric population value. Finally, multiply the two populations together and report the product.\"\nView agent: https://roselabs.ai/?agent-id=2148c346-335d-4de9-84f0-aee1c840b73e"
+        },
+        {
+          "role": "assistant",
+          "content": "Done: The current populations of Tokyo and New York City were researched using two separate general-purpose agents, then the two values were multiplied together. The final result includes the population figures for each city and their exact product.\nTokyo Population: 14299726\nNew York City Population: 8584629\nPopulation Product: 122757842511654\nView agent: https://roselabs.ai/?agent-id=2148c346-335d-4de9-84f0-aee1c840b73e"
+        },
+        {
+          "role": "assistant",
+          "content": "Started: \"Analyze the top 50 creators in the health, longevity, technology, and founder journey niche across YouTube, IG, TikTok, and Substack. For each creator, identify posting cadence, hook formulas, top 5 performing pieces from the last 90 days, and content gaps. Based on this analysis, provide: (a) a positioning statement for the user, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) a list of 20 creators for weekly engagement. Use a for_each agent pattern for the per-creator analysis.\"\nView agent: https://roselabs.ai/?agent-id=a9b2cc2b-4ffd-4f1c-8c82-737c5d344a62"
+        },
+        {
+          "role": "assistant",
+          "content": "Done: Completed a 50-creator competitive analysis across health, longevity, technology, and founder-journey niches, using per-creator parallel analysis to extract cadence, hooks, top content, and coverage gaps. Synthesized the findings into Andy’s differentiated positioning, a 90-day multi-platform content strategy, 30 tested video openings, and a prioritized weekly engagement list of creators to get on his radar.\nTop Creators Analysis: 1. **Andrew Huberman — Huberman Lab** - Platforms: YouTube `@hubermanlab`; Instagram/TikTok `@hubermanlab`; hubermanlab.com/newsletter. - Cadence: about two Yo...\nPositioning Statement: Andy Prevalsky is building the “longevity operating system for founders”: a public, data-driven record of what actually works when you’re trying to stay health...\nNinety Day Content Calendar: **Strategy:** Andy Prevalsky positions as the technology founder taking the engineer's approach to longevity — treating healthspan like a product built in publ...\nHook Tested Video Script Openings: Below are 30 ready-to-record video script openings for Andy Prevalsky, each derived from a proven hook formula observed in the 50-creator analysis and annotate...\nWeekly Engagement Target Creators: [ { \"creator_name\": \"Siim Land\", \"platform_to_engage_on\": \"YouTube + Skool\", \"handle/URL\": \"https://www.youtube.com/@siimland ; https://www.skool.com/@siim-lan...\nView agent: https://roselabs.ai/?agent-id=a9b2cc2b-4ffd-4f1c-8c82-737c5d344a62"
+        },
+        {
+          "role": "assistant",
+          "content": "Started: \"Purchase a 'squisky' costing approximately 10 dollars for Andy Prevalsky and arrange for it to be sent to him.\"\nView agent: https://roselabs.ai/?agent-id=30eff1ef-3e52-4b74-b5f4-4b3781a100e2"
+        },
+        {
+          "role": "assistant",
+          "content": "Approval needed: Rose wants to send a iMessage\n\nTo: +19729777432 (+19729777432)\n\nIntent: Tamara wants to send you a small surprise gift. Please reply with your complete current shipping address, including your full name, street address, any apartment or unit, city, state, and ZIP code, and confirm it is current.\n\nMessage:\nCofounder, I want to send you a small surprise gift hahaha. Can you send me your complete current shipping address please? Full name, street address, apt/unit if any, city, state and ZIP code. And confirm it’s current :)\n\nReply to approve, or say \"no\" to cancel.\n\nView agent: https://roselabs.ai/?agent-id=30eff1ef-3e52-4b74-b5f4-4b3781a100e2"
+        },
+        {
+          "role": "assistant",
+          "content": "Started: \"Analyze the top 50 creators in the health, longevity, technology, and founder journey niche across YouTube, IG, TikTok, and Substack. For each creator, identify posting cadence, hook formulas, top 5 performing pieces from the last 90 days, and content gaps. Based on this analysis, provide: (a) a positioning statement for the user, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) a list of 20 creators for weekly engagement. Use a for_each agent pattern for the per-creator analysis.\"\nView agent: https://roselabs.ai/?agent-id=c7588d12-d648-46b8-9015-f05c1215a094"
+        },
+        {
+          "role": "assistant",
+          "content": "Done: Completed a 50-creator competitive analysis across health, longevity, technology, and founder-journey niches, using per-creator parallel analysis to extract cadence, hooks, top content, and coverage gaps. Synthesized the findings into Andy’s differentiated positioning, a 90-day multi-platform content strategy, 30 tested video openings, and a prioritized weekly engagement list of creators to get on his radar.\nTop Creators Analysis: {\"created_at\":\"2026-09-03T13:48:00.123689Z\",\"id\":\"2f431815-2373-44e1-b846-ace6861122f5\",\"mime_type\":\"text/markdown\",\"original_filename\":\"top-creators-analysis....\nPositioning Statement: {\"created_at\":\"2026-09-03T13:47:59.894249Z\",\"id\":\"8d3861e0-b4fb-4320-a697-915577c7a1dc\",\"mime_type\":\"text/markdown\",\"original_filename\":\"positioning-statement....\nNinety Day Content Calendar: {\"created_at\":\"2026-09-03T13:48:00.329591Z\",\"id\":\"f36643d9-2acf-4109-9bab-c0e8c8eaba90\",\"mime_type\":\"text/markdown\",\"original_filename\":\"90-day-content-calenda...\nHook Tested Video Script Openings: {\"created_at\":\"2026-09-03T13:48:00.508757Z\",\"id\":\"e6a86d47-c340-41d1-95e8-dd205b978ed0\",\"mime_type\":\"text/markdown\",\"original_filename\":\"hook-tested-script-ope...\nWeekly Engagement Target Creators: {\"created_at\":\"2026-09-03T13:48:00.744458Z\",\"id\":\"bb6b5a6e-c96e-41b2-af10-a79e2f151eb1\",\"mime_type\":\"text/markdown\",\"original_filename\":\"weekly-engagement-targ...\nView agent: https://roselabs.ai/?agent-id=c7588d12-d648-46b8-9015-f05c1215a094"
+        },
+        {
+          "role": "assistant",
+          "content": "Started: \"Analyze the top 50 creators in the health, longevity, technology, and founder journey niche across YouTube, IG, TikTok, and Substack. For each creator, identify posting cadence, hook formulas, top 5 performing pieces from the last 90 days, and content gaps. Based on this analysis, provide: (a) a positioning statement for the user, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) a list of 20 creators for weekly engagement. Use a for_each agent pattern for the per-creator analysis.\"\nView agent: https://roselabs.ai/?agent-id=f9353e9e-02e9-4303-beee-8ec87dfc83c2"
+        },
+        {
+          "role": "assistant",
+          "content": "Done: Completed a 50-creator competitive analysis across health, longevity, technology, and founder-journey niches, using per-creator parallel analysis to extract cadence, hooks, top content, and coverage gaps. Synthesized the findings into Andy’s differentiated positioning, a 90-day multi-platform content strategy, 30 tested video openings, and a prioritized weekly engagement list of creators to get on his radar.\nTop Creators Analysis: {\"created_at\":\"2026-09-07T16:04:26.046890Z\",\"id\":\"e7316eca-377c-5737-9002-c1901df04a33\",\"mime_type\":\"text/html\",\"original_filename\":\"top-creators-analysis.html...\nPositioning Statement: {\"created_at\":\"2026-09-07T16:04:25.883318Z\",\"id\":\"0d48e50f-e45b-5613-9ae3-5afeff1a70a1\",\"mime_type\":\"text/html\",\"original_filename\":\"positioning-statement.html...\nNinety Day Content Calendar: {\"created_at\":\"2026-09-07T16:04:26.223054Z\",\"id\":\"b2b5dff5-c92a-5c71-a639-41ac5cb394e3\",\"mime_type\":\"text/csv\",\"original_filename\":\"90-day-content-calendar.csv...\nHook Tested Video Script Openings: {\"created_at\":\"2026-09-07T16:04:26.392061Z\",\"id\":\"397f12e9-d30c-54bb-a8ad-4311b31d8be9\",\"mime_type\":\"text/html\",\"original_filename\":\"hook-tested-script-opening...\nWeekly Engagement Target Creators: {\"created_at\":\"2026-09-07T16:04:26.629323Z\",\"id\":\"5040983e-3807-5fe6-a93f-cf4736dc4a64\",\"mime_type\":\"text/csv\",\"original_filename\":\"weekly-engagement-targets.c...\nView agent: https://roselabs.ai/?agent-id=f9353e9e-02e9-4303-beee-8ec87dfc83c2"
+        },
+        {
+          "role": "user",
+          "content": "I need to ask for the invoice at this place. You'll need my RFC, and more indormation, help me with getting the invoice\n\n[1 attachment(s)]"
+        },
+        {
+          "role": "assistant",
+          "content": "Sorry — I hit a snag on my end and couldn't get to that one. Please send it again in a moment."
+        },
+        {
+          "role": "assistant",
+          "content": "Started: \"Analyze the top 50 creators in the health, longevity, technology, and founder journey niche across YouTube, IG, TikTok, and Substack. For each creator, identify posting cadence, hook formulas, top 5 performing pieces from the last 90 days, and content gaps. Based on this analysis, provide: (a) a positioning statement for the user, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) a list of 20 creators for weekly engagement. Use a for_each agent pattern for the per-creator analysis.\"\nView agent: https://roselabs.ai/?agent-id=a171f4a9-a71c-4db0-9973-7698630cf4ec"
+        },
+        {
+          "role": "assistant",
+          "content": "Done: Completed a 50-creator competitive analysis across health, longevity, technology, and founder-journey niches, using per-creator parallel analysis to extract cadence, hooks, top content, and coverage gaps. Synthesized the findings into Andy’s differentiated positioning, a 90-day multi-platform content strategy, 30 tested video openings, and a prioritized weekly engagement list of creators to get on his radar.\nTop Creators Analysis: {\"created_at\":\"2026-09-18T23:43:26.981883Z\",\"id\":\"e8bf1161-3af7-52ff-8cfc-950b2fa500bb\",\"mime_type\":\"text/html\",\"original_filename\":\"top-creators-analysis.html...\nPositioning Statement: {\"created_at\":\"2026-09-18T23:43:26.822367Z\",\"id\":\"bef556f4-a20c-5852-a0a2-4a8b9559cc80\",\"mime_type\":\"text/html\",\"original_filename\":\"positioning-statement.html...\nNinety Day Content Calendar: {\"created_at\":\"2026-09-18T23:43:27.169983Z\",\"id\":\"405173f1-9265-5d19-91f8-a36ef36a5530\",\"mime_type\":\"text/csv\",\"original_filename\":\"90-day-content-calendar.csv...\nHook Tested Video Script Openings: {\"created_at\":\"2026-09-18T23:43:27.335210Z\",\"id\":\"9a60b5dc-fa48-5254-bced-39cd94367179\",\"mime_type\":\"text/html\",\"original_filename\":\"hook-tested-script-opening...\nWeekly Engagement Target Creators: {\"created_at\":\"2026-09-18T23:43:27.523524Z\",\"id\":\"00a5e2e2-ea02-5e83-baa6-8b3c32d50f4f\",\"mime_type\":\"text/csv\",\"original_filename\":\"weekly-engagement-targets.c...\nView agent: https://roselabs.ai/?agent-id=a171f4a9-a71c-4db0-9973-7698630cf4ec"
+        },
+        {
+          "role": "assistant",
+          "content": "Started: \"Analyze the top 50 creators in the health, longevity, technology, and founder journey niche across YouTube, IG, TikTok, and Substack. For each creator, identify posting cadence, hook formulas, top 5 performing pieces from the last 90 days, and content gaps. Based on this analysis, provide: (a) a positioning statement for the user, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) a list of 20 creators for weekly engagement. Use a for_each agent pattern for the per-creator analysis.\"\nView agent: https://roselabs.ai/?agent-id=666318e9-4ea4-43c7-92b5-0b116558de78"
+        },
+        {
+          "role": "assistant",
+          "content": "Done: Completed a 50-creator competitive analysis across health, longevity, technology, and founder-journey niches, using per-creator parallel analysis to extract cadence, hooks, top content, and coverage gaps. Synthesized the findings into Andy’s differentiated positioning, a 90-day multi-platform content strategy, 30 tested video openings, and a prioritized weekly engagement list of creators to get on his radar.\nTop Creators Analysis: {\"created_at\":\"2026-09-21T21:01:40.735409Z\",\"id\":\"9493aa8a-0a2a-5a38-a549-4138eec7feb9\",\"mime_type\":\"text/html\",\"original_filename\":\"top-creators-analysis.html...\nPositioning Statement: {\"created_at\":\"2026-09-21T21:01:40.566265Z\",\"id\":\"761ad2e8-a4ac-53bd-a546-00567d11d72a\",\"mime_type\":\"text/html\",\"original_filename\":\"positioning-statement.html...\nNinety Day Content Calendar: {\"created_at\":\"2026-09-21T21:01:41.336202Z\",\"id\":\"1dee38dd-b1d6-58ba-8b4e-6fa57a3614a8\",\"mime_type\":\"text/csv\",\"original_filename\":\"90-day-content-calendar.csv...\nHook Tested Video Script Openings: {\"created_at\":\"2026-09-21T21:01:41.533470Z\",\"id\":\"515dab81-af09-51c3-a8de-65c8516386ad\",\"mime_type\":\"text/html\",\"original_filename\":\"hook-tested-script-opening...\nWeekly Engagement Target Creators: {\"created_at\":\"2026-09-21T21:01:42.342367Z\",\"id\":\"e292c595-02b0-5618-948a-a4077a5997f5\",\"mime_type\":\"text/csv\",\"original_filename\":\"weekly-engagement-targets.c...\nView agent: https://roselabs.ai/?agent-id=666318e9-4ea4-43c7-92b5-0b116558de78"
+        },
+        {
+          "role": "user",
+          "content": "Help me find this documents and make them a draft in an email: \n\nCURP\n\t•\tConstancia de situación fiscal (septiembre)\n\t•\tOpinión de cumplimiento (septiembre)\n\t•\tCV con experiencia detallada\n\t•\tComprobante de domicilio (septiembre)\n\t•\tINE o pasaporte\n\t•\tActa de nacimiento\n\t•\tTítulos legalizados por ambos lados\n\t•\tCédulas por ambos lados\n\t•\tEstado de cuenta con CLABE\n\t•\t2 recibos de nómina, o declaración anual si cobras por honorarios"
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn’t locate any of those documents in your stored files. Could you upload them here or tell me where they’re saved (e.g., a folder name or cloud service) so I can pull them and draft the email?"
+        },
+        {
+          "role": "assistant",
+          "content": "I'm on it: Analyze the top 50 creators in the health, longevity, technology, and founder journey niche across YouTube, Instagram, TikTok, and Substack. Identify each creator's posting cadence, hook formulas, top 5 performing pieces from the last 90 days, and content gaps. Then produce for each: (a) a positioning statement, (b) a 90‑day content calendar covering all four platforms, (c) 30 hook‑tested video script openings, and (d) a list of 20 creators to engage with weekly to get on their radar.\nFollow along: https://roselabs.ai/?agent-id=d2eef079-c661-4f59-bbfa-97f5a9f7fb32"
+        },
+        {
+          "role": "assistant",
+          "content": "I finished the task: Completed a 50-creator competitive analysis across health, longevity, technology, and founder-journey niches, using per-creator parallel analysis to extract cadence, hooks, top content, and coverage gaps. Synthesized the findings into Andy’s differentiated positioning, a 90-day multi-platform content strategy, 30 tested video openings, and a prioritized weekly engagement list of creators to get on his radar.\nTop Creators Analysis: {\"created_at\":\"2026-10-02T21:04:35.607403Z\",\"id\":\"d28d6f75-bb37-5d2d-b97f-adfd9531080e\",\"mime_type\":\"text/html\",\"original_filename\":\"top-creators-analysis.html...\nPositioning Statement: {\"created_at\":\"2026-10-02T21:04:35.414718Z\",\"id\":\"386ca712-0d20-56fd-a42a-d7faf3076205\",\"mime_type\":\"text/html\",\"original_filename\":\"positioning-statement.html...\nNinety Day Content Calendar: {\"created_at\":\"2026-10-02T21:04:35.787981Z\",\"id\":\"5c66600a-d21e-5d49-909a-b7551b39deeb\",\"mime_type\":\"text/csv\",\"original_filename\":\"90-day-content-calendar.csv...\nHook Tested Video Script Openings: {\"created_at\":\"2026-10-02T21:04:36.036855Z\",\"id\":\"6a12a5fc-2901-5450-80f2-ac09a7ac36f2\",\"mime_type\":\"text/html\",\"original_filename\":\"hook-tested-script-opening...\nWeekly Engagement Target Creators: {\"created_at\":\"2026-10-02T21:04:36.206609Z\",\"id\":\"5785e9da-75b2-5ab8-b8c7-ff7734e1ae0a\",\"mime_type\":\"text/csv\",\"original_filename\":\"weekly-engagement-targets.c...\nSee the details: https://roselabs.ai/?agent-id=d2eef079-c661-4f59-bbfa-97f5a9f7fb32"
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey! Quick heads up: the Squisky gift order is paused on a Walmart sign-in. Want me to push it through?"
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey! I'm here. Two things waiting on you: 1) The Squisky gift is paused on a Walmart sign-in, say the word and I'll push it through. 2) For the invoice email, send over those documents (CURP, fiscal constancia, etc.) and I'll draft it."
+        },
+        {
+          "role": "user",
+          "content": "I need my ETA for Canada"
+        },
+        {
+          "role": "assistant",
+          "content": "Quick question: are you asking about an eTA (Electronic Travel Authorization) to apply for, or the ETA (arrival time) for a specific trip to Canada? And if it's a trip, where are you flying from and when?"
+        },
+        {
+          "role": "user",
+          "content": "The first one"
+        },
+        {
+          "role": "assistant",
+          "content": "Quick question to figure out your eTA eligibility: do you hold a valid US visa (B1/B2, F1, etc.) or have you had a Canadian visitor visa in the last 10 years? That determines whether you qualify for an eTA or need a full visitor visa."
+        },
+        {
+          "role": "user",
+          "content": "I have a US visa"
+        },
+        {
+          "role": "assistant",
+          "content": "Good news: with your US visa you qualify for an eTA, not a full visitor visa. A few things to know:\n\n- Apply online at canada.ca (search \"Canada eTA\")\n- Costs CAD $7\n- Your US visa must be valid on the day you apply (it can expire before your trip)\n- Approval is usually within minutes, sometimes a few days\n- It's linked to your passport, so have it ready\n\nWant me to walk you through the application?"
+        }
+      ],
+      "seed_agents": [
+        {
+          "goal": "I'm building a personal brand for health, longevity, technology, founder journey [I'll refine the angle]. Analyze the top 50 creators in this niche across YouTube, IG, TikTok, and Substack.\n\nUse a for_each agent run for the per-creator analysis: first identify the top 50 creators, then use spawn_general_purpose_agent_for_each / for_each so one agent analyzes each creator with the same template.\n\nFor each creator, pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover. Then give me: (a) a positioning statement, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) the 20 creators I should engage with weekly to get on their radar.",
+          "status": "COMPLETED",
+          "progress": 1.0,
+          "price_limit_cents": 1000,
+          "tree_cost_cents": 0,
+          "completion_summary": "Completed a 50-creator competitive analysis across health, longevity, technology, and founder-journey niches, using per-creator parallel analysis to extract cadence, hooks, top content, and coverage gaps. Synthesized the findings into Andy’s differentiated positioning, a 90-day multi-platform content strategy, 30 tested video openings, and a prioritized weekly engagement list of creators to get on his radar.",
+          "children": [
+            {
+              "goal": "You are analyzing ONE creator for Andy Prevalsky, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refined). The attached item is a JSON object describing your assigned creator (name, niche/archetype, primary platforms, handles/URLs, rank). Analyze ONLY that creator.",
+              "status": "COMPLETED",
+              "progress": 1.0,
+              "count": 50,
+              "completion_summaries": [
+                "[web_search] Source: https://www.youtube.com/@MyFirstMillionPod Source: https://findthatpod.com/best-episodes-my-first-million/ Sour [...truncated...] ted=1749224902) |Jun 06, 2025 | {\"query\": \"My First Million podcast Y",
+                "RESEARCH FINDINGS: Andrew Wilkinson (@awilkinson, co-founder of Tiny, Victoria BC) — public content, ~90 days (2026-04-04 → 2026-07-03) CRITICAL CONTEXT FIRST: Direct scraping of Instagram and YouTube was blocked (403/lo",
+                "BEN GREENFIELD (Ben Greenfield Life, formerly Ben Greenfield Fitness) — quick research summary as of 2026-07-03. 1. PLATFORM HANDLES (all confirmed to exist): - Website: bengreenfieldlife.com [2] - YouTube: youtube.com/c",
+                "The combined tool evidence now supports all 14 required fields at least to the level needed for a grounded single-pass structured output. The first pass returned partial fields, so the remaining ones were filled from the gathered evidence."
+              ]
+            }
+          ]
+        }
+      ],
+      "seed_attention_requests": [
+        {
+          "question": "Sign in to walmart.com",
+          "metadata": {
+            "attentionKind": "auth_assistance",
+            "authAssistance": {
+              "mode": "live_view",
+              "authRealm": "walmart.com"
+            }
+          }
+        }
+      ],
+      "seed_documents": [
+        {
+          "source": "apple_notes",
+          "title": "Travel docs",
+          "content": "Travel docs\n\nPassport (Mexico)\nNumber: G58219473\nIssued: 2022-03-14 · Expires: 2032-03-13\nDate of birth: 1994-05-21\nPlace of birth: Ciudad de México, México\nNationality: Mexican\n\nUS visa (B1/B2)\nVisa foil number: 72914836\nIssued: 2023-07-02 · Expires: 2033-06-30\n\nCanada trip\nFlying MEX → YYZ on 2026-11-14, back 2026-11-21\nStaying at The Drake Hotel, 1150 Queen St W, Toronto, ON M6J 1J3\nPurpose: tourism"
+        }
+      ],
+      "settle_seconds": 20,
+      "turn_timeout_seconds": 120,
+      "turns": [
+        {
+          "inbound": "Filled it for me",
+          "min_outbound": 1,
+          "max_outbound": 2,
+          "allow_spend": true
+        }
+      ],
+      "web_search_fixture": {
+        "default": "**Electronic Travel Authorization (eTA): who can apply - Canada.ca**\nCitizens of Mexico can apply for an eTA if they are flying to or transiting through a Canadian airport and either held a Canadian visitor visa in the last 10 years or currently hold a valid United States nonimmigrant visa. Apply online at canada.ca/eta. Fee: CAD $7.\n\n**Apply for an eTA - Canada.ca**\nYou need a valid passport, a credit or debit card and an email address. The online form asks for passport details, personal details (date and place of birth, nationality), contact information, employment, travel plans and background questions. Most applicants are approved by email within minutes."
+      }
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": ["live-tamy-account-snapshot"],
+      "services": [
+        "sms-supervisor",
+        "surge-inbound-webhook"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Drives the real SMS supervisor over the local benchmark stack: real inbound Surge webhook, real context build, real LLM tool loop. The prod supervisor state at the failing turn is seeded: the 30 prior thread messages verbatim, the completed creator-analysis root agent with 50 completed children and its five completion summaries, and the orphaned 'Sign in to walmart.com' attention request. A synthetic Apple Notes 'Travel docs' row is seeded into UserDataDocument so the answers exist in the user's grep-searchable data. All seeded rows are removed after the run. Runs as Tamy using the existing live-tamy-account-snapshot fixture: her account and profile are seeded from prod into the isolated DB, and browser auth is not synced. The seeded regression conversation, agent tree, Travel docs, and evaluator criteria remain unchanged. web_search is stubbed with canada.ca eTA text. Outbound Surge is intercepted by BLACKBOX_TEST_FAKE_SURGE so no human is texted."
+    },
+    "evaluators": [
+      {
+        "id": "sms-fill-form-search-then-delegate-contract",
+        "method": "static_check",
+        "criteria": [
+          "The request produces at most two outbound SMS from the supervisor",
+          "Exactly one agent is started to do the application",
+          "The started agent's goal carries the passport and US visa numbers, which exist only in the user's Travel docs note, so the form's questions were answered by searching",
+          "The run ends by calling attempt_completion"
+        ],
+        "checks": [
+          {
+            "type": "sms_outbound_budget"
+          },
+          {
+            "type": "sms_agents_started",
+            "count": 1
+          },
+          {
+            "type": "sms_agent_goal_contains",
+            "values": [
+              "G58219473",
+              "72914836"
+            ]
+          },
+          {
+            "type": "sms_completion_accepted"
+          }
+        ]
+      },
+      {
+        "id": "sms-fill-form-does-not-ask-for-known-facts",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "No SMS the assistant sent asks the user to provide a fact that is in their Travel docs note or their profile"
+        ],
+        "judge_prompt": "The user's Travel docs note (in the world state) holds their passport number, issue and expiry dates, date of birth, place of birth, nationality, US visa type, number and expiry, trip dates, lodging and trip purpose. The assistant's available profile fields are supplied in user_profile_available_to_assistant; only nonempty values are known, and null or empty values are unavailable. Score 0.0 if any SMS the assistant sent asks the user to send, type or provide any of those facts, in any wording (for example 'send me your passport number' or 'what's your date of birth?'). Asking only for things neither the note nor the nonempty profile fields contain, such as the eTA background declarations or approval of the CAD $7 payment, is fine, and so is restating a fact it found. Otherwise score 1.0."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "prod WhatsApp supervisor thread 2026-10-07T02:20-02:53Z (SmsSession [24]-[31]); RCA docs/rca/cases/2026-10-09-sms-supervisor-flash-model-asks-instead-of-retrieving.md"
+    ],
+    "deploy_category": "sms"
   },
   {
     "name": "browser-agent-amazon-mx-buy-under-5-usd",

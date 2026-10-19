@@ -12,7 +12,8 @@ scripts/run-bench $ARGUMENTS
 ```
 
 Every launch prints the mandatory parent-agent format and maintenance contract.
-Read it before communicating or scheduling the next slice; retrieve it again
+Read it, and the Operations Runbook in `agents/benchmarks/README.md`,
+before communicating or scheduling the next slice; retrieve it again
 without a launch with `scripts/run-bench report-format`. Its single source is
 `.claude/shared/benchmark-report-format.txt`, governed by
 `.claude/shared/report-display-format.md`. Render the card only with the
@@ -32,7 +33,8 @@ Required approval requests follow `.claude/shared/approval-format.md` instead,
 using the same styling and its complete evidence/diff/Links requirements.
 
 For the current user-requested five consecutive LIVE DAILY runs of fifty,
-follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
+follow the **Current width-fifty LIVE acceptance** subsection of
+the Operations Runbook in `agents/benchmarks/README.md`. Each run
 uses fifty distinct randomly selected eligible names through the normal CLI
 with `--retry-infra 1 --concurrency 50 --strict-barrier`, temporary execution
 1,200 seconds and `--e2e-timeout 5400 --e2e-started-at <original-image-epoch>`.
@@ -122,7 +124,7 @@ isolated backend/database and authenticated tunnel. Keep normal source, native
 capacity, ownership, clocks and physical resource guards unchanged.
 
 Ordinary cloud runs automatically reuse verified completed dependency snapshots,
-including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
+including from fresh checkouts. Use `scripts/run-bench --help` and the Operations Runbook's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
 
 Before an image-build-to-fleet measurement, complete CLAUDE.md's **Fresh clone
@@ -204,7 +206,7 @@ Foreground campaigns may print no `--controller-status` marker; use only the
 actual printed handle and read each copy's controller exit separately from
 `summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
 null controller fields alone do not establish liveness or completion.
-For a retained failed owner, follow CLAUDE.md's exact-owner recovery route.
+For a retained failed owner, follow the Operations Runbook's exact-owner recovery route.
 An `archive-verified.json` receipt preserves originals with zero proof credit;
 keep monitoring the supported CLI through the final native release audit.
 Lifecycle clocks are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
@@ -248,7 +250,7 @@ retain owned abort handling. Non-strict sliding scheduling remains unchanged. Re
 
 Follow the exact monitoring command printed by every launch. Poll every 30 seconds;
 check controller terminal status even when the card is stale, and continue through
-owned-resource release. See CLAUDE.md's "Monitor every cloud launch" guidance.
+owned-resource release. See the Operations Runbook's "Monitor every cloud launch" guidance.
 Task verdicts appear before cleanup; observation timeouts never authorize a restart.
 
 Keep the ordinary 7,200-second backstops. For an explicitly requested five-minute validation, set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and pass `--timeout 300`; the environment setting bounds task execution and the flag bounds the controller path. Preserve terminal task grading, meaningful real execution, exact resource cleanup and the separately monitored E2E deadline. Recovered errors and inner latency measurements remain diagnostics for an infrastructure-only campaign; an ordinary task failure can satisfy that campaign without satisfying the deploy smoke gate.

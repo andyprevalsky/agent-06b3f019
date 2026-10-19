@@ -117,7 +117,7 @@ def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypa
     from pathlib import Path
     tasks=json.loads((Path(owner.__file__).parents[1]/'benchmarks/tasks.json').read_text())
     demo=next(t['prompt'] for t in tasks if t['name']=='demo-fleet-alpha')
-    monkeypatch.setattr(owner.workflow, 'logger', SimpleNamespace(info=lambda *a,**k:None, warning=lambda *a,**k:None))
+    monkeypatch.setattr(owner.workflow, 'logger', SimpleNamespace(info=lambda *a,**k:None, warning=lambda *a,**k:None, error=lambda *a,**k:None))
     async def noop(*args, **kwargs): return None
     resolved_seen = False
     async def activity(fn, *args, **kwargs):

@@ -226,7 +226,64 @@ class BootstrapRecoveryTest(unittest.TestCase):
         self.source = dict(SOURCE_HASHES)
         self.make_capture()
         self.configure_bound_source()
+        self.configure_reviewed_source_fixture()
         self.update_review()
+
+    def configure_reviewed_source_fixture(self):
+        """Commit one reviewed test recipe without approving the real checkout."""
+        _, receipt = self.verify()
+        self.reviewed_source_root = self.base / "reviewed-source"
+        self.reviewed_source_root.mkdir()
+        for name in (
+            "cloudbench-prestack-recovery.py",
+            "cloudbench_execution_provenance.py",
+        ):
+            write(
+                self.reviewed_source_root / "scripts" / name,
+                git_blob("scripts/" + name),
+            )
+        self.reviewed_policy = {
+            "schema_version": 1,
+            "reviewed_executable_sources": {
+                receipt["source_review_fingerprint"]: [receipt["bootstrap_phase"]]
+            },
+        }
+        write(
+            self.reviewed_source_root
+            / "scripts/cloudbench-prestack-source-reviews.json",
+            json.dumps(self.reviewed_policy),
+        )
+        for args in (
+            ["init", "-q"],
+            ["add", "scripts"],
+            [
+                "-c", "user.name=Offline test fixture",
+                "-c", "user.email=fixture@example.invalid",
+                "-c", "core.hooksPath=/dev/null",
+                "commit", "-qm", "Review the single bootstrap fixture recipe",
+            ],
+        ):
+            subprocess.run(
+                ["git", "-C", str(self.reviewed_source_root), *args], check=True
+            )
+        self.reviewed_source_ref = subprocess.check_output(
+            ["git", "-C", str(self.reviewed_source_root), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        self.reviewed_helper = (
+            self.reviewed_source_root / "scripts/cloudbench-prestack-recovery.py"
+        )
+        fixture_spec = importlib.util.spec_from_file_location(
+            "reviewed_bootstrap_fixture", self.reviewed_helper
+        )
+        assert fixture_spec and fixture_spec.loader
+        fixture = importlib.util.module_from_spec(fixture_spec)
+        fixture_spec.loader.exec_module(fixture)
+        policy = patch.object(
+            recovery, "trusted_source_review_policy", fixture.trusted_source_review_policy
+        )
+        policy.start()
+        self.addCleanup(policy.stop)
 
     def test_bound_source_uses_private_snapshot_during_checkout_cache_churn(self):
         cache = (
@@ -694,12 +751,35 @@ class BootstrapRecoveryTest(unittest.TestCase):
                     policy.is_file(),
                     "normal snapshot omitted its committed source policy",
                 )
+                self.assertEqual(
+                    policy.read_bytes(),
+                    (ROOT / "cloudbench-prestack-source-reviews.json").read_bytes(),
+                )
+                # Exercise a legitimately committed, finite fixture policy.
+                # The current checkout's production policy need not approve
+                # the current native recipe merely because this is a test.
+                policy.write_bytes(
+                    (
+                        self.reviewed_source_root
+                        / "scripts/cloudbench-prestack-source-reviews.json"
+                    ).read_bytes()
+                )
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(snapshot / "cloudbench_execution_provenance.py"),
+                        "snapshot", "--snapshot-dir", str(snapshot),
+                        "--output",
+                        str(snapshot / "cloudbench-controller-snapshot-manifest.json"),
+                    ],
+                    env=environment,
+                    check=True,
+                    capture_output=True,
+                )
                 environment.update(
-                    CLOUDBENCH_FLEET_ROOT=str(ROOT.parent),
+                    CLOUDBENCH_FLEET_ROOT=str(self.reviewed_source_root),
                     CLOUDBENCH_SCRIPT_SNAPSHOT=str(snapshot),
-                    CLOUDBENCH_PRESTACK_CONTROLLER_REF=subprocess.check_output(
-                        ["git", "-C", str(ROOT.parent), "rev-parse", "HEAD"], text=True
-                    ).strip(),
+                    CLOUDBENCH_PRESTACK_CONTROLLER_REF=self.reviewed_source_ref,
                 )
                 args = [
                     sys.executable,
@@ -1173,7 +1253,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
         command = f"""set -eu
 {body}
 EXACT_SESSION_CLEANUP_HELPER={ROOT / "cloudbench-exact-session-cleanup.py"}
-PRESTACK_RECOVERY_HELPER={ROOT / "cloudbench-prestack-recovery.py"}
+PRESTACK_RECOVERY_HELPER={self.reviewed_helper}
 RUN_ID={RUN}
 APP={APP}
 CLOUDBENCH_BARRIER_TOKEN=unused
@@ -1217,7 +1297,7 @@ cloudbench_recover_guest_cleanup_receipts {self.registry}
         write(out / "guest-bootstrap.confirmed", json.dumps(receipt))
         command = [
             sys.executable,
-            str(ROOT / "cloudbench-prestack-recovery.py"),
+            str(self.reviewed_helper),
             "--registry",
             str(self.registry),
             "--bench",

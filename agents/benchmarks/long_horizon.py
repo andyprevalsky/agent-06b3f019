@@ -92,6 +92,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "sms_no_repeated_outbound",
     "sms_no_unrequested_spend",
     "sms_agents_started",
+    "sms_agent_goal_contains",
     "sms_completion_accepted",
     "sms_lifecycle_announced",
     "sms_outbound_budget",
