@@ -644,6 +644,14 @@ def load(run_dir: Path, deep: bool = True) -> dict:
         return load_campaign(run_dir)
     if (run_dir / "_batch/report-card.json").exists() or (run_dir / "report-card.json").exists():
         return load_fleet(run_dir)
+    abort = read_json(run_dir / "preallocation-abort.json")
+    if isinstance(abort, dict) and abort.get("allocated") is False:  # sharded launch refused before any Machine
+        exp = empty_experiment("sharded", run_dir)
+        exp["triggered_at"] = (read_json(run_dir / "admission-intent.private.json") or {}).get("started_at_epoch")
+        exp["state"], exp["state_reason"] = "ABORTED", str(abort.get("reason") or "aborted before allocation")[:160]
+        exp["ended_at"], exp["end_evidence"] = abort.get("ended_at"), "preallocation-abort.json"
+        lifecycle_item(exp, "ok", "No Machine allocated", "launch aborted before capacity admission")
+        return finish_experiment(exp)
     exp = empty_experiment("unknown", run_dir)
     exp["state"], exp["state_reason"] = "UNRECORDED", "no recorded benchmark artifacts in this directory"
     lifecycle_item(exp, "warn", "Recorded artifacts", "none found")
