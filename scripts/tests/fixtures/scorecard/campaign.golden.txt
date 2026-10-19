@@ -1,7 +1,7 @@
 🧪 EXPERIMENT #1 · 🔵 RUNNING
 mixed5 · 5 scheduled · cloud · src UNRECORDED
 Triggered Oct 18, 12:28:52 PM PDT
-24.0 experiments/day · 1 launch / 0.04 d
+experiments/day warming 1h00m · 1 launch (rate after 1 d)
 Since last benchmark ended: RUNNING
 QUEUED 1 · IN_PROGRESS 1 · COMPLETED 3/5
 PASS 1/2 50.0% · HARNESS 0 · INFRA 50.0% (2/4 terminal attempts)
