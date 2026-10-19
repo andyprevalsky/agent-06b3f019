@@ -205,6 +205,29 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(item["state"], "fail")
         self.assertIn("cloudbench-a", item["detail"])
 
+    def test_native_audit_fails_closed_without_identities_or_every_shard_export(self):
+        unchecked = AUDIT["audit"]([], app="app", guest_names=set(), guest_ids=set(), controllers=set(), exports=0, now=T0)
+        self.assertFalse(unchecked["released"], "an audit that checked no identity never certifies release")
+        partial = AUDIT["audit"]([], app="app", guest_names={"cloudbench-a"}, guest_ids=set(), controllers=set(),
+                                 exports=1, shards=2, now=T0)
+        self.assertFalse(partial["released"], "a shard without its verified export never certifies release")
+        self.assertTrue(AUDIT["audit"]([], app="app", guest_names={"cloudbench-a"}, guest_ids=set(), controllers=set(),
+                                       exports=2, shards=2, now=T0)["released"])
+        admission = self.f.sharded(audit=False)
+        (admission / "shard-01/run/export/disposable-export.verified.json").unlink()
+
+        class Api:
+            def api(self, method, path, timeout):
+                return []
+        result = AUDIT["run"](admission, Api(), "app",
+                              identities=AUDIT["guest_identities"](admission)[:2] + (1,))
+        self.assertEqual((result["present"], result["released"], result["checked"]["expected_shards"]), ([], False, 2))
+        write(admission / "native-release-audit.json", AUDIT["audit"](
+            [], app="app", guest_names={"cloudbench-a"}, guest_ids=set(), controllers=set(), exports=1, shards=2,
+            now=T0 + 2100))
+        item = next(i for i in render(admission, self.f)["experiment"]["lifecycle"] if i["label"].startswith("Guests released"))
+        self.assertNotEqual(item["state"], "ok", "an incomplete native audit renders no verified release")
+
     def test_sharded_live_counters_render_running(self):
         data = render(self.f.sharded(live=True), self.f)
         exp = data["experiment"]

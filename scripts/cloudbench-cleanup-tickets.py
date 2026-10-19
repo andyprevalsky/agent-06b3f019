@@ -325,7 +325,12 @@ def claim_inner(args):
             if current.exists():
                 prior=read(current)
                 # One shared N2 slot; never grant a duplicate unknown generation.
-                need(read(generation(base,'terminal',job,prior['generation'],'.released'))['physical_blocks_released'] is True,'nested cleanup slot still occupied')
+                # As in assign(), a release receipt is owed only by an existing claim;
+                # an unclaimed generation needs its exact prior owner retired.
+                if generation(base,'claims',job,prior['generation']).exists():
+                    need(read(generation(base,'terminal',job,prior['generation'],'.released'))['physical_blocks_released'] is True,'nested cleanup slot still occupied')
+                else:
+                    need(not birth(prior['owner_pid']) or birth(prior['owner_pid'])!=prior['owner_start'],'nested cleanup slot still occupied')
                 args.generation=prior['generation']+1;record=owner_record(args,budget)
             write(generation(base,'owners',job,args.generation),record);write(current,record,True)
         owner=read(generation(base,'owners',job,args.generation));need(owner==owner_record(args,budget) and read(keyed(base,'current',job))==owner,'cleanup assignment changed')

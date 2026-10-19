@@ -498,4 +498,47 @@ sys.stdin.read()
         self.assertEqual(budget['job_count'],3,'nested canary expanded the sealed ordinary job budget')
 
 
+    def test_nested_slot_recovers_after_a_dead_owner_left_no_claim(self):
+        # A nested attempt can publish owners/current and then fail before its
+        # claim (here: reserve outside the owned root). With no claim there is
+        # no physical liability, so a later canary must get the next generation.
+        fixture=TicketFixture(self,3)
+        canary=fixture.root/'canonical-canary.py'
+        lock=fixture.root/'canary.lock'
+        canary.write_text("""import fcntl,json,os,subprocess,sys
+from pathlib import Path
+lock=Path(sys.argv[2]);stream=lock.open('w');stream.write(str(os.getpid()));stream.flush();fcntl.flock(stream,fcntl.LOCK_EX)
+boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+start='proc-start:'+boot+':'+Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19]
+module,cohort,reserve,result=sys.argv[3:]
+common=['--cohort',cohort,'--cohort-id','c001']
+codes=[]
+item=subprocess.run([sys.executable,module,'claim',*common,'--nested','--job','r001-j00000','--generation','1','--owner-pid',str(os.getpid()),'--owner-start',start,'--reserve',reserve],capture_output=True,text=True)
+codes.append(dict(action='claim',code=item.returncode,stderr=item.stderr))
+if item.returncode==0:
+ item=subprocess.run([sys.executable,module,'release',*common,'--reserve',reserve],capture_output=True,text=True);codes.append(dict(action='release',code=item.returncode,stderr=item.stderr))
+Path(result).write_text(json.dumps(codes))
+""")
+        self.assert_ok(fixture.prepare(['--canary-script',canary,'--canary-lock',lock]))
+        from types import SimpleNamespace
+        self.assert_ok(fixture.assign(0,SimpleNamespace(pid=os.getpid())))
+        outside=fixture.root/'outside';outside.mkdir()
+        outcomes=[]
+        for index,reserve in enumerate((outside/'nested.reserve',fixture.reserve_root/'nested.reserve')):
+            result_path=fixture.root/('canary-result-'+str(index)+'.json')
+            process=subprocess.Popen([sys.executable,str(canary),'--lock',str(lock),str(MODULE),str(fixture.cohort),str(reserve),str(result_path)],env=fixture.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+            fixture.owners.append(process)
+            stdout,stderr=process.communicate(timeout=15)
+            self.assertEqual(process.returncode,0,stdout+stderr)
+            outcomes.append(json.loads(result_path.read_bytes()))
+        self.assertNotEqual(outcomes[0][0]['code'],0,outcomes)
+        self.assertFalse((outside/'nested.reserve').exists())
+        self.assertEqual([item['code']for item in outcomes[1]],[0,0],outcomes)
+        import hashlib
+        key=hashlib.sha256(b'__infra_canary__').hexdigest()
+        root=fixture.cohort/'cleanup-budget'
+        self.assertFalse((root/'claims'/key[:2]/key/'g0001.json').exists())
+        self.assertTrue((root/'terminal'/key[:2]/key/'g0002.released.json').exists())
+
+
 if __name__=='__main__':unittest.main()

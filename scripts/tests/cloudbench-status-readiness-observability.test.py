@@ -59,4 +59,40 @@ exit $?
                 else:self.assertNotIn('status readiness failed:',log)
 
 
+    def test_unusable_acquire_response_releases_the_granted_lease(self):
+        source = Path(os.environ.get('READINESS_TEST_SOURCE',str(ROOT/'scripts/lib/cloudbench-env.sh'))).read_text()
+        start=source.index('cloudbench_shared_proxy_start() {')
+        helper=source[start:source.index('\ncloudbench_start_data_plane_proxy()',start)]
+        lease='b'*32
+        scenarios=[('foreign_live_path','{"lease":"%s","live_path":"/elsewhere/%s.live","live_value":"V"}'%(lease,lease),[lease]),
+                   ('missing_live_value','{"lease":"%s","live_path":"FIXTURE/leases/%s.live"}'%(lease,lease),[lease]),
+                   ('invalid_lease','{"lease":"../x","live_path":"FIXTURE/leases/x.live","live_value":"V"}',[]),
+                   ('not_json','not json',[])]
+        for name,response,released in scenarios:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                script='''set -uo pipefail
+CLOUDBENCH_SHARED_RELAY_DIRECTORY="$FIXTURE"
+RUN_LOG_TOKEN=TOKEN
+mid=82d1477bed7678
+cloudbench_shared_relay_request() {
+ case "$1" in
+  acquire) printf '%s\\n' "${RESPONSE//FIXTURE/$FIXTURE}" ;;
+  release) printf '%s %s %s\\n' "$2" "$3" "$4" >> "$FIXTURE/released" ;;
+ esac
+}
+sleep() { :; }
+'''+helper+'''
+cloudbench_shared_proxy_start 9023 8011 private-ip "$FIXTURE/proxy.log" STATUS_PROXY_PID status 3
+rc=$?
+printf '%s|%s\\n' "${STATUS_PROXY_PID_LEASE:-}" "${STATUS_PROXY_PID_TOKEN:-}" > "$FIXTURE/published"
+exit $rc
+'''
+                env={**os.environ,'FIXTURE':tmp,'RESPONSE':response}
+                result=subprocess.run(['bash','-c',script],env=env,capture_output=True,text=True,timeout=10)
+                self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+                path=Path(tmp)/'released'
+                lines=path.read_text().splitlines() if path.exists() else []
+                self.assertEqual(lines,['TOKEN-status-9023 --lease '+value for value in released])
+                self.assertEqual((Path(tmp)/'published').read_text(),'|\n','an unusable lease is never published')
+
 if __name__ == '__main__':unittest.main()

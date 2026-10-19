@@ -158,7 +158,10 @@ def create(args: argparse.Namespace) -> int:
     try:
         status, raw = send(request, deadline)
     except urllib.error.HTTPError as error:
-        raw = error.read(4096)
+        try:
+            raw = error.read(4096)
+        except Exception as read_error:  # Incomplete error response: never a non-allocation proof.
+            return emit("ambiguous", reason="HTTP %d: %s" % (error.code, type(read_error).__name__))
         if 400 <= error.code < 500:
             return emit("rejected", status=error.code, message=provider_message(raw))
         return emit("ambiguous", reason="HTTP %d: %s" % (error.code, provider_message(raw)))

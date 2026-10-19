@@ -1605,7 +1605,9 @@ def main() -> int:
                     "directory": str(inventory_directory),
                     "publisher_pid": inventory_process.pid,
                 }
-            except (OSError, ValueError, RuntimeError):
+            # Startup reads (flyctl status, git show, owner records) can also
+            # raise these before any controller starts; fail the campaign normally.
+            except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
                 first_failure = 1
                 barrier_failure = True
                 state["shared_inventory_failed"] = True

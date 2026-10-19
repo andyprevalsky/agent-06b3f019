@@ -1561,8 +1561,14 @@ cloudbench_shared_proxy_start() {  # same signature as data-plane proxy
     [ $(( $(date +%s) - started )) -lt "$timeout" ] || return 1
     sleep 1
   done
-  IFS="$(printf '\t')" read -r lease live_path live_value <<< "$(printf '%s' "$result" | python3 -c 'import json,re,sys;v=json.load(sys.stdin);s=v["lease"];assert isinstance(s,str) and re.fullmatch(r"[a-f0-9-]{32,36}",s);print(s,v["live_path"],v["live_value"],sep="\t")')"
-  [ "$live_path" = "$CLOUDBENCH_SHARED_RELAY_DIRECTORY/leases/$lease.live" ] && [ -n "$live_value" ] || return 1
+  # Extract a well-formed granted lease even when the rest is unusable, so a
+  # rejected response releases it instead of leaking the broker's route.
+  # A non-whitespace separator keeps empty fields positional.
+  IFS="$(printf '\037')" read -r lease live_path live_value <<< "$(printf '%s' "$result" | python3 -c 'import json,re,sys;v=json.load(sys.stdin);v=v if isinstance(v,dict) else {};s=v.get("lease");s=s if isinstance(s,str) and re.fullmatch(r"[a-f0-9-]{32,36}",s) else "";print(s,v.get("live_path",""),v.get("live_value",""),sep="\037")' 2>/dev/null)"
+  if ! { [ -n "$lease" ] && [ "$live_path" = "$CLOUDBENCH_SHARED_RELAY_DIRECTORY/leases/$lease.live" ] && [ -n "$live_value" ]; }; then
+    [ -z "$lease" ] || cloudbench_shared_relay_request release "$token" --lease "$lease" >/dev/null || true
+    return 1
+  fi
   printf -v "$name" '%s' ''
   printf -v "$lease_name" '%s' "$lease"
   printf -v "$token_name" '%s' "$token"

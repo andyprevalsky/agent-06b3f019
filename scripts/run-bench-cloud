@@ -2115,6 +2115,13 @@ def native_receipt(action):
             "--lease", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LEASE"],
             "--native-owner-pid", str(os.getpid())], check=True)
 
+def joined_receipt():
+    # Tell the caller this attempt reaped its child and wrote join-native;
+    # its exit status alone cannot distinguish that from an unjoined one.
+    path = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT")
+    if path:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+
 native_receipt("start-native")
 if guarded:
     def stop(signum, _frame):
@@ -2141,8 +2148,10 @@ except (subprocess.TimeoutExpired, InterruptedError):
         proc.kill()
         proc.wait()
     native_receipt("join-native")
+    joined_receipt()
     raise SystemExit(128 + interrupted if interrupted is not None else 124)
 native_receipt("join-native")
+joined_receipt()
 raise SystemExit(rc if rc >= 0 else 128 - rc)
 ' "$@"
 }
@@ -3739,7 +3748,7 @@ acquire_boot_config_update_slot() {
 boot_update_with_capacity_recovery() {
     local update_log="$1" regular_attempts max_regular timeout_seconds
     local capacity_wait capacity_retry regular_retry capacity_deadline native_budget rate_code rate_delay
-    local native_rc native_unjoined=0
+    local native_rc native_join_receipt="$1.join-native"
     shift
     # No native mutation is in flight until an attempt starts below, so an early
     # refusal (invalid contract, pacing failure) leaves nothing to fence.
@@ -3772,17 +3781,21 @@ boot_update_with_capacity_recovery() {
                 --wait-seconds "$timeout_seconds" --print-budget)" || return 1
             case "$native_budget" in ''|*[!0-9]*|0) return 1 ;; esac
         fi
-        # Mark the lease joined only after _with_timeout reports an ordinary
-        # completion or its 124 timeout path, both of which write join-native.
-        # 128+signal can mean an interruption without a proven child handle,
-        # which deliberately retains the unjoined lease; never release it here.
+        # Mark the lease joined exactly when this attempt's _with_timeout wrote
+        # its join-native receipt. Its exit status cannot tell: a signal-killed
+        # child (137) or an interruption after the child exists is reaped and
+        # joined, while an interruption before any child handle is not. Follow
+        # the latest attempt: the helper refuses start-native after an unjoined
+        # owner, so a later receipt also proves every earlier owner joined.
         BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
         native_rc=0
-        _with_timeout "$native_budget" "$@" > "$update_log" 2>&1 || native_rc=$?
-        if [ "$native_rc" -gt 128 ]; then
-            native_unjoined=1
+        rm -f "$native_join_receipt" || return 1
+        CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT="$native_join_receipt" \
+            _with_timeout "$native_budget" "$@" > "$update_log" 2>&1 || native_rc=$?
+        if [ -f "$native_join_receipt" ]; then
+            BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1
+            rm -f "$native_join_receipt" || true
         fi
-        [ "$native_unjoined" = 1 ] || BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1
         if [ "$native_rc" = 0 ]; then
             return 0
         fi

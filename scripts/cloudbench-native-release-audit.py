@@ -72,7 +72,17 @@ def guest_identities(admission: Path) -> tuple[set[str], set[str], int]:
     return names, ids, exports
 
 
-def audit(machines: list, *, app: str, guest_names, guest_ids, controllers, exports: int, now: float | None = None) -> dict:
+def expected_shards(admission: Path) -> int:
+    """Shard count from the coordinator journal, else the shard directories."""
+    coordination = _json(admission / "coordination.json") or {}
+    count = coordination.get("controllers") if isinstance(coordination, dict) else None
+    if type(count) is int and count > 0:
+        return count
+    return sum(path.is_dir() for path in admission.glob("shard-*"))
+
+
+def audit(machines: list, *, app: str, guest_names, guest_ids, controllers, exports: int, now: float | None = None,
+          shards: int | None = None) -> dict:
     present = []
     for machine in machines:
         if not isinstance(machine, dict) or machine.get("state") == "destroyed":
@@ -82,8 +92,13 @@ def audit(machines: list, *, app: str, guest_names, guest_ids, controllers, expo
     return {"schema": SCHEMA, "app": app, "observed_at": round(time.time() if now is None else now, 3),
             "request": f"GET /v1/apps/{app}/machines?summary=true", "listed_machines": len(machines),
             "checked": {"guest_names": sorted(guest_names), "guest_ids": sorted(guest_ids),
-                        "controller_ids": sorted(controllers), "verified_exports": exports},
-            "present": present, "released": not present}
+                        "controller_ids": sorted(controllers), "verified_exports": exports,
+                        "expected_shards": shards},
+            # Fail closed: an unchecked identity set or a shard without its
+            # verified export never certifies release.
+            "present": present,
+            "released": (not present and exports > 0 and bool(guest_names or guest_ids)
+                         and (shards is None or exports == shards))}
 
 
 def save(path: Path, value: dict) -> None:
@@ -106,7 +121,7 @@ def run(admission: Path, api, app: str = DEFAULT_APP, identities=None) -> dict:
     if not isinstance(machines, list):
         raise ValueError("native Machine list is not a list")
     result = audit(machines, app=app, guest_names=names, guest_ids=ids, controllers=controller_ids(admission),
-                   exports=exports)
+                   exports=exports, shards=expected_shards(admission))
     save(admission / "native-release-audit.json", result)
     return result
 

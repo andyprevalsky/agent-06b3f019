@@ -2187,6 +2187,30 @@ def test_campaign_inventory_stress_parent_mints_exact_authority_for_both_control
     assert int(first['owner']['parent_pid']) > 1 and first['owner']['parent_start']
 
 
+@pytest.mark.parametrize("error", ["KeyError", "CalledProcessError", "TimeoutExpired"])
+def test_campaign_inventory_startup_authority_failure_takes_the_failed_campaign_path(tmp_path, monkeypatch, error):
+    """A relay/authority startup error before any controller fails the campaign normally."""
+    wrapper = tmp_path / "campaign-under-test.py"
+    wrapper.write_text(
+        "import importlib.util,os,subprocess,sys\n"
+        f"spec=importlib.util.spec_from_file_location('campaign_under_test',{str(ROOT / 'scripts/run-bench-campaign.py')!r})\n"
+        "module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)\n"
+        "def refuse(*args,**kwargs):\n"
+        " kind=os.environ['FIXTURE_AUTHORITY_ERROR']\n"
+        " if kind=='KeyError':raise KeyError('Organization')\n"
+        " if kind=='CalledProcessError':raise subprocess.CalledProcessError(128,['git','rev-parse','HEAD'])\n"
+        " raise subprocess.TimeoutExpired(['flyctl','status'],30)\n"
+        "module.mutation_inventory_authority=refuse\n"
+        "sys.exit(module.main())\n")
+    monkeypatch.setenv("CLOUDBENCH_CAMPAIGN_SCRIPT_UNDER_TEST", str(wrapper))
+    monkeypatch.setenv("FIXTURE_AUTHORITY_ERROR", error)
+    result, _, summary, _ = run_consumers(tmp_path, mutation=True)
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr, result.stderr
+    assert "Campaign inventory did not initialize" in result.stdout
+    assert summary["shared_inventory_failed"] is True
+    assert summary["status"] == "failed" and summary["finished_at"]
+
 
 def test_campaign_inventory_stress_rejects_live_nonancestor_as_original_caller(tmp_path):
     environment, _ = stress_mutation_feed(tmp_path)

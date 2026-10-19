@@ -1178,9 +1178,10 @@ unset -f boot_update_with_capacity_recovery _with_timeout sleep
 unset CLOUDBENCH_BOOT_UPDATE_ATTEMPTS CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS \
   CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS
 
-# A shared mutation lease is joined only after _with_timeout reports ordinary
-# completion or its 124 timeout path (both write join-native). 128+signal can be
-# an interruption without a proven child handle: the lease must stay fenced.
+# A shared mutation lease is joined exactly when _with_timeout wrote its
+# join-native receipt for the latest attempt, whatever its exit status: a
+# signal-killed child (137) or an interruption after the child exists (143)
+# is reaped and joined; an interruption before any child handle is not.
 boot_release_source="$(awk '
   /^release_boot_config_update_slot\(\)/ { capture = 1 }
   capture { print }
@@ -1197,12 +1198,22 @@ CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=1
 CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS=0
 sleep() { :; }
 cloudbench_mutation_admission() { printf '%s\n' "$2" >> "$TMP_ROOT/boot-lease-events"; }
-for boot_case in 0:0:1:released 1:1:1:released 124:1:1:released 143:1:0:retained 130:1:0:retained; do
-  IFS=: read -r boot_native_rc boot_expect_rc boot_expect_joined boot_expect_release <<EOF_CASE
+# _with_timeout fake: <rc>:<receipt> where receipt=1 writes the join-native receipt.
+boot_fake_attempts=""
+_with_timeout() {
+  local attempt
+  attempt="${boot_fake_attempts%% *}"
+  boot_fake_attempts="${boot_fake_attempts#* }"
+  [ "${attempt#*:}" != 1 ] || : > "${CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT:?join receipt path not passed}"
+  return "${attempt%%:*}"
+}
+for boot_case in 0:1:0:1:released 1:1:1:1:released 124:1:1:1:released 137:1:1:1:released \
+    143:1:1:1:released 143:0:1:0:retained 130:0:1:0:retained 1:0:1:0:retained; do
+  IFS=: read -r boot_native_rc boot_receipt boot_expect_rc boot_expect_joined boot_expect_release <<EOF_CASE
 $boot_case
 EOF_CASE
   : > "$TMP_ROOT/boot-lease-events"
-  _with_timeout() { return "$boot_native_rc"; }
+  boot_fake_attempts="$boot_native_rc:$boot_receipt "
   BOOT_CONFIG_UPDATE_SLOT=fixture-lease
   BOOT_CONFIG_UPDATE_SLOT_SHARED=1
   BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
@@ -1224,17 +1235,49 @@ EOF_CASE
       fail "unjoined boot update lease (rc $boot_native_rc) was released"
   fi
 done
-# An unjoined interruption stays fenced even if a later retry joins.
-boot_update_calls=0
-_with_timeout() { boot_update_calls=$((boot_update_calls + 1)); [ "$boot_update_calls" != 1 ] || return 143; return 0; }
+# Joined state follows the latest attempt's receipt: an earlier joined failure
+# (signal-killed child) is not sticky, and a later receiptless attempt fences.
+# The helper refuses start-native after an unjoined owner, so a receipt on a
+# later attempt also proves every earlier native owner was joined.
 CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2
-BOOT_CONFIG_UPDATE_SLOT=fixture-lease
-BOOT_CONFIG_UPDATE_SLOT_SHARED=1
-BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
-boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update ||
-  fail "boot update retry after an interrupted attempt did not complete"
-[ "$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED" = 0 ] ||
-  fail "a later joined retry cleared an earlier unjoined boot update"
+for boot_retry in "137:1 0:1 :0:1" "137:1 1:0 :1:0"; do
+  boot_fake_attempts="${boot_retry% :*:*} "
+  boot_retry_expect="${boot_retry##* :}"
+  : > "$TMP_ROOT/boot-lease-events"
+  BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+  BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+  boot_update_rc=0
+  boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update || boot_update_rc=$?
+  [ "$boot_update_rc:$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED" = "$boot_retry_expect" ] ||
+    fail "boot update retry ($boot_retry) returned rc:joined $boot_update_rc:$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED"
+done
+# The actual wrapper writes the join receipt after reaping its child, including
+# a signal-killed child, and never without a child handle.
+boot_timeout_source="$(awk '
+  /^_with_timeout\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$boot_timeout_source" ] || fail "missing production native timeout wrapper"
+(
+  eval "$boot_timeout_source"
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=0
+  for boot_child in "0:true" "137:kill -KILL \$\$" "3:exit 3"; do
+    rm -f "$TMP_ROOT/real-join-receipt"
+    boot_real_rc=0
+    CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT="$TMP_ROOT/real-join-receipt" \
+      _with_timeout 20 sh -c "${boot_child#*:}" || boot_real_rc=$?
+    [ "$boot_real_rc" = "${boot_child%%:*}" ] && [ -f "$TMP_ROOT/real-join-receipt" ] ||
+      fail "native timeout wrapper ($boot_child) returned $boot_real_rc without its join receipt"
+  done
+  rm -f "$TMP_ROOT/real-join-receipt"
+  boot_real_rc=0
+  CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT="$TMP_ROOT/real-join-receipt" \
+    _with_timeout 20 "$TMP_ROOT/absent-native-command" 2>/dev/null || boot_real_rc=$?
+  [ "$boot_real_rc" != 0 ] && [ ! -e "$TMP_ROOT/real-join-receipt" ] ||
+    fail "native timeout wrapper wrote a join receipt without a child handle"
+) || fail "native timeout wrapper join receipt checks failed"
 # A refusal before any native attempt has nothing in flight: its lease is
 # released (invalid contract, then a pacing failure on the first attempt).
 for boot_early in contract pace; do

@@ -466,7 +466,11 @@ def _job_lifecycle(exp, audit=None, finished_after=None):
     usable = (isinstance(audit, dict) and audit.get("schema") == "cloudbench-native-release-audit-v1"
               and isinstance(audit.get("present"), list) and checked.get("guest_names")
               and (not finished_after or (audit.get("observed_at") or 0) >= finished_after))
-    if usable and not audit["present"]:
+    if usable and not audit["present"] and audit.get("released") is False:
+        # Nothing listed, but the audit did not check every shard's export.
+        lifecycle_item(exp, "warn", "Guests released (native audit incomplete)",
+                       f"{checked.get('verified_exports')}/{checked.get('expected_shards')} verified shard exports checked")
+    elif usable and not audit["present"]:
         exp["_audit_released"] = True
         lifecycle_item(exp, "ok", "Guests released (native audit)",
                        f"{pacific(audit['observed_at'])}: none present of {len(checked['guest_names'])} owned guests "

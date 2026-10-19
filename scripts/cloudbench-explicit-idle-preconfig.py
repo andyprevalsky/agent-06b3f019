@@ -121,7 +121,7 @@ def recover(registry,common,source,native_read,volume_read,checkpoint=lambda sta
         for row in p['rows']:
             claim=Path(row['claim']);need(sha(read(claim))==row['claim_sha256'],'claim changed')
             old=fields(Path(row['audit']));updated=dict(old,disposition='returned-stopped-claim-released')
-            temp=Path(row['audit']+'.preconfig-return');save(temp,updated)
+            temp=Path(row['audit']+'.preconfig-return')
             # Canonical field format matches fleet_audit_record_pool_machine.
             raw=''.join(k+'='+v+'\n' for k,v in updated.items()).encode()
             fd=os.open(str(temp)+'.fields',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)

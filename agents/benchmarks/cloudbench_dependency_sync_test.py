@@ -5534,6 +5534,22 @@ def test_machine_readiness_publishes_keyed_inventory_index(tmp_path: Path) -> No
         fields = (index / "current/machines/machine-2").read_text().splitlines()
         assert "clone_cmd_overridable=0" in fields and "clone_cmd_inert=0" in fields
 
+    # An absent config or malformed init is published as neither overridable
+    # nor inert, through the one shared init predicate.
+    for malformed in (None, {"init": "sleep infinity"}):
+        rows[1]["config"] = malformed
+        machines.write_text(json.dumps(rows))
+        checked = subprocess.run(first.args, text=True, capture_output=True, check=False)
+        assert checked.returncode == 0, checked.stderr
+        fields = (index / "current/machines/machine-2").read_text().splitlines()
+        assert "clone_cmd_overridable=0" in fields and "clone_cmd_inert=0" in fields
+    readiness = runpy.run_path(str(MACHINE_READINESS_SCRIPT))
+    inert = readiness["startup_command_inert"]
+    assert not inert(None) and not inert(["sleep", "infinity"]) and not inert({"init": "sleep infinity"})
+    assert inert({"init": {"cmd": ["sleep", "infinity"]}})
+    assert not inert({"init": {"cmd": ["sleep", "infinity"], "exec": ["fixture"]}})
+    assert not inert({"init": {"cmd": ["fixture"]}})
+
 
 def test_machine_inventory_publication_cleans_temp_link_on_replace_failure(
     tmp_path: Path,
@@ -11237,7 +11253,8 @@ def test_ambiguous_unique_volume_create_reconciles_by_exact_name_without_duplica
 
 def test_clone_volume_helper_sends_flyctl_clone_create_request(tmp_path: Path) -> None:
     """The Machines API helper mirrors flyctl v0.4.115 clone's CreateVolumeRequest
-    and classifies only complete 4xx responses as non-allocating."""
+    and classifies only complete 4xx responses as non-allocating; an error body
+    that cannot be read still emits an ambiguous receipt."""
     import http.server
     import threading
 
@@ -11261,6 +11278,15 @@ def test_clone_volume_helper_sends_flyctl_clone_create_request(tmp_path: Path) -
             if status == "hang":
                 time.sleep(3)
                 status, body = 200, b"{}"
+            if status == "stall":
+                # Complete 4xx headers, then the body read times out.
+                self.send_response(429)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.flush()
+                time.sleep(3)
+                self.wfile.write(body)
+                return
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -11303,6 +11329,9 @@ def test_clone_volume_helper_sends_flyctl_clone_create_request(tmp_path: Path) -
         }
         replies.append((429, b'{"error":"rate limit exceeded"}'))
         assert run(*create) == {"outcome": "rejected", "status": 429, "message": "rate limit exceeded"}
+        # An unreadable error body is not a complete 4xx response.
+        replies.append(("stall", b'{"error":"rate limit exceeded"}'))
+        assert run(*create)["outcome"] == "ambiguous"
         unique = [arg for arg in create if arg not in ("--snapshot-id", "vs_1")]
         unique[unique.index("true")] = "false"
         replies.append((503, b'{"error":"unavailable"}'))

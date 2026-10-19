@@ -637,6 +637,8 @@ class BorrowedPreconfigRecovery(unittest.TestCase):
         self.assertEqual(result['status'],'RECOVERED_STOPPED');self.assertEqual(observed,['archived'])
         self.assertFalse(self.claim.exists());self.assertFalse((self.out/'runtime-evidence.pending').exists())
         self.assertEqual(self.h['fields'](self.audit/'pool'/self.f.mid)['disposition'],'returned-stopped-claim-released')
+        # Later field readers enumerate audit/pool: leave only the exact audit record.
+        self.assertEqual(sorted(path.name for path in (self.audit/'pool').iterdir()),[self.f.mid])
         self.assertIn(self.f.mid,Path(self.pool['pool_ledger_file']).read_text())
     @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
     def test_absent_infra_runtime_is_not_synthesized(self):
