@@ -11399,6 +11399,13 @@ def test_clone_volume_helper_sends_flyctl_clone_create_request(tmp_path: Path) -
             "compute": {"cpu_kind": "shared", "cpus": 2, "memory_mb": 4096, "kernel_args": ["x"]},
             "compute_image": "registry.fly.io/bench:warm@sha256:abc",
         }
+        # Fly answers a create that restores a large snapshot with 202 and a
+        # complete "restoring" volume body (observed 2026-10-19, 19 GB snapshot).
+        replies.append((202, json.dumps({"id": "vol_new2", "name": "cloudbench_t10_ord_85a7e2c", "region": "iad",
+                                         "state": "restoring"}).encode()))
+        assert run(*create) == {"outcome": "created", "id": "vol_new2", "name": "cloudbench_t10_ord_85a7e2c", "region": "iad"}
+        replies.append((202, b'{"id":"vol_x","name":"other","region":"iad"}'))
+        assert run(*create)["outcome"] == "ambiguous"
         replies.append((429, b'{"error":"rate limit exceeded"}'))
         assert run(*create) == {"outcome": "rejected", "status": 429, "message": "rate limit exceeded"}
         # An unreadable error body is not a complete 4xx response.
