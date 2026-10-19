@@ -3741,6 +3741,9 @@ boot_update_with_capacity_recovery() {
     local capacity_wait capacity_retry regular_retry capacity_deadline native_budget rate_code rate_delay
     local native_rc native_unjoined=0
     shift
+    # No native mutation is in flight until an attempt starts below, so an early
+    # refusal (invalid contract, pacing failure) leaves nothing to fence.
+    BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1
     max_regular="${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"
     timeout_seconds="${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}"
     capacity_wait="${CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS:-1200}"

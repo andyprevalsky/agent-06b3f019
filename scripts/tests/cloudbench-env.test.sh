@@ -1235,7 +1235,38 @@ boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update
   fail "boot update retry after an interrupted attempt did not complete"
 [ "$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED" = 0 ] ||
   fail "a later joined retry cleared an earlier unjoined boot update"
-if grep -Eq '^[[:space:]]*BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1[[:space:]]*$' "$ROOT_DIR/scripts/run-bench-cloud"; then
+# A refusal before any native attempt has nothing in flight: its lease is
+# released (invalid contract, then a pacing failure on the first attempt).
+for boot_early in contract pace; do
+  : > "$TMP_ROOT/boot-lease-events"
+  _with_timeout() { fail "early boot update refusal ($boot_early) started a native attempt"; }
+  CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2
+  CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=0
+  if [ "$boot_early" = contract ]; then
+    CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=0
+  else
+    CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=1
+    cloudbench_mutation_admission() {
+      printf '%s\n' "$2" >> "$TMP_ROOT/boot-lease-events"
+      [ "$2" != pace ]
+    }
+  fi
+  BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+  BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+  boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update &&
+    fail "early boot update refusal ($boot_early) reported success"
+  release_boot_config_update_slot && [ -z "$BOOT_CONFIG_UPDATE_SLOT" ] &&
+    grep -qx release "$TMP_ROOT/boot-lease-events" ||
+    fail "early boot update refusal ($boot_early) retained an unused lease"
+done
+CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=0
+# Outside the wrapper's own bookkeeping, no call site may mark the lease joined.
+if awk '
+  /^boot_update_with_capacity_recovery\(\)/ { inside = 1 }
+  !inside { print }
+  inside && /^}$/ { inside = 0 }
+' "$ROOT_DIR/scripts/run-bench-cloud" | grep -Eq '^[[:space:]]*BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1[[:space:]]*$'; then
   fail "boot config update call site marks the native lease joined unconditionally"
 fi
 )
