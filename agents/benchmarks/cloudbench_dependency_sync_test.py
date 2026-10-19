@@ -2742,6 +2742,14 @@ exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
     )
     (repo / "agents/benchmarks/tasks.json").write_text("{}\n")
     (data_dir / "world-model/build.manifest.json").write_text("{}\n")
+    # Cloud SIM defaults to the native engine: its guard needs the pointer and a
+    # pre-created native venv matching the ref's requirements.
+    (data_dir / "world-model/models/test-model/experiential.json").write_text("{}\n")
+    (repo / "agents/requirements-world-model.txt").write_text("fixture==1\n")
+    native_venv = repo / ".context/experiential-venv"
+    (native_venv / "bin").mkdir(parents=True)
+    (native_venv / "bin/python").symlink_to(sys.executable)
+    (native_venv / "requirements.sha256").write_text(hashlib.sha256(b"fixture==1\n").hexdigest() + "\n")
     (data_dir / "cloudbench-cache/victoria-seed.dump").write_text("fixture\n")
 
     write_executable(controls / "fetch.sh", "#!/usr/bin/env bash\nexit 0\n")
@@ -20242,6 +20250,9 @@ CLOUDBENCH_RUN_TOKEN=fixture
 STACK_CLEANUP_STATUS_FILE=/data/repo/.context/cloudbench/stack.status
 STACK_SEED_DUMP=/data/cloudbench-cache/victoria-seed.dump
 WMH_MODEL_NAME=fixture
+WMH_ENGINE=experiential
+WMH_ROSE_POOL=rose-wmh-gpt61
+WMH_EXECUTION_POLICY=rose-outcome-distribution-v4
 WMH_DIR=/data/world-model
 ROSE_EXCLUDE_ANTHROPIC_FAMILY=
 {stack_env}
