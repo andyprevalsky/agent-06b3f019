@@ -132,12 +132,38 @@ guest restore therefore validated an incomplete fixture as canonical.
    user, archive-backed `AgentTrajectorySearch` rows for each of the three
    reviewed roots at their reviewed counts. Live rows written by the restored
    stack never count. `run.sh` messages now name both row sets.
-3. Regression: `scripts/tests/canonical-seed-whatsapp-content.test.sh` builds a
-   hermetic private fixture database. With WhatsApp rows only it failed on the
-   old validator: three cases exited 0 where 1 was expected. All cases pass
-   after the fix, and the real pg15/pg16 restores give 1 and 0 respectively. The
-   test is registered in `scripts/run-deploy-structural-gates.py`,
-   `scripts/test.sh` and `/deploy`.
+3. Under the same key, a correction does not reach volumes that already hold
+   the old bytes. `seed_cache_decision` reuses any local copy whose sidecars
+   match and never contacts R2. In `run.sh`, a reused copy that fails the
+   content check now re-pulls the shared object once before failing closed. A
+   freshly pulled failure stays final.
+4. Regressions:
+   - `scripts/tests/canonical-seed-whatsapp-content.test.sh` builds a fixture in
+     a throwaway `initdb` cluster on a private unix socket. With WhatsApp rows
+     only, the old validator exited 0 where 1 was expected in three cases. All
+     pass after the fix, and the real pg15/pg16 restores give 1 and 0
+     respectively.
+   - `scripts/tests/seed-cache-decision.test.sh` runs the real `run.sh` consumer
+     section with a fake R2, restore and validator. It covers three cases: a
+     stale reused copy, a freshly pulled bad copy, and both bad. On the base two
+     cases failed; on the fix all pass.
+   - Both suites passed 5 consecutive runs and are deploy structural gates.
+5. Local outcome check: `scripts/run-bench --local
+   grep-agent-trajectories-cross-surface` with a `pg_dump --version` shim
+   reporting 15. The shim reproduces the guest's key selection and content only:
+   `pg_restore` and the server stayed at PG16.
+   - Base revision with the old object: FAIL (agent `63f7bd7b…`). Every
+     `agent_trajectories`-only grep returned 0/0. The earlier 3/3 hits came from
+     the combined `agent_trajectories,agent_network` source.
+   - Fix with the republished object: PASS (agent `6601049e…`),
+     `'example\.com' -> 9/9 matches in agent_trajectories`.
+   - The cloud outcome is pending an exact cloud member rerun.
+
+**Open.** No publish-time check compares per-table fingerprints across the PG
+majors of one schema hash. Each major is still produced by its own procedure,
+and the pg15 lineage migrates the previous pg15 fixture. The validator now
+blocks this content gap, but not some future divergence in a row set it does
+not name.
 
 **Golden reference.** I searched `claude-code-src/`, `openclaw/`,
 `hermes-agent/` and `codex/` for seed-dump, `pg_restore` and fixture-validation

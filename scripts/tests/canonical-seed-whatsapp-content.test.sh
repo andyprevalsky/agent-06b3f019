@@ -61,39 +61,37 @@ fi
 # index"). PG15 publications carried WhatsApp rows but an EMPTY
 # AgentTrajectorySearch table, and every cloud guest restored them because the
 # validator only checked WhatsApp. A fixture missing either row set must fail.
-FIXTURE_PG_HOST="${CANONICAL_SEED_TEST_PG_HOST:-localhost}"
-FIXTURE_PG_PORT=""
-FIXTURE_DB="canonical_seed_content_test_$$"
-fixture_psql() {
-  PGCONNECT_TIMEOUT=5 psql -h "$FIXTURE_PG_HOST" -p "$FIXTURE_PG_PORT" -U postgres \
-    -v ON_ERROR_STOP=1 -q "$@" >/dev/null
-}
-drop_fixture_db() {
-  fixture_psql -d postgres -c "DROP DATABASE IF EXISTS \"$FIXTURE_DB\"" 2>/dev/null || true
-}
-# Same local servers as the backend blackbox suites: system Postgres on 5432
-# (Linux/cloud) or the per-workspace Docker DB that run.sh binds to
-# CONDUCTOR_PORT+5 (Mac). An explicit port is used exactly.
-fixture_ports=("${CANONICAL_SEED_TEST_PG_PORT:-}")
-if [ -z "${CANONICAL_SEED_TEST_PG_PORT:-}" ]; then
-  fixture_ports=(5432)
-  [ -n "${CONDUCTOR_PORT:-}" ] && fixture_ports+=("$((CONDUCTOR_PORT + 5))")
-fi
-for candidate in "${fixture_ports[@]}"; do
-  FIXTURE_PG_PORT="$candidate"
-  if fixture_psql -d postgres -c 'SELECT 1' 2>/dev/null; then
-    break
-  fi
-  FIXTURE_PG_PORT=""
-done
-if [ -z "$FIXTURE_PG_PORT" ]; then
-  echo "FAIL: canonical content fixture needs local Postgres on $FIXTURE_PG_HOST port(s) ${fixture_ports[*]}"
-  echo "      (start the local DB used by the backend blackbox suites, or set"
-  echo "       CANONICAL_SEED_TEST_PG_HOST/CANONICAL_SEED_TEST_PG_PORT)"
+# Private throwaway cluster on a unix socket: no running stack DB, port, or
+# workspace variable is required, and no shared database is touched.
+PG_BINDIR="$(pg_config --bindir 2>/dev/null || true)"
+INITDB="$(command -v initdb || true)"
+[ -n "$INITDB" ] || INITDB="${PG_BINDIR:+$PG_BINDIR/initdb}"
+PG_CTL="$(command -v pg_ctl || true)"
+[ -n "$PG_CTL" ] || PG_CTL="${PG_BINDIR:+$PG_BINDIR/pg_ctl}"
+if [ ! -x "${INITDB:-}" ] || [ ! -x "${PG_CTL:-}" ]; then
+  echo "FAIL: canonical content fixture needs PostgreSQL server binaries (initdb, pg_ctl)"
+  echo "      on PATH or under \$(pg_config --bindir); install the local Postgres server package."
   exit 1
 fi
-trap drop_fixture_db EXIT
-drop_fixture_db
+FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/canonical-seed-pg.XXXXXX")"
+FIXTURE_PG_HOST="$FIXTURE_ROOT"
+FIXTURE_PG_PORT=55432
+FIXTURE_DB="canonical_seed_content_test"
+stop_fixture_cluster() {
+  "$PG_CTL" -D "$FIXTURE_ROOT/data" -m immediate stop >/dev/null 2>&1 || true
+  rm -rf "$FIXTURE_ROOT"
+}
+trap stop_fixture_cluster EXIT
+"$INITDB" -D "$FIXTURE_ROOT/data" -U postgres --auth=trust -E UTF8 >"$FIXTURE_ROOT/initdb.log" 2>&1
+if ! "$PG_CTL" -D "$FIXTURE_ROOT/data" -l "$FIXTURE_ROOT/server.log" -w -t 60 \
+  -o "-k $FIXTURE_ROOT -p $FIXTURE_PG_PORT -c listen_addresses=''" start >/dev/null; then
+  echo "FAIL: throwaway Postgres for the canonical content fixture did not start"
+  cat "$FIXTURE_ROOT/server.log"
+  exit 1
+fi
+fixture_psql() {
+  psql -h "$FIXTURE_PG_HOST" -p "$FIXTURE_PG_PORT" -U postgres -v ON_ERROR_STOP=1 -q "$@" >/dev/null
+}
 fixture_psql -d postgres -c "CREATE DATABASE \"$FIXTURE_DB\""
 fixture_psql -d "$FIXTURE_DB" <<'SQL'
 CREATE TABLE "Person" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL);
@@ -140,7 +138,7 @@ FROM generate_series(1, 178) g;
 SQL
 assert_exit "reviewed WhatsApp rows + all archived trajectory roots pass" 0 \
   bash "$VALIDATE" "$FIXTURE_DB" "$FIXTURE_PG_HOST" "$FIXTURE_PG_PORT"
-drop_fixture_db
+stop_fixture_cluster
 trap - EXIT
 
 # run.sh must call the validator after restore and before publish
