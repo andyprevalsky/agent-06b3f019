@@ -105,11 +105,13 @@ async function testReadableInboxProjection() {
         return rows.filter((row) => row.userId === query.where.userId);
       },
     },
+    mintedAccount: { findMany: async () => [] },
   };
   const readable = Function(
     'prisma',
-    `return (${extract(store, 'findReadableInboxEmails')});`
-  )(prisma);
+    'primitiveDomain',
+    `${extract(store, 'findReadableInboxes')}; return (${extract(store, 'findReadableInboxEmails')});`
+  )(prisma, () => 'mail.roselabs.test');
   const derive = Function(
     'isEmailProviderSlug',
     `return (${extract(service, 'withDerivedConnectedEmails')});`

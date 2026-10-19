@@ -156,7 +156,6 @@ export async function createAgentIdentityEmailIfAbsent(userId: string, email: st
   return prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
 }
 
-/** The login a sign-up created, saved the way a synced browser password is. */
 /**
  * Saves the password the agent created an account with. A login the user's
  * browser synced for the same site and username is theirs and is never
