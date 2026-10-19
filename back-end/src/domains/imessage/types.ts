@@ -13,3 +13,4 @@ export interface RecentInboundMessage {
   date: Date;
   personId: string;
 }
+export type { ImessageQueue } from '@prisma/client';

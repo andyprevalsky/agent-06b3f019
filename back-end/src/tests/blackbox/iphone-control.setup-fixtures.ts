@@ -64,7 +64,8 @@ export async function proveSettings(
   h: Harness,
   f: SetupFixture,
   includeIdentity = true,
-  includePortrait = true
+  includePortrait = true,
+  includeContacts = true
 ) {
   const prior = h.setupVerifier;
   h.setupVerifier = async () => ({
@@ -76,6 +77,7 @@ export async function proveSettings(
     for (const verificationTarget of [
       'icloud_messages',
       'icloud_keychain',
+      ...(includeContacts ? ['icloud_contacts'] : []),
       'imessage',
       'receive_address',
       ...(includePortrait ? ['portrait_lock'] : []),

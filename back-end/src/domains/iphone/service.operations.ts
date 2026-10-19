@@ -1,3 +1,5 @@
+import { runMessage } from './service.message';
+import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
 import { runSavedCredential } from './service.savedCredential';
 import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 /** Browser/user action -> durable command claim -> one physical operation -> encrypted receipt. */
@@ -83,7 +85,8 @@ export async function performPhoneCommand(
   actor: PhoneActor,
   clientFactory: PhoneClientFactory = defaultPhoneClient,
   credentialVerifier?: CredentialVerifier,
-  beforeSavedExecute?: () => Promise<void>
+  beforeSavedExecute?: () => Promise<void>,
+  messageVerifier?: MessageVerifier
 ) {
   if (
     input.operation === 'credentials.fill_saved' &&
@@ -97,6 +100,18 @@ export async function performPhoneCommand(
       400,
       'Saved credential operation requires empty args and current setup context'
     );
+  const message =
+    input.operation === 'messages.send_approved' || input.operation === 'messages.verify_sent';
+  if (
+    message &&
+    (actor !== 'agent' ||
+      Object.keys(input.args).length !== 1 ||
+      typeof input.args.queueId !== 'string' ||
+      input.expectedCursor === undefined ||
+      input.setupAttemptId === undefined ||
+      input.setupRevision === undefined)
+  )
+    throw new IPhoneError(400, 'Message operation requires queueId and current setup context');
   const claim = await commands.claimCommand(userId, leaseId, input, actor);
   let command = claim.command;
   if (claim.execute) {
@@ -109,9 +124,11 @@ export async function performPhoneCommand(
       return { operation: await publicOperation(command) };
     }
     command =
-      (await (input.operation === 'credentials.fill_saved'
-        ? runSavedCredential(claim, client, credentialVerifier, beforeSavedExecute)
-        : runClaim(claim, input, client))) ??
+      (await (message
+        ? runMessage(claim, input.args.queueId as string, client, messageVerifier)
+        : input.operation === 'credentials.fill_saved'
+          ? runSavedCredential(claim, client, credentialVerifier, beforeSavedExecute)
+          : runClaim(claim, input, client))) ??
       (await commands.ownedCommand(userId, leaseId, input.operationId)) ??
       command;
   }

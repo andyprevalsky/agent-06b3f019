@@ -126,6 +126,7 @@ from .config import (
 )
 from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
 from .download_persist import BrowserDownloadPersister
+from .phone import bind_approved_message
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
@@ -5262,6 +5263,7 @@ async def spawn_browser_agent_activity_v3(
     fast_mode_cache_enabled: bool = False,
     world_model_mode: Optional[str] = None,
     agent_model: Optional[str] = None,
+    approved_message_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
     browser_pool = browser_pool_for_agent_model(agent_model)
@@ -5323,6 +5325,7 @@ async def spawn_browser_agent_activity_v3(
         gpt_token_pool_id=gpt_token_pool_id,
         fast_mode_cache_enabled=fast_mode_cache_enabled,
         browser_pool=browser_pool,
+        **({"approved_message_intent": approved_message_intent} if approved_message_intent else {}),
     )
 
 
@@ -6860,6 +6863,7 @@ async def _spawn_browser_agent_activity_v3_real(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     browser_pool: str = BROWSER_USE_PRICING_POOL,
+    approved_message_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -7641,6 +7645,9 @@ async def _spawn_browser_agent_activity_v3_real(
             auth_realm = auth_options.get("realm") or auth_realm
         elif not auth_options:
             auth_options = {"realm": "this site"}
+        if approved_message_intent:
+            await bind_approved_message(config, user_id, task_id, approved_message_intent)
+
         if auth_options_prefetch is not None:
             if not auth_options_prefetch.done():
                 auth_options_prefetch.cancel()
@@ -11964,6 +11971,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
                     activity_args.append(world_model_mode if world_model_mode != "real" else None)
                     activity_args.append(getattr(workflow_instance, "model", None))
+                    if tool_call.get("approvedMessageIntent"):
+                        activity_args.append(tool_call["approvedMessageIntent"])
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,

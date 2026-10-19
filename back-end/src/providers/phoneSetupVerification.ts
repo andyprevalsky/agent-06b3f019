@@ -1,9 +1,10 @@
 /** Bounded last-observed configuration facts; never perpetual device attestation. */
-export const SETUP_REQUIREMENTS_VERSION = 2;
+export const SETUP_REQUIREMENTS_VERSION = 3;
 export const SETUP_TARGETS = [
   'apple_account',
   'icloud_messages',
   'icloud_keychain',
+  'icloud_contacts',
   'imessage',
   'receive_address',
   'portrait_lock',

@@ -1,3 +1,4 @@
+import { messageCases } from './iphone-control.messages.cases';
 import { savedCredentialCases } from './iphone-control.saved-credential.cases';
 import { rolloutCases } from './iphone-control.rollout.cases';
 import { setupCases } from './iphone-control.setup.cases';
@@ -66,6 +67,7 @@ async function queued(h: Harness, userId: string) {
   return waiter;
 }
 export const cases: Case[] = [
+  ...messageCases,
   ...savedCredentialCases,
   ...rolloutCases,
   ...setupCases,

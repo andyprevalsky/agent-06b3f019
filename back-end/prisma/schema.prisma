@@ -1237,21 +1237,24 @@ model GoalHistory {
 }
 
 model ImessageQueue {
-  id           String    @id @default(uuid())
-  userId       String
-  agentId      String
-  phoneNumber  String
-  message      String
-  createdAt    DateTime  @default(now())
-  expiresAt    DateTime?
-  claimedAt    DateTime?
-  claimToken   String?
-  dispatchedAt DateTime?
-  sentAt       DateTime?
-  failedAt     DateTime?
-  lastError    String?
-  attempts     Int       @default(0)
-  failures     Int       @default(0)
+  id                   String    @id @default(uuid())
+  transport            String    @default("mac")
+  phoneBrowserTaskId   String?   @unique
+  phoneSendOperationId String?   @unique
+  userId               String
+  agentId              String
+  phoneNumber          String
+  message              String
+  createdAt            DateTime  @default(now())
+  expiresAt            DateTime?
+  claimedAt            DateTime?
+  claimToken           String?
+  dispatchedAt         DateTime?
+  sentAt               DateTime?
+  failedAt             DateTime?
+  lastError            String?
+  attempts             Int       @default(0)
+  failures             Int       @default(0)
 
   @@index([userId])
   @@index([agentId])

@@ -94,7 +94,7 @@ test('portrait lock is a required version-two boot setting, not inferred from po
   const old = fixture();
   old.requirementsVersion = 1;
   const result = verificationDto(old, context);
-  assert.equal(result.requirementsVersion, 2);
+  assert.equal(result.requirementsVersion, SETUP_REQUIREMENTS_VERSION);
   assert.equal(result.configurationReady, false);
 });
 
@@ -102,4 +102,22 @@ test('upgraded envelope cannot revive prior requirements-version proofs', () => 
   const state = fixture();
   for (const proof of Object.values(state.checks)) if (proof) delete proof.requirementsVersion;
   assert.equal(verificationDto(state, context).configurationReady, false);
+});
+
+test('Contacts sync is a required version-three startup setting', () => {
+  const state = fixture();
+  const result = verificationDto(state, context);
+  assert.equal(result.requirementsVersion, 3);
+  assert.ok(Object.hasOwn(result.checks, 'icloud_contacts'), 'Required Contacts sync check absent');
+  assert.equal(result.configurationReady, true);
+  const legacy = fixture();
+  legacy.requirementsVersion = 2;
+  assert.equal(verificationDto(legacy, context).configurationReady, false);
+  const checks = state.checks as Record<string, unknown>;
+  delete checks.icloud_contacts;
+  assert.equal(
+    verificationDto(state, context).configurationReady,
+    false,
+    'Other settings must not substitute for Contacts synchronization'
+  );
 });

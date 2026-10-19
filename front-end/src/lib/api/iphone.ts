@@ -21,7 +21,7 @@ export interface PhoneOperation {
   errorCode: string | null;
   result: unknown;
 }
-/** Safe setup observation only. Readiness verifies Apple sign-in, not Messages or carrier SMS. */
+/** Safe setup observation only. Readiness reflects backend-verified configuration, not carrier SMS or external forwarding. */
 export interface PhoneSetupStatus {
   required: boolean;
   state:

@@ -1,3 +1,4 @@
+import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
 import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 import { profileBody, setupBody } from './routes.setup';
 import { configureSetup, submitSetup } from './service.setup';
@@ -75,7 +76,8 @@ function executePhoneOperation(
   userId: string,
   clientFactory: PhoneClientFactory,
   credentialVerifier?: CredentialVerifier,
-  beforeSavedExecute?: () => Promise<void>
+  beforeSavedExecute?: () => Promise<void>,
+  messageVerifier?: MessageVerifier
 ) {
   const body = bodyRecord(req.body);
   const args = body.args === undefined ? {} : bodyRecord(body.args);
@@ -115,7 +117,8 @@ function executePhoneOperation(
     req.isInternal === true ? 'agent' : 'user',
     clientFactory,
     credentialVerifier,
-    beforeSavedExecute
+    beforeSavedExecute,
+    messageVerifier
   );
 }
 
@@ -167,6 +170,7 @@ interface IPhoneRouterOptions {
   setupVerifier?: SetupVerifier;
   credentialVerifier?: CredentialVerifier;
   beforeSavedExecute?: () => Promise<void>;
+  messageVerifier?: MessageVerifier;
 }
 function phoneOperationHandler(
   clientFactory: PhoneClientFactory,
@@ -178,7 +182,8 @@ function phoneOperationHandler(
       userId,
       clientFactory,
       options.credentialVerifier,
-      options.beforeSavedExecute
+      options.beforeSavedExecute,
+      options.messageVerifier
     );
 }
 export function createIPhoneRouter(options: IPhoneRouterOptions = {}) {

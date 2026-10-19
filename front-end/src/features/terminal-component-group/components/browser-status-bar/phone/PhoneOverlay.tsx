@@ -198,7 +198,7 @@ export function PhoneOverlay({
         ) : (
           <p role="status" className="px-6 text-center text-sm text-white/70">
             {phoneVerificationPending(phone.snapshot?.pendingOperation)
-              ? 'Verifying phone sign-in'
+              ? 'Verifying phone setup'
               : active
                 ? 'Connecting to the phone…'
                 : 'Waiting for the current interaction to finish'}

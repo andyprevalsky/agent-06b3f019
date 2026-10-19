@@ -47,7 +47,8 @@ export async function createQueueEntry(
   phoneNumber: string,
   message: string,
   id?: string,
-  expiresAt?: Date
+  expiresAt?: Date,
+  transport = 'mac'
 ) {
   if (id !== undefined) {
     return prisma.imessageQueue.upsert({
@@ -60,6 +61,7 @@ export async function createQueueEntry(
         phoneNumber,
         message,
         expiresAt,
+        transport,
       },
     });
   }
@@ -70,6 +72,7 @@ export async function createQueueEntry(
       phoneNumber,
       message,
       expiresAt,
+      transport,
     },
   });
 }
@@ -105,6 +108,7 @@ export async function popOldestForUser(userId: string, supportsAcknowledgements:
       >(
         `SELECT * FROM "ImessageQueue"
        WHERE "userId" = $1
+         AND "transport" = 'mac'
          AND "sentAt" IS NULL
          AND "failedAt" IS NULL
          AND "dispatchedAt" IS NULL
@@ -160,7 +164,7 @@ export async function recordQueueDeliveryResult(params: {
     async (tx) => {
       const rows = await tx.$queryRawUnsafe<Array<{ claimToken: string | null; failures: number }>>(
         `SELECT "claimToken", "failures" FROM "ImessageQueue"
-       WHERE "id" = $1 AND "userId" = $2
+       WHERE "id" = $1 AND "userId" = $2 AND "transport" = 'mac'
        FOR UPDATE`,
         params.id,
         params.userId

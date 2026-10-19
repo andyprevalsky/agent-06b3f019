@@ -1,3 +1,5 @@
+import imessageRouter from '../../domains/imessage/routes';
+import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
 import { syntheticConfiguration } from './iphone-control.synthetic-setup';
 import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 import userSettingsRouter from '../../domains/user-settings/routes';
@@ -87,6 +89,18 @@ export class Harness {
   private readonly transportPrefix = `/phone-fixture-${randomUUID()}`;
   readonly calls: ProviderCall[] = [];
   clientCreations = 0;
+  messageVerifier: MessageVerifier = async () => ({
+    status: 'allowed',
+    x: 50,
+    y: 70,
+    usage: {
+      model: 'synthetic-message',
+      promptTokens: 10,
+      completionTokens: 1,
+      totalTokens: 11,
+      totalCostCents: 1,
+    },
+  });
   beforeSavedExecute: (() => Promise<void>) | undefined;
   credentialVerifier: CredentialVerifier = async () => ({ allowed: false });
   readonly fixtureErrors: string[] = [];
@@ -339,9 +353,11 @@ export class Harness {
     const app = express();
     app.use(express.json());
     app.use('/api/user-settings', userSettingsRouter);
+    app.use('/api/imessage', imessageRouter);
     app.use(
       '/api/iphone',
       createIPhoneRouter({
+        messageVerifier: (input) => this.messageVerifier(input),
         setupVerifier: (input) => this.setupVerifier(input),
         credentialVerifier: (input) => this.credentialVerifier(input),
         beforeSavedExecute: async () => {
@@ -574,6 +590,7 @@ export class Harness {
       await closeServer(this.appServer);
       await closeServer(this.providerServer);
       if (this.users.length > 0) {
+        await prisma.imessageQueue.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.browserSession.deleteMany({
           where: { context: { userId: { in: this.users } } },
         });

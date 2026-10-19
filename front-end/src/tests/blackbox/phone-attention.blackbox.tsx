@@ -448,8 +448,8 @@ describe('phone setup status', () => {
   it.each([
     ['not_started', 'Setting up your phone'],
     ['in_progress', 'Setting up your phone'],
-    ['awaiting_user', 'Phone sign-in needs your help'],
-    ['verifying', 'Verifying phone sign-in'],
+    ['awaiting_user', 'Phone setup needs your help'],
+    ['verifying', 'Verifying phone setup'],
     ['blocked', 'Phone setup blocked'],
     ['deferred', 'Phone setup deferred'],
     ['ready', 'Phone active'],
@@ -533,7 +533,7 @@ describe('phone setup status', () => {
       render(<BrowserStatusBarFullscreen {...ordinary()} />);
       await waitFor(() =>
         expect(screen.getByTestId('fullscreen-activity-status')).toHaveTextContent(
-          'Verifying phone sign-in',
+          'Verifying phone setup',
         ),
       );
       expect(screen.queryByText(/PRIVATE-VERIFY-CANARY/)).toBeNull();
@@ -543,7 +543,7 @@ describe('phone setup status', () => {
       );
       expect(f.calls.some((call) => call.endsWith('/frame'))).toBe(false);
       expect(screen.queryByText(/Connecting to the phone|temporarily unavailable/)).toBeNull();
-      expect(screen.getAllByText('Verifying phone sign-in').length).toBeGreaterThan(1);
+      expect(screen.getAllByText('Verifying phone setup').length).toBeGreaterThan(1);
       expect(screen.getByRole('button', { name: 'Take phone control' })).toBeDisabled();
       await waitFor(
         () =>

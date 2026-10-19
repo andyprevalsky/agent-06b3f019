@@ -12,6 +12,59 @@ import {
 } from './iphone-control.setup-fixtures';
 export const settingsCases: Case[] = [
   [
+    'Contacts synchronization requires explicit On evidence, not populated names',
+    async (h) => {
+      const f = await freshSetup(h);
+      await proveSettings(h, f, true, true, false);
+      assert.notEqual(
+        f.setup.state,
+        'ready',
+        'Other six settings cannot substitute for Contacts sync'
+      );
+      let status: 'confirmed' | 'disabled' | 'unknown' = 'unknown';
+      h.setupVerifier = async (input) => {
+        assert.equal(input.verificationTarget, 'icloud_contacts');
+        return { identityConfirmed: false, status, usage: verifierUsage };
+      };
+      const submit = async () => {
+        const read = await observe(h, f);
+        const reply = await setupPost(h, f, {
+          action: 'verify',
+          verificationTarget: 'icloud_contacts',
+          attemptId: f.setup.attemptId,
+          expectedRevision: f.setup.revision,
+          expectedCursor: read.cursor,
+          requestKey: randomUUID(),
+          evidenceOperationIds: [read.id],
+        });
+        assert.equal(reply.status, 200);
+        f.setup = reply.data.setup as SetupDto;
+        return (
+          f.setup as SetupDto & { verification: { checks: Record<string, { status: string }> } }
+        ).verification.checks.icloud_contacts;
+      };
+      h.observationResult = { text: 'Contacts: Alice, Bob, Carol' };
+      assert.equal((await submit()).status, 'unknown');
+      status = 'confirmed';
+      h.observationResult = { text: 'iCloud Contacts: On' };
+      assert.equal((await submit()).status, 'confirmed');
+      assert.equal(
+        f.setup.state,
+        'ready',
+        'Contacts On completes otherwise verified startup settings'
+      );
+      status = 'disabled';
+      h.observationResult = { text: 'iCloud Contacts: Off' };
+      assert.equal((await submit()).status, 'disabled');
+      assert.notEqual(f.setup.state, 'ready');
+      status = 'unknown';
+      h.observationResult = { text: 'Contacts: Alice, Bob, Carol' };
+      await submit();
+      assert.notEqual(f.setup.state, 'ready');
+    },
+  ],
+
+  [
     'portrait lock accepts explicit enabled proof but dimensions alone remain unknown',
     async (h) => {
       const f = await freshSetup(h);

@@ -12,6 +12,7 @@ import { IPhoneError, type Transaction } from './types';
 import type { CommandClaim, PhoneActor, PhoneCommand } from './types.operations';
 
 const READ_OPERATIONS = new Set([
+  'messages.verify_sent',
   'screen.frame',
   'screen.text',
   'screen.text_pixels',
@@ -63,6 +64,8 @@ export async function claimCommand(
         return new IPhoneError(409, 'Operation identity cannot be reused with different input');
       return { device, lease, command: existing, execute: false };
     }
+    if (await messageMutationBlocked(tx, userId, lease.browserTaskId, input.operation))
+      return new IPhoneError(409, 'A dispatched message permits observation and verification only');
     if (input.expectedCursor !== undefined && input.expectedCursor !== lease.actionCursor)
       return new IPhoneError(
         409,
@@ -221,3 +224,23 @@ export {
   confirmUnstartedCleanup,
   closeSessionForRefresh,
 } from './repo.session';
+
+async function messageMutationBlocked(
+  tx: Transaction,
+  userId: string,
+  taskId: string | null,
+  operation: string
+) {
+  if (taskId === null || isPhoneRead(operation)) return false;
+  return (
+    (await tx.imessageQueue.findFirst({
+      where: {
+        userId,
+        phoneBrowserTaskId: taskId,
+        transport: 'phone_harness',
+        dispatchedAt: { not: null },
+      },
+      select: { id: true },
+    })) !== null
+  );
+}

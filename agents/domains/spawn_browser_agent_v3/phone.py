@@ -50,7 +50,22 @@ Queue/lease timeout is a tool outcome, not a request for user attention. Pending
 or UNKNOWN input must never be blindly retried: inspect the durable receipt and
 screen, and wait for confirmed cleanup when necessary. Private password refs
 require verified phone app/account binding, which is not available yet.
-Use accessible Gmail push approvals and OTP flows autonomously. For an authorized
+Use accessible Gmail push approvals and OTP flows autonomously. When a browser
+sign-in asks for device approval, inspect the corresponding account app on the
+owned cloud phone when available. Match the account and current sign-in challenge
+or number to the browser request; approve only that intended request, then
+return to the browser and verify it continued. Never approve an unrelated or ambiguous
+login. An installed app alone does not prove it is signed in or can approve.
+If the app is signed out, the request cannot be matched, or user presence is
+required, use the existing critical authentication attention path when genuinely
+blocked. Queue and transport failures remain tool outcomes, not user-only auth.
+For browser SMS/OTP challenges, inspect the current matching Messages
+conversation on the owned cloud phone before asking the user when accessible.
+Match the intended account, recipient, and current challenge timestamp; never
+reuse an old or unrelated code. Enter only the code for this authorized challenge
+and verify browser continuation. An accessible matching code does not require
+user attention; unavailable or user-only verification still uses critical help.
+For an authorized
 current app/account, try an already available native AutoFill suggestion for the
 matching account before requesting password help, keeping the password masked.
 Use ordinary observed UI taps; do not open Passwords details or search the vault.
@@ -106,9 +121,13 @@ same original task, honoring user restrictions and protected authentication.
 After fresh observations, use mode=setup, action=verify with evidenceOperationIds
 containing 1..8 successful current broker observation IDs and verificationTarget:
 apple_account (the default when omitted), icloud_messages, icloud_keychain,
+icloud_contacts,
 imessage, receive_address, portrait_lock, or runtime. Verify iCloud Messages sync and iCloud
 Keychain sync separately. iMessage activation/sign-in is separate from iCloud
-Messages sync; neither one proves the other. For receive_address use only the
+Messages sync; neither one proves the other. For icloud_contacts, configure
+iCloud Contacts sync and verify explicit enabled control state; populated
+contact names or counts do not prove the iCloud Contacts setting is on.
+For receive_address use only the
 server's active expectedReceiveAddress and verify it is actually selected for
 receiving, not merely listed. For portrait_lock, use the observed Control Center
 UI to enable the OS Portrait Orientation Lock and verify explicit enabled control
@@ -124,6 +143,13 @@ for the current requirements/version and ownership. User Done only resumes
 verification. Current configuration readiness and runtime health are separate:
 use verificationTarget=runtime for current health; transient iCloud pause or
 delivery failure is not proof that the configured settings were never enabled.
+A cloud iPhone may have no SIM. Incoming carrier SMS may require the user to
+enable Text Message Forwarding on their primary iPhone if this cloud phone
+appears there. Request that device configuration through generic assistance,
+not authentication attention. Do not disable iCloud, delete messages, or shorten
+history to speed startup. Historical download completion is not a prerequisite
+to trying a fresh forwarded SMS. Settings or user Done alone are not proof that
+a real carrier SMS arrived. No forwarding verificationTarget exists.
 No setting check proves actual SMS/OTP delivery, full message history sync, or
 permission to use private password refs. Do not request authentication attention
 for a sync/configuration/transport problem unless a genuine protected auth step
@@ -239,6 +265,10 @@ async def execute_phone(
         return {"success": False, "error": "Invalid phone arguments"}
     if params["mode"] == "operation" and params.get("operation") == "credentials.fill_saved" and params.get("args", {}) != {}:
         return {"success": False, "error": "Saved credential fill accepts no model arguments"}
+    if params["mode"] == "operation" and params.get("operation") in {"messages.send_approved", "messages.verify_sent"}:
+        command_args = params.get("args", {})
+        if set(command_args) != {"queueId"} or not isinstance(command_args["queueId"], str) or not command_args["queueId"].strip():
+            return {"success": False, "error": "Approved message operation requires only its queueId"}
     view = (snapshot or {}).get("interaction") or {}
     path = f"interactions/{quote(task_id, safe='')}"
     if params["mode"] == "setup":
@@ -553,3 +583,23 @@ async def request_native_phone_authentication(
         return await read_receipt(request_id)
     except Exception:
         return failure
+
+
+async def bind_approved_message(config, user_id: str, task_id: str, queue_id: str, *, client=None):
+    """Bind only after server-created BrowserSession exists; never from model args."""
+    if client is None:
+        async with httpx.AsyncClient() as owned:
+            return await bind_approved_message(config, user_id, task_id, queue_id, client=owned)
+    if not all(isinstance(value, str) and value for value in (user_id, task_id, queue_id)):
+        raise RuntimeError("Approved cloud message binding unavailable")
+    response = await client.post(
+        config.backend.api_url.rstrip("/") + f"/api/imessage/queue/{quote(queue_id, safe='')}/phone-bind",
+        headers={"X-API-Key": config.backend.api_key or "", "X-User-Id": user_id},
+        json={"user_id": user_id, "browser_task_id": task_id}, timeout=15.0,
+    )
+    if response.status_code != 200:
+        raise RuntimeError("Approved cloud message binding rejected")
+    value = response.json()
+    if (value.get("success") is not True or value.get("provider") != "phone_harness"
+        or value.get("queue_id") != queue_id or value.get("browser_task_id") != task_id):
+        raise RuntimeError("Approved cloud message binding mismatch")

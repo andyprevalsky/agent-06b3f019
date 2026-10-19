@@ -4,6 +4,8 @@ const PURPOSES: Record<Exclude<SetupTarget, 'apple_account'>, string> = {
     'Determine whether current Settings observations explicitly state Messages in iCloud or Use on this iPhone is On (confirmed) or Off (disabled). A Messages label, message counts, or history presence alone is unknown.',
   icloud_keychain:
     'Determine whether current iCloud Settings observations explicitly state Passwords and Keychain sync is On (confirmed) or Off (disabled). A label or credential inventory alone is unknown.',
+  icloud_contacts:
+    'Determine whether current iCloud Settings observations explicitly establish Contacts synchronization or Use on this iPhone for Contacts is On (confirmed), or Off (disabled). Contacts label alone, contact names, counts, or populated Contacts app do not establish synchronization enabled and must remain unknown. Never infer complete contact-history synchronization.',
   imessage:
     'Determine whether current Messages Settings observations explicitly establish iMessage is On and signed in to the exact expected Apple account (confirmed), or explicitly Off or signed out (disabled). Labels, address presence, generic Apple sign-in and unlabelled visual toggles alone are unknown.',
   receive_address:

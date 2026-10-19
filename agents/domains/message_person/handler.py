@@ -12,6 +12,7 @@ import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from domains.message_person.cloud_phone import deliver_cloud_message
 from domains.message_person.service import (
     build_agent_sms_idempotency_key,
     build_cold_outreach_person,
@@ -211,6 +212,22 @@ class MessagePersonManager(ToolManager):
         if isinstance(delivery_result, ToolEvent):
             yield delivery_result
             return
+
+        if (delivery_result.get("provider") == "phone_harness" and delivery_result.get("status") == "sent"
+            and isinstance(delivery_result.get("sent_at"), str) and delivery_result["sent_at"]):
+            delivery_result = {**delivery_result, "channel": "imessage"}
+        elif delivery_result.get("provider") == "phone_harness":
+            confirmed = None
+            async for cloud_event in deliver_cloud_message(workflow_instance, queue_id=delivery_result["queue_id"],
+                                                          tool_call_id=tool_call_id, recipient=person_phone,
+                                                          body=generated_message):
+                if cloud_event.data and cloud_event.data.get("cloud_delivery"):
+                    confirmed = cloud_event.data["cloud_delivery"]
+                else:
+                    yield cloud_event
+            if confirmed is None:
+                return
+            delivery_result = confirmed
 
         # -- Done --
         yield self._build_finished_event(
@@ -680,6 +697,9 @@ class MessagePersonManager(ToolManager):
                 message=extract_root_error(exc),
                 status=MessageStatus.ERROR,
             )
+
+        if result.get("success") is True and result.get("provider") == "phone_harness" and result.get("queue_id"):
+            return result
 
         queue_id = result.get("queue_id")
         delivery_status = result.get("status")

@@ -110,6 +110,18 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
           'visual state not explicitly represented must remain unknown'
         )
       );
+      if (verificationTarget === 'icloud_contacts') {
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'contact names, counts, or populated Contacts app do not establish synchronization enabled'
+          )
+        );
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'Never infer complete contact-history synchronization'
+          )
+        );
+      }
       if (verificationTarget === 'portrait_lock') {
         assert.ok(
           settingsPurpose(verificationTarget).includes('Portrait Orientation Lock is enabled or On')

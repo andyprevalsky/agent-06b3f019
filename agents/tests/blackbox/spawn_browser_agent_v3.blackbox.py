@@ -21197,7 +21197,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -21321,7 +21321,14 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         if initial_poll_failure and input_poll_calls == 1:
             raise TimeoutError("resume input backend unavailable")
         return [await native_browser_start_source("2026-10-14T17:21:35.438+00:00"), *correction_rows]
+    fetched_session = AsyncMock(return_value=session_info)
+    async def bind_message(config, bound_user, bound_task, queue):
+        fetched_session.assert_awaited_once()
+        assert bound_user == "user-1" and bound_task == "task-1" and queue == approved_message_intent
+        assert actor_call.await_count == 0, "Message binding happened after the first model decision"
+    message_binding = AsyncMock(side_effect=bind_message)
     patch_targets = [
+        *([patch("domains.spawn_browser_agent_v3.handler.bind_approved_message", message_binding)] if approved_message_intent else []),
         *([patch("domains.spawn_browser_agent_v3.phone.request_native_phone_authentication", native_request)] if native_auth else []),
         *([
             patch("domains.spawn_browser_agent_v3.handler._prepare_pending_write_lock_action", pending_preparation),
@@ -21344,7 +21351,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         patch("domains.spawn_browser_agent_v3.handler.prepare_browser_auth", preparation),
         patch(
             "domains.spawn_browser_agent_v3.handler.fetch_session_info",
-            AsyncMock(return_value=session_info),
+            fetched_session,
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.fetch_recent_otps",
@@ -21413,6 +21420,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
             output_schema={"fields": [{"name": "result", "type": "string"}]},
             use_claude_mode=False,
             gpt_token=selected_gpt_token,
+            **({"approved_message_intent": approved_message_intent} if approved_message_intent else {}),
             gpt_account_id="fixture-gpt-account" if selected_gpt_token else None,
             gpt_token_source="user" if selected_gpt_token else None,
             write_lock_resume_state={
@@ -21426,6 +21434,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         from domains.spawn_browser_agent_v3.handler import drain_background_browser_cleanups
         await drain_background_browser_cleanups(timeout=1)
 
+    if approved_message_intent:
+        message_binding.assert_awaited_once()
     if browser_auth_pause:
         assert result["status"] == "awaiting_auth_assistance"
         assert result["request_id"] == "browser-attention"
@@ -30164,6 +30174,7 @@ async def run_all_tests():
     await r.record_async("native_phone_auth_http_identity_recovery", test_native_phone_auth_http_identity_recovery)
     await r.record_async("native_phone_auth_denials_and_safe_errors", test_native_phone_auth_denials_and_safe_errors)
     await r.record_async("native_phone_auth_manager_exact_resume", test_native_phone_auth_manager_exact_resume)
+    await r.record_async("cloud_message_actual_activity_binds_before_model", test_cloud_message_actual_resumed_activity_binds_before_model)
     await r.record_async("native_phone_auth_actual_activity_before_browser_recovery", test_native_phone_auth_actual_activity_before_browser_recovery)
     await r.record_async("native_phone_auth_manager_rejection_preserves_target", test_native_phone_auth_manager_rejection_preserves_target)
     await r.record_async("native_phone_auth_generation_reattaches_exact_request", test_native_phone_auth_generation_reattaches_exact_request)
@@ -30700,6 +30711,10 @@ async def test_native_phone_auth_generation_reattaches_exact_request():
     await _exercise_native_phone_auth_manager(handoff=True)
 
 
+async def test_cloud_message_actual_resumed_activity_binds_before_model():
+    await _exercise_browser_resume_user_input(approved_message_intent="owned-message-queue")
+
+
 async def test_native_phone_auth_actual_activity_before_browser_recovery():
     result = await _exercise_browser_resume_user_input(native_auth=True)
     assert not result.get("success"), "A handoff must not claim task or login completion"
@@ -31027,9 +31042,9 @@ async def test_phone_saved_credential_rejects_model_secret_routing_args():
 async def test_phone_setup_settings_targets_transport_recovery_and_billing():
     import httpx
     from domains.spawn_browser_agent_v3 import phone
-    targets = ("apple_account", "icloud_messages", "icloud_keychain", "imessage", "receive_address", "portrait_lock", "runtime")
+    targets = ("apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "runtime")
     lease = {"id": "settings-lease", "status": "ACTIVE", "browserTaskId": "settings-task"}
-    verification = {"requirementsVersion": 2, "checks": {"icloud_messages": {"status": "confirmed", "current": False}, "imessage": {"status": "disabled", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
+    verification = {"requirementsVersion": 3, "checks": {"icloud_messages": {"status": "confirmed", "current": False}, "imessage": {"status": "disabled", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
     setup = {"attemptId": "settings-attempt", "revision": 5, "identityVerified": True, "state": "in_progress", "verification": verification}
     view = {"lease": lease, "cursor": 11, "setup": setup}
     snapshot = {"enabled": True, "interaction": copy.deepcopy(view)}
@@ -31073,9 +31088,9 @@ async def test_phone_setup_settings_targets_transport_recovery_and_billing():
             assert result["usage"] == usage and "usage_items" not in result
             assert "SYNTHETIC-PRIVATE-ERROR" not in json.dumps(result)
         result = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "icloud_messages", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
-        assert result["success"] and len(paid) == 7, "Exact intent retry rebilled"
+        assert result["success"] and len(paid) == 8, "Exact intent retry rebilled"
         conflict = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "imessage", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
-        assert not conflict["success"] and conflict["_httpStatus"] == 409 and len(paid) == 7
+        assert not conflict["success"] and conflict["_httpStatus"] == 409 and len(paid) == 8
         assert posts[-1]["requestKey"] == posts[-2]["requestKey"], "Target entered the public decision ID instead of backend HMAC payload"
         legacy = await phone.execute_phone({"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="legacy")
         assert legacy["success"] and "verificationTarget" not in posts[-1]

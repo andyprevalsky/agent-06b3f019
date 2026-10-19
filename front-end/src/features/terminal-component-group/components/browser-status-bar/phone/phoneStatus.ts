@@ -13,9 +13,9 @@ function setupLabel(setup?: PhoneSetupStatus): string | undefined {
     case 'in_progress':
       return 'Setting up your phone';
     case 'awaiting_user':
-      return 'Phone sign-in needs your help';
+      return 'Phone setup needs your help';
     case 'verifying':
-      return 'Verifying phone sign-in';
+      return 'Verifying phone setup';
     case 'blocked':
       return 'Phone setup blocked';
     case 'deferred':
@@ -42,7 +42,7 @@ export function phoneStatus(
   )
     return {
       label:
-        pending.operation === 'setup.verify' ? 'Verifying phone sign-in' : 'Checking phone request',
+        pending.operation === 'setup.verify' ? 'Verifying phone setup' : 'Checking phone request',
       active: false,
     };
   const label = setupLabel(snapshot.setup);
