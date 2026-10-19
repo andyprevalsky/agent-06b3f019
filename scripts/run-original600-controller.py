@@ -1303,6 +1303,48 @@ def publish_shard_group(root, directory, args, runner, group_id, started_at, sha
     return campaign['publish_campaign_group'](root, group_dir, state, live=outcomes is None, stop_requested=lambda: False)
 
 
+def shard_group_status(merged, coordination):
+    """The Hub terminal status, mirroring a single campaign: operator stop, any failure, else passed."""
+    reason = coordination.get('terminate_reason') or coordination.get('abort_reason')
+    if isinstance(reason, str) and reason.startswith('operator '):
+        return 'cancelled'
+    codes = (coordination.get('exit_codes') or {}).values()
+    failed = merged['missing_jobs'] or reason or not codes or any(code != 0 for code in codes)
+    return 'failed' if failed else 'passed'
+
+
+def publish_final_shard_group(root, directory, args, runner, group_id, started_at, group_shards, summaries, merged,
+                              coordination):
+    """The operator's terminal Hub group from every joined shard summary and the coordination record.
+
+    Once reached, an unpublished group always carries its reason: the refusal, or the last line this
+    final publication appended to the publisher log (with its Hub request id).
+    """
+    outcomes = {job['job_id']: dict(status=job.get('status'), controller_exit_code=job.get('controller_exit_code'))
+                for summary in summaries if summary for job in summary.get('jobs') or []}
+    log = directory / 'hub-group' / 'hub-group-publication.private.log'
+    offset = log.stat().st_size if log.is_file() else 0  # the schedule registration shares this log
+    try:
+        published = publish_shard_group(
+            root, directory, args, runner, group_id, started_at, group_shards, outcomes,
+            dict(status=shard_group_status(merged, coordination),
+                 finished_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                 wall_clock_seconds=round(time.time() - started_at, 3)))
+    except Exception as error:
+        return dict(hub_group_final_published=False, hub_group_final_error=f'{type(error).__name__}: {error}'[:500])
+    if published:
+        return dict(hub_group_final_published=True)
+    lines = []
+    if log.is_file():
+        with open(log, 'rb') as stream:
+            stream.seek(offset)
+            lines = [line for line in stream.read().decode(errors='replace').splitlines() if line.strip()]
+    last = lines[-1] if lines else ''
+    reason = last if last and not last.startswith('📤') else ' '.join(
+        ['final publication was not acknowledged'] + (['after: ' + last] if last else []))
+    return dict(hub_group_final_published=False, hub_group_final_log=str(log), hub_group_final_error=reason[:500])
+
+
 def hub_interpreter(args):
     """Interpreter for operator-side Hub publication; checked before any provider read."""
     hub_python = str(args.hub_python.absolute()) if getattr(args, 'hub_python', None) else sys.executable
@@ -1447,17 +1489,8 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
                       for row in scorecard['compact_rows'](record['summary'], record['cards'])]
     merged.update(shards_without_summary=[s['index'] for s, v in zip(shards, summaries) if v is None],
                   coordination=record, hub_group=group_id)
-    outcomes = {job['job_id']: dict(status=job.get('status'), controller_exit_code=job.get('controller_exit_code'))
-                for summary in summaries if summary for job in summary.get('jobs') or []}
-    try:
-        merged['hub_group_final_published'] = publish_shard_group(
-            root, directory, args, runner, group_id, started_at, group_shards, outcomes,
-            dict(status='completed' if not merged['missing_jobs'] else 'failed',
-                 finished_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                 wall_clock_seconds=round(time.time() - started_at, 3)))
-    except Exception as error:
-        merged['hub_group_final_published'] = False
-        merged['hub_group_final_error'] = type(error).__name__
+    merged.update(publish_final_shard_group(root, directory, args, runner, group_id, started_at, group_shards,
+                                            summaries, merged, record))
     runner['save'](directory / 'result.json', merged)
     print(json.dumps(dict(directory=str(directory), status='SHARDS_JOINED', result=str(directory / 'result.json'),
                           observed_jobs=merged['observed_jobs'], missing_jobs=merged['missing_jobs'],

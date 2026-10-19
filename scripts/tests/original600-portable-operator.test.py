@@ -2313,6 +2313,24 @@ class Sharded(unittest.TestCase):
                     available_slots_conservative=free, new_controller_slots=1, requested_original_primary_slots=600,
                     proof_path=str(private(directory/'capacity-proof.private.json', {})))
 
+    def test_final_group_status_uses_the_hub_vocabulary(self):
+        """Every coordination outcome maps onto the Hub's passed|failed|cancelled group statuses."""
+        ok = dict(exit_codes={'0': 0, '1': 0}, abort_reason=None, terminate_reason=None)
+        cases = [
+            (0, ok, 'passed'),
+            (1, ok, 'failed'),  # a scheduled job never reported
+            (0, dict(ok, exit_codes={'0': 0, '1': 1}), 'failed'),
+            (0, dict(ok, exit_codes={}), 'failed'),
+            (0, dict(ok, abort_reason='shard [1] failed before global release'), 'failed'),
+            (0, dict(ok, terminate_reason='infra 30/600 reached the 5% threshold'), 'failed'),
+            (0, dict(ok, abort_reason='operator SIGTERM', terminate_reason='operator SIGTERM'), 'cancelled'),
+            (0, dict(ok, abort_reason='shard [0] failed before global release', terminate_reason='operator SIGINT'),
+             'cancelled'),
+        ]
+        for missing, coordination, expected in cases:
+            with self.subTest(coordination=coordination, missing=missing):
+                self.assertEqual(CLI.shard_group_status(dict(missing_jobs=missing), coordination), expected)
+
     def test_selection_defaults_to_controllers_sized_by_copies(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -2584,7 +2602,8 @@ class Sharded(unittest.TestCase):
             self.assertEqual({p['group_id'] for p in published}, {launched[0].config['shard']['group_run_id']})
             self.assertEqual(published[0]['members'], 36)
             self.assertEqual(len(published[1]['outcomes']), 36)
-            self.assertEqual(published[1]['finished']['status'], 'completed')
+            # The Hub's terminal vocabulary: every shard exited 0 and every job reported.
+            self.assertEqual(published[1]['finished']['status'], 'passed')
             self.assertEqual(code, 0)
             self.assertEqual(len(launched), 3)
             self.assertEqual(sorted(r.env['CLOUDBENCH_GATE_NAME_SUFFIX'] for r in launched), ['s00', 's01', 's02'])
