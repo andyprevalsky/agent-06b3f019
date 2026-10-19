@@ -1134,11 +1134,11 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
            ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
                 "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
-            echo "   ⚠️ restored dump failed canonical WhatsApp content check — invalidating"
+            echo "   ⚠️ restored dump failed canonical content check (WhatsApp history + archived agent trajectories) — invalidating"
             rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
             DB_RESTORED=false
             if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
-                fail_required_seed_dump "Required canonical base fixture restored but lacked reviewed WhatsApp history; refusing to continue on a poisoned substitute."
+                fail_required_seed_dump "Required canonical base fixture restored but lacked reviewed WhatsApp history or archived agent trajectories; refusing to continue on a poisoned substitute."
             fi
         else
             DB_RESTORED=true
@@ -1273,7 +1273,7 @@ if [ -n "$_SEED_DUMP" ]; then
             if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
                ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
                     "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
-                echo "   ❌ refusing to publish: DB failed canonical WhatsApp content check"
+                echo "   ❌ refusing to publish: DB failed canonical content check (WhatsApp history + archived agent trajectories)"
             elif (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
                 printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
                 echo "   ☁️ published seed dump to shared cache ($_SEED_CACHE_TOKEN)"

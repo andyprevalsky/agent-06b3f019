@@ -1,30 +1,35 @@
 ---
 id: 2026-08-20-poisoned-canonical-seed-missing-whatsapp-history
 date: 2026-08-20
-title: Canonical whatsapp-v2 R2 seed dump restored 0 WHATSAPP MessageRecords
+title: Canonical whatsapp-v2 R2 seed dump restored without reviewed rows (WhatsApp history; later archived agent trajectories)
 surface: harness
 component: seed-dump-cache / run.sh restore
 classification: our-bug
 problem_class: fixture-environment-data-mismatch
-first_bad_boundary: shared R2 object benchmark-seed-dumps/<schema>-pg16-victoria-prod-sync-v1-whatsapp-v2.dump — published without reviewed WhatsApp rows; run.sh restored it with no content check
+first_bad_boundary: shared R2 object benchmark-seed-dumps/<schema>-pg<major>-victoria-prod-sync-v1-whatsapp-v2.dump — published without reviewed rows the revision promises; the canonical content check did not cover them (WhatsApp 2026-08-20; AgentTrajectorySearch archive rows on every pg15 publication through 2026-10-19)
 symptoms:
   - "Source(s) not connected: whatsapp"
-  - "No local data available."
   - grep messages → 0 matches after seed restore
   - whatsapp-history-recall Timeout after 301s (ACTIVE, expected COMPLETED)
-  - User context fetched messages=0 contacts=0
+  - "grep: 'example\\.com' -> 0/0 matches in agent_trajectories"
+  - "Declared evaluator prior-browser-and-code-facts failed"
 tags:
   - seed-dump
   - canonical-base
   - whatsapp
   - fixtures
   - whatsapp-history-recall
+  - agent-trajectories
+  - grep-agent-trajectories-cross-surface
+  - pg15
 sources:
   - PR #1299
   - fleet run 20260820_211517_whatsapp-history-recall
   - agent 76b73506-a102-4ebc-a623-c69f5c279206
   - memory:poisoned-canonical-whatsapp-v2-seed-r2-cc104a3f
   - memory:prior-good-whatsapp-v2-seed-r2-2667c51
+  - benchmark run original600-1792433794419199295 (2026-10-19 sharded cloud, 9/9 grep-agent-trajectories-cross-surface FAILED)
+  - agent 0863942f-e6b9-4a12-8abd-6ee873b48894
 repro: bash scripts/tests/canonical-seed-whatsapp-content.test.sh
 status: fixed
 ---
@@ -79,16 +84,75 @@ verifying the reviewed WhatsApp row set after restore.
    poisoned probe, GREEN on fixed probe) and registered it in
    `scripts/test.sh` + deploy structural gates.
 
+## Recurrence 2026-10-19: pg15 artifacts without archived agent trajectories
+
+**Symptom.** In cloud sharded run `original600-1792433794419199295` (source
+f9c01f05c), 9/9 `grep-agent-trajectories-cross-surface` jobs failed. Eight
+failed `prior-browser-and-code-facts` and one hit the 300s backstop. The guest
+backend logged `grep: 'example\.com' -> 0/0 matches in agent_trajectories` for
+agent `0863942f-…`, with no filters. The agent then spawned new browser and
+coding agents, and the judge rejected them as not prior-run evidence.
+
+**Evidence.** The guest `stack.log` shows the restore of
+`cf8b2471…-pg15-victoria-prod-sync-v1-whatsapp-v2` and `canonical seed dump ok`
+(WhatsApp only). Between restore and the grep, nothing deleted trajectory rows.
+`AgentTrajectorySearch deleteMany` appears only after the grep, from archive
+finalization. A per-table diff of that pg15 object against its pg16 sibling
+`cf8b2471…-pg16-…` found exactly one difference: `AgentTrajectorySearch` had 0
+rows vs 241. The 241 rows are archive-backed rows for three prior runs: browser
+`ec19feb9` (42), Collatz `c4531f8e` (21) and city comparison `18ad8b43` (178).
+The catalog tasks name this content: "historical R2 trace content materialized
+in the canonical base image search index". The pg15 objects for schema hashes
+`fc9dc500` (2026-10-03), `82fe660b` (10-06), `50ee010b` (10-07) and `cf8b2471`
+(10-19) all had 0 rows; each pg16 sibling had them. The pg15 lineage never
+carried the rows after the 2026-09-29 trajectory migration. Each pg15
+publication migrated the previous pg15 fixture, so the new table was created
+empty, as noted in the PR #1299 schema-only refresh above. Fresh volumes did
+not drop the rows; cloud guests never had them. Running the backend's
+`searchTrajectorySource` against a local restore of the pg16 object returned 9
+matches for the identical grep.
+
+**Why the 2026-08-20 fix did not hold.** That fix encoded one promised row set
+(WhatsApp) in `validate-canonical-seed-dump.sh`. The revision's content promise
+grew when the trajectory tasks declared archived traces in the same base image,
+but the validator was not extended. The PG15 publication workflow and every
+guest restore therefore validated an incomplete fixture as canonical.
+
+**Fix.**
+1. Infra repair, 2026-10-19 19:41Z: restored the original pg15 object into an
+   isolated `pgvector/pgvector:pg15` container and loaded the 241 rows from the
+   pg16 sibling (identical table fingerprint across majors). All 75 public tables
+   were fingerprinted: only `AgentTrajectorySearch` changed. The dump came from
+   the PG15.19 client (archive 1.14, TOC identical to the original), passed a
+   round-trip restore with identical fingerprints and the extended validator,
+   and was republished under the same key. Readback sha256 is `f3e451e2…`; the
+   original pg15 object sha256 is `154e8b01…`. Both are retained in
+   `/project/pr1525-evidence/grep-traj-fresh-volume/`.
+2. `scripts/validate-canonical-seed-dump.sh` now also requires, for the bench
+   user, archive-backed `AgentTrajectorySearch` rows for each of the three
+   reviewed roots at their reviewed counts. Live rows written by the restored
+   stack never count. `run.sh` messages now name both row sets.
+3. Regression: `scripts/tests/canonical-seed-whatsapp-content.test.sh` builds a
+   hermetic private fixture database. With WhatsApp rows only it failed on the
+   old validator: three cases exited 0 where 1 was expected. All cases pass
+   after the fix, and the real pg15/pg16 restores give 1 and 0 respectively. The
+   test is registered in `scripts/run-deploy-structural-gates.py`,
+   `scripts/test.sh` and `/deploy`.
+
+**Golden reference.** I searched `claude-code-src/`, `openclaw/`,
+`hermes-agent/` and `codex/` for seed-dump, `pg_restore` and fixture-validation
+analogs. None of them publishes benchmark database fixtures, so no reference
+applies.
+
 ## Human feedback
 
 Pending HARNESS_FIX_DECISION for whatsapp-history-recall outcome-proof rerun.
 
 ## Reusable lesson
 
-A cache key's *revision name* is a content promise, not a size promise. When two
-valid archive encodings of different row sets share the same byte-size band,
-gate restore and publish on the reviewed row invariants — never on file size
-alone.
+A cache key's *revision name* is a content promise, not a size promise: gate
+restore and publish on every reviewed row set that catalog tasks declare in the
+base image, and extend that gate whenever a task adds base-image content.
 
 ## Schema-only refresh during PR #1299
 
