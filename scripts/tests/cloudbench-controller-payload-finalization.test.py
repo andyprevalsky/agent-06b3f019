@@ -575,14 +575,36 @@ m["main"]()
         with tempfile.TemporaryDirectory() as name:
             out = Path(name)
             journal = out / "payload-finalization-resume-0123456789abcdef"
+            # The recognizer pins the original operator's exact helper bytes
+            # (operator 447bf65e8), not whatever the live checkout holds now.
+            source = out / "original-source"
+            for relative in (
+                "cloudbench-disposable-controller.py",
+                "cloudbench-original-volume-capture.py",
+                "lib/cloudbench-inventory.sh",
+            ):
+                target = source / "scripts" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(
+                    subprocess.check_output(
+                        ["git", "-C", str(ROOT), "show", "447bf65e8:scripts/" + relative]
+                    )
+                )
+            for command in (
+                ["init", "-q"],
+                ["add", "scripts"],
+                ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "-qm", "original operator sources"],
+            ):
+                subprocess.run(["git", "-C", str(source), *command], check=True)
             state = {
                 "out": str(out),
-                "source_root": str(ROOT),
+                "source_root": str(source),
                 "machine_id": "a" * 14,
-                "source_ref": M["B"]["git"](ROOT, "rev-parse", "HEAD"),
+                "source_ref": M["B"]["git"](source, "rev-parse", "HEAD"),
             }
-            helper = str(ROOT / "scripts/cloudbench-disposable-controller.py")
-            transport = str(ROOT / "scripts/cloudbench-original-volume-capture.py")
+            helper = str(source / "scripts/cloudbench-disposable-controller.py")
+            transport = str(source / "scripts/cloudbench-original-volume-capture.py")
             log = (
                 "Traceback (most recent call last):\n"
                 f'  File "{helper}", line 221, in <module>\n'
@@ -623,7 +645,7 @@ m["main"]()
             with mock.patch.dict(G, verified_export=lambda _: "sealed"):
                 closure, pins = M["credential_refusal"](state, journal, intent)
                 self.assertEqual(closure, out / "cleanup-call.intent.json")
-                self.assertIn(str(ROOT / "scripts/lib/cloudbench-inventory.sh"), pins)
+                self.assertIn(str(source / "scripts/lib/cloudbench-inventory.sh"), pins)
                 write(out / "export/disposable-delete-machine.intent.json", {})
                 with self.assertRaisesRegex(
                     ValueError, "native cleanup already entered"
