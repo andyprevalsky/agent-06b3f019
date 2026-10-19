@@ -3572,12 +3572,17 @@ async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
     from wmh.core.types import Action, ActionKind, EnvState
     from wmh.providers.base import Message
 
+    from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.wmh_rose_provider import RoseUsageAccumulator, RoseWMHProvider
     from providers.fast_cache.context import current_context
+    from providers.fast_cache.normalize import demo_cache_allowed
     from providers.fast_cache.rose_cache import request_key_material
     from providers.rose import RoseResponse
 
-    goal = "Raise me 5m dollars for my company Rose Labs\nNo questions asked"
+    # The DEMO allowlist is the hash of each DEMO-tagged catalog prompt, so read
+    # the current fundraiser prompt instead of pinning a copy that drifts.
+    goal = get_task_by_name("raise-5m-rose-labs-brex").prompt
+    assert demo_cache_allowed(goal), "The fundraiser catalog prompt must stay a DEMO cache goal"
     keys = []
     sent_prompts = []
 
