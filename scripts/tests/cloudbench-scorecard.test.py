@@ -138,6 +138,35 @@ class Fixtures:
                          kind="sharded", run_dir=str(admission), triggered_at=T0, scheduled_total=4)
         return admission
 
+    def barrier_abort(self, *, shards=3, scheduled=70) -> Path:
+        """Mirrors original600-1792402040642867509: operator SIGTERM at the launch barrier, no
+        terminal.json, controllers released afterwards by the exact cleanup helper's canonical receipts."""
+        admission = self.base / "original600-1792402040642867509"
+        outs = {str(i): {"out": str(admission / f"shard-{i:02d}/run"), "pid": 347865 + i} for i in range(shards)}
+        write(admission / "coordination.json", {
+            "schema": "original600-shard-coordination-v1", "controllers": shards, "scheduled_total": scheduled,
+            "started_at": T0 + 10, "released_at": None, "aborted_at": T0 + 1072, "abort_reason": "operator SIGTERM",
+            "terminated_at": T0 + 1072, "terminate_reason": "operator SIGTERM", "finished_at": T0 + 3124,
+            "infra_true": 0, "exit_codes": {str(i): -9 for i in range(shards)}, "shards": outs})
+        for i in range(shards):
+            run = admission / f"shard-{i:02d}/run"
+            mid, vid = f"80e9037b3942{i:02d}", f"vol_vxmzjq6z13mwl9{i:02d}"
+            write(admission / f"shard-{i:02d}/attempt-start.safe.json", {"started_at_epoch": T0, "source_ref": "7441b41f4c56a24f350303fa31bfcf698e2519ff"})
+            write(run / "shard-status.json", {"schema": "original600-shard-status-v1", "state": "NOT_PUBLISHED",
+                                              "barrier": None, "infra": None, "machine": mid})
+            write(run / "global-abort.json", {"reason": "operator SIGTERM", "release_id": "354e4f818c1ed72f00480145"})
+            write(run / "export/disposable-export.verified.json", "{}")
+            write(run / "export/disposable-controller.ownership.json", {"machine": {"id": mid}, "volume": {"id": vid}})
+            write(run / "export/workspace-volume.ownership.json", {"volume_id": vid})
+            write(run / "export/disposable-controller.release.json", {"machine_deleted": True, "machine_id": mid,
+                                                                     "volume_disposition": "pending_destroy", "volume_id": vid})
+        write(admission / "result.json", {"campaign_status": {}, "jobs": [], "observed_jobs": 0, "missing_jobs": scheduled,
+                                          "scheduled_total": scheduled, "task_status": {}, "infra_failures": 0,
+                                          "hub_group_final_published": True})
+        LEDGER["record"]("launch", admission.name, ledger=self.ledger, goal="70-tasks", slice="70-tasks",
+                         kind="sharded", run_dir=str(admission), triggered_at=T0, scheduled_total=scheduled)
+        return admission
+
 
 def render(path, fixtures, **kw):
     return CARD["build"](path, ledger=fixtures.ledger, now=NOW, **kw)
@@ -227,6 +256,54 @@ class Scorecard(unittest.TestCase):
             now=T0 + 2100))
         item = next(i for i in render(admission, self.f)["experiment"]["lifecycle"] if i["label"].startswith("Guests released"))
         self.assertNotEqual(item["state"], "ok", "an incomplete native audit renders no verified release")
+
+    def controllers_released(self, admission):
+        return next(i for i in render(admission, self.f)["experiment"]["lifecycle"] if i["label"] == "Controllers released")
+
+    def test_canonical_release_receipts_count_controllers_released(self):
+        admission = self.f.barrier_abort()
+        item = self.controllers_released(admission)
+        self.assertEqual(item["state"], "ok", item)
+        self.assertTrue(item["detail"].startswith("3/3 "), item)
+        self.assertIn("pending_destroy", item["detail"])
+        export = admission / "shard-01/run/export"
+        bad = {"machine_deleted": False}, {"volume_disposition": "attached"}, {"machine_id": "abcdefabcdef01"}, {"volume_id": "vol_other"}
+        for change in bad:
+            receipt = json.loads((export / "disposable-controller.release.json").read_text())
+            original = dict(receipt)
+            write(export / "disposable-controller.release.json", dict(receipt, **change))
+            item = self.controllers_released(admission)
+            self.assertEqual((item["state"], item["detail"][:4]), ("pending", "2/3 "), f"{change} must not certify release")
+            write(export / "disposable-controller.release.json", original)
+        (export / "disposable-controller.ownership.json").unlink()
+        self.assertTrue(self.controllers_released(admission)["detail"].startswith("2/3 "),
+                        "a receipt without the exact controller ownership record certifies nothing")
+
+    def test_barrier_abort_before_release_renders_never_started_queue(self):
+        admission = self.f.barrier_abort()
+        data = render(admission, self.f)
+        exp = data["experiment"]
+        self.assertEqual(exp["progress"], {"queued": 70, "in_progress": 0, "completed": 0, "unobserved": 0})
+        self.assertTrue(exp["never_started"])
+        text = CARD["render_text"](data)
+        self.assertIn("QUEUED 70 · IN_PROGRESS 0 · COMPLETED 0/70 · never started", text)
+        self.assertNotIn("QUEUED / IN_PROGRESS / COMPLETED UNMEASURED", text)
+        self.assertIn("never started", self.valid(data))
+        # Any evidence that the barrier could have released keeps the queue UNMEASURED.
+        write(admission / "shard-02/run/global-release.json", {"release_id": "354e4f818c1ed72f00480145"})
+        self.assertIsNone(render(admission, self.f)["experiment"]["progress"])
+        (admission / "shard-02/run/global-release.json").unlink()
+        (admission / "shard-02/run/global-abort.json").unlink()
+        self.assertIsNone(render(admission, self.f)["experiment"]["progress"], "undelivered abort is not proof")
+
+    def test_experiments_per_day_warms_until_one_day_of_goal_history(self):
+        admission = self.f.barrier_abort()
+        text = CARD["render_text"](render(admission, self.f))
+        self.assertIn("experiments/day warming 1h00m · 1 launch (rate after 1 d)", text)
+        self.assertNotIn("24.0 experiments/day", text)
+        self.assertIn("experiments/day warming 1h00m", self.valid(render(admission, self.f)))
+        later = CARD["build"](admission, ledger=self.f.ledger, now=T0 + 2 * 86400)
+        self.assertIn("0.5 experiments/day · 1 launch / 2.00 d", CARD["render_text"](later))
 
     def test_sharded_live_counters_render_running(self):
         data = render(self.f.sharded(live=True), self.f)
