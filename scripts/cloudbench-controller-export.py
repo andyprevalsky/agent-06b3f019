@@ -278,6 +278,16 @@ def launch(args):
     sync_json(args.record, value)
 
 
+def writer_argv(row):
+    """Evidence only: the writer's argv while its birth still matches, else None."""
+    try:
+        raw = Path("/proc", str(row["pid"]), "cmdline").read_bytes()
+    except OSError:
+        return None
+    if birth(row["pid"]) != row["birth"]: return None
+    return [value.decode("utf-8", "replace")[:200] for value in raw.split(b"\0") if value][:4]
+
+
 def controller_active_writers(common, roots, permitted):
     active = writers(roots, permitted)
     ownership = common / "cloudbench-fleet-ownership"
@@ -476,10 +486,16 @@ def export(args):
     record_sha256 = hashlib.sha256(args.record.read_bytes()).hexdigest()
     attempts = []
     for attempt in range(1, EXPORT_SNAPSHOT_ATTEMPTS + 1):
+        # A campaign teardown writer can still be exiting when the step returns;
+        # it shares the same bounded settle as snapshot drift.
         active = controller_active_writers(common, roots, permitted)
         if active:
+            attempts.append({"writers":[dict(row, argv=writer_argv(row)) for row in active], "changed_count":0, "changed":[]})
+            if attempt < EXPORT_SNAPSHOT_ATTEMPTS:
+                time.sleep(EXPORT_SETTLE_SECONDS)
+                continue
             sync_json(args.pending, {"status":"pending", "reason":"live controller writers", "writers":active,
-                                     "record_sha256":record_sha256, **({"snapshot_attempts":attempts} if attempts else {})})
+                                     "record_sha256":record_sha256, "snapshot_attempts":attempts})
             return 75
         # Complete delayed allocation first: ext4 writeback of the campaign's last
         # appends can add an extent block (st_blocks) without touching mtime/ctime.

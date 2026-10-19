@@ -190,7 +190,14 @@ def closed_run(outer, inputs):
     return local_output, json.loads(read(local_config, inputs))
 
 
-INVENTORY_PRODUCER_SHA256 = "f8c22753a9498de5cd9e6c01f672556f8ee3caf6ea13415dd49b73bac8b03163"
+# Reviewed inventory publishers with an identical generation layout; the second
+# only extracts the startup-init predicates into shared helpers.
+INVENTORY_PRODUCER_SHA256S = frozenset(
+    {
+        "f8c22753a9498de5cd9e6c01f672556f8ee3caf6ea13415dd49b73bac8b03163",
+        "5843e509a64380711147b140c346e81622a2f904b300d3af5a247415f5488797",
+    }
+)
 
 
 def inventory_pointer_members(manifest, config):
@@ -217,8 +224,8 @@ def inventory_pointer_members(manifest, config):
         source = files.get("source/scripts/cloudbench-machine-readiness.py", {})
         need(
             source.get("kind") == "file"
-            and source.get("sha256") == INVENTORY_PRODUCER_SHA256
-            and config.get("source_files", {}).get("cloudbench-machine-readiness.py") == INVENTORY_PRODUCER_SHA256,
+            and source.get("sha256") in INVENTORY_PRODUCER_SHA256S
+            and config.get("source_files", {}).get("cloudbench-machine-readiness.py") == source["sha256"],
             "unknown inventory pointer producer",
         )
         required = {
@@ -253,11 +260,13 @@ def inventory_pointer_members(manifest, config):
 
 
 # Reviewed collectors whose cleanup-reserve exclusion semantics are identical; the
-# second only adds pre-snapshot flushing and bounded strict snapshot repetition.
+# second only adds pre-snapshot flushing and bounded strict snapshot repetition, the
+# third lets a still-exiting writer use that same bounded settle.
 RESERVE_COLLECTOR_SHA256S = frozenset(
     {
         "ff7681d3eefde5df2c678cb0f900b66cb2427cf39180c0ed9a5c28e7dd721c1b",
         "8a004d2f194f90229fd4e96306866c3c91502d434b3b535e2f44eddaee3daf19",
+        "a1710a683614345b8d9908ac3e811c8a773813b9b9968d78862a71b7b4ce7ad3",
     }
 )
 
@@ -441,7 +450,7 @@ def archive_members(run, closure, request, config, inputs):
         closure["inventory_pointer_proof"] = dict(
             schema="cloudbench-archived-inventory-pointer-v1",
             pointers=inventory_pointers,
-            producer_sha256=INVENTORY_PRODUCER_SHA256,
+            producer_sha256=manifest["files"]["source/scripts/cloudbench-machine-readiness.py"]["sha256"],
             followed=False,
             capacity_credit=0,
             claim_credit=0,

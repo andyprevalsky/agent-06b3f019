@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Actual local owned Hub process retirement; no provider operations."""
-import hashlib,json,os,runpy,subprocess,sys,tempfile,time,types,unittest
+import hashlib,json,os,runpy,shlex,subprocess,sys,tempfile,time,types,unittest
 from pathlib import Path
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[2]
@@ -10,7 +10,8 @@ class Finalize(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.repo=Path(self.tmp.name)/'repo';self.hub=self.repo/'.context/fleet/runs/_hub';self.hub.mkdir(parents=True);self.out=Path(self.tmp.name)/'custody';self.out.mkdir();self.script=self.repo/'agents/benchmarks/agent_link_server.py';self.script.parent.mkdir(parents=True);self.script.write_text('import time\ntime.sleep(60)\n')
   self.child=subprocess.Popen([sys.executable,str(self.script)],cwd=self.repo);self.addCleanup(self.join)
-  while not M['birth'](self.child.pid):time.sleep(.01)
+  # Popen returns after fork; wait for exec so retirement reads the Hub's own argv.
+  while not M['birth'](self.child.pid) or os.fsencode(self.script) not in Path('/proc',str(self.child.pid),'cmdline').read_bytes():time.sleep(.01)
   argv=[str(self.script)];self.owner=dict(pid=str(self.child.pid),pid_start=M['birth'](self.child.pid),repo_root=str(self.repo),root=str(self.hub.parent),runs_root=str(self.hub.parent),context_dir=str(self.hub),command=str(self.script),status='live-transfer-required',host='127.0.0.1',port='8765',owner_token='a'*32,argv_sha256=hashlib.sha256(b'\0'.join(os.fsencode(x)for x in argv)).hexdigest());self.path=self.hub/('agent-link-server.8765.'+'a'*32+'.owner');self.write()
  def write(self):
   if self.path.exists():self.path.chmod(0o600)
@@ -60,6 +61,22 @@ raise SystemExit(75 if active else 0)
   script='bound_controller_export() { '+sys.executable+' '+str(adapter)+' "$@"; }; '+rendered+'\nexit "$export_rc"'
   result=subprocess.run(['bash','-c',script],env=dict(os.environ,HELPER=str(ROOT/'scripts/cloudbench-controller-export.py'),REPO=str(self.repo),CHILD=str(self.child.pid),OUT=str(self.out)),text=True,capture_output=True)
   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+ def test_rendered_gate_logs_pending_reason_and_writer_names(self):
+  # shard-01's guest pending.json was destroyed with the host; only the log survived.
+  gate=(ROOT/'scripts/run-cloudbench-controller-gate').read_text()
+  start=gate.index('  if [ "$EXPORT_HOST" = 1 ]; then',gate.index('GATE_FAILED_STEPS${failed_steps}'))
+  end=gate.index('\n  fi',start)+5
+  rendered=subprocess.check_output(['bash','-c','EXPORT_HOST=1;DISPOSABLE_AUTHORITY=;'+gate[start:end]],text=True)
+  pending=Path(self.tmp.name)/'pending.json';rendered=rendered.replace('/tmp/gate/controller-host-custody/pending.json',str(pending))
+  attempt=dict(writers=[dict(pid=1259,birth='b',argv=['/usr/bin/python3','/repo/agents/benchmarks/agent_link_server.py','--token','s3cret'])],changed_count=0,changed=[])
+  fake='bound_controller_export() { printf %s '+shlex.quote(json.dumps(dict(status='pending',reason='live controller writers',writers=[dict(pid=1259,birth='b')],snapshot_attempts=[attempt]*3)))+' > '+shlex.quote(str(pending))+'; return 75; }; '
+  result=subprocess.run(['bash','-c',fake+rendered],text=True,capture_output=True)
+  self.assertIn('GATE_EXPORT exit=75',result.stdout,result.stderr)
+  line=next(row for row in result.stdout.splitlines() if row.startswith('GATE_EXPORT_PENDING_DETAIL '))
+  detail=json.loads(line.split(' ',1)[1])
+  self.assertEqual(detail['reason'],'live controller writers');self.assertEqual(detail['writers'],[1259])
+  self.assertEqual(detail['attempt_writers'],[[{'pid':1259,'argv':['python3','agent_link_server.py']}]]*3)
+  self.assertNotIn('s3cret',result.stdout)
  def test_gate_only_disposable_after_wait_and_before_export(self):
   gate=(ROOT/'scripts/run-cloudbench-controller-gate').read_text();a=gate.index('wait "$command_pid"; rc=$?');b=gate.index('controller-command.joined.json',a);c=gate.index('finalize_hubs=""',b);d=gate.index('bound_controller_export export',c)
   self.assertLess(a,b);self.assertLess(b,c);self.assertLess(c,d);self.assertIn('[ -z "$DISPOSABLE_AUTHORITY" ] || finalize_hubs=" --finalize-disposable-hubs"',gate)
@@ -156,4 +173,23 @@ class QuiescingOriginalsExport(unittest.TestCase):
   with patch.dict(G,{'writers':writers}):code=self.export()
   self.assertEqual(code,75);self.assertFalse(self.manifest.exists())
   self.assertEqual(json.loads(self.pending.read_text())['reason'],'live controller writers')
+ def test_transient_writer_at_first_check_settles_into_verified_export(self):
+  # original600-1792440129763435696 shard-01: export ran 8 s after the campaign step
+  # while a teardown writer was still exiting; it returned 75 once and was never retried.
+  self.flushed=True;seen=[]
+  def writers(roots,permitted):
+   seen.append(1);return [{'pid':1259,'birth':'proc-start:fixture:1259'}] if len(seen)==1 else []
+  with patch.dict(G,{'writers':writers}):code=self.export()
+  self.assertEqual(code,0,self.pending.read_text() if self.pending.exists() else '')
+  self.assertFalse(self.pending.exists());self.assertEqual(self.verify(),0)
+ def test_persistent_writer_fails_closed_after_bounded_attempts(self):
+  self.flushed=True;seen=[]
+  def writers(roots,permitted):
+   seen.append(1);return [{'pid':4242,'birth':'proc-start:fixture:4242'}]
+  with patch.dict(G,{'writers':writers}):code=self.export()
+  self.assertEqual(code,75);self.assertFalse(self.archive.exists());self.assertFalse(self.manifest.exists())
+  pending=json.loads(self.pending.read_text());self.assertEqual(pending['reason'],'live controller writers')
+  self.assertEqual(len(seen),G['EXPORT_SNAPSHOT_ATTEMPTS'])
+  self.assertEqual([row['writers'][0]['pid'] for row in pending['snapshot_attempts']],[4242]*G['EXPORT_SNAPSHOT_ATTEMPTS'])
+  self.assertFalse(list(self.custody.glob('.controller-export-*')))
 if __name__=='__main__':unittest.main()
