@@ -6,7 +6,7 @@ from domains.spawn_browser_agent_v3.service_crypto import ExtractedOTP
 
 
 async def assert_otp_reference_retries_after_unaccepted_write(owning_fixture, cancelled=False):
-    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
+    with _offline_activity_edges():
         await owning_fixture("persistence_cancelled" if cancelled else "persistence_false")
 
 
@@ -31,7 +31,7 @@ def assert_unexecuted_action_refund_is_bounded():
 
 
 @contextmanager
-def _offline_activity_edges(*, handoff_review=None):
+def _offline_activity_edges():
     """Fail even when an unexpected external attempt is swallowed by activity code."""
     attempts = []
 
@@ -40,8 +40,6 @@ def _offline_activity_edges(*, handoff_review=None):
         raise AssertionError("OTP owning control forbids network")
 
     async def scripted_progress(*args, **kwargs):
-        if len(args)>5 and args[5]=="verifier_browser_auth_handoff" and handoff_review is not None:
-            return dict(handoff_review)
         return {"progress": 0, "output": None, "usage": {}}
 
     try:
@@ -63,13 +61,13 @@ def _offline_activity_edges(*, handoff_review=None):
 
 async def assert_last_unexecuted_handoff_action_is_refunded(owning_fixture):
     from domains.spawn_browser_agent_v3.config import MAX_ITERATIONS
-    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
+    with _offline_activity_edges():
         await owning_fixture("fresh", MAX_ITERATIONS - 1)
 
 
 async def assert_otp_at_exhausted_budget_does_not_run_more_actions(owning_fixture):
     from domains.spawn_browser_agent_v3.config import MAX_ITERATIONS
-    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
+    with _offline_activity_edges():
         await owning_fixture("fresh", MAX_ITERATIONS, expected_exhaustion=True)
 
 
@@ -124,7 +122,7 @@ async def assert_sealed_otp_poll_stops_activity(owning_fixture, path="settled_dr
     original_handler, callback_errors = loop.get_exception_handler(), []
     loop.set_exception_handler(lambda _loop, context: callback_errors.append(context))
     try:
-        with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
+        with _offline_activity_edges():
             await owning_fixture(case)
             await asyncio.sleep(0)
     finally:
@@ -134,5 +132,5 @@ async def assert_sealed_otp_poll_stops_activity(owning_fixture, path="settled_dr
 
 async def assert_repeated_supersession_is_bounded(owning_fixture, case="repeated_fresh"):
     from domains.spawn_browser_agent_v3.config import MAX_ITERATIONS
-    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
+    with _offline_activity_edges():
         await owning_fixture(case, MAX_ITERATIONS - 1)

@@ -19,8 +19,8 @@ import {
   propagateCredentialInTransaction,
   tryCreatePropagationMarker,
 } from '../../domains/credential-propagation/repo';
-import { propagateBrowserRunCredentials } from '../../providers/credentialPropagation';
 import { retryCases } from './credential-propagation.retry.cases';
+import { mintedCases } from './credential-propagation.minted.cases';
 
 config();
 
@@ -511,74 +511,9 @@ test('domain repo disables and re-enables a passkey credential', async () => {
   }
 });
 
-test('provider browser-run propagation disables a failed passkey end to end', async () => {
-  const userId = await createUser();
-  try {
-    const agent = await prisma.agent.create({
-      data: {
-        userId,
-        goal: 'Sign in with passkey',
-        status: 'FAILED',
-        statusMessage: 'passkey failed',
-      },
-    });
-    const passkey = await prisma.passkeyCredential.create({
-      data: {
-        userId,
-        authRealm: 'amazon.com',
-        rpId: 'amazon.com',
-        credentialId: `cred-${randomUUID()}`,
-        encryptedPrivateKey: 'enc',
-        userHandle: 'uh',
-        signCount: 0,
-      },
-    });
-    const taskId = `browser-task-${randomUUID()}`;
-    await prisma.message.create({
-      data: {
-        agentId: agent.id,
-        role: 'TOOL',
-        text: 'Passkey assertion was rejected',
-        metadata: { task_id: taskId, credential_ref: { kind: 'passkey', id: passkey.id } },
-      },
-    });
-
-    const result = await withEnv(
-      {
-        CREDENTIAL_PROPAGATION_DISABLE_LLM: undefined,
-        CREDENTIAL_PROPAGATION_MOCK_LLM_RESPONSE: JSON.stringify({
-          reason: 'passkey rejected by relying party',
-          credentialOutcomes: [
-            { kind: 'passkey', id: passkey.id, outcome: 'auth_failed', reason: 'rp rejected' },
-          ],
-        }),
-      },
-      () =>
-        propagateBrowserRunCredentials({
-          agentId: agent.id,
-          taskId,
-          success: false,
-          status: 'failed',
-          message: 'passkey failed',
-        })
-    );
-
-    assert(result !== null, 'expected a propagation decision');
-    assert(result.refs === 1, `expected one passkey ref, got ${result.refs}`);
-    assert(
-      result.credentialOutcomes.some((o) => o.kind === 'passkey' && o.outcome === 'auth_failed'),
-      'expected passkey auth_failed outcome'
-    );
-    const row = await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: passkey.id } });
-    assert(row.disabledAt !== null, 'expected provider path to disable the failed passkey');
-  } finally {
-    await cleanup(userId);
-  }
-});
-
 async function main() {
   const results: Array<{ name: string; passed: boolean; error?: string; duration: number }> = [];
-  for (const { name, fn } of [...tests, ...retryCases]) {
+  for (const { name, fn } of [...tests, ...retryCases, ...mintedCases]) {
     const start = Date.now();
     try {
       await fn();

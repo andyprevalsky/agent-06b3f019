@@ -7,10 +7,8 @@ EXHAUSTED_AUTH_OPTIONS_HANDOFF_RULE = 'When authentication still blocks the task
 
 
 AUTH_ASSISTANCE_HANDOFF_RULE = (
-    "Keep the current sign-in or verification step open and visible when requesting help. "
-    "Do not go back, restart sign-in, or repeat a successful step merely to show a password or code form. "
-    "When the current step requires an action only the user can perform, request assistance "
-    "promptly instead of waiting for an action you have not asked the user to take."
+    "Before calling request_user_assistance_for_authentication, leave the auth step you are blocked on "
+    "open and visible, so the user can complete it without navigating."
 )
 
 

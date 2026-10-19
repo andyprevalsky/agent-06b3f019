@@ -6,6 +6,8 @@
 
 import { generateKeyPairSync, randomBytes } from '../../providers/crypto';
 import { encryptPasswordForStorage } from '../../providers/credentialEnvelope';
+import { prisma } from '../../providers/database';
+import { saveMintedPasswordlessLogin } from '../../providers/mintedAccountPassword';
 import * as repo from './repo';
 import { AUTH_TEST_SITE_BASE_PATH, SAVED_SESSION_LIFETIME_MS, SESSION_COOKIE_NAME } from './config';
 import type { ScenarioPlan } from './serviceScenarios';
@@ -36,6 +38,25 @@ export async function seedSavedPasswords(
     });
   }
   return records;
+}
+
+/**
+ * Records the minted identity's existing account through the same writer a
+ * successful minted sign-in uses, so the fixture is a state production makes.
+ */
+export async function seedMintedLogin(
+  site: AuthTestSite,
+  plan: ScenarioPlan,
+  nowMs: number
+): Promise<SavedPasswordRecord[]> {
+  if (plan.mintedLogin === null || plan.mintedLogin === '') return [];
+  const username = plan.mintedLogin;
+  await prisma.$transaction((tx) =>
+    saveMintedPasswordlessLogin(tx, { userId: site.userId, origin: site.entryUrl, username, nowMs })
+  );
+  const id = await repo.findSavedPasswordId(site.userId, site.entryUrl, username);
+  if (id === null) throw new Error('the minted passwordless login was not recorded');
+  return [{ id, username, matchesAccount: true }];
 }
 
 /**

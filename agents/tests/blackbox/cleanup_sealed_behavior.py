@@ -89,5 +89,5 @@ async def assert_first_native_seal_during_background_cleanup(stage="diagnostics"
 
 
 async def assert_first_native_seal_during_activity_finally(owning_fixture, resolution=False):
-    with _offline_activity_edges(handoff_review={"score": 1.0, "reasoning": "Scripted supported human transfer in this owning fixture", "usage": {}}):
+    with _offline_activity_edges():
         await owning_fixture("finally_resolution_first_seal" if resolution else "finally_diagnostics_first_seal")

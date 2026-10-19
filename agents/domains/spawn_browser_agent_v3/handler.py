@@ -88,7 +88,6 @@ from .activity_heartbeat import (
     stop_browser_activity_heartbeat,
     wait_for_browser_work,
 )
-from .auth_assessment import auth_assistance_assessment_result
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
@@ -7105,7 +7104,7 @@ async def _spawn_browser_agent_activity_v3_real(
         if isinstance(metadata, dict) and isinstance(trusted_credential_ref, dict):
             visible_ref = metadata.get("credential_ref")
             if isinstance(visible_ref, dict):
-                for key in ("kind", "id"):
+                for key in ("kind", "id", "username", "origin"):
                     if isinstance(trusted_credential_ref.get(key), str):
                         visible_ref[key] = trusted_credential_ref[key]
         auxiliary = kwargs.get("auxiliary")
@@ -9529,126 +9528,6 @@ async def _spawn_browser_agent_activity_v3_real(
             if action_name == "attempt_completion":
                 auth_runtime_state.mark_guest_attempted()
 
-            # An explicit per-recipient assessment is part of the assistance
-            # action contract. Return actual missing/remaining facts to the
-            # planner; never choose or submit another identity on its behalf.
-            if action_name == "request_user_assistance_for_authentication":
-                assessment_result = auth_assistance_assessment_result(
-                    (unified_action.get("params") or {}).get("auth_assessment"),
-                    auth_options=auth_options, auth_realm=auth_realm, current_url=current_url,
-                    action_history=action_history.get_entries(),
-                    model_visible_value=dom_service.model_visible_value,
-                    secret_redaction_refs=action_history.secret_redaction_state().get("secret_redaction_refs"),
-                )
-                if assessment_result is None:
-                    from .handoff_verification import AUTH_HANDOFF_VERIFICATION_GOAL, build_auth_handoff_verifier_context
-                    try:
-                        observed_state = await asyncio.wait_for(
-                            dom_service.get_browser_state(include_screenshot=True),
-                            timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-                        )
-                        observed_url = observed_state.get("url") or observed_state.get("current_url")
-                        observed_native_url = _private_browser_runtime_url(dom_service, observed_url)
-                        if (observed_native_url != current_url
-                                or observed_url != dom_service.model_visible_value(current_url)):
-                            assessment_result = {
-                                "success": False, "error": "authentication_handoff_page_changed",
-                                "reason": "Fresh browser observation does not match the assessed page; reassess its current inventory and blocker.",
-                                "observed_url": observed_url,
-                            }
-                        else:
-                            await sync_user_instructions(require_current_schema=True)
-                            handoff_instruction_count = len(user_instruction_messages)
-                            review_context = await build_browser_verifier_context(
-                                goal=goal, current_url=current_url, browser_state=observed_state,
-                                user_instruction_messages=user_instruction_messages,
-                                action_history=action_history, config=config, session_id=session_id,
-                                browser_checkpoints=verifier_checkpoints,
-                                verification_goal=AUTH_HANDOFF_VERIFICATION_GOAL,
-                            )
-                            if hasattr(dom_service, "model_visible_value"):
-                                review_context = _model_visible_browser_verifier_context(
-                                    review_context, dom_service, observed_state,
-                                )
-                            review_context = build_auth_handoff_verifier_context(
-                                review_context, auth_options=auth_options,
-                                assessment=(unified_action.get("params") or {}).get("auth_assessment"),
-                            )
-                            review_context[-1]["text"] = _redact_activity_value(review_context[-1]["text"])
-                            review = await call_temporal_activity_from_activity(
-                                check_progress,
-                                args=[review_context, build_verifier_prompt(), VERIFIER_ULTRA_MODEL, None,
-                                    token_state.access_token, "verifier_browser_auth_handoff", agent_id,
-                                    None, None, user_id, gpt_token, gpt_account_id,
-                                    gpt_token_source, gpt_token_pool_id, user_id, None, None,
-                                    ({"browser_recording_manifest_path": str(browser_recorder.output_dir / "manifest.json"),
-                                      "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
-                                      "browser_recording_task_id": browser_recorder.task_id,
-                                      "browser_session_metadata": browser_session_metadata} if browser_recorder else None),
-                                    bool(fast_mode_cache_enabled), goal if fast_mode_cache_enabled else None, int(iteration or 0)],
-                                start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
-                            )
-                            review_usage = review.get("usage") or {}
-                            total_input_tokens += review_usage.get("prompt_tokens", 0) or 0
-                            total_output_tokens += review_usage.get("completion_tokens", 0) or 0
-                            accumulate_model_usage(
-                                usage_by_model, review_usage.get("actual_model"),
-                                review_usage.get("prompt_tokens", 0) or 0,
-                                review_usage.get("completion_tokens", 0) or 0,
-                                cache_read_input_tokens=int(review_usage.get("cache_read_input_tokens") or 0),
-                                cache_creation_input_tokens=int(review_usage.get("cache_creation_input_tokens") or 0),
-                                from_fast_cache=bool(review_usage.get("from_fast_cache")),
-                                cache_sequence_id=review_usage.get("cache_sequence_id"),
-                            )
-                            await _save_browser_action_message(
-                                agent_id=agent_id, title="Authentication handoff verification", task_id=task_id,
-                                message=review.get("reasoning") or "No verification reasoning returned.",
-                                status=MessageStatus.FINISHED, browser_url=browser_url, action_type="system",
-                                tool_call_id=str(uuid_module.uuid4()),
-                            )
-                            if (not review.get("verdict_available", True) or review.get("score") != 1.0
-                                    or isinstance(review.get("score"), bool)
-                                    or review_usage.get("actual_model") == "fast-mode-soft-complete"):
-                                assessment_result = {"success": False, "error": "authentication_handoff_unverified",
-                                                     "reason": review.get("reasoning") or "Independent verification did not establish the handoff preconditions."}
-                            else:
-                                # Reuse the bounded inbox owner after the independent await.
-                                otp_poll_task = asyncio.create_task(
-                                    _fetch_and_append_recent_otp_user_messages(
-                                        user_id=user_id, api_url=config.backend.api_url,
-                                        api_key=config.backend.api_key, seen_otp_codes=seen_otp_codes,
-                                        otp_user_messages=otp_user_messages,
-                                        credential_refs_by_secret_ref=otp_credential_refs,
-                                        pending_otp_ref_messages=pending_otp_ref_messages,
-                                        agent_id=agent_id, task_id=task_id,
-                                        task_elapsed_seconds=time.monotonic() - otp_task_started_monotonic,
-                                    )
-                                )
-                                await _drain_otp_poll(otp_poll_task)
-                                otp_poll_task = None
-                                await sync_user_instructions(require_current_schema=True)
-                                if (handoff_instruction_count != len(user_instruction_messages)
-                                        or int(instruction_state.get("schema_user_instruction_count") or 0) < len(user_instruction_messages)
-                                        or len(otp_user_messages) > otp_history_count):
-                                    assessment_result = {"success": False, "error": "authentication_handoff_input_changed"}
-                    except (BrowserInstructionUnavailableError, WorkflowGenerationSealed):
-                        raise
-                    except Exception:
-                        assessment_result = {"success": False, "error": "authentication_handoff_unverified",
-                                             "reason": "Independent verification was unavailable; no handoff was committed."}
-                if assessment_result is not None:
-                    await action_history.record_action(
-                        dom_service=dom_service, action=action_name, thinking=thinking,
-                        params=unified_action.get("params") or {}, result=assessment_result,
-                    )
-                    _append_browser_turn_messages(
-                        browser_turn_messages, unified_action=unified_action,
-                        result=assessment_result,
-                        tool_call_id=str(llm_result.get("tool_call_id") or uuid_module.uuid4()),
-                    )
-                    await browser_stream.finish_tools(status="ERROR")
-                    continue
-
             # 5. Handle special actions
             if action_name == "request_user_assistance_for_authentication":
                 tool_call_id_action = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
@@ -9869,8 +9748,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     or (request_info.get("request") or {}).get("id")
                 )
 
-                success_result = {"success": True, "request_id": request_id,
-                                  "auth_assessment": (unified_action.get("params") or {})["auth_assessment"]}
+                success_result = {"success": True, "request_id": request_id}
                 if dom_service is not None:
                     await action_history.record_action(
                         dom_service=dom_service,
@@ -9924,7 +9802,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_url=browser_url,
                     status="awaiting_auth_assistance",
                     success=False,
-                    message=(unified_action.get("params") or {})["auth_assessment"]["reason"],
+                    message="Automated authentication options were exhausted; requesting user assistance.",
                 )
                 await browser_stream.finish_tools(status="FINISHED")
 
@@ -9949,7 +9827,6 @@ async def _spawn_browser_agent_activity_v3_real(
                     "browser_page_observation": public_parked_page,
                     "request_id": request_id,
                     "auth_assistance_request": request_info,
-                    "auth_assessment": (unified_action.get("params") or {})["auth_assessment"],
                     "base_site": base_site,
                     "auth_realm": auth_realm or base_site,
                     "task_id": task_id,
@@ -11137,6 +11014,18 @@ Based on this feedback, I need to continue working on the task and address the i
                 and str(unified_action.get("params", {}).get("text", "")).strip().lower() in minted_account_labels
             ):
                 result["credential_ref"] = minted_credential_ref
+            if (
+                action_name == "input_text"
+                and isinstance(result.get("credential_ref"), dict)
+                and result["credential_ref"].get("kind") == "minted_account"
+            ):
+                # Post-run propagation saves the exact identifier that signed in
+                # as a passwordless login for this site, so record what was typed.
+                result["credential_ref"] = {
+                    **result["credential_ref"],
+                    "username": str(unified_action.get("params", {}).get("text", "")),
+                    "origin": str(current_url or ""),
+                }
 
             _append_browser_turn_messages(
                 browser_turn_messages,
@@ -13188,7 +13077,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "toolName": "spawn_browser_agent",
                                 "action_type": "auth_assistance",
                                 "browser_page_observation": result.get("browser_page_observation"),
-                                **({"auth_assessment": result["auth_assessment"]} if result.get("auth_assessment") else {}),
                                 "task_id": result.get("task_id"),
                                 "requestUserAuthentication": {
                                     "requestId": request_id,

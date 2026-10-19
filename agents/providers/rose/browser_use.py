@@ -30,7 +30,7 @@ from tools.prompts import attempt_completion_prompt
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
-from utils.browser_auth_contract import AUTH_ASSISTANCE_HANDOFF_RULE, build_authentication_contract
+from utils.browser_auth_contract import build_authentication_contract
 
 logger = structlog.get_logger()
 
@@ -219,9 +219,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "available, the minted agent account when it has an email, and guest/anonymous completion when the "
             "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
             "Steel-session auth are applied automatically before you start. "
-            + AUTH_ASSISTANCE_HANDOFF_RULE
-            + " "
-            + "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
+            "Before calling, leave the auth step you are blocked on open and visible, so the user can "
+            "complete it without navigating. "
+            "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
             "unusual-traffic pages - those are not authentication blockers. Use recover_from_challenge for "
             "those instead of trying to solve them yourself."
         ),
@@ -730,9 +730,9 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
                 "account when it has an email, and guest/anonymous completion when the page "
                 "offers it (for example Continue as guest, Checkout as guest, or I'll reserve). "
                 "Cookie and Steel-session auth are applied automatically before you start. "
-                + AUTH_ASSISTANCE_HANDOFF_RULE
-                + " "
-                + "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
+                "Before calling, leave the auth step you are blocked on open and visible, so the user "
+                "can complete it without navigating. "
+                "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
                 "access-denied interstitials, or unusual-traffic pages - those are not "
                 "authentication blockers. Wait briefly or try an alternate URL/path instead "
                 "of trying to solve them yourself."
@@ -1379,9 +1379,6 @@ def _normalize_action_params(
     first_action: Dict[str, Any],
     index: Any,
 ) -> Dict[str, Any]:
-    if normalized_action == "request_user_assistance_for_authentication":
-        return {"auth_assessment": params.get("auth_assessment")}
-
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
 

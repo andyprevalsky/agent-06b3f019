@@ -352,23 +352,18 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
 
 def test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_recovery():
     """A handoff preserves the current auth step, including an accepted-password challenge."""
-    rule = (
-        "Keep the current sign-in or verification step open and visible when requesting help. "
-        "Do not go back, restart sign-in, or repeat a successful step merely to show a password or code form."
-    )
+    blocked_step = "leave the auth step you are blocked on open and visible"
     for disable_recover in ("", "1"):
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": disable_recover}):
             (auth_help,) = build_browser_use_tools(["request_user_assistance_for_authentication"])
             prompt = build_browser_use_system_prompt(
                 ["request_user_assistance_for_authentication", "recover_from_challenge"]
             )
-        assert rule in auth_help["description"], f"tool description missing rule (disable={disable_recover!r})"
-        assert rule in prompt, f"system prompt missing rule (disable={disable_recover!r})"
-        assert (
-            "When the current step requires an action only the user can perform, request assistance "
-            in auth_help["description"]
-        )
+        assert blocked_step in auth_help["description"], f"tool description missing rule (disable={disable_recover!r})"
+        assert blocked_step in prompt, f"system prompt missing rule (disable={disable_recover!r})"
+        # A pending approval is the blocked step; sending the agent back to a password form cancels it.
         assert "username/password or code entry" not in auth_help["description"]
+        assert "username/password or code entry" not in prompt
 
 
 def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
@@ -427,8 +422,8 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert auth_help["description"] == BROWSER_USE_TOOLS["request_user_assistance_for_authentication"]["description"]
     assert "Never use this for CAPTCHA" in auth_help["description"]
     assert "Bot or Not" in auth_help["description"]
-    assert set(auth_help["input_schema"]["properties"]) == {"auth_assessment"}
-    assert auth_help["input_schema"]["required"] == ["auth_assessment"]
+    assert auth_help["input_schema"]["properties"] == {}
+    assert auth_help["input_schema"]["required"] == []
 
     payment = tools[3]
     assert "only if checkout requires you to enter new card details" in payment["description"]
@@ -1434,46 +1429,13 @@ def test_normalize_provider_special_key_batch_keeps_first_action():
 
 
 def test_normalize_request_user_assistance():
-    from browser_tools.schemas import RequestUserAssistanceForAuthenticationBrowserTool
-    from domains.spawn_browser_agent_v3.auth_assessment import auth_assistance_assessment_result
-    from pydantic import ValidationError
-
-    assessment = {
-        "auth_realm": "shop.example", "page_url": "https://shop.example/verify",
-        "blocker": "user_only_verification", "reason": "The accepted account requires approval on its other device.",
-        "recipient_options": [{"method": "email_otp", "recipient": "owned@example.test",
-                               "status": "not_applicable", "evidence": "The accepted challenge cannot use an email code."}],
-    }
     out = normalize_browser_use_response(
-        {"action": [{"request_user_assistance_for_authentication": {"auth_assessment": assessment}}]}
+        {
+            "action": [{"request_user_assistance_for_authentication": {}}],
+        }
     )
     assert out["action"] == "request_user_assistance_for_authentication"
-    assert out["params"] == {"auth_assessment": assessment}
-    assert RequestUserAssistanceForAuthenticationBrowserTool.model_validate(
-        {"tool": out["action"], **out["params"]}
-    ).auth_assessment.recipient_options[0].recipient == "owned@example.test"
-
-    # Normalization preserves missing/invalid input for the owning validators;
-    # it must not manufacture a valid assessment or silently discard metadata.
-    missing = normalize_browser_use_response({"action": [{"request_user_assistance_for_authentication": {}}]})
-    assert missing["params"] == {"auth_assessment": None}
-    invalid = {**assessment, "blocker": "unknown_blocker"}
-    malformed = normalize_browser_use_response(
-        {"action": [{"request_user_assistance_for_authentication": {"auth_assessment": invalid}}]}
-    )
-    assert malformed["params"] == {"auth_assessment": invalid}
-    for params in (missing["params"], malformed["params"]):
-        try:
-            RequestUserAssistanceForAuthenticationBrowserTool.model_validate({"tool": out["action"], **params})
-        except ValidationError:
-            pass
-        else:
-            raise AssertionError("Missing/invalid auth assessment accepted by native tool schema")
-        result = auth_assistance_assessment_result(
-            params["auth_assessment"], auth_options={}, auth_realm="shop.example",
-            current_url="https://shop.example/verify", action_history=[],
-        )
-        assert result["error"] == "authentication_assessment_incomplete"
+    assert out["params"] == {}
 
 
 def test_normalize_request_payment_card_preserves_receipt():
@@ -2520,7 +2482,7 @@ async def test_completed_browser_output_validation_is_not_transport_or_completio
                 raise AssertionError("expected original transport/control error")
             except BaseException as error:
                 assert error is original and not isinstance(error, BrowserModelOutputValidationError)
-        typed = RoseResponse(tool_calls=[{"id": "real-tool", "name": "request_user_assistance_for_authentication", "arguments": "{}"}])
+        typed = RoseResponse(tool_calls=[{"id": "real-tool", "name": "wait", "arguments": '{"time_ms": "not-a-number"}'}])
         client.collect = AsyncMock(return_value=typed)
         try:
             await client.complete_browser_use(**kwargs)

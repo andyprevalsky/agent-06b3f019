@@ -38,6 +38,7 @@ import './auth-test-site.codes.cases';
 import './auth-test-site.signup-shop.cases';
 import './auth-test-site.checkout.cases';
 import './auth-test-site.lifecycle.cases';
+import './auth-test-site.minted-login.cases';
 
 test('fixture management requires the internal API key and unknown sites 404', async () => {
   const forbidden = await fetch(`${BASE_URL}${AUTH_TEST_SITE_BASE_PATH}/fixtures`, {
@@ -368,7 +369,11 @@ test('minted_otp: the emailed code reaches the minted inbox and signs in', async
       assert(created.status === 201, `fixture expected 201, got ${created.status}`);
       const manifest = (await created.json()) as Manifest;
       assert(manifest.mintedEmail === mintedEmail, `minted email mismatch ${manifest.mintedEmail}`);
-      assert(manifest.authOptionsPreview.passwordUsernames.length === 0, 'no saved passwords');
+      assert(
+        JSON.stringify(manifest.authOptionsPreview.passwordUsernames) ===
+          JSON.stringify([mintedEmail]),
+        'the minted account is its recorded passwordless login'
+      );
       assert(manifest.expectedSignInEmail === mintedEmail, 'minted account must be the target');
 
       const unknown = await postForm(base, pagePath(manifest, '/login/code'), {

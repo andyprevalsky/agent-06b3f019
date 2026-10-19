@@ -83,6 +83,14 @@ export async function upsertSavedPassword(params: {
   return row.id;
 }
 
+export async function findSavedPasswordId(userId: string, origin: string, username: string) {
+  const row = await prisma.browserPassword.findUnique({
+    where: { userId_origin_username: { userId, origin, username } },
+    select: { id: true },
+  });
+  return row?.id ?? null;
+}
+
 export async function findSavedPasswordStates(ids: string[]) {
   if (ids.length === 0) return [];
   return prisma.browserPassword.findMany({

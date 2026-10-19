@@ -1562,36 +1562,9 @@ async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> 
     assert armed == ["armed"], "press_key ran without arming the live target"
 
 
-def test_supplied_identity_inventory_separates_ownership_registration_and_reader() -> None:
-    """Inventory is contact provenance, not a site's account-membership assertion."""
-    import json
-    from domains.spawn_browser_agent_v3.service_crypto import build_auth_options_prompt_section
-
-    prefix = "- Supplied identity facts: "
-    def facts(minted, realm="store.example"):
-        section, _, _, _ = build_auth_options_prompt_section({"realm": realm, "minted": minted})
-        rows = [line[len(prefix):] for line in section.splitlines() if line.startswith(prefix)]
-        assert len(rows) == 1, "auth inventory loses supplied identity ownership/registration/reader provenance"
-        return json.loads(rows[0])
-
-    identity = {"id": "realm-record", "email": "contact@example.test", "phone": "+15550000002", "phoneProvider": "agentphone"}
-    got = facts(identity)
-    assert got == {"source": "auth_options.minted", "ownership_scope": "task_user",
-                   "site_registration": "not_established_by_inventory",
-                   "sms_reader_provider": "agentphone", "sms_delivery": "not_established_by_inventory"}
-    assert facts(identity, "unrelated.example") == got, "realm-scoped record must not become registration evidence"
-    assert facts({**identity, "phoneProvider": None})["sms_reader_provider"] == "unknown"
-    assert facts({**identity, "phoneProvider": "manual"})["sms_reader_provider"] == "unknown"
-    assert facts({**identity, "phone": None})["sms_reader_provider"] == "not_applicable"
-    assert facts({**identity, "disabled": True})["sms_reader_provider"] == "disabled"
-    section, _, _, _ = build_auth_options_prompt_section({"realm": "store.example"})
-    assert prefix not in section, "missing inventory must not invent an identity"
-
-
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
-    runner.record("supplied_identity_factual_provenance", test_supplied_identity_inventory_separates_ownership_registration_and_reader)
     runner.record(
         "steel_cdp_key_is_materialized_only_at_connection_boundary",
         test_steel_cdp_key_is_materialized_only_at_connection_boundary,

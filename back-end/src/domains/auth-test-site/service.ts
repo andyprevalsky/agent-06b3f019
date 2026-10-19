@@ -14,7 +14,7 @@ import {
   type PlanContext,
   type ScenarioPlan,
 } from './serviceScenarios';
-import { seedPasskey, seedSavedPasswords, seedSavedSession } from './serviceSeed';
+import { seedMintedLogin, seedPasskey, seedSavedPasswords, seedSavedSession } from './serviceSeed';
 import { recordAttempt } from './serviceSignIn';
 import {
   AuthTestSiteError,
@@ -201,7 +201,10 @@ export async function createAuthTestSite(
       publicOrigin: publicBase.origin,
       nowMs,
     });
-    site.savedPasswords = await seedSavedPasswords(site, plan, nowMs);
+    site.savedPasswords = [
+      ...(await seedSavedPasswords(site, plan, nowMs)),
+      ...(await seedMintedLogin(site, plan, nowMs)),
+    ];
     await seedSavedSession(site, plan, nowMs);
     await seedPasskey(site, plan);
     preview = await previewAuthOptions(site);

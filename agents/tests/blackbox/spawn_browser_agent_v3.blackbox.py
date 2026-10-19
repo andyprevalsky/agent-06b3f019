@@ -709,7 +709,7 @@ async def test_browser_verifier_target_attempt_survives_admission_and_provider_b
         ctx = await bsvc.build_browser_verifier_context(goal="Inspect", current_url="https://site.test/current",
             browser_state={"dom_tree": "Unrelated Resend code label"}, action_history=history,
             config=SimpleNamespace(), session_id="sess")
-    messages = build_verifier_context_messages(ctx, "Verify from untrusted page evidence", call_site="verifier_browser_auth_handoff")
+    messages = build_verifier_context_messages(ctx, "Verify from untrusted page evidence", call_site="verifier_browser")
     for body in (transform_messages_for_anthropic(messages), _build_responses_input(messages)):
         serialized = json.dumps(body)
         step = serialized.split("Step 12: click", 1)[1].split("Step 13:", 1)[0]
@@ -12922,7 +12922,6 @@ async def test_execute_action_navback():
 
 async def test_observed_action_result_is_retained_in_its_receipt():
     from browser_tools.dom_service import ActionHistory
-    from domains.spawn_browser_agent_v3.auth_assessment import auth_assistance_assessment_result
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     url = "https://example.test/verify"
@@ -12935,25 +12934,12 @@ async def test_observed_action_result_is_retained_in_its_receipt():
         dom_service=dom, action="input_text", params={"text": "+15550000002"},
         result={"success": True},
     )
-    assessment = {
-        "auth_realm": "example.test", "page_url": url,
-        "blocker": "automated_options_exhausted", "reason": "The requested code did not arrive.",
-        "recipient_options": [],
-        "attempted_recipient_options": [{
-            "method": "sms_otp", "recipient": "+15550000002", "status": "exhausted",
-            "evidence": "Input followed by the observed verification page.", "evidence_steps": [1, 2],
-        }],
-    }
     result = await execute_action(
         dom, history, {"action": "wait", "params": {"time_ms": 0}},
         current_url=url, auth_context_for_url=AsyncMock(return_value={"auth_realm": "example.test"}),
     )
     assert result["current_url"] == url
     assert history.get_entries()[-1]["result"].get("current_url") == result["current_url"]
-    assert auth_assistance_assessment_result(
-        assessment, auth_options={}, auth_realm="example.test", current_url=url,
-        action_history=history.get_entries(),
-    ) is None
     # A bare acknowledgement still is not an observation, and a failed
     # observation must not acquire the last page's identity.
     unobserved = ActionHistory()
@@ -12962,10 +12948,7 @@ async def test_observed_action_result_is_retained_in_its_receipt():
         result={"success": True},
     )
     await execute_action(dom, unobserved, {"action": "wait", "params": {"time_ms": 0}})
-    assert auth_assistance_assessment_result(
-        assessment, auth_options={}, auth_realm="example.test", current_url=url,
-        action_history=unobserved.get_entries(),
-    )["error"] == "authentication_assessment_incomplete"
+    assert "current_url" not in unobserved.get_entries()[-1]["result"]
     failed_observation = ActionHistory()
     await failed_observation.record_action(
         dom_service=dom, action="input_text", params={"text": "+15550000002"},
@@ -12978,10 +12961,6 @@ async def test_observed_action_result_is_retained_in_its_receipt():
     )
     assert failed["current_url"] == ""
     assert "current_url" not in failed_observation.get_entries()[-1]["result"]
-    assert auth_assistance_assessment_result(
-        assessment, auth_options={}, auth_realm="example.test", current_url=url,
-        action_history=failed_observation.get_entries(),
-    )["error"] == "authentication_assessment_incomplete"
     before = history.get_entries()
     await execute_action(dom, history, {"action": "unknown_action"})
     assert history.get_entries() == before
@@ -12998,7 +12977,6 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
     from browser_tools.dom_service import ActionHistory, DOMService
     from domains.spawn_browser_agent_v3.service_actions import execute_action
     from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
-    from domains.spawn_browser_agent_v3.handoff_verification import build_auth_handoff_verifier_context
     from helpers.llm import build_verifier_context_messages
     for private in (False, True):
         dom=DOMService('ws://unused-observed-receipt');dom._session=_fake_session_with_event_bus()
@@ -13021,8 +12999,7 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
                 context=await build_browser_verifier_context('Read outcome',url,final_state,h,_fake_config(),'session-1',payment_card_evidence={'role':'TOOL','text':'Final payment evidence','metadata':{'toolName':'payment_card','toolStatus':'FINISHED'}})
             from domains.spawn_browser_agent_v3.handler import _model_visible_browser_verifier_context
             context=_model_visible_browser_verifier_context(context,dom,final_state)
-            context=build_auth_handoff_verifier_context(context,auth_options={},assessment={})
-            return context,build_verifier_context_messages(context,'Existing verifier policy',call_site='verifier_browser_auth_handoff')
+            return context,build_verifier_context_messages(context,'Existing verifier policy',call_site='verifier_browser')
         context,messages=await build(history)
         wire=json.dumps(messages)
         assert 'Observed outcome: operation was not applied.' in wire, 'actual verifier admission lost a delivered observation'
@@ -13085,34 +13062,6 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
         assert sum(map(len,tool_lines))<=VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
         assert all(len(line)<=VERIFIER_MAX_TOOL_RESULT_CHARS for line in tool_lines)
         assert 'verifier truncated' in saturated_wire and 'Observed-unit-100' in saturated_wire and 'Observed-unit-1 ' not in saturated_wire
-
-
-def test_sms_action_receipts_match_presentation_only_phone_changes():
-    from domains.spawn_browser_agent_v3.auth_assessment import auth_assistance_assessment_result
-
-    url = "https://example.test/verify"
-    assessment = {
-        "auth_realm": "example.test", "page_url": url,
-        "blocker": "automated_options_exhausted", "reason": "No code after a resend and wait.",
-        "recipient_options": [{
-            "method": "sms_otp", "recipient": "+15550000002", "status": "exhausted",
-            "evidence": "This exact number was typed and the page was later observed.",
-            "evidence_steps": [1, 2],
-        }],
-    }
-    inventory = {"minted": {"phone": "+15550000002"}}
-    def check(text):
-        return auth_assistance_assessment_result(
-            assessment, auth_options=inventory, auth_realm="example.test", current_url=url,
-            action_history=[
-                {"step": 1, "action": "input_text", "params": {"text": text}},
-                {"step": 2, "action": "read_browser_state", "result": {"url": url}},
-            ],
-        )
-    for text in ("+15550000002", "15550000002", "+1 (555) 000-0002"):
-        assert check(text) is None, text
-    for text in ("5550000002", "+25550000002", "15550000002 extension 9", "text 15550000002"):
-        assert check(text)["error"] == "authentication_assessment_incomplete", text
 
 
 async def test_execute_action_wait():
@@ -21854,15 +21803,6 @@ class _FakeDomSession:
         return SimpleNamespace()
 
 
-def _scripted_handoff_assessment(realm, page_url, *, user_only=False, reason=None):
-    """Valid native arguments for legacy fixtures with no OTP inventory."""
-    return {"auth_assessment": {
-        "auth_realm": realm, "page_url": page_url,
-        "blocker": "user_only_verification" if user_only else "automated_options_exhausted",
-        "reason": reason or "The scripted fixture has reached its existing user authentication boundary.",
-        "recipient_options": [],
-    }}
-
 from browser_tools.dom_service import DOMService as _PrivacyPolicyDOMService
 
 
@@ -22010,7 +21950,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         return await create_auth_mock(*args, **kwargs)
 
     actor_responses = [
-        {"action": {"action": "request_user_assistance_for_authentication", "thinking": "", "params": _scripted_handoff_assessment("example.com", "https://example.com/login")}, "usage": {}, "mode": "waterfall"},
+        {"action": {"action": "request_user_assistance_for_authentication", "thinking": "", "params": {}}, "usage": {}, "mode": "waterfall"},
         {"action": {"action": "attempt_completion", "thinking": "The signed-in page confirms completion.", "params": {"reasoning": "confirmed"}}, "usage": {}, "mode": "waterfall"},
     ]
     captured_turns = []
@@ -22163,31 +22103,24 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         assert result["status"] == "completed"
         assert result["structured_response"] == {"result": "ride requested"}
         assert result["session_id"] == "session-cookie"
+    close_mock.assert_awaited_once_with(_fake_config(), "session-cookie", pause=False)
     create_auth_mock.assert_not_awaited()
-    if schema_failure:
-        close_mock.assert_awaited_once_with(_fake_config(), "session-1", pause=False)
-        restart_mock.assert_not_awaited()
-        reconnect_mock.assert_not_awaited()
-        preparation.assert_not_awaited()
-        assert auth_boundary_calls == []
-    else:
-        close_mock.assert_awaited_once_with(_fake_config(), "session-cookie", pause=False, **({"current_url": None} if schema_failure else {}))
-        restart_mock.assert_awaited_once_with(
-            config=_fake_config(),
-            user_id="user-1",
-            task_id="task-1",
-            credential_ref={"kind": "steel_session", "id": "steel-auth-1"},
-        )
-        assert auth_boundary_calls == ["restart"]
-        reconnect_mock.assert_awaited_once()
-        assert reconnect_mock.await_args.kwargs["new_cdp_url"] == "ws://cookie"
-        assert _FakeHumanizer.last_instance is not None
-        assert callable(_FakeHumanizer.last_instance.cursor_observer)
-        assert _FakeHumanizer.last_instance.idle_started is True
+    restart_mock.assert_awaited_once_with(
+        config=_fake_config(),
+        user_id="user-1",
+        task_id="task-1",
+        credential_ref={"kind": "steel_session", "id": "steel-auth-1"},
+    )
+    assert auth_boundary_calls == ["restart"]
+    reconnect_mock.assert_awaited_once()
+    assert reconnect_mock.await_args.kwargs["new_cdp_url"] == "ws://cookie"
+    assert _FakeHumanizer.last_instance is not None
+    assert callable(_FakeHumanizer.last_instance.cursor_observer)
+    assert _FakeHumanizer.last_instance.idle_started is True
 
 
-        preparation.assert_awaited_once()
-        assert preparation.await_args.kwargs["session_id"] == "session-cookie", "same-realm browser replacement reused prior credential binding"
+    preparation.assert_awaited_once()
+    assert preparation.await_args.kwargs["session_id"] == "session-cookie", "same-realm browser replacement reused prior credential binding"
 
     actor_call.activity_result = result
     return actor_call, judge_call
@@ -22310,18 +22243,11 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
 
     async def model_step(**kwargs):
         model_contexts.append(kwargs)
-        return {"action": {"action": "request_user_assistance_for_authentication", "thinking": "Google sign-in blocks admin access", "params": _scripted_handoff_assessment("admin.google.com", "https://admin.google.com/ac/users/fixture")},
+        return {"action": {"action": "request_user_assistance_for_authentication", "thinking": "Google sign-in blocks admin access", "params": {}},
                 "usage": {}, "mode": "waterfall"}
 
     handler = "domains.spawn_browser_agent_v3.handler."
-    import helpers.llm as fixture_llm
-    original_progress = fixture_llm.check_progress
-    async def declared_handoff_review(*args, **kwargs):
-        if len(args) > 5 and args[5] == "verifier_browser_auth_handoff":
-            return {"score": 1.0, "reasoning": "Scripted supported transfer in this inventory-transition fixture", "usage": {}}
-        return await original_progress(*args, **kwargs)
     targets = [
-        patch("helpers.llm.check_progress", declared_handoff_review),
         patch(handler + "load_config", return_value=_fake_config()),
         patch(handler + "activity.heartbeat"),
         patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
@@ -22333,7 +22259,6 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
         patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
         patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
         patch(handler + "_observe_step_page", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you"})),
-        patch.object(_FakeDomService, "get_browser_state", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you"})),
         patch(handler + "prepare_browser_auth", AsyncMock(side_effect=RuntimeError("credential inventory read failed"))),
         patch(handler + "create_user_auth_assistance_request", create_auth),
         patch(handler + "extract_session_files", AsyncMock(return_value=[])),
@@ -22430,7 +22355,7 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         await delivered.wait()
         if case.startswith("persistence_") and poll_count > 1:
             return []
-        if case in {"empty", "app_approval"} or finally_seal:
+        if case == "empty" or finally_seal:
             return []
         if case.startswith("repeated_"):
             from domains.spawn_browser_agent_v3.config import MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
@@ -22527,7 +22452,7 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         if auth_review is not None:
             chosen = auth_review["actions"][len(model_contexts) - 1]
             return {"action": chosen, "usage": {}, "mode": "waterfall"}
-        return {"action": {"action": action, "thinking": "Verification required", "params": _scripted_handoff_assessment("shop.example", "https://shop.example/login/verify", user_only=case == "app_approval")}, "usage": {}, "mode": "waterfall"}
+        return {"action": {"action": action, "thinking": "Verification required", "params": {}}, "usage": {}, "mode": "waterfall"}
 
     async def drain_poll(task, **kwargs):
         nonlocal drain_count
@@ -22561,12 +22486,6 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             return fallback or "https://shop.example/login/verify"
 
     handler = "domains.spawn_browser_agent_v3.handler."
-    import helpers.llm as fixture_llm
-    original_fixture_verifier = fixture_llm.check_progress
-    async def scripted_handoff_verifier(*args, **kwargs):
-        if len(args)>5 and args[5]=="verifier_browser_auth_handoff":
-            return {"score":1.0,"reasoning":"Scripted human-transfer verdict for the OTP handoff fixture","usage":{}}
-        return await original_fixture_verifier(*args, **kwargs)
     targets = [
         patch(handler + "_fetch_and_append_recent_otp_user_messages", poll),
         patch(handler + "BrowserThinkingStream", make_stream),
@@ -22600,10 +22519,6 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
         patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
     ]
-    # Explicit fixture-local reviewer for old direct OTP cases; preserve an
-    # injected reviewer (including rejection/soft-pass tests) without override.
-    if not isinstance(original_fixture_verifier, AsyncMock):
-        targets.append(patch("helpers.llm.check_progress", scripted_handoff_verifier))
     if auth_review is not None:
         async def reviewed_action(*args, **kwargs):
             from domains.spawn_browser_agent_v3.service_actions import _input_success_result
@@ -22789,25 +22704,11 @@ async def test_initial_auth_inventory_is_delivered_by_page_state_result():
     async def model_step(**kwargs):
         model_contexts.append(copy.deepcopy(kwargs))
         action = "read_browser_state" if len(model_contexts) == 1 else "request_user_assistance_for_authentication"
-        params = {}
-        if action == "request_user_assistance_for_authentication":
-            params = _scripted_handoff_assessment("admin.google.com", "https://admin.google.com/ac/users/fixture", user_only=True, reason="The fixture page explicitly asks for approval in the account authenticator app on another device")
-            params["auth_assessment"]["recipient_options"] = [{
-                "method": "email_otp", "recipient": "fixture@workspace.example", "status": "not_applicable",
-                "evidence": "The accepted account challenge requires approval on another device, not an email code.",
-            }]
-        return {"action": {"action": action, "thinking": "Google sign-in blocks admin access", "params": params},
+        return {"action": {"action": action, "thinking": "Google sign-in blocks admin access", "params": {}},
                 "usage": {}, "mode": "waterfall"}
 
     handler = "domains.spawn_browser_agent_v3.handler."
-    import helpers.llm as fixture_llm
-    original_progress = fixture_llm.check_progress
-    async def declared_handoff_review(*args, **kwargs):
-        if len(args) > 5 and args[5] == "verifier_browser_auth_handoff":
-            return {"score": 1.0, "reasoning": "Scripted supported transfer in this inventory-transition fixture", "usage": {}}
-        return await original_progress(*args, **kwargs)
     targets = [
-        patch("helpers.llm.check_progress", declared_handoff_review),
         patch(handler + "load_config", return_value=_fake_config()),
         patch(handler + "activity.heartbeat"),
         patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
@@ -22820,11 +22721,8 @@ async def test_initial_auth_inventory_is_delivered_by_page_state_result():
         patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
         patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
         patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
-        patch(handler + "_observe_step_page", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you", "dom_tree": "Approve this sign-in in the account authenticator app on your other device"})),
+        patch(handler + "_observe_step_page", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you", "dom_tree": "Google sign-in"})),
         patch.object(_FakeDomService, "get_page_identity", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture"})),
-        # New native tool contract needs an explicit user-only blocker; the old
-        # title alone did not establish it. Hydration assertions stay unchanged.
-        patch.object(_FakeDomService, "get_browser_state", AsyncMock(return_value={"url":"https://admin.google.com/ac/users/fixture", "title":"Verify it is you", "dom_tree":"Approve this sign-in in the account authenticator app on your other device", "screenshot":None})),
         patch(handler + "prepare_browser_auth", AsyncMock(return_value={
             "auth_realm": "admin.google.com", "auth_options": {
                 "realm": "admin.google.com", "email_otp": {"available": True, "connected_emails": ["fixture@workspace.example"]},
@@ -22870,8 +22768,6 @@ async def test_initial_auth_inventory_is_delivered_by_page_state_result():
     assert "18000ms" in context["credential_preparation_error"]
     assert "cookies_injected" not in context and "encryptedPassword" not in str(context)
 
-    assert "Approve this sign-in" in str(model_contexts[1]), "explicit fake app-approval evidence was not delivered to the model"
-
 @_in_browser_activity_context
 async def test_return_to_quarantined_realm_invalidates_other_auth_context():
     """Replay the Google observation after a Claude-spawned session loses preparation."""
@@ -22909,18 +22805,11 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
     async def model_step(**kwargs):
         model_contexts.append(copy.deepcopy(kwargs))
         action = "read_browser_state" if len(model_contexts) < 3 else "request_user_assistance_for_authentication"
-        return {"action": {"action": action, "thinking": "Google sign-in blocks admin access", "params": _scripted_handoff_assessment("admin.google.com", "https://admin.google.com/ac/users/fixture") if action == "request_user_assistance_for_authentication" else {}},
+        return {"action": {"action": action, "thinking": "Google sign-in blocks admin access", "params": {}},
                 "usage": {}, "mode": "waterfall"}
 
     handler = "domains.spawn_browser_agent_v3.handler."
-    import helpers.llm as fixture_llm
-    original_progress = fixture_llm.check_progress
-    async def declared_handoff_review(*args, **kwargs):
-        if len(args) > 5 and args[5] == "verifier_browser_auth_handoff":
-            return {"score": 1.0, "reasoning": "Scripted supported transfer in this inventory-transition fixture", "usage": {}}
-        return await original_progress(*args, **kwargs)
     targets = [
-        patch("helpers.llm.check_progress", declared_handoff_review),
         patch(handler + "load_config", return_value=_fake_config()),
         patch(handler + "activity.heartbeat"),
         patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
@@ -22933,7 +22822,6 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
         patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
         patch(handler + "_observe_step_page", observe),
         patch.object(_FakeDomService, "get_page_identity", identity),
-        patch.object(_FakeDomService, "get_browser_state", AsyncMock(side_effect=lambda **_kwargs: dict(active_page))),
         patch(handler + "prepare_browser_auth", preparation),
         patch(handler + "create_user_auth_assistance_request", create_auth),
         patch(handler + "extract_session_files", AsyncMock(return_value=[])),
@@ -23084,22 +22972,13 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
             params = copy.deepcopy(credential_action["params"])
         if action == "input_text" and minted_password_text is not None:
             params = {"text": minted_password_text}
-        if action == "request_user_assistance_for_authentication":
-            params = _scripted_handoff_assessment(urlparse(active_page["url"]).hostname, active_page["url"])
         return {"action": {"action": action, "thinking": "Inspect the surviving sign-in page", "params": params},
                 "usage": {}, "mode": "waterfall"}
 
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     fake_playwright = _FakePlaywright(fake_browser)
     prefix = "domains.spawn_browser_agent_v3.handler."
-    import helpers.llm as fixture_llm
-    original_progress = fixture_llm.check_progress
-    async def declared_handoff_review(*args, **kwargs):
-        if len(args) > 5 and args[5] == "verifier_browser_auth_handoff":
-            return {"score": 1.0, "reasoning": "Scripted supported transfer in this inventory-transition fixture", "usage": {}}
-        return await original_progress(*args, **kwargs)
     targets = [
-        patch("helpers.llm.check_progress", declared_handoff_review),
         patch(prefix + "load_config", return_value=_fake_config()),
         patch(prefix + "activity.heartbeat"),
         patch(prefix + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
@@ -23121,6 +23000,7 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         patch(prefix + "create_user_auth_assistance_request", AsyncMock(return_value={"id": "request-1"})),
         patch(prefix + "extract_session_files", AsyncMock(return_value=[])),
         patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
+        patch("helpers.llm.check_progress", AsyncMock(side_effect=AssertionError("unexpected live verifier in private fixture"))),
         patch(prefix + "disconnect_browser_after_passkey_capture", AsyncMock()),
         patch(prefix + "propagate_browser_run_credentials", propagated),
         patch(prefix + "close_browser_session", AsyncMock()),
@@ -23746,8 +23626,7 @@ async def test_private_browser_pause_urls_use_protected_continuity():
         save_action = AsyncMock()
         async def actor_transport(**kwargs):
             validate_transport_images(kwargs)
-            params = _scripted_handoff_assessment(realm.replace(secret, "{{secret:pwd:url}}") if private_entry else realm, visible_url if private_entry else raw_url, user_only=True) if pause == "auth" else {}
-            return {"action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": params}, "usage": {}}
+            return {"action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {}}
 
         actor_client = AsyncMock(side_effect=actor_transport)
         judge = AsyncMock(return_value={"score": 1.0, "structured_response": {"url": raw_url}, "usage": {}})
@@ -23775,7 +23654,7 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             patch(prefix + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
             patch(prefix + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
             patch(prefix + "_call_browser_use_with_rotation", handler._call_browser_use_with_rotation if actor_resume else AsyncMock(return_value={
-                "action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": _scripted_handoff_assessment(realm.replace(secret, "{{secret:pwd:url}}"), visible_url, user_only=True) if pause == "auth" else {}}, "usage": {},
+                "action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {},
                 "_fast_cache_browser_target": private_target,
             })),
             patch(prefix + "BrowserStreamingRoseClient.complete_browser_use", actor_client),
@@ -23799,7 +23678,6 @@ async def test_private_browser_pause_urls_use_protected_continuity():
             patch(prefix + "build_browser_verifier_context", verifier_context),
             patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
             patch(prefix + "call_temporal_activity_from_activity", judge),
-            patch("helpers.llm.check_progress", judge),
             patch(prefix + "build_verifier_prompt", verifier_prompt_builder),
             patch(prefix + "upload_to_storage", screenshot_upload),
         ]
@@ -26807,7 +26685,6 @@ async def _drive_browser_write_pause_archive_boundary(
     pause: bool,
     payment=False,
     auth=False,
-    auth_assessment=None,
     concurrent_approval=False,
     cancel=False,
     handoff=False,
@@ -26983,7 +26860,6 @@ async def _drive_browser_write_pause_archive_boundary(
                             "awaiting_payment_card_approval" if payment else
                             "awaiting_write_approval"
                         ),
-                        **({"auth_assessment": auth_assessment} if auth_assessment is not None else {}),
                         "request_id": "owned-approval",
                         "task_id": task_id,
                         "session_id": "owned-session",
@@ -27070,13 +26946,6 @@ async def _drive_browser_write_pause_archive_boundary(
                 tool_call_id=tool,
                 extra_metadata={"recording_view_url": "https://recording.example/owned"},
             )
-            if auth:
-                auth_rows = [row for row in rows if row.get("metadata", {}).get("action_type") == "auth_assistance"]
-                assert len(auth_rows) == 1
-                if auth_assessment is not None:
-                    assert auth_rows[0]["metadata"]["auth_assessment"] == auth_assessment
-                else:
-                    assert "auth_assessment" not in auth_rows[0]["metadata"]
             assert not owned.done() and len(starts) == 1
             assert not bench._agent_messages_ready_for_durable_browser_evidence(rows)
             wf._signal_responses["unrelated-approval"] = "approved"
@@ -30126,7 +29995,6 @@ async def run_all_tests():
     await r.record_async("execute_action_wait", test_execute_action_wait)
     await r.record_async("observed_action_result_retained_in_receipt", test_observed_action_result_is_retained_in_its_receipt)
     await r.record_async("delivered_observation_reaches_real_verifier", test_delivered_observation_reaches_verifier_through_owned_receipt)
-    r.record("sms_receipts_match_presentation_only_phone_changes", test_sms_action_receipts_match_presentation_only_phone_changes)
     await r.record_async(
         "execute_action_wait_coerces_numeric_string",
         test_execute_action_wait_coerces_numeric_string,
@@ -30966,11 +30834,8 @@ async def run_all_tests():
     await r.record_async("otp_duplicate_keeps_first_provenance", assert_duplicate_otp_keeps_first_provenance)
     r.record("unexecuted_action_refund_bounded", assert_unexecuted_action_refund_is_bounded)
     await r.record_async("otp_at_exhausted_budget", lambda: assert_otp_at_exhausted_budget_does_not_run_more_actions(test_auth_handoff_consumes_otp_received_during_decision))
-    await r.record_async("auth_assessment_manager_projection", lambda: _drive_browser_write_pause_archive_boundary(pause=False, auth=True, auth_assessment={"blocker":"user_only_verification","reason":"Approve the current sign-in","recipient_options":[]}))
-    from auth_assessment_behavior import assert_auth_assessment_controls
-    await r.record_async("auth_assessment_per_recipient_activity", lambda: assert_auth_assessment_controls(test_auth_handoff_consumes_otp_received_during_decision))
     await r.record_async("auth_handoff_consumes_otp_received_during_decision", test_auth_handoff_consumes_otp_received_during_decision)
-    for otp_case in ("empty", "stale", "app_approval", "during_drain"):
+    for otp_case in ("empty", "stale", "during_drain"):
         await r.record_async(f"auth_handoff_preserves_{otp_case}", lambda otp_case=otp_case: test_auth_handoff_consumes_otp_received_during_decision(otp_case))
     r.record("claude_token_state_defaults", test_claude_token_state_defaults)
     r.record("claude_token_state_mutation", test_claude_token_state_mutation)

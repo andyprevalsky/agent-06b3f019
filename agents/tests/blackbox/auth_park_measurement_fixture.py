@@ -28,7 +28,7 @@ async def _pipeline(native, origin, *, unknown=False, workflow_root_mode=None):
  if hasattr(DOMService,"get_parked_page_identity"):
   tests._FakeDomService.get_parked_page_identity=DOMService.get_parked_page_identity
  private_snapshot=AsyncMock(return_value={})
- review={'persist_resume':private_snapshot,'disconnect':disconnect_browser_after_passkey_capture,'inventory':{'realm':'shop.example'},'actions':[{'action':'request_user_assistance_for_authentication','thinking':'Fixture exhausted','params':tests._scripted_handoff_assessment('shop.example','https://shop.example/login/verify',user_only=True)}]}
+ review={'persist_resume':private_snapshot,'disconnect':disconnect_browser_after_passkey_capture,'inventory':{'realm':'shop.example'},'actions':[{'action':'request_user_assistance_for_authentication','thinking':'Fixture exhausted','params':{}}]}
  with patch.object(tests._FakeDomService,'__init__',native_init),patch('domains.spawn_browser_agent_v3.service.list_session_files',AsyncMock(return_value=[])),patch('domains.spawn_browser_agent_v3.repo.list_session_files',AsyncMock(return_value=[])):
   await ActivityEnvironment().run(tests.test_auth_handoff_consumes_otp_received_during_decision,case='empty',auth_review=review)
  actual=review['result']

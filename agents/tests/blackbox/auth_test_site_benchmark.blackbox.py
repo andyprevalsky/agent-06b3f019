@@ -61,6 +61,15 @@ SAVED = ["jordan.ellis.abc@example.com", "jordan.e.abc@example.com", "j.ellis.ab
 MINTED = "rose-agent-7@mail.example.test"
 INBOX = "jordan.ellis@inbox.example"
 MEMBER_NUMBER = "RS-12345678"
+MINTED_PHONE = "+15555550142"
+# A minted account is the passwordless login a minted sign-in records, not Minted.
+MINTED_ACCOUNT_LOGINS = {
+    "minted_otp": MINTED,
+    "code_never_arrives": MINTED,
+    "expired_code": MINTED,
+    "magic_link": MINTED,
+    "minted_sms_otp": MINTED_PHONE,
+}
 
 
 def _manifest(scenario: str, **overrides) -> dict:
@@ -68,8 +77,10 @@ def _manifest(scenario: str, **overrides) -> dict:
     from benchmarks.auth_test_site import NO_SESSION_SCENARIOS, SCENARIO_LADDERS
 
     passwords, minted_offered, passkeys, sessions = SCENARIO_LADDERS[scenario]
-    saved = list(SAVED[:passwords])
-    minted = MINTED if minted_offered else None
+    minted_login = MINTED_ACCOUNT_LOGINS.get(scenario)
+    saved = [minted_login] if minted_login else list(SAVED[:passwords])
+    offered = MINTED if minted_offered else None
+    minted = MINTED if minted_offered or minted_login else None
     reachable = scenario not in NO_SESSION_SCENARIOS
     manifest = {
         "siteId": "abc123",
@@ -78,7 +89,7 @@ def _manifest(scenario: str, **overrides) -> dict:
         "entryUrl": "https://rose-x.ngrok.app/api/rose-shop/abc123/?authRealm=rose-shop-abc123",
         "savedPasswordUsernames": saved,
         "mintedEmail": minted,
-        "mintedPhone": "+15555550142" if minted_offered else None,
+        "mintedPhone": MINTED_PHONE if minted else None,
         "expectedSignInEmail": INBOX if scenario == "email_otp" else (MINTED if scenario == "minted_otp" else None),
         "expectedMemberNumber": MEMBER_NUMBER if reachable else None,
         "namedAccountEmail": SAVED[1] if scenario == "named_account" else None,
@@ -94,7 +105,7 @@ def _manifest(scenario: str, **overrides) -> dict:
         "savedBrowserAuthHidden": False,
         "authOptionsPreview": {
             "passwordUsernames": list(saved),
-            "mintedEmail": minted,
+            "mintedEmail": offered,
             "passkeyCount": passkeys,
             "cookieBundleCount": sessions,
             "emailOtpInboxes": [INBOX] if scenario == "email_otp" else [],
@@ -356,14 +367,14 @@ def test_catalog_rejects_inconsistent_hosted_auth_contracts() -> None:
         "first_run_prompt must contain",
     )
 
-    minted = copy.deepcopy(_task_raw("browser-auth-minted-email-otp"))
+    minted = copy.deepcopy(_task_raw("browser-auth-minted-signup"))
     outcome(minted)["require_all_saved_passwords_attempted"] = True
     try:
         validate_task_contract(minted)
     except ValueError as exc:
         assert "saved-password scenario" in str(exc)
     else:
-        raise AssertionError("minted_otp accepted a saved-password requirement")
+        raise AssertionError("signup accepted a saved-password requirement")
 
     orphan = copy.deepcopy(base)
     orphan["environment"].pop("auth_test_site")
@@ -399,7 +410,9 @@ def test_manifest_preflight_fails_closed_before_an_agent_exists() -> None:
     rejects("all_fail", "minted account alongside", **preview("all_fail", mintedEmail=MINTED))
     rejects("all_fail", "0 passkeys, expected 1", **preview("all_fail", passkeyCount=0))
     rejects("saved_session", "0 saved sessions, expected 1", **preview("saved_session", cookieBundleCount=0))
-    rejects("minted_otp", "auth options would offer minted account", **preview("minted_otp", mintedEmail=None))
+    rejects("signup", "auth options would offer minted account", **preview("signup", mintedEmail=None))
+    # A recorded minted login hides Minted; offering it too is the stale state.
+    rejects("minted_otp", "minted account alongside", **preview("minted_otp", mintedEmail=MINTED))
     rejects("minted_sms_otp", "needs a minted phone number", mintedPhone=None)
     rejects("email_otp", "must list the connected inbox", **preview("email_otp", emailOtpInboxes=[]))
     rejects("all_fail", "must not have a reachable member account", expectedSignInEmail=SAVED[0])
