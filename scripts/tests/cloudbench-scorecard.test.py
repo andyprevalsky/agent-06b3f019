@@ -228,6 +228,18 @@ class Scorecard(unittest.TestCase):
         item = next(i for i in render(admission, self.f)["experiment"]["lifecycle"] if i["label"].startswith("Guests released"))
         self.assertNotEqual(item["state"], "ok", "an incomplete native audit renders no verified release")
 
+    def test_unpublished_hub_group_names_its_receipt(self):
+        admission = self.f.sharded()
+        result = json.loads((admission / "result.json").read_text())
+        reason = ("HubVisibilityError: benchmark Hub upload failed: HTTP Error 400; "
+                  'response_metadata={"status": 400, "x_request_id": "683e826b152f"}')
+        write(admission / "result.json", {**result, "hub_group_final_published": False,
+                                          "hub_group_final_error": reason})
+        item = next(i for i in render(admission, self.f)["experiment"]["lifecycle"]
+                    if i["label"] == "Hub group publication")
+        self.assertEqual(item["state"], "warn")
+        self.assertEqual(item["detail"], "final group NOT published: " + reason[:160])
+
     def test_sharded_live_counters_render_running(self):
         data = render(self.f.sharded(live=True), self.f)
         exp = data["experiment"]

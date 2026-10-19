@@ -36,7 +36,10 @@ const ownership = require(
     "back-end/src/providers/benchmarkHubStorageOwnership.ts",
   ),
 );
-const { BenchmarkHubUnavailableError } = require(
+const {
+  BenchmarkHubUnavailableError,
+  BenchmarkHubInvalidRecordError,
+} = require(
   path.join(sourceRoot, "back-end/src/providers/benchmarkHubErrors.ts"),
 );
 const workRoot =
@@ -149,6 +152,7 @@ function owningBoundary() {
     assertHubStorageOwnership: ownership.assertHubStorageOwnership,
     HUB_SQL_TIMEOUT_MS: ownership.HUB_SQL_TIMEOUT_MS,
     BenchmarkHubUnavailableError,
+    BenchmarkHubInvalidRecordError,
     prisma: {
       $transaction: (operation: (value: unknown) => unknown) =>
         operation({ $executeRaw: async () => {} }),
@@ -317,7 +321,10 @@ async function apiBoundary(boundary: ReturnType<typeof owningBoundary>) {
       _next: unknown,
     ) => {
       rejections.push({ run_id: req.body?.run_id, error: error.message });
-      res.status(500).json({ error: error.message });
+      // Mirrors back-end/src/server.ts: a typed statusCode, otherwise 500.
+      res
+        .status((error as Error & { statusCode?: number }).statusCode ?? 500)
+        .json({ error: error.message });
     },
   );
   const server = http.createServer(app);
@@ -826,6 +833,196 @@ test(
     assert.equal(terminal.task_counts.infra_error, 1);
     assert.equal(terminal.task_counts.queued, 1);
     assert.equal((await boundary.owner.listRuns({ grouped: true })).length, 1);
+  },
+);
+
+const OPERATOR_SHARD_GROUP = `import json, runpy, sys
+from pathlib import Path
+operator = runpy.run_path(sys.argv[1])
+coordinator = runpy.run_path(sys.argv[2])
+root, directory, spec = Path(sys.argv[3]), Path(sys.argv[4]), json.loads(sys.argv[5])
+directory.mkdir(mode=0o700, exist_ok=True)
+if spec.get("summaries") is None:
+    print(json.dumps({"registered": operator["publish_shard_group"](
+        root, directory, None, None, spec["group"], spec["started_at"], spec["shards"])}))
+else:
+    merged = coordinator["merge"](spec["summaries"], spec["scheduled_total"])
+    print(json.dumps(operator["publish_final_shard_group"](
+        root, directory, None, None, spec["group"], spec["started_at"], spec["shards"],
+        spec["summaries"], merged, spec["coordination"])))
+`;
+
+// The sharded operator derives its own terminal group status; that exact
+// derivation must satisfy the Hub schedule contract (incident: "completed").
+async function operatorShardGroup(
+  fixture: { root: string },
+  api: { base: string },
+  spec: Record<string, unknown>,
+) {
+  const child = spawn(
+    path.join(project, "agents/venv/bin/python"),
+    [
+      "-c",
+      OPERATOR_SHARD_GROUP,
+      path.join(sourceRoot, "scripts/run-original600-controller.py"),
+      path.join(sourceRoot, "scripts/cloudbench-shard-coordinator.py"),
+      // The operator loads the campaign publisher and uploader from its checkout.
+      sourceRoot,
+      fixture.root,
+      JSON.stringify(spec),
+    ],
+    {
+      cwd: fixture.root,
+      env: {
+        ...process.env,
+        BENCHMARK_HUB_API_KEY: "fixture-key",
+        BENCHMARK_HUB_UPLOAD_URL: api.base,
+        BENCHMARK_HUB_TERMINAL_PUBLICATION_SECONDS: "20",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let output = "";
+  child.stdout!.on("data", (chunk) => (output += chunk.toString()));
+  child.stderr!.on("data", (chunk) => (output += chunk.toString()));
+  await once(child, "close");
+  assert.equal(child.exitCode, 0, output);
+  const log = path.join(
+    fixture.root,
+    "hub-group/hub-group-publication.private.log",
+  );
+  return {
+    result: JSON.parse(output.trim().split("\n").at(-1)!),
+    log: existsSync(log) ? readFileSync(log, "utf8") : "",
+  };
+}
+
+test(
+  "a completed sharded run publishes its final operator group",
+  { timeout: 90_000 },
+  async (t) => {
+    const boundary = owningBoundary();
+    const api = await apiBoundary(boundary);
+    t.after(() => api.close());
+    const fixture = fixtureRoot("operator-final-completed");
+    const group = "original600-operator-final";
+    const shards = ["demo-fleet-alpha", "demo-fleet-beta"].map(
+      (task, index) => ({ tasks: [task], runs: 1, task_indexes: [index] }),
+    );
+    const plan = { group, started_at: 1792433798.1, shards };
+    const registered = await operatorShardGroup(fixture, api, plan);
+    assert.equal(registered.result.registered, true, registered.log);
+    // Both shard runners exited 0 and every scheduled job reported.
+    const final = await operatorShardGroup(fixture, api, {
+      ...plan,
+      scheduled_total: 2,
+      summaries: ["r001-j0001", "r001-j0002"].map((job_id) => ({
+        jobs: [{ job_id, status: "passed", controller_exit_code: 0 }],
+      })),
+      coordination: {
+        exit_codes: { "0": 0, "1": 0 },
+        abort_reason: null,
+        terminate_reason: null,
+      },
+    });
+    assert.deepEqual(
+      final.result,
+      { hub_group_final_published: true },
+      final.log,
+    );
+    assert.deepEqual(api.rejections, []);
+    const terminal = await boundary.owner.getRunDetail(group);
+    assert.equal(terminal.live, false);
+    const schedule = (await boundary.owner.listRuns({ grouped: false })).find(
+      (run: { run_id: string }) => run.run_id === group,
+    );
+    assert.equal(schedule.run_group.status, "passed");
+  },
+);
+
+test(
+  "a deterministic Hub record rejection fails fast instead of consuming the terminal window",
+  { timeout: 90_000 },
+  async (t) => {
+    const boundary = owningBoundary();
+    const api = await apiBoundary(boundary);
+    t.after(() => api.close());
+    const fixture = fixtureRoot("operator-final-rejected");
+    const record = path.join(fixture.root, "invalid-group.json");
+    writeFileSync(
+      record,
+      JSON.stringify({
+        run_id: "invalid-group",
+        timestamp: "2026-10-19T18:16:34.419244+00:00",
+        source: "benchmark-campaign",
+        suite: "cloud-fleet",
+        tasks: [],
+        run_group: {
+          status: "completed",
+          members: [{ member_id: "r001-j0001", name: "demo", run_number: 1 }],
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const began = Date.now();
+    const child = spawn(
+      path.join(project, "agents/venv/bin/python"),
+      [
+        path.join(fixture.root, "agents/benchmarks/hub_upload.py"),
+        "--upload-final",
+        record,
+      ],
+      {
+        cwd: fixture.root,
+        env: {
+          ...process.env,
+          BENCHMARK_HUB_API_KEY: "fixture-key",
+          BENCHMARK_HUB_UPLOAD_URL: api.base,
+          BENCHMARK_HUB_TERMINAL_PUBLICATION_SECONDS: "60",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    child.stdout!.on("data", (chunk) => (output += chunk.toString()));
+    child.stderr!.on("data", (chunk) => (output += chunk.toString()));
+    await once(child, "close");
+    const elapsed = (Date.now() - began) / 1000;
+    assert.notEqual(child.exitCode, 0, output);
+    assert.match(output, /benchmark Hub upload failed: HTTP Error 400/);
+    assert.doesNotMatch(output, /failed transiently/);
+    assert.ok(elapsed < 15, `rejection took ${elapsed}s:\n${output}`);
+    assert.equal(api.rejections.length, 1);
+    assert.equal(
+      api.rejections[0].error,
+      "Invalid Benchmark Hub group schedule",
+    );
+    // Producers refuse that value before any write or upload, naming it.
+    const refusal = spawn(
+      path.join(project, "agents/venv/bin/python"),
+      [
+        "-c",
+        `import runpy, sys
+campaign = runpy.run_path(sys.argv[1])
+state = campaign["campaign_group_state"]("refused-group", 1792433798.1, [{"job_id": "r001-j0001", "task": "demo", "run": 1}], status="completed")
+try:
+    campaign["publish_campaign_group"](None, None, state, live=False, stop_requested=lambda: False)
+except ValueError as error:
+    print(error)
+`,
+        path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let refused = "";
+    refusal.stdout!.on("data", (chunk) => (refused += chunk.toString()));
+    refusal.stderr!.on("data", (chunk) => (refused += chunk.toString()));
+    await once(refusal, "close");
+    assert.equal(refusal.exitCode, 0, refused);
+    assert.match(
+      refused,
+      /campaign group status 'completed' is not a Hub group status/,
+    );
   },
 );
 

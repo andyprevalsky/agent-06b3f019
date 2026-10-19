@@ -2447,7 +2447,8 @@ class Sharded(unittest.TestCase):
             self.assertEqual({p['group_id'] for p in published}, {launched[0].config['shard']['group_run_id']})
             self.assertEqual(published[0]['members'], 36)
             self.assertEqual(len(published[1]['outcomes']), 36)
-            self.assertEqual(published[1]['finished']['status'], 'completed')
+            # The Hub's terminal vocabulary: every shard exited 0 and every job reported.
+            self.assertEqual(published[1]['finished']['status'], 'passed')
             self.assertEqual(code, 0)
             self.assertEqual(len(launched), 3)
             self.assertEqual(sorted(r.env['CLOUDBENCH_GATE_NAME_SUFFIX'] for r in launched), ['s00', 's01', 's02'])

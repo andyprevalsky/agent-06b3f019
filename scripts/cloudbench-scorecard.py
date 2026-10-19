@@ -588,8 +588,10 @@ def load_sharded(run_dir: Path, deep: bool = True) -> dict:
     elif isinstance(result, dict):
         lifecycle_item(exp, "ok", "Results recorded", "result.json")
         published = result.get("hub_group_final_published")
+        reason = result.get("hub_group_final_error")
         lifecycle_item(exp, "ok" if published else "warn", "Hub group publication",
-                       "final group published" if published else "final group NOT published")
+                       "final group published" if published else "final group NOT published"
+                       + (f": {str(reason)[:160]}" if reason else ""))
     else:
         lifecycle_item(exp, "pending", "Results recorded", "result.json pending")
     finished = coordination.get("finished_at")
