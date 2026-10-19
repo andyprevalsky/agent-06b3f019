@@ -5878,7 +5878,7 @@ for name in expected:
 PYDISPOSED
 }
 
-fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume>
+fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume> [snapshot|fresh]
     [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] || return 0
     fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
     # Pass the exact source-owned mutation guards to bounded child shells.
@@ -5895,7 +5895,8 @@ fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume>
         --name "$1" --machine "$2" --volume "$3" \
         --protected "${WARM_ID:-}" --protected "${WARM_VOLUME_ID:-}" \
         --protected "${SHARED_WARM_ID:-}" --protected "${SHARED_WARM_VOLUME_ID:-}" \
-        --protected "${PRIVATE_SOURCE_ID:-}" --protected "${PRIVATE_SOURCE_VOLUME_ID:-}"
+        --protected "${PRIVATE_SOURCE_ID:-}" --protected "${PRIVATE_SOURCE_VOLUME_ID:-}" \
+        ${4:+$([ "$4" = snapshot ] && printf -- --snapshot-restored)}
 )
 
 fleet_release_cleanup_capacity() {
@@ -13326,7 +13327,7 @@ Error: snapshot storage entered terminal failed state"
                     echo "❌ clone $target_id became storage-ready without durable volume ownership" >&2
                     return 1
                 fi
-                if ! fleet_disable_disposable_volume_snapshots "$target_name" "$target_id" "$target_volume"; then
+                if ! fleet_disable_disposable_volume_snapshots "$target_name" "$target_id" "$target_volume" "$storage_mode"; then
                     echo "❌ new disposable Volume backup setting was not verified; retaining exact ownership for teardown" >&2
                     return 1
                 fi

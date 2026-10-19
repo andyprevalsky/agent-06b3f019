@@ -62,7 +62,7 @@ def save(path,value):
     try:os.fsync(fd)
     finally:os.close(fd)
 
-def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
+def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run,snapshot_restored=False):
     registry=Path(registry).absolute()
     with bounded(60):
         need(registry.resolve(strict=True)==registry and registry.name==owner,'wrong registry')
@@ -92,7 +92,11 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
             value=retried(lambda:command(['volumes','show',vid,'-a',app,'--json']))
             need(value.get('id')==vid and value.get('state')=='created','Volume identity/state changed')
             need(type(value.get('auto_backup_enabled')) is bool,'backup setting missing')
-            need(value.get('attached_machine_id')==mid,'Volume not attached to the exact owned Machine')
+            # A volume restored from a large snapshot reports attached_machine_id=null
+            # after the restore while the owned Machine runs with exactly this mount
+            # (checked above). Accept that only for an explicit snapshot restore.
+            attached=value.get('attached_machine_id')
+            need(attached==mid or (snapshot_restored and attached is None),'Volume not attached to the exact owned Machine')
             need(fields(registry/'clones'/name)==row,'ownership changed during read')
             return value
         before=inspect()
@@ -126,6 +130,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for key in ('registry','owner','app','name','machine','volume','audit','run'):parser.add_argument('--'+key,required=True)
     parser.add_argument('--protected',action='append',default=[])
+    parser.add_argument('--snapshot-restored',action='store_true')
     args=parser.parse_args()
     with bounded(60):
         helper=runpy.run_path(str(Path(__file__).resolve().with_name('cloudbench-original-volume-capture.py')))
@@ -146,5 +151,5 @@ def main():
                 # 142 is the bounded child's deadline: that request may still be in flight.
                 raise (ValueError if status==142 else Rejected)('Volume configuration CLI failed (exit '+str(status)+'; private receipt '+str(result)+')')
             value=json.loads(out);need(isinstance(value,dict),'invalid native JSON');return value
-        configure(args.registry,args.owner,args.app,args.name,args.machine,args.volume,args.protected,command,audit=args.audit,run=args.run)
+        configure(args.registry,args.owner,args.app,args.name,args.machine,args.volume,args.protected,command,audit=args.audit,run=args.run,snapshot_restored=args.snapshot_restored)
 if __name__=='__main__':main()
