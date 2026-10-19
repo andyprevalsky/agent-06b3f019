@@ -22,6 +22,11 @@ SOURCE = "724ae71f5bd8756be01ea237de0c2742e4f94b77"
 CLOSED_SOURCE = "49b792dcc2ea983325c6a25801da6c982f29c206"
 CLOSED75_SOURCE = "1cec8c1cb20c85e66e10cd49446b44c5e85101f1"
 CLOSED77_SOURCE = "c9d4817832720cc2b1bc6a212383973a77baf004"
+# The one reviewed successor of the historical dispatch protocol: 676f54aa8
+# makes wire() raise NativeRejected for a recorded 429 write receipt instead of
+# the generic child failure. Request, receipt and result artifacts are unchanged,
+# and known_error() treats the rejection as held. Any other change still fails.
+REVIEWED_PROTOCOL_SOURCE = "676f54aa89a87e7987aa535402f453804864a3e6"
 
 
 class CancelledAdmission(BaseException):
@@ -40,16 +45,20 @@ def protocol(source=SOURCE):
         "cloudbench-original600-runner.py": {"save"},
     }
     for name, selected in selections.items():
-        raw = subprocess.check_output(
-            [
-                "git",
-                "--no-replace-objects",
-                "-C",
-                str(HERE.parent),
-                "show",
-                source + ":scripts/" + name,
-            ]
-        )
+
+        def show(ref, name=name):
+            return subprocess.check_output(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    str(HERE.parent),
+                    "show",
+                    ref + ":scripts/" + name,
+                ]
+            )
+
+        raw = show(source)
 
         def functions(data, selected=selected):
             return {
@@ -60,8 +69,13 @@ def protocol(source=SOURCE):
                 and node.col_offset <= 4
             }
 
+        current = functions((HERE / name).read_bytes())
         need(
-            functions(raw) == functions((HERE / name).read_bytes()),
+            current == functions(raw)
+            or (
+                functions(raw) == functions(show(SOURCE))
+                and current == functions(show(REVIEWED_PROTOCOL_SOURCE))
+            ),
             "dispatch protocol source changed",
         )
         result[name] = sha(raw)
@@ -893,6 +907,8 @@ def known_error(error):
                 TypeError,
                 subprocess.SubprocessError,
                 R["Deadline"],
+                # A recorded 429 is a definitive no-effect write rejection.
+                H["NativeRejected"],
             ),
         )
         or type(error).__name__ == "CaptureFailure"
