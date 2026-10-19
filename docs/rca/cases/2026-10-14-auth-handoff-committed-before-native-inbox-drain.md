@@ -224,3 +224,23 @@ results and publication history intact.
 The approved eleven-line native-input admission hunk could supersede an unexecuted handoff at the last action slot but continue without the existing action-budget adjustment. Actual activity controls resume at step249 with MAX_ITERATIONS250: baseline897 reaches max_iterations before consuming the newly delivered input; the private correction refunds only the unexecuted action through the existing bounded adjust_iteration_after_action policy. Exhausted250 runs no model/auth/action; repeated fresh input reaches the existing consecutive refund cap, and duplicate/stale input commits one ordinary handoff without an unbounded loop. No numeric cap, timeout, task or evaluator was changed.
 
 Parent independently inspected Hermes agent/turn_iteration_prep.py:470-490 (bounded refund of a cancelled request with no valid item), alongside Claude src/query.ts:1506-1515 (a counterexample that counts aborted tools because its unit is a turn). Rose's established unit is actions. The analogy does not refund usage or cost. This review-only follow-up has owning offline proof; new trajectory/stop semantics still require exact source review and approval. It does not explain or repair the current minted-email, SMS or magic-link failures, and does not close the original Gmail credential ownership incident.
+
+## 2026-10-19 recorded failure case: premature handoff (not fixed)
+
+The drain above fixes only the stranded code. The primary failure in agent
+3caf15c9 is the model's decision: step 5 (dump
+`1792008253214-a116a32ac814-browser_use_step_5.json`) saw the verify page at
+20:04:08.3Z ("enter the 6-digit verification code we emailed to
+rose.river28.4698e3a3@mail.roselabs.ai") and called
+`request_user_assistance_for_authentication` 4.8 seconds later with no
+reasoning, although its system prompt contained the 60-second wait/resend
+contract. The code had arrived at 20:04:08.7Z. The expected behavior for this
+task is wait, type the code, sign in, zero handoffs; the same early handoff
+would also fail `browser-auth-code-never-arrives` (no resend).
+
+Its Auth Options listed the password under that address but said
+`Email OTP (user's inboxes): unavailable, none connected`. The likely cause is
+that the model had no evidence codes sent to that address reach it; the later
+`readableInboxEmails` change marks such identifiers "codes sent here reach you
+automatically". This is unverified: no replay compared the old and new Auth
+Options. The user chose to record this case and not fix it now.
