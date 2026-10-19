@@ -27,4 +27,8 @@ if [ "${PRISMA_LOCAL_PUSH_DRY_RUN:-0}" = "1" ]; then
   exit 0
 fi
 
+# Long-lived local databases can hold blank or duplicated phones that would
+# block the unique User.phone index; normalize them on this same local target.
+bash "$(dirname "${BASH_SOURCE[0]}")/normalize-local-user-phones.sh" "$DIRECT_URL" >/dev/null
+
 exec npx prisma db push "$@"

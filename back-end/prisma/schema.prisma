@@ -362,7 +362,7 @@ model User {
   usedInviteCode              Int?
   offWaitlistAt               DateTime?
   encryptedPaymentInformation String?
-  phone                       String?
+  phone                       String?                     @unique
   isAnonymous                 Boolean                     @default(false)
   onboardingCompletedAt       DateTime?
   imessageBridgeLastSeenAt    DateTime?

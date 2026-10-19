@@ -4,7 +4,7 @@ import { OLDEST_ACCOUNT_FIRST, phoneLookupVariants } from '../../providers/phone
 /**
  * Find the account that owns a phone number (tries both +prefix and no-prefix
  * variants). Normalizes input by stripping spaces, dashes, and parentheses.
- * A phone can match several rows (User.phone is not unique); the oldest
+ * Legacy rows can hold one number in both forms; the oldest
  * account always wins so login is deterministic.
  */
 export async function findUserByPhone(phone: string) {
