@@ -236,6 +236,15 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(item["state"], "fail")
         self.assertIn("cloudbench-a", item["detail"])
 
+    def test_native_audit_retained_owner_without_guest_names_is_not_hidden(self):
+        admission = self.f.sharded(audit=False)
+        write(admission / "native-release-audit.json", AUDIT["audit"](
+            [], app="app", guest_names=set(), guest_ids=set(), controllers=set(), exports=2, now=T0 + 2100,
+            retained_owners=["0123456789abcdef0123"]))
+        item = next(i for i in render(admission, self.f)["experiment"]["lifecycle"] if i["label"].startswith("Guests released"))
+        self.assertEqual((item["state"], item["label"]), ("fail", "Guests released (native audit)"))
+        self.assertIn("retained owners: 0123456789ab", item["detail"])
+
     def test_native_audit_fails_closed_without_identities_or_every_shard_export(self):
         unchecked = AUDIT["audit"]([], app="app", guest_names=set(), guest_ids=set(), controllers=set(), exports=0, now=T0)
         self.assertFalse(unchecked["released"], "an audit that checked no identity never certifies release")

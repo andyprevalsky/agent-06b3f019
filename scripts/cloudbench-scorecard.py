@@ -462,7 +462,10 @@ def _job_lifecycle(exp, audit=None, finished_after=None):
     released = sum(r.get("released") is True for r in terminal)
     checked = (audit or {}).get("checked") or {}
     usable = (isinstance(audit, dict) and audit.get("schema") == "cloudbench-native-release-audit-v1"
-              and isinstance(audit.get("present"), list) and checked.get("guest_names")
+              and isinstance(audit.get("present"), list)
+              # Registry/owner metadata can precede any recorded guest name; it still counts.
+              and (checked.get("guest_names") or checked.get("guest_ids") or checked.get("guest_volumes")
+                   or checked.get("owner_tokens") or checked.get("controller_ids") or audit.get("retained_owners"))
               and (not finished_after or (audit.get("observed_at") or 0) >= finished_after))
     lingering = (audit["present"] + (audit.get("present_volumes") or [])) if usable else []
     retained = (audit.get("retained_owners") or []) if usable else []
