@@ -87,6 +87,37 @@ def test_pull_streams_extraction_without_staging_the_whole_archive(tmp_path: Pat
     assert (target / "sessions" / "b.json").read_text() == "secret trajectory b " * 200
 
 
+def test_pull_restores_on_interpreters_without_tarfile_filters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cloud images run Python 3.11 builds older than 3.11.4, where extractall()
+    has no ``filter``; restore must still work and still refuse escaping paths."""
+    import tarfile
+
+    bucket = _FakeBucket()
+    wmh_build_cache.push(_build_dir(tmp_path / "src"), store=(bucket, "b"), part_bytes=4096, log=_quiet)
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+    original_extractall = tarfile.TarFile.extractall
+
+    def legacy_extractall(self, path=".", members=None, *, numeric_owner=False, **kwargs):
+        if "filter" in kwargs:
+            raise TypeError("TarFile.extractall() got an unexpected keyword argument 'filter'")
+        return original_extractall(self, path, members, numeric_owner=numeric_owner)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", legacy_extractall)
+    target = tmp_path / "dst" / "world-model-native"
+    wmh_build_cache.pull(target, store=(bucket, "b"), log=_quiet)
+    assert (target / "sessions" / "a.json").read_text() == "secret trajectory a " * 200
+
+    evil = io.BytesIO()
+    with tarfile.open(fileobj=evil, mode="w") as archive:
+        info = tarfile.TarInfo("../escaped.txt")
+        info.size = 1
+        archive.addfile(info, io.BytesIO(b"x"))
+    evil.seek(0)
+    with tarfile.open(fileobj=evil, mode="r|") as archive, pytest.raises(ValueError, match="unsafe path"):
+        wmh_build_cache._safe_extract(archive, tmp_path / "evil")
+    assert not (tmp_path / "escaped.txt").exists()
+
+
 def test_pull_rejects_tampered_part_and_keeps_target_untouched(tmp_path: Path) -> None:
     bucket = _FakeBucket()
     store = (bucket, "test-bucket")

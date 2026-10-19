@@ -197,6 +197,27 @@ def push(
     return manifest
 
 
+def _safe_extract(tar: tarfile.TarFile, target: Path) -> None:
+    """Extract with the ``data`` filter, or its essential checks where the
+    interpreter predates tarfile filters (cloud images ship Python < 3.11.4)."""
+    if hasattr(tarfile, "data_filter"):
+        tar.extractall(target, filter="data")
+        return
+    root = target.resolve()
+    for member in tar:
+        destination = (root / member.name).resolve()
+        if Path(member.name).is_absolute() or (destination != root and root not in destination.parents):
+            raise ValueError(f"unsafe path in build cache archive: {member.name!r}")
+        if member.issym() or member.islnk():
+            link = (destination.parent / member.linkname) if member.issym() else (root / member.linkname)
+            if Path(member.linkname).is_absolute() or root not in link.resolve().parents:
+                raise ValueError(f"unsafe link in build cache archive: {member.name!r}")
+        elif not (member.isfile() or member.isdir()):
+            raise ValueError(f"unsupported member in build cache archive: {member.name!r}")
+        member.mode &= 0o755
+        tar.extract(member, root)
+
+
 def pull(
     build_dir: Path,
     *,
@@ -240,7 +261,7 @@ def pull(
         writer.start()
         try:
             with os.fdopen(read_fd, "rb") as source, tarfile.open(fileobj=source, mode="r|") as tar:
-                tar.extractall(extract_dir, filter="data")
+                _safe_extract(tar, extract_dir)
         except BaseException:
             writer.join()
             # A rejected part truncates the stream; report the verification error.
