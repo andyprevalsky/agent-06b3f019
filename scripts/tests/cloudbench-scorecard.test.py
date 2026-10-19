@@ -279,6 +279,17 @@ class Scorecard(unittest.TestCase):
         self.assertTrue(self.controllers_released(admission)["detail"].startswith("2/3 "),
                         "a receipt without the exact controller ownership record certifies nothing")
 
+    def test_runner_pre_supervisor_release_terminal_counts_controllers_released(self):
+        # The runner now ends a startup that never published a supervisor with its own terminal.
+        admission = self.f.barrier_abort()
+        for shard in ("00", "01", "02"):
+            write(admission / f"shard-{shard}/run/terminal.json",
+                  {"status": "FAILED_BEFORE_SUPERVISOR_RELEASED", "supervisor_state": "NOT_PUBLISHED", "gate_exit_code": 1,
+                   "release": {"machine_deleted": True, "volume_disposition": "pending_destroy"}, "benchmark_success_inferred": False})
+        item = self.controllers_released(admission)
+        self.assertEqual((item["state"], item["detail"][:4]), ("ok", "3/3 "), item)
+        self.assertIn("FAILED_BEFORE_SUPERVISOR_RELEASED", item["detail"])
+
     def test_barrier_abort_before_release_renders_never_started_queue(self):
         admission = self.f.barrier_abort()
         data = render(admission, self.f)

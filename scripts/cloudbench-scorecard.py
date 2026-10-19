@@ -248,7 +248,7 @@ def _window(card) -> float | None:
 CARD_PATTERN = re.compile(r"(^|/)\.?context/fleet/runs/([^/]+)/_batch/report-card\.json$")
 OWNED_PATTERN = re.compile(r"(^|/)\.?context/fleet/runs/[^/]+/(teardown-ownership/owned-clones\.(names|ids)|[^/]+/worker-clones\.ids)$")
 MACHINE_ID = re.compile(r"^[0-9a-f]{14}$")
-RELEASED_TERMINALS = {"CONTROLLER_RELEASE_VERIFIED", "DEAD_OWNER_CONTROLLER_RELEASE_VERIFIED"}
+RELEASED_TERMINALS = {"CONTROLLER_RELEASE_VERIFIED", "DEAD_OWNER_CONTROLLER_RELEASE_VERIFIED", "FAILED_BEFORE_SUPERVISOR_RELEASED"}
 SUMMARY_PATTERN = re.compile(r"(^|/)\.?context/benchmarks/campaigns/[^/]+/summary\.json$")
 
 
