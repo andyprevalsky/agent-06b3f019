@@ -444,6 +444,70 @@ else
     FAIL=$((FAIL+1)); echo "  ❌ seed memory measurement fails on a box with no cached dump"
 fi
 
+# A copy reused from a persistent volume can predate a corrective republication
+# of the same immutable key (2026-10-19: the cf8b...-pg15 object was republished
+# with its archived agent trajectories). Execute run.sh's real consumer section
+# with fake R2/restore/validate: a stale reused copy that fails the canonical
+# content check must re-pull the shared object exactly once, and a freshly
+# pulled failure must stay final.
+run_consumer_section() {
+    local case_dir="$1" local_content="$2" remote_content="$3"
+    rm -rf "$case_dir"
+    mkdir -p "$case_dir/root/back-end" "$case_dir/root/scripts" "$case_dir/bin" "$case_dir/cache"
+    printf '%s\n' '#!/bin/sh' \
+        'printf "get\n" >> "$CONSUMER_LOG"' \
+        'printf "%s" "$CONSUMER_REMOTE" > "$5"' > "$case_dir/bin/npx"
+    printf '%s\n' '#!/bin/sh' 'cp "$1" "$CONSUMER_DB"' > "$case_dir/root/scripts/restore-seed-dump.sh"
+    printf '%s\n' '#!/bin/sh' 'grep -qx reviewed "$CONSUMER_DB"' > "$case_dir/root/scripts/validate-canonical-seed-dump.sh"
+    chmod +x "$case_dir/bin/npx"
+    local dump="$case_dir/cache/seed.dump" token="cf8b-pg15-victoria-prod-sync-v1-whatsapp-v2"
+    if [ -n "$local_content" ]; then
+        printf '%s' "$local_content" > "$dump"
+        printf '%s' "schema-hash" > "${dump}.schemahash"
+        printf '%s' "$token" > "${dump}.cachetoken"
+    fi
+    {
+        printf '%s\n' "set -eo pipefail" \
+            "source '$ROOT_DIR/scripts/lib/seed-cache.sh'" \
+            'acquire_benchmark_seed_lock() { :; }' \
+            'release_seed_lock_if_held() { :; }' \
+            'fail_required_seed_dump() { echo "FAIL_CLOSED: $1"; exit 3; }' \
+            "_SEED_DUMP='$dump' _SCHEMA_HASH=schema-hash _SEED_CACHE_ENABLED=1" \
+            "_SEED_CACHE_TOKEN='$token' USE_SYSTEM_PG=true BENCHMARK_REQUIRE_SEED_DUMP=1" \
+            "LOCAL_DB_ACTUAL_PORT=5432 LOCAL_DB_NAME=victoria DB_RESTORED=false"
+        sed -n '/BEGIN BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION/,/END BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION/p' \
+            "$ROOT_DIR/scripts/run.sh"
+        printf '%s\n' 'echo "DB_RESTORED=$DB_RESTORED"'
+    } > "$case_dir/section.sh"
+    : > "$case_dir/get.log"
+    (cd "$case_dir/root" && CONSUMER_LOG="$case_dir/get.log" CONSUMER_DB="$case_dir/db" \
+        CONSUMER_REMOTE="$remote_content" PATH="$case_dir/bin:$PATH" \
+        bash "$case_dir/section.sh" > "$case_dir/out.log" 2>&1)
+}
+set +e
+run_consumer_section "$TMP/consumer-stale" stale reviewed; STALE_STATUS=$?
+run_consumer_section "$TMP/consumer-fresh-bad" "" stale; FRESH_BAD_STATUS=$?
+run_consumer_section "$TMP/consumer-both-bad" stale stale; BOTH_BAD_STATUS=$?
+set -e
+if [ "$STALE_STATUS" -eq 0 ] && grep -qx 'DB_RESTORED=true' "$TMP/consumer-stale/out.log" \
+   && [ "$(wc -l < "$TMP/consumer-stale/get.log")" -eq 1 ] \
+   && [ "$(cat "$TMP/consumer-stale/db")" = reviewed ]; then
+    PASS=$((PASS+1)); echo "  ✅ a stale reused dump that fails content re-pulls the shared object once and restores it"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ stale reused dump was not re-pulled: status=$STALE_STATUS $(tr '\n' ' ' < "$TMP/consumer-stale/out.log")"
+fi
+if [ "$FRESH_BAD_STATUS" -eq 3 ] && [ "$(wc -l < "$TMP/consumer-fresh-bad/get.log")" -eq 1 ] \
+   && grep -q 'FAIL_CLOSED' "$TMP/consumer-fresh-bad/out.log"; then
+    PASS=$((PASS+1)); echo "  ✅ a freshly pulled dump that fails content fails closed without another pull"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ freshly pulled bad dump: status=$FRESH_BAD_STATUS gets=$(wc -l < "$TMP/consumer-fresh-bad/get.log")"
+fi
+if [ "$BOTH_BAD_STATUS" -eq 3 ] && [ "$(wc -l < "$TMP/consumer-both-bad/get.log")" -eq 1 ]; then
+    PASS=$((PASS+1)); echo "  ✅ a stale copy and a bad shared object fail closed after exactly one re-pull"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ stale copy + bad shared object: status=$BOTH_BAD_STATUS gets=$(wc -l < "$TMP/consumer-both-bad/get.log")"
+fi
+
 echo "RESULTS: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 echo "PASS: seed-cache decision routes stale/absent dumps to the shared cache; valid dumps restore locally"
