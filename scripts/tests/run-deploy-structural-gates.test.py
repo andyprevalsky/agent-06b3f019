@@ -1094,6 +1094,7 @@ helper=Path(sys.argv[1]);sys.argv=sys.argv[1:]
 subject={'__name__':'fake_native_host','__file__':str(helper)}
 exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
 subject['record_temp_roots']=lambda repo,common:[str(repo.parent/'owned-temp-state')]
+subject['EXPORT_WRITER_DRAIN_SECONDS']=2  # these writers persist; keep the bounded drain short
 try: raise SystemExit(subject['main']())
 except (OSError,ValueError,KeyError): raise SystemExit(75)
 """
