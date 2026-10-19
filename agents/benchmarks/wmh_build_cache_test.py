@@ -97,3 +97,82 @@ def test_pull_refuses_non_empty_target_without_force_and_missing_cache_returns_n
 def test_push_refuses_non_build_directory(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         wmh_build_cache.push(tmp_path, store=(_FakeBucket(), "b"), log=_quiet)
+
+
+def _native_build_dir(root: Path) -> Path:
+    build = _build_dir(root)
+    (build / "build.manifest.json").write_text(json.dumps({"engine": "experiential"}))
+    (build / "conformance.json").write_text("{}")
+    (build / "conformance.native.json").write_text("{}")
+    (build / "prediction-audit.json").write_text("{}")
+    (build / "models" / "rose-archive").mkdir(parents=True)
+    (build / "models" / "rose-archive" / "experiential.json").write_text(json.dumps({"world_model_id": "w"}))
+    (build / "experiential" / "artifacts").mkdir(parents=True)
+    (build / "experiential" / "artifacts" / "w.json").write_text("native artifact")
+    (build / "otel").mkdir()
+    (build / "otel" / "a.otel.jsonl").write_text("secret trajectory a")
+    (build / "sessions.json").write_text("{}")
+    (build / "traces.otel.jsonl").write_text("secret trajectory")
+    return build
+
+
+def _restored_files(root: Path) -> set[str]:
+    return {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()}
+
+
+def test_serving_only_push_archives_exactly_what_native_serving_reads(tmp_path: Path) -> None:
+    bucket = _FakeBucket()
+    store = (bucket, "test-bucket")
+    source = _native_build_dir(tmp_path / "src")
+    manifest = wmh_build_cache.push(
+        source, name="rose-archive-serving", store=store, part_bytes=4096, serving_only=True, log=_quiet
+    )
+    assert manifest["serving_only"] is True
+    assert manifest["entries"] == [
+        "build.manifest.json",
+        "conformance.json",
+        "conformance.native.json",
+        "experiential",
+        "models",
+        "prediction-audit.json",
+    ]
+    assert manifest["indexed_bundles"] == 2
+    assert bucket.put_order[-1] == "wmh-build-cache/rose-archive-serving/manifest.json"
+
+    target = tmp_path / "dst" / "world-model"
+    assert wmh_build_cache.pull(target, name="rose-archive-serving", store=store, log=_quiet) is not None
+    assert _restored_files(target) == {
+        "build.manifest.json",
+        "conformance.json",
+        "conformance.native.json",
+        "prediction-audit.json",
+        "models/rose-archive/experiential.json",
+        "experiential/artifacts/w.json",
+    }
+    for rel in _restored_files(target):
+        assert (target / rel).read_bytes() == (source / rel).read_bytes()
+
+
+def test_serving_only_push_refuses_a_build_without_a_native_model(tmp_path: Path) -> None:
+    source = _build_dir(tmp_path / "src")
+    with pytest.raises(FileNotFoundError, match="native serving model"):
+        wmh_build_cache.push(source, store=(_FakeBucket(), "b"), serving_only=True, log=_quiet)
+    (source / "build.manifest.json").write_text("{}")
+    (source / "experiential").mkdir()
+    (source / "models" / "rose-archive").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="native serving model"):
+        wmh_build_cache.push(source, store=(_FakeBucket(), "b"), serving_only=True, log=_quiet)
+
+
+def test_cli_serving_only_flag_reaches_push_and_is_push_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+    monkeypatch.setattr(wmh_build_cache, "push", lambda build_dir, **kwargs: calls.append(kwargs))
+    assert (
+        wmh_build_cache.main(
+            ["push", "--serving-only", "--name", "rose-archive-serving", "--build-dir", str(tmp_path)]
+        )
+        == 0
+    )
+    assert calls == [{"name": "rose-archive-serving", "serving_only": True}]
+    with pytest.raises(SystemExit):
+        wmh_build_cache.main(["pull", "--serving-only", "--build-dir", str(tmp_path)])

@@ -18,6 +18,14 @@ Usage (from ``agents/`` with the venv active and ``.env`` loaded):
     python -m benchmarks.wmh_build_cache push --build-dir ../.context/world-model-native
     python -m benchmarks.wmh_build_cache pull --build-dir ../.context/world-model-native
     python -m benchmarks.wmh_build_cache status
+    python -m benchmarks.wmh_build_cache push --serving-only --name rose-archive-serving \
+        --build-dir ../.context/world-model-native
+
+``push --serving-only`` archives just what ``serve_world_model --engine
+experiential`` opens (the native artifact store, the model pointers and the
+build/conformance/prediction records), excluding the exported trajectories that
+only a rebuild needs. ``run-bench-cloud --refresh-wmh`` restores such a cache
+(``rose-archive-serving``) onto the cloud donor volume.
 """
 
 from __future__ import annotations
@@ -39,6 +47,14 @@ CACHE_PREFIX = "wmh-build-cache"
 DEFAULT_NAME = "rose-archive"
 PART_BYTES = 256 * 1024 * 1024
 MANIFEST_SCHEMA = "rose.wmh_build_cache.v1"
+# Top-level entries the native server reads (benchmarks/experiential_bridge.py
+# serve_native -> serve_experiential_world_model.load_native reads
+# experiential/ + models/<name>/experiential.json) plus the build/conformance
+# records that identify the artifact. Rebuild-only inputs (otel/, sessions/,
+# sessions.json, traces.otel.jsonl, delta-index.json) are never included.
+SERVING_FILES = ("build.manifest.json",)
+SERVING_DIRS = ("experiential", "models")
+SERVING_PREFIXES = ("conformance", "prediction")
 
 
 def _manifest_key(name: str) -> str:
@@ -64,15 +80,44 @@ def _source_commit() -> Optional[str]:
         return None
 
 
-def _tar_chunks(build_dir: Path, part_bytes: int) -> Iterator[bytes]:
-    """Stream a tar of ``build_dir`` and yield it in ``part_bytes`` chunks."""
+def serving_entries(build_dir: Path) -> list[str]:
+    """Top-level names of ``build_dir`` that native serving needs, sorted."""
+    names: list[str] = []
+    for entry in sorted(build_dir.iterdir(), key=lambda path: path.name):
+        if entry.is_dir() and not entry.is_symlink():
+            selected = entry.name in SERVING_DIRS
+        else:
+            selected = entry.is_file() and (
+                entry.name in SERVING_FILES
+                or (entry.name.startswith(SERVING_PREFIXES) and entry.name.endswith(".json"))
+            )
+        if selected:
+            names.append(entry.name)
+    pointers = list((build_dir / "models").glob("*/experiential.json")) if "models" in names else []
+    if "build.manifest.json" not in names or "experiential" not in names or not pointers:
+        raise FileNotFoundError(
+            f"{build_dir} has no native serving model (needs build.manifest.json, experiential/,"
+            " models/<name>/experiential.json)"
+        )
+    return names
+
+
+def _tar_chunks(build_dir: Path, part_bytes: int, entries: Optional[list[str]] = None) -> Iterator[bytes]:
+    """Stream a tar of ``build_dir`` (or only its top-level ``entries``) in ``part_bytes`` chunks."""
     read_fd, write_fd = os.pipe()
     pid = os.fork()
     if pid == 0:  # child: write the tar stream into the pipe
         os.close(read_fd)
-        with os.fdopen(write_fd, "wb") as sink:
-            with tarfile.open(fileobj=sink, mode="w|") as tar:
-                tar.add(str(build_dir), arcname=".")
+        try:
+            with os.fdopen(write_fd, "wb") as sink:
+                with tarfile.open(fileobj=sink, mode="w|") as tar:
+                    if entries is None:
+                        tar.add(str(build_dir), arcname=".")
+                    else:
+                        for name in entries:
+                            tar.add(str(build_dir / name), arcname=name)
+        except BaseException:
+            os._exit(1)
         os._exit(0)
     os.close(write_fd)
     try:
@@ -105,16 +150,24 @@ def push(
     name: str = DEFAULT_NAME,
     store: Optional[tuple[Any, str]] = None,
     part_bytes: int = PART_BYTES,
+    serving_only: bool = False,
     log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
-    """Upload ``build_dir`` as encrypted parts, then publish the manifest last."""
+    """Upload ``build_dir`` as encrypted parts, then publish the manifest last.
+
+    ``serving_only`` uploads only the entries native serving reads (see
+    ``serving_entries``); the full directory is needed only to resume a rebuild.
+    """
     build_dir = build_dir.resolve()
-    if not (build_dir / "delta-index.json").is_file():
+    entries: Optional[list[str]] = None
+    if serving_only:
+        entries = serving_entries(build_dir)
+    elif not (build_dir / "delta-index.json").is_file():
         raise FileNotFoundError(f"{build_dir} is not a WMH build directory (no delta-index.json)")
     client, bucket = store or _default_store()
     upload_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
     parts: list[dict[str, Any]] = []
-    for index, chunk in enumerate(_tar_chunks(build_dir, part_bytes)):
+    for index, chunk in enumerate(_tar_chunks(build_dir, part_bytes, entries)):
         key = _part_key(name, upload_id, index)
         encrypted = encrypt_artifact(chunk, path=key, content_type="application/x-tar", compress=False)
         if encrypted is None:
@@ -123,7 +176,8 @@ def push(
         client.put_object(Bucket=bucket, Key=key, Body=ciphertext)
         parts.append({"key": key, "metadata": metadata})
         log(f"[wmh-build-cache] uploaded part {index} ({len(chunk) / 1e6:.0f} MB)")
-    delta = json.loads((build_dir / "delta-index.json").read_text())
+    delta_path = build_dir / "delta-index.json"
+    delta = json.loads(delta_path.read_text()) if delta_path.is_file() else {}
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "name": name,
@@ -132,6 +186,8 @@ def push(
         "source_commit": _source_commit(),
         "indexed_bundles": len(delta.get("bundles") or {}),
         "plaintext_bytes": sum(int(p["metadata"]["plaintext_bytes"]) for p in parts),
+        "serving_only": serving_only,
+        "entries": entries,
         "parts": parts,
     }
     # The manifest goes last so a reader never sees a partially uploaded cache.
@@ -186,9 +242,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--build-dir", type=Path, default=Path(os.environ.get("WMH_BUILD_DIR", "../.context/world-model-native")))
     parser.add_argument("--name", default=os.environ.get("WMH_MODEL_NAME", DEFAULT_NAME))
     parser.add_argument("--force", action="store_true", help="pull: replace a non-empty build directory")
+    parser.add_argument(
+        "--serving-only",
+        action="store_true",
+        help="push: archive only what native serving reads (no exported trajectories)",
+    )
     args = parser.parse_args(argv)
+    if args.serving_only and args.command != "push":
+        parser.error("--serving-only applies to push")
     if args.command == "push":
-        push(args.build_dir, name=args.name)
+        push(args.build_dir, name=args.name, serving_only=args.serving_only)
     elif args.command == "pull":
         return 0 if pull(args.build_dir, name=args.name, force=args.force) is not None else 1
     else:
@@ -196,11 +259,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         if manifest is None:
             print(f"no cache published for {args.name}")
             return 1
-        summary = {k: manifest.get(k) for k in ("name", "created_at", "source_commit", "indexed_bundles", "plaintext_bytes")}
+        keys = ("name", "created_at", "source_commit", "indexed_bundles", "plaintext_bytes", "serving_only", "entries")
+        summary = {k: manifest.get(k) for k in keys}
         summary["parts"] = len(manifest.get("parts") or [])
         print(json.dumps(summary, indent=2))
     return 0
 
 
 if __name__ == "__main__":
+    # R2 + trace-archive key come from agents/.env; an exported value wins.
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
     sys.exit(main())

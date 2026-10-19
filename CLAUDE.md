@@ -831,6 +831,16 @@ devbox restores it instead of rebuilding for hours:
 Rebuild and push only on user request. The full run procedure is the
 `instantiate-whm` skill (`.claude/skills/instantiate-whm/SKILL.md`, section 6).
 
+Cloud SIM guests serve the same native model by default (`WMH_ENGINE=experiential`,
+`rose-archive`, `rose-wmh-gpt61`, `rose-outcome-distribution-v4`; set
+`WMH_ENGINE=legacy` for the old model). Publish it to the fleet donor in three
+steps: build natively on a big owned machine →
+`python -m benchmarks.wmh_build_cache push --serving-only --name rose-archive-serving --build-dir <dir>`
+→ `bash scripts/run-bench-cloud --refresh-wmh` (restores that cache and the native
+venv on the donor volume, then snapshots it; the 2 GB donor never builds). Then run
+`scripts/run-bench <task> --sim-on <task>`. Guests fail clearly if the native
+pointer or venv is missing; they never build or install at run time.
+
 ## Log Files
 
 Check these when errors occur:

@@ -210,6 +210,25 @@ Rebuild (and push) only when the user asks for an updated model. `pull`
 refuses a non-empty directory unless `--force` is given; `push` publishes the
 manifest last, so a reader never sees a partial upload.
 
+**Cloud SIM (fleet) runs serve the same native model.** Guests default to
+`WMH_ENGINE=experiential`, `WMH_MODEL_NAME=rose-archive`,
+`WMH_ROSE_POOL=rose-wmh-gpt61` and
+`WMH_EXECUTION_POLICY=rose-outcome-distribution-v4`; exported values override
+them, and `WMH_ENGINE=legacy` selects the old model. To publish a new model:
+
+1. Build the native model on a big machine you own (never on the 2 GB donor).
+2. `python -m benchmarks.wmh_build_cache push --serving-only --name rose-archive-serving --build-dir <dir>`
+   uploads only what serving reads (`experiential/`, `models/`,
+   `build.manifest.json`, `conformance*.json`, `prediction*.json`).
+3. `bash scripts/run-bench-cloud --refresh-wmh` restores that cache onto the
+   donor's `/data/world-model`, creates the native venv (with uv and its Python
+   on the volume), checks `models/rose-archive/experiential.json`, then
+   snapshots the volume for fleet clones. `WMH_CACHE_NAME` selects another cache.
+4. `scripts/run-bench <task> --sim-on <task>`.
+
+Guests never build or install: they stop with a clear error if the native
+pointer is missing or the venv does not match `agents/requirements-world-model.txt`.
+
 
 ```bash
 .claude/skills/instantiate-whm/scripts/run-trajectory.sh --task <task> --timeout 3600 \

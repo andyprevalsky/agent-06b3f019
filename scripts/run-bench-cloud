@@ -53,7 +53,9 @@
 #   --builder native|depot  image-build only; native default, Depot app scope/zstd 3
 #   --no-cache         explicitly bypass image build layers (build/setup only)
 #   --build-context D  build the unchanged source in another checkout
-#   --refresh-wmh      explicit-only: (re)build the cached WMH model on /data/world-model
+#   --refresh-wmh      explicit-only: refresh the cached WMH model on /data/world-model
+#                      (native default: restore WMH_CACHE_NAME from the R2 build cache
+#                      + pre-create the native venv; WMH_ENGINE=legacy rebuilds on-box)
 #   --refresh-secrets  refresh + verify the app environment, then exit (maintenance
 #                      op — the ONLY path that stages/activates app secrets)
 #   --verify-secrets   READ-ONLY check that the app environment exists, then exit.
@@ -68,7 +70,8 @@
 #   --no-dashboard     do NOT proxy/open the live dashboard (implied under CI)
 #   --dash-port <n>    local port for the proxied dashboard (default CONDUCTOR_PORT+5764
 #                      → 8765 on the standard 3001 workspace)
-#   --model <name>     WMH model artifact name (default rose-r2-archive-anthropic)
+#   --model <name>     WMH model artifact name (default rose-archive; legacy engine:
+#                      rose-r2-archive-anthropic)
 #   --vm-size <size>   machine size at --setup (default shared-cpu-4x)
 #   --vm-memory <mb>   machine memory at --setup (default 8192)
 #   --volume-size <gb> volume size at --setup (default 20)
@@ -150,6 +153,8 @@ source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-app-env-
 # On-box paths (mirror scripts/cloudbench-run.sh).
 REMOTE_REPO="/data/repo"
 REMOTE_WMH="/data/world-model"
+# uv-managed Python for the native WMH venv; must live on the volume so clones keep it.
+REMOTE_UV_PYTHON="/data/uv-python"
 REMOTE_LOG="/data/bench.log"      # detached on-box driver logs here; we poll it.
 REMOTE_TMP_SCRIPT="/tmp/rb.sh"    # the base64'd on-box invocation lands here.
 REMOTE_DASH_PORT="8009"           # on-box static dashboard http.server port.
@@ -175,14 +180,34 @@ BENCH_SIMULATE="1"
 BENCH_PARALLEL="0"
 BENCH_MAX_CONCURRENCY="5"
 BENCH_REF=""
-WMH_MODEL_NAME="rose-r2-archive-anthropic"
 # World-model launch configuration uses portable values, never controller paths.
-WMH_ENGINE="${WMH_ENGINE:-legacy}"
+# Cloud SIM serves the same native experiential WMH as local runs by default
+# (see .claude/skills/instantiate-whm). WMH_ENGINE=legacy explicitly selects the
+# previous model and its legacy defaults; every value stays operator-overridable.
+WMH_ENGINE="${WMH_ENGINE:-experiential}"
 case "$WMH_ENGINE" in
     legacy|experiential) ;;
     *) echo "Invalid WMH_ENGINE: expected legacy or experiential" >&2; exit 2 ;;
 esac
-WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-1-ultra}"
+if [ "$WMH_ENGINE" = experiential ]; then
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-archive}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-wmh-gpt61}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-rose-outcome-distribution-v4}"
+else
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-1-ultra}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
+fi
+if ! [[ "$WMH_MODEL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid WMH_MODEL_NAME" >&2
+    exit 2
+fi
+# R2 cache name of the serving-only native build that --refresh-wmh restores.
+WMH_CACHE_NAME="${WMH_CACHE_NAME:-rose-archive-serving}"
+if ! [[ "$WMH_CACHE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid WMH_CACHE_NAME" >&2
+    exit 2
+fi
 if ! [[ "$WMH_ROSE_POOL" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
     echo "Invalid WMH_ROSE_POOL" >&2
     exit 2
@@ -233,7 +258,6 @@ if [ -n "$WMH_CONTEXT_TOKENS" ] && ! [[ "$WMH_CONTEXT_TOKENS" =~ ^[1-9][0-9]*$ ]
     echo "Invalid WMH_CONTEXT_TOKENS: expected a positive integer or unset" >&2
     exit 2
 fi
-WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
 case "$WMH_EXECUTION_POLICY" in
     upstream|rose-virtual-public-affordances-v1|rose-virtual-public-affordances-v2|rose-outcome-distribution-v1|rose-outcome-distribution-v2|rose-outcome-distribution-v3|rose-outcome-distribution-v4) ;;
     *) echo "Invalid WMH_EXECUTION_POLICY: expected an immutable registered policy" >&2; exit 2 ;;
@@ -484,6 +508,11 @@ if [ -z "$BENCH_REF" ]; then
     BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
 fi
 validate_wmh_rose_pool_at_ref "$BENCH_REF" "$WMH_ROSE_POOL" || exit 2
+# --model may replace the configured name after the launch block validated it.
+if ! [[ "$WMH_MODEL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid WMH_MODEL_NAME" >&2
+    exit 2
+fi
 
 # ── Fly auth token ───────────────────────────────────────────────────────────
 # Operating the bench app requires a USER/org-scoped token. Prefer, in order:
@@ -3166,6 +3195,7 @@ if [ "$MODE" = "refresh-wmh" ]; then
         fi
     fi
     echo "═══ run-bench-cloud --refresh-wmh ═══"
+    echo "engine=$WMH_ENGINE cache=$WMH_CACHE_NAME pool=$WMH_ROSE_POOL policy=$WMH_EXECUTION_POLICY"
     echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH max_bundles=$WMH_REFRESH_MAX_BUNDLES max_steps=$WMH_REFRESH_MAX_STEPS max_steps_per_bundle=$WMH_REFRESH_MAX_STEPS_PER_BUNDLE"
     [ -n "$WMH_REFRESH_ROOT_AGENT_IDS" ] \
         && echo "explicit_roots=${#_wmh_refresh_roots[@]} (strict corpus selection)"
@@ -3198,10 +3228,32 @@ if [ "$MODE" = "refresh-wmh" ]; then
     fi
     warm_source_fetch_ref "$mid" "$EXPECTED_WMH_REF" || exit 1
     echo ""
-    echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
-    # Decode secrets into the checkout .env, mirror deps if needed, then run the
-    # WMH build. This is the ONLY place update_world_model_for_simulation() runs
-    # cloud-side. Runs as rose from the agents dir with the cached-model build root.
+    # Native (default): the small donor never builds. The model is built on a big
+    # owned machine and published with `wmh_build_cache push --serving-only`; here
+    # the donor restores that serving-only cache, and pre-creates the native venv
+    # (and its uv-managed Python) on the volume so guests never install at run time.
+    NATIVE_REFRESH_CMD="set -e
+[ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
+[ -n \"\${BACKEND_ENV_B64:-}\" ] && echo \"\$BACKEND_ENV_B64\" | base64 -d > '$REMOTE_REPO/back-end/.env'
+chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env' 2>/dev/null || true
+[ -x '$REMOTE_REPO/agents/venv/bin/python' ] || rsync -a /app/agents/venv/ '$REMOTE_REPO/agents/venv/'
+mkdir -p '$REMOTE_REPO/.context' '$REMOTE_UV_PYTHON'
+chown -R rose:rose '$REMOTE_REPO/agents/venv' '$REMOTE_REPO/.context' '$REMOTE_UV_PYTHON' 2>/dev/null || true
+cd '$REMOTE_REPO'
+[ -x agents/venv/bin/uv ] || gosu rose env HOME=/home/rose agents/venv/bin/python -m pip install --quiet uv
+gosu rose env HOME=/home/rose UV_PYTHON_INSTALL_DIR='$REMOTE_UV_PYTHON' UV_CACHE_DIR=/tmp/rose-uv-cache UV_LINK_MODE=copy bash scripts/setup-world-model.sh
+cd agents
+PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH' --name '$WMH_CACHE_NAME' --force
+rm -rf '$REMOTE_WMH'.replaced-*
+chown -R rose:rose '$REMOTE_WMH'
+[ -f '$REMOTE_WMH/models/$WMH_MODEL_NAME/experiential.json' ] || { echo 'restored cache $WMH_CACHE_NAME lacks models/$WMH_MODEL_NAME/experiential.json' >&2; exit 1; }
+[ -f '$REMOTE_WMH/build.manifest.json' ] || { echo 'restored cache $WMH_CACHE_NAME lacks build.manifest.json' >&2; exit 1; }
+echo '::WMH-REFRESH-DONE::'
+ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
+    # Legacy (explicit WMH_ENGINE=legacy): decode secrets into the checkout .env,
+    # mirror deps if needed, then run the WMH build. This is the ONLY place
+    # update_world_model_for_simulation() runs cloud-side. Runs as rose from the
+    # agents dir with the cached-model build root.
     BUILD_CMD="set -e
 # decode env for R2 creds the corpus read needs
 [ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
@@ -3216,11 +3268,17 @@ gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_M
   venv/bin/python -u -c \"from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json, os; ids=[value for value in os.environ.get('WMH_ROOT_AGENT_IDS', '').split(',') if value]; print(json.dumps(u(root_agent_ids=ids or None, progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))))\"
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
+    if [ "$WMH_ENGINE" = experiential ]; then
+        echo "🌍 Restoring native WMH cache $WMH_CACHE_NAME → $REMOTE_WMH (model $WMH_MODEL_NAME; no on-box build) ..."
+        BUILD_CMD="$NATIVE_REFRESH_CMD"
+    else
+        echo "🌍 Building the legacy WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
+    fi
     REFRESH_LOG="$(mktemp)"
     ssh_exec "$mid" "$BUILD_CMD" 2>&1 | grep -av '^Connecting to' | tee "$REFRESH_LOG" | sed 's/^/   /'
     if grep -q '::WMH-REFRESH-DONE::' "$REFRESH_LOG" 2>/dev/null; then
         echo ""
-        echo "✅ WMH model refreshed + cached at $REMOTE_WMH (served-not-rebuilt on every future run)."
+        echo "✅ WMH model ($WMH_ENGINE) refreshed + cached at $REMOTE_WMH (served-not-rebuilt on every future run)."
         rm -f "$REFRESH_LOG"
     else
         echo ""
@@ -3351,7 +3409,7 @@ print(round(mult * 0.00288 * perf + mem_gb * 0.00732, 5))
 
 echo "═══ run-bench-cloud (warm run) ═══"
 echo "tasks=[$TASKS_DISPLAY] simulate=$BENCH_SIMULATE parallel=$BENCH_PARALLEL max_concurrency=$BENCH_MAX_CONCURRENCY"
-echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOARD workspace=$RUN_WORKSPACE_NAME"
+echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME engine=$WMH_ENGINE app=$APP dashboard=$DASHBOARD workspace=$RUN_WORKSPACE_NAME"
 echo ""
 
 # READ-ONLY env preflight (concurrent-workstream safe): the run path only

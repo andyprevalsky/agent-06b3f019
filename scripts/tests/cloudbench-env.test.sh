@@ -66,11 +66,12 @@ def run(script, values=None):
                           text=True, capture_output=True)
 
 class WorldModelLaunch(unittest.TestCase):
-    def assert_handoff(self, values):
+    def assert_handoff(self, values, *, engine="experiential", pool="rose-1-mini",
+                       policy="rose-outcome-distribution-v4"):
         self.assertEqual({key: values.get(key) for key in (
-            "WMH_ENGINE", "WMH_ROSE_POOL", "WMH_CONTEXT_TOKENS",
-        )}, {"WMH_ENGINE": "experiential", "WMH_ROSE_POOL": "rose-1-mini",
-            "WMH_CONTEXT_TOKENS": "131072"})
+            "WMH_ENGINE", "WMH_ROSE_POOL", "WMH_CONTEXT_TOKENS", "WMH_EXECUTION_POLICY",
+        )}, {"WMH_ENGINE": engine, "WMH_ROSE_POOL": pool,
+            "WMH_CONTEXT_TOKENS": "131072", "WMH_EXECUTION_POLICY": policy})
         self.assertNotIn("WMH_NATIVE_PYTHON", values)
         self.assertNotIn("WMH_BUILD_DIR", values)
 
@@ -89,6 +90,8 @@ class WorldModelLaunch(unittest.TestCase):
                       {"WMH_ENGINE": "legacy", "WMH_ROSE_POOL": "rose-1-ultra", "WMH_CONTEXT_TOKENS": ""})
         self.assertEqual(exports.returncode, 0, exports.stderr)
         self.assertEqual(exports.stdout.splitlines(), ["experiential", "rose-1-mini", "131072"])
+        model = run(result.stdout + '\nprintf "%s\\n" "$WMH_MODEL_NAME" "$WMH_EXECUTION_POLICY"', {})
+        self.assertEqual(model.stdout.splitlines(), ["rose-archive", "rose-outcome-distribution-v4"])
         exported_keys = {line.split("=", 1)[0].removeprefix("export ") for line in result.stdout.splitlines()}
         self.assertFalse(exported_keys & {"WMH_NATIVE_PYTHON", "WMH_BUILD_DIR"})
 
@@ -106,10 +109,12 @@ class WorldModelLaunch(unittest.TestCase):
                                   "from pathlib import Path\nPath(os.environ['LAUNCH_RECEIPT']).write_text(json.dumps("
                                   "{'env': {k:v for k,v in os.environ.items() if k.startswith('WMH_')}, 'args':sys.argv[1:]}))\n")
             executable.chmod(0o755)
+            # The on-box build is the explicit legacy path; native restores a cache.
             result = run(
                 "gosu() { shift; \"$@\"; }; chown() { :; };\n" + fragment
                 + '\nunset WMH_ENGINE WMH_ROSE_POOL WMH_CONTEXT_TOKENS WMH_NATIVE_PYTHON WMH_BUILD_DIR; eval "$BUILD_CMD"',
-                {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(scratch / "world-model"),
+                {"WMH_ENGINE": "legacy", "WMH_EXECUTION_POLICY": "upstream",
+                 "REMOTE_REPO": str(repo), "REMOTE_WMH": str(scratch / "world-model"),
                  "WMH_MODEL_NAME": "rose-test", "WMH_REFRESH_MAX_BUNDLES": "0",
                  "WMH_REFRESH_MAX_STEPS": "0", "WMH_REFRESH_MAX_STEPS_PER_BUNDLE": "0",
                  "WMH_REFRESH_ROOT_AGENT_IDS": "", "LAUNCH_RECEIPT": str(receipt)},
@@ -118,20 +123,190 @@ class WorldModelLaunch(unittest.TestCase):
             captured = json.loads(receipt.read_text())
             settings = captured["env"]
             self.assertEqual(settings.pop("WMH_BUILD_DIR"), str(scratch / "world-model"))
-            self.assert_handoff(settings)
+            self.assert_handoff(settings, engine="legacy", policy="upstream")
             self.assertEqual(captured["args"][:2], ["-u", "-c"])
             self.assertIn("update_world_model_for_simulation", captured["args"][2])
 
     def test_defaults_and_invalid_configuration(self):
-        result = run('printf "%s\\n" "$WMH_ENGINE" "$WMH_ROSE_POOL" "$WMH_CONTEXT_TOKENS"',
-                     {"WMH_ENGINE": "", "WMH_ROSE_POOL": "", "WMH_CONTEXT_TOKENS": ""})
+        show = 'printf "%s\\n" "$WMH_ENGINE" "$WMH_MODEL_NAME" "$WMH_ROSE_POOL" "$WMH_EXECUTION_POLICY" "$WMH_CONTEXT_TOKENS" "$WMH_CACHE_NAME"'
+        unset = {"WMH_ENGINE": "", "WMH_ROSE_POOL": "", "WMH_CONTEXT_TOKENS": ""}
+        result = run(show, unset)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["legacy", "rose-1-ultra", ""])
+        # Cloud SIM defaults to the native experiential WMH the local runs use.
+        self.assertEqual(result.stdout.splitlines(), [
+            "experiential", "rose-archive", "rose-wmh-gpt61", "rose-outcome-distribution-v4", "",
+            "rose-archive-serving"])
+        legacy = run(show, {**unset, "WMH_ENGINE": "legacy"})
+        self.assertEqual(legacy.returncode, 0, legacy.stderr)
+        self.assertEqual(legacy.stdout.splitlines(), [
+            "legacy", "rose-r2-archive-anthropic", "rose-1-ultra", "upstream", "", "rose-archive-serving"])
+        overridden = run(show, {**unset, "WMH_MODEL_NAME": "custom-model", "WMH_ROSE_POOL": "rose-1-ultra",
+                                "WMH_EXECUTION_POLICY": "upstream", "WMH_CACHE_NAME": "custom-cache"})
+        self.assertEqual(overridden.stdout.splitlines(), [
+            "experiential", "custom-model", "rose-1-ultra", "upstream", "", "custom-cache"])
+        self.assertEqual(run(":", {"WMH_ENGINE": "legacy",
+                                   "WMH_EXECUTION_POLICY": "rose-outcome-distribution-v4"}).returncode, 2)
+        for key in ("WMH_MODEL_NAME", "WMH_CACHE_NAME"):
+            with self.subTest(unsafe=key):
+                self.assertEqual(run(":", {key: "x';id'"}).returncode, 2)
         for key, value in (("WMH_ENGINE", "unknown"),
                            ("WMH_ROSE_POOL", "pool;invalid"), ("WMH_CONTEXT_TOKENS", "0"),
                            ("WMH_CONTEXT_TOKENS", "-1"), ("WMH_CONTEXT_TOKENS", "1.5")):
             with self.subTest(key=key, value=value):
                 self.assertEqual(run(":", {key: value}).returncode, 2)
+
+    def test_native_refresh_restores_the_serving_cache_without_building(self):
+        refresh = source[source.index('if [ "$MODE" = "refresh-wmh" ]; then'):source.index("# MODE: run (default)")]
+        # Experiential (the default) selects the cache restore; only legacy builds on the donor.
+        self.assertRegex(refresh, r'if \[ "\$WMH_ENGINE" = experiential \]; then\n[^\n]*\n\s+BUILD_CMD="\$NATIVE_REFRESH_CMD"')
+        fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
+        fragment = fragment[:fragment.rfind("    # Legacy")]
+        self.assertNotIn("update_world_model_for_simulation", fragment)
+        self.assertIn("create_volume_snapshot_exact", refresh[refresh.index('BUILD_CMD="$NATIVE_REFRESH_CMD"'):])
+        fake_python = (
+            "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\n"
+            "argv=sys.argv[1:]\n"
+            "open(os.environ['CALLS'],'a').write(json.dumps({'tool':'python','argv':argv,"
+            "'user_home':os.environ.get('HOME')})+'\\n')\n"
+            "if argv[:4]==['-m','pip','install','--quiet']:\n"
+            "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755)\n"
+            "if 'benchmarks.wmh_build_cache' in argv and os.environ.get('PULL_MODE')!='fail':\n"
+            "    root=Path(argv[argv.index('--build-dir')+1])\n"
+            "    (root/'models/rose-archive').mkdir(parents=True, exist_ok=True)\n"
+            "    if os.environ.get('PULL_MODE')!='no-pointer':\n"
+            "        (root/'models/rose-archive/experiential.json').write_text('{}')\n"
+            "    (root/'build.manifest.json').write_text('{}')\n"
+            "    Path(str(root)+'.replaced-1').mkdir(exist_ok=True)\n"
+            "sys.exit(3 if os.environ.get('PULL_MODE')=='fail' and 'benchmarks.wmh_build_cache' in argv else 0)\n"
+        )
+        for mode, ok in (("ok", True), ("no-pointer", False), ("fail", False)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="wmh-native-refresh-") as temporary:
+                scratch = Path(temporary)
+                repo = scratch / "repo"
+                python = repo / "agents/venv/bin/python"
+                python.parent.mkdir(parents=True)
+                (repo / "back-end").mkdir()
+                (repo / "scripts").mkdir()
+                python.write_text(fake_python)
+                python.chmod(0o755)
+                calls = scratch / "calls.jsonl"
+                (repo / "scripts/setup-world-model.sh").write_text(
+                    "printf '{\"tool\":\"setup\",\"uv_python\":\"%s\",\"cwd\":\"%s\"}\\n' "
+                    "\"$UV_PYTHON_INSTALL_DIR\" \"$PWD\" >> \"$CALLS\"\n")
+                world = scratch / "world-model"
+                (world / "stale").mkdir(parents=True)
+                result = run(
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n" + fragment
+                    + '\neval "$NATIVE_REFRESH_CMD"',
+                    {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "WMH_MODEL_NAME": "rose-archive",
+                     "WMH_CACHE_NAME": "rose-archive-serving", "REMOTE_UV_PYTHON": str(scratch / "uv-python"),
+                     "CALLS": str(calls), "PULL_MODE": mode},
+                )
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
+                records = [json.loads(line) for line in calls.read_text().splitlines()]
+                pythons = [record["argv"] for record in records if record["tool"] == "python"]
+                self.assertEqual(pythons[0], ["-m", "pip", "install", "--quiet", "uv"])
+                self.assertEqual(pythons[1], ["-u", "-m", "benchmarks.wmh_build_cache", "pull", "--build-dir",
+                                              str(world), "--name", "rose-archive-serving", "--force"])
+                self.assertEqual(len(pythons), 2)
+                setup = [record for record in records if record["tool"] == "setup"]
+                self.assertEqual(setup, [{"tool": "setup", "uv_python": str(scratch / "uv-python"),
+                                          "cwd": str(repo)}])
+                self.assertTrue((scratch / "uv-python").is_dir())
+                if ok:
+                    self.assertFalse(Path(str(world) + ".replaced-1").exists())
+
+    def test_guest_guard_requires_the_native_pointer_and_pre_created_venv(self):
+        run_script = (root / "scripts/cloudbench-run.sh").read_text()
+        guard = re.search(r"^# Begin cached WMH guard\.\n.*?^# End cached WMH guard\.\n", run_script, re.M | re.S).group(0)
+        requirements = (root / "agents/requirements-world-model.txt").read_bytes()
+        with tempfile.TemporaryDirectory(prefix="wmh-guest-guard-") as temporary:
+            scratch = Path(temporary)
+            repo, world, venv = scratch / "repo", scratch / "world-model", scratch / "venv"
+            (repo / "agents").mkdir(parents=True)
+            (repo / "agents/requirements-world-model.txt").write_bytes(requirements)
+            values = {"REPO_DIR": str(repo), "WMH_DIR": str(world), "WMH_NATIVE_VENV": str(venv),
+                      "WMH_MODEL_NAME": "rose-archive", "WMH_ENGINE": "experiential"}
+            def check():
+                outcome = subprocess.run(["bash", "-c", guard + "cloudbench_cached_wmh_problem"],
+                                         env={"PATH": os.environ["PATH"], **values}, text=True, capture_output=True)
+                return outcome.returncode, outcome.stdout
+            self.assertIn("no cached WMH model", check()[1])
+            (world / "models/rose-archive").mkdir(parents=True)
+            (world / "build.manifest.json").write_text("{}")
+            self.assertIn("models/rose-archive/experiential.json", check()[1])
+            values["WMH_ENGINE"] = "legacy"
+            self.assertEqual(check(), (0, ""))
+            values["WMH_ENGINE"] = "experiential"
+            (world / "models/rose-archive/experiential.json").write_text("{}")
+            self.assertIn("native WMH venv is absent", check()[1])
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin/python").symlink_to(sys.executable)
+            self.assertIn("does not match", check()[1])
+            (venv / "requirements.sha256").write_text(hashlib.sha256(requirements).hexdigest() + "\n")
+            self.assertEqual(check(), (0, ""))
+            (repo / "agents/requirements-world-model.txt").write_bytes(requirements + b"\nchanged==1\n")
+            self.assertIn("does not match", check()[1])
+        self.assertNotRegex(guard, r"\buv\b|pip install")
+
+    def test_guest_stack_receives_native_serving_settings(self):
+        run_script = (root / "scripts/cloudbench-run.sh").read_text()
+        selection = re.search(r"^# Begin WMH selection\.\n.*?^# End WMH selection\.\n", run_script, re.M | re.S).group(0)
+        stack = run_script[run_script.index("STACK_ENV=(\n"):run_script.index('if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then\n    STACK_ENV')]
+        def stack_env(values):
+            outcome = subprocess.run(["bash", "-c", selection + stack + 'printf "%s\\n" "${STACK_ENV[@]}"'],
+                                     env={"PATH": os.environ["PATH"], "REPO_DIR": "/data/repo",
+                                          "WMH_DIR": "/data/world-model", **values}, text=True, capture_output=True)
+            self.assertEqual(outcome.returncode, 0, outcome.stderr)
+            return dict(line.split("=", 1) for line in outcome.stdout.splitlines() if "=" in line)
+        native = stack_env({})
+        self.assertEqual({key: native.get(key) for key in (
+            "WMH_ENGINE", "WMH_MODEL_NAME", "WMH_ROSE_POOL", "WMH_EXECUTION_POLICY", "WMH_BUILD_DIR",
+            "BENCHMARK_SKIP_WMH_DELTA", "WMH_NATIVE_PYTHON")}, {
+            "WMH_ENGINE": "experiential", "WMH_MODEL_NAME": "rose-archive", "WMH_ROSE_POOL": "rose-wmh-gpt61",
+            "WMH_EXECUTION_POLICY": "rose-outcome-distribution-v4", "WMH_BUILD_DIR": "/data/world-model",
+            "BENCHMARK_SKIP_WMH_DELTA": "1", "WMH_NATIVE_PYTHON": "/data/repo/.context/experiential-venv/bin/python"})
+        self.assertNotIn("WMH_CONTEXT_TOKENS", native)
+        handed = stack_env({"WMH_ENGINE": "experiential", "WMH_MODEL_NAME": "custom", "WMH_ROSE_POOL": "rose-1-mini",
+                            "WMH_EXECUTION_POLICY": "upstream", "WMH_CONTEXT_TOKENS": "131072"})
+        self.assertEqual((handed["WMH_MODEL_NAME"], handed["WMH_ROSE_POOL"], handed["WMH_EXECUTION_POLICY"],
+                          handed["WMH_CONTEXT_TOKENS"]), ("custom", "rose-1-mini", "upstream", "131072"))
+        legacy = stack_env({"WMH_ENGINE": "legacy"})
+        self.assertEqual((legacy["WMH_MODEL_NAME"], legacy["WMH_ROSE_POOL"], legacy["WMH_EXECUTION_POLICY"]),
+                         ("rose-r2-archive-anthropic", "rose-1-ultra", "upstream"))
+        self.assertNotIn("WMH_NATIVE_PYTHON", legacy)
+        rejected = subprocess.run(["bash", "-c", selection], env={"PATH": os.environ["PATH"], "WMH_MODEL_NAME": "a b"},
+                                  text=True, capture_output=True)
+        self.assertEqual(rejected.returncode, 2)
+        # The benchmark runner records the engine that owns each seeded session.
+        self.assertIn("export WMH_ENGINE='$WMH_ENGINE'", run_script)
+        self.assertIn('--world-model-name "$WMH_MODEL_NAME"', run_script)
+
+    def test_fleet_resolves_the_same_defaults_for_children_workers_and_provenance(self):
+        fleet = (root / "scripts/run-bench-fleet").read_text()
+        defaults = re.search(r"^# Begin fleet WMH defaults\.\n.*?^# End fleet WMH defaults\.\n", fleet, re.M | re.S).group(0)
+        show = 'printf "%s\\n" "$WMH_ENGINE" "$WMH_MODEL_NAME" "$WMH_ROSE_POOL" "$WMH_EXECUTION_POLICY"'
+        for values in ({}, {"WMH_ENGINE": "legacy"}, {"WMH_MODEL_NAME": "custom"}):
+            with self.subTest(values=values):
+                fleet_values = subprocess.run(["bash", "-c", defaults + "bash -c " + repr(show)],
+                                              env={"PATH": os.environ["PATH"], **values}, text=True, capture_output=True)
+                cloud_values = run(show, {"WMH_ENGINE": "", "WMH_ROSE_POOL": "", **values})
+                self.assertEqual(cloud_values.returncode, 0, cloud_values.stderr)
+                self.assertEqual(fleet_values.stdout, cloud_values.stdout)
+        self.assertNotIn("rose-r2-archive-anthropic\"", fleet.replace('"${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"', ""))
+        keys = set(re.findall(r'--config-value "(wmh_[a-z_]+)=', fleet))
+        self.assertEqual(keys, {"wmh_model_name", "wmh_engine", "wmh_rose_pool", "wmh_execution_policy"})
+        sys.path.insert(0, str(root / "scripts"))
+        try:
+            import cloudbench_execution_provenance as provenance
+        finally:
+            sys.path.remove(str(root / "scripts"))
+        self.assertTrue(keys <= provenance._CONFIG_SCALAR_KEYS)
+        # Autoscaled worker-only clones need the model name for simulated tool calls.
+        self.assertIn('echo "export WMH_MODEL_NAME=$(printf \'%q\' "$WMH_MODEL_NAME")"', fleet)
+        worker = (root / "scripts/cloudbench-worker.sh").read_text()
+        self.assertIn('${WMH_BASE_URL:+${WMH_MODEL_NAME:+WMH_MODEL_NAME="$WMH_MODEL_NAME"}}', worker)
 
     def test_rose_pool_is_validated_against_the_benchmark_ref(self):
         # A pool that exists only at the requested ref must pass, and one that
@@ -924,7 +1099,7 @@ fleet_production_function() {
 # bridge is an exact no-op, so load it rather than stubbing the call away.
 for function_name in machine_creation_admission fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release \
   inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots \
-  clone_volume_receipt_field clone_attach_failure_prelaunch clone_retire_owned_volume clone_create_owned_volume; do
+  clone_volume_receipt_field clone_attach_failure_prelaunch clone_retire_owned_volume clone_create_owned_volume clone_storage_ready_seconds; do
   function_source="$(fleet_production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
   eval "$function_source"
