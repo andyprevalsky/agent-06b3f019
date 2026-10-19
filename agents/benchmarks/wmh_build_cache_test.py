@@ -61,6 +61,32 @@ def test_round_trip_restores_identical_tree_and_encrypts_parts(tmp_path: Path) -
         assert (target / rel).read_bytes() == (source / rel).read_bytes()
 
 
+def test_pull_streams_extraction_without_staging_the_whole_archive(tmp_path: Path) -> None:
+    """A cloud volume cannot hold the archive and its extraction at once, so
+    extraction must already be writing files while later parts download."""
+    bucket = _FakeBucket()
+    manifest = wmh_build_cache.push(_build_dir(tmp_path / "src"), store=(bucket, "b"), part_bytes=4096, log=_quiet)
+    assert len(manifest["parts"]) >= 3
+    last_key = manifest["parts"][-1]["key"]
+    extracted_before_last: list[int] = []
+    staged_tars: list[Path] = []
+    original_get = bucket.get_object
+
+    def observing_get(*, Bucket: str, Key: str) -> dict:
+        if Key == last_key:
+            staging = list((tmp_path / "dst").glob(".wmh-cache-*"))
+            staged_tars.extend(path for root in staging for path in root.rglob("*.tar"))
+            extracted_before_last.append(sum(1 for root in staging for p in root.rglob("*") if p.is_file()))
+        return original_get(Bucket=Bucket, Key=Key)
+
+    bucket.get_object = observing_get
+    target = tmp_path / "dst" / "world-model-native"
+    wmh_build_cache.pull(target, store=(bucket, "b"), log=_quiet)
+    assert staged_tars == []
+    assert extracted_before_last and extracted_before_last[0] >= 1
+    assert (target / "sessions" / "b.json").read_text() == "secret trajectory b " * 200
+
+
 def test_pull_rejects_tampered_part_and_keeps_target_untouched(tmp_path: Path) -> None:
     bucket = _FakeBucket()
     store = (bucket, "test-bucket")
@@ -168,9 +194,7 @@ def test_cli_serving_only_flag_reaches_push_and_is_push_only(tmp_path: Path, mon
     calls: list[dict] = []
     monkeypatch.setattr(wmh_build_cache, "push", lambda build_dir, **kwargs: calls.append(kwargs))
     assert (
-        wmh_build_cache.main(
-            ["push", "--serving-only", "--name", "rose-archive-serving", "--build-dir", str(tmp_path)]
-        )
+        wmh_build_cache.main(["push", "--serving-only", "--name", "rose-archive-serving", "--build-dir", str(tmp_path)])
         == 0
     )
     assert calls == [{"name": "rose-archive-serving", "serving_only": True}]

@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
@@ -217,16 +218,38 @@ def pull(
         raise ValueError(f"unsupported cache schema {manifest.get('schema')!r}")
     build_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=build_dir.parent, prefix=".wmh-cache-") as staging:
-        tar_path = Path(staging) / "build.tar"
-        with tar_path.open("wb") as sink:
-            for index, part in enumerate(manifest["parts"]):
-                ciphertext = client.get_object(Bucket=bucket, Key=part["key"])["Body"].read()
-                sink.write(decrypt_and_validate_artifact(ciphertext, part["metadata"]))
-                log(f"[wmh-build-cache] verified part {index + 1}/{len(manifest['parts'])}")
+        # Stream verified plaintext straight into extraction: staging the whole
+        # tar as well would need twice the build size free (a 16 GB cache on a
+        # 40 GB cloud volume does not fit).
         extract_dir = Path(staging) / "extract"
         extract_dir.mkdir()
-        with tarfile.open(tar_path, mode="r") as tar:
-            tar.extractall(extract_dir, filter="data")
+        read_fd, write_fd = os.pipe()
+        failure: list[BaseException] = []
+
+        def feed() -> None:
+            try:
+                with os.fdopen(write_fd, "wb") as sink:
+                    for index, part in enumerate(manifest["parts"]):
+                        ciphertext = client.get_object(Bucket=bucket, Key=part["key"])["Body"].read()
+                        sink.write(decrypt_and_validate_artifact(ciphertext, part["metadata"]))
+                        log(f"[wmh-build-cache] verified part {index + 1}/{len(manifest['parts'])}")
+            except BaseException as exc:  # surfaced after the reader stops
+                failure.append(exc)
+
+        writer = threading.Thread(target=feed, daemon=True)
+        writer.start()
+        try:
+            with os.fdopen(read_fd, "rb") as source, tarfile.open(fileobj=source, mode="r|") as tar:
+                tar.extractall(extract_dir, filter="data")
+        except BaseException:
+            writer.join()
+            # A rejected part truncates the stream; report the verification error.
+            if failure:
+                raise failure[0] from None
+            raise
+        writer.join()
+        if failure:
+            raise failure[0]
         if build_dir.exists():
             replaced = build_dir.with_name(build_dir.name + f".replaced-{int(time.time())}")
             build_dir.rename(replaced)
@@ -239,7 +262,9 @@ def pull(
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("push", "pull", "status"))
-    parser.add_argument("--build-dir", type=Path, default=Path(os.environ.get("WMH_BUILD_DIR", "../.context/world-model-native")))
+    parser.add_argument(
+        "--build-dir", type=Path, default=Path(os.environ.get("WMH_BUILD_DIR", "../.context/world-model-native"))
+    )
     parser.add_argument("--name", default=os.environ.get("WMH_MODEL_NAME", DEFAULT_NAME))
     parser.add_argument("--force", action="store_true", help="pull: replace a non-empty build directory")
     parser.add_argument(
