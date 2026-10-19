@@ -244,7 +244,8 @@ def pull(
         except BaseException:
             writer.join()
             # A rejected part truncates the stream; report the verification error.
-            if failure:
+            # A broken pipe only means extraction stopped first: report that.
+            if failure and not isinstance(failure[0], BrokenPipeError):
                 raise failure[0] from None
             raise
         writer.join()
