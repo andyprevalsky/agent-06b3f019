@@ -106,6 +106,10 @@ GATES = (
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
     Gate(
+        "original600-portable-operator",
+        ("python3", "scripts/tests/original600-portable-operator.test.py"),
+    ),
+    Gate(
         "benchmark-provider-capacity",
         ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
     ),

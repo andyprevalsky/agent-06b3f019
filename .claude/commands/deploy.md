@@ -557,6 +557,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-staged-boot.test.py`,
 `python3 scripts/tests/cloudbench-static-service-observation.test.py`,
 `python3 scripts/tests/cloudbench-scorecard.test.py`,
+`python3 scripts/tests/original600-portable-operator.test.py`,
 `python3 scripts/tests/cloudbench-explicit-idle-admission.test.py`,
 `python3 scripts/tests/cloudbench-fixed-native-worker.test.py`,
 `python3 scripts/tests/cloudbench-protected-resources.test.py`,

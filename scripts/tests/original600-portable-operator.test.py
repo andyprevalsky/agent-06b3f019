@@ -1601,6 +1601,63 @@ class Portable(unittest.TestCase):
             self.assertFalse((root/'back-end/.env').exists())
             self.assertFalse((root/'agents/.env').exists())
 
+    def test_joined_gate_before_supervisor_publication_releases_and_terminates(self):
+        # polar70 post-deploy: the guest launcher failed before publishing a supervisor,
+        # the gate joined with a verified export, and every probe said NOT_PUBLISHED.
+        # The runner must invoke the canonical cleanup once and end, not probe forever.
+        with tempfile.TemporaryDirectory() as name:
+            base=Path(name);base.chmod(0o700);root=base/'source';(root/'scripts').mkdir(parents=True)
+            (root/'scripts/cloudbench-original-volume-capture.py').write_text("def resolve_token(scope):return 'fixture'\nclass Fly:\n def __init__(self,app,token):pass\n")
+            cleanup_calls=base/'cleanup-calls.jsonl'
+            (root/'scripts/cloudbench-disposable-controller.py').write_text(
+                "import json,os,sys\nfrom pathlib import Path\n"
+                "args=sys.argv[1:];directory=Path(args[args.index('--directory')+1])\n"
+                "with open("+repr(str(cleanup_calls))+",'a')as f:f.write(json.dumps(args)+'\\n')\n"
+                "record=json.loads((directory/'disposable-controller.ownership.json').read_bytes())\n"
+                "fd=os.open(directory/'disposable-controller.release.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
+                "os.write(fd,json.dumps(dict(machine_id=record['machine']['id'],volume_id=record['volume']['id'],volume_disposition='pending_destroy',machine_deleted=True)).encode());os.close(fd)\n")
+            tasks=private(base/'tasks.json',json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text()))
+            template=private(base/'authority-template.json',dict(allowed=True,source_ref='a'*40,protected_machines=['keep'+str(i) for i in range(4)],protected_volumes=['vol_keep']))
+            inventory=private(base/'inventory.json','{}')
+            config=private(base/'config.private.json',dict(schema='original600-controller-runner-v1',allowed=True,source_root=str(root),source_ref='a'*40,
+                source_files={'cloudbench-original600-runner.py':'f'*64,'cloudbench-original600-supervisor.py':'d'*64},tasks_path=str(tasks),started_at_epoch=time.time(),authority_template=str(template),
+                host_operator_provenance=dict(fixture=True),gate_env=dict(CLOUDBENCH_GATE_TIMEOUT_S='7200'),
+                remote_files=[dict(relative_path=RUNNER['WARM_INVENTORY_RELATIVE'],source_path=str(inventory),sha256=hashlib.sha256(inventory.read_bytes()).hexdigest())]))
+            out=base/'run';mid='0123456789abcd';probes=[]
+            class JoinedGate:
+                pid=os.getpid();returncode=1
+                def poll(self):return 1
+                def wait(self):return 1
+            def spawn(command,source,env,stream,output,config_path,config_sha,authority):
+                export=output/'export';export.mkdir(mode=0o700)
+                workspace=private(export/'workspace-volume.ownership.json',dict(volume_id='vol_fixture123'))
+                digest=hashlib.sha256(authority.read_bytes()).hexdigest()
+                private(export/'disposable-controller.ownership.json',dict(authority_sha256=digest,workspace_sha256=hashlib.sha256(workspace.read_bytes()).hexdigest(),
+                        machine=dict(id=mid,instance_id='fixture-instance'),volume=dict(id='vol_fixture123')))
+                private(export/'disposable-export.verified.json',dict(authority_sha256=digest,machine_id=mid))
+                return JoinedGate()
+            def control(api,machine,payload):
+                probes.append(payload['action']);return dict(state='NOT_PUBLISHED')
+            real_sleep=time.sleep;slept=[0]
+            def bounded_sleep(seconds):
+                slept[0]+=1
+                if slept[0]>400:raise TimeoutError('runner never ended a joined pre-supervisor startup')
+                real_sleep(.025)
+            stubs=dict(validate_source_members=lambda *unused:None,pin_warm_snapshot=lambda *unused:None,host_gate=lambda *unused:root/'gate',
+                       launch_handoff=lambda output,remote:(output/'payload.gz','e'*64,['true']),spawn_gate=spawn,machine_control=control,
+                       transfer_sidecars=lambda *unused,**kw:None)
+            with patch.dict(RUNNER['run'].__globals__,stubs),patch.object(RUNNER['subprocess'],'check_output',return_value='a'*40+'\n'),patch.object(RUNNER['time'],'sleep',bounded_sleep):
+                code=RUNNER['run'](config,hashlib.sha256(config.read_bytes()).hexdigest(),out)
+            self.assertEqual(code,1)
+            self.assertEqual(len(cleanup_calls.read_text().splitlines()),1)
+            self.assertEqual(json.loads(cleanup_calls.read_text())[0],'cleanup')
+            self.assertTrue(probes and set(probes)=={'PROBE'},probes)
+            intent=json.loads((out/'cleanup-call.intent.json').read_bytes())
+            self.assertEqual((intent['supervisor_joined'],intent['supervisor_state'],intent['probed_after_join']),(False,'NOT_PUBLISHED',True))
+            terminal=json.loads((out/'terminal.json').read_bytes())
+            self.assertEqual((terminal['status'],terminal['supervisor_state'],terminal['benchmark_success_inferred']),('FAILED_BEFORE_SUPERVISOR_RELEASED','NOT_PUBLISHED',False))
+            self.assertEqual(terminal['release']['machine_id'],mid)
+
     def test_actual_gate_typed_preallocation_refusal_terminates_only_joined_no_effect(self):
         source=Path(os.environ.get('ORIGINAL600_GATE_SOURCE',ROOT/'scripts/run-cloudbench-controller-gate')).read_text()
         message=source.index('echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)"')
