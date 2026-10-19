@@ -42,6 +42,8 @@ const prisma = {
           ];
     },
   },
+  // No minted inboxes: readableInboxEmails lists only the user's own inboxes.
+  mintedAccount: { findMany: async () => [] },
 };
 
 async function main() {
