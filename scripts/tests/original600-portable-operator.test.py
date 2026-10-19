@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 import runpy
 import signal
+import ssl
 import shlex
 import subprocess
 import sys
@@ -2194,6 +2195,85 @@ class Portable(unittest.TestCase):
 
 
 
+    def test_transient_app_inventory_timeout_is_retried_and_persistent_failure_fails_closed(self):
+        """Live proof 1792433714160918322 lost launch attempt 1 to one 20 s `flyctl apps list` timeout."""
+        settings = {'data': {'organization': {'slug': 'personal', 'settings': {'machines_per_org_limit': 1000}, 'billingStatus': 'fixture'}}}
+        apps = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'navi-whisper-lux-bench', 'Organization': {'Slug': 'personal'}}]), '')
+        argv = ['flyctl', 'apps', 'list', '--org', 'personal', '--json']
+        slow = subprocess.TimeoutExpired(argv, 20)
+        attempts = 3  # bounded: the read-only inventory gets two more tries, then refuses
+
+        class API:
+            def __init__(self, app, token):
+                pass
+            def api(self, method, path, timeout):
+                return [{'id': 'm1'}]
+
+        for name, effects, outcome in (('one slow read', [slow, apps], 2),
+                                       ('one failed read', [subprocess.CalledProcessError(1, argv), apps], 2),
+                                       ('persistent slow reads', [slow] * attempts, subprocess.TimeoutExpired)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory, \
+                 patch.object(CLI.urllib.request, 'urlopen', side_effect=lambda *a, **k: io.BytesIO(json.dumps(settings).encode())), \
+                 patch.object(CLI.time, 'sleep') as pause, \
+                 patch.object(CLI.subprocess, 'run', side_effect=effects) as run:
+                if isinstance(outcome, int):
+                    cap = CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+                    self.assertEqual(cap['available_slots_conservative'], 998)
+                    self.assertEqual(run.call_count, outcome)
+                else:
+                    with self.assertRaises(outcome):
+                        CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+                    self.assertEqual(run.call_count, attempts)
+                    self.assertEqual(list(Path(directory).iterdir()), [], 'no partial inventory is saved')
+                self.assertTrue(all(c.kwargs['timeout'] == 20 and c.args[0] == argv for c in run.call_args_list))
+                self.assertEqual(pause.call_count, run.call_count - 1)
+        # A malformed but successful read is not transient: it still refuses at once.
+        bad = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'unrelated', 'Organization': {'Slug': 'personal'}}]), '')
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
+             patch.object(CLI.time, 'sleep'), patch.object(CLI.subprocess, 'run', return_value=bad) as run:
+            with self.assertRaisesRegex(ValueError, 'does not include'):
+                CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+            self.assertEqual(run.call_count, 1)
+        # The organization settings read is retried the same way; an authorization refusal is not.
+        import urllib.error
+        for name, effects, calls in (('slow settings read', [TimeoutError('read timed out')], 2),
+                                     ('settings 503', [urllib.error.HTTPError('https://api.fly.io/graphql', 503, 'busy', {}, io.BytesIO())], 2),
+                                     ('settings 401', [urllib.error.HTTPError('https://api.fly.io/graphql', 401, 'denied', {}, io.BytesIO())], 1),
+                                     ('untrusted certificate', [urllib.error.URLError(ssl.SSLCertVerificationError('bad cert'))], 1)):
+            responses = iter(effects + [io.BytesIO(json.dumps(settings).encode())])
+            def urlopen(*a, **k):
+                value = next(responses)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory, \
+                 patch.object(CLI.urllib.request, 'urlopen', side_effect=urlopen) as opened, \
+                 patch.object(CLI.time, 'sleep'), patch.object(CLI.subprocess, 'run', return_value=apps):
+                if calls == 1:
+                    with self.assertRaises(urllib.error.URLError):
+                        CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+                else:
+                    self.assertEqual(CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)['machine_limit'], 1000)
+                self.assertEqual(opened.call_count, calls)
+        # A missing flyctl binary is not transient either.
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
+             patch.object(CLI.time, 'sleep'), patch.object(CLI.subprocess, 'run', side_effect=FileNotFoundError('flyctl')) as run:
+            with self.assertRaises(FileNotFoundError):
+                CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+            self.assertEqual(run.call_count, 1)
+        # Retries never outlive the caller's existing I/O alarm: its Deadline ends the read at once.
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
+             patch.object(CLI.time, 'sleep') as pause, \
+             patch.object(CLI.subprocess, 'run', side_effect=RUNNER['Deadline']('external controller I/O deadline')) as run:
+            with self.assertRaises(RUNNER['Deadline']):
+                CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+            self.assertEqual((run.call_count, pause.call_count), (1, 0))
+        self.assertEqual((CLI.INVENTORY_READ_ATTEMPTS, len(CLI.INVENTORY_RETRY_PAUSES)), (attempts, attempts - 1))
+
+
 class Sharded(unittest.TestCase):
     def setUp(self):
         # Launches append to the experiments ledger and run a read-only native audit;
@@ -2517,6 +2597,39 @@ class Sharded(unittest.TestCase):
             costed = [row for row in result['jobs'] if row['cost_usd'] is not None]
             self.assertEqual([(row['cost_usd'], row['exec_s'], row['wall_s']) for row in costed], [(0.25, 42.0, 61.5)] * 3)  # one carded job per shard
             self.assertEqual(json.loads((admission/'capacity-proof.private.json').read_bytes())['new_machine_demand'], 45)
+
+    def test_preallocation_abort_ends_the_ledger_entry_and_admission_as_aborted(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            args = self.args(directory, task_count=12, repetitions=3, tasks_per_controller=4)
+            plan = CLI.shard_selection(args, RUNNER)
+            timeout = subprocess.TimeoutExpired(['flyctl', 'apps', 'list', '--org', 'personal', '--json'], 20)
+            guest_env = CLI.guest_temporal_env(ROOT, args.agents_env, args.backend_env)  # rendered before Popen is refused
+            with patch.object(CLI, 'capacity_snapshot', side_effect=timeout), \
+                 patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
+                 patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
+                 patch.object(CLI.subprocess, 'Popen', side_effect=AssertionError('nothing launches')), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
+            ledger = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+            self.assertEqual([e['event'] for e in ledger], ['launch', 'end'])
+            end = ledger[1]
+            self.assertEqual(end['state'], 'ABORTED')
+            self.assertGreaterEqual(end['ended_at'], ledger[0]['triggered_at'])
+            self.assertEqual(end['outcome'], {'allocated': False})
+            self.assertIn('TimeoutExpired', end['abort_reason'])
+            admission = next((directory/'state').iterdir())
+            receipt = json.loads((admission/'preallocation-abort.json').read_bytes())
+            self.assertEqual((receipt['ended_at'], receipt['allocated']), (end['ended_at'], False))
+            card = CLI.scorecard_module(ROOT)['build'](admission, ledger=self.ledger)
+            self.assertEqual(card['experiment']['state'], 'ABORTED')
+            self.assertEqual(card['experiment']['ended_at'], end['ended_at'])
+            self.assertIn('TimeoutExpired', card['experiment']['state_reason'])
+            self.assertEqual(card['since']['state'], 'ENDED')
+            self.assertEqual(card['history'][0]['state'], 'ABORTED')
+            self.assertEqual(self.audits, [], 'nothing was allocated, so there is nothing to audit')
 
     def test_sharded_run_refuses_a_hub_interpreter_without_agents_dependencies(self):
         with tempfile.TemporaryDirectory() as name:
