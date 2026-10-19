@@ -268,6 +268,11 @@ class WorldModelLaunch(unittest.TestCase):
             "WMH_EXECUTION_POLICY": "rose-outcome-distribution-v4", "WMH_BUILD_DIR": "/data/world-model",
             "BENCHMARK_SKIP_WMH_DELTA": "1", "WMH_NATIVE_PYTHON": "/data/repo/.context/experiential-venv/bin/python"})
         self.assertNotIn("WMH_CONTEXT_TOKENS", native)
+        # Native inference matches the validated local instantiate-whm runs.
+        self.assertEqual({key: native.get(key) for key in (
+            "WMH_INFERENCE_POOL", "WMH_AZURE_FIRST", "WMH_EXCLUDE_FAILED_TOOL_EXAMPLES", "WMH_JSON_MODE")}, {
+            "WMH_INFERENCE_POOL": "rose-1-flash", "WMH_AZURE_FIRST": "1",
+            "WMH_EXCLUDE_FAILED_TOOL_EXAMPLES": "1", "WMH_JSON_MODE": "1"})
         handed = stack_env({"WMH_ENGINE": "experiential", "WMH_MODEL_NAME": "custom", "WMH_ROSE_POOL": "rose-1-mini",
                             "WMH_EXECUTION_POLICY": "upstream", "WMH_CONTEXT_TOKENS": "131072"})
         self.assertEqual((handed["WMH_MODEL_NAME"], handed["WMH_ROSE_POOL"], handed["WMH_EXECUTION_POLICY"],
@@ -276,6 +281,7 @@ class WorldModelLaunch(unittest.TestCase):
         self.assertEqual((legacy["WMH_MODEL_NAME"], legacy["WMH_ROSE_POOL"], legacy["WMH_EXECUTION_POLICY"]),
                          ("rose-r2-archive-anthropic", "rose-1-ultra", "upstream"))
         self.assertNotIn("WMH_NATIVE_PYTHON", legacy)
+        self.assertNotIn("WMH_INFERENCE_POOL", legacy)
         rejected = subprocess.run(["bash", "-c", selection], env={"PATH": os.environ["PATH"], "WMH_MODEL_NAME": "a b"},
                                   text=True, capture_output=True)
         self.assertEqual(rejected.returncode, 2)

@@ -1153,6 +1153,14 @@ if [ "$WMH_ENGINE" = experiential ]; then
     # Pin the guarded, pre-created interpreter: setup-world-model.sh then only
     # validates it and never runs uv on the guest.
     STACK_ENV+=("WMH_NATIVE_PYTHON=$WMH_NATIVE_VENV/bin/python")
+    # Native inference settings validated by the local instantiate-whm runs
+    # (.claude/skills/instantiate-whm/scripts/run-trajectory.sh).
+    STACK_ENV+=(
+        "WMH_INFERENCE_POOL=${WMH_INFERENCE_POOL:-rose-1-flash}"
+        "WMH_AZURE_FIRST=${WMH_AZURE_FIRST:-1}"
+        "WMH_EXCLUDE_FAILED_TOOL_EXAMPLES=${WMH_EXCLUDE_FAILED_TOOL_EXAMPLES:-1}"
+        "WMH_JSON_MODE=${WMH_JSON_MODE:-1}"
+    )
 fi
 if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then
     STACK_ENV+=("BENCHMARK_FAST_MODE_CACHE=$BENCHMARK_FAST_MODE_CACHE")
