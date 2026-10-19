@@ -8779,6 +8779,7 @@ def test_failed_clone_captures_owned_volume_before_machine_name_reconciliation(
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
         )
     ) + "\n" + _owned_volume_bundle(fleet)
@@ -8904,6 +8905,7 @@ def test_failed_clone_retains_exact_owner_when_delete_absence_is_unknown(
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
         )
     ) + "\n" + _owned_volume_bundle(fleet)
@@ -9013,6 +9015,7 @@ def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
         )
     ) + "\n" + _owned_volume_bundle(fleet) + "\n" + _disposable_volume_backup_function(fleet)
@@ -10787,6 +10790,7 @@ def _clone_machine_bundle(source: str) -> str:
             _extract_fleet_function(source, "clone_failure_owned_volume_id() {"),
             _extract_fleet_function(source, "fleet_clone_with_queue_admission() {"),
             _owned_volume_bundle(source),
+            _extract_fleet_function(source, "clone_storage_ready_seconds() {"),
             _extract_fleet_function(source, "clone_machine_target() {"),
         )
     )
@@ -12839,6 +12843,7 @@ reap_volume vol_exact || reap_status=$?
             "registry_record_is_stale_phantom() {",
             "reap_registry_clones() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
             "inventory_index_healthy() {",
             "inventory_machine_record_path() {",
@@ -13076,6 +13081,7 @@ def test_ambiguous_408_clone_absent_at_lookup_is_reaped_at_teardown(
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
             "registry_record_machine_identity() {",
             "fleet_current_disposable_registry() {",
@@ -31794,6 +31800,53 @@ clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" share
         assert result.stdout.strip() == "feedface000002"
     else:
         assert "--snapshot-id vs_fixture" in volume_calls[0]
+        assert result.returncode == 1
+        assert "storage was not mountable" in result.stderr
+
+
+@pytest.mark.parametrize("storage_mode", ["snapshot", "fresh"])
+def test_snapshot_clone_storage_budget_covers_measured_restore(tmp_path: Path, storage_mode: str) -> None:
+    """A SIM clone restored from the donor snapshot stays RESTORING for about
+    ten minutes (measured 590-600s, >625s and <=909s on 2026-10-19). The
+    former shared 600s default failed `raise-5m-rose-labs-brex --sim-on` at
+    the provider median. Simulate the slowest observed restore through the
+    real clone path with default budgets: snapshot storage must be awaited,
+    while fresh storage keeps its original bounded 600s deadline."""
+    source = fleet_source_text()
+    provider = tmp_path / "provider.py"
+    provider.write_text("print('Machine feedface000002 has been created...')\n")
+    script = f"""set -uo pipefail
+APP=fixture-app
+REGION=iad
+WARM_ID=feedface000001
+SNAP_ID=vs_fixture
+FRESH_VOLUMES=1
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
+fleet_registry_release_name() {{ return 0; }}
+machine_storage_failed() {{ return 1; }}
+sleep() {{ :; }}
+export CLONE_VOLUME_CALLS={shlex.quote(str(tmp_path / "volume-calls"))}
+RESTORE_BEGAN=$SECONDS
+machine_storage_ready() {{
+  SECONDS=$((SECONDS + 150))
+  [ $((SECONDS - RESTORE_BEGAN)) -ge 910 ]
+}}
+{_clone_machine_bundle(source)}
+fly_with_timeout() {{ shift; {shlex.quote(sys.executable)} {shlex.quote(str(provider))}; }}
+clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" shared-cpu-2x 4096 "$SNAP_ID" {storage_mode}
+"""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"CLOUDBENCH_CLONE_STORAGE_READY_SECONDS", "CLOUDBENCH_CLONE_SNAPSHOT_RESTORE_SECONDS"}
+    }
+    result = subprocess.run(["bash", "-c", "machine_creation_admission() { return 0; }\n" + script], env=env, text=True, capture_output=True, timeout=30)
+    assert (tmp_path / "owned.ids").read_text().split() == ["feedface000002"]
+    if storage_mode == "snapshot":
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "feedface000002"
+    else:
         assert result.returncode == 1
         assert "storage was not mountable" in result.stderr
 

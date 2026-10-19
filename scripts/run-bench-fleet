@@ -12881,6 +12881,25 @@ machine_creation_admission() {  # <target-ledger>; ordinary disposable lifecycle
     return 78
 }
 
+clone_storage_ready_seconds() {  # clone_storage_ready_seconds <snapshot|fresh>
+    # Provider storage-readiness budget for one accepted clone. A fresh volume
+    # is `created` on allocation; a 40GB volume restored from the donor snapshot
+    # stays RESTORING for about ten minutes. Measured 2026-10-19 on
+    # vs_ZPnK9baJYXkfpK036YB (3.5GB stored): 590-600s, >625s and <=909s, so
+    # the former shared 600s budget failed SIM clones at the provider median.
+    # Snapshot restores therefore get roughly twice the slowest observed
+    # restore. An explicit CLOUDBENCH_CLONE_STORAGE_READY_SECONDS still
+    # overrides both modes.
+    if [ -n "${CLOUDBENCH_CLONE_STORAGE_READY_SECONDS:-}" ]; then
+        printf '%s' "$CLOUDBENCH_CLONE_STORAGE_READY_SECONDS"
+        return 0
+    fi
+    case "$1" in
+        snapshot) printf '%s' "${CLOUDBENCH_CLONE_SNAPSHOT_RESTORE_SECONDS:-1800}" ;;
+        *) printf '600' ;;
+    esac
+}
+
 clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] [memory-mb] [snapshot-id] [snapshot|fresh]
     machine_creation_admission "$1" || return $?
     local DISPOSABLE_REAP=0
@@ -13196,7 +13215,7 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             # volume destroy can keep billing. Keep the durable record
             # name-only until the exact forked volume is visible, then publish
             # machine + volume atomically before any path may destroy it.
-            storage_deadline=$((SECONDS + ${CLOUDBENCH_CLONE_STORAGE_READY_SECONDS:-600}))
+            storage_deadline=$((SECONDS + $(clone_storage_ready_seconds "$storage_mode")))
             target_volume=""
             while [ -z "$target_volume" ]; do
                 target_volume="$(machine_volume_id "$target_id")"
