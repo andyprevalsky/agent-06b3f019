@@ -30147,6 +30147,7 @@ async def run_all_tests():
     await r.record_async("phone_off_stale_model_action_cannot_dispatch", test_phone_off_stale_model_action_cannot_dispatch)
     await r.record_async("phone_off_browser_auth_pause_does_not_retain_phone", test_phone_off_browser_auth_pause_does_not_retain_phone)
     await r.record_async("phone_auth_retain_uses_only_seen_owned_lease", test_phone_auth_retain_uses_only_seen_owned_lease)
+    await r.record_async("phone_setup_settings_targets_transport", test_phone_setup_settings_targets_transport_recovery_and_billing)
     await r.record_async("phone_setup_first_operation_and_seen_context", test_phone_setup_first_operation_and_seen_context)
     await r.record_async("phone_setup_actions_recovery_and_heartbeat", test_phone_setup_actions_recovery_and_heartbeat)
     await r.record_async("phone_setup_failclosed_and_safe_errors", test_phone_setup_failclosed_and_safe_errors)
@@ -31021,6 +31022,63 @@ async def test_phone_saved_credential_rejects_model_secret_routing_args():
             assert not result["success"], "Model supplied credential/routing arguments reached execution"
             assert "SYNTHETIC-CANARY" not in json.dumps(result)
         assert mutations == [], "Invalid saved-credential arguments reached physical command submission"
+
+
+async def test_phone_setup_settings_targets_transport_recovery_and_billing():
+    import httpx
+    from domains.spawn_browser_agent_v3 import phone
+    targets = ("apple_account", "icloud_messages", "icloud_keychain", "imessage", "receive_address", "runtime")
+    lease = {"id": "settings-lease", "status": "ACTIVE", "browserTaskId": "settings-task"}
+    verification = {"requirementsVersion": 1, "checks": {"icloud_messages": {"status": "confirmed", "current": False}, "imessage": {"status": "disabled", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
+    setup = {"attemptId": "settings-attempt", "revision": 5, "identityVerified": True, "state": "in_progress", "verification": verification}
+    view = {"lease": lease, "cursor": 11, "setup": setup}
+    snapshot = {"enabled": True, "interaction": copy.deepcopy(view)}
+    posts, receipts, submitted, paid = [], {}, {}, []
+    usage = {"billedBy": "backend", "usageRecordId": "backend-settings-usage", "model": "synthetic-verifier", "promptTokens": 20, "completionTokens": 4, "totalCostCents": 1}
+    def backend(request):
+        body = json.loads(request.content) if request.content else {}
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.url.path.endswith("/setup"):
+            posts.append(body)
+            key = body["requestKey"]
+            if key in submitted and submitted[key] != body:
+                return httpx.Response(409, json={"error": "changed_verification_payload"})
+            submitted[key] = body
+            assert body["expectedCursor"] == 11 and body["attemptId"] == "settings-attempt" and body["expectedRevision"] == 5
+            target = body.get("verificationTarget", "apple_account")
+            if key not in receipts:
+                paid.append(key)
+                receipts[key] = {"operation": {"id": key, "operation": "setup.verify", "status": "SUCCEEDED", "result": {"verificationTarget": target}}, "setup": setup, "usage": usage}
+            if target == "runtime":
+                raise httpx.ReadTimeout("SYNTHETIC-PRIVATE-ERROR", request=request)
+            return httpx.Response(200, json=receipts[key])
+        if "/operations/" in request.url.path:
+            return httpx.Response(200, json=receipts[request.url.path.rsplit("/", 1)[1]])
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json=view)
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={})
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="settings-task", snapshot=snapshot, client=client)
+        for target in targets:
+            params = {"mode": "setup", "action": "verify", "verificationTarget": target, "evidenceOperationIds": ["owned-read"]}
+            before = len(posts)
+            result = await phone.execute_phone(params, **common, decision_id="verify-" + target)
+            assert result["success"] and len(posts) == before + 1
+            assert posts[-1]["verificationTarget"] == target
+            assert result["setup"]["verification"] == verification and result["setup"]["identityVerified"] is True
+            assert result["setup"]["verification"]["configurationReady"] is False, "Partial proof was promoted to ready in Python"
+            assert result["usage"] == usage and "usage_items" not in result
+            assert "SYNTHETIC-PRIVATE-ERROR" not in json.dumps(result)
+        result = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "icloud_messages", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
+        assert result["success"] and len(paid) == 6, "Exact intent retry rebilled"
+        conflict = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "imessage", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
+        assert not conflict["success"] and conflict["_httpStatus"] == 409 and len(paid) == 6
+        assert posts[-1]["requestKey"] == posts[-2]["requestKey"], "Target entered the public decision ID instead of backend HMAC payload"
+        legacy = await phone.execute_phone({"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="legacy")
+        assert legacy["success"] and "verificationTarget" not in posts[-1]
 
 
 if __name__ == "__main__":

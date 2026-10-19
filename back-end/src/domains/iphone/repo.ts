@@ -225,7 +225,7 @@ export async function mutate(
     });
   } else {
     if (action === 'control' && actor === 'user' && input.mode === 'agent')
-      await resumePrivacy(tx, lease.deviceId);
+      await resumePrivacy(tx, lease.deviceId, lease.id, lease.actionCursor, now);
     await tx.iPhoneLease.update({
       where: { id: lease.id },
       data: {

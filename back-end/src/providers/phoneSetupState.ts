@@ -1,5 +1,6 @@
 /** One bounded encrypted setup profile/current attempt. setupState is the phase authority. */
 import { openPhoneValue, sealPhoneValue, phoneCommandHash } from './phoneHarnessCredentials';
+import { validSetupChecks, type SetupChecks, type SetupTarget } from './phoneSetupVerification';
 import { PhoneInteractionError } from './phoneInteractionError';
 export interface SetupAttempt {
   id: string;
@@ -26,6 +27,8 @@ export interface SetupState {
   expectedAppleIdentity?: string;
   attempt?: SetupAttempt;
   verified?: { at: string; profileRevision: number };
+  verification?: SetupChecks;
+  expectedPhone?: string | null;
 }
 export function setupState(encrypted: string | null): SetupState {
   if (encrypted === null) return { version: 1, profileRevision: 0, claimRevision: 0 };
@@ -35,6 +38,7 @@ export function setupState(encrypted: string | null): SetupState {
     if (
       !value ||
       value.version !== 1 ||
+      (value.verification !== undefined && !validSetupChecks(value.verification)) ||
       !Number.isSafeInteger(value.profileRevision) ||
       value.profileRevision < 0 ||
       !Number.isSafeInteger(value.claimRevision) ||
@@ -85,5 +89,6 @@ export interface SetupInput {
   reasonCode?:
     'user_constraint' | 'unsupported' | 'configuration_unavailable' | 'observed_signed_out';
   evidenceOperationIds?: string[];
+  verificationTarget?: SetupTarget;
 }
 export const SETUP_OPERATIONS = new Set(['setup.defer', 'setup.block', 'setup.verify']);

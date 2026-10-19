@@ -24,6 +24,8 @@ export async function setupCommitValid(
     device.enabled &&
     permitted(await tx.user.findUnique({ where: { userId: claim.lease.userId } })) &&
     state.profileRevision === claim.state.profileRevision &&
+    (await tx.user.findUnique({ where: { userId: claim.lease.userId }, select: { phone: true } }))
+      ?.phone === claim.state.expectedPhone &&
     state.attempt?.id === input.attemptId &&
     state.attempt.revision === input.expectedRevision &&
     device.providerEpoch === command.providerEpoch &&

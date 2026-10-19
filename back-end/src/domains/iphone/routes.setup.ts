@@ -1,3 +1,4 @@
+import { SETUP_TARGETS, type SetupTarget } from '../../providers/phoneSetupVerification';
 import type { SetupInput } from '../../providers/phoneSetupState';
 import { IPhoneError } from './types';
 function object(value: unknown): Record<string, unknown> {
@@ -37,6 +38,7 @@ export function setupBody(value: unknown): SetupInput {
     'requestKey',
     'reasonCode',
     'evidenceOperationIds',
+    'verificationTarget',
   ]);
   if (body.action !== 'defer' && body.action !== 'block' && body.action !== 'verify')
     throw new IPhoneError(400, 'Invalid setup action');
@@ -49,6 +51,8 @@ export function setupBody(value: unknown): SetupInput {
   };
   if (body.action === 'verify') {
     if (
+      (body.verificationTarget !== undefined &&
+        !SETUP_TARGETS.includes(body.verificationTarget as SetupTarget)) ||
       body.reasonCode !== undefined ||
       !Array.isArray(body.evidenceOperationIds) ||
       body.evidenceOperationIds.length < 1 ||
@@ -58,9 +62,17 @@ export function setupBody(value: unknown): SetupInput {
     const ids = body.evidenceOperationIds.map(text);
     if (new Set(ids).size !== ids.length)
       throw new IPhoneError(400, 'Duplicate setup observations');
-    return { ...base, action: 'verify', evidenceOperationIds: ids };
+    return {
+      ...base,
+      action: 'verify',
+      evidenceOperationIds: ids,
+      ...(body.verificationTarget !== undefined
+        ? { verificationTarget: body.verificationTarget as SetupTarget }
+        : {}),
+    };
   }
   if (
+    body.verificationTarget !== undefined ||
     body.evidenceOperationIds !== undefined ||
     (body.action === 'defer'
       ? body.reasonCode !== 'user_constraint'

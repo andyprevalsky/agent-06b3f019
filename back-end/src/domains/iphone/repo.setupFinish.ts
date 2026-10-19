@@ -67,7 +67,17 @@ export async function finishSetup(
           }
         : undefined;
     if (valid) {
-      await writeSetupOutcome(tx, device, state, input, result, now, succeeded, errorCode);
+      await writeSetupOutcome(
+        tx,
+        device,
+        state,
+        input,
+        result,
+        now,
+        succeeded,
+        errorCode,
+        claim.evidenceDigest
+      );
     }
     await tx.iPhoneOperation.updateMany({
       where: { id: command.id, state: 'RUNNING' },

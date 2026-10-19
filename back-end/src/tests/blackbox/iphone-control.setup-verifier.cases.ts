@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { settingsCases } from './iphone-control.settings.cases';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { sealPhoneValue, openPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { Case } from './iphone-control.cases';
 import {
   freshSetup,
+  proveSettings,
   observe,
   setupPost,
   verifierUsage,
@@ -13,10 +15,48 @@ import {
 import { setupRaceCases } from './iphone-control.setup-races.cases';
 export const setupVerifierCases: Case[] = [
   ...setupRaceCases,
+  ...settingsCases,
+  [
+    'signed-in Apple identity with disabled Messages settings must not yield overall setup ready',
+    async (h) => {
+      const f = await freshSetup(h);
+      h.observationResult = {
+        text: `Apple Account: ${f.identity}. Signed in. iCloud Messages: Off. iMessage: signed out.`,
+      };
+      const observation = await observe(h, f);
+      let calls = 0;
+      h.setupVerifier = async (input) => {
+        calls++;
+        assert.equal(input.expectedAppleIdentity, f.identity);
+        assert.equal(input.evidence[0].operationId, observation.id);
+        assert.deepEqual(input.evidence[0].result, h.observationResult);
+        // The existing verifier proves identity only, not Messages configuration.
+        return { identityConfirmed: true, usage: verifierUsage };
+      };
+      const response = await setupPost(h, f, {
+        action: 'verify',
+        attemptId: f.setup.attemptId,
+        expectedRevision: f.setup.revision,
+        expectedCursor: observation.cursor,
+        requestKey: randomUUID(),
+        evidenceOperationIds: [observation.id],
+      });
+      assert.equal(response.status, 200);
+      assert.equal(calls, 1);
+      assert.notEqual(
+        (response.data.setup as SetupDto).state,
+        'ready',
+        'Identity-only proof incorrectly marked disabled/signed-out Messages configuration ready'
+      );
+      const durable = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
+      assert.notEqual(durable.setupState, 'ready');
+    },
+  ],
   [
     'setup verifier consumes actual sanitized receipts once and ready never replays original intent',
     async (h) => {
       const f = await freshSetup(h);
+      await proveSettings(h, f, false);
       const original = randomUUID();
       const send = () =>
         h.request(f.userId, `/leases/${f.leaseId}/operations`, {

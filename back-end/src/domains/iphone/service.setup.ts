@@ -28,8 +28,16 @@ export async function submitSetup(
           agentId: claim.lease.agentId,
           expectedAppleIdentity: claim.state.expectedAppleIdentity!,
           evidence: claim.evidence,
+          verificationTarget: input.verificationTarget,
+          expectedReceiveAddress: claim.state.expectedPhone ?? null,
         });
-        const billed = await billSetup(claim, result);
+        const billed = await billSetup(
+          claim,
+          result,
+          input.verificationTarget && input.verificationTarget !== 'apple_account'
+            ? `phone_setup_${input.verificationTarget}`
+            : 'phone_setup_identity'
+        );
         usageRecordId = billed.id;
       } catch {
         result = null;

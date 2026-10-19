@@ -40,6 +40,10 @@ In mode=operation, set operation to the wire name and args to its arguments:
   or coordinates. The worker/model never reads or types the saved secret.
 Before credentials.fill_saved obtain fresh screen.text. The backend obtains
 trusted bounds and independently verifies the current form/account binding.
+When the latest successful operation is screen.text for the current interaction
+cursor, use that observation to choose the next action; do not repeat an
+identical read unless specific missing information or a state change requires
+it. A stale-binding response is a reason to obtain a new observation.
 The live host decides which operations are supported. An unsupported response
 is a capability limit; do not repeat it or assume back/current-app/tree exists.
 Queue/lease timeout is a tool outcome, not a request for user attention. Pending
@@ -88,11 +92,38 @@ setup blocker use action=block with reasonCode=unsupported,
 configuration_unavailable, or observed_signed_out; these do not request attention.
 A signed-out screen normally means continue setup; block only when unable to
 proceed safely. Do not abandon the original task or claim setup succeeded.
-After fresh observations, use action=verify with evidenceOperationIds containing
-1..8 successful current broker observation IDs. The backend independently checks
-the intended Apple Account sign-in. Supply no OCR text, readiness verdict, account
-override or routing IDs. User Done only resumes verification. Ready means verified
-Apple Account sign-in, not Messages/OTP delivery or permission to use password refs.
+Setup includes the required device settings, not merely Apple Account identity.
+Follow setup in order: observe the current screen; if Apple Account sign-in is
+incomplete, finish that authentication flow before auditing later settings.
+Do not wait for configurationReady to sign in. If already signed in, verify
+that evidence without signing out, then check the remaining settings.
+Read actual interaction.setup.verification: requirementsVersion, each target's
+checks/status/current scope, configurationReady, and operationalStatus. A durable
+identityVerified record or a last-known confirmed check is not current proof of
+all required settings. Inspect existing signed-in state without signing out or
+resetting it. Configure authorized required settings autonomously within this
+same original task, honoring user restrictions and protected authentication.
+After fresh observations, use mode=setup, action=verify with evidenceOperationIds
+containing 1..8 successful current broker observation IDs and verificationTarget:
+apple_account (the default when omitted), icloud_messages, icloud_keychain,
+imessage, receive_address, or runtime. Verify iCloud Messages sync and iCloud
+Keychain sync separately. iMessage activation/sign-in is separate from iCloud
+Messages sync; neither one proves the other. For receive_address use only the
+server's active expectedReceiveAddress and verify it is actually selected for
+receiving, not merely listed. Supply no phone/account override, OCR text, verdict,
+proof status, attempt/revision/epoch or routing IDs.
+Labels alone or an address appearing in a list do not prove an enabled toggle
+or selected address. If evidence cannot establish the actual control state,
+retain unknown and obtain better observations; do not invent success. The backend
+independently verifies scoped receipt evidence and decides configurationReady
+for the current requirements/version and ownership. User Done only resumes
+verification. Current configuration readiness and runtime health are separate:
+use verificationTarget=runtime for current health; transient iCloud pause or
+delivery failure is not proof that the configured settings were never enabled.
+No setting check proves actual SMS/OTP delivery, full message history sync, or
+permission to use private password refs. Do not request authentication attention
+for a sync/configuration/transport problem unless a genuine protected auth step
+blocks progress. Ready never unlocks private refs.
 After setup or deferral, reassess the original goal and choose the next action;
 setup never automatically replays the interrupted input or replaces the task.
 """
@@ -327,7 +358,7 @@ async def _execute_setup(params, *, config, user_id, task_id, decision_id, snaps
     path = f"interactions/{quote(task_id, safe='')}"
     payload = {"action": params["action"], "attemptId": context["setupAttemptId"],
                "expectedRevision": context["setupRevision"], "expectedCursor": cursor, "requestKey": key}
-    for field in ("reasonCode", "evidenceOperationIds"):
+    for field in ("reasonCode", "evidenceOperationIds", "verificationTarget"):
         if field in params:
             payload[field] = params[field]
 

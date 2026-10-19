@@ -58,3 +58,40 @@ export async function observe(h: Harness, f: SetupFixture, setup = f.setup) {
 export function setupPost(h: Harness, f: SetupFixture, body: Record<string, unknown>) {
   return h.request(f.userId, `/interactions/${f.taskId}/setup`, { method: 'POST', body });
 }
+
+/** Prove explicit settings through the real route; caller may leave identity for its own assertions. */
+export async function proveSettings(h: Harness, f: SetupFixture, includeIdentity = true) {
+  const prior = h.setupVerifier;
+  h.setupVerifier = async () => ({
+    identityConfirmed: true,
+    status: 'confirmed',
+    usage: verifierUsage,
+  });
+  try {
+    for (const verificationTarget of [
+      'icloud_messages',
+      'icloud_keychain',
+      'imessage',
+      'receive_address',
+      ...(includeIdentity ? ['apple_account'] : []),
+    ]) {
+      h.observationResult = {
+        text: `Explicit synthetic ${verificationTarget} On/enabled and signed in ${f.identity}; selected receive address +19729777432`,
+      };
+      const evidence = await observe(h, f);
+      const response = await setupPost(h, f, {
+        action: 'verify',
+        verificationTarget,
+        attemptId: f.setup.attemptId,
+        expectedRevision: f.setup.revision,
+        expectedCursor: evidence.cursor,
+        requestKey: randomUUID(),
+        evidenceOperationIds: [evidence.id],
+      });
+      assert.equal(response.status, 200);
+      f.setup = response.data.setup as SetupDto;
+    }
+  } finally {
+    h.setupVerifier = prior;
+  }
+}

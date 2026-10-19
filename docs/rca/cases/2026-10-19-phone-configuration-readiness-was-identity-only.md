@@ -1,0 +1,72 @@
+---
+id: 2026-10-19-phone-configuration-readiness-was-identity-only
+date: 2026-10-19
+title: Phone setup readiness recorded only Apple identity rather than required settings
+surface: back-end
+component: iphone-setup
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: repo.setupOutcome mapped identityConfirmed directly to overall setupState ready
+symptoms:
+  - "Identity-only proof incorrectly marked disabled/signed-out Messages configuration ready"
+  - "runtime health ages out at 120s"
+  - "user interaction evidence floor invalidates prior configuration proof"
+tags:
+  - iphone
+  - setup
+  - readiness
+  - evidence
+sources:
+  - memory: .context/phone-harness/settings-readiness-red.log
+  - memory: .context/phone-harness/settings-fourth-green.log
+  - memory: .context/phone-harness/settings-floor-unit-red.log
+  - memory: .context/phone-harness/settings-runtime-status-red.log
+repro: back-end/src/tests/blackbox/iphone-control.setup-verifier.cases.ts
+status: open
+---
+
+## Problem
+
+The newly required configuration boundary failed in the existing normal local iphone-control runner: a stored broker observation explicitly described the exact Apple account signed in, Messages in iCloud Off, and iMessage signed out. The existing verifier seam correctly established identity only; the real setup route nevertheless returned overall ready. Run 1792380330-3062455-2694 passed 66/67, failing exactly the new assertion. No live phone/model calls were used by this worker regression.
+
+## Diagnosis
+
+Flow: broker screen.text receipt → current strict setup evidence window → fixed identity verifier → identityConfirmed → repo.setupOutcome → durable ready. The owned contract had only identityConfirmed and a verified timestamp/profile revision. It explicitly excluded settings/sync proof, so changing its prompt alone could not represent the new requirement safely.
+
+What: partial identity evidence produced overall configuration readiness. Where: writeSetupOutcome mapped identityConfirmed directly to ready. Why: there was no versioned per-setting proof contract. Proof: the unchanged normal route red above, followed by 70-case control green after implementation. Problem class: incomplete readiness contract. This extends the previously intentional identity-only definition; it does not establish that the old verifier incorrectly performed its old task.
+
+Current symptom archive searches were `identity-only readiness` and `iMessage signed out setup settings`. They found the existing phone setup claim/UNKNOWN-fence case and saved-password runtime-contract case, whose diagnosis, solution and human-feedback sections were reviewed, along with process-feedback.md. These are relatives, not a recurrence: their custody and credential boundaries remain preserved, while this case adds the newly requested configuration contract. The current owning route red is the causal evidence. Related lifecycle and settings tests retain their original rejection assertions. The deeper alternative of asking the identity verifier to infer all device readiness was rejected: one boolean cannot represent partial configuration and transient runtime health, and text labels cannot establish visual selected/toggle state. Existing identity purpose remains unchanged. New typed target purposes remain fixed server-side, with unknown required where text evidence is insufficient.
+
+Additional executed unit reds independently exposed missing runtime age and evidence-floor invalidation (82/84), and unknown runtime verdict incorrectly allowing operational status (84/85). The runtime expiry fixture places its floor before the old runtime proof, so the age regression is independent of floor rejection.
+
+## Solution
+
+The existing setup.verify journal accepts a verify-only target: apple_account default, icloud_messages, icloud_keychain, imessage, receive_address, or runtime. Existing encrypted setup storage holds bounded versioned per-target facts and preserves historical identity proof. All five configuration targets must be confirmed in the current attempt/profile/generation/epoch/expected owner phone and after the current user-interaction floor. Each verification retains the original current uninterrupted 1..8 screen.text receipt window and 120-second admission bound. Settings facts remain last observations within the startup attempt, not perpetual device attestation.
+
+Runtime status is separate, requires complete current configuration and a confirmed runtime observation, and ages out after 120 seconds. Paused/pending health does not erase enabled settings. User handback and native completion advance the evidence floor; explicit sign-out invalidates identity and the Apple configuration proof. Current owner phone is captured and rechecked under the existing device-first commit locks. Invalid late results mutate no proofs. Usage remains canonical backend-billed once per stable journal key, with target-specific tool names.
+
+The normal control suite passed 70 cases in run 1792380863-3193116-950; provider units passed 85; layer checks passed 1662; build/lint/format passed. Final adjacent run 1792381014-3229221-20609 passes all seven normal domains (settings-final-blackboxes.log); parent integrated review remains pending. Main rollout remains default-off. This worker performed no production writes, live phone/model calls, schema changes, or benchmark changes. Parent separately executed ten canonical synthetic semantic controls under an explicit guarded loopback database; all ten passed (settings-semantic-result.json / settings-semantic-check.log). This is semantic evidence, not live full-configuration proof.
+
+Limits: OCR label/address presence is insufficient for enabled/selected visual state. Such targets remain unknown. No full-history completion, carrier SMS delivery, or perpetual Apple attestation is claimed. Parent owns semantic/live validation and archive closure/indexing.
+
+### Sign-out re-login followup
+
+Parent review identified that disabling only the Apple proof left other settings current after sign-out. The existing owning route regression was extended: full ready → explicit observed_signed_out block → fresh Apple verification alone must still require remaining settings audit. Normal control run 1792381296-3289163-16843 passed 69/70 and failed exactly `Fresh Apple identity reused settings proofs from before sign-out` (settings-signout-red.log). On explicit sign-out, the existing attempt evidence floor now advances to database time and the block journal cursor. Historical per-setting values remain available as lastKnown but cannot contribute current readiness. No API, prompt, schema, caller routing, or evidence-window relaxation was introduced. The unchanged control regression and adjacent auth-assistance/interactions passed 3/3 in settings-signout-green.log. A further pure same-millisecond boundary test reproduced timestamp-only invalidation failure (85/86, settings-floor-cursor-red.log). Each new proof now stores the existing monotonic attempt floor cursor and must match it as well as the timestamp. Historical proofs without that field are safely noncurrent; the unit command passes 86/86. Final affected/adjacent run 1792381427-3320009-27934 passes control70, auth-assistance37 and interactions13 (3/3; settings-cursor-final-blackboxes.log). Provider units pass 86, layers1662, build/lint/format/diff checks pass on the final frozen source.
+
+### Agent guidance and semantic validation
+
+The parent ran the normal Rose suite with explicit loopback database and backend overrides. Its existing saved-credential semantic control initially failed after three reads without a fill (111/112). Two independent offline regressions then proved that the synthetic control omitted the current backend setup DTO and bypassed real ActionHistory serialization; repairing those fixtures retained all five branch assertions and the three-decision limit. The repaired fixture still failed the real-model outcome (113/114), so fixture repair was not claimed as sufficient.
+
+The enabled-only guidance now states the setup order: finish current Apple authentication before auditing subsequent settings, and consume an already-current successful screen.text receipt instead of reading repeatedly merely to satisfy the word fresh. The deeper alternative of enforcing a fixed action sequence in the executor was rejected because it would prevent legitimate observation, existing signed-in accounts, user constraints and recovery. The backend already owns readiness enforcement; contextual navigation remains the model's job. This addresses stage precedence and evidence consumption rather than embedding the observed account or a desired test action.
+
+The unchanged full Rose suite then passed 114/114 in 8.8 seconds (settings-stage-guidance-full-normal.log). Its five real Foundry scenarios selected native AutoFill, server-side saved fill, or protected user assistance as appropriate. This is one observed stochastic outcome, not proof of deterministic model accuracy or proof that the earlier failure had only one cause. Offline request assertions pin the enabled guidance and preserve all six disabled tool/system/message hashes. Mock spawn and context suites also passed on the final guidance. No benchmark limits, model choice, decision count, or final branch assertions were relaxed.
+
+The final backend followup passed control70/auth37/interactions13 in run 1792381427-3320009-27934, with provider86 and build/lint/format/layer checks green. The earlier seven-domain pass remains broader adjacent evidence. The parent also ran ten real semantic verifier controls using synthetic text and a hard-guarded local database; all passed, including labels-only unknown and pause-with-unknown-cause. No current live-phone configuration pass or deployment is claimed.
+
+## Human feedback
+
+The user requires default-off isolation of main trajectories and consistent first-use phone settings configuration. No claim that message counts prove completed history sync is authorized. Parent technical review is not additional human feedback.
+
+## Reusable lesson
+
+Represent identity, required configuration facts, and transient operational health as separate evidence-bound readiness contracts.

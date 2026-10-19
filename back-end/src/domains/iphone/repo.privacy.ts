@@ -1,4 +1,5 @@
 /** Caller holds device lock; privacy admission precedes physical provider execution. */
+import { setupAfterAttention } from '../../providers/phoneSetupState';
 import { prisma } from '../../providers/database';
 import { IPhoneError, type IPhoneDevice, type Transaction } from './types';
 import type { PhoneActor, PhoneCommand } from './types.operations';
@@ -29,11 +30,20 @@ export async function claimPrivacy(
   }
   return null;
 }
-export async function resumePrivacy(tx: Transaction, deviceId: string) {
+export async function resumePrivacy(
+  tx: Transaction,
+  deviceId: string,
+  leaseId: string,
+  cursor: number,
+  now: Date
+) {
   const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: deviceId } });
   await tx.iPhoneDevice.update({
     where: { id: device.id },
-    data: { privateInputEncrypted: resumedPrivacy(device.privateInputEncrypted) },
+    data: {
+      privateInputEncrypted: resumedPrivacy(device.privateInputEncrypted),
+      setupEncrypted: setupAfterAttention(device.setupEncrypted, leaseId, cursor, now),
+    },
   });
 }
 

@@ -40,6 +40,10 @@ Archive searches used shared cooldown and production dotenv vocabulary; the Octo
 
 Production source remains frozen. The artifact runner now rejects non-loopback DATABASE_URL before invoking the canonical model. Executed default-dotenv guard exits 1 with no model request in credential-semantic-local-guard.log. Explicit loopback victoria controls independently passed the positive form and all four negative controls in credential-semantic-local-after.log. No shared rows were reset or deleted. Keep this case open pending parent review, expiry confirmation, and a durable registered harness safeguard if this artifact becomes reusable. No product code workaround or global pricing change is proposed.
 
+## Expiry verification
+
+At 2026-10-19T00:51:36.048332Z, a production read-only SELECT of only these two rows' id, updatedAt and rateLimitedUntil confirmed both original cooldown deadlines had passed. Both rows still matched the original accidental writes; neither had a later update. Evidence: `.context/phone-harness/cooldown-expiry-result.json`. No production write, model call, phone action, authentication completion or worker restart occurred. Expiry is confirmed; the case remains open for review and the durable runner safeguard noted above.
+
 ## Human feedback
 
 The user required that the change not affect main trajectories at all. The delegated task separately required read-only production access; that parent technical instruction is not additional human feedback.

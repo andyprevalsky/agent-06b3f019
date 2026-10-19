@@ -55,6 +55,11 @@ export async function claimSetup(userId: string, taskId: string, input: SetupInp
       throw new IPhoneError(409, 'Phone setup interaction changed');
     if (input.action === 'verify' && state.expectedAppleIdentity === undefined)
       throw new IPhoneError(409, 'Phone setup profile is unavailable');
+    if (
+      input.verificationTarget === 'receive_address' &&
+      (state.expectedPhone === undefined || state.expectedPhone === null)
+    )
+      throw new IPhoneError(409, 'Phone receive address is unavailable');
     const proof =
       input.action === 'verify'
         ? await setupEvidence(tx, setup.device, holder, state, input)

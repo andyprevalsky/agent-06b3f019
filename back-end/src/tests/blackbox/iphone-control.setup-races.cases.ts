@@ -5,6 +5,7 @@ import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { Case } from './iphone-control.cases';
 import {
   freshSetup,
+  proveSettings,
   observe,
   setupPost,
   verifierUsage,
@@ -60,7 +61,7 @@ export const setupRaceCases: Case[] = [
     },
   ],
 
-  ...(['epoch', 'generation', 'task', 'private'] as const).map((change): Case => [
+  ...(['epoch', 'generation', 'task', 'private', 'phone'] as const).map((change): Case => [
     `held setup verdict cannot mark ready after ${change} changes`,
     async (h) => {
       const f = await freshSetup(h);
@@ -87,6 +88,11 @@ export const setupRaceCases: Case[] = [
       });
       await entered;
       try {
+        if (change === 'phone')
+          await prisma.user.update({
+            where: { userId: f.userId },
+            data: { phone: '+19729777433' },
+          });
         if (change === 'epoch')
           await prisma.iPhoneDevice.update({
             where: { id: f.deviceId },
@@ -143,7 +149,10 @@ export const setupRaceCases: Case[] = [
       h.setupVerifier = async () => ({ identityConfirmed: true, usage: verifierUsage });
       const setup = denied.data.setup as SetupDto;
       const proof = await observe(h, f, setup);
-      assert.equal(((await submit(setup, proof)).data.setup as SetupDto).state, 'ready');
+      f.setup = (await submit(setup, proof)).data.setup as SetupDto;
+      assert.equal((f.setup as SetupDto & { identityVerified: boolean }).identityVerified, true);
+      await proveSettings(h, f);
+      assert.equal(f.setup.state, 'ready');
       h.cleanupComplete = true;
       await h.request(f.userId, `/leases/${f.leaseId}/release`, { method: 'POST' });
       const agent = await h.createAgent(f.userId);
@@ -159,12 +168,13 @@ export const setupRaceCases: Case[] = [
         data: { browserTaskId: task.id },
       });
       h.setupVerifier = async () => {
-        throw new Error('Ready successor must not verify again');
+        throw new Error('Observing successor must not silently invoke verifier');
       };
       const next = (await h.request(f.userId, `/interactions/${task.id}`)).data.setup as SetupDto;
-      assert.equal(next.required, false);
-      assert.equal(next.state, 'ready');
-      assert.equal(next.expectedAccountIdentifier, undefined);
+      assert.equal(next.required, true);
+      assert.notEqual(next.state, 'ready');
+      assert.equal((next as SetupDto & { identityVerified: boolean }).identityVerified, true);
+      assert.equal(next.expectedAccountIdentifier, f.identity);
     },
   ],
 ];

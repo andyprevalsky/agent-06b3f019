@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict';
 import { test, mock } from 'node:test';
 import { StructuredOutputAccumulator } from '../../providers/rose/structuredOutput';
+import { settingsPurpose } from '../../providers/phoneSetupPurpose';
+import { SETUP_TARGETS } from '../../providers/phoneSetupVerification';
 import type { CompletionOptions, CompletionChunk } from '../../providers/rose/types';
 
 test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual usage fail closed', async () => {
@@ -86,6 +88,32 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
       0,
       'Canonical funded Foundry user-facing policy must apply'
     );
+    for (const verificationTarget of SETUP_TARGETS.filter((target) => target !== 'apple_account')) {
+      text = JSON.stringify({
+        status: 'confirmed',
+        runtime: { sync: 'paused', activation: 'active', reason: 'unknown' },
+      });
+      const check = await verifyPhoneSetup({
+        ...input,
+        verificationTarget,
+        expectedReceiveAddress: '+19729777432',
+      });
+      assert.equal(check.status, 'confirmed');
+      assert.equal(captured?.messages[0].content, settingsPurpose(verificationTarget));
+      assert.deepEqual(JSON.parse(captured!.messages[1].content as string), {
+        expectedAppleIdentity: input.expectedAppleIdentity,
+        observations: input.evidence,
+        expectedReceiveAddress: '+19729777432',
+      });
+      assert.ok(
+        settingsPurpose(verificationTarget).includes(
+          'visual state not explicitly represented must remain unknown'
+        )
+      );
+      if (verificationTarget === 'runtime') assert.equal(check.runtime?.sync, 'paused');
+      text = '{"status":"yes","runtime":null}';
+      assert.equal((await verifyPhoneSetup({ ...input, verificationTarget })).status, 'unknown');
+    }
     actual = 'actual-identity-model';
     hasUsage = false;
     await assert.rejects(verifyPhoneSetup(input));

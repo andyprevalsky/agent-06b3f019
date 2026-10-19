@@ -1,3 +1,4 @@
+import './phone-settings-verification.cases';
 import './phone-saved-credential.cases';
 import './phone-setup-verifier.cases';
 import assert from 'node:assert/strict';

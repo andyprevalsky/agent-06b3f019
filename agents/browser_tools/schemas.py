@@ -447,9 +447,12 @@ class PhoneBrowserTool(BaseModel):
     action: Optional[Literal["defer", "block", "verify"]] = None
     reasonCode: Optional[Literal["user_constraint", "unsupported", "configuration_unavailable", "observed_signed_out"]] = None
     evidenceOperationIds: Optional[List[str]] = None
+    verificationTarget: Optional[Literal["apple_account", "icloud_messages", "icloud_keychain", "imessage", "receive_address", "runtime"]] = None
 
     @model_validator(mode="after")
     def validate_mode(self):
+        if "verificationTarget" in self.model_fields_set and (self.mode != "setup" or self.action != "verify"):
+            raise ValueError("verificationTarget requires setup verify")
         if self.mode == "operation" and not (self.operation or "").strip():
             raise ValueError("operation mode requires an operation")
         if self.mode != "operation" and (self.operation is not None or self.args):

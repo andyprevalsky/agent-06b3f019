@@ -1,0 +1,156 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { prisma } from '../../providers/database';
+import type { Case } from './iphone-control.cases';
+import {
+  freshSetup,
+  observe,
+  setupPost,
+  proveSettings,
+  verifierUsage,
+  type SetupDto,
+} from './iphone-control.setup-fixtures';
+export const settingsCases: Case[] = [
+  [
+    'settings proof is invalid after user handback or observed signout and runtime ages out',
+    async (h) => {
+      const f = await freshSetup(h);
+      await proveSettings(h, f);
+      assert.equal(f.setup.state, 'ready');
+      await h.request(f.userId, `/leases/${f.leaseId}/control`, {
+        actor: 'user',
+        method: 'POST',
+        body: { mode: 'user' },
+      });
+      await h.request(f.userId, `/leases/${f.leaseId}/control`, {
+        actor: 'user',
+        method: 'POST',
+        body: { mode: 'agent' },
+      });
+      const current = (await h.request(f.userId, `/interactions/${f.taskId}`)).data
+        .setup as SetupDto;
+      assert.notEqual(current.state, 'ready', 'User handback retained prior settings proof');
+      f.setup = current;
+      await proveSettings(h, f);
+      const last = await prisma.iPhoneLease.findUniqueOrThrow({ where: { id: f.leaseId } });
+      const blocked = await setupPost(h, f, {
+        action: 'block',
+        reasonCode: 'observed_signed_out',
+        attemptId: f.setup.attemptId,
+        expectedRevision: f.setup.revision,
+        expectedCursor: last.actionCursor,
+        requestKey: randomUUID(),
+      });
+      f.setup = blocked.data.setup as SetupDto;
+      h.setupVerifier = async () => ({
+        identityConfirmed: false,
+        status: 'confirmed',
+        runtime: { sync: 'syncing', activation: 'active', reason: 'unknown' },
+        usage: verifierUsage,
+      });
+      const read = await observe(h, f);
+      const runtime = await setupPost(h, f, {
+        action: 'verify',
+        verificationTarget: 'runtime',
+        attemptId: f.setup.attemptId,
+        expectedRevision: f.setup.revision,
+        expectedCursor: read.cursor,
+        requestKey: randomUUID(),
+        evidenceOperationIds: [read.id],
+      });
+      assert.notEqual(
+        (runtime.data.setup as SetupDto).state,
+        'ready',
+        'Runtime reverified stale signed-out identity'
+      );
+      f.setup = runtime.data.setup as SetupDto;
+      h.setupVerifier = async () => ({ identityConfirmed: true, usage: verifierUsage });
+      const signedIn = await observe(h, f);
+      const apple = await setupPost(h, f, {
+        action: 'verify',
+        verificationTarget: 'apple_account',
+        attemptId: f.setup.attemptId,
+        expectedRevision: f.setup.revision,
+        expectedCursor: signedIn.cursor,
+        requestKey: randomUUID(),
+        evidenceOperationIds: [signedIn.id],
+      });
+      assert.notEqual(
+        (apple.data.setup as SetupDto).state,
+        'ready',
+        'Fresh Apple identity reused settings proofs from before sign-out'
+      );
+    },
+  ],
+
+  [
+    'settings proof is partial until all targets; disabled and unavailable supersede confirmed; runtime never invents readiness',
+    async (h) => {
+      const f = await freshSetup(h);
+      let status: 'confirmed' | 'disabled' | 'unknown' = 'confirmed';
+      let fail = false;
+      h.setupVerifier = async (input) => {
+        assert.equal(input.expectedReceiveAddress, '+19729777432');
+        if (fail) throw new Error('Synthetic verifier unavailable');
+        return {
+          identityConfirmed: true,
+          status,
+          runtime: { sync: 'paused', activation: 'active', reason: 'unknown' },
+          usage: verifierUsage,
+        };
+      };
+      const submit = async (verificationTarget: string) => {
+        h.observationResult = {
+          text: `Explicit ${verificationTarget} status; signed in ${f.identity}; selected enabled +19729777432`,
+        };
+        const read = await observe(h, f);
+        const body = {
+          action: 'verify',
+          verificationTarget,
+          attemptId: f.setup.attemptId,
+          expectedRevision: f.setup.revision,
+          expectedCursor: read.cursor,
+          requestKey: randomUUID(),
+          evidenceOperationIds: [read.id],
+        };
+        const reply = await setupPost(h, f, body);
+        f.setup = reply.data.setup as SetupDto;
+        return { reply, body };
+      };
+      await submit('runtime');
+      assert.equal(
+        (f.setup as SetupDto & { verification: { operationalStatus: string } }).verification
+          .operationalStatus,
+        'unknown'
+      );
+      await proveSettings(h, f);
+      assert.equal(f.setup.state, 'ready');
+      await submit('runtime');
+      assert.equal(f.setup.state, 'ready');
+      assert.equal(
+        (f.setup as SetupDto & { verification: { operationalStatus: string } }).verification
+          .operationalStatus,
+        'degraded'
+      );
+      status = 'disabled';
+      const { body } = await submit('imessage');
+      assert.notEqual(f.setup.state, 'ready');
+      const repeated = await setupPost(h, f, body);
+      assert.equal(repeated.status, 200);
+      assert.equal(
+        (await setupPost(h, f, { ...body, verificationTarget: 'icloud_keychain' })).status,
+        409
+      );
+      status = 'confirmed';
+      await submit('imessage');
+      assert.equal(f.setup.state, 'ready');
+      fail = true;
+      await submit('icloud_messages');
+      assert.notEqual(f.setup.state, 'ready');
+      const check = (
+        f.setup as SetupDto & { verification: { checks: { icloud_messages: { status: string } } } }
+      ).verification.checks.icloud_messages;
+      assert.equal(check.status, 'unknown');
+    },
+  ],
+];

@@ -1,3 +1,4 @@
+import { syntheticConfiguration } from './iphone-control.synthetic-setup';
 import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 import userSettingsRouter from '../../domains/user-settings/routes';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
@@ -536,6 +537,17 @@ export class Harness {
       api?: 'iphone' | 'auth-assistance';
     } = {}
   ): Promise<ApiResult> {
+    const operationLease = /^\/leases\/([^/]+)\/operations$/.exec(path)?.[1];
+    if (operationLease && options.actor !== 'user') {
+      const context = await syntheticConfiguration(userId, operationLease);
+      if (
+        context &&
+        options.actor !== 'user' &&
+        options.body !== null &&
+        typeof options.body === 'object'
+      )
+        options = { ...options, body: { ...context, ...options.body } };
+    }
     const user = options.actor === 'user';
     const response = await fetch(`${this.base}/api/${options.api ?? 'iphone'}${path}`, {
       method: options.method ?? 'GET',
