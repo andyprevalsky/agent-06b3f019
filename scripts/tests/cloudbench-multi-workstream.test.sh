@@ -2649,6 +2649,11 @@ os.execvp(sys.argv[1], sys.argv[1:])')
     # Leaked GIT_* / CLOUDBENCH_FLEET_ROOT from a parent agent shell must not
     # redirect this worktree's ownership roots into a foreign sandbox.
     # Real provider credentials must not reach the fixture's children either.
+    # A young ambiguous name-only record at joined final teardown is re-resolved
+    # by exact name for the rest of its 900s phantom window (0c4374c32). The
+    # fake's ambiguous attempts never age out within a scenario, so bound that
+    # wait: the real exact-name re-resolution still runs, then ownership is
+    # retained and teardown fails closed exactly as each scenario asserts.
     env -u CLOUDBENCH_SNAPSHOT_ID -u CLOUDBENCH_FLEET_ROOT \
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
         -u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS \
@@ -2671,6 +2676,8 @@ os.execvp(sys.argv[1], sys.argv[1:])')
         CLOUDBENCH_DETACHED_RECOVERY_SECONDS="${CLOUDBENCH_DETACHED_RECOVERY_SECONDS:-120}" \
         CLOUDBENCH_CAPACITY_RESERVATION_ROOT="$TMP_ROOT/capacity-reservations" \
         CLOUDBENCH_CLONE_LOOKUP_SECONDS="${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}" \
+        CLOUDBENCH_PHANTOM_TEARDOWN_WAIT_SECONDS="${CLOUDBENCH_PHANTOM_TEARDOWN_WAIT_SECONDS:-2}" \
+        CLOUDBENCH_PHANTOM_TEARDOWN_POLL_SECONDS="${CLOUDBENCH_PHANTOM_TEARDOWN_POLL_SECONDS:-1}" \
         CLOUDBENCH_POOL_STOP_ATTEMPTS="${CLOUDBENCH_POOL_STOP_ATTEMPTS:-3}" \
         CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT="${CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT:-3}" \
         CLOUDBENCH_DATA_PROXY_READY_TIMEOUT="${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}" \
@@ -5588,6 +5595,9 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=2 
 grep -qF "mandatory autoscaler did not confirm terminal completion" \
     "$TMP_ROOT/controller-autoscaler-worker-clone-pending.log" ||
     fail "blocked provisioning did not preserve mandatory causal terminal failure"
+grep -qF "stayed unresolved through its bounded visibility wait; retaining ownership" \
+    "$TMP_ROOT/controller-autoscaler-worker-clone-pending.log" ||
+    fail "blocked provisioning must re-resolve its exact name and then retain ownership"
 remaining="$(python3 -c '
 import json, sys
 machines = json.load(open(sys.argv[1]))["machines"]
@@ -6893,14 +6903,26 @@ for reg in "$SANDBOX"/.git/cloudbench-fleet-ownership/*/clones/*; do
 done
 [ "${#amb_records[@]}" -eq 1 ] && [ "${amb_records[0]}" = "$amb_name" ] ||
     fail "scenario 16: expected exactly the ambiguous name-only record, got: ${amb_records[*]:-none}"
-if FAKE_STATE="$FAKE_DIR/state.json" python3 - <<'PY'
+# 1a88cde8c owns each clone Volume by exact ID before its Machine launch, so
+# the ambiguous attempt's record carries only its never-attached owned Volume.
+# The Machine may still appear attached to it, so that Volume stays owned with
+# the unresolved name (reaped only once the name retires); every other
+# allocated Machine and Volume is destroyed.
+amb_volume="$(sed -n 's/^volume_id=//p' \
+    "$SANDBOX"/.git/cloudbench-fleet-ownership/*/clones/"$amb_name" 2>/dev/null)"
+if FAKE_STATE="$FAKE_DIR/state.json" AMB_VOLUME="$amb_volume" python3 - <<'PY'
 import json, os
 state = json.load(open(os.environ["FAKE_STATE"]))
+owned = os.environ["AMB_VOLUME"]
+live = [v for v in state["volumes"] if v["state"] not in ("pending_destroy", "destroyed")]
 raise SystemExit(0 if [m["id"] for m in state["machines"]] == ["aaaa0000000001"]
-                 and [v["id"] for v in state["volumes"] if v["state"] not in ("pending_destroy", "destroyed")] == ["vol_aaaa0001"] else 1)
+                 and owned.startswith("vol_")
+                 and sorted(v["id"] for v in live) == sorted(["vol_aaaa0001", owned])
+                 and all(v["attached_machine_id"] is None for v in live if v["id"] == owned)
+                 else 1)
 PY
 then :; else
-    fail "scenario 16: teardown left an allocated Machine or Volume behind the retained name"
+    fail "scenario 16: teardown left an allocated Machine or unowned Volume behind the retained name"
 fi
 # Remove only this asserted, test-owned retained name-only record.
 rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership"

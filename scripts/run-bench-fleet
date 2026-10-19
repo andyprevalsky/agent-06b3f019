@@ -6126,6 +6126,18 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
                 unresolved=1
                 continue
             fi
+        elif [ -z "$(registry_meta_value "$record" id)" ]; then
+            # Volume-first allocation records the exact Volume before its
+            # Machine launch. A controller killed after launch acceptance but
+            # before ID publication leaves volume-only ownership whose Machine
+            # resolved above by exact name. Bind that ID (audit first) only when
+            # the Machine mounts exactly the owned Volume; otherwise retain.
+            if [ "$(machine_volume_id "$id")" != "$volume_id" ] \
+                || ! registry_record_machine_identity "$record" "$clone_name" "$id" "$volume_id"; then
+                echo "❌ owned fleet machine $id does not mount owned volume $volume_id; retaining record" >&2
+                unresolved=1
+                continue
+            fi
         fi
         if [ "$registry_version" = "2" ]; then
             volume_id="$(fleet_registry_reconcile_mounted_volume \
@@ -11983,7 +11995,7 @@ PYWRITE
 }
 
 pool_verify_reuse_proof() {  # <machine> <volume> [refresh after canonical return]
-    local id="$1" volume="$2" mode="${3:-verify}" path fields name image prior current cold imported_attempt
+    local id="$1" volume="$2" mode="${3:-verify}" path fields name image prior current cold imported_attempt verify_rc
     path="$(pool_reuse_proof_file "$id")" || return 1
     if [ "$mode" = refresh ] && [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ]; then
         fleet_verify_staged_primary_return "$id" "$volume" refresh
@@ -11996,14 +12008,18 @@ PYEXPLICIT
     then
         [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] || return 1
         imported_attempt="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-explicit-proof.XXXXXX")" || return 1
-        fleet_preconfig_native_read "$id" "$imported_attempt/before.json" \
-            && fleet_preconfig_native_read "$id" "$imported_attempt/after.json" || return 1
-        fleet_cold_handoff_volume_read "$volume" "$imported_attempt/volume.json" || return 1
-        python3 - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-explicit-idle-admission.py" "$path" "$GIT_COMMON_DIR" "$imported_attempt/before.json" "$imported_attempt/after.json" "$BENCH_REF" "$imported_attempt/volume.json" <<'PYVERIFYEXPLICIT'
+        verify_rc=1
+        if fleet_preconfig_native_read "$id" "$imported_attempt/before.json" \
+            && fleet_preconfig_native_read "$id" "$imported_attempt/after.json" \
+            && fleet_cold_handoff_volume_read "$volume" "$imported_attempt/volume.json"; then
+            python3 - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-explicit-idle-admission.py" "$path" "$GIT_COMMON_DIR" "$imported_attempt/before.json" "$imported_attempt/after.json" "$BENCH_REF" "$imported_attempt/volume.json" <<'PYVERIFYEXPLICIT'
 import json,runpy,sys
 helper=runpy.run_path(sys.argv[1]);helper['verify_pool'](sys.argv[2],sys.argv[3],helper['descriptor'](sys.argv[4]),helper['descriptor'](sys.argv[5]),sys.argv[6],json.load(open(sys.argv[7])))
 PYVERIFYEXPLICIT
-        return $?
+            verify_rc=$?
+        fi
+        rm -rf -- "$imported_attempt"
+        return "$verify_rc"
     fi
     if [ "$mode" != refresh ] && [ -f "$path" ] && python3 - "$path" <<'PYIMPORTED'
 import json,sys
@@ -12012,14 +12028,18 @@ PYIMPORTED
     then
         [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] || return 1
         imported_attempt="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-import-proof.XXXXXX")" || return 1
-        fleet_preconfig_native_read "$id" "$imported_attempt/before.json" \
-            && fleet_preconfig_native_read "$id" "$imported_attempt/after.json" || return 1
-        fleet_cold_handoff_volume_read "$volume" "$imported_attempt/volume.json" || return 1
-        python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$path" "$GIT_COMMON_DIR" "$imported_attempt/before.json" "$imported_attempt/after.json" "$BENCH_REF" "$imported_attempt/volume.json" <<'PYVERIFYIMPORT'
+        verify_rc=1
+        if fleet_preconfig_native_read "$id" "$imported_attempt/before.json" \
+            && fleet_preconfig_native_read "$id" "$imported_attempt/after.json" \
+            && fleet_cold_handoff_volume_read "$volume" "$imported_attempt/volume.json"; then
+            python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$path" "$GIT_COMMON_DIR" "$imported_attempt/before.json" "$imported_attempt/after.json" "$BENCH_REF" "$imported_attempt/volume.json" <<'PYVERIFYIMPORT'
 import json,runpy,sys
 runpy.run_path(sys.argv[1])['verify_imported_pool_proof'](*sys.argv[2:7], native_volume=json.load(open(sys.argv[7])))
 PYVERIFYIMPORT
-        return $?
+            verify_rc=$?
+        fi
+        rm -rf -- "$imported_attempt"
+        return "$verify_rc"
     fi
     [ -e "$path" ] || { [ ! -L "$path" ]; return; }
     fields="$(python3 - "$path" "$id" "$volume" "$APP" <<'PYREAD'
