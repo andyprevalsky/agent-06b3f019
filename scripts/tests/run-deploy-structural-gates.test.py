@@ -885,11 +885,9 @@ else: print('origin/fixture')
         self.assertFalse(any(row[:2] in (["machine","destroy"],["volumes","destroy"]) for row in calls))
         self.assertIn("GATE_WORKSPACE_VOLUME_RETAINED",result.stdout+result.stderr)
 
-    def test_root_workspace_custody_leaves_repo_context_writable_by_runtime_user(self):
-        # The generated guest script hands /tmp/gate to the runtime user and then
-        # records workspace custody as root. The runtime's first controller step
-        # writes its supervisor files under repo/.context, so custody must not
-        # leave that directory root-owned (polar70 post-deploy step-1 EACCES).
+    @contextlib.contextmanager
+    def _root_workspace_custody(self):
+        """Yield (repo, run) for the real generated custody block run as root."""
         with tempfile.TemporaryDirectory(prefix="gate-custody-uid-") as temporary:
             base=Path(temporary);copy=base/"gate.sh"
             with patch.dict(os.environ,{"GATE_TEST_SCRIPT_COPY":str(copy)}):
@@ -904,15 +902,52 @@ else: print('origin/fixture')
             code=code.replace("/tmp/controller-host-workspace.json",str(owner)).replace("/tmp/gate/repo",str(repo))
             import hashlib
             env=["GATE_WORKSPACE_VOLUME_SHA256="+hashlib.sha256(owner.read_bytes()).hexdigest(),"GATE_WORKSPACE_VOLUME_ID=vol_fixture123","GATE_REF="+"a"*40,"FLY_APP_NAME=navi-whisper-lux-bench"]
+            def run():
+                return subprocess.run(["sudo","-n","env",*env,sys.executable,"-I","-B","-c",code],capture_output=True,text=True,timeout=30)
             try:
-                subprocess.run(["sudo","-n","env",*env,sys.executable,"-I","-B","-c",code],check=True,timeout=30)
-                custody=(repo/".context/controller-workspace-volume").stat()
-                self.assertEqual((custody.st_uid,custody.st_mode&0o777),(0,0o700))
-                supervisor=repo/".context/original600-supervisor.fixture.tasks.json"
-                supervisor.write_text("[]\n")
-                self.assertEqual(supervisor.stat().st_uid,os.getuid())
+                yield repo,run
             finally:
                 subprocess.run(["sudo","-n","chown","-R",str(os.getuid())+":"+str(os.getgid()),str(base)],check=True)
+
+    def test_root_workspace_custody_leaves_repo_context_writable_by_runtime_user(self):
+        # The generated guest script hands /tmp/gate to the runtime user and then
+        # records workspace custody as root. The runtime's first controller step
+        # writes its supervisor files under repo/.context, so custody must not
+        # leave that directory root-owned (polar70 post-deploy step-1 EACCES).
+        with self._root_workspace_custody() as (repo,run):
+            result=run()
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            custody=(repo/".context/controller-workspace-volume").stat()
+            self.assertEqual((custody.st_uid,custody.st_mode&0o777),(0,0o700))
+            record=subprocess.run(["sudo","-n","stat","-c","%u %a",str(repo/".context/controller-workspace-volume/ownership.json")],capture_output=True,text=True,check=True)
+            self.assertEqual(record.stdout.split(),["0","600"])
+            supervisor=repo/".context/original600-supervisor.fixture.tasks.json"
+            supervisor.write_text("[]\n")
+            self.assertEqual(supervisor.stat().st_uid,os.getuid())
+
+    def test_root_workspace_custody_refuses_runtime_user_planted_paths(self):
+        # The runtime user owns repo/ and may pre-create .context entries before
+        # root records custody; root must never write through them.
+        for planted in ("context-symlink","context-file","custody-symlink","custody-directory"):
+            with self.subTest(planted=planted), self._root_workspace_custody() as (repo,run):
+                decoy=repo.parent/"decoy";decoy.mkdir()
+                context=repo/".context"
+                if planted=="context-symlink":
+                    context.symlink_to(decoy,target_is_directory=True)
+                elif planted=="context-file":
+                    context.write_text("not a directory\n")
+                else:
+                    context.mkdir()
+                    if planted=="custody-symlink":
+                        (context/"controller-workspace-volume").symlink_to(decoy,target_is_directory=True)
+                    else:
+                        (context/"controller-workspace-volume").mkdir()
+                result=run()
+                self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+                self.assertEqual(list(decoy.iterdir()),[])
+                self.assertFalse(os.path.lexists(decoy/"ownership.json"))
+                if planted=="custody-directory":
+                    self.assertEqual(list((context/"controller-workspace-volume").iterdir()),[])
 
     def test_workspace_volume_changed_original_owner_refuses_export_and_retains(self):
         for fault in ("exchanged-owner","missing-owner"):

@@ -54,15 +54,20 @@ is new.
 The custody block now creates `.context` itself. It refuses a non-directory or
 a symlink. It then gives `.context` the repository owner's uid and gid. Only
 `controller-workspace-volume` stays root-owned with mode 0700, so the
-custody record keeps its original protection.
+custody record keeps its original protection. After the initial review, every
+step after opening `.context` uses directory file descriptors (`O_NOFOLLOW`,
+`fchown`, `dir_fd` mkdir/open/fsync), so a runtime-user rename or symlink
+between steps cannot redirect the root-owned writes.
 
 The regression in `run-deploy-structural-gates.test.py` captures the actual
 generated guest script from the gate. It asserts that custody runs after the
 ownership handoff, then runs the extracted custody block as real root via
 `sudo -n`, the same way the suite's foreign-uid case does. It then writes a
 supervisor file as the runtime user. On origin/main it fails with the
-production `PermissionError`; with the fix it passes. The deploy structural
-registry runs this suite.
+production `PermissionError`; with the fix it passes. A second case plants a
+symlinked `.context`, a file `.context`, and a pre-existing or symlinked
+custody entry as the runtime user, and requires root to refuse without writing
+through them. The deploy structural registry runs this suite.
 
 ## Human feedback
 

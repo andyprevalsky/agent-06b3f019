@@ -433,15 +433,19 @@ value=json.loads(raw)
 if hashlib.sha256(raw).hexdigest()!=os.environ['GATE_WORKSPACE_VOLUME_SHA256'] or value['volume_id']!=os.environ['GATE_WORKSPACE_VOLUME_ID'] or value['source_ref']!=os.environ['GATE_REF'] or value['app']!=os.environ['FLY_APP_NAME'] or value['mount_path']!='/tmp/gate': raise SystemExit('workspace ownership binding refused')
 # Runs as root after /tmp/gate was handed to the runtime user, whose controller
 # writes its supervisor files under repo/.context: only the custody directory stays root's.
+# Every step after the open is relative to directory fds, so a runtime-user
+# rename or symlink cannot redirect the root-owned custody writes.
 repo=Path('/tmp/gate/repo');context=repo/'.context'
-try: context.mkdir()
+try: os.mkdir(context)
 except FileExistsError: pass
-if not context.is_dir() or context.is_symlink(): raise SystemExit('workspace context must be a directory')
-owner=repo.stat();os.chown(context,owner.st_uid,owner.st_gid,follow_symlinks=False)
-parent=context/'controller-workspace-volume';parent.mkdir(mode=0o700)
-fd=os.open(parent/'ownership.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+try: cfd=os.open(context,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+except OSError: raise SystemExit('workspace context must be a directory')
+owner=repo.stat();os.fchown(cfd,owner.st_uid,owner.st_gid)
+os.mkdir('controller-workspace-volume',0o700,dir_fd=cfd)
+pfd=os.open('controller-workspace-volume',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=cfd)
+fd=os.open('ownership.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=pfd)
 with os.fdopen(fd,'wb') as output: output.write(raw);output.flush();os.fsync(output.fileno())
-fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+os.fsync(pfd);os.close(pfd);os.fsync(cfd);os.close(cfd)
 PY_WORKSPACE_CUSTODY
   [ "$?" = 0 ] || { echo "GATE_RESULT exit=93 workspace_custody_failed"; exit 93; }
 fi
