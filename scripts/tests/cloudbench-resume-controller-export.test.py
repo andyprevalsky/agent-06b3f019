@@ -344,6 +344,12 @@ class ExportResume(unittest.TestCase):
         (foreign / "cwd").symlink_to(repo)
         for pid in (710, 5854, 9999):
             (proc / str(pid) / "maps").write_text("")
+            # Real /proc lists the leader under task/<tid>; the collector reads every thread.
+            task = proc / str(pid) / "task" / str(pid)
+            task.mkdir(parents=True, exist_ok=True)
+            (task / "cwd").symlink_to(os.readlink(proc / str(pid) / "cwd"))
+            for name in ("fd", "maps"):
+                (task / name).symlink_to(Path("..") / ".." / name)
 
         def old(roots, permitted):
             with mock.patch.dict(

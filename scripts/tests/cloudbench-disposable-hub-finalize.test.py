@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Actual local owned Hub process retirement; no provider operations."""
-import hashlib,json,os,runpy,subprocess,sys,tempfile,time,types,unittest
+import hashlib,json,os,runpy,shlex,subprocess,sys,tempfile,time,types,unittest
 from pathlib import Path
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[2]
@@ -10,7 +10,8 @@ class Finalize(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.repo=Path(self.tmp.name)/'repo';self.hub=self.repo/'.context/fleet/runs/_hub';self.hub.mkdir(parents=True);self.out=Path(self.tmp.name)/'custody';self.out.mkdir();self.script=self.repo/'agents/benchmarks/agent_link_server.py';self.script.parent.mkdir(parents=True);self.script.write_text('import time\ntime.sleep(60)\n')
   self.child=subprocess.Popen([sys.executable,str(self.script)],cwd=self.repo);self.addCleanup(self.join)
-  while not M['birth'](self.child.pid):time.sleep(.01)
+  # Popen returns after fork; wait for exec so retirement reads the Hub's own argv.
+  while not M['birth'](self.child.pid) or os.fsencode(self.script) not in Path('/proc',str(self.child.pid),'cmdline').read_bytes():time.sleep(.01)
   argv=[str(self.script)];self.owner=dict(pid=str(self.child.pid),pid_start=M['birth'](self.child.pid),repo_root=str(self.repo),root=str(self.hub.parent),runs_root=str(self.hub.parent),context_dir=str(self.hub),command=str(self.script),status='live-transfer-required',host='127.0.0.1',port='8765',owner_token='a'*32,argv_sha256=hashlib.sha256(b'\0'.join(os.fsencode(x)for x in argv)).hexdigest());self.path=self.hub/('agent-link-server.8765.'+'a'*32+'.owner');self.write()
  def write(self):
   if self.path.exists():self.path.chmod(0o600)
@@ -60,6 +61,24 @@ raise SystemExit(75 if active else 0)
   script='bound_controller_export() { '+sys.executable+' '+str(adapter)+' "$@"; }; '+rendered+'\nexit "$export_rc"'
   result=subprocess.run(['bash','-c',script],env=dict(os.environ,HELPER=str(ROOT/'scripts/cloudbench-controller-export.py'),REPO=str(self.repo),CHILD=str(self.child.pid),OUT=str(self.out)),text=True,capture_output=True)
   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+ def test_rendered_gate_logs_pending_reason_and_writer_names(self):
+  # shard-01's guest pending.json was destroyed with the host; only the log survived.
+  gate=(ROOT/'scripts/run-cloudbench-controller-gate').read_text()
+  start=gate.index('  if [ "$EXPORT_HOST" = 1 ]; then',gate.index('GATE_FAILED_STEPS${failed_steps}'))
+  end=gate.index('\n  fi',start)+5
+  rendered=subprocess.check_output(['bash','-c','EXPORT_HOST=1;DISPOSABLE_AUTHORITY=;'+gate[start:end]],text=True)
+  pending=Path(self.tmp.name)/'pending.json';rendered=rendered.replace('/tmp/gate/controller-host-custody/pending.json',str(pending))
+  writer=dict(pid=1259,birth='b',state='Z',ppid=1,comm='python3',threads=2,argv=['env','FLY_API_TOKEN=s3cret'])
+  fleet=dict(pid=25270,birth='c',registry='/tmp/gate/repo/.git/cloudbench-fleet-ownership/daffda62',state='S',ppid=712,comm='bash',threads=1)
+  value=dict(status='pending',reason='live controller writers',writers=[dict(pid=1259,birth='b')],writer_observations=[dict(elapsed_s=0.0,writers=[writer,fleet])])
+  fake='bound_controller_export() { printf %s '+shlex.quote(json.dumps(value))+' > '+shlex.quote(str(pending))+'; return 75; }; '
+  result=subprocess.run(['bash','-c',fake+rendered],text=True,capture_output=True)
+  self.assertIn('GATE_EXPORT exit=75',result.stdout,result.stderr)
+  line=next(row for row in result.stdout.splitlines() if row.startswith('GATE_EXPORT_PENDING_DETAIL '))
+  detail=json.loads(line.split(' ',1)[1])
+  self.assertEqual(detail['reason'],'live controller writers');self.assertEqual(detail['writers'],[1259])
+  self.assertEqual(detail['writer_observations'],[{'elapsed_s':0.0,'writers':[{'pid':1259,'state':'Z','ppid':1,'comm':'python3','threads':2},{'pid':25270,'state':'S','ppid':712,'comm':'bash','threads':1,'registry':'daffda62'}]}])
+  self.assertNotIn('s3cret',result.stdout);self.assertNotIn('FLY_API_TOKEN',result.stdout)
  def test_gate_only_disposable_after_wait_and_before_export(self):
   gate=(ROOT/'scripts/run-cloudbench-controller-gate').read_text();a=gate.index('wait "$command_pid"; rc=$?');b=gate.index('controller-command.joined.json',a);c=gate.index('finalize_hubs=""',b);d=gate.index('bound_controller_export export',c)
   self.assertLess(a,b);self.assertLess(b,c);self.assertLess(c,d);self.assertIn('[ -z "$DISPOSABLE_AUTHORITY" ] || finalize_hubs=" --finalize-disposable-hubs"',gate)
@@ -111,7 +130,7 @@ class QuiescingOriginalsExport(unittest.TestCase):
     return value if test.changes==1 else dict(value,allocated_bytes=value['allocated_bytes'])
    return dict(value,allocated_bytes=value['allocated_bytes']+4096) if Path(path)==test.log and test.flushed else value
   def sync():test.flushed=True
-  self.patches=[patch.dict(G,{'git':git,'birth':lambda pid:'proc-start:fixture:'+str(pid),'record_temp_roots':lambda repo,common:[],'file_state':file_state,'writers':lambda roots,permitted:[],'EXPORT_SETTLE_SECONDS':0}),patch.object(G['os'],'sync',sync),patch.dict(os.environ,{'FLY_MACHINE_ID':'abc123','FLY_APP_NAME':'fixture'})]
+  self.patches=[patch.dict(G,{'git':git,'birth':lambda pid:'proc-start:fixture:'+str(pid),'record_temp_roots':lambda repo,common:[],'file_state':file_state,'writers':lambda roots,permitted:[],'EXPORT_SETTLE_SECONDS':0,'EXPORT_WRITER_DRAIN_SECONDS':0.3,'EXPORT_WRITER_POLL_SECONDS':0.01}),patch.object(G['os'],'sync',sync),patch.dict(os.environ,{'FLY_MACHINE_ID':'abc123','FLY_APP_NAME':'fixture'})]
   for item in self.patches:item.start();self.addCleanup(item.stop)
   os.environ.pop('GATE_WORKSPACE_VOLUME_ID',None)
   G['launch'](types.SimpleNamespace(repo=self.repo,ref=self.ref,driver_pid=os.getpid(),caller=self.caller,image='image@sha256:fixture',record=self.record))
@@ -156,4 +175,50 @@ class QuiescingOriginalsExport(unittest.TestCase):
   with patch.dict(G,{'writers':writers}):code=self.export()
   self.assertEqual(code,75);self.assertFalse(self.manifest.exists())
   self.assertEqual(json.loads(self.pending.read_text())['reason'],'live controller writers')
+ def test_transient_writer_at_first_check_settles_into_verified_export(self):
+  # original600-1792440129763435696 shard-01: export ran 8 s after the campaign step
+  # while a teardown writer was still exiting; it returned 75 once and was never retried.
+  self.flushed=True;seen=[]
+  def writers(roots,permitted):
+   seen.append(1);return [{'pid':1259,'birth':'proc-start:fixture:1259'}] if len(seen)==1 else []
+  with patch.dict(G,{'writers':writers}):code=self.export()
+  self.assertEqual(code,0,self.pending.read_text() if self.pending.exists() else '')
+  self.assertFalse(self.pending.exists());self.assertEqual(self.verify(),0)
+ def test_persistent_writer_fails_closed_after_bounded_drain(self):
+  self.flushed=True;seen=[]
+  def writers(roots,permitted):
+   seen.append(1);return [{'pid':4242,'birth':'proc-start:fixture:4242'}]
+  with patch.dict(G,{'writers':writers}):code=self.export()
+  self.assertEqual(code,75);self.assertFalse(self.archive.exists());self.assertFalse(self.manifest.exists())
+  pending=json.loads(self.pending.read_text());self.assertEqual(pending['reason'],'live controller writers')
+  self.assertGreater(len(seen),2)
+  self.assertEqual(pending['writer_observations'][0]['writers'][0]['pid'],4242)
+  self.assertEqual(pending['writer_observations'][0]['writers'][0]['state'],'gone')
+  self.assertNotIn('snapshot_attempts',pending)
+  self.assertFalse(list(self.custody.glob('.controller-export-*')))
+class ZombieLeaderWriter(unittest.TestCase):
+ def test_live_thread_of_zombie_leader_is_a_writer(self):
+  # A SIGTERMed threaded Hub can show a zombie leader (no cwd/fd/maps) while a thread still writes.
+  tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup);root=Path(tmp.name)/'repo';root.mkdir()
+  code="""import ctypes,os,sys,threading,time
+f=open(sys.argv[1]+'/hub.log','a')
+def hold():
+ while True:f.write('x');f.flush();time.sleep(.01)
+threading.Thread(target=hold,daemon=True).start();time.sleep(.2)
+ctypes.CDLL(None,use_errno=True).syscall(60,0)
+"""
+  child=subprocess.Popen([sys.executable,'-c',code,str(root)],cwd='/')
+  def stop():
+   if child.poll() is None:child.kill()
+   child.wait(timeout=5)
+  self.addCleanup(stop)
+  deadline=time.time()+10
+  while Path('/proc',str(child.pid),'stat').read_text().rsplit(') ',1)[1].split()[0]!='Z':
+   self.assertLess(time.time(),deadline);time.sleep(.01)
+  self.assertEqual(len(os.listdir(Path('/proc',str(child.pid),'task'))),2)
+  original=Path.iterdir
+  def selected(path):return iter([Path('/proc',str(child.pid))]) if path==Path('/proc') else original(path)
+  with patch.object(Path,'iterdir',selected):active=M['writers']([root],{os.getpid()})
+  self.assertEqual([row['pid'] for row in active],[child.pid])
+  self.assertEqual(M['writer_identity'](active[0])['state'],'Z')
 if __name__=='__main__':unittest.main()

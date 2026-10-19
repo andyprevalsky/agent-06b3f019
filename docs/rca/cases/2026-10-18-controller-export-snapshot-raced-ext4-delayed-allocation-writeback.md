@@ -85,3 +85,5 @@ None recorded.
 A strict byte/metadata snapshot that includes st_blocks must flush pending writeback
 first, and must retry a fresh snapshot only while no writer is live. Delayed
 allocation changes st_blocks with no mtime/ctime change.
+
+2026-10-19 relative: a live writer now gets its own bounded drain before each snapshot instead of failing on first sight; see `2026-10-19-export-returned-tempfail-on-first-live-writer-without-bounded-settle`.
