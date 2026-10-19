@@ -194,6 +194,23 @@ caches on the first v4 run; do not copy or rekey older entries.
 
 ## 6. Run
 
+**Get the native model without a cold rebuild.** The build directory is cached,
+encrypted, in R2 and is not tied to any devbox. On a fresh box, restore it, then
+let the normal build refresh only new bundles:
+
+```bash
+cd agents && source venv/bin/activate && set -a && source .env && set +a
+python -m benchmarks.wmh_build_cache status                       # what is published
+python -m benchmarks.wmh_build_cache pull --build-dir ../.context/world-model-native
+WMH_BUILD_DIR="$PWD/../.context/world-model-native" ...  # the native rebuild recipe in WMH_HANDOFF.md
+python -m benchmarks.wmh_build_cache push --build-dir ../.context/world-model-native
+```
+
+Rebuild (and push) only when the user asks for an updated model. `pull`
+refuses a non-empty directory unless `--force` is given; `push` publishes the
+manifest last, so a reader never sees a partial upload.
+
+
 ```bash
 .claude/skills/instantiate-whm/scripts/run-trajectory.sh --task <task> --timeout 3600 \
   --wmh-root <native model root> --state-file run-state.json --out <evidence dir>

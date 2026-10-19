@@ -823,6 +823,14 @@ When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
 One task name threads all three stores, so any eval is traceable end-to-end: definition (tasks.json) → pass history → latency profile → run record.
 
+## World Model Harness (WMH) model cache
+
+The native WMH model is built locally and cached, encrypted, in R2 so a fresh
+devbox restores it instead of rebuilding for hours:
+`python -m benchmarks.wmh_build_cache pull|push|status` (from `agents/`).
+Rebuild and push only on user request. The full run procedure is the
+`instantiate-whm` skill (`.claude/skills/instantiate-whm/SKILL.md`, section 6).
+
 ## Log Files
 
 Check these when errors occur:
