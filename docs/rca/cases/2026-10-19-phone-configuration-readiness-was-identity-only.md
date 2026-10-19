@@ -71,6 +71,10 @@ The server target set now includes portrait_lock, and a single SETUP_REQUIREMENT
 
 The mocked canonical wrapper exercises every target including the new fixed purpose. Provider units pass 88, including the version-upgrade proof regression. Final source-frozen run 1792382173-3493199-4261 passes control71/auth37/interactions13 (3/3; portrait-frozen-blackboxes.log). Provider units pass88, layers1662, build/lint/format/diff checks pass. The existing function-size cap was preserved by removing a redundant assignment temporary, without changing behavior. Parent owns actual UI lock operation and live evidence. This does not claim a lock has been observed or enabled on the live phone.
 
+### Live portrait lock observation
+
+Following the user's explicit request, the parent opened Control Center on the existing cloud iPhone through the normal protected USER broker. Edge gestures did not open it; a temporary AssistiveTouch menu provided access. The lock initially appeared disabled. Operation bcf663f7-7bdc-42f7-84c5-4f4e8f92c727 enabled it, and the private frame showed the enabled red control and Portrait Orientation Lock: On confirmation. The parent then restored AssistiveTouch to its observed original Off state (operation 524223e7-ffd7-46d4-9d1e-0f027f144a98); the portrait-lock status-bar icon remained visible. This is a manual owner-authorized device observation, not proof that the new automatic startup verifier completed. Credentials, account data and the private vault were preserved. Safe state is recorded in .context/phone-harness/saved-password-live-progress.json; private pixels were not added to the repository.
+
 ## Human feedback
 
 The user requires default-off isolation of main trajectories and consistent first-use phone settings configuration, including Portrait Orientation Lock when absent. No claim that message counts prove completed history sync is authorized. Parent technical review is not additional human feedback.
