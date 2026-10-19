@@ -2755,6 +2755,7 @@ exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
     )
     (controls / "env.sh").write_text(
         """cloudbench_verify_env_file() { return 0; }
+cloudbench_require_guest_temporal_namespace() { return 0; }
 cloudbench_require_agentcard_org_oauth() { return 0; }
 cloudbench_validate_browser_provider_contract() { return 0; }
 cloudbench_env_value() { return 0; }
@@ -5818,7 +5819,12 @@ def test_post_config_start_rejected_ack_requires_current_guest_proof(
     serving.start()
     cloud = CLOUD_SCRIPT.read_text()
     post_start = cloud[cloud.index("# The update above is explicitly `--skip-start`"):]
-    post_start = post_start.split("\nelse\n# ── 1.", 1)[0]
+    post_start = post_start.split("\nelse\n# ── 1.", 1)[0].rstrip()
+    # The configured (non-staged) transport branch closes after the start
+    # proof; replay only the start proof itself, not that enclosing `fi`.
+    assert 'if [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ]; then' in cloud
+    assert post_start.endswith("\n    fi\n    fi")
+    post_start = post_start[: -len("\n    fi")] + "\n"
     poll = cloud.split('while :; do\n    now="$(date +%s)"', 1)[1]
     poll = poll.split("    # A later chunk", 1)[0]
     native_calls = tmp_path / "native-start.calls"
@@ -5891,7 +5897,11 @@ def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     branch = cloud[cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then') :]
     update_retry = _extract_fleet_function(cloud, "boot_update_with_capacity_recovery() {")
     assert "CLOUDBENCH_BOOT_UPDATE_TIMEOUT" in update_retry
-    assert '_with_timeout "$timeout_seconds" "$@"' in update_retry
+    # Each native update is bounded by the configured timeout: directly, or by
+    # the paced admission budget, which cannot exceed that same wait.
+    assert 'native_budget="$timeout_seconds"' in update_retry
+    assert '--wait-seconds "$timeout_seconds" --print-budget' in update_retry
+    assert '_with_timeout "$native_budget" "$@"' in update_retry
     assert 'boot_update_with_capacity_recovery "$_update_log"' in branch
     assert "final Fly update error" in branch
     post_config_start = branch[branch.index("# The update above is explicitly `--skip-start`") :]
@@ -23059,7 +23069,8 @@ def test_fleet_retained_resources_do_not_claim_release_before_owned_worker_close
     finished = out / "bench-e2e.finished-epoch"
     pool_return = out / "pool-primary.returned-epoch"
     if pooled:
-        anchor = fleet.index("if fleet_audit_record_pool_machine")
+        # Staged-return verification now precedes the same pool audit record.
+        anchor = fleet.index("if fleet_verify_staged_primary_return \"$id\" \"$pool_volume_id\"")
         start = fleet.index('                    for i in "${!CHILD_MACHINE[@]}"; do', anchor)
         end = fleet.index("                    done", start) + len("                    done")
         pool_code = fleet[start:end]
@@ -23171,6 +23182,9 @@ def test_fleet_retained_resources_do_not_claim_release_when_clock_write_fails(
         registry,
         audit,
         r"""
+# A not-allocated-verified name is sealed only after one complete native read
+# proves it absent; this inventory contains no Machine of that name.
+FLY() { [ "$1 $2" = "machines list" ] || { printf unexpected-provider-call >&2; return 99; }; printf '[]\n'; }
 # Force failure of the exact clock temporary file, while meta remains writable.
 clock_tmp="$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch.tmp.$$"
 mkdir "$clock_tmp"
@@ -31787,7 +31801,11 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
     launch = launch.split('for bench in "${BENCHES[@]}"; do', 1)[1].split("    CHILD_PIDS+=(", 1)[0]
     supervisor = "\n".join(
         _extract_fleet_function(source, name + "() {")
-        for name in ("terminate_fleet_runner_group", "run_fleet_child_supervised", "bench_execution_budget")
+        for name in (
+            "terminate_fleet_runner_group", "run_fleet_child_supervised", "bench_execution_budget",
+            # Warm/cold claim intent; ordinary fleets have no cold bootstrap.
+            "primary_cold_bootstrap_requested",
+        )
     )
     parameters = {
         "RUN_TIMEOUT": "10",
@@ -32012,7 +32030,8 @@ def test_prebuilt_volume_cli_keeps_pool_and_last_override_contract(args: list[st
     start = source.index("while [ $# -gt 0 ]; do")
     end = source.index('export CLOUDBENCH_FRESH_VOLUMES="$FRESH_VOLUMES"', start)
     parse = source[start:end] + 'export CLOUDBENCH_FRESH_VOLUMES="$FRESH_VOLUMES"'
-    script = f'set -uo pipefail\nPROVISION_POOL=""\n{initialize}\nset -- {shlex.join(args)}\n{parse}\nprintf "%s" "$CLOUDBENCH_FRESH_VOLUMES"'
+    # The controller initializes these globals before argument parsing.
+    script = f'set -uo pipefail\nPROVISION_POOL=""\nRECOVER_STALE_ONLY="0"\nPOOL_COLD_BOOTSTRAP="0"\n{initialize}\nset -- {shlex.join(args)}\n{parse}\nprintf "%s" "$CLOUDBENCH_FRESH_VOLUMES"'
     result = subprocess.run(
         ["bash", "-c", script],
         env=dict(os.environ, CLOUDBENCH_BOOT_LAUNCH="1", CLOUDBENCH_FRESH_VOLUMES="1"),
@@ -33713,8 +33732,8 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_nested_liability_owner_fe
             assert time.monotonic() < deadline, 'actual preflight never reached nested live boundary'
             time.sleep(0.01)
         nested_pid = int(ready.read_text())
-        subject['birth_snapshot'] = subject['capture_births']()
-        subject['parent_snapshot'] = subject['capture_parents']()
+        # One coherent native enumeration supplies both births and ancestry.
+        subject['birth_snapshot'], subject['parent_snapshot'] = subject['capture_processes']()
         births = subject['birth_snapshot']; parent = os.getpid()
         members = ['r001-j0001', 'r001-j0002']; observed = os.fstat(lock.fileno())
         cohort = {'directory':str(barrier), 'parent_lock_identity':[observed.st_dev,observed.st_ino], 'members':members,
