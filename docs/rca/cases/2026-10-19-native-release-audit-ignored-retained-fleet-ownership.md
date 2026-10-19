@@ -128,6 +128,29 @@ false`.
 calls. Owner-token matching is exact on 32-hex tokens, so other campaigns and
 warm donors are never matched.
 
+Adversarial review found that the first candidate counted verified exports per
+attempt, not per shard. With a retried shard, an earlier attempt's export could
+satisfy `exports == shards` while the final attempt had none, which fails open.
+`test_retried_shard_counts_only_its_final_attempt_export` failed on that
+candidate (`verified_exports` 2 instead of 1). It passes now that the count
+uses each shard's final `coordination.json` `out`. Ownership is still read from
+every attempt's export.
+
+Known limits:
+
+- An admission whose exported owner was released outside exact-owner recovery
+  (as here) stays `released: false` permanently. That is an evidence gap, not
+  a live leak. Read `present`/`present_volumes` for the native state.
+- Fresh clones transferred to a pool keep their fleet token and are reported
+  present.
+- Token matching against live leaked guests was proven on the fixture. The
+  real replay ran after the manual release and exercised only the
+  retained-owner path.
+
+The leak's own cause (why each fleet ended with `guest-cleanup-unconfirmed`,
+and why no run artifact was produced) is a separate open RCA. It is not closed
+by this fix, which only makes the leak visible.
+
 Not fixed here (open): retained owners are still exported and the controller
 is deleted without discharge. `cloudbench-archived-owner-stop.py` (stop-only)
 exists but is not invoked automatically. The three guests were released

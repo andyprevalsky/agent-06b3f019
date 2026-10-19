@@ -516,6 +516,32 @@ class NativeReleaseAuditOwnership(unittest.TestCase):
             self.assertTrue(AUDIT["audit"]([], app="app", guest_names={"cloudbench-a"}, guest_ids=set(), controllers=set(),
                                            exports=1, shards=1, now=T0)["released"])
 
+    def test_retried_shard_counts_only_its_final_attempt_export(self):
+        with tempfile.TemporaryDirectory() as name:
+            admission = self.admission(Path(name))
+            retained = admission / "shard-00/run/export/originals.tar.gz"
+            # The released fleet alone, in the shard's first attempt and in shard-01.
+            for target in (admission / "shard-00/run/export", admission / "shard-01/run/export"):
+                write(target / "disposable-export.verified.json", "{}")
+                with tarfile.open(target / "originals.tar.gz", "w:gz") as stream:
+                    data = b"847559f2e20318\n"
+                    info = tarfile.TarInfo("context/fleet/runs/20261019-201626-26082/teardown-ownership/owned-clones.ids")
+                    info.size = len(data)
+                    stream.addfile(info, io.BytesIO(data))
+            final = admission / "shard-01/attempt-02/run"
+            final.mkdir(parents=True)
+            write(admission / "coordination.json", {"controllers": 2, "shards": {
+                "0": {"out": str(admission / "shard-00/run")}, "1": {"out": str(final)}}})
+            result = AUDIT["run"](admission, self.api([], []), "app")
+            self.assertEqual(result["checked"]["verified_exports"], 1, "shard-01's final attempt exported nothing")
+            self.assertFalse(result["released"], "an earlier attempt's export never stands in for the final one")
+            write(final / "export/disposable-export.verified.json", "{}")
+            (final / "export/originals.tar.gz").write_bytes((admission / "shard-01/run/export/originals.tar.gz").read_bytes())
+            result = AUDIT["run"](admission, self.api([], []), "app")
+            self.assertEqual((result["checked"]["verified_exports"], result["checked"]["expected_shards"]), (2, 2))
+            self.assertTrue(result["released"], "every final export checked, nothing present, no retained owner")
+            self.assertTrue(retained.exists())
+
 
 class LaunchInstructions(unittest.TestCase):
     def test_instruction_names_the_exact_render_and_publish_commands(self):

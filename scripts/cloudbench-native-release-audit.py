@@ -113,14 +113,38 @@ def ownership_from_archive(archive: Path) -> dict:
     return found
 
 
+def _verified(export: Path) -> bool:
+    return (export / "disposable-export.verified.json").exists() and (export / "originals.tar.gz").exists()
+
+
+def final_exports(admission: Path) -> list[Path]:
+    """Each shard's final attempt export, from the coordinator journal.
+
+    A respawned shard rewrites its journal ``out``; an earlier attempt's export never
+    stands in for the final one. Without journal entries, each ``shard-*`` directory
+    counts once."""
+    coordination = _json(admission / "coordination.json") or {}
+    shards = coordination.get("shards") if isinstance(coordination, dict) else None
+    if isinstance(shards, dict) and shards:
+        finals = []
+        for entry in shards.values():
+            out = Path(str((entry or {}).get("out") or ""))
+            if not out.exists() and admission.name in out.parts:
+                out = admission.joinpath(*out.parts[out.parts.index(admission.name) + 1:])
+            finals.append(out / "export")
+        return finals
+    return [next(iter(sorted(shard.glob("**/export"))), shard / "run/export")
+            for shard in sorted(admission.glob("shard-*")) if shard.is_dir()]
+
+
 def guest_identities(admission: Path) -> tuple[dict, int]:
-    owned, exports = empty_ownership(), 0
+    """Ownership from every attempt's verified export; the count covers final attempts only."""
+    owned = empty_ownership()
     for export in sorted(admission.glob("shard-*/**/export")):
-        if (export / "disposable-export.verified.json").exists() and (export / "originals.tar.gz").exists():
+        if _verified(export):
             for key, values in ownership_from_archive(export / "originals.tar.gz").items():
                 owned[key] |= values
-            exports += 1
-    return owned, exports
+    return owned, sum(_verified(export) for export in final_exports(admission))
 
 
 def expected_shards(admission: Path) -> int:
