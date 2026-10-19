@@ -1,0 +1,48 @@
+{
+  "scope": "Sanitized source fragments of actual failing private operators; never full entrypoints; no live resources",
+  "fixture_sha256": "47f60af55d01c27d535d2bc030be23c19841aadc6a57218d0590533855d4bbd3",
+  "fragments": [
+    {
+      "boundary": "identity",
+      "original_sha256": "8af33a913ecbb1f7be437cd6b104a0ff474d5f3899ab49834e03f0fa5f2469e4",
+      "selection": "AST init_identity + init_before assignment + uid assertion; PID791\u2192101,birth174\u2192123,argv path\u2192fixture path",
+      "published_fragment_sha256": "2809b870c1d8353ac3fcd7239f509dc25f5fc34760d6b98eaca60fe6418a6917"
+    },
+    {
+      "boundary": "optional",
+      "original_sha256": "bab06cc0452a1c729e95f0ba3ea2bda7a292102c4cd8de8f190aa71f0a960200",
+      "selection": "Original inventory block from owner assignment to first git assertion; owner replaced consistently; no git/native code",
+      "published_fragment_sha256": "a787ba2728fb17cdd7c7daae38a0aa5e5e29f5c3d6593c49ff26c0960edf2055"
+    },
+    {
+      "boundary": "typed",
+      "original_sha256": "f231e49fcd7e38f056de5b9fc4b1ed90a856b9ff23b90be668e07f5c0fa698d8",
+      "selection": "Original inventory block from owner assignment to first git assertion; owner replaced consistently; no git/native code",
+      "published_fragment_sha256": "c3b317841c0199506b31d13a1fdf29a7be6eb34511f0104cc0bb5ff57571c00a"
+    },
+    {
+      "boundary": "privilege",
+      "original_sha256": "b2a61a744a6be7a35177fa953eb08219ddd847fbf94567fd209272a6d4b4f23e",
+      "selection": "Only captured top-level os.setgroups/setgid/setuid/chdir calls; capability-model adapter never changes real credentials",
+      "published_fragment_sha256": "fcd8632ceda68f6991a573917a257504283ede1631852892fdf33877a7571b20"
+    },
+    {
+      "boundary": "directory",
+      "original_sha256": "9899c76150cfb7ef7959e0bfe79450dcde952c5f0d15ad330a23d9457a09e181",
+      "selection": "Exact operation directory block; shell paths supplied from isolated test temp directory",
+      "published_fragment_sha256": "93546a7a48969a30753d5ea682e3ea6798a2070bc7dfb877bc449657cc784119"
+    },
+    {
+      "boundary": "scheduler",
+      "original_sha256": "1258187b4a7c979be859a0983850f443d2b487575cc3b0887067efecd0f69478",
+      "selection": "AST exact_init plus original pending-stop loop; process/clock/sleep are controlled observations",
+      "published_fragment_sha256": "b63a3f324175059178a9671bdb4ee5a175f7464b9dc266a6f2b12cca59729037"
+    },
+    {
+      "boundary": "path",
+      "original_sha256": "f5b1182949f579cc2a868a00e8970c6e6debb23c15d0148b455919b578a162cb",
+      "selection": "Only original driver environment construction AST; no process launch",
+      "published_fragment_sha256": "a3b88f1be96d422868675e6b04b4b4f2c9f850015ab8bb5882ec3444e0fbb207"
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "actual600_parallel_and_infra_under5_outcome": "PENDING",
+  "actual_canonical_fingerprint": "3d13501494656e79b8a6093749e08aca9b26fff09b2e37c4f72c440ce8413c9f",
+  "actual_recipe_receipt_path": "/home/boxes/rose/.context/stress600-root/capacity0dde-actual-recipe.safe.json",
+  "actual_recipe_receipt_sha256": "1d4fb4bebaa8e40c45b70d79af9d8f5d5b5b9d18ebe9673a439486e12d269542",
+  "base": "d83c5ba9a71e1d8528e5bdfa7aff4715b30307ba",
+  "causal_counterexample": "Exact24MiB inline inventory under64MiB process memory fails full JSON parsing; compact input retains native admission semantics and succeeds. Original publisher owning RED retained. Final13 affected fixture cases pass after one genuine dependency import.",
+  "component_packet_path": "/home/boxes/rose-full600-capacity-projection/.context/capacity-projection/review-v3.safe.json",
+  "component_packet_sha256": "b579e253797d6310867a7c29d5320f396f768c27451eab225be8f58b09ba842f",
+  "independent_tests": {
+    "affected_case": {
+      "path": "/home/boxes/rose/.context/stress600-root/capacity0dde-independent-affected.private.log",
+      "sha256": "f1ac91a84a3ed7fa6365585693000aa10c009da08f55fe4b7b717f7253d0781e",
+      "summary": "1 passed, 1044 deselected in 2.44s"
+    },
+    "affected_fixture_family": {
+      "path": "/home/boxes/rose/.context/stress600-root/capacity0dde-independent-affected-fixture-family.private.log",
+      "sha256": "d6f5ebe6b0f9e3bb54445b041fe2bcc9d130ff1522638e7d1eb96e7d92f8ef49",
+      "summary": "13 passed, 1032 deselected in 2.48s"
+    },
+    "original_family": {
+      "path": "/home/boxes/rose/.context/stress600-root/capacity6c-independent-full-family.private.log",
+      "sha256": "9b2a374beec33ebb6165cd70cb2a595aa0695bdaed138d521b5dee0298891901",
+      "summary": "1 failed, 77 passed, 967 deselected in 17.46s"
+    }
+  },
+  "limitations": [
+    "Native globalOOM observed; exact historical71 classifier PID/cause attribution unproved.",
+    "Independent77PASS/1FAIL family on6c is retained; one omitted genuine fixture library dependency corrected, affected13 cases independently pass on0dde. No claim of a fresh full78-case invocation.",
+    "Existing25-input canonical recipe does not enumerate the two readonly inventory helpers; their exact Git/materialized bytes are additionally bound in this review and immutable source ref.",
+    "Documented create queue-inclusive240 bound can expire before RPC; queue correction pending, no full600 launch/execution or infra-under5 credit."
+  ],
+  "native_capacity_execution_acceptance_or_release_credit": false,
+  "observed_epoch": 1792004115.1670303,
+  "phases": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "preserved": [
+    "all prior source policy entries",
+    "one strict600manifest, exact200names/order times3",
+    "task1200/whole5400/controller perf16/128GiB/256workspace and physical floors",
+    "native ownership/mutation/recovery full config inputs",
+    "original epochs and every original task attempt",
+    "original1/sec create pacing and clone240 RPC wrapper bounds"
+  ],
+  "reviewed": true,
+  "reviewed_paths_sha256": {
+    "agents/benchmarks/cloudbench_dependency_sync_test.py": "9f32c785bf32a78fe7e01c429d75a592633e78dd75ff8b8385ee7076550823f2",
+    "scripts/cloudbench-machine-readiness.py": "f8c22753a9498de5cd9e6c01f672556f8ee3caf6ea13415dd49b73bac8b03163",
+    "scripts/lib/cloudbench-inventory.sh": "0e75e842e1634a98b12f2642a2a0a2a7f58e1665f029e811a637b75dc8c7d710",
+    "scripts/run-bench-fleet": "55f045291a9149d9a0bca0f7d9fa08d93a2e305c608c6060b96243b7d17f33f6"
+  },
+  "reviewer": "root independent source, owning-boundary and actual packed recipe review",
+  "runtime_scope": "One publisher produces an atomic compact native admission view excluding only config.files/env; fleet borrows original publisher before either warm-source branch; same owner/birth/token/freshness and generation checks; standalone post-reconciliation direct native read retained; parser refuses invalid inputs with nonsecret diagnostics. Full native config mutation/recovery readers unchanged.",
+  "schema_version": 1,
+  "source": "0dde7bc0d13569ee158fb34e922b8bf0712a9ef4",
+  "transitive_bindings": {
+    "back-end/package.json": "2b466d4362ccb48ae00a7d3f043ce49f3ed423a27c7bcbe6a207b7c3da72d2d1",
+    "back-end/scripts/apply-local-workflow-ddl.sh": "b349eb7350578aca283969360749e094b6f78b4b64b9707d74ac13ab47d96f36",
+    "back-end/scripts/ensure-agent-network-grep-indexes.ts": "653de4f229b9ea3bb71f8f6d2cc5de113d63e37e85899efb239f559d42edd709",
+    "back-end/scripts/ensure-fast-mode-cache-schema.ts": "085230371c95de56845ceb3bd4eef4948144cfab31231d4e06ac527320463f8f",
+    "front-end/package.json": "ac5d4c244d39877641ed9753cb18511ba958df94d0887d574ca189207c75a3c1",
+    "package.json": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
+    "scripts/cloudbench-campaign-mutation.py": "a0452d635ce446f4fd178f510081772fd0435e9ad1ccff5c14462c8adbd2bafc",
+    "scripts/cloudbench-guest-recovery.py": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
+    "scripts/cloudbench-port-lease.py": "183116af91e2044a91c3d497d4229db78caa8c867af408a3448fb15c58b021e1",
+    "scripts/cloudbench-run.sh": "55d4faec82afa676ecd6dde64dc5685508bc0f3c4ad42e466709b1a95a53635f",
+    "scripts/cloudbench-script-snapshot.py": "fc6fabcdf8724d28d5bedbf5c87019ca92d930beafbf817b489cc405d186bfbd",
+    "scripts/cloudbench-status-server.py": "6901d035b4b0ac76fff8faafa0fa015e69671c12ea3793d423277e79d05eadc3",
+    "scripts/ensure-workspace-dependencies.sh": "c5c13af190c43ec8dc88f743ed481c8c1121ad390c68bdfa9e98b89eb3970cb1",
+    "scripts/lib/fast-mode-cache-schema.sh": "154637d61a8728bbfb3dfe286b5202c9e89f5fdee8a2b168ffb76e715612590a",
+    "scripts/lib/local-pg-image.sh": "a5a3b3f57eaa4fc2fe1c2a32b65c830bd2a4d619bc2ec040608e2d02b23bb889",
+    "scripts/lib/ngrok-tunnel.sh": "d53a51a4e43e956ccd36f997fcfa15ffef2bcb9d33e3533e8c1673eda11e561e",
+    "scripts/lib/run-context.sh": "0be5db39d87319d11e3d2afc4ccea97581f46754021bee0f3020939788a0d22a",
+    "scripts/lib/run-process-cleanup.sh": "ecc491254ef4e0e7b1712215757045ddf797ca3414c2185e55e09e346690a338",
+    "scripts/lib/run-service-readiness.sh": "3b8a264ea7a785219faea9fcd1cf2ab37a53060a37951f95d4c0a00688d819b6",
+    "scripts/lib/seed-cache.sh": "87a4b83a73c58f67513b2e3402eeb27005a7c9bf7ef78dae039aa4161244e65e",
+    "scripts/lib/workspace-env.sh": "ea649a1212dab724c16f3da995c796ff099caa5dabbcb106c6a359260b5bc9d2",
+    "scripts/run-bench-campaign.py": "ae4af6d784c7ff735c1ba9596738037c5d4a4d40168a8e2cd35b558ec0670916",
+    "scripts/run-bench-cloud": "279aa310b9dda8e9ecdca5e1370657cb03f58790685b01cbb359c84b9facbabe",
+    "scripts/run-bench-fleet": "55f045291a9149d9a0bca0f7d9fa08d93a2e305c608c6060b96243b7d17f33f6",
+    "scripts/run.sh": "dc24bbb33bd7913e7f206ae2a148f09f387399cc3e9fbd7bfbaf97c7ebc676cc"
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "actual600_parallel_and_infra_under5_outcome": "PENDING",
+  "actual_canonical_fingerprint": "dbceae6e91050e5c3c548a239ac52426f5adc343cc790216ecd7798a94628d97",
+  "actual_recipe_receipt_path": "/home/boxes/rose-full600-publication-provenance/.context/publication-provenance/actual-recipe.safe.json",
+  "actual_recipe_receipt_sha256": "ea2396c019d352a2fe6651aac4de6f55cd7426a527684c910579c67085839cfa",
+  "base": "4eb2d7880ae8a4977fda4a6b67adca284140af50",
+  "changed_paths": [
+    "agents/benchmarks/cloudbench_dependency_sync_test.py",
+    "scripts/cloudbench_execution_provenance.py",
+    "scripts/run-bench-fleet",
+    "scripts/tests/cloudbench-multi-workstream.test.sh"
+  ],
+  "combined_changed_owning_controls": {
+    "deselected": 1037,
+    "passed": 2,
+    "seconds": 3.65
+  },
+  "component_independent_tests": {
+    "provenance": {
+      "passed": 1,
+      "seconds": 0.4
+    },
+    "snapshot": {
+      "cases": [
+        "published",
+        "unpublished",
+        "invalid",
+        "foreign"
+      ],
+      "passed": 1,
+      "seconds": 0.57
+    }
+  },
+  "component_refs": [
+    "8ef0c80d6d073399948de64f19b0257488c6c566",
+    "7062f8a29984bc2f193270fd2c90e1032f0be97c"
+  ],
+  "component_reviews": [
+    {
+      "path": "/home/boxes/rose/.context/stress600-root/provenance-8ef-component-root-review.safe.json",
+      "sha256": "0d2439d1731ac56b71cb951404f8671e95c9fe86618db35329cebc38141acc3b"
+    },
+    {
+      "path": "/home/boxes/rose/.context/stress600-root/snapshot-7062-component-root-review.safe.json",
+      "sha256": "e2d562533f81a39ae1a64218eaf0d89369c198dc6bf40059b6ee9c28dbd9e938"
+    }
+  ],
+  "limitations": [
+    "Historical j484 inner blocked operand remains unknown; the reproduced publication race is a source counterexample, not sole historical attribution.",
+    "Source-phase approval grants no actual600 overlap, native capacity, task grade, INFRA<5 acceptance or resource release credit."
+  ],
+  "native_capacity_execution_acceptance_or_release_credit": false,
+  "observed_epoch": 1791946740.2475243,
+  "phases": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "preserved": [
+    "30-second snapshot creation deadline",
+    "exact result path and adoption/native ownership fences",
+    "all source identity and native capacity guards",
+    "same200 task names/order, three copies, peak600, one strict600 cohort",
+    "task1200/whole5400 and retained retries/original outcomes",
+    "all app, agent runtime, task catalog, evaluator and dependency bytes"
+  ],
+  "reviewed": true,
+  "reviewer": "root independent component and exact composition review",
+  "schema_version": 1,
+  "source": "78672f9166cad75b49a35de4ed3c5bfb3d1e14ed",
+  "source_scope": "Restore the existing campaign mutation scalar allowlist key; preserve valid snapshot publication before existing deadline rollback and add bounded private diagnostics; update existing owning/native fixtures.",
+  "transitive_bindings": {
+    "back-end/package.json": "2b466d4362ccb48ae00a7d3f043ce49f3ed423a27c7bcbe6a207b7c3da72d2d1",
+    "back-end/scripts/apply-local-workflow-ddl.sh": "b349eb7350578aca283969360749e094b6f78b4b64b9707d74ac13ab47d96f36",
+    "back-end/scripts/ensure-agent-network-grep-indexes.ts": "653de4f229b9ea3bb71f8f6d2cc5de113d63e37e85899efb239f559d42edd709",
+    "back-end/scripts/ensure-fast-mode-cache-schema.ts": "085230371c95de56845ceb3bd4eef4948144cfab31231d4e06ac527320463f8f",
+    "front-end/package.json": "ac5d4c244d39877641ed9753cb18511ba958df94d0887d574ca189207c75a3c1",
+    "package.json": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
+    "scripts/cloudbench-campaign-mutation.py": "a0452d635ce446f4fd178f510081772fd0435e9ad1ccff5c14462c8adbd2bafc",
+    "scripts/cloudbench-guest-recovery.py": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
+    "scripts/cloudbench-port-lease.py": "183116af91e2044a91c3d497d4229db78caa8c867af408a3448fb15c58b021e1",
+    "scripts/cloudbench-run.sh": "55d4faec82afa676ecd6dde64dc5685508bc0f3c4ad42e466709b1a95a53635f",
+    "scripts/cloudbench-script-snapshot.py": "fc6fabcdf8724d28d5bedbf5c87019ca92d930beafbf817b489cc405d186bfbd",
+    "scripts/cloudbench-status-server.py": "6901d035b4b0ac76fff8faafa0fa015e69671c12ea3793d423277e79d05eadc3",
+    "scripts/ensure-workspace-dependencies.sh": "c5c13af190c43ec8dc88f743ed481c8c1121ad390c68bdfa9e98b89eb3970cb1",
+    "scripts/lib/fast-mode-cache-schema.sh": "154637d61a8728bbfb3dfe286b5202c9e89f5fdee8a2b168ffb76e715612590a",
+    "scripts/lib/local-pg-image.sh": "a5a3b3f57eaa4fc2fe1c2a32b65c830bd2a4d619bc2ec040608e2d02b23bb889",
+    "scripts/lib/ngrok-tunnel.sh": "d53a51a4e43e956ccd36f997fcfa15ffef2bcb9d33e3533e8c1673eda11e561e",
+    "scripts/lib/run-context.sh": "0be5db39d87319d11e3d2afc4ccea97581f46754021bee0f3020939788a0d22a",
+    "scripts/lib/run-process-cleanup.sh": "ecc491254ef4e0e7b1712215757045ddf797ca3414c2185e55e09e346690a338",
+    "scripts/lib/run-service-readiness.sh": "3b8a264ea7a785219faea9fcd1cf2ab37a53060a37951f95d4c0a00688d819b6",
+    "scripts/lib/seed-cache.sh": "87a4b83a73c58f67513b2e3402eeb27005a7c9bf7ef78dae039aa4161244e65e",
+    "scripts/lib/workspace-env.sh": "ea649a1212dab724c16f3da995c796ff099caa5dabbcb106c6a359260b5bc9d2",
+    "scripts/run-bench-campaign.py": "ae4af6d784c7ff735c1ba9596738037c5d4a4d40168a8e2cd35b558ec0670916",
+    "scripts/run-bench-cloud": "279aa310b9dda8e9ecdca5e1370657cb03f58790685b01cbb359c84b9facbabe",
+    "scripts/run-bench-fleet": "4ffb598e66776ea94e05214f91b8b5f4f32a6d7b0e07d66ac515ba56ddfe5ac9",
+    "scripts/run.sh": "dc24bbb33bd7913e7f206ae2a148f09f387399cc3e9fbd7bfbaf97c7ebc676cc"
+  }
+}

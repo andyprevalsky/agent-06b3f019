@@ -177,6 +177,36 @@ binding are not silently accepted. The quick bootstrap and existing prestack
 controls run in the ordinary deploy process. Continue monitoring through exact
 Machine/volume release.
 
+A post-service fresh or pool guest that stopped before sealing runtime evidence
+makes recovery report `original-volume runtime archive required`. Capture its
+exact stopped volume with the generic helper, then build the archive and repeat
+recovery:
+
+```bash
+python3 scripts/cloudbench-original-volume-capture.py \
+  --registry <git-common>/cloudbench-fleet-ownership/<exact-owner-token> \
+  --bench <task> --machine-id <machine> --volume-id <owned-volume> \
+  --capture-dir <absolute-private-capture-directory> [--preflight-only]
+python3 scripts/cloudbench-build-interrupted-pool-archive.py \
+  --registry <git-common>/cloudbench-fleet-ownership/<exact-owner-token> \
+  --capture-dir <absolute-private-capture-directory>
+scripts/run-bench --recover-stale-owner <exact-owner-token>
+```
+
+The helper verifies owner, run, Machine and volume against the registry, audit
+and native Machines API, and holds the owner's recovery lock. It saves the exact
+original config, changes only `init.cmd` to `sleep infinity` while stopped, and
+boots once. It refuses any inherited `init.exec`/`init.entrypoint` or live driver
+process. It copies the `original_files` set of `cloudbench-startup-failure-archive.py`
+read-only, then stops and restores the exact config without starting it. It writes
+`<machine>.tar.gz` and `<machine>.provenance.json` only after the native
+stopped state is proven. Missing files stay listed as missing. It never deletes
+or reaps, grants zero credit, and refuses foreign/live owners, changed configs,
+destroyed or running resources and existing captures. A failure leaves
+`<machine>.capture-failure.json`; if the original config is not proven restored,
+rerun with `--restore-original-config` and the same capture directory. Archive
+building and recovery still apply their own exact checks.
+
 For generic failed-owner recovery, `_forensic/archive-verified.json` preserves
 complete originals with `native_release_verified=false` and zero proof credit.
 Continue `scripts/run-bench --recover-stale-owner <exact-owner-token>` through
@@ -344,6 +374,20 @@ visible-card sequence. Use `--checkpoint-no-start` to leave a paused workflow
 open in the local FE; the runner keeps that isolated stack alive and prints the
 resume command. To reuse a pre-existing export instead of generating one, pass
 `--checkpoint-source-json`; optional tree cloning uses `--checkpoint-tree-json`.
+
+### Provider rate-limit concurrency cap
+
+Benchmark guests share the Parallel Search+Extract and Kernel browser keys with
+production. `scripts/cloudbench-provider-limits.json` records each enforced
+limit, the measured run600c per-bench peak and a 20% production reserve; the
+cap is `floor(limit × 0.8 / per-bench peak)`, minimum across enforced providers
+(`python3 scripts/cloudbench-provider-capacity.py cap`, `cap --json` for the
+table). `run-original600-controller.py` (including `--check`), campaigns (whole
+sharded group), fleets and `--local` refuse a wider global simultaneous width
+with exit 78 before any credential or provider call. Do not retry, split or
+work around a refusal: ask the user to raise the provider limits (then record
+them in the registry in a reviewed change) or rerun at or below the cap.
+Task-free `--infra-probe` fleets and validated `--demo-cache` replays are exempt.
 
 ### World-model refresh conformance
 
@@ -550,6 +594,15 @@ curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT"
 - **Supabase**: REST API call to `api.supabase.com/v1/projects/.../analytics/endpoints/logs.all` with time window, filtered for completions-related requests
 - **Messages**: Extracted from the agent GET response (always available, no external API needed)
 
+These production sources are queried only when the backend under test is
+production (`--prod` or a non-loopback `--url`). A loopback stack — `run-bench
+--local`, `scripts/run.sh` or an isolated cloud guest — runs its own backend,
+worker and completions, so prod stores cannot contain its agents. Its
+`worker_logs` come from the stack's local worker files, and `backend_logs` /
+`research_logs` carry a skip note; the full stack logs stay in its run archive.
+`SUPABASE_PROJECT_REF` falls back only to the project named by the configured
+`SUPABASE_URL`, never to a hard-coded production project.
+
 ### Token Setup
 
 ```bash
@@ -579,22 +632,26 @@ Moved verbatim from `CLAUDE.md`. "This file" means these instructions;
 **Benchmark communication and maintenance:** every launch prints the canonical
 parent-agent contract in `.claude/shared/benchmark-report-format.txt`; retrieve it
 without launching anything with `scripts/run-bench report-format`. All benchmark
-progress and final messages must use its exact fenced `text` scorecard, styled
-like `/deploy` Step 15, with no surrounding prose. Keep the stacked loading bar,
-queued/in-progress/complete percentages and counts, execution clocks, task
-PASS/FAIL, infra percentage/count, costs (including Azure), separate DEMO/agent/WMH
-cache and latency metrics, lifecycle evidence, and one line per active sub-agent
-with its task, blocking emoji, start/block timestamp and age. Preserve unknowns
-honestly and keep every section. At three hours since the last original slice
-trigger, a concrete no-new-slice reason, owner/action and resume condition are
-mandatory; retries and recovery never reset clocks or discard attempts.
+progress and final messages must use its full scorecard with actual CSS-colored
+text on boxes.dev, with no surrounding prose. Use the documented diff fallback
+only when HTML rendering is unavailable. The first row names the
+Experiment Number; include actual launches/day for this goal and a compact table
+of the last three experiments with their own original trigger/end/elapsed,
+queued/running/terminal counts, PASS/AGENT FAILURE/INFRA FAILURE, unknown outcomes,
+cost/cache/LLM coverage and lifecycle evidence. Use one status emoji per worker,
+recorded scope tokens spent, rolling 15-minute tokens/min and LIFE at the far
+right. Remove UPD, wheels and the old standalone active-run/progress/metrics and last-slice sections.
+A delay needing action belongs in ISSUES / NEXT ACTION with an owner and concrete
+correction. Do not reset clocks or discard attempts.
 
-The root agent must continuously drive authorized benchmark work. Pause starting
-a new slice iff infra failures exceed 10% of all terminal attempts (including
-retries); exactly 10% permits continuing. Ordinary task failures do not stop
-iteration. Healthy current work and repairs continue during an infra hold. This
-root scheduling instruction does not replace current campaign scheduling, smoke
-gates, resource safety, explicit user stops, approvals or authorized budgets.
+The root agent must continuously drive the experiment iteration loop above.
+Immediately stop the exact owned run at infra >=5% of its original scheduled
+total (`20 * infra_failed_jobs >= scheduled_total`): for 600 jobs, 30 failures.
+Retries never change the denominator or count a scheduled job twice.
+Preserve its original breach and repair the critical causes before rerunning.
+Ordinary task failures do not add a global gate; independent campaigns, RCA
+workers and operational monitors continue. Preserve resource safety, explicit
+user stops, scoped approvals and authorized budgets.
 Delegate independent issues with `/RCA` and their exact evidence. Delegate
 `/deploy` on an immutable full-SHA checkpoint captured at dispatch in an isolated
 checkout; later root changes are excluded unless explicitly handed off as a new

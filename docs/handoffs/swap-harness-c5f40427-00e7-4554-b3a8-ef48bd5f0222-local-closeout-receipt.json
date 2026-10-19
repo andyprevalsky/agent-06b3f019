@@ -1,0 +1,47 @@
+{
+  "schema": "rose-swap-harness-private-v1",
+  "old_devbox_id": "c5f40427-00e7-4554-b3a8-ef48bd5f0222",
+  "bucket": "trace-archive",
+  "object_key": "swap-harness-private/c5f40427-00e7-4554-b3a8-ef48bd5f0222/benchmark-infra-local-closeout-6112c492b3a1854d9b3747cd4479f5d82b87f6b7f8eaf7a0ca38d23928178886.tar.gz.aesgcm",
+  "encrypted_bytes": 8528,
+  "sha256": "6112c492b3a1854d9b3747cd4479f5d82b87f6b7f8eaf7a0ca38d23928178886",
+  "remote_full_readback_verified": true,
+  "file_count": 4,
+  "roots": [
+    "/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.0108dd85850e4b26b0a3dab4794ded7e.owner.terminal",
+    "/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8766.0007c994935ad730c4b47e957b3aa692.owner.terminal",
+    "/home/boxes/rose/.context/swap-harness/watch-closure.json",
+    "/home/boxes/rose/.context/g4/pooler.log"
+  ],
+  "key_source": "authoritative agents/.env BACKEND_API_KEY",
+  "restore": "Read ROSESWAP1 magic, 4-byte big-endian JSON header length and JSON header; derive AES key with HKDF-SHA256 salt/header hkdf_info and authoritative BACKEND_API_KEY; AES-GCM nonce from header, header bytes as AAD, final 16 bytes as tag. Decrypt to gzip tar. Extract privately into an isolated recovery directory; never overwrite live .git or runtime identities.",
+  "authenticated_decryption_verified": true,
+  "decrypted_gzip_sha256": "b9b22538258d06abb2baa767c00cf4a0deabd3873425fa44efbbd6766cee9c63",
+  "replacement_must_compare_all_members": true,
+  "original_member_hashes": [
+    {
+      "path": "rose/.context/fleet/runs/_hub/agent-link-server.8765.0108dd85850e4b26b0a3dab4794ded7e.owner.terminal",
+      "type": "0",
+      "bytes": 419,
+      "sha256": "52a30f8fa2eb7470c4859ae3a75cb6237e4954fcd7fe404f9f1fb6816700ca57"
+    },
+    {
+      "path": "rose/.context/fleet/runs/_hub/agent-link-server.8766.0007c994935ad730c4b47e957b3aa692.owner.terminal",
+      "type": "0",
+      "bytes": 419,
+      "sha256": "3c674d5e83228b6f69348465ca843112bc5695d646c92278172345021b6ed15d"
+    },
+    {
+      "path": "rose/.context/swap-harness/watch-closure.json",
+      "type": "0",
+      "bytes": 606,
+      "sha256": "7eabef1d38166a99952748cec778ee582a34a5d1114ab6fe8f89c728a4906531"
+    },
+    {
+      "path": "rose/.context/g4/pooler.log",
+      "type": "0",
+      "bytes": 46222,
+      "sha256": "a75323a80b37820642bfdf9eea8dfd0b5e6295820df4983f7fcade181d3892a7"
+    }
+  ]
+}

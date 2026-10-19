@@ -693,7 +693,7 @@ export async function deleteRun(runId: string): Promise<boolean> {
         ...(await Promise.all(
           targets.slice(start, start + 4).map(async (run) => ({
             runId: run.run_id,
-            bundle: await getRunBundleStrict(run.run_id),
+            bundle: await getRunBundleStrict(run.run_id, run),
           }))
         ))
       );

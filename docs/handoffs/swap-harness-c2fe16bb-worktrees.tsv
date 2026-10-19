@@ -1,0 +1,128 @@
+/home/boxes/rose	6189d6e6cdbcc82d7715809daef25158e6834534	fix/full600-post-admission-inventory-wait	dirty=0	untracked=0	remotes_containing=7
+/tmp/pr1525-after72-large-artifacts	7ecd7d15556d5f31ed8e8b982b78107fcf07259d		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-after72-operator	b29102c303f63cf2a9d0058566e0199bd417986c		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-archive-stop-scope	a82f959dbc72737a8a5584a24f3ba90022cc2703		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-auth-state	018a4c9a2a0f13ac35e1c17613f598d9cec70d1e	pr1525-auth-state	dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-bound-launch-operator	6e6ad080dcffdf85d84f677740d9f9e9af6bad0d		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-campaign-workspace	53f7d8e4ecc0ae6d81048569ea87483407928e52		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-cleanup-admission-scans	c2ad90ceb4a50a6e15f6fa0d757a3b6efa5a9262		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-cleanup70-operator	1fc5b729ced76dda398f997650b8ba5d08eb522b		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-cli-reproducibility	e19cd026fb2650eb76a6b6ac4083cf41414a89f4		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-cohort-proxy-once	c00e0933535fcfea792a1274ff9fb0bf796941b3		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-cohort-refresh-receipt	41f525019d8da0f008daf65669943d62adb887de		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-cohort-stale-once	4c1d92e21a9bc109f0bf856fa3c6bdeb5e71efc9		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-cold-bootstrap-once	fa6e2a28c658d2766f04e881de76719bd172e58f		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-configured-billing-stop	638cefde32b3d14ebb2e613989bfe12d01da00d3	pr1525-configured-billing-stop	dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-continuation-status	3e8f0c836c739896b819dd68f1482bab33d77e4d		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-controller-client-path	6401ae56d857d4804c8d70da25334e7f78402749	pr1525-controller-client-path	dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-controller-delete-deadline	0d2713ef206837d0563b06337905acb80f5863ce		dirty=9205	untracked=1	remotes_containing=0
+/tmp/pr1525-controller-hub-finalize	1d7a77d56440f28ff7bbad105fe53334def56bed		dirty=9207	untracked=1	remotes_containing=0
+/tmp/pr1525-controller-lock-recheck	52d830dc5120e234c3af771b3e55ac46e0ebb8a6		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-disposable-controller	ec8efb5fc582adc19327b6084bd9084c28ff6287	pr1525-disposable-controller	dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-disposable-lifecycle	2789f6ddccb60730ce7a76e6715d6e7314e8b808	pr1525-destroy-idle-maintenance	dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-fifo-custody	56abb2cb97852ab588aad02181f0a0fc200c1529		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-finalize70-operator	2bacd15761af82b3b5112df7daf84b621adf2109		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-finalize70-resume	447bf65e8e4f5b3faf8e02c695ac5f7411d24c39		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-fixed-native-worker	fe3d6733289bb93e90ded2f154316cfc21788eaa		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-hallpass-version	63a52c42227dac6d9ca9397302eeac3f508e7f05		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-host67-operator	0acca452d5d4241c9ecbf7bb72f691cd19341dc2		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-host70-operator	d55229d36b53f7946b0b025ce00b3e4d88489f7e		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-hub-admission-site-startup	77f4d6b06cb149584f7fbb98404750af68317599		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-hub-composed-qualification	b7aa3a2f080a487f144cb544ad87f58291114cdc	fix/hub-composed-offline-9f8	dirty=2	untracked=2	remotes_containing=4
+/tmp/pr1525-hub-dead-starting	47c6fa9c77674920d273fdadb56a866c9f5bcd80		dirty=9219	untracked=0	remotes_containing=0
+/tmp/pr1525-hub-prefix-cutover	bf4afc03861a796e83bd37c9f43cd8b25db8fd9b		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-hub-publication-review-fix	835671836f3409ddb99f324ef4d0c282ce855921	release/hub-fast-main	dirty=1	untracked=1	remotes_containing=3
+/tmp/pr1525-import-native-seal	be6a3c1bcbc708e9c3fea677f7bdc2412e4d4497		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-infra-cold-propagation	9f294c94f87c0cddd86bf8bfefb6be63cd59261f		dirty=1	untracked=1	remotes_containing=0
+/tmp/pr1525-infra30-supervisor	1bed18048178e19b3f36fcf018b0ad0bdb49e739		dirty=9200	untracked=1	remotes_containing=0
+/tmp/pr1525-main-hub-admission-site-startup	9462c3c434911629da9e415f496968aacbdb3bfb		dirty=0	untracked=0	remotes_containing=3
+/tmp/pr1525-main-persistent-fleet-aggregator	201226d3cfee46b7ad6abea2397e2332676d3c74		dirty=0	untracked=0	remotes_containing=3
+/tmp/pr1525-main-site-startup	f9b2d4e3082ad7f4d5d351e40e02a8998d132843		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-namespace-pilot-source	e19f0a4d8661c93c6b937eaa875d70b5e0a667a4		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next-campaign-operator	852692d8c850c6d20640103561fa02ad0cb333ed		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next68-operator	f7e5c99e722997af6f3f2b539c4e337c6a239ef1		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next69-operator	5475599b297efc1b50da42fd8470e06d9db5a1d0		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next69-status-operator	215b71289889d7c37648428b545db1a33e12230e		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next70-operator	efd8a396a6b6e4a65d10186c7c9a24342ad9065a		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next71-operator	08ecb42f3f8837fbc90ca6ab6857ffd9de795201		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next72-operator	724ae71f5bd8756be01ea237de0c2742e4f94b77		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next73-closed-evidence	59ab01b35aa91521e105a3d48e1587007aa347ad		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next73-current-owners	a1e3d5084bd7cff1eed36e30f45d3132fe337cda		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next73-operator	e86dd8696b089337dd9dba904f0650435adc6737		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next74-history	5a05e6590099f9cdf97f980574a5db99ff2f4289		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next74-holds	52ce8fb026e92075cf8fd1a2fb95a769e8e5b07f		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next74-operator	0ec5672c3f98f8c553f1430dd2ce8d0f427ea255		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next74-simplified	49b792dcc2ea983325c6a25801da6c982f29c206		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next74-unused	55de5e0b9ee5f0bf89b52b3c9c2445fd65f8aac3		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next75-operator	3356eee98f5e638b5c5905660b11a84952292b07		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next75-workspace-reader	1cec8c1cb20c85e66e10cd49446b44c5e85101f1		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next76-operator	0000435cd1fab76a4285e7c97da6e8177eced026		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next77-operator	2aff0c25658a2938dc0a5a51f937b8d3bc6de663		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-next77-reader	c9d4817832720cc2b1bc6a212383973a77baf004		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-operator-guards	9703035a5b3a15cafa9fe89ae5ed17a7c40b0c8d		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-original600-status	42f757e30fb9c1383136dc23cff0cff9961ba954		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-overlay-worktree-clean	2bb30dcb0199d42bc02facfbbc8c364f6c2b709d		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-parallel-native-admission	8bfc612a3fa09b58a656a5ebd07fd6ca46d4326a		dirty=9205	untracked=2	remotes_containing=0
+/tmp/pr1525-parallel-startup	0438c2be065a89ff66f2b2d8197d9afdf92c17b5	ai/pr1525-parallel-startup	dirty=0	untracked=0	remotes_containing=3
+/tmp/pr1525-partial-output	df0058fcd5e07934575ba5849d8022cb4d9f1088		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-persistent-cli-fast	fa1485b567a16d754dbd64d580d9ef4f65aab844	release/persistent-cli-fast	dirty=1	untracked=1	remotes_containing=3
+/tmp/pr1525-persistent-fleet-aggregator	4670c2d200c4635758f28334f9597c78dde93dea		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-pool-inventory-index	069f242a1ba91ec630bfe66145d82da5ea5c58d8		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-pool-shape-skip	9d9b61a024a28c7dd3dc3f6fb3d0809bd3ea033c		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-portable-original600	b84098b3e0d1eab0891f5616a4488336346b5a0a		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-preconfig-snapshot-path	5b64a610e2926fc196c8f81200ced9f40f1b2bf2		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-primary-reuse	1377abab90c0762d175b04d6d8707ed31ac78a1d		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-repair70-operator	5a586e336eb03b536bfe523aec51cec8f0440646		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-reuse-index	2fff3b7b96d734407ad1b17e825e1f1305d0b1f5		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-reuse-integration	fd7b4865a043391ef1d6015e33aef27270951bcb		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-reuse-only-idle-retain	45f8813b1d03cfd0e0d05dabfd228e3643445ef6	pr1525-reuse-only-idle-retain	dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-reviewed-integration	5325063db69abc4600cb79f667b2f0d869f003d2	ai/pr1525-reviewed-integration	dirty=0	untracked=0	remotes_containing=4
+/tmp/pr1525-run72-export-recovery	70e2cad0c8179bb6211085598fabc19c377b3c63		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-export-recovery-v2	aedafe73aa0d7dbfb5814868b891b655891ae878		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-export-recovery-v3	8832a3fcf4eb2ca589b82fe8dd31aebc1bed9f6f		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-export-recovery-v4	4338bf2190a8ed0316841a56c77e62bbbb89d70c		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-export-recovery-v5	d8e10d0109e27257c53f5c09f8299431f64edd54		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-finalizer-recovery	c51755facce9e45afbc831f8b807ad6940fc313e		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-monitor	7d5a7048b4dcb89cdcade8cdff92e9d88c401177		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-orphan-drain	5a35d5ea8c973efca904b30d677ffaabc4edef6e		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-recovery	f4ba201ff08041b58a4abebf96f5d797af56cb6c		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-relay-resume	fb7e372ef50e10f9e0cd6ea2fa654ba0713a6c68		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-relay-resume-v2	664c11ca9b4306ea1ead5fcc60a0efd0ea0cb9c8		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-relay-retire	ae21ee1646ed0b6ef0672157febd618ee247c176		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run72-transfer-recovery	0f20aa678f5433dcbe871e53e5760fbdffe4be9f		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run73-prepare-only	a77308d06a8af585b01f8db3c5b0685cd0762309		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run73-release-only	e3595737a0292e4b6ee494e6d120b0ecb381c3e1		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run73-startup-finalize	2a4624e8388c526b290cf9cbfe21f5f2143cf007		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run74-bound-launch	dbc3cbad0f3324cf0ec8a77a6950a22c270d828b		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run74-recovery	69aa6ff584588cfaa07d0a875fb9bdf308267c5c		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run75-recovery	fc005c2075f349b6380f9627c908ac329c6c2be8		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run77-agent-retirement	30eb08e7ead85d03a44edf06cc557c8888ba4267		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run77-cleanup-window	4c27d29dfc243e101be34a3685c19652ade1a64b		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-run77-export-recovery	ffe622243b8d704692fd3b69ab1d08eb1bb54040		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run77-observer-recovery	a819e410264bf95c993d551d406375a8621026d2		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run77-plan-continuation	b52200409d5c97e27c9cb64550f5f046ce46b2c6		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run77-recovery	2477583b27e84d1213c099718528b29d1e7a3bb8		dirty=0	untracked=0	remotes_containing=1
+/tmp/pr1525-run77-semantic-cleanup	02c195ef05fb5dcc41f2048c3fb0bd867580f46b		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-shared-relay-broker	29ed77342431f9880a81ce0105292eaa8b185a54		dirty=9223	untracked=1	remotes_containing=0
+/tmp/pr1525-shared-transport-integration	f05d587eaa8b9d493113b215c95521ffecd96c2a		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-snapshot-waiting	c53ee7d4a1153641cacb9ba48b34366ffb0642e3		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-staged-boot	c7ba73b6824a7ab3efd28d532a202b012e916e4a		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-staged-primary-exact	c57cd674d9a6b1d77f5f35c0f626ed6447362448		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-staged-reuse-bootstrap	71c9897531ad4ded947abe343359d3161b1ce32e		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-staged-volume-counters	0292feff06a1c9c37ef298f8271e8bce45d2c452	pr1525-cold-absent-pool	dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-startup-reconcile-once	b0fbd7742dde51446288c22601825a85981c1d0b	ai/pr1525-reconcile-once	dirty=0	untracked=0	remotes_containing=2
+/tmp/pr1525-static-service-observation	9f387fc317005b7e10a196300845644aea26bc90		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-status-readiness-diagnostics	8130df07a03a69ceca2a23e2b7b25e8f6d4b4d39		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-stop-all-maintenance	c467280103cc255b26733b5b11858887f209113b	pr1525-stop-all-maintenance	dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-teardown-stop	51904304ea8ca22c88abbdbec4773d817be539e2	pr1525-teardown-stop-confirmation	dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-ten-run-operator	aadc668ad828d5d996d7e8c19521a5f7219e40bd		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-three-test-parked	0c6ca2b073254acd33c7e2a747a5ba747f99a537		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-three-test-reader	87ef40a5c898a9b699f5efc7783bfd2c5ce94451		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-three-test-reader-v2	0344cd6787a21beec46f81b0426698ad9867064c		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-volume-cli-flags	7b4df663a5ea9280c842efa7d73cb6ad82379963		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-worker-claim-failure	57450befa119e07cf9275f49f0e6dc743ffd7504		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-worker-no-resize	2d1155d7d9297f428a91d62edbca21e1c140969a		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-worker-prestage-recovery	ad6fc7296ad55c104e355174afceade3678675c5		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-worker-qualification	4352cd65912d940ecadd88e1e61c7a355e6d4c93		dirty=0	untracked=0	remotes_containing=0
+/tmp/pr1525-worker-token-flat	5872e88e574b891c19298a086c0bbd4d4e6d3780		dirty=0	untracked=0	remotes_containing=0
+/tmp/rose-pr1525-absent-runtime	2643ceab961efb5ffd923520cb4c49e9dab13549		dirty=0	untracked=0	remotes_containing=0

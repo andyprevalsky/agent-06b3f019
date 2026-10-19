@@ -1,0 +1,22 @@
+{
+  "source_sha256": {
+    "identity": "995b1195e8776bc34293ec6a09d8a74a1b7c3d301a87020ebc2e9a02b1117146",
+    "optional": "debb3bc6bd35d5607d12e3bd3019b65ffa15de79d2affd7dfeb3233813546a65",
+    "typed": "ba54a306ee94d562812716606552f4db69fae868fdb8b4138159f155dbd68764",
+    "path": "8628213fc614ecb3664303e8a8d37d75cb2abb62624149b2c30c3dbc5e5c6783",
+    "directory": "244ff3a4acd926487605e8028f992e1d6e4c570be698f94561ecd6be242ff582",
+    "scheduler": "bb2c2b8fe632510bbcdff696e9d6fa190bf2940e8505748b54cd0cccca03dcd1"
+  },
+  "sanitization": "Runtime fixture values in controller_maintenance_cases.py are normalized from these observations: PID791\u2192101, birth174\u2192123, root/campaign/owner paths\u2192temporary tree, relative generation link\u2192snapshot, flyctl bytes\u2192harmless never-executed fixture. UID0 process vs UID1001 workspace, absent registry, symlink/FIFO behavior and original missing-parent boundary are retained. Scheduler R/S/D test sequence is an adversarial controlled transition, not a claim about unrecorded pre-fix instantaneous state.",
+  "facts": {
+    "process_uid": 0,
+    "workspace_uid": 1001,
+    "process_state": "S",
+    "process_ppid": 1,
+    "registry_present": false,
+    "audit_present": true,
+    "original_inventory_entry_kind": "symlink",
+    "ambient_path_missing_flyctl": true,
+    "original_directory_parent_missing": true
+  }
+}

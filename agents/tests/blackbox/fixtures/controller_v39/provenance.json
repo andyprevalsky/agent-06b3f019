@@ -1,0 +1,35 @@
+{
+  "files": {
+    "fresh/native-after.json": {
+      "fixture_sha256": "e0e81e25204d13f01241a42ed8b5ea2b60ae1b88cd5846d74ea79cde94781d43",
+      "original_path": "v39-export-final/pair-rca/selected/native-after.json",
+      "original_sha256": "e5238d003cf27115b316fc699aaf35b010baf49604c97161d194162d0a553e98"
+    },
+    "fresh/native-before.json": {
+      "fixture_sha256": "e0e81e25204d13f01241a42ed8b5ea2b60ae1b88cd5846d74ea79cde94781d43",
+      "original_path": "v39-export-final/pair-rca/selected/native-before.json",
+      "original_sha256": "e5238d003cf27115b316fc699aaf35b010baf49604c97161d194162d0a553e98"
+    },
+    "fresh/volume.json": {
+      "fixture_sha256": "35322f7f11c8fc861cc05ad296af5cbc4b412ff60eb5b5c60e68b911f1e103c3",
+      "original_path": "v39-export-final/pair-rca/selected/volume.json",
+      "original_sha256": "0927e064eb6c2a0ba20a6a4a1969340328689dec2078f17f09db4c53edd38d0a"
+    },
+    "stale/native-after.json": {
+      "fixture_sha256": "e0e81e25204d13f01241a42ed8b5ea2b60ae1b88cd5846d74ea79cde94781d43",
+      "original_path": "v39-export-successor/inputs/native-after.json",
+      "original_sha256": "13eebf3040644a9471fd1a7ca3868951bbe30cab11db51b8312f8fb6b274f7cc"
+    },
+    "stale/native-before.json": {
+      "fixture_sha256": "bf55436d346b9939cb040076f587ec41ff77b0902e769b6dfe8d7cbc97e0823d",
+      "original_path": "v39-export-successor/inputs/native-before.json",
+      "original_sha256": "3bb64d2d99a25211f694eee115974e6b2b29bf526c7c49efcfa9740897b40ab3"
+    },
+    "stale/volume.json": {
+      "fixture_sha256": "35322f7f11c8fc861cc05ad296af5cbc4b412ff60eb5b5c60e68b911f1e103c3",
+      "original_path": "v39-export-successor/inputs/volume.json",
+      "original_sha256": "9fc8d979af5b33387d0042a00eeaa79b70ca58c632bd6383ff15415be99e038c"
+    }
+  },
+  "scope": "Full native object shapes retained; identities and executable payload redacted. Original private artifacts remain unchanged. Native equality validator unchanged."
+}

@@ -159,7 +159,11 @@ bootstrap_checkout_ref() {
             || echo "[boot] bootstrap fetch-ref failed (driver git_sync will retry)"
     fi
 }
-bootstrap_checkout_ref >> "$LOG" 2>&1
+# The injected cold driver owns the first empty-destination check and checkout.
+# Prefetching here would populate that destination before its mandatory guard.
+if [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" != 1 ]; then
+    bootstrap_checkout_ref >> "$LOG" 2>&1
+fi
 
 # Run the controller-injected driver, not the copy in the checkout. This matters
 # for dirty-worktree validation: cloudbench-run.sh is the process that applies

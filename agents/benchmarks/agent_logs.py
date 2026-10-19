@@ -146,6 +146,7 @@ async def run(args):
             tree_agents,
             start_time,
             get_agent_fn=lambda aid: get_agent(base_url, aid),
+            backend_url=base_url,
         )
 
         if args.diagnostics:
@@ -195,7 +196,7 @@ async def run(args):
         agent = agent_data.get("agent", {})
         print(f"Status: {agent.get('status', '?')}  Messages: {agent.get('message_count', 0)}")
 
-        logs = await collect_logs(agent_id, agent_data, start_time)
+        logs = await collect_logs(agent_id, agent_data, start_time, backend_url=base_url)
 
         if "messages" in sources:
             _print_logs("MESSAGES", logs["messages"])
@@ -222,8 +223,8 @@ def main():
     parser.add_argument("--diagnostics", action="store_true", help="Show formatted tree diagnostics")
     parser.add_argument(
         "--url",
-        default="https://navi-j9a9.onrender.com",
-        help="Base API URL (default: prod)",
+        default=None,
+        help=f"Base API URL of the backend that served the agent (default: {PROD_BASE_URL})",
     )
     parser.add_argument(
         "--hours",
@@ -240,18 +241,17 @@ def main():
     target_group.add_argument(
         "--local",
         action="store_true",
-        help="Use localhost (default behavior)",
+        help="Use localhost:$CONDUCTOR_PORT (local stack logs only; no prod log APIs)",
     )
     args = parser.parse_args()
 
-    # Resolve URL: --url > --prod/--local > default
-    _default_url = f"http://localhost:{os.environ.get('CONDUCTOR_PORT', '3001')}"
-    if args.url != _default_url:
-        pass  # User explicitly passed --url, keep it
-    elif args.prod:
-        args.url = PROD_BASE_URL
-    elif args.local:
-        args.url = _default_url
+    # Resolve URL: --url > --local > --prod/default. The URL also decides
+    # whether production log APIs can contain the agent at all.
+    if args.url is None:
+        if args.local:
+            args.url = f"http://localhost:{os.environ.get('CONDUCTOR_PORT', '3001')}"
+        else:
+            args.url = PROD_BASE_URL
 
     if args.diagnostics and not args.tree:
         print("--diagnostics requires --tree")

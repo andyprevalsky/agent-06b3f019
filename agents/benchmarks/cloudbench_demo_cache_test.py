@@ -10,6 +10,31 @@ import pytest
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 from benchmarks.hub_upload_test import _serve
 
+
+def _serve_machines():
+    """Loopback Machines API: the parent publisher's direct HTTP list read."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Machines(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if not (self.path.startswith("/v1/apps/") and self.path.endswith("/machines")):
+                self.send_error(404)
+                return
+            body = b"[]"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Machines)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}"
+
 ROOT = Path(__file__).resolve().parents[2]
 READ_ONLY = "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"
 PROBE = "BENCHMARK_DEMO_CACHE_READ_ONLY"
@@ -47,6 +72,7 @@ def launch_probe(tmp_path: Path, *arguments: str):
     )
     fly.chmod(0o700)
     server, hub_url = _serve([])
+    machines_server, machines_url = _serve_machines()
     env = dict(os.environ)
     env.pop("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", None)
     env.pop("BENCHMARK_FAST_MODE_CACHE", None)
@@ -65,6 +91,9 @@ def launch_probe(tmp_path: Path, *arguments: str):
             "BENCHMARK_HUB_API_KEY": "offline-demo-fixture-key",
             "BACKEND_API_KEY": "offline-demo-fixture-key",
             "CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY": "1",
+            "FLY_FLAPS_BASE_URL": machines_url,
+            # The shared Fly relay has its own offline owning control.
+            "CLOUDBENCH_CAMPAIGN_SHARED_RELAY": "0",
         }
     )
     try:
@@ -78,6 +107,8 @@ def launch_probe(tmp_path: Path, *arguments: str):
     finally:
         server.shutdown()
         server.server_close()
+        machines_server.shutdown()
+        machines_server.server_close()
     return result, json.loads(receipt.read_text()) if receipt.exists() else None
 
 

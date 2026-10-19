@@ -266,6 +266,32 @@ RECIPE_PATHS = (
 )
 
 
+def git_blob(root: Path, ref: str, path: str) -> bytes:
+    """One bounded loader for bound-source blobs (fingerprint and comparison)."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "show", f"{ref}:{path}"],
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode or len(result.stdout) > 67108864:
+        raise ValueError("bound source blob is unavailable")
+    return result.stdout
+
+
+def recipe_paths(blob) -> tuple[str, ...]:
+    # Historical captures retain their original checkout binding and fingerprint.
+    # A source that can delegate native mutations must bind that authority and
+    # both identity providers, including the parent that mints feed identity.
+    if b"cloudbench-campaign-mutation.py" in blob("scripts/run-bench-fleet"):
+        return RECIPE_PATHS + (
+            "scripts/cloudbench-campaign-mutation.py",
+            "scripts/cloudbench-script-snapshot.py",
+            "scripts/run-bench-campaign.py",
+            "scripts/cloudbench-port-lease.py",
+        )
+    return RECIPE_PATHS
+
+
 def native_recipe(meta: dict[str, str], config: dict) -> tuple[str, str, str]:
     if (
         not isinstance(config, dict)
@@ -311,16 +337,9 @@ def native_recipe(meta: dict[str, str], config: dict) -> tuple[str, str, str]:
         raise ValueError("execution lacks an immutable source binding")
 
     def blob(path: str) -> bytes:
-        result = subprocess.run(
-            ["git", "-C", str(root), "show", f"{ref}:{path}"],
-            capture_output=True,
-            timeout=15,
-        )
-        if result.returncode or len(result.stdout) > 67108864:
-            raise ValueError("bound source blob is unavailable")
-        return result.stdout
+        return git_blob(root, ref, path)
 
-    expected = {path: sha(blob(path)) for path in RECIPE_PATHS}
+    expected = {path: sha(blob(path)) for path in recipe_paths(blob)}
     injected = {}
     for item in config.get("files", []):
         if (
@@ -442,14 +461,13 @@ def native_recipe(meta: dict[str, str], config: dict) -> tuple[str, str, str]:
 
 def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[str, str, str]:
     result = native_recipe(meta, config)
-    ref = result[0]
-    expected = {}
-    for path in RECIPE_PATHS:
-        blob = subprocess.run(["git", "-C", meta["workspace_root"], "show", f"{ref}:{path}"],
-                              capture_output=True, timeout=15)
-        if blob.returncode or len(blob.stdout) > 67108864:
-            raise ValueError("bound source blob is unavailable")
-        expected[path] = sha(blob.stdout)
+    # native_recipe has validated this exact absolute, resolved workspace root.
+    ref, root = result[0], Path(meta["workspace_root"])
+
+    def blob(path: str) -> bytes:
+        return git_blob(root, ref, path)
+
+    expected = {path: sha(blob(path)) for path in recipe_paths(blob)}
     if (
         provenance.get("git_head") != ref
         or provenance.get("git_exit_code") != 0
