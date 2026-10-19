@@ -5,8 +5,11 @@ import argparse
 import json
 import time
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+PACIFIC = ZoneInfo("America/Los_Angeles")
 
 
 def read(path):
@@ -104,9 +107,7 @@ def observe(directory, controller_status=None):
         max(0, time.time() - card_path.stat().st_mtime) if card_path.exists() else None
     )
     return {
-        "timestamp_pst": datetime.now(timezone(timedelta(hours=-8))).strftime(
-            "%b %d, %I:%M:%S %p PST"
-        ),
+        "timestamp_pst": datetime.now(PACIFIC).strftime("%b %d, %I:%M:%S %p %Z"),
         "run_id": directory.name,
         "occupancy": occupancy,
         "task_outcomes": dict(outcomes),

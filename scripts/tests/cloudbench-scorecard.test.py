@@ -256,6 +256,28 @@ class Scorecard(unittest.TestCase):
         self.assertIn("NO TERMINAL ATTEMPTS", document)
         self.assertIsNone(CARD["SENTINEL"].search(" ".join(re.sub(r"<script.*?</script>|<style.*?</style>|<[^>]+>", " ", document, flags=re.S).split())))
 
+    def test_fleet_startup_card_lists_starting_tasks(self):
+        run = self.tmp / "20261018-192852-2"
+        starting = [{"name": n, "status": "starting", "phase": "verifying environment"} for n in ("alpha", "beta")]
+        write(run / "_batch/report-card.json", {"run_id": run.name, "timestamp": "2026-10-18T19:28:52+00:00",
+                                               "status": "starting", "phase": "verifying environment",
+                                               "summary": {"total": 2, "passed": 0, "failed": 0},
+                                               "tasks": starting, "per_task": starting})
+        data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+        self.assertEqual((data["experiment"]["scheduled_total"], data["experiment"]["state"]), (2, "RUNNING"))
+        self.valid(data)
+
+    def test_monitor_observation_time_respects_daylight_saving(self):
+        monitor = runpy.run_path(str(ROOT / "scripts/cloudbench-monitor.py"), run_name="monitor")
+        write(self.tmp / "_batch/report-card.json", {"per_task": []})
+        for instant, label in ((T0, "Oct 18, 12:28:52 PM PDT"), (T0 + 55 * 86400, "Dec 12, 11:28:52 AM PST")):
+            class Fixed(monitor["datetime"]):
+                @classmethod
+                def now(cls, tz=None, instant=instant):
+                    return monitor["datetime"].fromtimestamp(instant, tz)
+            with mock.patch.dict(monitor["observe"].__globals__, {"datetime": Fixed}):
+                self.assertEqual(monitor["observe"](self.tmp)["timestamp_pst"], label)
+
     def test_pacific_time_respects_daylight_saving(self):
         pacific = CARD["pacific"]
         self.assertEqual(pacific(T0), "Oct 18, 12:28:52 PM PDT")

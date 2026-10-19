@@ -366,7 +366,9 @@ def load_fleet(run_dir: Path) -> dict:
     exp["surface"] = "local" if local else "cloud"
     exp["id"] = card.get("run_id") or run_dir.name
     tasks = card.get("tasks") or {}
-    exp["scheduled_total"] = tasks.get("total") if isinstance(tasks.get("total"), int) else None
+    # The fleet's startup card lists starting tasks; later cards carry counts.
+    total = len(tasks) if isinstance(tasks, list) else tasks.get("total")
+    exp["scheduled_total"] = total if isinstance(total, int) else None
     code = str(card.get("code") or "")
     match = re.search(r"@([0-9a-f]{7,40})", code)
     exp["source_ref"] = match.group(1) if match else None
