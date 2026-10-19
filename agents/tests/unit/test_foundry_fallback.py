@@ -574,6 +574,19 @@ def test_secondary_regions_serve_only_listed_models(monkeypatch):
     assert [r.slot for r in foundry.foundry_regions()] == [3]
 
 
+def test_model_listed_only_by_another_region_never_routes_to_region_one(monkeypatch):
+    """Region 1 lists only Sol; region 2 lists GPT-6.1 Sol. Region 1's deploymentless
+    GPT-6.1 call is a terminal 400, so every GPT-6.1 route key must start (and end) in region 2."""
+    _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
+    for i in range(200):
+        assert _plan_regions(f"agent-{i}", "gpt-6.1-sol") == [_R2]
+        assert _plan_regions(f"agent-{i}", "gpt-5.6-luna") == [_R1]
+    # Unlisted everywhere: region 1 keeps its deploymentless route.
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6-sol")
+    assert _plan_regions("agent-1", "gpt-6.1-sol") == [_R1]
+
+
 @pytest.mark.asyncio
 async def test_non_https_optional_region_is_skipped_and_primary_still_rejects(monkeypatch):
     """A typo in one optional slot must not stop the healthy regions (mirrors foundry.ts)."""

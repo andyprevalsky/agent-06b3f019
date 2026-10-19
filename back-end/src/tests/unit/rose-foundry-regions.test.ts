@@ -312,6 +312,22 @@ async function main(): Promise<void> {
     );
     process.stdout.write('Foundry regions: secondary regions serve only listed models\n');
 
+    // A model listed only by another region never routes to region 1, whose
+    // deploymentless call for it is a terminal 400.
+    configure(ok, [R1, R2]);
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6.1-sol';
+    for (let i = 0; i < 200; i++) {
+      assert.deepEqual(planRegions(`agent-${i}`, 'gpt-6.1-sol'), [R2]);
+      assert.deepEqual(planRegions(`agent-${i}`, 'gpt-5.6-luna'), [R1]);
+    }
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6-sol';
+    assert.deepEqual(
+      planRegions('agent-1', 'gpt-6.1-sol'),
+      [R1],
+      'unlisted: deploymentless region 1'
+    );
+    process.stdout.write('Foundry regions: a model listed elsewhere skips region 1\n');
+
     // A non-HTTPS optional region is dropped (one warning naming its slot); the
     // healthy regions keep serving and foundryConfigured agrees with routing.
     attempts = configure(() => ok(), [R1, R2]);

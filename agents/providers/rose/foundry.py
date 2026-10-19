@@ -136,17 +136,21 @@ def _matching(configured: tuple[str, ...], model: str) -> list[str]:
     return [name for name in configured if name == model or name.startswith(f"{model}-")]
 
 
-def _region_deployments(region: FoundryRegion, model: str) -> list[str]:
+def _region_deployments(region: FoundryRegion, model: str, listed_elsewhere: bool = False) -> list[str]:
     """Deployments serving ``model``: configured names equal to it or prefixed ``<model>-``.
 
     A region's deployment list is shared by every Foundry pool, so one pool's
     deployments must never receive another pool's model. Without a matching
-    name, region 1 uses Foundry's deploymentless inference for the model id;
-    other regions serve only the names they list, so a new resource holding
-    only GPT-6 Sol never receives Luna or DeepSeek traffic.
+    name, region 1 uses Foundry's deploymentless inference for the model id
+    unless another region lists the model (that region is where it is
+    deployed; region 1's deploymentless call would be a terminal 400). Other
+    regions serve only the names they list, so a new resource holding only
+    GPT-6 Sol never receives Luna or DeepSeek traffic.
     """
     matching = _matching(region.deployments, model)
-    return (matching or [model]) if region.slot == 1 else matching
+    if matching or region.slot != 1 or listed_elsewhere:
+        return matching
+    return [model]
 
 
 def _rotated(names: list[str], route_key: str) -> list[str]:
@@ -162,12 +166,13 @@ def _rendezvous_weight(route_key: str, region: FoundryRegion) -> int:
 
 def _route_plan(regions: list[FoundryRegion], model: str, route_key: str) -> list[tuple[FoundryRegion, str]]:
     """Every (region, deployment) to try, primary region first, for this route key."""
-    serving = [region for region in regions if _region_deployments(region, model)]
+    listed = any(_matching(region.deployments, model) for region in regions)
+    serving = [region for region in regions if _region_deployments(region, model, listed)]
     serving.sort(key=lambda region: (-_rendezvous_weight(route_key, region), region.slot))
     return [
         (region, deployment)
         for region in serving
-        for deployment in _rotated(_region_deployments(region, model), route_key)
+        for deployment in _rotated(_region_deployments(region, model, listed), route_key)
     ]
 
 

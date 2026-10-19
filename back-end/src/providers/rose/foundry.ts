@@ -169,13 +169,19 @@ function rotated(names: string[], routeKey: string): string[] {
  * Deployments serving `model`: configured names equal to it or prefixed
  * `<model>-`. A region's deployment list is shared by every Foundry pool, so one
  * pool's deployments never receive another pool's model. Without a matching
- * name, region 1 uses Foundry's deploymentless inference for the model id; other
- * regions serve only the names they list, so a new resource holding only GPT-6
- * Sol never receives Luna traffic that would fail there with DeploymentNotFound.
+ * name, region 1 uses Foundry's deploymentless inference for the model id
+ * unless another region lists the model (that region is where it is deployed;
+ * region 1's deploymentless call would be a terminal 400). Other regions serve
+ * only the names they list, so a new resource holding only GPT-6 Sol never
+ * receives Luna traffic that would fail there with DeploymentNotFound.
  */
-function regionDeployments(region: FoundryRegion, model: string): string[] {
+function regionDeployments(
+  region: FoundryRegion,
+  model: string,
+  listedElsewhere = false
+): string[] {
   const names = matching(region.deployments, model);
-  return region.slot === 1 && !names.length ? [model] : names;
+  return region.slot === 1 && !names.length && !listedElsewhere ? [model] : names;
 }
 
 function rendezvousWeight(routeKey: string, region: FoundryRegion): bigint {
@@ -191,8 +197,9 @@ export function foundryRoutePlan(
   routeKey: string
 ): Array<{ region: FoundryRegion; deployment: string }> {
   const weights = new Map(regions.map((region) => [region, rendezvousWeight(routeKey, region)]));
+  const listed = regions.some((region) => matching(region.deployments, model).length > 0);
   return regions
-    .filter((region) => regionDeployments(region, model).length > 0)
+    .filter((region) => regionDeployments(region, model, listed).length > 0)
     .sort((a, b) => {
       const wa = weights.get(a) ?? 0n;
       const wb = weights.get(b) ?? 0n;
@@ -200,7 +207,7 @@ export function foundryRoutePlan(
       return a.slot - b.slot;
     })
     .flatMap((region) =>
-      rotated(regionDeployments(region, model), routeKey).map((deployment) => ({
+      rotated(regionDeployments(region, model, listed), routeKey).map((deployment) => ({
         region,
         deployment,
       }))
