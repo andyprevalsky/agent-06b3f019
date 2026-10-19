@@ -422,7 +422,7 @@ clone_source_read_rate_limit_contract() (
     DISPOSABLE_LIFECYCLE=1; POOL_REUSE_ONLY=0; PROVISION_POOL=""
     for function_name in machine_creation_admission fleet_clone_with_queue_admission clone_failure_definitively_unallocated \
         clone_failure_owned_volume_id machine_id_for_clone_name clone_volume_receipt_field clone_attach_failure_prelaunch \
-        clone_retire_owned_volume clone_create_owned_volume clone_machine_target; do
+        clone_retire_owned_volume clone_create_owned_volume clone_storage_ready_seconds clone_machine_target; do
         function_source="$(fleet_production_function "$function_name")"
         [ -n "$function_source" ] \
             || { echo "FAIL: could not load production $function_name" >&2; return 1; }
