@@ -17805,6 +17805,27 @@ def test_local_automatic_port_range_excludes_reported_ephemeral_window():
             local_bench._release_port_range(base)
 
 
+
+def test_local_workspace_derived_base_skips_reported_ephemeral_window():
+    """A base derived from CONDUCTOR_PORT is a preference, not an owned range.
+
+    On 2026-10-19 the AgentCard lane derived 56060 + 200 = 56260 inside Linux's
+    32768-60999 client range, and its backend failed both starts with
+    EADDRINUSE. Derived preferences inside the reported range must fall back to
+    automatic allocation; outside it they stay preferred.
+    """
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    with patch.object(local_bench, "_linux_ephemeral_port_range", return_value=(32768, 60999)):
+        assert local_bench.workspace_preferred_base("56060") is None
+        assert local_bench.workspace_preferred_base("3001") == 3201
+        assert local_bench.workspace_preferred_base("") is None
+        assert local_bench.workspace_preferred_base("abc") is None
+    with patch.object(local_bench, "_linux_ephemeral_port_range", return_value=None):
+        assert local_bench.workspace_preferred_base("56060") == 56260
+
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
 @patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_start_services_limits_automatic_system_postgres_to_linux():
@@ -25499,6 +25520,10 @@ async def run_all_tests():
     r.record(
         "local_automatic_port_range_excludes_reported_ephemeral_window",
         test_local_automatic_port_range_excludes_reported_ephemeral_window,
+    )
+    r.record(
+        "local_workspace_derived_base_skips_reported_ephemeral_window",
+        test_local_workspace_derived_base_skips_reported_ephemeral_window,
     )
     r.record(
         "code_agent_sdk_evidence_chips_count_as_grounded_steps",
