@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('operator_cli', Path(os.environ.get('PORTABLE_OPERATOR_SOURCE', ROOT/'scripts/run-original600-controller.py')))
 CLI = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CLI)
+AUDIT = runpy.run_path(str(ROOT/'scripts/cloudbench-native-release-audit.py'))
 RUNNER = runpy.run_path(os.environ.get('ORIGINAL600_RUNNER_SOURCE',str(ROOT/'scripts/cloudbench-original600-runner.py')))
 
 
@@ -2284,9 +2285,10 @@ class Sharded(unittest.TestCase):
         self.addCleanup(self.ledger.unlink, missing_ok=True)
         self.audits = []
         for patcher in (patch.dict(os.environ, CLOUDBENCH_EXPERIMENTS_LEDGER=str(self.ledger)),
-                        patch.object(CLI, 'native_release_audit', lambda root, directory, token, owned: (
-                            self.audits.append((directory, owned)) or dict(released=True, present=[],
-                                                                           checked=dict(guest_names=sorted(owned[0])))))):
+                        patch.object(CLI, 'native_release_audit', lambda root, directory, token: (
+                            self.audits.append((directory, AUDIT['guest_identities'](directory)[0]))
+                            or dict(released=True, present=[], present_volumes=[], retained_owners=[],
+                                    checked=dict(guest_names=sorted(self.audits[-1][1]['names'])))))):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -2597,7 +2599,7 @@ class Sharded(unittest.TestCase):
             self.assertEqual([(e['event'], e['goal']) for e in ledger], [('launch', 'original600'), ('end', 'original600')])
             self.assertEqual((ledger[0]['scheduled_total'], ledger[0]['controllers'], ledger[0]['slice']), (36, 3, 'tasks'))
             self.assertEqual(len(self.audits), 1)
-            self.assertIn('cloudbench-owned', self.audits[0][1][0], 'the native audit checks owned guest names from the exports')
+            self.assertIn('cloudbench-owned', self.audits[0][1]['names'], 'the native audit reads owned guest names from the exports')
             self.assertEqual([p['outcomes'] is None for p in published], [True, False])
             self.assertEqual({p['group_id'] for p in published}, {launched[0].config['shard']['group_run_id']})
             self.assertEqual(published[0]['members'], 36)

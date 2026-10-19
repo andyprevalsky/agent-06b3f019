@@ -1278,11 +1278,11 @@ def experiment_fields(args, plan):
                 runs=plan['shards'][0]['runs'], scheduled_total=plan['copies'], controllers=plan['controllers'])
 
 
-def native_release_audit(root, directory, token, identities):
-    """Final read-only native audit of every owned guest/controller identity (never mutates)."""
+def native_release_audit(root, directory, token):
+    """Final read-only native audit of every owned guest/volume/controller identity (never mutates)."""
     capture = runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))
     audit = runpy.run_path(str(root / 'scripts/cloudbench-native-release-audit.py'))
-    return audit['run'](directory, capture['Fly']('navi-whisper-lux-bench', token), identities=identities)
+    return audit['run'](directory, capture['Fly']('navi-whisper-lux-bench', token))
 
 
 def publish_shard_group(root, directory, args, runner, group_id, started_at, shards, outcomes=None, finished=None):
@@ -1497,11 +1497,10 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     print(json.dumps(dict(directory=str(directory), status='SHARDS_JOINED', result=str(directory / 'result.json'),
                           observed_jobs=merged['observed_jobs'], missing_jobs=merged['missing_jobs'],
                           infra_failures=merged['infra_failures'])), flush=True)
-    owned = (set().union(*(r['owned_names'] for r in exports)), set().union(*(r['owned_ids'] for r in exports)),
-             sum(r['summary'] is not None for r in exports))
     try:
-        audit = native_release_audit(root, directory, token, owned)
+        audit = native_release_audit(root, directory, token)
         print(json.dumps(dict(status='NATIVE_RELEASE_AUDIT', released=audit['released'], present=audit['present'],
+                              present_volumes=audit['present_volumes'], retained_owners=audit['retained_owners'],
                               checked_guests=len(audit['checked']['guest_names']))), flush=True)
     except Exception as error:  # read-only evidence; its absence renders as an unverified release, never a pass
         print(json.dumps(dict(status='NATIVE_RELEASE_AUDIT_UNAVAILABLE', error=type(error).__name__)), flush=True)
