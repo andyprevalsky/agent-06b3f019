@@ -16,6 +16,7 @@ import type { CreateAgentBody } from './types';
 import { getPromptSecret } from './config';
 import * as repo from './repo';
 import { resolveCreateMetadata } from './agentCreateMetadata';
+import { resolveCreateTaskPaths } from './agentTaskPathCreate';
 import { prepareAgentStartArchive } from '../../providers/traceArchiveLifecycle';
 import {
   applyFastModeDefault,
@@ -189,6 +190,7 @@ export async function createAgent(
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
+  const [taskPath] = await resolveCreateTaskPaths([body]);
   // Workflow ID === agent ID by convention (see providers/temporal.ts:88).
   // For sub-agents and direct (plan/execute) root agents, the workflow always
   // starts immediately after this transaction, so set the column up-front and
@@ -226,6 +228,7 @@ export async function createAgent(
     workflowContextGates: body.context_gates,
     workflowStartPhase: body.start_phase,
     workflowTaskQueue: body.task_queue,
+    taskPath,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
 
@@ -238,6 +241,7 @@ export async function createAgent(
     progress: agent.agent.progress,
     goal: agent.agent.goal,
     title: agent.agent.title,
+    task_path: agent.agent.taskPath,
     model: agent.agent.model,
     source: body.source,
     reasoning_max_tokens: body.reasoning_max_tokens,

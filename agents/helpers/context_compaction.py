@@ -21,7 +21,11 @@ def is_context_compaction_checkpoint(message: Dict[str, Any]) -> bool:
 
 
 def is_excluded_from_model(message: Dict[str, Any]) -> bool:
-    """Return True for context rows used for cursoring/UI but hidden from LLMs."""
+    """Return True for context rows used for cursoring/UI but hidden from LLMs.
+
+    Includes every row a background spawn's executor posts under its spawn's
+    tool-call id (helpers.background_agents.background_execution_metadata).
+    """
     return bool(_metadata(message).get("excludeFromModel"))
 
 

@@ -31,6 +31,7 @@ from domains.spawn_claude_code_agent.service import (
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED
 from helpers.attachments import extract_attachments_from_context
 from helpers.generation_handoff import GenerationHandoffRequested, park_pending_tool, take_tool_resume
+from helpers.tool_interrupts import tool_stop_requested
 from helpers.tracing import span
 from helpers.wait_condition_or_handoff import live_handoff_queue
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -49,9 +50,7 @@ def _is_recoverable_github_clone_denial(error: BaseException) -> bool:
     benches that only needed metadata discovery.
     """
     text = extract_error_message(error).upper()
-    return "GITHUB_ACCESS_DENIED" in text or (
-        "PERMISSION TO CLONE" in text and "GITHUB" in text
-    )
+    return "GITHUB_ACCESS_DENIED" in text or ("PERMISSION TO CLONE" in text and "GITHUB" in text)
 
 
 def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
@@ -129,9 +128,7 @@ def _is_recoverable_claude_billing_failure(error: BaseException) -> bool:
     return any(m in text for m in markers)
 
 
-def _soft_fail_github_clone_denial_result(
-    *, code_provider: Optional[str], error: BaseException
-) -> Dict[str, Any]:
+def _soft_fail_github_clone_denial_result(*, code_provider: Optional[str], error: BaseException) -> Dict[str, Any]:
     detail = extract_error_message(error)
     return {
         "success": False,
@@ -145,9 +142,7 @@ def _soft_fail_github_clone_denial_result(
     }
 
 
-def _soft_fail_sandbox_infra_result(
-    *, code_provider: Optional[str], error: BaseException
-) -> Dict[str, Any]:
+def _soft_fail_sandbox_infra_result(*, code_provider: Optional[str], error: BaseException) -> Dict[str, Any]:
     detail = extract_error_message(error)
     return {
         "success": False,
@@ -161,9 +156,7 @@ def _soft_fail_sandbox_infra_result(
     }
 
 
-def _soft_fail_claude_billing_result(
-    *, code_provider: Optional[str], error: BaseException
-) -> Dict[str, Any]:
+def _soft_fail_claude_billing_result(*, code_provider: Optional[str], error: BaseException) -> Dict[str, Any]:
     detail = extract_error_message(error)
     return {
         "success": False,
@@ -183,26 +176,18 @@ def _maybe_soft_fail_session_create_result(
 ) -> Optional[Dict[str, Any]]:
     """Map recoverable session-create failures to soft-fail tool results."""
     if _is_recoverable_github_clone_denial(error):
-        return _soft_fail_github_clone_denial_result(
-            code_provider=code_provider, error=error
-        )
+        return _soft_fail_github_clone_denial_result(code_provider=code_provider, error=error)
     # Billing markers must win over the broad sandbox "FAILED TO CREATE CODE
     # SESSION" substring — otherwise Anthropic payment blocks are mislabeled as
     # capacity flakes (cuda-kernel k=3 r13).
     if _is_recoverable_claude_billing_failure(error):
-        return _soft_fail_claude_billing_result(
-            code_provider=code_provider, error=error
-        )
+        return _soft_fail_claude_billing_result(code_provider=code_provider, error=error)
     if _is_recoverable_sandbox_infra_failure(error):
-        return _soft_fail_sandbox_infra_result(
-            code_provider=code_provider, error=error
-        )
+        return _soft_fail_sandbox_infra_result(code_provider=code_provider, error=error)
     return None
 
 
-def _drained_code_session(
-    result: Dict[str, Any], prior_session: Optional[Dict[str, Any]]
-) -> Dict[str, Any]:
+def _drained_code_session(result: Dict[str, Any], prior_session: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Session that reattaches the next activity to the drained sandbox."""
     prior = prior_session or {}
     session = dict(result.get("code_session") or prior)
@@ -287,9 +272,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
             active_gpt_token = getattr(workflow_instance, "_active_gpt_token", None)
             gpt_token = (
-                active_gpt_token()
-                if callable(active_gpt_token)
-                else getattr(workflow_instance, "gpt_code_token", None)
+                active_gpt_token() if callable(active_gpt_token) else getattr(workflow_instance, "gpt_code_token", None)
             )
             active_gpt_account_id = getattr(workflow_instance, "_active_gpt_account_id", None)
             gpt_account_id = (
@@ -378,9 +361,12 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     # Wait for activity completion or pause signal
                     was_cancelled = False
                     # cutover-class: activity-bound — the activity detaches at a deploy drain and returns its session
-                    await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
-                    if workflow_instance.is_paused and not activity_handle.done():
-                        logger.info("[ClaudeCode] Cancelling due to pause", agent_id=agent_id)
+                    await workflow.wait_condition(
+                        lambda: activity_handle.done() or tool_stop_requested(workflow_instance, tool_call_id)
+                    )
+                    # Pause, or a kill_agent of this agent (helpers/tool_interrupts.py).
+                    if tool_stop_requested(workflow_instance, tool_call_id) and not activity_handle.done():
+                        logger.info("[ClaudeCode] Cancelling due to pause or interrupt", agent_id=agent_id)
                         activity_handle.cancel()
                         was_cancelled = True
 
@@ -407,9 +393,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                                         task_id=abandoned.get("task_id"),
                                         error=extract_error_message(close_error),
                                     )
-                            soft = _maybe_soft_fail_session_create_result(
-                                code_provider=code_provider, error=e
-                            )
+                            soft = _maybe_soft_fail_session_create_result(code_provider=code_provider, error=e)
                             if soft is not None:
                                 logger.warning(
                                     "[ClaudeCode] Recoverable session-create failure; soft-failing tool",
@@ -574,9 +558,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             if isinstance(e, asyncio.CancelledError):
                 raise
 
-            soft = _maybe_soft_fail_session_create_result(
-                code_provider=code_provider, error=e
-            )
+            soft = _maybe_soft_fail_session_create_result(code_provider=code_provider, error=e)
             if soft is not None:
                 logger.warning(
                     "[ClaudeCode] Recoverable session-create failure; soft-failing tool",

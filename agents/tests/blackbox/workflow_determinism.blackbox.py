@@ -25,6 +25,9 @@ WORKFLOW_SCOPE_MODULES = [
     "workflows/agent_workflow.py",
     "loop/run_agent.py",
     "loop/dag_executor.py",
+    "workflows/background_agents.py",
+    "helpers/background_agents.py",
+    "domains/agent_messaging/handler.py",
 ]
 
 # (module_attr, method) pairs that are non-deterministic in workflow scope,
@@ -114,6 +117,12 @@ def test_dag_executor_deterministic():
     _assert_module_clean("loop/dag_executor.py")
 
 
+def test_background_agent_modules_deterministic():
+    """Background spawn + agent-messaging code runs in workflow scope too."""
+    for rel_path in WORKFLOW_SCOPE_MODULES[3:]:
+        _assert_module_clean(rel_path)
+
+
 def test_tool_manager_workflow_paths_deterministic():
     """Check direct ToolManager bodies, including handlers that also define activities."""
     hits = [
@@ -150,6 +159,7 @@ async def run_all_tests():
     r.record("agent_workflow_deterministic", test_agent_workflow_deterministic)
     r.record("run_agent_deterministic", test_run_agent_deterministic)
     r.record("dag_executor_deterministic", test_dag_executor_deterministic)
+    r.record("background_agent_modules_deterministic", test_background_agent_modules_deterministic)
     r.record("tool_manager_workflow_paths_deterministic", test_tool_manager_workflow_paths_deterministic)
     r.record("scanner_detects_planted_violation", test_scanner_detects_a_planted_violation)
     return r.summary() if hasattr(r, "summary") else r.all_passed

@@ -109,4 +109,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   query_blueprints: 'Query Blueprints',
   search_x402_bazaar: 'Bazaar Searches',
   pay_for_x402_bazaar_service: 'Bazaar Payments',
+  send_message_to_agent: 'Agent Messages Sent',
+  list_agents: 'Agent Tree Listings',
+  kill_agent: 'Agents Killed',
 };

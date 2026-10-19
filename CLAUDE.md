@@ -360,7 +360,11 @@ of truth; do not duplicate them into other files.
 - **Database:** Docker is typically unavailable on the Cloud VM, so the stack uses
   **system PostgreSQL** at `localhost:5432` (`postgres`/`postgres`, db `victoria`);
   `scripts/run.sh` and the blackbox runner auto-fall back to it. Start it with
-  `sudo service postgresql start` if needed.
+  `sudo service postgresql start` if needed. `victoria` belongs to the
+  `.cloud-env` identity (same name and port); any other workspace or port gets
+  its own `victoria_stack_<workspace>[_p<port>]`
+  (`workspace_system_pg_db_name`). Set `ROSE_SYSTEM_PG_DB_NAME` only to target
+  a specific database deliberately.
 - **Toolchain:** `agents/venv` uses Python 3.11 (the pinned version; system
   `python3` may be newer). A few suites also need `ruby` + `rsync` installed
   (deploy-gate + cloudbench tests) — otherwise you'll see `ruby: command not

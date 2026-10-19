@@ -20,6 +20,7 @@ export {
   getCircleState,
   getStatusText,
   type TreeNode,
+  type TreeBackgroundTask,
 } from '@/hooks/useAgentTree';
 export {
   useAgentContext,

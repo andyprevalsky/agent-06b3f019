@@ -28,6 +28,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 from helpers.attachments import extract_file_pointer_dicts, resolve_attachments_activity
+from helpers.background_agents import is_agent_authored_user_metadata
 from helpers.context_pointers import annotate_with_pointer
 from helpers.handle_tool_event import handle_tool_event
 from helpers.llm import (
@@ -189,7 +190,19 @@ async def run_agent(
     # For posting messages and executing tools
     post_message: Optional[Callable[[str, str, Optional[Dict]], Awaitable[None]]] = None,
     poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,  # Takes last_checked timestamp
+    # In-activity agents (explore) have no poll_messages; this returns new
+    # agent-to-agent context rows to append before each LLM call.
+    poll_inbox: Optional[Callable[[], Awaitable[List[Dict]]]] = None,
     execute_tool: Optional[Callable[[str, Dict, str], Awaitable[Dict]]] = None,
+    # Factual status of this agent's still-running background agents, appended
+    # to the completion verifier's evidence (None when nothing is pending).
+    get_pending_background_status: Optional[Callable[[], Optional[str]]] = None,
+    # Environment context (helpers/environment_context.py). Before each turn's
+    # poll: append the persisted <environment> row when it differs from the last
+    # one in ``context`` (the poll then loads it). Per LLM call: the seed for the
+    # unsaved <environment-status> tail appended after the cached prefix.
+    sync_environment_context: Optional[Callable[[List[Dict]], Awaitable[None]]] = None,
+    get_environment_tail: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
     # For tree state updates (sub-agent UI)
     update_tree_state: Optional[Callable[[], Awaitable[None]]] = None,
     # For tree token aggregation - returns (children_tokens_in, children_tokens_out)
@@ -441,21 +454,9 @@ async def run_agent(
                 else remembered_claude_token_pool_id
             ),
             current_gpt,
-            (
-                get_gpt_account_id()
-                if get_gpt_account_id and current_gpt
-                else remembered_gpt_account_id
-            ),
-            (
-                get_gpt_token_source()
-                if get_gpt_token_source and current_gpt
-                else remembered_gpt_token_source
-            ),
-            (
-                get_gpt_token_pool_id()
-                if get_gpt_token_pool_id and current_gpt
-                else remembered_gpt_token_pool_id
-            ),
+            (get_gpt_account_id() if get_gpt_account_id and current_gpt else remembered_gpt_account_id),
+            (get_gpt_token_source() if get_gpt_token_source and current_gpt else remembered_gpt_token_source),
+            (get_gpt_token_pool_id() if get_gpt_token_pool_id and current_gpt else remembered_gpt_token_pool_id),
         )
 
     async def _account_llm_usage(attempt_usage: Dict[str, Any], *, label: str) -> bool:
@@ -653,9 +654,7 @@ async def run_agent(
             # Cooperative generation handoff while paused: check periodically so
             # a user-paused agent still moves to the live queue without waiting
             # for the 45m force-migrate SLO.
-            if check_generation_handoff and (
-                consecutive_paused == 1 or consecutive_paused % 10 == 0
-            ):
+            if check_generation_handoff and (consecutive_paused == 1 or consecutive_paused % 10 == 0):
                 try:
                     handoff_queue = await check_generation_handoff()
                 except Exception as e:
@@ -789,9 +788,23 @@ async def run_agent(
                     "cache_creation_input_tokens": cache_write_total,
                 }
 
+        # 1.7. Environment block: appended (and polled in below) only when it changed.
+        if sync_environment_context and poll_messages:
+            try:
+                await sync_environment_context(context)
+            except Exception as e:
+                logger.warning(f"Environment context sync failed (continuing): {e}")
+
         # 2. Poll for new messages (pass our own last_checked, not workflow's)
         if poll_messages:
             last_checked = await poll_and_update_context(poll_messages, context, last_checked)
+        elif poll_inbox:
+            # Agent-to-agent messages for in-activity agents. A failed poll must
+            # never end the agent; the callback logs its own failures.
+            try:
+                context.extend(await poll_inbox())
+            except Exception as e:
+                logger.error("run_agent.poll_inbox_failed", agent_id=agent_id, task_id=task_id, error=str(e)[:200])
 
         # 3. Query blueprints after first iteration (only in PLAN phase, not EXECUTE)
         if False:
@@ -1133,9 +1146,7 @@ async def run_agent(
             if completed_child_output is not None:
                 child_identity = _completed_child_handoff_identity(completed_child_tool_call_id)
                 identity_segment = f"{child_identity}-" if child_identity else ""
-                synthetic_tool_call_id = (
-                    f"completed-child-attempt-completion-{identity_segment}{_safe_uuid4()}"
-                )
+                synthetic_tool_call_id = f"completed-child-attempt-completion-{identity_segment}{_safe_uuid4()}"
                 result = type(
                     "CompletedChildAction",
                     (),
@@ -1146,9 +1157,7 @@ async def run_agent(
                     },
                 )()
                 usage = {}
-                detected_tools_ordered = [
-                    ("attempt_completion", synthetic_tool_call_id, _safe_now().timestamp())
-                ]
+                detected_tools_ordered = [("attempt_completion", synthetic_tool_call_id, _safe_now().timestamp())]
                 llm_response_accepted = True
                 logger.info(
                     "run_agent.completed_child_dispatches_completion",
@@ -1268,9 +1277,7 @@ async def run_agent(
 
                     root_goal = await resolve_soft_complete_root_goal(agent_id, goal_text)
                     _e, _g, _w, _r, _rg, provider_fast_mode = (
-                        await resolve_agent_fast_mode(agent_id)
-                        if agent_id
-                        else (False, None, False, None, None, True)
+                        await resolve_agent_fast_mode(agent_id) if agent_id else (False, None, False, None, None, True)
                     )
                     set_context(
                         FastCacheContext(
@@ -1472,6 +1479,7 @@ async def run_agent(
                         # an older replayed history falls back to the default.
                         exclude_anthropic_family_on_llm_retry,
                         pending_context_token,
+                        get_environment_tail() if get_environment_tail else None,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -1520,8 +1528,7 @@ async def run_agent(
                 pending_tool_calls = result.tool_calls if hasattr(result, "tool_calls") else []
                 if pending_tool_calls:
                     logger.info(
-                        "Agent paused after cost check with pending tool_calls; "
-                        "dispatching before pause",
+                        "Agent paused after cost check with pending tool_calls; dispatching before pause",
                         tool_count=len(pending_tool_calls),
                     )
                 else:
@@ -1598,9 +1605,14 @@ async def run_agent(
                 "cache_creation_input_tokens": cache_write_total,
             }
         except Exception as e:
-            if any(error_chain_has_type(e, kind) for kind in (
-                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-            )):
+            if any(
+                error_chain_has_type(e, kind)
+                for kind in (
+                    "CancelledError",
+                    "WorkflowGenerationSealed",
+                    "GenerationHandoffRequested",
+                )
+            ):
                 _pending_llm_context.pop(agent_id, None)
                 raise
             consecutive_llm_failures += 1
@@ -2235,11 +2247,19 @@ async def run_agent(
                         fast_mode_cache_enabled=fast_mode_cache_enabled,
                         fast_mode_goal=goal_text,
                         fast_mode_step=fast_cache_step,
+                        pending_background_status=(
+                            get_pending_background_status() if get_pending_background_status else None
+                        ),
                     )
                 except Exception as error:
-                    if any(error_chain_has_type(error, kind) for kind in (
-                        "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-                    )):
+                    if any(
+                        error_chain_has_type(error, kind)
+                        for kind in (
+                            "CancelledError",
+                            "WorkflowGenerationSealed",
+                            "GenerationHandoffRequested",
+                        )
+                    ):
                         raise
                     verifier_error = error
                 else:
@@ -2282,7 +2302,9 @@ async def run_agent(
 
                 # Track raised verifier errors and existing "Progress check failed" results.
                 if verifier_error is not None or v_reasoning.startswith("Progress check failed"):
-                    verifier_failure_reason = extract_error_message(verifier_error) if verifier_error is not None else v_reasoning
+                    verifier_failure_reason = (
+                        extract_error_message(verifier_error) if verifier_error is not None else v_reasoning
+                    )
                     consecutive_verifier_errors += 1
                     logger.warning(
                         f"[run_agent] Verifier failed (consecutive={consecutive_verifier_errors}): {verifier_failure_reason[:100]}"
@@ -2344,7 +2366,9 @@ async def run_agent(
                     )
 
                 if _verifier_superseded_by_user_feedback(
-                    verifier_result, context, get_requirement_revision() if get_requirement_revision else None,
+                    verifier_result,
+                    context,
+                    get_requirement_revision() if get_requirement_revision else None,
                 ):
                     recent_verifier_scores.pop()
                     continue
@@ -2379,8 +2403,7 @@ async def run_agent(
                 # the rest of the budget re-spawning CC (cuda-kernel top100).
                 reasoning_l = (v_reasoning or "").lower()
                 infra_soft_fail = v_reasoning.startswith("Progress check failed") or any(
-                    token in reasoning_l
-                    for token in ("deadline", "timeout", "timed out", "rose deadline")
+                    token in reasoning_l for token in ("deadline", "timeout", "timed out", "rose deadline")
                 )
                 if infra_soft_fail:
                     feedback_text += (
@@ -2546,7 +2569,9 @@ async def run_agent(
             if poll_messages:
                 last_checked = await poll_and_update_context(poll_messages, context, last_checked)
             final_verifier_superseded = _verifier_superseded_by_user_feedback(
-                final_verifier_result, context, get_requirement_revision() if get_requirement_revision else None,
+                final_verifier_result,
+                context,
+                get_requirement_revision() if get_requirement_revision else None,
             )
             final_verifier_requirement_keys = final_verifier_result.get("_verified_user_requirement_keys")
             final_verifier_requirement_revision = final_verifier_result.get("_verified_requirement_revision")
@@ -2556,11 +2581,18 @@ async def run_agent(
                 final_verifier_progress = final_verifier_result.get("score", 0.0)
                 final_verifier_reasoning = final_verifier_result.get("reasoning", "")
                 final_partial_structured_response = final_verifier_result.get("structured_response")
-                logger.info(f"Final verifier: {final_verifier_progress * 100:.0f}% - {final_verifier_reasoning[:100]}...")
+                logger.info(
+                    f"Final verifier: {final_verifier_progress * 100:.0f}% - {final_verifier_reasoning[:100]}..."
+                )
         except Exception as e:
-            if any(error_chain_has_type(e, kind) for kind in (
-                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-            )):
+            if any(
+                error_chain_has_type(e, kind)
+                for kind in (
+                    "CancelledError",
+                    "WorkflowGenerationSealed",
+                    "GenerationHandoffRequested",
+                )
+            ):
                 raise
             logger.error(f"Final verifier call failed: {e}")
 
@@ -2729,17 +2761,24 @@ def _real_user_requirement_keys(context: List[Dict]) -> set:
         if (message.get("role") or "").upper() != "USER" or (message.get("metadata") or {}).get("hidden"):
             continue
         metadata = message.get("metadata") or {}
+        if is_agent_authored_user_metadata(metadata):
+            continue
         request_id = metadata.get("attentionRequestId")
         if metadata.get("source") == "attention_response" and isinstance(request_id, str) and request_id:
             keys.add(("attention_response", request_id))
             continue
         message_id = message.get("message_id") or message.get("id")
-        keys.add(("id", str(message_id)) if message_id else
-                 ("legacy", str(message.get("timestamp") or ""), str(message.get("text") or "")))
+        keys.add(
+            ("id", str(message_id))
+            if message_id
+            else ("legacy", str(message.get("timestamp") or ""), str(message.get("text") or ""))
+        )
     return keys
 
 
-def _verifier_superseded_by_user_feedback(result: Dict, context: List[Dict], requirement_revision: Optional[int] = None) -> bool:
+def _verifier_superseded_by_user_feedback(
+    result: Dict, context: List[Dict], requirement_revision: Optional[int] = None
+) -> bool:
     """Version the verdict without rewriting the provider's judgment or usage."""
     judged_keys = result.get("_verified_user_requirement_keys")
     if judged_keys is not None and (_real_user_requirement_keys(context) - set(map(tuple, judged_keys))):
@@ -2778,6 +2817,7 @@ async def _run_verifier(
     fast_mode_step: int = 0,
     poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,
     get_requirement_revision: Optional[Callable[[], int]] = None,
+    pending_background_status: Optional[str] = None,
 ) -> Dict:
     """Run verifier to check completion."""
     verifier_call_id = tool_call_id or str(_safe_uuid4())
@@ -2808,9 +2848,14 @@ async def _run_verifier(
             if not get_requirement_revision or judged_revision == get_requirement_revision():
                 break
     except Exception as error:
-        if any(error_chain_has_type(error, kind) for kind in (
-            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-        )):
+        if any(
+            error_chain_has_type(error, kind)
+            for kind in (
+                "CancelledError",
+                "WorkflowGenerationSealed",
+                "GenerationHandoffRequested",
+            )
+        ):
             raise
         if post_message:
             try:
@@ -2828,9 +2873,14 @@ async def _run_verifier(
                     },
                 )
             except Exception as post_error:
-                if any(error_chain_has_type(post_error, kind) for kind in (
-                    "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-                )):
+                if any(
+                    error_chain_has_type(post_error, kind)
+                    for kind in (
+                        "CancelledError",
+                        "WorkflowGenerationSealed",
+                        "GenerationHandoffRequested",
+                    )
+                ):
                     raise
                 logger.warning(
                     "Failed to close verifier attempt after prerequisite error",
@@ -2849,7 +2899,9 @@ async def _run_verifier(
             verification_cursor = max(verification_cursor, timestamp)
         except ValueError:
             continue
-    verification_cursor = max(datetime.fromtimestamp(0, tz=timezone.utc), verification_cursor - timedelta(milliseconds=1))
+    verification_cursor = max(
+        datetime.fromtimestamp(0, tz=timezone.utc), verification_cursor - timedelta(milliseconds=1)
+    )
 
     # C7: dead `phase` positional arg has been removed from check_progress;
     # callers no longer pass it. `model` is kept as a positional but ignored
@@ -2859,31 +2911,36 @@ async def _run_verifier(
     # agent's own visible conversation, accumulated from `poll_messages`
     # after dropping spawned-agent work rows tagged with singular
     # metadata.subAgentId, plus locally-appended tool results.
+    check_progress_args = [
+        context,
+        verifier_prompt,
+        model,
+        current_response_schema,
+        claude_token,
+        "verifier_plan" if is_plan_loop else "verifier_execute",
+        agent_id,
+        claude_token_source,
+        claude_token_pool_id,
+        claude_token_user_id,
+        gpt_token,
+        gpt_account_id,
+        gpt_token_source,
+        gpt_token_pool_id,
+        gpt_token_user_id,
+        compute_token_lineage_key,
+        compute_token_fast_cache_affinity_key,
+        None,  # dump_extra
+        fast_mode_cache_enabled,
+        fast_mode_goal,
+        fast_mode_step,
+    ]
+    if pending_background_status:
+        # Appended only when background agents are still running, so every
+        # other verifier call keeps its exact arguments and cached prefix.
+        check_progress_args.append(pending_background_status)
     result = await execute_activity(
         check_progress,
-        args=[
-            context,
-            verifier_prompt,
-            model,
-            current_response_schema,
-            claude_token,
-            "verifier_plan" if is_plan_loop else "verifier_execute",
-            agent_id,
-            claude_token_source,
-            claude_token_pool_id,
-            claude_token_user_id,
-            gpt_token,
-            gpt_account_id,
-            gpt_token_source,
-            gpt_token_pool_id,
-            gpt_token_user_id,
-            compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key,
-            None,  # dump_extra
-            fast_mode_cache_enabled,
-            fast_mode_goal,
-            fast_mode_step,
-        ],
+        args=check_progress_args,
         start_to_close_timeout=timedelta(seconds=VERIFIER_ACTIVITY_TIMEOUT_SECONDS),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
@@ -2892,7 +2949,9 @@ async def _run_verifier(
     result["_verified_requirement_revision"] = judged_revision
     if poll_messages:
         await poll_and_update_context(poll_messages, context, verification_cursor)
-    _verifier_superseded_by_user_feedback(result, context, get_requirement_revision() if get_requirement_revision else None)
+    _verifier_superseded_by_user_feedback(
+        result, context, get_requirement_revision() if get_requirement_revision else None
+    )
     score = result.get("score", 0.0)
     reasoning = result.get("reasoning", "")
     structured_response = result.get("structured_response")
@@ -2918,8 +2977,7 @@ async def _run_verifier(
         # does not keep telling the agent to spawn new work after a soft fail.
         reasoning_l = (reasoning or "").lower()
         infra_soft_fail = reasoning.startswith("Progress check failed") or any(
-            token in reasoning_l
-            for token in ("deadline", "timeout", "timed out", "rose deadline")
+            token in reasoning_l for token in ("deadline", "timeout", "timed out", "rose deadline")
         )
         if infra_soft_fail:
             guidance = (
@@ -2935,11 +2993,7 @@ async def _run_verifier(
                 "Take a NEW action that produces fresh tool evidence matching the goal, "
                 "then call attempt_completion again."
             )
-        message_text = (
-            f"Verifier score: {score:.0%}\n\n"
-            f"Reasoning: {message_text}\n\n"
-            f"{guidance}"
-        )
+        message_text = f"Verifier score: {score:.0%}\n\nReasoning: {message_text}\n\n{guidance}"
 
     # Post FINISHED. Surface verifier feedback as the completed
     # attempt_completion result for UI continuity, and mark it with
@@ -2967,7 +3021,9 @@ async def _run_verifier(
     logger.info(f"Verifier score: {score * 100:.1f}%")
     if poll_messages:
         await poll_and_update_context(poll_messages, context, verification_cursor)
-    _verifier_superseded_by_user_feedback(result, context, get_requirement_revision() if get_requirement_revision else None)
+    _verifier_superseded_by_user_feedback(
+        result, context, get_requirement_revision() if get_requirement_revision else None
+    )
     # Surface the schema the verifier actually judged against so soft-accept
     # does not re-validate against a stale static response_schema when
     # get_response_schema resolved a different field set (CodeRabbit #1260).

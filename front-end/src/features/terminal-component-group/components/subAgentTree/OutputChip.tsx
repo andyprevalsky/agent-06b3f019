@@ -62,14 +62,20 @@ function PartialHeader({ failureReason }: { failureReason?: string }) {
   );
 }
 
-function SchemaRows({
+/**
+ * Schema fields with their extracted values. Shared by the hover chip and the
+ * running-agents dock (`showRequired` adds the required/optional tag).
+ */
+export function SchemaRows({
   schema,
   output,
   isPartial,
+  showRequired = false,
 }: {
   schema: OutputSchema;
   output?: Record<string, unknown>;
   isPartial?: boolean;
+  showRequired?: boolean;
 }) {
   return (
     <>
@@ -83,6 +89,11 @@ function SchemaRows({
               <span className="text-muted-foreground text-[10px]">
                 ({formatFieldType(field.type)})
               </span>
+              {showRequired && (
+                <span className="text-muted-foreground text-[10px]">
+                  {field.required ? 'required' : 'optional'}
+                </span>
+              )}
             </div>
             {hasValue ? (
               <span

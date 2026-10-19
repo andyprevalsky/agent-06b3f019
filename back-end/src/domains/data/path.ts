@@ -38,6 +38,28 @@ export type ParsedGrepPath =
   | { source: 'documents'; documentSource?: string; rest?: string }
   | { source: 'calendar' | 'drive'; rest?: string };
 
+// ── Agent task paths ──
+
+/**
+ * An agent address in the caller's own tree (`/root`, `/root/outreach/draft_a`),
+ * as list_agents prints it. Same grammar as the agents domain's task paths;
+ * as a grep `trace_path` it scopes agent_network / agent_trajectories to that
+ * agent and every agent below it.
+ */
+const AGENT_TASK_PATH_PATTERN = /^\/root(\/[a-z][a-z0-9_]{0,59})*$/;
+export const ROOT_AGENT_TASK_PATH = '/root';
+
+export function isAgentTaskPath(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 400 && AGENT_TASK_PATH_PATTERN.test(value);
+}
+
+/** A `trace_path` value naming an agent task path (trailing slashes tolerated), else undefined. */
+export function agentTaskPathParam(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim().replace(/\/+$/, '');
+  return isAgentTaskPath(trimmed) ? trimmed : undefined;
+}
+
 // ── Build ──
 
 export function buildMessagePath(threadName: string, messageId?: string): string {

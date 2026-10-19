@@ -112,6 +112,7 @@ export async function searchAgentNetworkSource(
     agentIds: await agentTreeIdsForGrep(userId, agentId),
     pattern: input.dbPattern,
     caseInsensitive: input.caseInsensitive,
+    pathAgentIds: filters?.pathAgentIds,
     pathAgentId: filters?.pathAgentId,
     pathRole: filters?.pathRole,
     pathMessageId: filters?.pathMessageId,

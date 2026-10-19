@@ -10,6 +10,7 @@ import type {
 } from './tool-metadata';
 import type { AssistantStreamPayload } from './stream-payloads';
 import type { AgentStateChangedPayload } from './bus-channel';
+import type { AgentMessageMetadata, AgentNotificationMetadata } from './message-metadata';
 
 // =============================================================================
 // Tool Message Type Guards
@@ -185,5 +186,32 @@ export function isAgentStateChangedPayload(payload: unknown): payload is AgentSt
     typeof p.status === 'string' &&
     typeof p.progress === 'number' &&
     Array.isArray(p.toolsInUse)
+  );
+}
+
+// =============================================================================
+// Agent-to-agent Row Guards
+// =============================================================================
+
+const CODEX_MESSAGE_TYPES = new Set(['MESSAGE', 'NEW_TASK']);
+const CODEX_COMPLETION_TYPES = new Set(['FINAL_ANSWER', 'FAILED']);
+
+/** True when a message's metadata marks it as an agent-to-agent message. */
+export function isAgentMessageMetadata<T extends Record<string, unknown>>(
+  metadata: T | null | undefined,
+): metadata is T & AgentMessageMetadata {
+  if (!metadata) return false;
+  if (CODEX_MESSAGE_TYPES.has(String(metadata.messageType ?? ''))) return true;
+  return metadata.agentMessage === true && typeof metadata.fromAgentId === 'string';
+}
+
+/** True when a message's metadata marks it as a sub-agent completion. */
+export function isAgentNotificationMetadata<T extends Record<string, unknown>>(
+  metadata: T | null | undefined,
+): metadata is T & AgentNotificationMetadata {
+  if (!metadata) return false;
+  return (
+    metadata.agentNotification === true ||
+    CODEX_COMPLETION_TYPES.has(String(metadata.messageType ?? ''))
   );
 }

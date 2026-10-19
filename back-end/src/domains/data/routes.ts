@@ -18,6 +18,7 @@ import {
   InvalidGrepParamError,
   MissingAgentIdError,
   AgentNotFoundError,
+  AgentPathNotFoundError,
 } from './service';
 import { createLogger } from '../../providers/logger';
 
@@ -82,6 +83,10 @@ router.post(
       }
       if (error instanceof AgentNotFoundError) {
         res.status(403).json({ error: 'AGENT_NOT_FOUND', message: error.message });
+        return;
+      }
+      if (error instanceof AgentPathNotFoundError) {
+        res.status(404).json({ error: 'AGENT_PATH_NOT_FOUND', message: error.message });
         return;
       }
 

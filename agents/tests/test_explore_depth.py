@@ -5,6 +5,7 @@ prompt + per-call [Thoroughness:] goal tag), and the schema default. The cap is
 TURNS, not searches (one turn can batch parallel searches), mirroring Claude
 Code's exploreAgent thoroughness levels.
 """
+
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -55,9 +56,9 @@ def test_winddown_window_is_positive():
 
 
 def test_spawn_agent_schema_depth_defaults_to_quick():
-    t = SpawnAgentTool(tool="spawn_agent", type="explore", goal="find X")
+    t = SpawnAgentTool(tool="spawn_agent", type="explore", task_name="find_x", goal="find X")
     assert t.depth == "quick"
-    t2 = SpawnAgentTool(tool="spawn_agent", type="explore", goal="find X", depth="deep")
+    t2 = SpawnAgentTool(tool="spawn_agent", type="explore", task_name="find_x", goal="find X", depth="deep")
     assert t2.depth == "deep"
 
 

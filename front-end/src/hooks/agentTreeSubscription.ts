@@ -21,6 +21,54 @@ export interface TreeNode {
   outputSchema?: OutputSchema;
   structuredOutput?: Record<string, unknown>;
   failureContext?: FailureContext;
+  /** ISO creation time (REST snapshot only; realtime updates preserve it). */
+  createdAt?: string;
+  /** ISO last-update time (REST snapshot, or the moment a realtime update arrived). */
+  updatedAt?: string;
+  /** In-activity background tasks (explore/browser/code) owned by this agent. */
+  backgroundTasks?: TreeBackgroundTask[];
+  /** Codex-style tree address, e.g. `/root/outreach/draft_a` (absent on older rows). */
+  taskPath?: string;
+}
+
+/** One background explore/browser/code task tracked on its owner agent. */
+export interface TreeBackgroundTask {
+  address: string;
+  /** Codex-style tree path (absent on older rows). */
+  path?: string;
+  type: string;
+  goal: string;
+  status: string;
+  startedAt?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/** Tolerant parse of `backgroundTasks` / `background_tasks` (absent → undefined). */
+export function parseBackgroundTasks(raw: unknown): TreeBackgroundTask[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const tasks: TreeBackgroundTask[] = [];
+  for (const item of raw) {
+    if (!isRecord(item) || typeof item.address !== 'string' || !item.address) continue;
+    const startedAt = item.started_at ?? item.startedAt;
+    tasks.push({
+      address: item.address,
+      path: typeof item.path === 'string' && item.path ? item.path : undefined,
+      type: typeof item.type === 'string' ? item.type : 'agent',
+      goal: typeof item.goal === 'string' ? item.goal : '',
+      status: typeof item.status === 'string' ? item.status : 'running',
+      startedAt: typeof startedAt === 'string' ? startedAt : undefined,
+    });
+  }
+  return tasks;
+}
+
+function isoOrUndefined(value: unknown): string | undefined {
+  if (typeof value === 'string' && value) return value;
+  if (value instanceof Date) return value.toISOString();
+  return undefined;
 }
 
 interface BusSubscription {
@@ -50,10 +98,14 @@ function apiToTreeNode(node: AgentTreeNode): TreeNode {
     outputSchema: node.output_schema,
     structuredOutput: node.structured_output,
     failureContext: node.failure_context,
+    createdAt: isoOrUndefined(node.created_at),
+    updatedAt: isoOrUndefined(node.updated_at),
+    backgroundTasks: parseBackgroundTasks(node.background_tasks),
+    taskPath: typeof node.task_path === 'string' && node.task_path ? node.task_path : undefined,
   };
 }
 
-function realtimeToTreeNode(data: AgentStateChangedPayload): TreeNode {
+function realtimeToTreeNode(data: AgentStateChangedPayload, previous?: TreeNode): TreeNode {
   return {
     agentId: data.agentId,
     parentAgentId: data.parentAgentId,
@@ -66,6 +118,11 @@ function realtimeToTreeNode(data: AgentStateChangedPayload): TreeNode {
     outputSchema: data.outputSchema,
     structuredOutput: data.structuredOutput,
     failureContext: data.failureContext,
+    createdAt: previous?.createdAt,
+    updatedAt: new Date().toISOString(),
+    backgroundTasks: parseBackgroundTasks(data.backgroundTasks) ?? previous?.backgroundTasks,
+    taskPath:
+      typeof data.taskPath === 'string' && data.taskPath ? data.taskPath : previous?.taskPath,
   };
 }
 
@@ -117,8 +174,18 @@ function fetchInitialTree(
       }
       const nodes = new Map<string, TreeNode>();
       agents.forEach((agent) => nodes.set(agent.agent_id, apiToTreeNode(agent)));
-      reconciliationNodes.forEach((node, agentId) => nodes.set(agentId, node));
-      subscription.realtimeNodes.forEach((node, agentId) => nodes.set(agentId, node));
+      // Realtime values win, but only REST knows creation time / task path.
+      const overlay = (node: TreeNode, agentId: string) => {
+        const rest = nodes.get(agentId);
+        nodes.set(agentId, {
+          ...node,
+          createdAt: node.createdAt ?? rest?.createdAt,
+          taskPath: node.taskPath ?? rest?.taskPath,
+          backgroundTasks: node.backgroundTasks ?? rest?.backgroundTasks,
+        });
+      };
+      reconciliationNodes.forEach(overlay);
+      subscription.realtimeNodes.forEach(overlay);
       publishNodes(subscription, nodes);
     })
     .catch((error) => {
@@ -145,7 +212,7 @@ function createHandlers(busId: string, subscription: BusSubscription, generation
         return;
       }
       const nodes = new Map(subscription.nodes);
-      const node = realtimeToTreeNode(data);
+      const node = realtimeToTreeNode(data, subscription.nodes.get(data.agentId));
       subscription.realtimeNodes.set(data.agentId, node);
       nodes.set(data.agentId, node);
       publishNodes(subscription, nodes);

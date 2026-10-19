@@ -128,6 +128,17 @@ from benchmarks.timeout_history import (
 from benchmarks.timeout_history import (
     summary as _history_summary,
 )
+from benchmarks.tree_feedback_routing import (
+    TREE_ROUTING_CHECK_TYPES,
+    background_routing_trace,
+    background_trigger_ready,
+    check_tree_feedback_routing,
+    routing_trace,
+    tree_snapshot,
+    tree_trigger_ready,
+    trigger_uses_background_task,
+    trigger_uses_tree,
+)
 from benchmarks.world_model_harness import (
     archive_artifact_paths,
     evaluate_archive_with_world_model,
@@ -4572,7 +4583,7 @@ def _detect_infra_errors_from_fly(agent_ids: List[str]) -> List[str]:
     Scan Fly.io streaming logs for infrastructure-level errors across all agents.
     Returns list of error descriptions.
     """
-    from benchmarks.logs import _fly_collector
+    from benchmarks.logs import _fly_collector, _is_remote_worker_log_placeholder
 
     if not _fly_collector:
         return []
@@ -4581,6 +4592,10 @@ def _detect_infra_errors_from_fly(agent_ids: List[str]) -> List[str]:
     for aid in agent_ids:
         logs = _fly_collector.get_logs_for_agent(aid)
         for log_line in logs:
+            # Collector placeholders ("[fly.io] 0 logs ... (N total captured)")
+            # are not log content; their captured-line count can contain "429".
+            if _is_remote_worker_log_placeholder(log_line):
+                continue
             ll = log_line.lower()
             if any(
                 kw in ll
@@ -4752,6 +4767,7 @@ async def _poll_agent(
     payment_card_action_completed = False
     task._mid_run_feedback_posted = False
     task._mid_run_feedback_initial_schema = None
+    task._mid_run_feedback_evidence = None
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     wall_clock_disabled = polar_wall_clock_disabled(task) or resolved_timeout in (None, 0)
@@ -4977,13 +4993,35 @@ async def _poll_agent(
         # Regression tasks can inject genuine USER feedback after the run has
         # produced durable work. Capture the already-generated schema first so
         # evaluation can prove non-goal feedback did not revise it.
+        # Three triggers (validated by tree_feedback_routing.validate_mid_run_feedback):
+        # a root-message boundary, `when.active_depth_at_least` = N active
+        # layers (root + descendants, every agent on the chain STARTING_UP/ACTIVE)
+        # read from the per-root tree endpoint on this poll's cadence until fired,
+        # or `when.background_task_active` = a running root explore/browser task
+        # derived from this poll's root rows (no extra request).
         feedback_config = task.mid_run_feedback or {}
         if feedback_config and not task._mid_run_feedback_posted and status not in TERMINAL_STATUSES:
-            after_message_count = int(feedback_config.get("after_root_message_count", 1))
             feedback_message = feedback_config.get("message")
             initial_schema = agent.get("response_schema")
+            trigger_ready = False
+            trigger_chain: list[dict] = []
+            trigger_tree: list[dict] = []
+            trigger_task: Optional[dict] = None
+            if trigger_uses_background_task(feedback_config):
+                trigger_ready, trigger_task = background_trigger_ready(feedback_config, messages)
+            elif trigger_uses_tree(feedback_config):
+                try:
+                    trigger_agents = await get_agent_tree(base_url, agent_id)
+                except httpx.HTTPError as tree_error:
+                    print(f"    ⚠ Mid-run feedback tree poll failed; will retry: {tree_error}")
+                    trigger_agents = []
+                trigger_ready, trigger_chain = tree_trigger_ready(feedback_config, trigger_agents, agent_id)
+                if trigger_ready:
+                    trigger_tree = tree_snapshot(trigger_agents, agent_id)
+            else:
+                trigger_ready = root_msg_count >= int(feedback_config.get("after_root_message_count", 1))
             if (
-                root_msg_count >= after_message_count
+                trigger_ready
                 and isinstance(feedback_message, str)
                 and feedback_message.strip()
                 and isinstance(initial_schema, dict)
@@ -4992,9 +5030,26 @@ async def _poll_agent(
                 if await post_message(base_url, agent_id, feedback_message):
                     task._mid_run_feedback_initial_schema = json.loads(json.dumps(initial_schema))
                     task._mid_run_feedback_posted = True
+                    task._mid_run_feedback_evidence = {
+                        "posted": True,
+                        "message": feedback_message,
+                        "trigger": {k: v for k, v in feedback_config.items() if k != "message"},
+                        "posted_after_seconds": round(time.time() - start, 1),
+                        "root_message_count": root_msg_count,
+                        "active_layers": len(trigger_chain),
+                        "active_chain": trigger_chain,
+                        "tree_at_trigger": trigger_tree,
+                        "background_task": trigger_task,
+                    }
+                    trigger_detail = (
+                        f"running {trigger_task['agent_type']} task {trigger_task['background_task_id']}"
+                        if trigger_task
+                        else f"{len(trigger_chain)} active layers"
+                    )
                     print(
                         "    💬 Injected mid-run feedback after "
-                        f"{root_msg_count} root messages; captured {len(initial_schema['fields'])} schema field(s)"
+                        f"{root_msg_count} root messages ({trigger_detail}); "
+                        f"captured {len(initial_schema['fields'])} schema field(s)"
                     )
                 else:
                     print("    ⚠ Failed to inject configured mid-run feedback; will retry")
@@ -5607,8 +5662,12 @@ async def _poll_agent(
 
 
 def _validate_mid_run_feedback_schema(task: BenchmarkTask, data: dict) -> Optional[str]:
-    """Require non-goal mid-run feedback to leave the response schema untouched."""
-    if not task.mid_run_feedback:
+    """Require non-goal mid-run feedback to leave the response schema untouched.
+
+    Only feedback declared ``non_goal: true`` pins the schema; goal-changing
+    feedback may legitimately refresh it.
+    """
+    if not task.mid_run_feedback or not task.mid_run_feedback.get("non_goal"):
         return None
     if not getattr(task, "_mid_run_feedback_posted", False):
         return "Configured mid-run feedback was never posted"
@@ -13406,6 +13465,11 @@ def _run_declared_static_check(
     benchmark_state = data.get("_benchmark", {})
     for check in evaluator.get("checks", []):
         check_type = check.get("type")
+        if check_type in TREE_ROUTING_CHECK_TYPES:
+            ok, reason = check_tree_feedback_routing(data, check)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "lantern_people_trace":
             from benchmarks.lantern_people_trace import check_lantern_people_trace
 
@@ -13936,6 +14000,34 @@ async def _run_declared_evaluators(
     if needs_tree_evidence and base_url:
         await _hydrate_semantic_evaluator_tree(data, base_url)
 
+    # Judge-visible routing trace (compact state keeps every `_benchmark` key).
+    routing_markers = sorted(
+        {
+            str(check.get("marker"))
+            for evaluator in task.evaluators
+            if evaluator.get("method") == "static_check"
+            for check in evaluator.get("checks", [])
+            if check.get("type") in TREE_ROUTING_CHECK_TYPES and check.get("marker")
+        }
+    )
+    if routing_markers:
+        data.setdefault("_benchmark", {})["tree_feedback_routing"] = [
+            routing_trace(data, marker) for marker in routing_markers
+        ]
+    background_types = sorted(
+        {
+            str(check.get("agent_type"))
+            for evaluator in task.evaluators
+            if evaluator.get("method") == "static_check"
+            for check in evaluator.get("checks", [])
+            if check.get("type") == "background_task_message_routed" and check.get("agent_type")
+        }
+    )
+    if background_types:
+        data.setdefault("_benchmark", {})["background_task_routing"] = [
+            background_routing_trace(data, agent_type) for agent_type in background_types
+        ]
+
     results: list[dict] = []
     for evaluator in task.evaluators:
         evaluator_id = evaluator.get("id", "unnamed")
@@ -14453,6 +14545,11 @@ async def _run_single_task_as_run_user(
         if isinstance(execution_result, TaskResult):
             return execution_result
         data, approvals_triggered, approvals_resolved, early_fail_reason = execution_result
+        if task.mid_run_feedback:
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "mid_run_feedback": getattr(task, "_mid_run_feedback_evidence", None) or {"posted": False},
+            }
         early_fail_reason = _annotate_needs_auth_failure(task, early_fail_reason, data)
         if realtime_monitor:
             await realtime_monitor.stop()

@@ -81,16 +81,26 @@ CRITICAL_CONSTRAINTS_RULE = """
 - Causal deps: emit A alone, wait, then emit B (don't batch dependent calls).
 """
 
+WORKING_WITH_OTHER_AGENTS_PROMPT = """
+# Working with other agents
+
+You are one agent in a tree of agents. Each agent's address is its path from the root: /root, /root/outreach, /root/outreach/draft_a. "parent" is the agent that spawned you. The environment block at the end of your context shows the time and your running sub-agents.
+- A background agent's result arrives later as an agent message of type FINAL_ANSWER (FAILED if it did not finish, including when it was killed).
+- Agent messages appear in your context as "Message Type: <MESSAGE | NEW_TASK | FINAL_ANSWER | FAILED>", "Task name: <recipient>", "Sender: <address>", then "Payload:". They come from other agents, not from the user. Your text output is not visible to other agents: use send_message_to_agent to talk to one, including to reply.
+- To see the wider tree or read what another agent has done, spawn an explore agent: it has list_agents and can grep agent_network / agent_trajectories with trace_path="/root/...".
+- Before you finish, wait_for the sub-agents whose results you still need and kill_agent the ones you don't; any still running when you finish are killed.
+- As a sub-agent, your attempt_completion result is delivered to your parent automatically as your FINAL_ANSWER. Put the full deliverable there; do not send_message_to_agent your results to the parent.
+- When a user message corrects or changes work a sub-agent is doing, forward the relevant part to that sub-agent (send_message_to_agent) instead of redoing the work yourself.
+- As a sub-agent, the user cannot see your messages. When you need a decision, send_message_to_agent(to="parent", ...) and then wait_for(agents=["parent"]); otherwise proceed on reasonable assumptions.
+"""
+
 PLANNER_RESPONSE_TITLE_DESCRIPTION = "Short plan title."
 PLANNER_RESPONSE_TASKS_DESCRIPTION = "List of executable tasks with tool choices and dependencies."
 PLANNER_TASK_IDX_DESCRIPTION = (
     "The 0-based array index of this task, encoded as a string. "
     "This must equal the task's position in tasks and is included only to make dependency lookups easy."
 )
-PLANNER_TASK_GOAL_DESCRIPTION = (
-    "Self-contained task brief for the spawned agent. "
-    + SELF_CONTAINED_GOAL_RULE.strip()
-)
+PLANNER_TASK_GOAL_DESCRIPTION = "Self-contained task brief for the spawned agent. " + SELF_CONTAINED_GOAL_RULE.strip()
 PLANNER_TASK_TOOL_NAME_DESCRIPTION = (
     "The tool to execute for this task. When using spawn_agent for a task, alias it with "
     "one of the planner spawn aliases; raw spawn_agent with no type alias is not allowed."
@@ -100,8 +110,12 @@ PLANNER_TASK_DEPENDS_ON_DESCRIPTION = (
     "Use an empty list only when the task can start immediately without another task's output, artifact, "
     "state, credentials, or decision."
 )
-PLANNER_RESPONSE_DEPENDENCIES_GRAPH_DESCRIPTION = "Explicit dependency DAG as list entries that mirror tasks[i].depends_on."
-PLANNER_DEPENDENCY_TASK_IDX_DESCRIPTION = "The task index this dependency entry describes, 0-based and encoded as a string."
+PLANNER_RESPONSE_DEPENDENCIES_GRAPH_DESCRIPTION = (
+    "Explicit dependency DAG as list entries that mirror tasks[i].depends_on."
+)
+PLANNER_DEPENDENCY_TASK_IDX_DESCRIPTION = (
+    "The task index this dependency entry describes, 0-based and encoded as a string."
+)
 PLANNER_DEPENDENCY_DEPENDS_ON_DESCRIPTION = (
     "0-based task indices, as strings, that must complete before task_idx. "
     "Use an empty list only when the task can start immediately without another task's output, artifact, "
@@ -187,7 +201,7 @@ human attention, social credibility, or monetary capital. Behave like a world-cl
  - Use spawn_agent(type="for_each") when you need to complete a complex, multi-step chunk of work for each item in a set of items of size > 3. This is specifically useful when you need to create a large number of agents for optimal execution.
  - MANDATORY: When passing files to spawned agents, strictly use the type='file_pointer' argument. Pass attachments via original_filename only (not id or storage_path). Files in context are already available, don't attempt to re-download.
  - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
-- Prefer wait_for(condition=...) over recursive general-purpose agents for polling tasks
+- Prefer wait_for over recursive general-purpose agents for polling tasks
 
 {HOW_YOU_ARE_GRADED_PROMPT.strip()}
 
@@ -203,6 +217,8 @@ Context is available to you primarily through spawn_agent(type="explore"), this 
 {CONTEXT_POINTERS_RULE.strip()}
 
 Your harness splits up your work into 3 phases, a PLAN phase, a DECOMPOSITION phase, and an EXECUTE phase. You will spawn in at either PLAN or EXECUTE and aren't guaranteed to have been through a PLAN phase before you spawn into the EXECUTE phase. The PLAN phase is the only place you can directly request user guidance, and you have access to extra compute in order to create an extra precise task decomposition plan via the DECOMPOSITION. Once you are in the EXECUTE phase you will continue running until completing the task at hand by passing the grader. You may not reward hack, fabricate output, or stop running until the task is verifiably completed.
+
+{WORKING_WITH_OTHER_AGENTS_PROMPT.strip()}
 """
 
 
@@ -291,7 +307,8 @@ def _format_output_field_contract(field: Dict[str, Any]) -> str:
     if isinstance(properties, list) and properties:
         nested = ", ".join(
             f"{item['name']}: {_format_output_field_contract(item)}"
-            for item in properties if isinstance(item, dict) and item.get("name")
+            for item in properties
+            if isinstance(item, dict) and item.get("name")
         )
         parts.append(f"properties={{{nested}}}")
     return ", ".join(parts)
@@ -455,7 +472,10 @@ def build_verifier_prompt(response_schema: dict = None) -> str:
         return _VERIFIER_STATIC_PROMPT + SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
     fields_desc = "\n".join(
-        [f"  - {f['name']} ({_format_output_field_contract(f)}, {'required' if f.get('required', True) else 'optional'}): {f.get('description', '')}" for f in response_schema["fields"]]
+        [
+            f"  - {f['name']} ({_format_output_field_contract(f)}, {'required' if f.get('required', True) else 'optional'}): {f.get('description', '')}"
+            for f in response_schema["fields"]
+        ]
     )
     num_fields = len(response_schema["fields"])
     num_required = sum(f.get("required", True) is not False for f in response_schema["fields"])

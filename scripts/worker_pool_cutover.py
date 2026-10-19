@@ -349,16 +349,43 @@ class NativePool(WorkerRuntime):
         return self.retire(prior, destination, previous)
 
 
-def backend_command(script, *arguments):
+def backend_command(script, *arguments, timeout=60):
     result = subprocess.run(
         ["node", "--import", "tsx", "scripts/" + script, *arguments],
         cwd=ROOT / "back-end",
         check=True,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=timeout,
     )
     return result.stdout
+
+
+def broadcast_generation_handoff(previous_queue, live_queue):
+    """Push the pointer flip to workflows idling on the old queue; never blocks the deploy.
+
+    Idle parks no longer poll the pointer every 30s; this signal wakes them
+    (agents/helpers/wait_condition_or_handoff.py). Re-running it on a resumed
+    DRAINING stage is harmless: the workflow signal handler is idempotent.
+    """
+    if not previous_queue or previous_queue == live_queue:
+        return
+    try:
+        # 200 signals/s for up to 120s covers 24k workflows (10k-agent target).
+        output = backend_command(
+            "broadcast-generation-handoff.ts",
+            "--from-queue",
+            previous_queue,
+            "--live-queue",
+            live_queue,
+            "--deadline-ms",
+            "120000",
+            timeout=180,
+        )
+        lines = output.strip().splitlines()
+        print(f"Generation handoff broadcast: {lines[-1] if lines else '{}'}", flush=True)
+    except Exception as error:  # best-effort: agents still hand off at their next re-check
+        print(f"Generation handoff broadcast failed; agents hand off at their next re-check: {error}", flush=True)
 
 
 def prepare_bank(job, ledger, native, minimum):
@@ -482,6 +509,7 @@ def run(ledger=None, native_factory=NativePool):
         job = ledger.stage("ACTIVATED", "DRAINING", {})
     if job["stage"] == "DRAINING":
         previous = job["priorPointer"]
+        broadcast_generation_handoff(previous["taskQueue"], deployment_queue(job["identity"], ledger.job_id))
         prior_records = job["evidence"]["PREPARING"]["previousRecords"]
         mismatch_records = job["evidence"]["PREPARING"].get("retainedRouteMismatchRecords", [])
         held_ids = {record["id"] for record in mismatch_records}

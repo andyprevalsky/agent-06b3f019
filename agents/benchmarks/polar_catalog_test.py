@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import benchmarks.run_benchmark as rb
 from benchmarks.benchmark_tasks import (
     all_tasks,
     get_task_by_name,
@@ -20,20 +21,20 @@ from benchmarks.polar_catalog import (
     load_polar_tasks_file,
     write_polar_tasks_file,
 )
-import benchmarks.run_benchmark as rb
 
 
-def test_polar_tasks_file_matches_sources():
+def test_polar_tasks_file_matches_sources(tmp_path):
     """Committed polar_tasks.json stays in sync with polar/*.json sources."""
     built = build_polar_catalog_tasks()
     committed = load_polar_tasks_file()
     assert len(built) == len(committed) == 300
     assert [t["name"] for t in built] == [t["name"] for t in committed]
     assert built == committed
-    # Spot-check rebuild is a semantic no-op on the committed file.
-    path = Path(__file__).resolve().parent / "polar_tasks.json"
-    before = json.loads(path.read_text())
-    write_polar_tasks_file(path)
+    # Spot-check rebuild is a semantic no-op. Write to a scratch copy: the
+    # commit-time escaping depends on ambient env values, so rewriting the
+    # committed file in place dirtied the checkout on other hosts.
+    before = json.loads((Path(__file__).resolve().parent / "polar_tasks.json").read_text())
+    path = write_polar_tasks_file(tmp_path / "polar_tasks.json")
     assert json.loads(path.read_text()) == before
 
 

@@ -31,9 +31,12 @@ from helpers.attachments import (
     get_cached_file,
     get_file_from_pointer,
 )
+from helpers.background_agents import model_agent_row_text
 from helpers.context_compaction import is_excluded_from_model
 from helpers.context_pointers import annotate_with_pointer, resolve_pointers_in_messages
 from helpers.context_scope import is_internal_subagent_message
+from helpers.environment_context import is_environment_context_row
+from helpers.environment_tail import append_environment_tail, build_environment_tail_text
 from helpers.messages import (
     CoalescingStreamBroadcaster,
     stream_assistant_chunk,
@@ -74,6 +77,7 @@ from providers.rose import (
     pool_for_model,
 )
 from providers.rose.errors import RoseAllFailed
+from providers.rose.inter_agent_context import inter_agent_message, is_inter_agent_message
 from providers.rose.policy import anthropic_family_excluded, benchmark_compute_token_type
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
@@ -713,7 +717,9 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
             "required": field.required,
         }
         item.update(bounds_from_entries(field.type, field.constraints))
-        item.update({key: getattr(field, key) for key in ("description", "nullable") if getattr(field, key) is not None})
+        item.update(
+            {key: getattr(field, key) for key in ("description", "nullable") if getattr(field, key) is not None}
+        )
         if field.properties is not None:
             item["properties"] = [
                 {
@@ -721,7 +727,9 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
                     "type": prop.type,
                     "required": prop.required,
                     **bounds_from_entries(prop.type, prop.constraints),
-                    **{key: getattr(prop, key) for key in ("description", "nullable") if getattr(prop, key) is not None},
+                    **{
+                        key: getattr(prop, key) for key in ("description", "nullable") if getattr(prop, key) is not None
+                    },
                 }
                 for prop in field.properties
             ]
@@ -816,9 +824,14 @@ async def _generate_response_schema_with_rose(
                     },
                 )
             except Exception as exc:
-                if any(error_chain_has_type(exc, kind) for kind in (
-                    "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-                )):
+                if any(
+                    error_chain_has_type(exc, kind)
+                    for kind in (
+                        "CancelledError",
+                        "WorkflowGenerationSealed",
+                        "GenerationHandoffRequested",
+                    )
+                ):
                     raise
                 last_error = exc
                 if not isinstance(exc, RoseError) and max_tokens < 4000 and "finish_reason=length" in str(exc):
@@ -1007,7 +1020,8 @@ def build_verifier_context_messages(
 
         if is_excluded_from_model(msg) or is_internal_subagent_message(msg):
             continue
-        if role == "SYSTEM":
+        if role == "SYSTEM" or is_environment_context_row(msg):
+            # Environment rows are run-time state for the acting model, not evidence.
             continue
 
         if role == "ASSISTANT":
@@ -1024,6 +1038,32 @@ def build_verifier_context_messages(
             continue
 
         if role == "USER":
+            if metadata.get("agentMessage") is True:
+                # Agent-to-agent chatter is not evidence (like the agent's own
+                # assistant turns, it could argue for its own completion).
+                continue
+            if metadata.get("agentNotification") is True:
+                # A child's completion result is factual, like a tool result
+                # (same TOOL_RESULT line and budget as spawn_agent results).
+                notification_line = "TOOL_RESULT " + json.dumps(
+                    {"tool_name": "agent_notification", "result": text},
+                    ensure_ascii=False,
+                    default=str,
+                )
+                if str(call_site or "") == "benchmark_declared_evaluator":
+                    notification_text, truncated = notification_line, False
+                else:
+                    notification_text, truncated = _budget_verifier_tool_result_text(
+                        notification_line,
+                        tool_name="agent_notification",
+                        used_chars=_tool_result_chars_used,
+                    )
+                if truncated:
+                    _tool_result_budget_hits += 1
+                if notification_text:
+                    _tool_result_chars_used += len(notification_text)
+                    current_batch.append(notification_text)
+                continue
             current_batch.append(text)
             _append_file_evidence(msg)
             continue
@@ -1798,6 +1838,12 @@ def convert_context_to_messages(
                 messages.append({"role": "system", "content": content})
 
         elif role == "USER":
+            agent_text = model_agent_row_text(msg)
+            if agent_text is not None:
+                # Agent-to-agent content is assistant-role (Codex); the pairing
+                # pass below keeps it after the tool results of its turn.
+                messages.append(inter_agent_message(agent_text))
+                continue
             messages.append({"role": "user", "content": content})
 
         elif role == "ASSISTANT":
@@ -2113,6 +2159,17 @@ async def build_llm_messages(
         # Determine LLM role and base text
         ts_prefix = _ts_header(msg)
         if role == "USER":
+            agent_text = model_agent_row_text(msg)
+            if agent_text is not None:
+                # Agent-to-agent content is assistant-role (Codex). Kept as its
+                # own message (never merged into a model turn, so its bytes stay
+                # stable); _ensure_tool_result_pairing places it after the tool
+                # results of the turn it arrived in.
+                full_text = ts_prefix + agent_text
+                if metadata_texts:
+                    full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
+                messages.append(inter_agent_message(full_text))
+                continue
             llm_role = "user"
             full_text = ts_prefix + text
 
@@ -2325,7 +2382,12 @@ async def build_llm_messages(
     # next — both get posted as separate ASSISTANT rows in the DB.
     i = 1
     while i < len(messages):
-        if messages[i].get("role") == "assistant" and messages[i - 1].get("role") == "assistant":
+        if (
+            messages[i].get("role") == "assistant"
+            and messages[i - 1].get("role") == "assistant"
+            and not is_inter_agent_message(messages[i])
+            and not is_inter_agent_message(messages[i - 1])
+        ):
             prev = messages[i - 1]
             curr = messages[i]
             merged = (prev.get("content", "") + "\n\n" + curr.get("content", "")).strip()
@@ -2463,7 +2525,9 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
             j = i + 1
             tool_run: List[Dict[str, Any]] = []
             non_tool_run: List[Dict[str, Any]] = []
-            while j < len(messages) and messages[j].get("role") != "assistant":
+            # Inter-agent messages are assistant-role but never a turn boundary:
+            # they ride with the turn's non-tool content, after its tool results.
+            while j < len(messages) and (messages[j].get("role") != "assistant" or is_inter_agent_message(messages[j])):
                 m2 = messages[j]
                 if id(m2) in pulled_forward:
                     # Already emitted under the assistant that declared it.
@@ -5702,6 +5766,7 @@ async def check_progress(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: int = 0,
+    pending_background_status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal. Canonical entry point — all
@@ -5751,6 +5816,10 @@ async def check_progress(
             ``verifier_plan``, ``verifier_execute``, ``verifier_post_dag``,
             ``verifier_browser``, ``verifier_claude_code``.
         agent_id: Optional agent ID for tracing.
+        pending_background_status: Optional factual status block of the
+            caller's background agents still running at completion time. It
+            is appended as the LAST user message (after all conversation
+            evidence) only when non-empty, so the cached prefix is unchanged.
 
     Returns:
         Dict with:
@@ -5911,6 +5980,8 @@ async def check_progress(
 
         # Resolve context pointers
         messages = await resolve_pointers_in_messages(messages, local_context=context)
+        if isinstance(pending_background_status, str) and pending_background_status.strip():
+            messages.append({"role": "user", "content": pending_background_status.strip()})
 
         # Debug: Log context size to detect contamination
         logger.info(
@@ -6200,6 +6271,7 @@ async def call_llm_activity(
     cache_sequence_id: Optional[str] = None,
     exclude_anthropic_family: bool = False,
     pending_context_token: Optional[str] = None,
+    environment_tail: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -6239,6 +6311,10 @@ async def call_llm_activity(
             block before appending extra_user_message. This lets productive
             param calls create/read one shared prefix without caching the unique
             task instruction.
+        environment_tail: Workflow-state seed for the unsaved environment status
+            tail (helpers/environment_tail.py). Appended after the conversation as
+            uncached runtime context, so the cached prefix is byte-identical; skipped
+            under Fast Mode / write-through (position keys include user turns).
 
     Returns:
         Dict with:
@@ -6328,6 +6404,12 @@ async def call_llm_activity(
             messages = messages_or_agent_id
             if llm_only_user_preamble:
                 messages = inject_llm_only_user_preamble(messages, llm_only_user_preamble)
+
+        if environment_tail and not (fast_mode_cache_enabled or write_through_enabled):
+            messages = append_environment_tail(
+                messages,
+                await build_environment_tail_text(environment_tail, agent_id=agent_id, user_id=user_id),
+            )
 
         if cache_before_extra_user_message and extra_user_message:
             _add_cache_breakpoint_before_extra_user_message(messages)
@@ -6633,9 +6715,7 @@ async def persist_response_schema_activity(agent_id: str, schema: Dict[str, Any]
         raise ResponseSchemaPersistenceError("Cannot persist response schema without credentials and fields")
     _safe_heartbeat("Saving accepted response schema")
     async with httpx.AsyncClient(timeout=30.0) as client:
-        await _persist_response_schema(
-            client, agent_id, schema, config.backend.api_url.rstrip("/"), api_key
-        )
+        await _persist_response_schema(client, agent_id, schema, config.backend.api_url.rstrip("/"), api_key)
 
 
 @activity.defn
@@ -6822,9 +6902,14 @@ async def set_response_schema_activity(
     except ResponseSchemaPersistenceError:
         raise
     except Exception as e:
-        if any(error_chain_has_type(e, kind) for kind in (
-            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-        )):
+        if any(
+            error_chain_has_type(e, kind)
+            for kind in (
+                "CancelledError",
+                "WorkflowGenerationSealed",
+                "GenerationHandoffRequested",
+            )
+        ):
             raise
         logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
         if persist:
@@ -7381,7 +7466,11 @@ async def call_planner_llm_activity(
                 world_time_cursor_ms=world_time_cursor_ms,
             )
             world_ms = world_time_cursor_ms
-        current = datetime.fromtimestamp(world_ms / 1000, timezone.utc) if world_ms is not None else datetime.now(timezone.utc)
+        current = (
+            datetime.fromtimestamp(world_ms / 1000, timezone.utc)
+            if world_ms is not None
+            else datetime.now(timezone.utc)
+        )
         system_prompt += f"\n\nCurrent UTC date: {current.date().isoformat()}."
         prompt_elapsed = time.perf_counter() - prompt_start
         logger.info(f"[TIMING] Planner system prompt build: {prompt_elapsed * 1000:.1f}ms")

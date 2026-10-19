@@ -275,6 +275,9 @@ async def resolve_pointers_in_messages(
                 user_id=user_id,
             )
             if new_content != content:
+                # Keep a str-subclass marker (InterAgentText / UncachedContextText).
+                if type(content) is not str:
+                    new_content = type(content)(new_content)
                 resolved.append({**msg, "content": new_content})
             else:
                 resolved.append(msg)

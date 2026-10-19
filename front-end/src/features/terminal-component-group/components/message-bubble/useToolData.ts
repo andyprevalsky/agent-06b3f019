@@ -2,11 +2,12 @@
  * Hook that flattens the Message metadata shape into the `ToolMessageData` a
  * generic tool card expects. Streaming messages and ASSISTANT text messages
  * (no file_pointer) with content are also modeled as synthetic "Thought" tool
- * cards.
+ * cards. Agent-to-agent rows map through agentToolData.ts first.
  */
 import { useMemo } from 'react';
 import { userFacingMessageText } from '@/lib/userFacingMessage';
 import type { Message } from '../../hooks';
+import { buildAgentToolData } from './agentToolData';
 import type { ToolMessageData } from './types';
 
 interface UseToolDataArgs {
@@ -25,6 +26,11 @@ export function useToolData({
   return useMemo(() => {
     // Streaming messages render as text, not as a "Thought" tool card.
     if (isStreaming) return null;
+
+    // Agent-to-agent rows (messages, completions, agent tools) are tool cards,
+    // never a user bubble or a synthetic "Thought" — even with role ASSISTANT.
+    const agentData = buildAgentToolData(message);
+    if (agentData) return agentData;
 
     // ASSISTANT messages without an attachment render as synthetic "Thought" cards.
     // Status is always FINISHED: the card has no typing animation, so a

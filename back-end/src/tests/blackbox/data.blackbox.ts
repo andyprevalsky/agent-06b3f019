@@ -43,6 +43,7 @@
 import { config } from 'dotenv';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { testGrepAgentTaskPaths } from './data-agent-task-path.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -703,6 +704,11 @@ async function runAll() {
     {
       name: 'POST /data/grep -- agent_network source is valid',
       fn: testGrepAgentNetwork_sourceInValidList,
+    },
+    {
+      name: 'POST /data/grep -- trace_path /root/... scopes agent_network + agent_trajectories',
+      fn: () =>
+        testGrepAgentTaskPaths(ctx.userId!, { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! }),
     },
     // invariants
     { name: 'idempotency -- grep same on repeat', fn: testIdempotency_grep },

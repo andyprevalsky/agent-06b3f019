@@ -27,14 +27,19 @@ DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
 USE_SYSTEM_PG=false
 SEED_DUMP_SOURCE="$DB_CONTAINER"
+# The database this run resets. A Docker workspace owns its whole container, so
+# `victoria` inside it is private. System Postgres is one server shared by every
+# workspace on the host: resolve this workspace's own database there instead.
+LOCAL_DB_NAME=victoria
 
 use_system_postgres() {
     USE_SYSTEM_PG=true
     LOCAL_DB_PORT=5432
-    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:5432/victoria"
+    LOCAL_DB_NAME="$(workspace_system_pg_db_name "$REPO_ROOT")" || exit 1
+    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:5432/$LOCAL_DB_NAME"
     SEED_DUMP_SOURCE="system"
     DB_CONTAINER=""
-    echo "🐘 Using system Postgres on localhost:5432 (ROSE_USE_SYSTEM_PG)"
+    echo "🐘 Using system Postgres database $LOCAL_DB_NAME on localhost:5432 (ROSE_USE_SYSTEM_PG)"
 }
 
 start_system_postgres() {
@@ -204,16 +209,16 @@ fi
 # The key must be the DATABASE actually being reset, not the workspace:
 #   - Docker mode: each workspace owns its own container, so $DB_CONTAINER is
 #     both the workspace identity and the database identity.
-#   - System-PG mode: EVERY workspace targets the one shared
-#     localhost:5432/victoria. Keying on the per-workspace container name there
-#     would give each concurrent run a different lock and serialize nothing,
-#     which is precisely the wipe-each-other's-seed race this lock exists to
-#     stop. They must contend on one shared key.
+#   - System-PG mode: every workspace shares one server, so the key is the
+#     resolved database (workspace_system_pg_db_name), never the container
+#     name. Runs resolving the same database (e.g. the cloud identity's shared
+#     `victoria`) contend on one key; distinct workspaces reset distinct
+#     databases and need not wait for each other.
 #
 # Acquired after provisioning because that is where the mode is decided;
 # provisioning itself only creates/starts a server, it does not touch data.
 if $USE_SYSTEM_PG; then
-    acquire_workspace_db_lock "system-pg:localhost:5432/victoria"
+    acquire_workspace_db_lock "system-pg:localhost:5432/$LOCAL_DB_NAME"
 else
     acquire_workspace_db_lock "$DB_CONTAINER"
 fi
@@ -463,9 +468,9 @@ trap 'trap "" INT TERM; setup_db_signal_teardown 15' TERM
 echo "🧹 Resetting local database..."
 if $USE_SYSTEM_PG; then
     PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d postgres -tAc \
-        "SELECT 1 FROM pg_database WHERE datname = 'victoria'" | grep -q '^1$' \
-        || PGPASSWORD=postgres createdb -h localhost -p 5432 -U postgres victoria
-    PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d victoria \
+        "SELECT 1 FROM pg_database WHERE datname = '$LOCAL_DB_NAME'" | grep -q '^1$' \
+        || PGPASSWORD=postgres createdb -h localhost -p 5432 -U postgres "$LOCAL_DB_NAME"
+    PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d "$LOCAL_DB_NAME" \
         -v ON_ERROR_STOP=1 \
         -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' \
         -c 'GRANT ALL ON SCHEMA public TO postgres;' \
@@ -503,8 +508,8 @@ setup_db_run_interruptible bash -c \
     "$LOCAL_DB_URL"
 if $USE_SYSTEM_PG; then
     setup_db_run_interruptible bash -c \
-        'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh' \
-        "$LOCAL_DB_URL"
+        'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" LOCAL_DB_NAME="$1" bash scripts/apply-local-workflow-ddl.sh' \
+        "$LOCAL_DB_URL" "$LOCAL_DB_NAME"
 else
     setup_db_run_interruptible bash -c \
         'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" DB_CONTAINER="$1" LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh' \
@@ -524,7 +529,9 @@ BENCHMARK_SEED_PATH="$(
     bash "$SCRIPT_DIR/benchmark-seed-cache" materialize \
         "$REPO_ROOT/back-end/prisma/schema.prisma" \
         "$REPO_ROOT/.context/benchmarks/seed-cache" \
-        "$SEED_DUMP_SOURCE"
+        "$SEED_DUMP_SOURCE" \
+        "" \
+        "$LOCAL_DB_NAME"
 )"
 echo "   ✅ Local benchmark seed dump: $BENCHMARK_SEED_PATH"
 

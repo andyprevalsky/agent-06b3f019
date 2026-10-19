@@ -12,11 +12,14 @@ from tools.prompts.attempt_completion_with_result import (
     PROMPT as attempt_completion_with_result_prompt,
 )
 from tools.prompts.call_phone_number import PROMPT as call_phone_number_prompt
-from tools.prompts.grep import PROMPT as grep_prompt
 from tools.prompts.google_workspace_run import PROMPT as google_workspace_run_prompt
+from tools.prompts.grep import PROMPT as grep_prompt
+from tools.prompts.kill_agent import PROMPT as kill_agent_prompt
+from tools.prompts.list_agents import PROMPT as list_agents_prompt
 from tools.prompts.message_person import PROMPT as message_person_prompt
 from tools.prompts.people_search import PROMPT as people_search_prompt
 from tools.prompts.reasoning import PROMPT as reasoning_prompt
+from tools.prompts.send_message_to_agent import PROMPT as send_message_to_agent_prompt
 from tools.prompts.send_message_to_user import PROMPT as send_message_to_user_prompt
 from tools.prompts.send_message_to_user_execute_phase import (
     PROMPT as send_message_to_user_execute_phase_prompt,
@@ -36,6 +39,9 @@ TOOL_PROMPTS: dict[str, str] = {
     "send_message_to_user_execute_phase": send_message_to_user_execute_phase_prompt,
     "message_person": message_person_prompt,
     "call_phone_number": call_phone_number_prompt,
+    "list_agents": list_agents_prompt,
+    "send_message_to_agent": send_message_to_agent_prompt,
+    "kill_agent": kill_agent_prompt,
     # Research
     "grep": grep_prompt,
     "google_workspace_run": google_workspace_run_prompt,

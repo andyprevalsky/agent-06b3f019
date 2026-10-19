@@ -1,10 +1,15 @@
-/** Deduplicates TOOL messages while preserving explore-agent and wait_for step history. */
+/**
+ * Deduplicates TOOL messages while preserving explore-agent and wait_for step history.
+ * Background spawn rows (excludeFromModel) stay visible while the parent keeps
+ * thinking (see backgroundSpawnRows.ts).
+ */
 
 import { isExplorePlumbingCopy, userFacingMessageText } from '@/lib/userFacingMessage';
 import type { Message } from '../api';
 import type { ExploreStep, WaitForCheck } from '../types';
 import { isInternalLivenessTool, removeCancelledThoughtErrors } from './messageCleanup';
 import { deriveExploreStepTitle } from './exploreStepTitles';
+import { isBackgroundSpawnRow } from './backgroundSpawnRows';
 
 interface ExploreData {
   repMessageId: string;
@@ -123,6 +128,8 @@ function cleanOrphanedInProgress(tools: Message[], lastAssistantTimestamp: numbe
     if (m.metadata?.isUserAttentionMessage || m.metadata?.gate) return true;
     if (m.metadata?.agentType === 'explore') return true;
     if (m.metadata?.toolName === 'wait_for') return true;
+    // Background spawns keep running while the parent keeps thinking.
+    if (isBackgroundSpawnRow(m)) return true;
     const toolTime = new Date(m.timestamp).getTime();
     return toolTime >= lastAssistantTimestamp;
   });
@@ -151,6 +158,7 @@ function buildExploreStep(m: Message): ExploreStep {
     message,
     toolName: (m.metadata?.toolName as string) || '',
     toolCallId: (m.metadata?.toolCallId as string) || undefined,
+    agentTree: m.metadata?.agentTree,
   };
 }
 

@@ -284,9 +284,7 @@ def test_grep_tool_schema_exact_contract():
     assert _enum_values(schema["properties"]["source"]) == expected_sources
     assert _enum_values(schema["properties"]["sources"]) == expected_sources
     assert _enum_values(schema["properties"]["role"]) == {"USER", "ASSISTANT", "TOOL"}
-    assert _enum_values(schema["properties"]["record_kind"]) == {
-        "message", "llm_output", "llm_context", "all"
-    }
+    assert _enum_values(schema["properties"]["record_kind"]) == {"message", "llm_output", "llm_context", "all"}
     assert "pattern" not in schema.get("required", [])
 
     removed = {
@@ -484,6 +482,7 @@ def test_spawn_agent_browser_missing_url_raises():
     _assert_raises(
         lambda: SpawnAgentTool(
             tool="spawn_agent",
+            task_name="task_a",
             type="browser",
             goal=LONG_GOAL,
             output_schema=schema,
@@ -513,6 +512,7 @@ def test_spawn_agent_browser_recovers_start_url_from_goal():
     )
     tool = SpawnAgentTool(
         tool="spawn_agent",
+        task_name="task_a",
         type="browser",
         goal=(
             "Navigate to https://example-shop.test/test_payment?benchmark=agentcard-abandonment. "
@@ -574,6 +574,7 @@ def test_spawn_agent_browser_refuses_to_recover_cleartext_url():
     try:
         SpawnAgentTool(
             tool="spawn_agent",
+            task_name="task_a",
             type="browser",
             goal="Navigate to http://insecure.test/checkout and pay.",
             output_schema=schema,
@@ -609,6 +610,7 @@ def test_spawn_agent_general_purpose_missing_phase_raises():
     _assert_raises(
         lambda: SpawnAgentTool(
             tool="spawn_agent",
+            task_name="task_a",
             type="general_purpose",
             goal=LONG_GOAL,
             output_schema=schema,
@@ -631,6 +633,7 @@ def test_spawn_agent_for_each_items_and_csv_raises():
     _assert_raises(
         lambda: SpawnAgentTool(
             tool="spawn_agent",
+            task_name="task_a",
             type="for_each",
             goal=LONG_GOAL,
             output_schema=schema,
@@ -656,6 +659,7 @@ def test_spawn_agent_for_each_no_items_raises():
     _assert_raises(
         lambda: SpawnAgentTool(
             tool="spawn_agent",
+            task_name="task_a",
             type="for_each",
             goal=LONG_GOAL,
             output_schema=schema,
@@ -689,6 +693,7 @@ def test_spawn_agent_for_each_accepts_recursive_json_items():
 
     tool = SpawnAgentTool(
         tool="spawn_agent",
+        task_name="task_a",
         type="for_each",
         goal=LONG_GOAL,
         output_schema=schema,
@@ -706,6 +711,7 @@ def test_spawn_agent_browser_no_schema_raises():
     _assert_raises(
         lambda: SpawnAgentTool(
             tool="spawn_agent",
+            task_name="task_a",
             type="browser",
             goal=LONG_GOAL,
             start_url="https://example.com",
@@ -729,6 +735,7 @@ def test_spawn_agent_explore_with_schema_dropped():
     )
     t = SpawnAgentTool(
         tool="spawn_agent",
+        task_name="task_a",
         type="explore",
         goal=LONG_GOAL,
         output_schema=schema,
@@ -789,6 +796,7 @@ def test_response_schema_coerces_null_properties_for_primitive_fields():
 
     t = SpawnAgentTool(
         tool="spawn_agent",
+        task_name="task_a",
         type="general_purpose",
         goal=LONG_GOAL,
         start_phase="EXECUTE",
@@ -836,10 +844,20 @@ def test_response_schema_constraints_validate_at_tool_boundary():
     from pydantic import ValidationError
     from utils.tool_schemas import ResponseSchemaConfig
 
-    schema = ResponseSchemaConfig.model_validate({"fields": [
-        {"name": "items", "type": "list[object]", "required": True, "minItems": 2, "maxItems": 2,
-         "properties": [{"name": "note", "type": "str", "required": False, "maxLength": 20}]},
-    ]})
+    schema = ResponseSchemaConfig.model_validate(
+        {
+            "fields": [
+                {
+                    "name": "items",
+                    "type": "list[object]",
+                    "required": True,
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "properties": [{"name": "note", "type": "str", "required": False, "maxLength": 20}],
+                },
+            ]
+        }
+    )
     field = schema.model_dump()["fields"][0]
     assert field["minItems"] == field["maxItems"] == 2
     assert field["properties"][0]["required"] is False
@@ -850,8 +868,12 @@ def test_response_schema_constraints_validate_at_tool_boundary():
         {"name": "title", "type": "str", "required": True, "minItems": 1},
         {"name": "items", "type": "list[str]", "required": True, "maxLength": 10},
         {"name": "items", "type": "list[str]", "required": True, "minItems": -1},
-        {"name": "rows", "type": "list[object]", "required": True,
-         "properties": [{"name": "title", "type": "str", "minLength": 8, "maxLength": 2}]},
+        {
+            "name": "rows",
+            "type": "list[object]",
+            "required": True,
+            "properties": [{"name": "title", "type": "str", "minLength": 8, "maxLength": 2}],
+        },
     )
     for item in invalid:
         try:
@@ -873,6 +895,7 @@ def test_spawn_agent_browser_with_string_output_schema():
     )
     t = SpawnAgentTool(
         tool="spawn_agent",
+        task_name="task_a",
         type="browser",
         goal=LONG_GOAL,
         output_schema=raw_schema,
@@ -895,6 +918,7 @@ def test_spawn_agent_short_goal_allowed():
     )
     t = SpawnAgentTool(
         tool="spawn_agent",
+        task_name="task_a",
         type="general_purpose",
         goal="short",
         output_schema=schema,
@@ -916,6 +940,7 @@ def test_spawn_agent_browser_valid():
     )
     t = SpawnAgentTool(
         tool="spawn_agent",
+        task_name="task_a",
         type="browser",
         goal=LONG_GOAL,
         output_schema=schema,
@@ -1055,9 +1080,7 @@ async def run_all_tests():
     r.record(
         "explore_agent_action_model_accepts_documents_grep", test_explore_agent_action_model_accepts_documents_grep
     )
-    r.record(
-        "explore_agent_action_model_accepts_summary_grep", test_explore_agent_action_model_accepts_summary_grep
-    )
+    r.record("explore_agent_action_model_accepts_summary_grep", test_explore_agent_action_model_accepts_summary_grep)
     r.record("planner_assignable_tools", test_planner_assignable_tools)
     r.record(
         "gpa_kill_switch_swaps_spawn_schema_and_planner_enums",

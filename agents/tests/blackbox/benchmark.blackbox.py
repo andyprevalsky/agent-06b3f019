@@ -263,11 +263,13 @@ def test_hub_requests_preserve_external_proxy_routing():
         control(monkeypatch)
 
 
-
-
 def test_archived_diagnostic_projection_requires_authenticated_bindings():
-    from benchmarks.hub_upload_test import test_archived_diagnostic_projection_requires_authenticated_bindings as control
+    from benchmarks.hub_upload_test import (
+        test_archived_diagnostic_projection_requires_authenticated_bindings as control,
+    )
+
     control()
+
 
 def test_hub_upload_rejection_retains_safe_response_identity_without_retry():
     """A forbidden upload stays failed while preserving upstream correlation."""
@@ -1255,27 +1257,6 @@ def test_ci_should_fail_on_skipped_required_task():
     assert _ci_should_fail({"failed": 0}) is False
 
 
-def test_ci_permits_only_the_opt_in_agentcard_release_skip():
-    """The AgentCard sandbox release stall is a deploy-approved SKIP only behind its exact flag."""
-    from benchmarks.results import TaskResult
-    from benchmarks.run_benchmark import AGENTCARD_RELEASE_SKIP_REASON, _ci_should_fail
-
-    def skipped(reason: str) -> TaskResult:
-        return TaskResult(name="agent-payment-abandonment", passed=False, agent_id="agent-123",
-                          status="SKIPPED", progress_score=0, duration_seconds=1, cost_cents=0,
-                          message_count=0, failure_reason=reason)
-
-    summary = {"failed": 0, "skipped": 1}
-    stall = skipped(f"{AGENTCARD_RELEASE_SKIP_REASON}: owt_1 consumed")
-    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
-        assert _ci_should_fail(summary, [stall]) is False
-        assert _ci_should_fail(summary, [skipped("Cloud cleanup failed: payment: TimeoutError")]) is True
-        assert _ci_should_fail({"failed": 1, "skipped": 1}, [stall]) is True
-    for value in ("", "0", "true"):
-        with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": value}):
-            assert _ci_should_fail(summary, [stall]) is True
-
-
 def test_outreach_batch_has_timeout_floor():
     """Outreach batch keeps enough time for root research before row fanout."""
     from benchmarks.benchmark_tasks import get_timeout_floor
@@ -1745,6 +1726,7 @@ def test_response_schema_feedback_benchmark_declares_real_mid_run_message():
     assert task.mid_run_feedback == {
         "after_root_message_count": 2,
         "message": "Please keep going. Keep the final prose concise and easy to scan.",
+        "non_goal": True,
     }
     assert task.start_phase == "execute"
     assert task.runner == "agent"
@@ -1787,6 +1769,608 @@ def test_mid_run_feedback_schema_evaluator_requires_exact_stability():
     reason = _validate_mid_run_feedback_schema(task, changed)
     assert reason is not None
     assert "changed after non-goal feedback" in reason
+
+    # Only feedback declared non-goal pins the schema. Goal-changing feedback
+    # ("also include the lead investor") may legitimately refresh it.
+    assert task.mid_run_feedback.get("non_goal") is True
+    for name in ("explore-agent-mid-run-message", "browser-agent-mid-run-message", "tree-feedback-routing"):
+        goal_task = get_task_by_name(name)
+        assert not goal_task.mid_run_feedback.get("non_goal")
+        goal_task._mid_run_feedback_posted = True
+        goal_task._mid_run_feedback_initial_schema = initial_schema
+        assert _validate_mid_run_feedback_schema(goal_task, changed) is None, name
+
+
+def _tree_routing_fixture(*, research_hit: bool = False, outreach_hit: bool = True, signature: str = "Prevalskii"):
+    """Run-record shape the declared evaluators see: root + research + outreach -> 3 drafters."""
+    root, research, outreach = "root-0001", "research-01", "outreach-01"
+    drafters = [f"draft-0{i}" for i in range(1, 4)]
+    correction = "Correction for the outreach: sign every email as Andy Prevalskii, not Andy Prevalsky."
+    routed = {
+        "role": "USER",
+        "message": "From root: sign every email as Andy Prevalskii.",
+        "metadata": {"agentMessage": True, "fromAgentId": root, "fromGoal": "Prepare outreach"},
+    }
+    tree = {
+        root: {"parent_agent_id": None, "goal": "Prepare outreach", "status": "COMPLETED", "messages": []},
+        research: {
+            "parent_agent_id": root,
+            "goal": "Gather sourced market facts about AI agent platforms",
+            "status": "COMPLETED",
+            "messages": [routed] if research_hit else [{"role": "USER", "message": "Andy Prevalskii", "metadata": {}}],
+        },
+        outreach: {
+            "parent_agent_id": root,
+            "goal": "Pick 3 seed investors and coordinate email drafts",
+            "status": "COMPLETED",
+            "messages": [routed] if outreach_hit else [],
+        },
+    }
+    for drafter in drafters:
+        tree[drafter] = {
+            "parent_agent_id": outreach,
+            "goal": "Write one personalized email to an investor",
+            "status": "COMPLETED",
+            "messages": [],
+        }
+    drafts = [
+        {
+            "investor_name": f"Investor {i}",
+            "investor_firm": "Fund",
+            "subject": "Rose Labs",
+            "body": f"Hi\n\nAndy {signature}",
+        }
+        for i in range(3)
+    ]
+    return {
+        "agent": {"agent_id": root, "structured_output": {"drafts": drafts, "market_facts": ["fact"]}},
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": (
+                    f"Agent tree (root: {root}). Address = first column; pass it to send_message_to_agent.\n"
+                    f"- {root} [you] agent ACTIVE: Prepare outreach\n"
+                    f"  - {research} [your child] agent ACTIVE: Gather sourced market facts\n"
+                    f"  - {outreach} [your child] agent ACTIVE: Pick 3 seed investors"
+                ),
+                "metadata": {"toolName": "list_agents", "toolStatus": "FINISHED", "toolCallId": "la-1"},
+            },
+            {"role": "USER", "message": correction, "metadata": None},
+        ],
+        "_benchmark": {
+            "tree": tree,
+            "mid_run_feedback": {"posted": True, "message": correction, "active_layers": 3},
+        },
+    }
+
+
+def test_mid_run_feedback_active_depth_trigger_requires_unbroken_active_chain():
+    """`active_depth_at_least: 3` fires only for root+child+grandchild all active; old trigger still validates."""
+    from benchmarks.tree_feedback_routing import tree_trigger_ready, validate_mid_run_feedback
+
+    config = {"when": {"active_depth_at_least": 3}, "message": "fix"}
+    agents = [
+        {"agent_id": "r", "parent_agent_id": None, "status": "ACTIVE"},
+        {"agent_id": "c", "parent_agent_id": "r", "status": "ACTIVE"},
+        {"agent_id": "g", "parent_agent_id": "c", "status": "STARTING_UP"},
+    ]
+    ready, chain = tree_trigger_ready(config, agents, "r")
+    assert ready and [row["agent_id"] for row in chain] == ["r", "c", "g"]
+    assert [row["depth"] for row in chain] == [0, 1, 2]
+
+    # A completed middle layer breaks the chain even though the grandchild row is still active.
+    broken = [dict(a, status="COMPLETED") if a["agent_id"] == "c" else a for a in agents]
+    assert tree_trigger_ready(config, broken, "r")[0] is False
+    # Two layers only (wide but shallow) never fires.
+    shallow = agents[:2] + [{"agent_id": "c2", "parent_agent_id": "r", "status": "ACTIVE"}]
+    assert tree_trigger_ready(config, shallow, "r")[0] is False
+    # Paused root never fires.
+    paused = [dict(agents[0], status="PAUSED"), *agents[1:]]
+    assert tree_trigger_ready(config, paused, "r")[0] is False
+
+    validate_mid_run_feedback(config, "t")
+    validate_mid_run_feedback({"after_root_message_count": 2, "message": "keep going"}, "t")
+    for bad in (
+        {"message": "x"},
+        {"after_root_message_count": 2, "when": {"active_depth_at_least": 3}, "message": "x"},
+        {"when": {"active_depth_at_least": 1}, "message": "x"},
+        {"when": {"depth": 3}, "message": "x"},
+        {"when": {"active_depth_at_least": 3}, "message": " "},
+        {"after_root_message_count": 0, "message": "x"},
+    ):
+        try:
+            validate_mid_run_feedback(bad, "t")
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted invalid mid_run_feedback {bad}")
+
+
+async def test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence():
+    """The poll loop posts once when the tree reaches 3 active layers and records the chain."""
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("tree-feedback-routing")
+    schema = task.response_schema
+    states = [
+        [{"agent_id": "root", "parent_agent_id": None, "status": "ACTIVE"}],
+        [
+            {"agent_id": "root", "parent_agent_id": None, "status": "ACTIVE"},
+            {"agent_id": "out", "parent_agent_id": "root", "status": "ACTIVE"},
+            {"agent_id": "d1", "parent_agent_id": "out", "status": "ACTIVE"},
+        ],
+    ]
+    polls = {"n": 0}
+
+    async def fake_get_agent(_base, _aid):
+        polls["n"] += 1
+        status = "COMPLETED" if polls["n"] >= 4 else "ACTIVE"
+        return {"agent": {"agent_id": "root", "status": status, "response_schema": schema}, "messages": []}
+
+    async def fake_tree(_base, _aid):
+        return states[min(polls["n"] - 1, 1)]
+
+    posted: list[str] = []
+
+    async def fake_post(_base, _aid, message):
+        posted.append(message)
+        return True
+
+    with (
+        patch.object(bench, "get_agent", side_effect=fake_get_agent),
+        patch.object(bench, "get_agent_tree", side_effect=fake_tree),
+        patch.object(bench, "post_message", side_effect=fake_post),
+        patch.object(bench, "POLL_INTERVAL", 0),
+        patch.object(
+            bench,
+            "_fetch_tree_stats",
+            AsyncMock(
+                return_value={
+                    "agent_count": 0,
+                    "total_messages": 0,
+                    "total_cost_cents": 0,
+                    "active_count": 0,
+                    "failed_count": 0,
+                    "tree_tokens_in": 0,
+                    "tree_tokens_out": 0,
+                    "error_agents": [],
+                    "all_agents": [],
+                }
+            ),
+        ),
+    ):
+        await bench._poll_agent("http://x", "root", task, None, {})
+
+    assert posted == [task.mid_run_feedback["message"]]
+    evidence = task._mid_run_feedback_evidence
+    assert evidence["posted"] is True and evidence["active_layers"] == 3
+    assert [row["agent_id"] for row in evidence["active_chain"]] == ["root", "out", "d1"]
+
+
+def test_tree_feedback_routing_static_checks_grade_routing_and_signatures():
+    """Routing checks require outreach delivery, research precision, and corrected drafts."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    task = get_task_by_name("tree-feedback-routing")
+    statics = {e["id"]: e for e in task.evaluators if e["method"] == "static_check"}
+    assert set(statics) == {
+        "feedback_during_three_active_layers",
+        "routed_to_outreach_subtree",
+        "not_routed_to_research_subtree",
+        "drafts_use_corrected_signature",
+    }
+    # list_agents coverage is a check type, not a catalog requirement: a correct
+    # run may address agents from spawn results without listing the tree.
+    list_agents_probe = {
+        "id": "list_agents_listed_probe",
+        "method": "static_check",
+        "checks": [{"type": "list_agents_listed", "min_other_entries": 1}],
+    }
+
+    good = _tree_routing_fixture()
+    for evaluator in statics.values():
+        ok, reason = _run_declared_static_check(task, evaluator, good)
+        assert ok, (evaluator["id"], reason)
+
+    ok, reason = _run_declared_static_check(
+        task, statics["routed_to_outreach_subtree"], _tree_routing_fixture(outreach_hit=False)
+    )
+    assert not ok and "outreach" in reason
+    ok, reason = _run_declared_static_check(
+        task, statics["not_routed_to_research_subtree"], _tree_routing_fixture(research_hit=True)
+    )
+    assert not ok and "research" in reason
+    ok, reason = _run_declared_static_check(
+        task, statics["drafts_use_corrected_signature"], _tree_routing_fixture(signature="Prevalsky")
+    )
+    assert not ok and "Prevalsk" in reason
+
+    shallow = _tree_routing_fixture()
+    shallow["_benchmark"]["mid_run_feedback"]["active_layers"] = 2
+    ok, reason = _run_declared_static_check(task, statics["feedback_during_three_active_layers"], shallow)
+    assert not ok and "2 active layer" in reason
+    unposted = _tree_routing_fixture()
+    unposted["_benchmark"]["mid_run_feedback"] = {"posted": False}
+    assert not _run_declared_static_check(task, statics["feedback_during_three_active_layers"], unposted)[0]
+
+    # Ambiguous goals fall back to structure: the head with descendants is outreach.
+    ambiguous = _tree_routing_fixture()
+    ambiguous["_benchmark"]["tree"]["outreach-01"]["goal"] = "Research investors and draft emails"
+    ambiguous["_benchmark"]["tree"]["research-01"]["goal"] = "Research facts for the outreach emails"
+    for evaluator in statics.values():
+        assert _run_declared_static_check(task, evaluator, ambiguous)[0], evaluator["id"]
+
+    # Model-chosen task paths label a head when goals are ambiguous; never a hard-coded name.
+    pathed = _tree_routing_fixture(research_hit=True, outreach_hit=False)
+    pathed["_benchmark"]["tree"]["outreach-01"]["goal"] = "Handle part of the job"
+    pathed["_benchmark"]["tree"]["research-01"]["goal"] = "Handle part of the job"
+    pathed["_benchmark"]["tree"]["outreach-01"]["taskPath"] = "/root/market_facts"
+    pathed["_benchmark"]["tree"]["research-01"]["taskPath"] = "/root/investor_drafts"
+    # research-01 has no descendants but its path says drafts -> outreach; it received the marker.
+    ok, reason = _run_declared_static_check(task, statics["routed_to_outreach_subtree"], pathed)
+    assert ok, reason
+
+    # list_agents must have run and listed someone besides the caller.
+    no_listing = _tree_routing_fixture()
+    no_listing["messages"] = no_listing["messages"][1:]
+    ok, reason = _run_declared_static_check(task, list_agents_probe, no_listing)
+    assert not ok and "list_agents" in reason
+    self_only = _tree_routing_fixture()
+    self_only["messages"][0]["message"] = "Agent tree (root: root-0001).\n- root-0001 [you] agent ACTIVE: Prepare"
+    ok, reason = _run_declared_static_check(task, list_agents_probe, self_only)
+    assert not ok and "besides the caller" in reason
+    child_listing = _tree_routing_fixture()
+    listing_row = child_listing["messages"].pop(0)
+    child_listing["_benchmark"]["tree"]["outreach-01"]["messages"].append(listing_row)
+    assert _run_declared_static_check(task, list_agents_probe, child_listing)[0]
+
+
+def _bg_rows(bg: str, agent_type: str, *, address: str | None = None, launched: bool = True) -> list[dict]:
+    """Root rows for one activity-backed background spawn: started row (+ first IN_PROGRESS progress row).
+
+    Both live under the spawn's own tool-call id: the started row is the model's
+    result (hidden from the FE), the executor's rows are FE-only.
+    """
+    rows = [
+        {
+            "role": "TOOL",
+            "message": f"Started {agent_type} agent in background. Address: {address or bg}.",
+            "metadata": {
+                "toolCallId": bg,
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+                "runInBackground": True,
+                "hidden": True,
+                "backgroundTaskId": bg,
+                "backgroundAddress": address or bg,
+                "backgroundAgentType": agent_type,
+            },
+        }
+    ]
+    if launched:
+        progress_tool = "spawn_browser_agent" if agent_type == "browser" else "spawn_agent"
+        rows.append(
+            {
+                "role": "TOOL",
+                "message": "working",
+                "metadata": {
+                    "toolCallId": bg,
+                    "toolName": progress_tool,
+                    "toolStatus": "IN_PROGRESS",
+                    "agentType": agent_type,
+                    "excludeFromModel": True,
+                },
+            }
+        )
+    return rows
+
+
+def _bg_notification(bg: str, agent_type: str) -> dict:
+    return {
+        "role": "USER",
+        "message": f"Message Type: FINAL_ANSWER\nTask name: /root\nSender: {bg}\nPayload:\ndone",
+        "metadata": {
+            "agentNotification": True,
+            "toolName": "agent_notification",
+            "backgroundTaskId": bg,
+            "agentType": agent_type,
+            "status": "completed",
+        },
+    }
+
+
+def test_mid_run_feedback_background_task_trigger_detects_running_activity_task():
+    """`background_task_active` fires only for a launched, un-notified root task of the requested type."""
+    from benchmarks.tree_feedback_routing import (
+        background_tasks,
+        background_trigger_ready,
+        trigger_uses_background_task,
+        trigger_uses_tree,
+        validate_mid_run_feedback,
+    )
+
+    config = {"when": {"background_task_active": "explore"}, "message": "also X"}
+    validate_mid_run_feedback(config, "t")
+    validate_mid_run_feedback({"when": {"background_task_active": "browser"}, "message": "x"}, "t")
+    assert trigger_uses_background_task(config) and not trigger_uses_tree(config)
+    assert trigger_uses_tree({"when": {"active_depth_at_least": 3}, "message": "x"})
+    for bad in (
+        {"when": {"background_task_active": "general_purpose"}, "message": "x"},
+        {"when": {"background_task_active": "explore", "active_depth_at_least": 3}, "message": "x"},
+        {"when": {}, "message": "x"},
+    ):
+        try:
+            validate_mid_run_feedback(bad, "t")
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted invalid mid_run_feedback {bad}")
+
+    # Started but the activity has not posted progress yet: not running.
+    assert background_trigger_ready(config, _bg_rows("toolu_e1", "explore", launched=False)) == (False, None)
+    # Launched explore: fires with the task identity.
+    rows = _bg_rows("toolu_e1", "explore", address="/root/funding_research")
+    ready, task = background_trigger_ready(config, rows)
+    assert ready and task["background_task_id"] == "toolu_e1" and task["address"] == "/root/funding_research"
+    # A running browser task does not satisfy an explore trigger.
+    assert background_trigger_ready(config, _bg_rows("toolu_b1", "browser"))[0] is False
+    # Completion notification ends it, even if late progress rows were posted out of order.
+    finished = rows + [_bg_notification("toolu_e1", "explore")]
+    assert background_trigger_ready(config, finished)[0] is False
+    # A second, still-running explore task fires after the first finished.
+    ready, task = background_trigger_ready(config, finished + _bg_rows("toolu_e2", "explore"))
+    assert ready and task["background_task_id"] == "toolu_e2"
+    # General-purpose background spawns are child agents, not inbox tasks.
+    gp = _bg_rows("toolu_g1", "general_purpose")
+    assert background_tasks(gp) == [] and background_trigger_ready(config, gp)[0] is False
+    # Model-visible "started" rows never count as progress of their own task.
+    assert background_tasks(_bg_rows("toolu_e3", "explore", launched=False))[0]["running"] is False
+
+
+async def test_mid_run_feedback_background_trigger_posts_once_with_task_evidence():
+    """The poll loop posts once when the root's explore task is running and records which task it was."""
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("explore-agent-mid-run-message")
+    schema = task.response_schema
+    transcripts = [[], _bg_rows("toolu_e1", "explore", launched=False), _bg_rows("toolu_e1", "explore")]
+    polls = {"n": 0}
+
+    async def fake_get_agent(_base, _aid):
+        polls["n"] += 1
+        status = "COMPLETED" if polls["n"] >= 5 else "ACTIVE"
+        messages = transcripts[min(polls["n"] - 1, 2)]
+        return {"agent": {"agent_id": "root", "status": status, "response_schema": schema}, "messages": messages}
+
+    posted: list[str] = []
+
+    async def fake_post(_base, _aid, message):
+        posted.append(message)
+        return True
+
+    tree = AsyncMock(side_effect=AssertionError("background trigger must not poll the tree endpoint"))
+    with (
+        patch.object(bench, "get_agent", side_effect=fake_get_agent),
+        patch.object(bench, "get_agent_tree", tree),
+        patch.object(bench, "post_message", side_effect=fake_post),
+        patch.object(bench, "POLL_INTERVAL", 0),
+        patch.object(
+            bench,
+            "_fetch_tree_stats",
+            AsyncMock(
+                return_value={
+                    "agent_count": 0,
+                    "total_messages": 0,
+                    "total_cost_cents": 0,
+                    "active_count": 0,
+                    "failed_count": 0,
+                    "tree_tokens_in": 0,
+                    "tree_tokens_out": 0,
+                    "error_agents": [],
+                    "all_agents": [],
+                }
+            ),
+        ),
+    ):
+        await bench._poll_agent("http://x", "root", task, None, {})
+
+    assert posted == [task.mid_run_feedback["message"]]
+    evidence = task._mid_run_feedback_evidence
+    assert evidence["posted"] is True
+    assert evidence["background_task"]["background_task_id"] == "toolu_e1"
+    assert evidence["background_task"]["agent_type"] == "explore"
+    assert evidence["root_message_count"] == 2
+
+
+def _background_routing_fixture(
+    agent_type: str,
+    *,
+    send: bool = True,
+    inbox: bool = True,
+    after_completion: bool = False,
+    listing_types: tuple[str, ...] = ("explore", "browser"),
+    progress_after: int = 2,
+    to_address: str | None = None,
+    satisfied: bool = True,
+) -> dict:
+    """Root transcript + structured output for the explore/browser mid-run message tasks."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task_name = "explore-agent-mid-run-message" if agent_type == "explore" else "browser-agent-mid-run-message"
+    feedback = get_task_by_name(task_name).mid_run_feedback["message"]
+    root, bg = "root-0001", "toolu_01"
+    marker = "Also include who led each round." if agent_type == "explore" else "Also add each story's points."
+    progress_tool = "spawn_browser_agent" if agent_type == "browser" else "spawn_agent"
+    listing_lines = [
+        f"Agent tree (root: {root}). Address = first column; pass it to send_message_to_agent.",
+        f"- {root} [you] agent ACTIVE: goal",
+    ]
+    for index, listed in enumerate(listing_types):
+        address = bg if listed == agent_type else f"toolu_other_{index}"
+        listing_lines.append(f"  - {address} [your background task] {listed} running: research")
+    messages = _bg_rows(bg, agent_type)
+    messages.append({"role": "USER", "message": feedback, "metadata": None})
+    messages.append(
+        {
+            "role": "TOOL",
+            "message": "\n".join(listing_lines),
+            "metadata": {"toolName": "list_agents", "toolStatus": "FINISHED", "toolCallId": "la-1"},
+        }
+    )
+    inbox_row = {
+        "role": "USER",
+        "message": marker,
+        "metadata": {
+            "agentMessage": True,
+            "fromAgentId": root,
+            "recipientTaskId": bg,
+            "excludeFromModel": True,
+        },
+    }
+    send_row = {
+        "role": "TOOL",
+        "message": f"Message sent to {to_address or bg}.",
+        "metadata": {
+            "toolName": "send_message_to_agent",
+            "toolStatus": "FINISHED",
+            "toolCallId": "sm-1",
+            "toAgentAddress": to_address or bg,
+            "targetAgentId": root,
+            "recipientTaskId": bg,
+        },
+    }
+    progress = [
+        {
+            "role": "TOOL",
+            "message": f"step {i}",
+            "metadata": {"toolCallId": f"step-{i}", "toolName": progress_tool, "toolStatus": "FINISHED"},
+        }
+        for i in range(progress_after)
+    ]
+    if after_completion:
+        messages += progress + [_bg_notification(bg, agent_type)]
+    if inbox:
+        messages.append(inbox_row)
+    if send:
+        messages.append(send_row)
+    if not after_completion:
+        messages += progress + [_bg_notification(bg, agent_type)]
+    if agent_type == "explore":
+        items = [
+            {
+                "company": f"Co {i}",
+                "amount": "$10M",
+                "announced_on": "2026-05-01",
+                "summary": f"Seed round. Led by Fund {i}." if satisfied else "Seed round.",
+                "source_url": f"https://example.com/{i}",
+            }
+            for i in range(8)
+        ]
+        structured = {"rounds": items}
+    else:
+        items = [
+            {
+                "rank": i + 1,
+                "title": f"Story {i}",
+                "comment_count": "12",
+                "first_commenter": "pg",
+                "notes": f"{100 + i} points" if satisfied else "popular",
+            }
+            for i in range(8)
+        ]
+        structured = {"stories": items}
+    return {
+        "agent": {"agent_id": root, "structured_output": structured},
+        "messages": messages,
+        "_benchmark": {
+            "tree": {root: {"parent_agent_id": None, "goal": "goal", "status": "COMPLETED", "messages": []}},
+            "mid_run_feedback": {
+                "posted": True,
+                "message": feedback,
+                "background_task": {"background_task_id": bg, "agent_type": agent_type, "address": bg},
+            },
+        },
+    }
+
+
+def test_background_task_mid_run_message_static_checks():
+    """Explore/browser tasks: feedback while running, list_agents lists the task, routed before completion."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+    from benchmarks.tree_feedback_routing import background_routing_trace
+
+    for agent_type, task_name in (
+        ("explore", "explore-agent-mid-run-message"),
+        ("browser", "browser-agent-mid-run-message"),
+    ):
+        task = get_task_by_name(task_name)
+        assert task.status == "ready" and task.bench == "pipeline-e2e" and task.deploy_category == "harness"
+        assert "smoke" not in (task.tags or [])
+        assert task.mid_run_feedback["when"] == {"background_task_active": agent_type}
+        # Natural feedback: routing is the model's job, never spelled out.
+        for text in (task.prompt, task.mid_run_feedback["message"]):
+            assert "send_message_to_agent" not in text and "list_agents" not in text
+        statics = {e["id"]: e for e in task.evaluators if e["method"] == "static_check"}
+        assert len(statics) == 3
+        by_type = {e["checks"][0]["type"]: e for e in statics.values()}
+        assert set(by_type) == {
+            "mid_run_feedback_background_task_active",
+            "background_task_message_routed",
+            "structured_output_signature",
+        }
+        # list_agents_listed stays a supported check type (probe below), not a
+        # catalog requirement: the spawn result already carries the address.
+        list_agents_probe = {
+            "id": "list_agents_listed_probe",
+            "method": "static_check",
+            "checks": [{"type": "list_agents_listed", "min_other_entries": 1, "required_types": [agent_type]}],
+        }
+        good_probe = _run_declared_static_check(task, list_agents_probe, _background_routing_fixture(agent_type))
+        assert good_probe[0], good_probe
+
+        good = _background_routing_fixture(agent_type)
+        for evaluator in statics.values():
+            ok, reason = _run_declared_static_check(task, evaluator, good)
+            assert ok, (task_name, evaluator["id"], reason)
+
+        routed = by_type["background_task_message_routed"]
+        # Tree-wide and path addresses resolve to the same task.
+        for address in ("root-0001/toolu_01", "/root/the_task"):
+            fixture = _background_routing_fixture(agent_type, to_address=address)
+            fixture["messages"][0]["metadata"]["backgroundPath"] = "/root/the_task"
+            assert _run_declared_static_check(task, routed, fixture)[0], address
+        for broken, needle in (
+            (_background_routing_fixture(agent_type, send=False), "no send_message_to_agent"),
+            (_background_routing_fixture(agent_type, inbox=False), "no inbox row"),
+            (_background_routing_fixture(agent_type, after_completion=True), "after the task had completed"),
+        ):
+            ok, reason = _run_declared_static_check(task, routed, broken)
+            assert not ok and needle in reason, (task_name, reason)
+        other_type = "browser" if agent_type == "explore" else "explore"
+        ok, reason = _run_declared_static_check(
+            task, list_agents_probe, _background_routing_fixture(agent_type, listing_types=(other_type,))
+        )
+        assert not ok and agent_type in reason
+        ok, reason = _run_declared_static_check(
+            task, by_type["structured_output_signature"], _background_routing_fixture(agent_type, satisfied=False)
+        )
+        assert not ok and "does not match" in reason
+        wrong_type = _background_routing_fixture(agent_type)
+        wrong_type["_benchmark"]["mid_run_feedback"]["background_task"]["agent_type"] = other_type
+        assert not _run_declared_static_check(task, by_type["mid_run_feedback_background_task_active"], wrong_type)[0]
+
+        trace = background_routing_trace(good, agent_type)
+        assert [t["background_task_id"] for t in trace["tasks"]] == ["toolu_01"]
+        assert trace["inbox_rows"] and trace["send_message_rows"] and trace["list_agents"]
+
+    # The browser must keep stepping after the message (its inbox is polled per step).
+    browser = get_task_by_name("browser-agent-mid-run-message")
+    routed = next(
+        e for e in browser.evaluators if e.get("checks") and e["checks"][0]["type"] == "background_task_message_routed"
+    )
+    ok, reason = _run_declared_static_check(browser, routed, _background_routing_fixture("browser", progress_after=0))
+    assert not ok and "progress row" in reason
 
 
 def test_toast_nopa_benchmark_uses_semantic_outcome_validation():
@@ -3266,9 +3850,7 @@ def _resumed_recording_archive_rows():
     )
 
     def row(action, status, **extra):
-        return {
-            "metadata": dict(identity, action_type=action, toolStatus=status, **extra)
-        }
+        return {"metadata": dict(identity, action_type=action, toolStatus=status, **extra)}
 
     first = row("recording", "IN_PROGRESS", toolCallId="first-start")
     saved = row(
@@ -3303,18 +3885,16 @@ def test_browser_archive_requires_each_resumed_recording_part():
     complete = rows + [latest]
     assert bench._agent_messages_ready_for_browser_hub_archive(complete)
     assert bench._agent_messages_ready_for_durable_browser_evidence(complete)
-    assert not bench._agent_messages_ready_for_durable_browser_evidence(
-        [rows[0], rows[2], latest, rows[3]]
-    ), "a later saved part concealed an earlier missing part"
+    assert not bench._agent_messages_ready_for_durable_browser_evidence([rows[0], rows[2], latest, rows[3]]), (
+        "a later saved part concealed an earlier missing part"
+    )
     for field, value in (
         ("workflowGeneration", "foreign-generation"),
         ("browser_url", "https://fixture.kernel.sh/browser/live/foreign-session"),
     ):
         foreign = deepcopy(latest)
         foreign["metadata"][field] = value
-        assert not bench._agent_messages_ready_for_durable_browser_evidence(
-            rows + [foreign]
-        ), field
+        assert not bench._agent_messages_ready_for_durable_browser_evidence(rows + [foreign]), field
     empty = deepcopy(latest)
     empty["metadata"].pop("recording_view_url")
     assert not bench._agent_messages_ready_for_durable_browser_evidence(rows + [empty])
@@ -3330,9 +3910,7 @@ async def test_browser_archive_refresh_waits_for_resumed_recording_part():
     complete = {"agent": {"status": "PAUSED"}, "messages": rows + [latest]}
     logs = {}
     with (
-        patch.object(
-            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
-        ) as tree,
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])) as tree,
         patch.object(
             bench,
             "get_agent",
@@ -3343,9 +3921,7 @@ async def test_browser_archive_refresh_waits_for_resumed_recording_part():
         observed = await bench._refresh_browser_archive_snapshot(
             "https://fixture.invalid", root, {}, logs, expected_agent_ids={root}
         )
-    assert get.await_count == tree.await_count == 2, (
-        "archive owner returned before resumed recording was attached"
-    )
+    assert get.await_count == tree.await_count == 2, "archive owner returned before resumed recording was attached"
     assert observed["messages"] == complete["messages"]
     assert len(logs["tree"][root]["messages"]) == len(complete["messages"])
 
@@ -3357,9 +3933,7 @@ async def test_browser_archive_missing_resumed_part_preserves_existing_deadline(
     root = "owned-root-generation"
     logs = {}
     with (
-        patch.object(
-            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
-        ),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
         patch.object(
             bench,
             "get_agent",
@@ -3378,9 +3952,7 @@ async def test_browser_archive_missing_resumed_part_preserves_existing_deadline(
         except TimeoutError:
             pass
         else:
-            raise AssertionError(
-                "missing resumed recording bypassed the archive deadline"
-            )
+            raise AssertionError("missing resumed recording bypassed the archive deadline")
     assert logs["browser_archive_observation"]["ready"] is False
 
 
@@ -4675,10 +5247,6 @@ async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
             timeout_seconds=0,
             poll_interval_seconds=0,
         )
-
-
-
-
 
 
 async def test_abandonment_timeout_names_the_unreleased_agentcard_transfer():
@@ -12230,10 +12798,21 @@ async def test_declared_judge_without_verdict_is_judge_unavailable_error():
     )
     user_profile = {
         "userId": "test-user",
-        **dict.fromkeys((
-            "name", "email", "phone", "deliveryRecipientName", "addressLine1", "addressLine2",
-            "city", "state", "postalCode", "country", "systemName",
-        )),
+        **dict.fromkeys(
+            (
+                "name",
+                "email",
+                "phone",
+                "deliveryRecipientName",
+                "addressLine1",
+                "addressLine2",
+                "city",
+                "state",
+                "postalCode",
+                "country",
+                "systemName",
+            )
+        ),
     }
     deps = SimpleNamespace(
         is_local_base_url=lambda _: True,
@@ -12342,7 +12921,9 @@ async def test_sms_runner_harness_error_has_explicit_error_outcome():
         stack.enter_context(patch.object(sms, "_live_agent_ids", side_effect=RuntimeError("database unavailable")))
         stack.enter_context(patch.object(sms, "_cleanup"))
         stack.enter_context(patch.object(sms, "_apply_web_search_fixture"))
-        result = await sms.run_sms_task("http://127.0.0.1:32001", SimpleNamespace(name="sms-error", timeout_seconds=420), deps)
+        result = await sms.run_sms_task(
+            "http://127.0.0.1:32001", SimpleNamespace(name="sms-error", timeout_seconds=420), deps
+        )
     assert result.passed is False
     assert result.benchmark_status == "ERROR", result.benchmark_status
 
@@ -20941,7 +21522,12 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity", "live-tamy-account-snapshot", "live-aman-food-plan-identity"}
+    assert LIVE_FIXTURE_NAMES == {
+        "live",
+        "live-tamy-identity",
+        "live-tamy-account-snapshot",
+        "live-aman-food-plan-identity",
+    }
 
 
 def test_amazon_passkey_scenario_is_exclusive_and_restorable():
@@ -21016,9 +21602,12 @@ def test_live_fixture_is_single_and_explicit():
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
-        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity", "live-tamy-account-snapshot", "live-aman-food-plan-identity"}, (
-            f"{t.name}: noncanonical live fixture"
-        )
+        assert set(env["live_fixtures"]) <= {
+            "live",
+            "live-tamy-identity",
+            "live-tamy-account-snapshot",
+            "live-aman-food-plan-identity",
+        }, f"{t.name}: noncanonical live fixture"
         if env.get("mode") == "synthetic":
             assert env["live_fixtures"] == [], f"{t.name}: synthetic must not carry live fixtures"
 
@@ -22635,67 +23224,131 @@ async def test_agentcard_release_skip_rejects_independent_native_retirement_fail
     import uuid
     from benchmarks import run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
+
     # Synthetic live response; the archived allocation has no live Stripe provenance.
     lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
-    for native in ('none', 'joined', 'failed'):
-        task = deepcopy(get_task_by_name('agent-payment-production-abandonment'))
+    for native in ("none", "joined", "failed"):
+        task = deepcopy(get_task_by_name("agent-payment-production-abandonment"))
         calls = []
-        task.world_model_mode = 'simulate'
-        if native != 'none':
-            task.wmh_initial_state = {'structured': {'schema':'offline-retirement-control', 'as_of_utc':'2026-10-15T00:00:00Z'}, 'scratchpad':''}
+        task.world_model_mode = "simulate"
+        if native != "none":
+            task.wmh_initial_state = {
+                "structured": {"schema": "offline-retirement-control", "as_of_utc": "2026-10-15T00:00:00Z"},
+                "scratchpad": "",
+            }
         else:
             task.wmh_initial_state = None
         actual_client = httpx.AsyncClient
+
         def transport(request):
-            assert request.url.host == 'fixture.invalid'
+            assert request.url.host == "fixture.invalid"
             payload = json.loads(request.content)
-            assert payload['world_model_mode'] == 'simulate'
-            assert request.method == 'POST' and request.url.path == '/api/agents'
-            return httpx.Response(201, json={'agent_id': lifecycle['agentId']})
+            assert payload["world_model_mode"] == "simulate"
+            assert request.method == "POST" and request.url.path == "/api/agents"
+            return httpx.Response(201, json={"agent_id": lifecycle["agentId"]})
+
         def client(*args, **kwargs):
             return actual_client(*args, transport=httpx.MockTransport(transport), **kwargs)
+
         class NativeClient:
-            def __init__(self, base): assert base == 'http://native.test'
+            def __init__(self, base):
+                assert base == "http://native.test"
+
             async def create_session(self, model, **kwargs):
-                assert model == 'rose-test'
-                assert kwargs['session_scope_id'] == lifecycle['agentId']
-                assert kwargs['seed_state']['structured']['root_agent_id'] == lifecycle['agentId']
-                assert kwargs['seed_state']['structured']['root_goal'] == kwargs['task']
-                return 'owned-session'
+                assert model == "rose-test"
+                assert kwargs["session_scope_id"] == lifecycle["agentId"]
+                assert kwargs["seed_state"]["structured"]["root_agent_id"] == lifecycle["agentId"]
+                assert kwargs["seed_state"]["structured"]["root_goal"] == kwargs["task"]
+                return "owned-session"
+
             async def end_session(self, model, sid):
-                assert (model, sid) == ('rose-test', 'owned-session')
+                assert (model, sid) == ("rose-test", "owned-session")
                 calls.append((model, sid))
-                if native == 'failed': raise RuntimeError('exact owned retirement unavailable')
-                return dict(engine='experiential', join_verified=True, ended=sid, session_id=sid, session_scope_id=lifecycle['agentId'], revision=1, state={}, history=[], usage={})
-        cleanup = AsyncMock(side_effect=AssertionError('duplicate financial cleanup'))
+                if native == "failed":
+                    raise RuntimeError("exact owned retirement unavailable")
+                return dict(
+                    engine="experiential",
+                    join_verified=True,
+                    ended=sid,
+                    session_id=sid,
+                    session_scope_id=lifecycle["agentId"],
+                    revision=1,
+                    state={},
+                    history=[],
+                    usage={},
+                )
+
+        cleanup = AsyncMock(side_effect=AssertionError("duplicate financial cleanup"))
         delete = AsyncMock()
         archive = AsyncMock(return_value=(None, None))
-        logs = {'failure_evidence': {'errors': []}}
-        stall = bench._payment_reconciliation_timeout('pending', lifecycle, task_name=task.name)
+        logs = {"failure_evidence": {"errors": []}}
+        stall = bench._payment_reconciliation_timeout("pending", lifecycle, task_name=task.name)
         assert isinstance(stall, bench.AgentCardReleaseStall)
         with contextlib.ExitStack() as stack:
-            stack.enter_context(patch.dict(os.environ, {'BENCHMARK_WORLD_MODEL_MODE':'simulate','WMH_BASE_URL':'http://native.test','WMH_MODEL_NAME':'rose-test','WMH_ENGINE':'experiential'}))
-            for key in ('WMH_SESSION_ID', 'WORLD_MODEL_SESSION_ID'):
+            stack.enter_context(
+                patch.dict(
+                    os.environ,
+                    {
+                        "BENCHMARK_WORLD_MODEL_MODE": "simulate",
+                        "WMH_BASE_URL": "http://native.test",
+                        "WMH_MODEL_NAME": "rose-test",
+                        "WMH_ENGINE": "experiential",
+                    },
+                )
+            )
+            for key in ("WMH_SESSION_ID", "WORLD_MODEL_SESSION_ID"):
                 stack.enter_context(patch.dict(os.environ))
                 os.environ.pop(key, None)
-            stack.enter_context(patch.object(bench.uuid, 'uuid4', return_value=uuid.UUID(lifecycle['agentId'])))
-            stack.enter_context(patch.object(bench.httpx, 'AsyncClient', client))
-            for name in ('prepare_sandbox_payment_residual', '_preflight_production_payment_identity', '_apply_live_fixtures', '_apply_memory_fixtures', '_apply_auth_test_site', '_restore_live_fixture_scenarios_async', '_release_auth_test_site'):
+            stack.enter_context(patch.object(bench.uuid, "uuid4", return_value=uuid.UUID(lifecycle["agentId"])))
+            stack.enter_context(patch.object(bench.httpx, "AsyncClient", client))
+            for name in (
+                "prepare_sandbox_payment_residual",
+                "_preflight_production_payment_identity",
+                "_apply_live_fixtures",
+                "_apply_memory_fixtures",
+                "_apply_auth_test_site",
+                "_restore_live_fixture_scenarios_async",
+                "_release_auth_test_site",
+            ):
                 stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
-            for name, value in {'_api_headers':AsyncMock(return_value={}), 'WMHHttpClient':NativeClient, '_run_with_agent_execution_backstop':AsyncMock(side_effect=stall), '_capture_task_failure_evidence':AsyncMock(return_value=({'messages': [], '_benchmark': {'payment_lifecycle':deepcopy(lifecycle)}}, logs)), 'finalize_archive_and_score_world_model':archive, 'ensure_payment_lifecycle_cleanup':cleanup, 'delete_agent':delete, '_run_user_id_override_for_task':lambda *_args:None}.items():
+            for name, value in {
+                "_api_headers": AsyncMock(return_value={}),
+                "WMHHttpClient": NativeClient,
+                "_run_with_agent_execution_backstop": AsyncMock(side_effect=stall),
+                "_capture_task_failure_evidence": AsyncMock(
+                    return_value=({"messages": [], "_benchmark": {"payment_lifecycle": deepcopy(lifecycle)}}, logs)
+                ),
+                "finalize_archive_and_score_world_model": archive,
+                "ensure_payment_lifecycle_cleanup": cleanup,
+                "delete_agent": delete,
+                "_run_user_id_override_for_task": lambda *_args: None,
+            }.items():
                 stack.enter_context(patch.object(bench, name, value))
-            result = await bench.run_single_task('https://fixture.invalid', task)
-        cleanup.assert_not_awaited(); delete.assert_awaited_once()
-        assert len(calls) == (native != 'none'), calls
-        assert result.logs['agentcard_release_stall_lifecycle'] == lifecycle
-        expected = 'ERROR' if native == 'failed' else 'SKIPPED'
-        assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False), (native, result.status, result.failure_reason)
-        assert bench._is_permitted_agentcard_release_skip(result) is (native != 'failed')
-        assert archive.await_args.kwargs['benchmark_status'] == expected
-        if native == 'failed':
-            assert result.logs['wmh_retirement_error'] == dict(type='RuntimeError', message='exact owned retirement unavailable', session_id='owned-session', session_scope_id=lifecycle['agentId'], join_verified=False, cost_verified=False)
-            assert 'exact owned retirement unavailable' in result.failure_reason
-        elif native == 'joined': assert result.logs['wmh_retirement']['join_verified'] is True
+            result = await bench.run_single_task("https://fixture.invalid", task)
+        cleanup.assert_not_awaited()
+        delete.assert_awaited_once()
+        assert len(calls) == (native != "none"), calls
+        assert result.logs["agentcard_release_stall_lifecycle"] == lifecycle
+        expected = "ERROR" if native == "failed" else "SKIPPED"
+        assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False), (
+            native,
+            result.status,
+            result.failure_reason,
+        )
+        assert bench._is_permitted_agentcard_release_skip(result) is (native != "failed")
+        assert archive.await_args.kwargs["benchmark_status"] == expected
+        if native == "failed":
+            assert result.logs["wmh_retirement_error"] == dict(
+                type="RuntimeError",
+                message="exact owned retirement unavailable",
+                session_id="owned-session",
+                session_scope_id=lifecycle["agentId"],
+                join_verified=False,
+                cost_verified=False,
+            )
+            assert "exact owned retirement unavailable" in result.failure_reason
+        elif native == "joined":
+            assert result.logs["wmh_retirement"]["join_verified"] is True
 
 
 async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown():
@@ -22880,6 +23533,30 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
         assert result.logs["cloud_cleanup_evidence"]["warnings"] == []
 
 
+def test_fly_infra_detector_ignores_collector_placeholders():
+    """A '[fly.io] 0 logs ... (N total captured)' placeholder is not a log line.
+
+    Regression: on --local runs the prod Fly stream never contains local agents,
+    and a captured-line count containing "429" made every agent an INFRA ERROR.
+    """
+    import benchmarks.logs as bench_logs
+    from benchmarks.run_benchmark import _detect_infra_errors_from_fly
+
+    class _Collector:
+        def get_logs_for_agent(self, agent_id):
+            if agent_id == "real":
+                return ["2026-10-19T03:00:00Z worker got 429 Too Many Requests from provider"]
+            return [f"[fly.io] 0 logs for agent {agent_id[:12]} (674429 total captured)"]
+
+    previous = bench_logs._fly_collector
+    bench_logs._fly_collector = _Collector()
+    try:
+        assert _detect_infra_errors_from_fly(["placeholder-agent"]) == []
+        assert len(_detect_infra_errors_from_fly(["real"])) == 1
+    finally:
+        bench_logs._fly_collector = previous
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
@@ -22895,17 +23572,46 @@ async def run_all_tests():
         "test_lantern_latest_completion_and_cache_evidence_are_strict",
     ):
         r.record(name, getattr(lantern_people_trace_tests, name))
-    r.record("archived_diagnostic_projection_requires_authenticated_bindings", test_archived_diagnostic_projection_requires_authenticated_bindings)
-    await r.record_async("production_agentcard_release_stall_default_skip", test_production_agentcard_release_stall_is_skippable_by_default)
-    r.record("agentcard_release_skip_rejects_independent_failures", test_agentcard_release_skip_rejects_independent_lifecycle_failures)
-    await r.record_async("agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip)
-    await r.record_async("agentcard_release_skip_execution_cleanup", test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup)
-    await r.record_async("agentcard_release_skip_native_retirement_strict", test_agentcard_release_skip_rejects_independent_native_retirement_failure)
-    await r.record_async("agentcard_release_skip_preserves_task_failure", test_agentcard_release_stall_cannot_replace_an_independent_task_failure)
-    await r.record_async("agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown)
-    await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown)
-    await r.record_async("agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict)
-    await r.record_async("agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict)
+    r.record(
+        "archived_diagnostic_projection_requires_authenticated_bindings",
+        test_archived_diagnostic_projection_requires_authenticated_bindings,
+    )
+    await r.record_async(
+        "production_agentcard_release_stall_default_skip",
+        test_production_agentcard_release_stall_is_skippable_by_default,
+    )
+    r.record(
+        "agentcard_release_skip_rejects_independent_failures",
+        test_agentcard_release_skip_rejects_independent_lifecycle_failures,
+    )
+    await r.record_async(
+        "agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip
+    )
+    await r.record_async(
+        "agentcard_release_skip_execution_cleanup",
+        test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup,
+    )
+    await r.record_async(
+        "agentcard_release_skip_native_retirement_strict",
+        test_agentcard_release_skip_rejects_independent_native_retirement_failure,
+    )
+    await r.record_async(
+        "agentcard_release_skip_preserves_task_failure",
+        test_agentcard_release_stall_cannot_replace_an_independent_task_failure,
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_ci",
+        test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown,
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict
+    )
     r.record(
         "agentcard_release_policy_rejects_incomplete_foreign_state",
         test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state,
@@ -23690,6 +24396,34 @@ async def run_all_tests():
     r.record(
         "mid_run_feedback_schema_evaluator",
         test_mid_run_feedback_schema_evaluator_requires_exact_stability,
+    )
+    r.record(
+        "mid_run_feedback_active_depth_trigger",
+        test_mid_run_feedback_active_depth_trigger_requires_unbroken_active_chain,
+    )
+    await r.record_async(
+        "mid_run_feedback_depth_trigger_poll_loop",
+        test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence,
+    )
+    r.record(
+        "fly_infra_detector_ignores_placeholders",
+        test_fly_infra_detector_ignores_collector_placeholders,
+    )
+    r.record(
+        "tree_feedback_routing_static_checks",
+        test_tree_feedback_routing_static_checks_grade_routing_and_signatures,
+    )
+    r.record(
+        "mid_run_feedback_background_task_trigger",
+        test_mid_run_feedback_background_task_trigger_detects_running_activity_task,
+    )
+    await r.record_async(
+        "mid_run_feedback_background_trigger_poll_loop",
+        test_mid_run_feedback_background_trigger_posts_once_with_task_evidence,
+    )
+    r.record(
+        "background_task_mid_run_message_static_checks",
+        test_background_task_mid_run_message_static_checks,
     )
     r.record(
         "toast_nopa_semantic_outcome_validation",
@@ -24625,14 +25359,13 @@ async def run_all_tests():
         "payment_setup_resume_stays_exclusive_beside_event_ticket",
         test_payment_setup_resume_stays_exclusive_beside_event_ticket,
     )
-    r.record(
-        "browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part
-    )
+    r.record("browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part)
     await r.record_async(
         "browser_archive_waits_resumed_recording_part", test_browser_archive_refresh_waits_for_resumed_recording_part
     )
     await r.record_async(
-        "browser_archive_missing_resumed_part_deadline", test_browser_archive_missing_resumed_part_preserves_existing_deadline
+        "browser_archive_missing_resumed_part_deadline",
+        test_browser_archive_missing_resumed_part_preserves_existing_deadline,
     )
     r.record(
         "agent_messages_ready_for_browser_hub_archive_waits_for_recording",

@@ -38,6 +38,9 @@ function buildAgentUpdateData(body: UpdateAgentBody): Record<string, unknown> {
   if (body.tools_in_use !== undefined) {
     data.toolsInUse = body.tools_in_use;
   }
+  if (body.background_tasks !== undefined) {
+    data.backgroundTasks = body.background_tasks;
+  }
   if (body.progress !== undefined) {
     data.progress = body.progress;
   }

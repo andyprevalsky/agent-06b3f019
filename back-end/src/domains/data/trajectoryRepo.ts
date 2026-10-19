@@ -18,6 +18,8 @@ export interface AgentTrajectoryRow {
   agentTitle: string | null;
   archivePath: string | null;
   traceKind: string;
+  /** The agent's task path (/root/...) in its tree; null for pre-path or deleted agents. */
+  agentPath: string | null;
 }
 
 interface Query {
@@ -35,17 +37,20 @@ function where(query: Query): Prisma.Sql {
     // Keep this predicate even after the indexer is fixed: older derived rows
     // must never become visible through a path, role, or cursor query.
     Prisma.sql`s.role <> 'SYSTEM'`,
-    // A prior trajectory is either a finalized archive or a terminal live run.
-    // Concurrent active agents otherwise bury the older evidence in results.
-    Prisma.sql`(s."archivePath" IS NOT NULL OR EXISTS (
+  ];
+  // A prior trajectory is either a finalized archive or a terminal live run.
+  // Concurrent active agents otherwise bury the older evidence in results. An
+  // agent task path (/root/...) names the caller's own live tree explicitly.
+  if (filters?.taskPath === undefined) {
+    clauses.push(Prisma.sql`(s."archivePath" IS NOT NULL OR EXISTS (
       SELECT 1 FROM "Agent" root
       WHERE root.id = s."rootAgentId"
         AND root.status IN (
           'COMPLETED'::"AgentStatus", 'FAILED'::"AgentStatus",
           'OUT_OF_CREDITS'::"AgentStatus", 'COST_LIMIT_REACHED'::"AgentStatus"
         )
-    ))`,
-  ];
+    ))`);
+  }
   if (query.excludeRootAgentId !== undefined) {
     clauses.push(Prisma.sql`s."rootAgentId" <> ${query.excludeRootAgentId}`);
   }
@@ -61,6 +66,8 @@ function where(query: Query): Prisma.Sql {
   }
   if (filters?.pathAgentId !== undefined)
     clauses.push(Prisma.sql`s."agentId" = ${filters.pathAgentId}`);
+  if (filters?.pathAgentIds !== undefined && filters.pathAgentIds.length > 0)
+    clauses.push(Prisma.sql`s."agentId" IN (${Prisma.join(filters.pathAgentIds)})`);
   if (filters?.pathRole !== undefined) clauses.push(Prisma.sql`s.role = ${filters.pathRole}`);
   if (filters?.pathMessageId !== undefined)
     clauses.push(Prisma.sql`s."messageId" = ${filters.pathMessageId}`);
@@ -143,8 +150,11 @@ export async function searchAgentTrajectories(
   return prisma.$queryRaw<AgentTrajectoryRow[]>`
     SELECT s."messageId", s."rootAgentId", s."agentId", s.role,
       s.surface, s."createdAt", s."searchText", s."agentGoal",
-      s."agentTitle", s."archivePath", s."traceKind"
+      s."agentTitle", s."archivePath", s."traceKind",
+      CASE WHEN a.id IS NULL THEN NULL WHEN a."taskPath" IS NOT NULL THEN a."taskPath"
+        WHEN a."parentAgentId" IS NULL THEN '/root' END AS "agentPath"
     FROM "AgentTrajectorySearch" s
+    LEFT JOIN "Agent" a ON a.id = s."agentId"
     WHERE ${predicate} ${pagePredicate}
     ORDER BY ${ordering}
     LIMIT ${take}

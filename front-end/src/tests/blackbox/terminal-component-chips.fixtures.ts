@@ -21,5 +21,9 @@ export function makeAgentTreeNode(overrides: Record<string, unknown> = {}) {
     outputSchema: overrides.outputSchema,
     structuredOutput: overrides.structuredOutput,
     failureContext: overrides.failureContext,
+    createdAt: overrides.createdAt,
+    updatedAt: overrides.updatedAt,
+    taskPath: overrides.taskPath,
+    backgroundTasks: overrides.backgroundTasks,
   };
 }

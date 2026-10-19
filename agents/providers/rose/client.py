@@ -62,6 +62,7 @@ from providers.rose.errors import (
 )
 from providers.rose.foundry import foundry_complete, foundry_configured
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
+from providers.rose.inter_agent_context import settle_trailing_inter_agent_messages
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, foundry_model, get_pool
@@ -648,6 +649,11 @@ class RoseClient:
 
         call_site = kwargs.get("call_site", "unspecified")
         agent_id = kwargs.get("agent_id")
+        # A trailing inter-agent (assistant-role) message would be stripped as
+        # assistant prefill by every transport; send it as user role instead.
+        settled_messages = settle_trailing_inter_agent_messages(kwargs.get("messages"))
+        if settled_messages is not kwargs.get("messages"):
+            kwargs = {**kwargs, "messages": settled_messages}
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
         probe_read_only = os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(
@@ -885,7 +891,9 @@ class RoseClient:
                 _fc_accumulate(acc, chunk)
                 if chunk.kind == "done" and ctx.should_write and not structured_response_model:
                     stored = await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
-                    logger.info("llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key)
+                    logger.info(
+                        "llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key
+                    )
                 yield chunk
 
     async def _complete_impl(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
@@ -959,8 +967,11 @@ class RoseClient:
         first_contentful_at: Optional[float] = None
 
         openrouter_response_format = (
-            build_openai_response_format(response_model) if response_model is not None
-            else {"type": "json_object"} if json_mode else None
+            build_openai_response_format(response_model)
+            if response_model is not None
+            else {"type": "json_object"}
+            if json_mode
+            else None
         )
         direct_auth_tools = tools
         effective_tool_choice = tool_choice
@@ -1839,7 +1850,7 @@ class RoseClient:
                     )
 
             cerebras_key = _cerebras_api_key() if pool_spec.cerebras_model else ""
-            for route in (("foundry", "cerebras") if prefer_azure else ("cerebras", "foundry")):
+            for route in ("foundry", "cerebras") if prefer_azure else ("cerebras", "foundry"):
                 if route == "cerebras" and cerebras_key and model_key(pool_spec.cerebras_model) not in _skip_models:
                     active_route = "cerebras"
                     cerebras_yielded_any = False
@@ -1977,7 +1988,9 @@ class RoseClient:
                                 chunk = _with_cache_sequence(chunk)
                                 _record_dump_chunk(chunk)
                                 yield chunk
-                        logger.info("rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site)
+                        logger.info(
+                            "rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site
+                        )
                         _finalize_dump()
                         return
                     except (_FallThrough, RoseStallError, RoseError) as exc:

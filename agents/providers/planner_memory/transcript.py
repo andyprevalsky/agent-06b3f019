@@ -15,6 +15,8 @@ from typing import Any, Literal, Optional
 
 import structlog
 
+from helpers.background_agents import is_agent_authored_user_metadata
+from helpers.environment_context import is_environment_context_metadata
 from providers.planner_memory.bundle import read_bundle_json, redact_reference_text
 from providers.planner_memory.records import Transcript, TranscriptRow
 
@@ -112,8 +114,22 @@ def trim_rows(messages: list[dict[str, Any]]) -> tuple[list[TranscriptRow], int]
                 tool = _SPAWN_PLANNER_TOOLS.get(str(meta.get("agentType") or "").strip().lower(), tool)
         status = meta.get("toolStatus") if isinstance(meta.get("toolStatus"), str) else None
         title = _clip(meta.get("title"), MAX_TITLE) if meta.get("title") else None
-        if role == "SYSTEM":
+        if role == "SYSTEM" or (role == "USER" and is_environment_context_metadata(meta)):
+            # Environment rows restate run-time state; they are not decisions or results.
             dropped += 1
+            continue
+        if role == "USER" and is_agent_authored_user_metadata(meta):
+            # Agent notifications / agent-to-agent messages are not user turns.
+            kept.append(
+                TranscriptRow(
+                    index=index,
+                    role="tool",
+                    tool=str(meta.get("toolName") or "agent_message"),
+                    status=None,
+                    title=None,
+                    text=text,
+                )
+            )
             continue
         if role == "USER":
             if index == 0 or text:

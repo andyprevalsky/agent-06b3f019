@@ -4,6 +4,7 @@
  * Keeps `QueryInput.tsx` under the 300-line cap by isolating the component
  * contract, attachment lifecycle, and drip-styling shape in one place.
  */
+import type React from 'react';
 
 import type { AgentDetail, FilePointer, Model } from '../../hooks';
 
@@ -35,6 +36,12 @@ export interface DripStyles {
 }
 
 export interface QueryInputProps {
+  /**
+   * Rendered flush on top of the input box (same column + edges), e.g. the
+   * "Running N agents" banner. When it renders, the box's top corners square
+   * off so the two read as one attached container.
+   */
+  topAttachment?: React.ReactNode;
   value: string;
   onChange: (value: string) => void;
   onSubmit: (attachments?: FilePointer[]) => void;

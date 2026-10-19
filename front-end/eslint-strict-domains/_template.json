@@ -1,4 +1,1 @@
-[
-  "src/pages/EXAMPLE.tsx",
-  "src/components/EXAMPLE/SomeComponent.tsx"
-]
+["src/pages/EXAMPLE.tsx", "src/components/EXAMPLE/SomeComponent.tsx"]

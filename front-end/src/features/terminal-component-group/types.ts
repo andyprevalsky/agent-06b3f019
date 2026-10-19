@@ -61,6 +61,8 @@ export interface ExploreStep {
   message?: string;
   toolName?: string;
   toolCallId?: string;
+  /** list_agents steps: structured tree view (metadata.agentTree). */
+  agentTree?: unknown;
 }
 
 // ─── Wait-For Chip ────────────────────────────────────────────────────────

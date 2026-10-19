@@ -49,7 +49,12 @@ export async function searchTrajectorySource(
   nextPageAfter?: string | null;
 }> {
   let excludeRootAgentId: string | undefined;
-  if (agentId !== undefined && agentId !== '') {
+  // An agent task path (/root/...) addresses the caller's own tree explicitly.
+  if (
+    agentId !== undefined &&
+    agentId !== '' &&
+    input.filters.agentTrajectories?.taskPath === undefined
+  ) {
     const agent = await repo.findAgentByIdAndUser(agentId, userId);
     if (agent === null) throw new AgentNotFoundError(agentId);
     excludeRootAgentId = await repo.findRootAgentId(agentId, userId);
@@ -57,6 +62,7 @@ export async function searchTrajectorySource(
   const pathRoot = input.filters.agentTrajectories?.pathRootAgentId;
   if (
     pathRoot !== undefined &&
+    input.filters.agentTrajectories?.taskPath === undefined &&
     /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(pathRoot) &&
     !(await trajectoryRepo.hasTrajectoryRoot(userId, pathRoot)) &&
     allowArchiveRepair(userId, pathRoot)
