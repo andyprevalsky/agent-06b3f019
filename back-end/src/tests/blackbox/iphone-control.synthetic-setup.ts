@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { setupState, sealSetup } from '../../providers/phoneSetupState';
-import { CONFIG_TARGETS } from '../../providers/phoneSetupVerification';
+import { CONFIG_TARGETS, SETUP_REQUIREMENTS_VERSION } from '../../providers/phoneSetupVerification';
 export async function syntheticConfiguration(userId: string, leaseId: string) {
   const device = await prisma.iPhoneDevice.findUnique({ where: { userId } });
   if (!device) return;
@@ -41,7 +41,7 @@ export async function syntheticConfiguration(userId: string, leaseId: string) {
   state.expectedPhone = '+19729777432';
   if (state.verification === undefined)
     state.verification = {
-      requirementsVersion: 1,
+      requirementsVersion: SETUP_REQUIREMENTS_VERSION,
       checks: Object.fromEntries(
         CONFIG_TARGETS.map((target) => [
           target,
@@ -49,6 +49,7 @@ export async function syntheticConfiguration(userId: string, leaseId: string) {
             status: 'confirmed',
             observedAt: new Date().toISOString(),
             evidenceDigest: 'trusted-synthetic-fixture',
+            requirementsVersion: SETUP_REQUIREMENTS_VERSION,
             floorCursor: state.attempt.floorCursor,
             attemptId: state.attempt?.id ?? '',
             profileRevision: state.profileRevision,

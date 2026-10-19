@@ -73,6 +73,7 @@ export async function proveSettings(h: Harness, f: SetupFixture, includeIdentity
       'icloud_keychain',
       'imessage',
       'receive_address',
+      'portrait_lock',
       ...(includeIdentity ? ['apple_account'] : []),
     ]) {
       h.observationResult = {

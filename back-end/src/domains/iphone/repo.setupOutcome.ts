@@ -1,6 +1,9 @@
 import type { IPhoneDevice, Transaction } from './types';
 import { sealSetup, type SetupState, type SetupInput } from '../../providers/phoneSetupState';
-import { verificationDto } from '../../providers/phoneSetupVerification';
+import {
+  verificationDto,
+  SETUP_REQUIREMENTS_VERSION,
+} from '../../providers/phoneSetupVerification';
 import type { SetupVerificationResult } from '../../providers/phoneSetupVerifier';
 export async function writeSetupOutcome(
   tx: Transaction,
@@ -17,7 +20,8 @@ export async function writeSetupOutcome(
   state.attempt!.revision = state.claimRevision;
   const target = input.verificationTarget ?? 'apple_account';
   if (input.action === 'verify') {
-    state.verification ??= { requirementsVersion: 1, checks: {} };
+    state.verification ??= { requirementsVersion: SETUP_REQUIREMENTS_VERSION, checks: {} };
+    state.verification.requirementsVersion = SETUP_REQUIREMENTS_VERSION;
     const status =
       target === 'apple_account'
         ? result?.identityConfirmed === true
@@ -28,6 +32,7 @@ export async function writeSetupOutcome(
       status,
       observedAt: now.toISOString(),
       evidenceDigest,
+      requirementsVersion: SETUP_REQUIREMENTS_VERSION,
       floorCursor: state.attempt!.floorCursor,
       attemptId: state.attempt!.id,
       profileRevision: state.profileRevision,
@@ -58,14 +63,13 @@ export async function writeSetupOutcome(
           ? 'ready'
           : 'in_progress';
   state.attempt!.reasonCode = outcomeReason(input, result);
-  const lastRequest = {
+  state.attempt!.lastRequest = {
     requestKey: input.requestKey,
     operationId: input.requestKey,
     action: input.action,
     status: succeeded ? 'SUCCEEDED' : 'FAILED',
     errorCode,
   };
-  state.attempt!.lastRequest = lastRequest;
   if (input.action === 'block' && input.reasonCode === 'observed_signed_out') {
     state.attempt!.floorAt = now.toISOString();
     state.attempt!.floorCursor = input.expectedCursor + 1;

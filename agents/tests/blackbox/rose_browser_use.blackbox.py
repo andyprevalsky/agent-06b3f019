@@ -3026,7 +3026,7 @@ async def test_native_autofill_real_model_synthetic_controls():
 def test_phone_setup_verification_targets_schema_and_isolation():
     import pytest
     from browser_tools.schemas import validate_browser_tool_args
-    targets = ["apple_account", "icloud_messages", "icloud_keychain", "imessage", "receive_address", "runtime"]
+    targets = ["apple_account", "icloud_messages", "icloud_keychain", "imessage", "receive_address", "portrait_lock", "runtime"]
     before = json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
     for target in targets:
         params = {"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"], "verificationTarget": target}
@@ -3042,6 +3042,9 @@ def test_phone_setup_verification_targets_schema_and_isolation():
     ):
         with pytest.raises(ValueError):
             validate_browser_tool_args("phone", params)
+    for proof_field in ("enabled", "orientation", "controlState", "requirementsVersion"):
+        with pytest.raises(ValueError):
+            validate_browser_tool_args("phone", {"mode": "setup", "action": "verify", "verificationTarget": "portrait_lock", "evidenceOperationIds": ["read"], proof_field: True})
     legacy = validate_browser_tool_args("phone", {"mode": "setup", "action": "verify", "evidenceOperationIds": ["read"]})
     assert "verificationTarget" not in legacy, "Legacy default must remain omitted on the wire"
     assert not any(tool["name"] == "phone" for tool in build_browser_use_tools(["wait"]))
@@ -3052,22 +3055,23 @@ async def test_phone_setup_settings_actual_handler_observation():
     from types import SimpleNamespace
     from domains.spawn_browser_agent_v3 import handler as h
     from domains.spawn_browser_agent_v3.types import ClaudeTokenState
-    verification = {"requirementsVersion": 1, "checks": {"icloud_messages": {"status": "confirmed", "observedAt": "2026-10-19T00:00:00Z", "current": False}, "imessage": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
+    verification = {"requirementsVersion": 2, "checks": {"icloud_messages": {"status": "confirmed", "observedAt": "2026-10-19T00:00:00Z", "current": False}, "imessage": {"status": "unknown", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
     setup = {"identityVerified": True, "state": "in_progress", "attemptId": "owned-attempt", "revision": 7, "verification": verification}
     captured = []
     def provider(request):
         captured.append(json.loads(request.content))
-        args = {"mode": "setup", "action": "verify", "verificationTarget": "imessage", "evidenceOperationIds": ["owned-read"]}
+        args = {"mode": "setup", "action": "verify", "verificationTarget": "portrait_lock", "evidenceOperationIds": ["owned-read"]}
         return httpx.Response(200, text=_openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "settings-decision", "type": "function", "function": {"name": "phone", "arguments": json.dumps(args)}}]}, "finish_reason": "tool_calls"}]}]), headers={"Content-Type": "text/event-stream"})
     set_mock_handler(provider)
     try:
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
             result = await h._call_browser_use_with_rotation(rose_client=RoseClient(openrouter_key="synthetic"), task="Preserve the original authorized phone task", dynamic_system_context="Original context", turn_messages=[], browser_state=_browser_state(), action_entries=[], config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="enabled", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task", phone_observation={"enabled": True, "interaction": {"cursor": 12, "setup": setup}})
-        assert result["action"]["params"]["verificationTarget"] == "imessage"
+        assert result["action"]["params"]["verificationTarget"] == "portrait_lock"
         observed = [m for m in captured[0]["messages"] if "<observed_phone_state>" in str(m.get("content"))]
         assert len(observed) == 1 and json.dumps(verification) in observed[0]["content"]
         wire = json.dumps(captured[0]["messages"])
         assert "Labels alone" in wire and "configurationReady" in wire and "operationalStatus" in wire
+        assert "Portrait Orientation Lock" in wire and "portrait frame alone" in wire
         assert "Do not wait for configurationReady to sign in" in wire
         assert "latest successful operation is screen.text for the current interaction" in wire
         assert "Preserve the original authorized phone task" in wire

@@ -63,9 +63,17 @@ The unchanged full Rose suite then passed 114/114 in 8.8 seconds (settings-stage
 
 The final backend followup passed control70/auth37/interactions13 in run 1792381427-3320009-27934, with provider86 and build/lint/format/layer checks green. The earlier seven-domain pass remains broader adjacent evidence. The parent also ran ten real semantic verifier controls using synthetic text and a hard-guarded local database; all passed, including labels-only unknown and pause-with-unknown-cause. No current live-phone configuration pass or deployment is claimed.
 
+### Required portrait lock followup
+
+The user additionally required Portrait Orientation Lock as a boot setting after the phone appeared landscape. The existing normal control suite gained a portrait target route case: dimension-only evidence returns unknown, explicit Portrait Orientation Lock On may confirm the setting, and portrait alone cannot confirm all required settings. Before implementation, normal control run 1792382014-3449429-31308 passed 70/71 and rejected the new target (400 rather than 200; portrait-control-red.log). The registered provider unit gate passed 86/87, failing the new version-two assertion (portrait-unit-red.log).
+
+The server target set now includes portrait_lock, and a single SETUP_REQUIREMENTS_VERSION constant is 2. All six configuration targets are required. Each new proof also carries its requirements version; older proofs remain lastKnown/noncurrent when the envelope is upgraded, preventing one new check from reviving older-version proofs. Historical Apple identity remains separate and preserved. The fixed purpose requires explicitly enabled/On or disabled/Off Portrait Orientation Lock evidence. Label presence, current portrait/landscape orientation, dimensions, and a portrait screenshot alone remain unknown. No rotation operation, vision/media path, schema migration, model call, or live phone operation was added by this worker.
+
+The mocked canonical wrapper exercises every target including the new fixed purpose. Provider units pass 88, including the version-upgrade proof regression. Final source-frozen run 1792382173-3493199-4261 passes control71/auth37/interactions13 (3/3; portrait-frozen-blackboxes.log). Provider units pass88, layers1662, build/lint/format/diff checks pass. The existing function-size cap was preserved by removing a redundant assignment temporary, without changing behavior. Parent owns actual UI lock operation and live evidence. This does not claim a lock has been observed or enabled on the live phone.
+
 ## Human feedback
 
-The user requires default-off isolation of main trajectories and consistent first-use phone settings configuration. No claim that message counts prove completed history sync is authorized. Parent technical review is not additional human feedback.
+The user requires default-off isolation of main trajectories and consistent first-use phone settings configuration, including Portrait Orientation Lock when absent. No claim that message counts prove completed history sync is authorized. Parent technical review is not additional human feedback.
 
 ## Reusable lesson
 

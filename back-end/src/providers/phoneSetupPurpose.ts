@@ -8,6 +8,8 @@ const PURPOSES: Record<Exclude<SetupTarget, 'apple_account'>, string> = {
     'Determine whether current Messages Settings observations explicitly establish iMessage is On and signed in to the exact expected Apple account (confirmed), or explicitly Off or signed out (disabled). Labels, address presence, generic Apple sign-in and unlabelled visual toggles alone are unknown.',
   receive_address:
     'Determine whether current iMessage Send and Receive observations explicitly establish BOTH the exact expected Apple account signed in AND the exact expected receive phone address selected/enabled (confirmed). Explicitly disabled/unselected or wrong signed-in account is disabled. Address presence alone or OCR without explicit selected/enabled state is unknown. Never infer a checkmark from address presence.',
+  portrait_lock:
+    'Determine whether current observations explicitly establish Portrait Orientation Lock is enabled or On (confirmed), or explicitly disabled or Off (disabled). Portrait Orientation Lock label alone, portrait or landscape screen dimensions, current orientation, and a portrait screenshot do not establish lock state and must remain unknown. Do not invent a rotation operation.',
   runtime:
     'Report only explicitly observed current sync and activation state. Sync is syncing, paused, idle, or unknown; activation is active, pending, failed, or unknown. A reason is low_power, low_battery, network, storage, user_paused, or unknown ONLY when explicitly evidenced. Never guess pause cause. Never infer history completion, SMS delivery or OTP readiness from counts, labels or absence of errors.',
 };

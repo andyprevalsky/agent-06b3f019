@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   verificationDto,
   CONFIG_TARGETS,
+  SETUP_REQUIREMENTS_VERSION,
   validSetupChecks,
   type SetupChecks,
 } from '../../providers/phoneSetupVerification';
@@ -19,7 +20,7 @@ const context = {
 };
 function fixture(): SetupChecks {
   return {
-    requirementsVersion: 1,
+    requirementsVersion: SETUP_REQUIREMENTS_VERSION,
     checks: Object.fromEntries(
       [...CONFIG_TARGETS, 'runtime'].map((target) => [
         target,
@@ -27,6 +28,7 @@ function fixture(): SetupChecks {
           status: 'confirmed',
           observedAt: now.toISOString(),
           evidenceDigest: 'digest',
+          requirementsVersion: SETUP_REQUIREMENTS_VERSION,
           floorCursor: 0,
           attemptId: 'attempt',
           profileRevision: 1,
@@ -78,4 +80,18 @@ test('same-millisecond later custody floor invalidates prior proof by monotonic 
   const state = fixture();
   const result = verificationDto(state, { ...context, floorAt: now.toISOString(), floorCursor: 1 });
   assert.equal(result.configurationReady, false);
+});
+
+test('portrait lock is a required version-two boot setting, not inferred from portrait dimensions', () => {
+  const old = fixture();
+  old.requirementsVersion = 1;
+  const result = verificationDto(old, context);
+  assert.equal(result.requirementsVersion, 2);
+  assert.equal(result.configurationReady, false);
+});
+
+test('upgraded envelope cannot revive prior requirements-version proofs', () => {
+  const state = fixture();
+  for (const proof of Object.values(state.checks)) if (proof) delete proof.requirementsVersion;
+  assert.equal(verificationDto(state, context).configurationReady, false);
 });

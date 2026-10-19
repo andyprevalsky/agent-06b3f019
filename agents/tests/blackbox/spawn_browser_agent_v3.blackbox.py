@@ -31027,9 +31027,9 @@ async def test_phone_saved_credential_rejects_model_secret_routing_args():
 async def test_phone_setup_settings_targets_transport_recovery_and_billing():
     import httpx
     from domains.spawn_browser_agent_v3 import phone
-    targets = ("apple_account", "icloud_messages", "icloud_keychain", "imessage", "receive_address", "runtime")
+    targets = ("apple_account", "icloud_messages", "icloud_keychain", "imessage", "receive_address", "portrait_lock", "runtime")
     lease = {"id": "settings-lease", "status": "ACTIVE", "browserTaskId": "settings-task"}
-    verification = {"requirementsVersion": 1, "checks": {"icloud_messages": {"status": "confirmed", "current": False}, "imessage": {"status": "disabled", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
+    verification = {"requirementsVersion": 2, "checks": {"icloud_messages": {"status": "confirmed", "current": False}, "imessage": {"status": "disabled", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
     setup = {"attemptId": "settings-attempt", "revision": 5, "identityVerified": True, "state": "in_progress", "verification": verification}
     view = {"lease": lease, "cursor": 11, "setup": setup}
     snapshot = {"enabled": True, "interaction": copy.deepcopy(view)}
@@ -31073,9 +31073,9 @@ async def test_phone_setup_settings_targets_transport_recovery_and_billing():
             assert result["usage"] == usage and "usage_items" not in result
             assert "SYNTHETIC-PRIVATE-ERROR" not in json.dumps(result)
         result = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "icloud_messages", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
-        assert result["success"] and len(paid) == 6, "Exact intent retry rebilled"
+        assert result["success"] and len(paid) == 7, "Exact intent retry rebilled"
         conflict = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "imessage", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
-        assert not conflict["success"] and conflict["_httpStatus"] == 409 and len(paid) == 6
+        assert not conflict["success"] and conflict["_httpStatus"] == 409 and len(paid) == 7
         assert posts[-1]["requestKey"] == posts[-2]["requestKey"], "Target entered the public decision ID instead of backend HMAC payload"
         legacy = await phone.execute_phone({"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="legacy")
         assert legacy["success"] and "verificationTarget" not in posts[-1]

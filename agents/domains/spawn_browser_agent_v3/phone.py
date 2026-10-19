@@ -106,11 +106,15 @@ same original task, honoring user restrictions and protected authentication.
 After fresh observations, use mode=setup, action=verify with evidenceOperationIds
 containing 1..8 successful current broker observation IDs and verificationTarget:
 apple_account (the default when omitted), icloud_messages, icloud_keychain,
-imessage, receive_address, or runtime. Verify iCloud Messages sync and iCloud
+imessage, receive_address, portrait_lock, or runtime. Verify iCloud Messages sync and iCloud
 Keychain sync separately. iMessage activation/sign-in is separate from iCloud
 Messages sync; neither one proves the other. For receive_address use only the
 server's active expectedReceiveAddress and verify it is actually selected for
-receiving, not merely listed. Supply no phone/account override, OCR text, verdict,
+receiving, not merely listed. For portrait_lock, use the observed Control Center
+UI to enable the OS Portrait Orientation Lock and verify explicit enabled control
+state or OS confirmation. A portrait frame alone, portrait dimensions, or a lock
+label without its enabled state is not proof. Keep ambiguous evidence unknown.
+Supply no phone/account override, OCR text, verdict,
 proof status, attempt/revision/epoch or routing IDs.
 Labels alone or an address appearing in a list do not prove an enabled toggle
 or selected address. If evidence cannot establish the actual control state,

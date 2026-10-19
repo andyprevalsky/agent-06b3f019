@@ -110,6 +110,16 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
           'visual state not explicitly represented must remain unknown'
         )
       );
+      if (verificationTarget === 'portrait_lock') {
+        assert.ok(
+          settingsPurpose(verificationTarget).includes('Portrait Orientation Lock is enabled or On')
+        );
+        assert.ok(
+          settingsPurpose(verificationTarget).includes(
+            'dimensions, current orientation, and a portrait screenshot do not establish lock state'
+          )
+        );
+      }
       if (verificationTarget === 'runtime') assert.equal(check.runtime?.sync, 'paused');
       text = '{"status":"yes","runtime":null}';
       assert.equal((await verifyPhoneSetup({ ...input, verificationTarget })).status, 'unknown');

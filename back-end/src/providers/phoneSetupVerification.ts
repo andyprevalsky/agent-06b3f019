@@ -1,10 +1,12 @@
 /** Bounded last-observed configuration facts; never perpetual device attestation. */
+export const SETUP_REQUIREMENTS_VERSION = 2;
 export const SETUP_TARGETS = [
   'apple_account',
   'icloud_messages',
   'icloud_keychain',
   'imessage',
   'receive_address',
+  'portrait_lock',
   'runtime',
 ] as const;
 export type SetupTarget = (typeof SETUP_TARGETS)[number];
@@ -19,6 +21,7 @@ export interface SetupProof {
   observedAt: string;
   evidenceDigest: string;
   floorCursor?: number;
+  requirementsVersion?: number;
   attemptId: string;
   profileRevision: number;
   workflowId: string;
@@ -46,6 +49,7 @@ export function proofCurrent(
 ) {
   return Boolean(
     proof &&
+    proof.requirementsVersion === SETUP_REQUIREMENTS_VERSION &&
     proof.attemptId === (context.attemptId ?? '') &&
     proof.profileRevision === context.profileRevision &&
     proof.workflowId === (context.workflowId ?? '') &&
@@ -62,8 +66,9 @@ export function verificationDto(
 ) {
   const checks = Object.fromEntries(
     SETUP_TARGETS.map((target) => {
-      const proof = value?.requirementsVersion === 1 ? value.checks[target] : undefined;
-      const current = proofCurrent(proof, context);
+      const proof = value?.checks[target];
+      const current =
+        value?.requirementsVersion === SETUP_REQUIREMENTS_VERSION && proofCurrent(proof, context);
       return [
         target,
         {
@@ -78,7 +83,8 @@ export function verificationDto(
     CONFIG_TARGETS.every(
       (target) => checks[target].current && checks[target].status === 'confirmed'
     ) && context.expectedPhone !== null;
-  const runtime = value?.requirementsVersion === 1 ? value.checks.runtime : undefined;
+  const runtime =
+    value?.requirementsVersion === SETUP_REQUIREMENTS_VERSION ? value.checks.runtime : undefined;
   const currentRuntime =
     proofCurrent(runtime, context) &&
     runtime !== undefined &&
@@ -97,7 +103,7 @@ export function verificationDto(
           ? 'operational'
           : 'unknown';
   return {
-    requirementsVersion: 1,
+    requirementsVersion: SETUP_REQUIREMENTS_VERSION,
     checks,
     configurationReady,
     operationalStatus,

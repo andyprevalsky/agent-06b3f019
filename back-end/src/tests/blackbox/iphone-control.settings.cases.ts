@@ -12,6 +12,48 @@ import {
 } from './iphone-control.setup-fixtures';
 export const settingsCases: Case[] = [
   [
+    'portrait lock accepts explicit enabled proof but dimensions alone remain unknown',
+    async (h) => {
+      const f = await freshSetup(h);
+      let status: 'confirmed' | 'unknown' = 'unknown';
+      h.setupVerifier = async (input) => {
+        assert.equal(input.verificationTarget, 'portrait_lock');
+        return { identityConfirmed: false, status, usage: verifierUsage };
+      };
+      const submit = async () => {
+        const read = await observe(h, f);
+        const reply = await setupPost(h, f, {
+          action: 'verify',
+          verificationTarget: 'portrait_lock',
+          attemptId: f.setup.attemptId,
+          expectedRevision: f.setup.revision,
+          expectedCursor: read.cursor,
+          requestKey: randomUUID(),
+          evidenceOperationIds: [read.id],
+        });
+        assert.equal(reply.status, 200);
+        f.setup = reply.data.setup as SetupDto;
+        return reply;
+      };
+      h.observationResult = { text: 'Portrait screen', width: 750, height: 1334 };
+      await submit();
+      let check = (
+        f.setup as SetupDto & { verification: { checks: { portrait_lock: { status: string } } } }
+      ).verification.checks.portrait_lock;
+      assert.equal(check.status, 'unknown');
+      assert.notEqual(f.setup.state, 'ready');
+      status = 'confirmed';
+      h.observationResult = { text: 'Portrait Orientation Lock: On' };
+      await submit();
+      check = (
+        f.setup as SetupDto & { verification: { checks: { portrait_lock: { status: string } } } }
+      ).verification.checks.portrait_lock;
+      assert.equal(check.status, 'confirmed');
+      assert.notEqual(f.setup.state, 'ready', 'Portrait lock alone cannot prove all settings');
+    },
+  ],
+
+  [
     'settings proof is invalid after user handback or observed signout and runtime ages out',
     async (h) => {
       const f = await freshSetup(h);
