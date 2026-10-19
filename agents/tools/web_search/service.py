@@ -13,13 +13,16 @@ from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from tools.web_search.config import (
+    DDGS_FALLBACK_RESERVE_SECONDS,
     DEFAULT_MAX_TOKENS,
+    HTTP_TIMEOUT,
     PROVIDER_MAX_ATTEMPTS,
     PROVIDER_RETRY_AFTER_MAX_SECONDS,
     PROVIDER_RETRY_BUDGET_SECONDS,
     RETRY_BACKOFF_COEFFICIENT,
     RETRY_INITIAL_INTERVAL_SECONDS,
     RETRY_MAX_INTERVAL_SECONDS,
+    SEARCH_DEADLINE_SECONDS,
 )
 from tools.web_search.repo import (
     classify_ddgs_failure,
@@ -38,7 +41,8 @@ logger = structlog.get_logger()
 # ApplicationError.type for a search that no provider answered.
 WEB_SEARCH_UNAVAILABLE_ERROR_TYPE = "WebSearchProviderUnavailable"
 
-ProviderCall = Callable[[], Awaitable[list[dict[str, Any]]]]
+# Called with the HTTP timeout (seconds) remaining before the provider deadline.
+ProviderCall = Callable[[float], Awaitable[list[dict[str, Any]]]]
 
 
 def format_search_results(results: list[dict]) -> str:
@@ -82,11 +86,14 @@ def _retry_delay(failure: ProviderFailure, elapsed: float) -> Optional[float]:
 async def _search_authenticated(
     providers: list[tuple[str, ProviderCall]],
     failures: list[ProviderFailure],
+    deadline: float,
 ) -> Optional[tuple[str, list[dict[str, Any]]]]:
     """Try each provider in order; retry transient failures per provider on its own schedule.
 
     A provider whose request fails transiently is retried no earlier than its
     Retry-After (plus jittered backoff) while the next provider is tried at once.
+    Every request is bounded by the time remaining before ``deadline`` (a
+    ``time.monotonic()`` value), and no retry is scheduled at or past it.
     Returns ``(provider, results)`` from the first provider that answers (an
     empty list is that provider's genuine answer), else records each provider's
     final failure in ``failures`` and returns None.
@@ -100,14 +107,21 @@ async def _search_authenticated(
 
     while active:
         for name in [n for n in active if not_before[n] <= time.monotonic()]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             attempts[name] += 1
             try:
-                return name, await calls[name]()
+                # httpx timeouts apply per phase; the outer bound caps the whole request.
+                async with asyncio.timeout(remaining):
+                    return name, await calls[name](min(HTTP_TIMEOUT, remaining))
             except Exception as error:
                 failure = classify_provider_failure(name, error)
                 failure.attempts = attempts[name]
                 last_failure[name] = failure
                 delay = _retry_delay(failure, time.monotonic() - started)
+                if delay is not None and time.monotonic() + delay >= deadline:
+                    delay = None
                 logger.warning(
                     "web_search.provider_failed",
                     provider=name,
@@ -122,6 +136,8 @@ async def _search_authenticated(
                     active.remove(name)
                 else:
                     not_before[name] = time.monotonic() + delay
+        if time.monotonic() >= deadline:
+            break
         if active:
             await asyncio.sleep(max(0.0, min(not_before[n] for n in active) - time.monotonic()))
 
@@ -161,6 +177,8 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
     DuckDuckGo metasearch once. If no provider answers, raises a non-retryable
     ``ApplicationError`` of type ``WebSearchProviderUnavailable`` whose message
     and details state each provider's failure; it never reports "No results".
+    The whole search, including the fallback, is bounded by one
+    ``SEARCH_DEADLINE_SECONDS`` deadline inside the activity timeout.
 
     Args:
         query: Search query or question.
@@ -169,6 +187,7 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
     Returns:
         SearchResult with answer, sources, query, and provider.
     """
+    deadline = time.monotonic() + SEARCH_DEADLINE_SECONDS
     activity.heartbeat(f"Web searching: {query}")
 
     app_config = load_config()
@@ -181,8 +200,8 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
         providers.append(
             (
                 "parallel-ai",
-                lambda: fetch_search_results(
-                    query=query, api_key=parallel_key, max_chars_per_result=max_chars_per_result
+                lambda timeout: fetch_search_results(
+                    query=query, api_key=parallel_key, max_chars_per_result=max_chars_per_result, timeout=timeout
                 ),
             )
         )
@@ -190,14 +209,18 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
         providers.append(
             (
                 "exa",
-                lambda: fetch_search_results_exa(
-                    query=query, api_key=exa_key, max_chars_per_result=max_chars_per_result
+                lambda timeout: fetch_search_results_exa(
+                    query=query, api_key=exa_key, max_chars_per_result=max_chars_per_result, timeout=timeout
                 ),
             )
         )
 
     failures: list[ProviderFailure] = []
-    answered = await _search_authenticated(providers, failures) if providers else None
+    answered = (
+        await _search_authenticated(providers, failures, deadline - DDGS_FALLBACK_RESERVE_SECONDS)
+        if providers
+        else None
+    )
     if answered is not None:
         provider, raw_results = answered
     else:
@@ -208,8 +231,12 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
         )
         provider = "ddgs"
         try:
-            # DDGS is synchronous (threads + blocking HTTP); keep it off the worker event loop.
-            raw_results = await asyncio.to_thread(fetch_search_results_ddgs, query)
+            # DDGS is synchronous (threads + blocking HTTP); keep it off the worker event
+            # loop and stop waiting for it at the search deadline.
+            raw_results = await asyncio.wait_for(
+                asyncio.to_thread(fetch_search_results_ddgs, query),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
         except Exception as error:
             failures.append(classify_ddgs_failure(error))
             raw_results = []

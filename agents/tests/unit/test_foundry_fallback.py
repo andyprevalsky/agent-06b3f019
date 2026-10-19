@@ -575,11 +575,41 @@ def test_secondary_regions_serve_only_listed_models(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_non_https_region_is_rejected_before_any_request(monkeypatch):
-    requests = _install_regions(monkeypatch, lambda *_: _ok())
-    monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT_2", "http://rose-eastus2.openai.azure.com")
-    with pytest.raises(RoseInvalidRequest, match="AZURE_FOUNDRY_ENDPOINT_2 must be HTTPS"):
-        [chunk async for chunk in _call_with("agent-http")]
+async def test_non_https_optional_region_is_skipped_and_primary_still_rejects(monkeypatch):
+    """A typo in one optional slot must not stop the healthy regions (mirrors foundry.ts)."""
+    monkeypatch.setattr(foundry, "_warned_insecure_regions", set())
+    requests = _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
+    monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT_7", "http://typo-region.openai.azure.com")
+    monkeypatch.setenv("AZURE_FOUNDRY_API_KEY_7", "key-region-7")
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_7", "gpt-6-sol")
+    with capture_logs() as logs:
+        assert foundry.foundry_configured(get_pool("rose-1-ultra"))
+        chunks = [chunk async for chunk in _call_with("agent-insecure-optional")]
+        [chunk async for chunk in _call_with("agent-insecure-optional-2")]
+    assert next(c for c in chunks if c.kind == "content").data["text"] == "Hi"
+    assert {region for region, _ in requests} <= {_R1, _R2}
+    warnings = [entry for entry in logs if entry["event"] == "rose.foundry.region_not_https"]
+    assert len(warnings) == 1 and warnings[0]["env"] == "AZURE_FOUNDRY_ENDPOINT_7", warnings
+
+    # Only the insecure optional region lists Ultra's model: routing never uses it.
+    _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2), deployments="gpt-5.6-luna")
+    for name in ("AZURE_FOUNDRY_ENDPOINT", "AZURE_FOUNDRY_API_KEY"):
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT_3", "http://typo-region.openai.azure.com")
+    monkeypatch.setenv("AZURE_FOUNDRY_API_KEY_3", "key-region-3")
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_3", "gpt-6-sol")
+    assert not foundry.foundry_configured(get_pool("rose-1-ultra"))
+    # No HTTPS region left: the configuration is rejected.
+    monkeypatch.delenv("AZURE_FOUNDRY_ENDPOINT_2")
+    with pytest.raises(RoseInvalidRequest, match="AZURE_FOUNDRY_ENDPOINT_3 must be HTTPS"):
+        [chunk async for chunk in _call_with("agent-only-insecure")]
+
+    # A non-HTTPS region 1 still rejects the whole configuration before any request.
+    requests = _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
+    monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "http://a-4989-resource.openai.azure.com")
+    assert foundry.foundry_configured(get_pool("rose-1-ultra")), "routing surfaces the config error"
+    with pytest.raises(RoseInvalidRequest, match="AZURE_FOUNDRY_ENDPOINT must be HTTPS"):
+        [chunk async for chunk in _call_with("agent-insecure-primary")]
     assert requests == []
 
 

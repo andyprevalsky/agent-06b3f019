@@ -1665,10 +1665,10 @@ def test_build_anthropic_body_identity_and_cache_block():
     assert body["model"] == spec.claude_auth_model
     assert body["max_tokens"] == 128
     assert body["stream"] is True
-    sys = body["system"]
-    assert sys[0]["text"].startswith("You are a Claude agent")
+    system_blocks = body["system"]
+    assert system_blocks[0]["text"].startswith("You are a Claude agent")
     # Without boundary, all system text is in one static block with global scope
-    cached_blocks = [b for b in sys if "cache_control" in b]
+    cached_blocks = [b for b in system_blocks if "cache_control" in b]
     assert len(cached_blocks) == 1
     assert cached_blocks[0]["cache_control"] == {"type": "ephemeral", "scope": "global"}
 
@@ -1834,11 +1834,11 @@ def test_build_anthropic_body_static_dynamic_split():
         max_tokens=128,
         skip_cache_write=False,
     )
-    sys = body["system"]
+    system_blocks = body["system"]
     # identity + disclaimer + static (cached) + dynamic (no cache)
-    assert len(sys) == 4
-    static_block = sys[2]
-    dynamic_block = sys[3]
+    assert len(system_blocks) == 4
+    static_block = system_blocks[2]
+    dynamic_block = system_blocks[3]
     assert static_block["text"] == "static instructions"
     assert static_block["cache_control"] == {"type": "ephemeral", "scope": "global"}
     assert dynamic_block["text"] == "Current time: April 28"
@@ -1867,9 +1867,9 @@ def test_build_anthropic_body_multi_boundary_system_blocks_are_cached():
         skip_cache_write=False,
     )
 
-    sys = body["system"]
-    assert [b["text"] for b in sys[2:]] == ["static instructions", "user context", "phase prompt"]
-    assert all(b["cache_control"] == {"type": "ephemeral", "scope": "global"} for b in sys[2:])
+    system_blocks = body["system"]
+    assert [b["text"] for b in system_blocks[2:]] == ["static instructions", "user context", "phase prompt"]
+    assert all(b["cache_control"] == {"type": "ephemeral", "scope": "global"} for b in system_blocks[2:])
     assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in json.dumps(body)
 
 
@@ -6637,6 +6637,109 @@ async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
         assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
 
 
+async def test_client_foundry_skips_non_https_optional_region_and_keeps_serving():
+    """A typo (``http://``) in one optional Foundry slot must not stop Foundry.
+
+    Before 2026-10-19 one non-HTTPS optional region made every Foundry request
+    raise ``RoseInvalidRequest`` while ``foundry_configured`` stayed true, so
+    every Ultra call left Azure credit for OpenRouter. The bad slot is skipped
+    with one warning naming it; a non-HTTPS region 1 still rejects the config.
+    """
+    import providers.rose.foundry as foundry
+    from structlog.testing import capture_logs
+
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"region ok"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    attempted: list[str] = []
+
+    def handler(req):
+        if req.url.host.endswith(".openai.azure.com"):
+            attempted.append(f"{req.url.scheme}://{req.url.host}")
+        if req.url.host == "a-4989-resource.openai.azure.com" and req.url.scheme == "https":
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    env = {name: "" for name in foundry.FOUNDRY_REGION_ENV_NAMES}
+    env.update(
+        {
+            "GPT_API_KEY": "",
+            "ANTHROPIC_API_KEY": "",
+            "CEREBRAS_API_KEY": "",
+            "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY": "key-1",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+            "AZURE_FOUNDRY_ENDPOINT_7": "http://typo-region.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY_7": "key-7",
+            "AZURE_FOUNDRY_DEPLOYMENTS_7": "gpt-6-sol",
+        }
+    )
+
+    async def run() -> list:
+        return await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                agent_id="agent-insecure-optional-region",
+                dump_context=False,
+                _exclude_anthropic_family=True,
+                call_site="test-foundry-insecure-optional-region",
+            )
+        )
+
+    set_mock_handler(handler)
+    with (
+        patch.dict(os.environ, env),
+        patch.object(foundry, "_cooldown_until", {}),
+        patch.object(foundry, "_auth_cooldown_until", {}),
+        patch.object(foundry, "_warned_insecure_regions", set()),
+    ):
+        with capture_logs() as logs:
+            assert foundry.foundry_configured(get_pool("rose-1-ultra"))
+            for _ in range(2):
+                chunks = await run()
+                assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6-sol-foundry"
+                assert any(c.kind == "content" and c.data.get("text") == "region ok" for c in chunks)
+        assert attempted == ["https://a-4989-resource.openai.azure.com"] * 2, attempted
+        warnings = [entry for entry in logs if entry["event"] == "rose.foundry.region_not_https"]
+        assert [entry["env"] for entry in warnings] == ["AZURE_FOUNDRY_ENDPOINT_7"], warnings
+
+        # A non-HTTPS region 1 is still a whole-configuration error.
+        os.environ["AZURE_FOUNDRY_ENDPOINT"] = "http://a-4989-resource.openai.azure.com"
+        attempted.clear()
+        try:
+            await _drain(
+                foundry.foundry_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort="high",
+                    provider_fast_mode=False,
+                    request_id="req-insecure-primary",
+                    route_key="agent-insecure-primary",
+                    agent_id="agent-insecure-primary",
+                    call_site="test",
+                    cache_namespace=None,
+                    ttft_timeout_s=2,
+                    idle_timeout_s=2,
+                )
+            )
+        except RoseInvalidRequest as exc:
+            assert "AZURE_FOUNDRY_ENDPOINT must be HTTPS" in str(exc)
+        else:
+            raise AssertionError("non-HTTPS region 1 must reject the configuration")
+        assert attempted == [], attempted
+
+
 async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
     """Azure credit serves the world model ahead of OpenRouter, on the WMH model.
 
@@ -9895,6 +9998,10 @@ async def run_all_tests():
     await r.record_async(
         "client_foundry_region_rate_limit_fails_over_before_openrouter",
         test_client_foundry_region_rate_limit_fails_over_before_openrouter,
+    )
+    await r.record_async(
+        "client_foundry_skips_non_https_optional_region",
+        test_client_foundry_skips_non_https_optional_region_and_keeps_serving,
     )
     await r.record_async(
         "client_foundry_luna_backs_mini_and_speed_pools",

@@ -39,7 +39,10 @@ def parse_retry_after(headers: httpx.Headers) -> Optional[float]:
 
 
 def classify_provider_failure(provider: str, error: BaseException) -> ProviderFailure:
-    """Classify an authenticated provider failure from its HTTP status / exception type."""
+    """Classify an authenticated provider failure from its HTTP status / exception type.
+
+    ``TimeoutError`` is the search deadline expiring around the request.
+    """
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
         if status == 429:
@@ -57,7 +60,7 @@ def classify_provider_failure(provider: str, error: BaseException) -> ProviderFa
             retry_after_seconds=parse_retry_after(error.response.headers),
             error_type=type(error).__name__,
         )
-    if isinstance(error, httpx.TimeoutException):
+    if isinstance(error, (httpx.TimeoutException, TimeoutError)):
         return ProviderFailure(provider, ProviderFailureKind.TIMEOUT, error_type=type(error).__name__)
     if isinstance(error, httpx.TransportError):
         return ProviderFailure(provider, ProviderFailureKind.TRANSPORT, error_type=type(error).__name__)
@@ -75,7 +78,7 @@ def classify_ddgs_failure(error: BaseException) -> ProviderFailure:
 
     if isinstance(error, RatelimitException):
         kind = ProviderFailureKind.RATE_LIMITED
-    elif isinstance(error, TimeoutException):
+    elif isinstance(error, (TimeoutException, TimeoutError)):
         kind = ProviderFailureKind.TIMEOUT
     elif isinstance(error, DDGSException):
         kind = ProviderFailureKind.NO_RESULTS
@@ -88,6 +91,7 @@ async def fetch_search_results(
     query: str,
     api_key: str,
     max_chars_per_result: int,
+    timeout: float = HTTP_TIMEOUT,
 ) -> list[dict[str, Any]]:
     """Call Parallel AI search API and return raw results list.
 
@@ -95,6 +99,7 @@ async def fetch_search_results(
         query: Search query string.
         api_key: Parallel AI API key.
         max_chars_per_result: Maximum characters per result excerpt.
+        timeout: HTTP timeout; callers pass the search deadline's remaining time.
 
     Returns:
         List of result dicts from the API response.
@@ -120,7 +125,7 @@ async def fetch_search_results(
         },
     }
 
-    response = await get_http_client().post(PARALLEL_API_URL, headers=headers, json=payload, timeout=HTTP_TIMEOUT)
+    response = await get_http_client().post(PARALLEL_API_URL, headers=headers, json=payload, timeout=timeout)
     response.raise_for_status()
     data = response.json()
 
@@ -131,6 +136,7 @@ async def fetch_search_results_exa(
     query: str,
     api_key: str,
     max_chars_per_result: int,
+    timeout: float = HTTP_TIMEOUT,
 ) -> list[dict[str, Any]]:
     """Call Exa Search API and return results in the Parallel shape (title, url, excerpts).
 
@@ -150,7 +156,7 @@ async def fetch_search_results_exa(
         "contents": {"highlights": True},
     }
 
-    response = await get_http_client().post(EXA_SEARCH_URL, headers=headers, json=payload, timeout=HTTP_TIMEOUT)
+    response = await get_http_client().post(EXA_SEARCH_URL, headers=headers, json=payload, timeout=timeout)
     response.raise_for_status()
     data = response.json()
 

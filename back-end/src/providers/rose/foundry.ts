@@ -50,6 +50,15 @@ export const FOUNDRY_REGION_ENV_NAMES: readonly string[] = REGION_SLOTS.flatMap(
   ['ENDPOINT', 'API_KEY', 'DEPLOYMENTS'].map((name) => `AZURE_FOUNDRY_${name}${suffix(slot)}`)
 );
 
+/** `URL.canParse` needs Node 18.17; engines allow 18.0, so parse inside try/catch. */
+function hostnameOf(endpoint: string): string {
+  try {
+    return new URL(endpoint).hostname;
+  } catch {
+    return '';
+  }
+}
+
 /** One Azure resource. The key is a private field, so JSON/inspect never render it. */
 export class FoundryRegion {
   readonly #apiKey: string;
@@ -62,7 +71,7 @@ export class FoundryRegion {
     readonly deployments: readonly string[]
   ) {
     this.#apiKey = apiKey;
-    this.host = URL.canParse(endpoint) ? new URL(endpoint).hostname : '';
+    this.host = hostnameOf(endpoint);
   }
 
   apiKey(): string {
@@ -100,10 +109,46 @@ export function foundryRegions(): FoundryRegion[] {
   return regions;
 }
 
+/** `${slot}\n${endpoint}` pairs already warned about, so a bad optional slot logs once. */
+const warnedInsecureRegions = new Set<string>();
+
+/**
+ * Configured regions that routing may use: HTTPS endpoints only. A non-HTTPS
+ * optional region (slot 2..9) is dropped with one warning naming its env slot,
+ * so a typo there cannot stop the healthy regions. A non-HTTPS region 1, or a
+ * configuration with no HTTPS region left, stays a whole-config error.
+ * Mirrors `_routable_regions` in agents/providers/rose/foundry.py.
+ */
+function routableRegions(): FoundryRegion[] {
+  const configured = foundryRegions();
+  const usable = configured.filter((region) => region.endpoint.startsWith('https://'));
+  const insecure = configured.filter((region) => !region.endpoint.startsWith('https://'));
+  if (insecure.length && (insecure[0].slot === 1 || !usable.length))
+    throw new RoseInvalidRequest(`AZURE_FOUNDRY_ENDPOINT${suffix(insecure[0].slot)} must be HTTPS`);
+  for (const region of insecure) {
+    const key = `${region.slot}\n${region.endpoint}`;
+    if (warnedInsecureRegions.has(key)) continue;
+    warnedInsecureRegions.add(key);
+    log.warn('foundry.region_not_https', {
+      env: `AZURE_FOUNDRY_ENDPOINT${suffix(region.slot)}`,
+      region_slot: region.slot,
+    });
+  }
+  return usable;
+}
+
 export function foundryConfigured(poolSpec: PoolSpec): boolean {
   if (!poolSpec.foundryEnabled) return false;
+  let regions: FoundryRegion[];
+  try {
+    regions = routableRegions();
+  } catch (error) {
+    // Routing rejects this configuration; let foundryComplete surface that error.
+    if (error instanceof RoseInvalidRequest) return true;
+    throw error;
+  }
   const now = Date.now();
-  return foundryRegions().some(
+  return regions.some(
     (region) =>
       now >= (authCooldownUntil.get(region.endpoint) ?? 0) &&
       regionDeployments(region, poolSpec.gptAuthModel).length > 0
@@ -162,10 +207,11 @@ export function foundryRoutePlan(
     );
 }
 
-/** Test hook: forget every rate-limit and auth cooldown. */
+/** Test hook: forget every rate-limit and auth cooldown and every once-only warning. */
 export function __resetFoundryCooldowns(): void {
   cooldownUntil.clear();
   authCooldownUntil.clear();
+  warnedInsecureRegions.clear();
 }
 
 function cooldownMs(headers: Headers): number {
@@ -215,12 +261,8 @@ function recordHttpFailure(
 
 export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<RoseStreamChunk> {
   const model = opts.poolSpec.gptAuthModel;
-  const regions = foundryRegions();
+  const regions = routableRegions();
   if (!regions.length) throw new RoseAuthError('Foundry endpoint or key missing');
-  for (const region of regions) {
-    if (!region.endpoint.startsWith('https://'))
-      throw new RoseInvalidRequest(`AZURE_FOUNDRY_ENDPOINT${suffix(region.slot)} must be HTTPS`);
-  }
   let lastError: RoseError | null = null;
   let skippedCooling = false;
   let attempt = 0;

@@ -29,6 +29,16 @@ EXA_COST_CENTS_PER_QUERY = 0.7
 HTTP_TIMEOUT = 60.0
 ACTIVITY_TIMEOUT_SECONDS = 60
 
+# One end-to-end deadline per activity attempt, strictly inside
+# ACTIVITY_TIMEOUT_SECONDS so the typed result or outage error is returned
+# before Temporal's start-to-close timeout. Every provider request and the
+# keyless fallback receives only the time remaining (HTTP_TIMEOUT is a cap,
+# not a grant). Authenticated providers and their retries must finish by
+# SEARCH_DEADLINE_SECONDS - DDGS_FALLBACK_RESERVE_SECONDS, so a provider that
+# hangs can never consume the fallback's time.
+SEARCH_DEADLINE_SECONDS = 55.0
+DDGS_FALLBACK_RESERVE_SECONDS = 15.0
+
 # Retry policy
 RETRY_MAX_ATTEMPTS = 3
 RETRY_BACKOFF_COEFFICIENT = 2.0
@@ -40,8 +50,9 @@ RETRY_MAX_INTERVAL_SECONDS = 10
 # exponential backoff (the RETRY_* values above), never earlier than the
 # provider's Retry-After. A provider is not retried in this call when its
 # Retry-After exceeds PROVIDER_RETRY_AFTER_MAX_SECONDS or the retry would start
-# after PROVIDER_RETRY_BUDGET_SECONDS; the rest of the ACTIVITY_TIMEOUT_SECONDS
-# attempt is left for the final request and the keyless fallback. Exhaustion is
+# after PROVIDER_RETRY_BUDGET_SECONDS or past the authenticated deadline above;
+# the rest of the SEARCH_DEADLINE_SECONDS budget is left for the final request
+# and the keyless fallback. Exhaustion is
 # non-retryable so the activity retry policy does not multiply provider load.
 PROVIDER_MAX_ATTEMPTS = RETRY_MAX_ATTEMPTS
 PROVIDER_RETRY_BUDGET_SECONDS = 25.0

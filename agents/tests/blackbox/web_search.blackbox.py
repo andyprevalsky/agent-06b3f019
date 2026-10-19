@@ -1,6 +1,7 @@
 """Blackbox tests for web-search domain."""
 
 import asyncio
+import contextlib
 import json
 import threading
 import time
@@ -601,6 +602,130 @@ async def test_server_error_is_retried_as_transient():
     assert len(calls[PARALLEL_URL]) == 2
 
 
+# -------------------- one end-to-end deadline inside the activity timeout --------------------
+#
+# CodeRabbit 4310481662: HTTP_TIMEOUT and ACTIVITY_TIMEOUT_SECONDS were both 60
+# seconds, so one slow authenticated request could consume the whole activity
+# attempt before the retry or DDGS fallback ran. The service now carries one
+# deadline below the activity timeout and gives each call only what remains.
+# These cases scale every budget by 1/100 (a controlled clock) instead of
+# sleeping through real 60-second windows.
+
+_SCALE = 0.01
+
+
+@contextmanager
+def _scaled_search_budgets():
+    """Scale the activity, search, fallback-reserve, retry and HTTP budgets by 1/100."""
+    from tools.web_search import config
+
+    scaled = {
+        "SEARCH_DEADLINE_SECONDS": 55.0 * _SCALE,
+        "DDGS_FALLBACK_RESERVE_SECONDS": 15.0 * _SCALE,
+        "PROVIDER_RETRY_BUDGET_SECONDS": config.PROVIDER_RETRY_BUDGET_SECONDS * _SCALE,
+        "HTTP_TIMEOUT": config.HTTP_TIMEOUT * _SCALE,
+    }
+    with contextlib.ExitStack() as stack:
+        for name, value in scaled.items():
+            # create=True keeps the fail-before revision (no deadline constants) runnable.
+            stack.enter_context(patch(f"tools.web_search.service.{name}", value, create=True))
+        yield config.ACTIVITY_TIMEOUT_SECONDS * _SCALE
+
+
+def _hanging_provider(seen: list[dict]):
+    """An authenticated provider that never answers within any search budget."""
+
+    async def fetch(**kwargs):
+        seen.append({"at": time.monotonic(), "timeout": kwargs.get("timeout")})
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+    return fetch
+
+
+def test_search_deadline_fits_inside_the_activity_timeout():
+    """The end-to-end deadline, fallback reserve and retry budget fit strictly inside the activity."""
+    from tools.web_search.config import (
+        ACTIVITY_TIMEOUT_SECONDS,
+        DDGS_FALLBACK_RESERVE_SECONDS,
+        PROVIDER_RETRY_BUDGET_SECONDS,
+        SEARCH_DEADLINE_SECONDS,
+    )
+
+    assert 0 < SEARCH_DEADLINE_SECONDS < ACTIVITY_TIMEOUT_SECONDS
+    assert 0 < DDGS_FALLBACK_RESERVE_SECONDS < SEARCH_DEADLINE_SECONDS
+    assert PROVIDER_RETRY_BUDGET_SECONDS < SEARCH_DEADLINE_SECONDS - DDGS_FALLBACK_RESERVE_SECONDS
+
+
+async def test_hanging_provider_leaves_the_fallback_its_time_inside_the_activity_deadline():
+    """A provider that never answers is cut off at its deadline; DDGS still answers in the attempt."""
+    from tools.web_search.service import execute_search
+
+    seen: list[dict] = []
+    fallback = [{"title": "DDG", "url": "https://ddg.example.com", "excerpts": ["body"]}]
+    with (
+        _scaled_search_budgets() as activity_timeout,
+        patch("temporalio.activity.heartbeat"),
+        patch("tools.web_search.service.load_config", return_value=_provider_config()),
+        patch("tools.web_search.service.fetch_search_results", _hanging_provider(seen)),
+        patch("tools.web_search.service.fetch_search_results_ddgs", return_value=fallback) as ddgs_fetch,
+    ):
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(activity_timeout):  # Temporal's start-to-close timeout
+                result = await execute_search(QUERY)
+        except TimeoutError:
+            raise AssertionError("the hung provider consumed the activity deadline before the fallback") from None
+        elapsed = time.monotonic() - started
+
+    assert result["provider"] == "ddgs" and result["sources"] == ["https://ddg.example.com"], result
+    ddgs_fetch.assert_called_once_with(QUERY)
+    assert elapsed < 55.0 * _SCALE, elapsed
+    assert len(seen) == 1, "no retry is scheduled past the authenticated deadline"
+    # The provider receives only the time left before its deadline, never the full HTTP_TIMEOUT.
+    assert 0 < seen[0]["timeout"] <= (55.0 - 15.0) * _SCALE, seen
+
+
+async def test_hanging_provider_and_fallback_raise_the_typed_outage_before_the_activity_deadline():
+    """When every provider runs out of time the typed, truthful outage is still returned in the attempt."""
+    from tools.web_search.service import execute_search
+
+    seen: list[dict] = []
+    fallback_released = threading.Event()
+
+    def slow_ddgs(query):
+        fallback_released.wait(5.0)
+        return []
+
+    try:
+        with (
+            _scaled_search_budgets() as activity_timeout,
+            patch("temporalio.activity.heartbeat"),
+            patch("tools.web_search.service.load_config", return_value=_provider_config()),
+            patch("tools.web_search.service.fetch_search_results", _hanging_provider(seen)),
+            patch("tools.web_search.service.fetch_search_results_ddgs", side_effect=slow_ddgs),
+        ):
+            error = None
+            try:
+                async with asyncio.timeout(activity_timeout):
+                    await execute_search(QUERY)
+            except TimeoutError:
+                raise AssertionError("the search outlived the activity deadline") from None
+            except Exception as exc:
+                error = exc
+    finally:
+        fallback_released.set()  # release the abandoned fallback thread
+
+    app_error = _application_error(error)
+    assert app_error is not None and app_error.type == "WebSearchProviderUnavailable", error
+    assert app_error.non_retryable
+    detail = app_error.details[0]
+    assert detail["status"] == "search_provider_unavailable", detail
+    kinds = {p["provider"]: p["kind"] for p in detail["providers"]}
+    assert kinds == {"parallel-ai": "timeout", "ddgs": "timeout"}, kinds
+    assert len(seen) == 1, seen
+
+
 async def run_all_tests():
     print("web-search blackbox tests:")
     r = BlackboxResult()
@@ -640,6 +765,15 @@ async def run_all_tests():
         "retry_after_beyond_budget_fails_over", test_retry_after_beyond_call_budget_fails_over_without_waiting
     )
     await r.record_async("server_error_retried_as_transient", test_server_error_is_retried_as_transient)
+    r.record("search_deadline_fits_activity_timeout", test_search_deadline_fits_inside_the_activity_timeout)
+    await r.record_async(
+        "hanging_provider_leaves_fallback_time",
+        test_hanging_provider_leaves_the_fallback_its_time_inside_the_activity_deadline,
+    )
+    await r.record_async(
+        "hanging_provider_and_fallback_typed_outage",
+        test_hanging_provider_and_fallback_raise_the_typed_outage_before_the_activity_deadline,
+    )
     teardown_mock()
     return r.all_passed
 

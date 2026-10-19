@@ -83,14 +83,47 @@ def foundry_regions() -> list[FoundryRegion]:
     return regions
 
 
+# (slot, endpoint) pairs already warned about, so a bad optional slot logs once.
+_warned_insecure_regions: set[tuple[int, str]] = set()
+
+
+def _routable_regions() -> list[FoundryRegion]:
+    """Configured regions that routing may use: HTTPS endpoints only.
+
+    A non-HTTPS optional region (slot 2..9) is dropped with one warning naming
+    its env slot, so a typo there cannot stop the healthy regions. A non-HTTPS
+    region 1, or a configuration with no HTTPS region left, stays a whole-config
+    error: it raises ``RoseInvalidRequest`` naming the env slot.
+    """
+    configured = foundry_regions()
+    usable = [region for region in configured if region.endpoint.startswith("https://")]
+    insecure = [region for region in configured if not region.endpoint.startswith("https://")]
+    if insecure and (insecure[0].slot == 1 or not usable):
+        raise RoseInvalidRequest(f"AZURE_FOUNDRY_ENDPOINT{_suffix(insecure[0].slot)} must be HTTPS")
+    for region in insecure:
+        if (region.slot, region.endpoint) not in _warned_insecure_regions:
+            _warned_insecure_regions.add((region.slot, region.endpoint))
+            logger.warning(
+                "rose.foundry.region_not_https",
+                env=f"AZURE_FOUNDRY_ENDPOINT{_suffix(region.slot)}",
+                region_slot=region.slot,
+            )
+    return usable
+
+
 def foundry_configured(pool_spec: PoolSpec) -> bool:
     if not pool_spec.foundry_enabled:
         return False
+    try:
+        regions = _routable_regions()
+    except RoseInvalidRequest:
+        # Routing rejects this configuration; let foundry_complete surface that error.
+        return True
     now = time.monotonic()
     model = foundry_model(pool_spec)
     return any(
         now >= _auth_cooldown_until.get(region.endpoint, 0.0) and _region_deployments(region, model)
-        for region in foundry_regions()
+        for region in regions
     )
 
 
@@ -185,10 +218,7 @@ async def foundry_complete(
     max_tokens: Optional[int] = None,
 ) -> AsyncIterator[StreamChunk]:
     model = foundry_model(pool_spec)
-    regions = foundry_regions()
-    for region in regions:
-        if not region.endpoint.startswith("https://"):
-            raise RoseInvalidRequest(f"AZURE_FOUNDRY_ENDPOINT{_suffix(region.slot)} must be HTTPS")
+    regions = _routable_regions()
     last_error: Optional[RoseError] = None
     skipped_cooling = False
     attempt = 0

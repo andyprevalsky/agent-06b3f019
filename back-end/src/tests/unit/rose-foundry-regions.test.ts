@@ -312,12 +312,60 @@ async function main(): Promise<void> {
     );
     process.stdout.write('Foundry regions: secondary regions serve only listed models\n');
 
-    // Non-HTTPS endpoints are rejected before any request.
-    attempts = configure(ok);
-    process.env.AZURE_FOUNDRY_ENDPOINT_2 = 'http://rose-eastus2.openai.azure.com';
-    await assert.rejects(drain('agent-http'), /AZURE_FOUNDRY_ENDPOINT_2 must be HTTPS/);
+    // A non-HTTPS optional region is dropped (one warning naming its slot); the
+    // healthy regions keep serving and foundryConfigured agrees with routing.
+    attempts = configure(() => ok(), [R1, R2]);
+    process.env.AZURE_FOUNDRY_ENDPOINT_7 = 'http://typo-region.openai.azure.com';
+    process.env.AZURE_FOUNDRY_API_KEY_7 = 'key-region-7';
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_7 = 'gpt-6-sol';
+    {
+      const { result, output } = await captureOutput(async () => {
+        const configured = foundryConfigured(ULTRA);
+        const served = text(await drain('agent-insecure-optional'));
+        await drain('agent-insecure-optional-2');
+        return { configured, served };
+      });
+      assert.equal(result.configured, true);
+      assert.equal(result.served, 'Hi');
+      assert.equal(output.split('foundry.region_not_https').length - 1, 1, output);
+      assert(output.includes('AZURE_FOUNDRY_ENDPOINT_7'), output);
+      assert(
+        attempts.every(([region]) => region === R1 || region === R2),
+        String(attempts)
+      );
+    }
+    // Only the insecure optional region lists Ultra's model: Foundry is not configured.
+    configure(() => ok(), [R1, R2], 'gpt-5.6-luna');
+    delete process.env.AZURE_FOUNDRY_ENDPOINT;
+    delete process.env.AZURE_FOUNDRY_API_KEY;
+    process.env.AZURE_FOUNDRY_ENDPOINT_3 = 'http://typo-region.openai.azure.com';
+    process.env.AZURE_FOUNDRY_API_KEY_3 = 'key-region-3';
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_3 = 'gpt-6-sol';
+    await captureOutput(async () =>
+      assert.equal(foundryConfigured(ULTRA), false, 'routing would never use slot 3')
+    );
+    // No HTTPS region left at all: the configuration is rejected.
+    delete process.env.AZURE_FOUNDRY_ENDPOINT_2;
+    await assert.rejects(
+      captureOutput(() => drain('agent-only-insecure')),
+      (error: unknown) =>
+        error instanceof RoseInvalidRequest &&
+        /AZURE_FOUNDRY_ENDPOINT_3 must be HTTPS/.test(error.message)
+    );
+    // A non-HTTPS region 1 still rejects the whole configuration.
+    attempts = configure(() => ok(), [R1, R2]);
+    process.env.AZURE_FOUNDRY_ENDPOINT = 'http://a-4989-resource.openai.azure.com';
+    assert.equal(foundryConfigured(ULTRA), true, 'routing surfaces the config error');
+    await assert.rejects(
+      drain('agent-insecure-primary'),
+      (error: unknown) =>
+        error instanceof RoseInvalidRequest &&
+        /AZURE_FOUNDRY_ENDPOINT must be HTTPS/.test(error.message)
+    );
     assert.deepEqual(attempts, []);
-    process.stdout.write('Foundry regions: non-HTTPS region rejected\n');
+    process.stdout.write(
+      'Foundry regions: non-HTTPS optional region is skipped, primary rejects\n'
+    );
 
     // Logs name the region and deployment that failed and served; never a key.
     attempts = configure((region) => {
