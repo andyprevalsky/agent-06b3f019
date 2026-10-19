@@ -654,7 +654,7 @@ elif args[:2]==['machine','run']:
                     if process.name.isdecimal() and process.stat().st_uid==os.getuid():
                         status=Path(str(process)+'/stat').read_text();fields=status[status.rfind(')')+2:].split()
                         if int(process.name) in (os.getpid(),os.getppid()) or int(fields[1])==os.getppid(): selected.append(process)
-                except FileNotFoundError: continue
+                except (FileNotFoundError, ProcessLookupError): continue  # exited mid-scan
             return iter(selected)
         Path.iterdir=bounded_proc
         subject={'__name__':'fake_native_collector','__file__':str(helper)}
