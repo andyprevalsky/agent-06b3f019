@@ -62,7 +62,7 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
-from providers.rose.foundry import foundry_complete, foundry_configured
+from providers.rose.foundry import foundry_candidates, foundry_complete, foundry_configured
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
@@ -887,7 +887,9 @@ class RoseClient:
                 _fc_accumulate(acc, chunk)
                 if chunk.kind == "done" and ctx.should_write and not structured_response_model:
                     stored = await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
-                    logger.info("llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key)
+                    logger.info(
+                        "llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key
+                    )
                 yield chunk
 
     async def _complete_impl(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
@@ -961,8 +963,11 @@ class RoseClient:
         first_contentful_at: Optional[float] = None
 
         openrouter_response_format = (
-            build_openai_response_format(response_model) if response_model is not None
-            else {"type": "json_object"} if json_mode else None
+            build_openai_response_format(response_model)
+            if response_model is not None
+            else {"type": "json_object"}
+            if json_mode
+            else None
         )
         direct_auth_tools = tools
         effective_tool_choice = tool_choice
@@ -1841,7 +1846,7 @@ class RoseClient:
                     )
 
             cerebras_key = _cerebras_api_key() if pool_spec.cerebras_model else ""
-            for route in (("foundry", "cerebras") if prefer_azure else ("cerebras", "foundry")):
+            for route in ("foundry", "cerebras") if prefer_azure else ("cerebras", "foundry"):
                 if route == "cerebras" and cerebras_key and model_key(pool_spec.cerebras_model) not in _skip_models:
                     active_route = "cerebras"
                     cerebras_yielded_any = False
@@ -1929,11 +1934,7 @@ class RoseClient:
                         model=foundry_model(pool_spec),
                         reason="images_need_vision",
                     )
-                if (
-                    foundry_configured(pool_spec)
-                    and not foundry_blind
-                    and model_key(foundry_model(pool_spec)) not in _skip_models
-                ):
+                if foundry_configured(pool_spec) and not foundry_blind and foundry_candidates(pool_spec, _skip_models):
                     active_route = "foundry"
                     foundry_yielded_any = False
                     try:
@@ -1957,6 +1958,7 @@ class RoseClient:
                                 cache_namespace=cache_namespace,
                                 ttft_timeout_s=ttft_timeout_s,
                                 idle_timeout_s=idle_timeout_s,
+                                skip_models=_skip_models,
                             )
                         ) as foundry_source:
                             async for chunk in _guarded(foundry_source):
@@ -1979,7 +1981,9 @@ class RoseClient:
                                 chunk = _with_cache_sequence(chunk)
                                 _record_dump_chunk(chunk)
                                 yield chunk
-                        logger.info("rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site)
+                        logger.info(
+                            "rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site
+                        )
                         _finalize_dump()
                         return
                     except (_FallThrough, RoseStallError, RoseError) as exc:

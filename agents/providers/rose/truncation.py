@@ -34,8 +34,8 @@ from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
 
 import structlog
 
-from providers.rose.types import StreamChunk
 from providers.rose.errors import RoseError
+from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger(__name__)
 

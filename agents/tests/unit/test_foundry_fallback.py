@@ -574,6 +574,113 @@ def test_secondary_regions_serve_only_listed_models(monkeypatch):
     assert [r.slot for r in foundry.foundry_regions()] == [3]
 
 
+def test_model_listed_only_by_another_region_never_routes_to_region_one(monkeypatch):
+    """Region 1 lists only Sol; region 2 lists GPT-6.1 Sol. Region 1's deploymentless
+    GPT-6.1 call is a terminal 400, so every GPT-6.1 route key must start (and end) in region 2."""
+    _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
+    for i in range(200):
+        assert _plan_regions(f"agent-{i}", "gpt-6.1-sol") == [_R2]
+        assert _plan_regions(f"agent-{i}", "gpt-5.6-luna") == [_R1]
+    # Unlisted everywhere: region 1 keeps its deploymentless route.
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6-sol")
+    assert _plan_regions("agent-1", "gpt-6.1-sol") == [_R1]
+
+
+@pytest.mark.asyncio
+async def test_unpinned_sol_pool_uses_any_sol_deployment_and_pinned_pool_does_not(monkeypatch):
+    """GPT-6 Sol and GPT-6.1 Sol stand in for each other unless a pool pins its Foundry model."""
+    _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
+    ultra = foundry.foundry_models(get_pool("rose-1-ultra"))
+    assert ultra == ("gpt-6-sol", "gpt-6.1-sol")
+    assert foundry.foundry_models(get_pool("rose-wmh-gpt61")) == ("gpt-6.1-sol",)
+    assert foundry.foundry_models(get_pool("rose-1-oss")) == ("DeepSeek-V3.2",)
+    plans = {
+        f"agent-{i}": [(r.endpoint, d) for r, d in foundry._route_plan(foundry.foundry_regions(), ultra, f"agent-{i}")]
+        for i in range(200)
+    }
+    assert all(sorted(plan) == [(_R1, "gpt-6-sol"), (_R2, "gpt-6.1-sol")] for plan in plans.values())
+    assert 0.35 < sum(plan[0][0] == _R2 for plan in plans.values()) / len(plans) < 0.65
+    for i in range(50):
+        assert _plan_regions(f"agent-{i}", foundry.foundry_models(get_pool("rose-wmh-gpt61"))) == [_R2]
+
+    # A region-1 429 moves ultra to the GPT-6.1 deployment, reported as the model that served.
+    requests = _install_regions(
+        monkeypatch,
+        lambda region, _d: httpx.Response(429, headers={"retry-after": "5"}) if region == _R1 else _ok(),
+        regions=(_R1, _R2),
+    )
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
+    route_key = next(key for key, plan in plans.items() if plan[0][0] == _R1)
+    chunks = [chunk async for chunk in _call_with(route_key)]
+    assert requests == [(_R1, "gpt-6-sol"), (_R2, "gpt-6.1-sol")]
+    assert chunks[0].data["actual_model"] == "gpt-6.1-sol-foundry"
+
+
+@pytest.mark.asyncio
+async def test_truncation_exclusion_removes_only_the_excluded_sol_model(monkeypatch):
+    """A Sol model cut off at its output limit is never retried; the other Sol model still serves."""
+    requests = _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
+    ultra = get_pool("rose-1-ultra")
+    assert foundry.foundry_candidates(ultra, frozenset({"gpt61sol"})) == ("gpt-6-sol",)
+    assert foundry.foundry_candidates(ultra, frozenset({"gpt6sol"})) == ("gpt-6.1-sol",)
+    assert foundry.foundry_candidates(ultra, frozenset({"gpt6sol", "gpt61sol"})) == ()
+    assert foundry.foundry_candidates(get_pool("rose-wmh-gpt61"), frozenset({"gpt6sol"})) == ("gpt-6.1-sol",)
+
+    for excluded, served in (("gpt61sol", (_R1, "gpt-6-sol")), ("gpt6sol", (_R2, "gpt-6.1-sol"))):
+        for i in range(20):
+            requests.clear()
+            chunks = [
+                chunk
+                async for chunk in foundry.foundry_complete(
+                    pool_spec=ultra,
+                    messages=[{"role": "user", "content": "Say hi"}],
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort="high",
+                    provider_fast_mode=True,
+                    request_id=f"trunc-{excluded}-{i}",
+                    route_key=f"agent-{i}",
+                    agent_id=None,
+                    call_site="test",
+                    cache_namespace=None,
+                    ttft_timeout_s=2,
+                    idle_timeout_s=2,
+                    skip_models=frozenset({excluded}),
+                )
+            ]
+            assert requests == [served]
+            assert chunks[0].data["actual_model"] == f"{served[1]}-foundry"
+    with pytest.raises(RoseServerError):
+        [
+            chunk
+            async for chunk in foundry.foundry_complete(
+                pool_spec=ultra,
+                messages=[{"role": "user", "content": "Say hi"}],
+                response_format=None,
+                tools=None,
+                context_tools=None,
+                tool_choice=None,
+                temperature=None,
+                effort="high",
+                provider_fast_mode=True,
+                request_id="trunc-all",
+                route_key="agent-1",
+                agent_id=None,
+                call_site="test",
+                cache_namespace=None,
+                ttft_timeout_s=2,
+                idle_timeout_s=2,
+                skip_models=frozenset({"gpt6sol", "gpt61sol"}),
+            )
+        ]
+
+
 @pytest.mark.asyncio
 async def test_non_https_optional_region_is_skipped_and_primary_still_rejects(monkeypatch):
     """A typo in one optional slot must not stop the healthy regions (mirrors foundry.ts)."""

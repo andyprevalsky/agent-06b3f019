@@ -148,15 +148,40 @@ export function foundryConfigured(poolSpec: PoolSpec): boolean {
     throw error;
   }
   const now = Date.now();
+  const models = foundryModels(poolSpec);
+  const listed = isListed(regions, models);
   return regions.some(
     (region) =>
       now >= (authCooldownUntil.get(region.endpoint) ?? 0) &&
-      regionDeployments(region, poolSpec.gptAuthModel).length > 0
+      regionDeployments(region, models, listed).length > 0
   );
 }
 
-const matching = (configured: readonly string[], model: string): string[] =>
-  configured.filter((name) => name === model || name.startsWith(`${model}-`));
+/** Azure Sol deployments stand in for each other; other models serve only themselves. */
+const FOUNDRY_SOL_MODELS: readonly string[] = ['gpt-6-sol', 'gpt-6.1-sol'];
+
+/** Models whose Foundry deployments may serve the pool, its own model first. */
+export function foundryModels(poolSpec: PoolSpec): string[] {
+  const model = poolSpec.gptAuthModel;
+  if (!FOUNDRY_SOL_MODELS.includes(model)) return [model];
+  return [model, ...FOUNDRY_SOL_MODELS.filter((other) => other !== model)];
+}
+
+const asModels = (models: string | readonly string[]): readonly string[] =>
+  typeof models === 'string' ? [models] : models;
+
+const servesModel = (name: string, model: string): boolean =>
+  name === model || name.startsWith(`${model}-`);
+
+const matching = (configured: readonly string[], models: string | readonly string[]): string[] =>
+  configured.filter((name) => asModels(models).some((model) => servesModel(name, model)));
+
+const isListed = (regions: FoundryRegion[], models: string | readonly string[]): boolean =>
+  regions.some((region) => matching(region.deployments, models).length > 0);
+
+/** The model a deployment name serves: the first of `models` it equals or extends. */
+const servedModel = (deployment: string, models: readonly string[]): string =>
+  models.find((model) => servesModel(deployment, model)) ?? models[0];
 
 function rotated(names: string[], routeKey: string): string[] {
   if (!names.length) return [];
@@ -169,13 +194,19 @@ function rotated(names: string[], routeKey: string): string[] {
  * Deployments serving `model`: configured names equal to it or prefixed
  * `<model>-`. A region's deployment list is shared by every Foundry pool, so one
  * pool's deployments never receive another pool's model. Without a matching
- * name, region 1 uses Foundry's deploymentless inference for the model id; other
- * regions serve only the names they list, so a new resource holding only GPT-6
- * Sol never receives Luna traffic that would fail there with DeploymentNotFound.
+ * name, region 1 uses Foundry's deploymentless inference for the pool's own
+ * model unless another region lists one of the models (that region is where it is deployed;
+ * region 1's deploymentless call would be a terminal 400). Other regions serve
+ * only the names they list, so a new resource holding only GPT-6 Sol never
+ * receives Luna traffic that would fail there with DeploymentNotFound.
  */
-function regionDeployments(region: FoundryRegion, model: string): string[] {
-  const names = matching(region.deployments, model);
-  return region.slot === 1 && !names.length ? [model] : names;
+function regionDeployments(
+  region: FoundryRegion,
+  models: string | readonly string[],
+  listedElsewhere = false
+): string[] {
+  const names = matching(region.deployments, models);
+  return region.slot === 1 && !names.length && !listedElsewhere ? [asModels(models)[0]] : names;
 }
 
 function rendezvousWeight(routeKey: string, region: FoundryRegion): bigint {
@@ -187,12 +218,13 @@ function rendezvousWeight(routeKey: string, region: FoundryRegion): bigint {
 /** Every (region, deployment) to try, primary region first, for this route key. */
 export function foundryRoutePlan(
   regions: FoundryRegion[],
-  model: string,
+  models: string | readonly string[],
   routeKey: string
 ): Array<{ region: FoundryRegion; deployment: string }> {
   const weights = new Map(regions.map((region) => [region, rendezvousWeight(routeKey, region)]));
+  const listed = isListed(regions, models);
   return regions
-    .filter((region) => regionDeployments(region, model).length > 0)
+    .filter((region) => regionDeployments(region, models, listed).length > 0)
     .sort((a, b) => {
       const wa = weights.get(a) ?? 0n;
       const wb = weights.get(b) ?? 0n;
@@ -200,7 +232,7 @@ export function foundryRoutePlan(
       return a.slot - b.slot;
     })
     .flatMap((region) =>
-      rotated(regionDeployments(region, model), routeKey).map((deployment) => ({
+      rotated(regionDeployments(region, models, listed), routeKey).map((deployment) => ({
         region,
         deployment,
       }))
@@ -260,14 +292,14 @@ function recordHttpFailure(
 }
 
 export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<RoseStreamChunk> {
-  const model = opts.poolSpec.gptAuthModel;
+  const models = foundryModels(opts.poolSpec);
   const regions = routableRegions();
   if (!regions.length) throw new RoseAuthError('Foundry endpoint or key missing');
   let lastError: RoseError | null = null;
   let skippedCooling = false;
   let attempt = 0;
 
-  for (const { region, deployment } of foundryRoutePlan(regions, model, opts.routeKey)) {
+  for (const { region, deployment } of foundryRoutePlan(regions, models, opts.routeKey)) {
     const now = Date.now();
     if (now < (authCooldownUntil.get(region.endpoint) ?? 0)) continue;
     const cooldownKey = `${region.endpoint}\n${deployment}`;
@@ -332,7 +364,7 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
     let yieldedVisible = false;
     try {
       for await (const chunk of parseResponsesSSE(response.body, {
-        actualModel: `${model}-foundry`,
+        actualModel: `${servedModel(deployment, models)}-foundry`,
         poolName: 'foundry',
         requestId: opts.requestId,
       })) {
