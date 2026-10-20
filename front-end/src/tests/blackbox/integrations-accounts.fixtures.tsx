@@ -1,7 +1,8 @@
 /**
- * Shared fixtures for the Rose Desktop multi-account integrations suites
- * (Gmail I3, LinkedIn I4, passwords I7, WhatsApp I2): wire shapes exactly as
- * back-end/src/domains/integrations/service.accountsView.ts emits them.
+ * Shared fixtures for the Rose Desktop integrations suites (single-account
+ * rows, Gmail per-address progress): wire shapes exactly as the backend
+ * emits them (lane L-CULL-INTEG: `integrations[].accounts` holds one entry
+ * per row; Gmail addresses and Plaid items match their entries by id).
  */
 import type { ReactNode } from 'react';
 import { screen, within } from '@testing-library/react';
@@ -47,16 +48,19 @@ export function account(provider: string, accountId: string, extra: Record<strin
   };
 }
 
-/** One Integration row; every row of a provider carries that provider's whole account list. */
-export function row(name: string, accounts: unknown[], extra: Record<string, unknown> = {}) {
+/** One Integration row with its account entries (one entry for single-account rows). */
+export function row(
+  name: string,
+  accounts: unknown[] | undefined,
+  extra: Record<string, unknown> = {},
+) {
   return {
-    id: `int-${name}-${String(extra.accountId ?? '')}`,
+    id: `int-${name}`,
     name,
     type: 'DATA_SOURCE',
     status: 'CONNECTED',
     isActive: true,
-    accountId: '',
-    accounts,
+    ...(accounts === undefined ? {} : { accounts }),
     ...extra,
   };
 }
@@ -94,7 +98,7 @@ export function serveList(
   return served;
 }
 
-/** Desktop handlers with browser cookies (LinkedIn connect) and an optional WhatsApp bridge. */
+/** Desktop handlers with browser cookies (cookies, passwords and LinkedIn connect). */
 export function desktopHandlers(extra: IntegrationHandlers = {}): IntegrationHandlers {
   return {
     browserCookies: {
@@ -110,7 +114,13 @@ export function desktopHandlers(extra: IntegrationHandlers = {}): IntegrationHan
 }
 
 export function renderIntegrations(
-  options: { roseDesktop?: boolean; handlers?: IntegrationHandlers; children?: ReactNode } = {},
+  options: {
+    roseDesktop?: boolean;
+    handlers?: IntegrationHandlers;
+    children?: ReactNode;
+    /** Signed-in user for RoseThemeProvider (store 'dark' under its key for dark mode). */
+    roseThemeUserId?: string;
+  } = {},
 ) {
   return renderWithProviders(
     <IntegrationHandlersProvider handlers={options.handlers ?? desktopHandlers()}>
@@ -118,7 +128,7 @@ export function renderIntegrations(
       <Toaster />
       {options.children}
     </IntegrationHandlersProvider>,
-    { roseDesktop: options.roseDesktop ?? true },
+    { roseDesktop: options.roseDesktop ?? true, roseThemeUserId: options.roseThemeUserId },
   );
 }
 
