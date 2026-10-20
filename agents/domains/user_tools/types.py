@@ -20,7 +20,6 @@ The pinned spec stored in workflow state is small (schemas + metadata, never
 handler bytes).
 """
 
-
 import json
 import posixpath
 import re

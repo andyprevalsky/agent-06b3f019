@@ -629,9 +629,13 @@ async def run_all_tests():
             "run_agent_declares_user_tools_and_dispatches_calls",
             test_run_agent_declares_user_tools_and_dispatches_calls,
         )
-        await r.record_async("sub_agent_and_disabled_executor_get_no_tools", test_sub_agent_and_disabled_executor_get_no_tools)
+        await r.record_async(
+            "sub_agent_and_disabled_executor_get_no_tools", test_sub_agent_and_disabled_executor_get_no_tools
+        )
         await r.record_async("pinned_version_survives_mid_run_publish", test_pinned_version_survives_mid_run_publish)
-        await r.record_async("handler_success_posts_result_with_inline_view", test_handler_success_posts_result_with_inline_view)
+        await r.record_async(
+            "handler_success_posts_result_with_inline_view", test_handler_success_posts_result_with_inline_view
+        )
         await r.record_async("node_runtime_handler", test_node_runtime_handler)
         await r.record_async("bad_output_schema_is_tool_error", test_bad_output_schema_is_tool_error)
         await r.record_async("invalid_input_never_runs_handler", test_invalid_input_never_runs_handler)
@@ -642,8 +646,12 @@ async def run_all_tests():
         )
         await r.record_async("handler_env_has_no_secrets", test_handler_env_has_no_secrets)
         await r.record_async("side_effect_tools_rejected_in_v1", test_side_effect_tools_rejected_in_v1)
-        await r.record_async("invalid_tool_json_is_skipped_not_declared", test_invalid_tool_json_is_skipped_not_declared)
-        await r.record_async("pinned_tools_decode_in_production_sandbox", test_pinned_tools_decode_in_production_sandbox)
+        await r.record_async(
+            "invalid_tool_json_is_skipped_not_declared", test_invalid_tool_json_is_skipped_not_declared
+        )
+        await r.record_async(
+            "pinned_tools_decode_in_production_sandbox", test_pinned_tools_decode_in_production_sandbox
+        )
     finally:
         teardown_mock()
     return r.all_passed

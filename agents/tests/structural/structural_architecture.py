@@ -555,8 +555,8 @@ def test_every_scheduled_activity_is_registered():
                     continue
                 if name not in registered:
                     violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: {name}")
-    assert not violations, (
-        "Scheduled activities missing from worker.py registered_activities:\n" + "\n".join(violations)
+    assert not violations, "Scheduled activities missing from worker.py registered_activities:\n" + "\n".join(
+        violations
     )
 
 
@@ -647,8 +647,8 @@ def test_workflow_sandbox_is_production_only():
                     violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: imports {sorted(names)}")
             elif isinstance(node, ast.Attribute) and node.attr in _SANDBOX_CONFIG_NAMES:
                 violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: uses {node.attr}")
-    assert not violations, (
-        "Run workflows with helpers.workflow_sandbox.production_workflow_runner():\n" + "\n".join(violations)
+    assert not violations, "Run workflows with helpers.workflow_sandbox.production_workflow_runner():\n" + "\n".join(
+        violations
     )
 
 
