@@ -69,8 +69,12 @@ From the isolated deploy checkout's `agents` directory, the exact parameter:
 ```
 
 passed unchanged in 5.88 seconds. This does not reproduce the original miss and
-is not a causal fix proof. The unchanged full failed gate is being rechecked;
-its result remains separate from the original failure. Existing permanent test
+is not a causal fix proof. The unchanged full failed gate subsequently passed: 1100 passed, four skipped,
+1242 deselected in 549.25 seconds. Its result remains separate from the
+original failure. Sixty other original structural branches passed and were
+retained without duplicate execution. `A3-structural-recheck-receipt.json`
+binds the original and rerun log hashes and verifies only documentation
+changed between these source snapshots. Existing permanent test
 coverage is retained. No bounds, assertions, retries, source or schemas changed.
 
 ## Solution
