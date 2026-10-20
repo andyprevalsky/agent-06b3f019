@@ -9,6 +9,7 @@
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../database';
+import { normalizeGithubUrl } from '../github';
 import { randomBytes } from '../crypto';
 import { decryptProjectBinary, decryptProjectSecret } from './secrets';
 import { redactableSecretValues, type EnvVariableMeta } from './envFile';
@@ -72,6 +73,29 @@ export async function listProjects(userId: string): Promise<ProjectWithCount[]> 
     take: PROJECT_LIST_LIMIT,
     include: { _count: { select: { envFiles: true } } },
   });
+}
+
+/**
+ * Repo URLs (as stored on projects) Rose has verified clone access to for this
+ * user: a GithubRepoAccess grant exists for the normalized URL. One indexed
+ * query for any number of projects.
+ */
+export async function findGithubConnectedRepoUrls(
+  userId: string,
+  repoUrls: (string | null)[]
+): Promise<Set<string>> {
+  const normalized = new Map<string, string[]>();
+  for (const raw of repoUrls) {
+    if (!raw) continue;
+    const url = normalizeGithubUrl(raw);
+    if (url) normalized.set(url, [...(normalized.get(url) ?? []), raw]);
+  }
+  if (normalized.size === 0) return new Set();
+  const grants = await prisma.githubRepoAccess.findMany({
+    where: { userId, repoUrl: { in: [...normalized.keys()] } },
+    select: { repoUrl: true },
+  });
+  return new Set(grants.flatMap((grant) => normalized.get(grant.repoUrl) ?? []));
 }
 
 export async function findProject(userId: string, id: string): Promise<ProjectRecord | null> {
