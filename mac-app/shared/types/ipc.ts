@@ -211,9 +211,15 @@ export interface IPC {
     isConnected: () => Promise<boolean>;
     connectWithExistingSession: () => Promise<{ success: boolean; error?: string }>;
     disconnect: () => Promise<{ success: boolean; error?: string }>;
-    logout: () => Promise<{ success: boolean; error?: string }>;
+    /** Log out one account (Telegram user id), or every connected account when omitted. */
+    logout: (accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    /** Saved Telegram accounts on this Mac with their connection state. */
+    listAccounts?: () => Promise<
+      Array<{ accountId: string; label: string | null; connected: boolean }>
+    >;
     syncHistorical: (
-      messagesPerDialog?: number
+      messagesPerDialog?: number,
+      accountId?: string
     ) => Promise<{ success: boolean; count?: number; error?: string }>;
     // Auth flow methods
     startAuth: (phoneNumber: string) => Promise<{ success: boolean; error?: string }>;
