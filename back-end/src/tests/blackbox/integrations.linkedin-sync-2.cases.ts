@@ -266,6 +266,10 @@ export async function testLinkedinAccounts_reportNamesTheAccount() {
     const { accounts, rows } = await listed(token);
     assert(accounts.length === 1, `one LinkedIn account, got ${accounts.map((x) => x.accountId)}`);
     assert(accounts[0].accountId === 'ada-owner-3003', 'the run moved to the named account');
+    assert(
+      accounts[0].label === 'linkedin.com/in/ada-owner-3003',
+      `server label for a profile id, got ${accounts[0].label}`
+    );
     assert(accounts[0].progress.phase === 'export_requested', 'with its current phase');
     assert(rows.length === 1 && rows[0].config?.syncAgentId === agentId, 'one row, same agent');
     assert(phasesOf(rows[0]).join(' > ') === 'starting > export_requested', 'history moved too');

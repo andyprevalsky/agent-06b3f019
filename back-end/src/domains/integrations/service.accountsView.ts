@@ -15,6 +15,7 @@
 
 import type { CookieProfileSource, EmailCredentialSource, PlaidItemSource } from './repo.accounts';
 import type { ProgressRow } from './repo.progress';
+import { derivedAccountLabel } from './service.accountLabels';
 import { resolveAccountAdapter } from './service.accountRegistry';
 import { asSyncState, iso, progressOf, snapshotOf } from './service.progressSnapshot';
 import {
@@ -62,7 +63,7 @@ function rowAccount(row: AccountViewRow): KnownAccount {
     provider: row.name,
     storageAccountId: row.accountId,
     rowId: row.id,
-    label: row.accountEmail,
+    label: row.accountEmail ?? derivedAccountLabel(row.name, row.accountId),
     health,
     lastSyncAt: row.lastSuccessfulSyncAt ?? row.lastSyncAt,
     lastError: health === 'failed' || health === 'needs_reconnect' ? row.failureReason : null,
@@ -197,7 +198,7 @@ export function buildAccountsView(input: {
     push({
       provider: snapshot.provider,
       accountId: snapshot.accountId,
-      label: null,
+      label: derivedAccountLabel(progress.provider, progress.accountId),
       state: snapshot.state,
       progress: snapshot.progress,
       lastSyncAt: snapshot.lastSyncAt,
