@@ -2,6 +2,7 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import type { Agent, AgentTreeNode, OutputSchema } from '@/lib/api';
 import { fetchTreeState } from '@/lib/api';
 import { recordAgentScopeDiscard } from '@/lib/agentScopeDiagnostics';
+import { notifyOpenAgentActivity } from '@/lib/openAgentActivity';
 import {
   subscribeToBus,
   unsubscribe,
@@ -149,6 +150,8 @@ function createHandlers(busId: string, subscription: BusSubscription, generation
       subscription.realtimeNodes.set(data.agentId, node);
       nodes.set(data.agentId, node);
       publishNodes(subscription, nodes);
+      // This bus is held only while the open view shows the tree.
+      notifyOpenAgentActivity({ agentId: data.agentId, kind: 'sub-agent' });
     },
     onDisconnect: () => {
       if (!isLiveGeneration(busId, subscription, generation)) return;

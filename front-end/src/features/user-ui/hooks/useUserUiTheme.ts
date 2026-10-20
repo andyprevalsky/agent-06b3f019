@@ -4,13 +4,23 @@
  *   no theme / safe mode → nothing applied (previous tokens removed)
  *   theme loaded         → valid `--name: value` tokens set on <html>;
  *                          invalid names/values are dropped (tokens are data)
- *   version change       → old tokens removed before the new ones apply
+ *   version change       → the previous theme (tokens + background, resolved
+ *                          against ITS version's baseUrl) stays until the new
+ *                          theme.json loads, then swaps in place — no flash
+ *                          to the stock UI during a live publish
+ *   new version has no theme / its theme fails → cleared (stock tokens)
  */
 import { useEffect, useState } from 'react';
 
 import { fetchUserUiTheme } from '../api';
 import { joinUserContentUrl, validateThemeTokens } from '../config';
 import type { ActiveUserUi, UserUiTheme } from '../types';
+
+/** A loaded theme.json plus the version base URL its relative paths resolve to. */
+export interface LoadedUserUiTheme {
+  theme: UserUiTheme;
+  baseUrl: string;
+}
 
 /** Apply validated tokens to <html>; returns a cleanup that removes them. */
 export function applyThemeTokens(
@@ -26,37 +36,47 @@ export function applyThemeTokens(
   };
 }
 
-function useThemeDocument(active: ActiveUserUi | null): UserUiTheme | null {
-  const [theme, setTheme] = useState<UserUiTheme | null>(null);
+function useThemeDocument(active: ActiveUserUi | null): LoadedUserUiTheme | null {
+  const [loaded, setLoaded] = useState<LoadedUserUiTheme | null>(null);
+  const baseUrl = active?.baseUrl ?? null;
   const themeUrl =
     active?.manifest.theme !== undefined
       ? joinUserContentUrl(active.baseUrl, active.manifest.theme)
       : null;
 
   useEffect(() => {
-    setTheme(null);
-    if (!themeUrl) return;
+    if (!themeUrl || !baseUrl) {
+      setLoaded(null);
+      return;
+    }
     let cancelled = false;
     fetchUserUiTheme(themeUrl)
-      .then((loaded) => {
-        if (!cancelled) setTheme(loaded);
+      .then((theme) => {
+        if (!cancelled) setLoaded({ theme, baseUrl });
       })
-      .catch((error: unknown) => console.warn('[UserUi] theme load failed', error));
+      .catch((error: unknown) => {
+        console.warn('[UserUi] theme load failed', error);
+        if (!cancelled) setLoaded(null);
+      });
     return () => {
       cancelled = true;
     };
-  }, [themeUrl]);
+  }, [themeUrl, baseUrl]);
 
-  return theme;
+  return loaded;
 }
 
-export function useUserUiTheme(active: ActiveUserUi | null, safeMode: boolean) {
-  const theme = useThemeDocument(active);
+export function useUserUiTheme(
+  active: ActiveUserUi | null,
+  safeMode: boolean,
+): LoadedUserUiTheme | null {
+  const loaded = useThemeDocument(active);
+  const tokens = loaded?.theme.tokens;
 
   useEffect(() => {
-    if (safeMode || !theme?.tokens) return;
-    return applyThemeTokens(theme.tokens);
-  }, [theme, safeMode]);
+    if (safeMode || !tokens) return;
+    return applyThemeTokens(tokens);
+  }, [tokens, safeMode]);
 
-  return safeMode ? null : theme;
+  return safeMode ? null : loaded;
 }

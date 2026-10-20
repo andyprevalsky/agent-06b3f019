@@ -42,9 +42,18 @@ export interface ActiveUserUiResponse {
   baseUrl?: string;
 }
 
+/**
+ * One item of `GET /api/user-ui/versions` → `{ activeVersionId, versions: [...] }`
+ * (back-end/src/domains/user-ui/service.ts listVersions). Legacy `{ id }` items
+ * are normalized to `versionId` by the API parser.
+ */
 export interface UserUiVersionSummary {
-  id: string;
+  versionId: string;
   manifest: UserUiManifest;
+  fileCount?: number;
+  totalBytes?: number;
+  createdAt?: string;
+  active?: boolean;
 }
 
 export interface UserUiThemeBackground {
@@ -75,6 +84,16 @@ export interface ResolvedBackground {
   /** Theme background image (null when only a `background` slot exists). */
   imageUrl: string | null;
   fadeOpacity: number;
+}
+
+/** Name of the backend realtime event emitted when a user UI version is published/activated. */
+export const USER_UI_PUBLISHED_EVENT = 'user_ui.published' as const;
+
+/** Typed hook point for that event (see hooks/liveRefresh.ts). */
+export interface UserUiPublishedEvent {
+  type: typeof USER_UI_PUBLISHED_EVENT;
+  /** The version that became active (null when the user reverted to stock). */
+  versionId: string | null;
 }
 
 /** Messages a user view may post to the host. Anything else is dropped. */

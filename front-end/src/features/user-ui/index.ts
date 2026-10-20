@@ -1,6 +1,7 @@
 export * from './types';
 export {
   INLINE_VIEW_LIVE_CAP,
+  USER_UI_REFRESH_WINDOW_MS,
   backdropOpacity,
   USER_UI_IFRAME_SANDBOX,
   isAllowedUserContentUrl,
@@ -11,6 +12,8 @@ export {
 export {
   InlineLiveCapStore,
   applyThemeTokens,
+  handleUserUiPublishedEvent,
+  refreshActiveUserUi,
   resetUserUiVersionCache,
   useUserUi,
   useUserUiOpaqueSurfaces,

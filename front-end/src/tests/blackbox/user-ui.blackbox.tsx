@@ -444,6 +444,52 @@ describe('inline trajectory views', () => {
     }
   });
 
+  it('renders a view pinned to a non-active version from the real GET /versions shape (versionId)', async () => {
+    useVisibleIntersection();
+    serveActive(FULL_MANIFEST);
+    // Mirrors back-end/src/domains/user-ui/service.ts listVersions().
+    server.use(
+      http.get(`${API_BASE}/user-ui/versions`, () =>
+        HttpResponse.json({
+          activeVersionId: 'v2',
+          versions: [
+            {
+              versionId: 'v2',
+              manifest: FULL_MANIFEST,
+              fileCount: 4,
+              totalBytes: 2048,
+              createdAt: '2026-10-20T18:00:00.000Z',
+              active: true,
+            },
+            {
+              versionId: 'v1',
+              manifest: {
+                version: 1,
+                inline: { chart: { entry: 'inline/chart/v1.html', summary: 'Chart v1' } },
+              },
+              fileCount: 2,
+              totalBytes: 1024,
+              createdAt: '2026-10-19T18:00:00.000Z',
+              active: false,
+            },
+          ],
+        }),
+      ),
+    );
+    render(
+      <UserUiProvider userId="test-user">
+        <InlineUserView inlineView={{ view: 'chart', versionId: 'v1' }} messageId="pinned" />
+      </UserUiProvider>,
+    );
+    const frame = await screen.findByTestId('user-ui-inline-frame');
+    expect(frame).toHaveAttribute(
+      'src',
+      'http://localhost:3001/usercontent/v1/inline/chart/v1.html',
+    );
+    expect(frame).toHaveAttribute('title', 'Chart v1');
+    expect(screen.getByTestId('user-ui-inline-view')).toHaveAttribute('data-inline-state', 'live');
+  });
+
   it('keeps at most 4 frames live in a long trajectory; the rest show posters', async () => {
     useVisibleIntersection();
     serveActive({

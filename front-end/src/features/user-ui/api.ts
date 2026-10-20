@@ -17,19 +17,37 @@ export async function fetchActiveUserUi(): Promise<ActiveUserUiResponse> {
   return (await response.json()) as ActiveUserUiResponse;
 }
 
+function readVersionId(record: Record<string, unknown>): string | null {
+  if (typeof record.versionId === 'string' && record.versionId.length > 0) return record.versionId;
+  // Legacy shape: `{ id, manifest }`.
+  if (typeof record.id === 'string' && record.id.length > 0) return record.id;
+  return null;
+}
+
+/** Accepts `{ activeVersionId, versions: [{ versionId, manifest, ... }] }` or a bare array. */
 function extractVersionList(body: unknown): UserUiVersionSummary[] {
   const list = Array.isArray(body)
     ? body
     : body && typeof body === 'object' && Array.isArray((body as { versions?: unknown }).versions)
       ? (body as { versions: unknown[] }).versions
       : [];
-  return list.filter(
-    (item): item is UserUiVersionSummary =>
-      !!item &&
-      typeof item === 'object' &&
-      typeof (item as { id?: unknown }).id === 'string' &&
-      !!(item as { manifest?: unknown }).manifest,
-  );
+  const versions: UserUiVersionSummary[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const versionId = readVersionId(record);
+    const manifest = record.manifest;
+    if (versionId === null || !manifest || typeof manifest !== 'object') continue;
+    versions.push({
+      versionId,
+      manifest: manifest as UserUiVersionSummary['manifest'],
+      ...(typeof record.fileCount === 'number' ? { fileCount: record.fileCount } : {}),
+      ...(typeof record.totalBytes === 'number' ? { totalBytes: record.totalBytes } : {}),
+      ...(typeof record.createdAt === 'string' ? { createdAt: record.createdAt } : {}),
+      ...(typeof record.active === 'boolean' ? { active: record.active } : {}),
+    });
+  }
+  return versions;
 }
 
 export async function fetchUserUiVersions(): Promise<UserUiVersionSummary[]> {

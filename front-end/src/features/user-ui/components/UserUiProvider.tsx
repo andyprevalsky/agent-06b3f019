@@ -12,10 +12,20 @@
  *
  *   [ACTIVE] <--toggle--> [SAFE]
  *   window focus (and DEV ?rose_ui_live=1 every 5s) → refetch active version
+ *   LIVE REFRESH (Rose Desktop flag only):
+ *     open agent new message / status change, a sub-agent of its shown tree
+ *     changing state, refreshActiveUserUi(), `user_ui.published`
+ *       → [REFRESH PENDING] one GET per 750ms window (deduped, cancelled on
+ *         unmount; reuses the chat's agent:<id> / bus channels, opens none)
+ *       → newer versionId → [ACTIVE vN+1]: theme tokens + background swap in
+ *         place (previous theme held until the new theme.json loads); the
+ *         app backdrop still stays opaque until the agent's first USER message
  *
  * SafeModeControl is host DOM above every user frame, so a shell cannot hide it.
  */
 import { useMemo, useRef, type ReactNode } from 'react';
+
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import { joinUserContentUrl, resolveBackground } from '../config';
 import {
@@ -43,7 +53,8 @@ function slotUrlFor(active: ActiveUserUi | null, enabled: boolean) {
 }
 
 export function UserUiProvider({ userId, children }: UserUiProviderProps) {
-  const active = useActiveUserUi(userId);
+  const liveRefresh = useRoseDesktop();
+  const active = useActiveUserUi(userId, { liveRefresh });
   const [safeMode, setSafeMode] = useSafeMode();
   const theme = useUserUiTheme(active, safeMode);
   const liveCapRef = useRef<InlineLiveCapStore | null>(null);
@@ -59,7 +70,11 @@ export function UserUiProvider({ userId, children }: UserUiProviderProps) {
       safeMode,
       setSafeMode,
       background: enabled
-        ? resolveBackground(theme, active.baseUrl, slotUrl('background') !== null)
+        ? resolveBackground(
+            theme?.theme ?? null,
+            theme?.baseUrl ?? active.baseUrl,
+            slotUrl('background') !== null,
+          )
         : null,
       slotUrl,
       shellUrl: active && shellEntry ? joinUserContentUrl(active.baseUrl, shellEntry) : null,
