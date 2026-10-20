@@ -6,7 +6,7 @@
  * POST   /checkpoint         - checkpoint a running task (worker drain) without pausing
  * POST   /:taskId/keepalive  - extend an attached task's sandbox idle window + lease
  * POST   /:taskId/usage-limit - the CLI stopped on a usage limit: rate-limit its credential (C15)
- * GET    /credential-availability?user_id - can a Claude / Codex credential be leased now
+ * GET    /credential-availability?user_id[&own_only=true] - can a Claude / Codex credential be leased now
  *
  * Every read/write is scoped to the authenticated user; a foreign id is
  * indistinguishable from an unknown one.
@@ -102,8 +102,10 @@ export function registerCodeSessionRoutes(router: Router): void {
         res.status(403).json({ error: 'Internal callers only' });
         return;
       }
-      const { user_id } = credentialAvailabilityQuerySchema.parse(req.query);
-      res.json(await codeCredentialAvailability(user_id));
+      const { user_id, own_only } = credentialAvailabilityQuerySchema.parse(req.query);
+      res.json(
+        await codeCredentialAvailability(user_id, new Date(), { ownOnly: own_only === 'true' })
+      );
     })
   );
 

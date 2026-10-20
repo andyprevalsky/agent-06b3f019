@@ -38,6 +38,47 @@ const router = Router();
 registerCodeSessionRoutes(router);
 
 /**
+ * C14: a local session runs on the agent tree's Mac with the user's own login,
+ * in the folder they granted (no clone, Project restore or persistent code
+ * session: the work stays in that folder). Otherwise an E2B sandbox resumes or
+ * starts the agent's persistent code session.
+ */
+async function createSessionForTarget(body: unknown) {
+  const {
+    agent_id,
+    goal,
+    attachments,
+    github_repo_url,
+    user_id,
+    code_session_id,
+    lease_owner,
+    base_branch,
+    project_id,
+    target,
+  } = createSessionSchema.parse(body);
+  if (target === 'local') {
+    const local = await createLocalCodeSessionResponse({
+      agentId: agent_id,
+      goal,
+      provider: 'claude',
+      expectedUserId: user_id,
+    });
+    return { ...local, project: null };
+  }
+  return service.createSession({
+    agent_id,
+    goal,
+    attachments: attachments as FilePointer[] | undefined,
+    github_repo_url,
+    user_id,
+    code_session_id,
+    lease_owner,
+    base_branch,
+    project_id,
+  });
+}
+
+/**
  * POST /api/claude-code-session/create
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
  * Called by agents service to create a new session.
@@ -48,44 +89,7 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const {
-        agent_id,
-        goal,
-        attachments,
-        github_repo_url,
-        user_id,
-        code_session_id,
-        lease_owner,
-        base_branch,
-        project_id,
-        target,
-      } = createSessionSchema.parse(req.body);
-
-      // C14: a local session runs on the agent tree's Mac with the user's own
-      // login, in the folder they granted (no clone, Project restore or
-      // persistent code session: the work stays in that folder).
-      const result =
-        target === 'local'
-          ? {
-              ...(await createLocalCodeSessionResponse({
-                agentId: agent_id,
-                goal,
-                provider: 'claude',
-                expectedUserId: user_id,
-              })),
-              project: null,
-            }
-          : await service.createSession({
-              agent_id,
-              goal,
-              attachments: attachments as FilePointer[] | undefined,
-              github_repo_url,
-              user_id,
-              code_session_id,
-              lease_owner,
-              base_branch,
-              project_id,
-            });
+      const result = await createSessionForTarget(req.body);
 
       res.json({
         success: true,

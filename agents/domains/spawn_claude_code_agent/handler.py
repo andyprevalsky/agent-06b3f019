@@ -223,6 +223,11 @@ def _local_target_unavailable(error: BaseException) -> Optional[ApplicationError
     return None
 
 
+def _failed_code_agent(target_info: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
+    """``metadata.code_agent`` for a run that failed before or outside the activity result."""
+    return {**code_agent_metadata(target_info), "state": "failed", "failure_message": message}
+
+
 def _resumed_target(code_session: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Target recorded on a parked/drained session, so a reattach keeps its Mac."""
     if not code_session or code_session.get("target") != CODE_TARGET_LOCAL:
@@ -341,14 +346,15 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     agent_id=agent_id,
                     error=extract_error_message(lookup_error),
                 )
+                lookup_message = extract_error_message(lookup_error)
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Code session failed",
-                    message=extract_error_message(lookup_error),
+                    message=lookup_message,
                     status=MessageStatus.ERROR,
                     metadata={
                         "toolName": "spawn_claude_code_agent",
-                        "code_agent": {"target": CODE_TARGET_LOCAL},
+                        "code_agent": _failed_code_agent({"target": CODE_TARGET_LOCAL}, lookup_message),
                     },
                 )
                 return
@@ -367,7 +373,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     metadata={
                         "toolName": "spawn_claude_code_agent",
                         "error_code": LOCAL_TARGET_UNAVAILABLE_CODE,
-                        "code_agent": code_agent_metadata(target_info),
+                        "code_agent": _failed_code_agent(target_info, target_info.get("error") or ""),
                     },
                 )
                 return
@@ -739,8 +745,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "toolName": "spawn_claude_code_agent",
                         "code_provider": code_provider,
                         "error_code": LOCAL_TARGET_UNAVAILABLE_CODE,
-                        "code_agent": code_agent_metadata(
-                            {**target_info, "device_name": device_name or target_info.get("device_name")}
+                        "code_agent": _failed_code_agent(
+                            {**target_info, "device_name": device_name or target_info.get("device_name")},
+                            local_unavailable.message,
                         ),
                     },
                 )
@@ -779,15 +786,16 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 error_type=type(e).__name__,
             )
 
+            failure_message = extract_error_message(e)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Code session failed",
-                message=extract_error_message(e),
+                message=failure_message,
                 status=MessageStatus.ERROR,
                 metadata={
                     "toolName": "spawn_claude_code_agent",
                     "code_provider": code_provider,
-                    "code_agent": code_agent_metadata(target_info),
+                    "code_agent": _failed_code_agent(target_info, failure_message),
                 },
             )
 

@@ -2407,18 +2407,41 @@ def _provider_label(code_provider: str) -> str:
     return "Codex" if code_provider == "codex" else "Claude Code"
 
 
+def local_workspace_place(target_meta: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Where a local (Mac) run's work lives, e.g. "~/Developer/rose on Andy's MacBook"."""
+    if not target_meta or target_meta.get("target") != "local":
+        return None
+    folder = target_meta.get("folder") or "the shared folder"
+    return f"{folder} on {target_meta.get('device_name') or 'the Mac'}"
+
+
 def format_usage_limit_message(
-    *, code_provider: str, resets_at_iso: Optional[str], facts: Optional[Dict[str, Any]]
+    *,
+    code_provider: str,
+    resets_at_iso: Optional[str],
+    facts: Optional[Dict[str, Any]],
+    local_place: Optional[str] = None,
 ) -> str:
-    """Short, factual retry instructions for the parent (C15)."""
+    """Short, factual retry instructions for the parent (C15).
+
+    ``local_place`` (a Mac run): the work stays in that folder and the run used
+    the user's own CLI login, so the retry targets the Mac again.
+    """
     facts = facts or {}
     other = "claude" if code_provider == "codex" else "codex"
+    resets = f" (resets {resets_at_iso})" if resets_at_iso else ""
+    if local_place:
+        return (
+            f"Code agent stopped: the usage limit of your own {_provider_label(code_provider)} login was "
+            f"reached{resets}. Its files and commits stay in {local_place}. Retry with "
+            "spawn_agent(type='code', target='local', goal=<the same goal>): it continues there on your "
+            f"{_provider_label(other)} login when one is connected, otherwise after the reset."
+        )
     saved = "Its work is saved"
     if facts.get("branch"):
         saved += f" on branch {facts['branch']}"
     if facts.get("checkpoint_seq"):
         saved += f" (checkpoint {facts['checkpoint_seq']})"
-    resets = f" (resets {resets_at_iso})" if resets_at_iso else ""
     return (
         f"Code agent stopped: the {_provider_label(code_provider)} usage limit was reached{resets}. "
         f"{saved}. Retry now with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
@@ -2662,7 +2685,8 @@ async def spawn_claude_code_activity(
         if attached is None:
             # C15: continue on the other provider when this one has no
             # leasable credential left (the session itself is provider-neutral).
-            available = await fetch_code_credential_availability(user_id)
+            # A Mac run only ever gets the user's own CLI login, never a pool token.
+            available = await fetch_code_credential_availability(user_id, own_only=target == "local")
             other_provider = "codex" if code_provider == "claude" else "claude"
             if available is not None and not available.get(code_provider) and available.get(other_provider):
                 logger.warning(
@@ -2916,8 +2940,12 @@ async def spawn_claude_code_activity(
             if log_collector:
                 await log_collector.stop()
             resets_at_iso = (marked or {}).get("resets_at")
+            local_place = local_workspace_place(code_agent_meta)
             message = format_usage_limit_message(
-                code_provider=code_provider, resets_at_iso=resets_at_iso, facts=code_session_facts
+                code_provider=code_provider,
+                resets_at_iso=resets_at_iso,
+                facts=code_session_facts,
+                local_place=local_place,
             )
             code_agent = build_code_agent_metadata(
                 target_meta=code_agent_meta,
@@ -2953,11 +2981,16 @@ async def spawn_claude_code_activity(
                     "limit_type": usage_limit.get("limit_type"),
                     "credential_marked": (marked or {}).get("marked"),
                 },
-                "retry": {
-                    "tool": "spawn_agent",
-                    "type": "code",
-                    "code_session_id": (code_session_facts or {}).get("code_session_id"),
-                },
+                # A Mac run has no code session: its retry targets the same Mac folder.
+                "retry": (
+                    {"tool": "spawn_agent", "type": "code", "target": "local"}
+                    if local_place
+                    else {
+                        "tool": "spawn_agent",
+                        "type": "code",
+                        "code_session_id": (code_session_facts or {}).get("code_session_id"),
+                    }
+                ),
                 "task_id": task_id,
                 "ws_url": ws_url,
                 "execution_time_ms": (safe_time() - start_time) * 1000,
@@ -3012,11 +3045,26 @@ async def spawn_claude_code_activity(
             # Idle is not failure (C11): report the paused, resumable session.
             if log_collector:
                 await log_collector.stop()
-            if isinstance(awaiting_parent, dict):
+            local_place = local_workspace_place(code_agent_meta)
+            if isinstance(awaiting_parent, dict) and local_place:
+                message = (
+                    f"The code agent asked you: {awaiting_parent.get('question')}\n"
+                    "It is paused (not failed) and waiting for your answer. Spawn the code agent "
+                    f"again with target='local' and your answer as the goal to continue in {local_place}."
+                )
+            elif isinstance(awaiting_parent, dict):
                 message = (
                     f"The code agent asked you: {awaiting_parent.get('question')}\n"
                     "It is paused (not failed) and waiting for your answer. Spawn the code agent "
                     "again with this code_session_id and your answer as the goal to resume it."
+                )
+            elif local_place:
+                # A Mac session cannot be E2B-paused: its CLI is stopped and the
+                # work stays in the user's folder; the next spawn continues there.
+                message = (
+                    f"Code session paused after {loop_outcome.get('idle_s', 0)}s with no activity "
+                    f"(not failed). Its files and commits stay in {local_place}; spawn the code agent "
+                    "again with target='local' to continue there."
                 )
             else:
                 message = (

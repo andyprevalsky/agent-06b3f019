@@ -27,6 +27,7 @@ import {
   markGptApiKeyOnCooldown,
   markGptIntegrationRateLimited,
 } from '../gptCredentials';
+import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { checkpointKey, getCheckpointObject } from './artifactStore';
 import { CLI_LOG_ARTIFACT } from './checkpoint';
 import { excerpt, parseCodeEvents } from './codeEvents';
@@ -56,9 +57,17 @@ export async function markCodeTaskUsageLimited(
 ): Promise<{ marked: string | null }> {
   const task = await prisma.claudeCodeSession.findUnique({
     where: { id: taskId },
-    select: { agentId: true, claudeTokenSource: true, claudeTokenIntegrationId: true },
+    select: {
+      agentId: true,
+      sandboxId: true,
+      claudeTokenSource: true,
+      claudeTokenIntegrationId: true,
+    },
   });
   if (task === null) return { marked: null };
+  // A Mac session (C14) never receives a pool token or a funded key, so its
+  // limit never puts those on cooldown.
+  const macSession = isLocalDeviceSandboxId(task.sandboxId);
   const source = task.claudeTokenSource ?? '';
   const integrationId = task.claudeTokenIntegrationId ?? '';
   const until = resetsAt ?? undefined;
@@ -67,6 +76,7 @@ export async function markCodeTaskUsageLimited(
       await markGptIntegrationRateLimited(integrationId, { rateLimitedUntil: until });
       return { marked: `gpt_integration:${integrationId}` };
     }
+    if (macSession) return { marked: null };
     await markGptApiKeyOnCooldown('codex_code_usage_limit');
     return { marked: 'gpt_api_key' };
   }
@@ -87,33 +97,45 @@ export async function markCodeTaskUsageLimited(
       return { marked: `claude_user:${agent.userId}` };
     }
   }
+  if (macSession) return { marked: null };
   await markAnthropicApiKeyOnCooldown('claude_code_rate_limit');
   return { marked: 'anthropic_api_key' };
 }
 
-async function hasLeasableIntegration(userId: string, name: string, now: Date): Promise<boolean> {
+async function hasLeasableIntegration(
+  userId: string,
+  name: string,
+  now: Date,
+  ownOnly: boolean
+): Promise<boolean> {
   const notLimited = [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }];
   const own = await prisma.integration.count({
     where: { userId, name, status: 'CONNECTED', OR: notLimited },
   });
-  if (own > 0) return true;
+  if (own > 0 || ownOnly) return own > 0;
   const pooled = await prisma.integration.count({
     where: { name, status: 'CONNECTED', poolingEnabled: true, OR: notLimited },
   });
   return pooled > 0;
 }
 
-/** Whether a spawn could lease a Claude / Codex credential right now. */
+/**
+ * Whether a spawn could lease a Claude / Codex credential right now.
+ * `ownOnly` (a Mac run) counts only the user's own logins: a local session
+ * never receives a pool token or a funded key.
+ */
 export async function codeCredentialAvailability(
   userId: string,
-  now = new Date()
+  now = new Date(),
+  options: { ownOnly?: boolean } = {}
 ): Promise<Record<CodeProvider, boolean>> {
+  const ownOnly = options.ownOnly === true;
   const claude =
-    (await hasLeasableIntegration(userId, 'claude_code', now)) ||
-    (Boolean(process.env.ANTHROPIC_API_KEY) && !(await isAnthropicApiKeyOnCooldown()));
+    (await hasLeasableIntegration(userId, 'claude_code', now, ownOnly)) ||
+    (!ownOnly && Boolean(process.env.ANTHROPIC_API_KEY) && !(await isAnthropicApiKeyOnCooldown()));
   const codex =
-    (await hasLeasableIntegration(userId, 'gpt_code', now)) ||
-    (Boolean(process.env.GPT_API_KEY) && !(await isGptApiKeyOnCooldown()));
+    (await hasLeasableIntegration(userId, 'gpt_code', now, ownOnly)) ||
+    (!ownOnly && Boolean(process.env.GPT_API_KEY) && !(await isGptApiKeyOnCooldown()));
   return { claude, codex };
 }
 

@@ -492,15 +492,22 @@ async def report_code_usage_limit(
         return None
 
 
-async def fetch_code_credential_availability(user_id: str) -> Optional[dict[str, bool]]:
-    """Whether a Claude / Codex credential can be leased right now (no lease taken)."""
+async def fetch_code_credential_availability(user_id: str, own_only: bool = False) -> Optional[dict[str, bool]]:
+    """Whether a Claude / Codex credential can be leased right now (no lease taken).
+
+    ``own_only``: count only the user's own logins (a local Mac run never gets a
+    pool token or a funded key).
+    """
     config = load_config()
+    params = {"user_id": user_id}
+    if own_only:
+        params["own_only"] = "true"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{config.backend.api_url}/api/claude-code-session/credential-availability",
                 headers={"x-api-key": config.backend.api_key or ""},
-                params={"user_id": user_id},
+                params=params,
             )
             if response.status_code != 200:
                 return None

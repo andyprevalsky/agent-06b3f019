@@ -119,4 +119,6 @@ export const codeTaskUsageLimitSchema = z.object({
 /** GET /credential-availability — can a Claude / Codex credential be leased now. */
 export const credentialAvailabilityQuerySchema = z.object({
   user_id: z.string().min(1).max(200),
+  // A local (Mac) run: count only the user's own logins.
+  own_only: z.enum(['true', 'false']).optional(),
 });

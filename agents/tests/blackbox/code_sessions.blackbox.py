@@ -1,7 +1,7 @@
 """Blackbox tests for persistent code sessions on the agents side.
 
-Covers rose-builds-rose rows C1, C2, C4, C11 and C13 at the activity / sandbox
-boundary. Every case runs the production ``ws-server.mjs`` on localhost with a
+Covers rose-builds-rose rows C1, C2, C4, C11, C13 and C15 at the activity / sandbox
+boundary, for cloud sessions and for local (Mac, C14) runs. Every case runs the production ``ws-server.mjs`` on localhost with a
 scripted ``claude`` CLI; the backend session API is recorded. Like a paused E2B
 sandbox, the session HOME outlives each ws-server, so "resume" restarts the
 ws-server in the same HOME with the stored CLI session id.
@@ -197,9 +197,26 @@ class _Backend:
         self.usage_reports: list[tuple] = []
         # Credential availability the backend reports to each spawn (C15).
         self.availability: list[dict] = []
+        self.availability_own_only: list[bool] = []
+        self.local = False
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
+        if kwargs.get("target") == "local":
+            # A Mac run (C14): the same ws-server in the user's folder, no code
+            # session; a later run in that folder is a fresh CLI conversation.
+            self.local = True
+            later = {"STUB_MODE": "finish"} if len(self.created) > 1 else {}
+            ws_url = await self.session_home.start(**later)
+            return {
+                "task_id": f"task-{len(self.created)}",
+                "sandbox_id": f"local-device:dev-1-task-{len(self.created)}",
+                "ws_url": ws_url,
+                "uploaded_files": [],
+                "github_repo_url": None,
+                "device_name": _MAC,
+                "folder": _MAC_FOLDER,
+            }
         code_session_id = kwargs.get("code_session_id") or "6c1d6f1e-0000-4000-8000-00000000c0de"
         resume_env = {"CLAUDE_CODE_RESUME_SESSION_ID": _CLI_SESSION_ID} if len(self.created) > 1 else {}
         ws_url = await self.session_home.start(**resume_env)
@@ -218,6 +235,8 @@ class _Backend:
     async def close_session(self, **kwargs):
         self.closed.append(kwargs)
         self.session_home.pause()
+        if self.local:
+            return {"output_files": []}  # nothing uploaded from the Mac, no code session
         return {
             "output_files": [],
             "usage": None,
@@ -253,7 +272,8 @@ class _Backend:
         self.usage_reports.append((task_id, code_provider, resets_at))
         return {"marked": f"{code_provider}_pool:tok-1", "resets_at": "2026-10-03T00:50:00.000Z"}
 
-    async def credential_availability(self, user_id):
+    async def credential_availability(self, user_id, own_only=False):
+        self.availability_own_only.append(own_only)
         return self.availability.pop(0) if self.availability else {"claude": True, "codex": True}
 
     async def verifier(self, **kwargs):
@@ -297,11 +317,16 @@ class _Backend:
         reset_live_queue_cache()
 
 
-def _activity_args(*, code_session_request=None, tool_call_id="tc-code") -> list:
+_MAC = "Andy's MacBook"
+_MAC_FOLDER = "~/Developer/rose"
+
+
+def _activity_args(*, code_session_request=None, tool_call_id="tc-code", local=False) -> list:
     return [
         "user-code", "agent-code", "Write answer.txt with the answer", tool_call_id, _SCHEMA, None,
         "rose-labs/rose-1-flash", None, None, "claude", None, None, None, None, False, None,
         code_session_request,
+        *(["local", "dev-1", _MAC] if local else []),
     ]
 
 
@@ -472,6 +497,85 @@ async def test_usage_limit_retry_switches_provider_when_pool_is_exhausted():
         assert retry["code_provider"] == "codex" and retry["status"] == "completed", retry
         texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
         assert "notes: uncommitted work" in texts, texts
+    finally:
+        session_home.cleanup()
+
+
+async def test_local_session_idle_pauses_in_the_mac_folder():
+    """C11 on a Mac run (C14): no runtime limit, idle → paused, never failed.
+
+    A Mac session cannot be E2B-paused: closing stops its CLI and the work
+    stays in the user's folder, so the paused result points the parent at
+    target='local' instead of a code_session_id. Keepalives still run (the
+    backend has no sandbox idle window to extend for a Mac).
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome()
+    backend = _Backend(session_home)
+    try:
+        with backend.patched(clock=_virtual_clock(2000.0)):
+            run = asyncio.create_task(ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(local=True)))
+            await _wait_until(lambda: session_home.runs(), "the CLI to start")
+            await asyncio.sleep(1.0)  # ~2000 virtual seconds with Bash in flight
+            assert not run.done(), f"an in-flight tool keeps a Mac session attached too: {run.result()}"
+            session_home.release("tool_done")
+            paused = await asyncio.wait_for(run, timeout=30)
+
+        assert backend.created[0]["target"] == "local" and backend.created[0]["local_device_id"] == "dev-1"
+        assert paused["status"] == "paused" and paused["success"] is False, paused
+        assert f"stay in {_MAC_FOLDER} on {_MAC}" in paused["message"], paused["message"]
+        assert "target='local'" in paused["message"] and "code_session_id" not in paused["message"], paused
+        assert [call.get("reason") for call in backend.closed] == ["idle"], backend.closed
+        meta = paused["code_agent"]
+        assert (meta["target"], meta["device_name"], meta["folder"], meta["state"]) == (
+            "local", _MAC, _MAC_FOLDER, "paused"
+        ), meta
+        assert backend.keepalives >= 1, backend.keepalives
+        assert backend.availability_own_only == [True], "a Mac run only counts the user's own logins"
+    finally:
+        session_home.cleanup()
+
+
+async def test_local_usage_limit_retries_on_the_mac_with_the_other_login():
+    """C15 on a Mac run: structured error with a target='local' retry; the work stays in the folder.
+
+    The retry continues in the same folder on the user's other own login when
+    the limited one is still exhausted (own-only availability, no pool token).
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "rate_limit"})
+    backend = _Backend(session_home)
+    backend.availability = [{"claude": True, "codex": True}, {"claude": False, "codex": True}]
+    try:
+        with backend.patched():
+            first = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(local=True)), timeout=30
+            )
+            retry = await asyncio.wait_for(
+                ActivityEnvironment().run(
+                    service.spawn_claude_code_activity, *_activity_args(tool_call_id="tc-retry", local=True)
+                ),
+                timeout=30,
+            )
+        assert first["status"] == "usage_limit" and first["retryable"] is True, first
+        assert first["retry"] == {"tool": "spawn_agent", "type": "code", "target": "local"}, first
+        assert "your own Claude Code login" in first["message"], first["message"]
+        assert f"stay in {_MAC_FOLDER} on {_MAC}" in first["message"], first["message"]
+        assert "target='local'" in first["message"], first["message"]
+        assert backend.usage_reports == [("task-1", "claude", 1790988600)], backend.usage_reports
+        assert first["code_agent"]["target"] == "local" and first["code_agent"]["state"] == "failed", first
+
+        assert backend.availability_own_only == [True, True], backend.availability_own_only
+        assert backend.created[1]["target"] == "local" and backend.created[1]["code_provider"] == "codex"
+        assert retry["status"] == "completed" and retry["code_provider"] == "codex", retry
+        texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
+        assert "notes: uncommitted work" in texts, f"the retry continues in the same folder: {texts}"
     finally:
         session_home.cleanup()
 
@@ -689,6 +793,11 @@ async def _run_all_tests():
         test_usage_limit_retry_switches_provider_when_pool_is_exhausted,
     )
     r.record("usage_limit_detection_structured_only", test_usage_limit_detection_reads_structured_events_only)
+    await r.record_async("local_session_idle_pauses_in_mac_folder", test_local_session_idle_pauses_in_the_mac_folder)
+    await r.record_async(
+        "local_usage_limit_retries_on_the_mac",
+        test_local_usage_limit_retries_on_the_mac_with_the_other_login,
+    )
     await r.record_async("tool_result_reports_branch_and_merge", test_tool_result_reports_branch_and_merged_only_when_confirmed)
     await r.record_async("ws_server_checks_out_session_branch", test_ws_server_checks_out_the_code_session_branch)
     teardown_mock()

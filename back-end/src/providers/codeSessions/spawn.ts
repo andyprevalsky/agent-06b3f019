@@ -6,6 +6,7 @@ import { Sandbox } from 'e2b';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
+import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
 import { checkpointCodeSession, retireCodeSession, sweepExpiredCodeSessions } from './lifecycle';
 import { e2bSandboxFs, localSandboxFs } from './sandboxFs';
@@ -237,7 +238,9 @@ export async function keepAliveCodeTask(
   if (task === null || task.status === 'CLOSED') {
     return { alive: false, code_session_id: task?.codeSessionId ?? null, awaiting_parent: null };
   }
-  if (!isLocalClaudeCodeSandboxId(task.sandboxId)) {
+  // Only an E2B sandbox has an idle window; a Mac session (C14) lives while its
+  // CLI runs and the Rose Mac app is connected.
+  if (!isLocalClaudeCodeSandboxId(task.sandboxId) && !isLocalDeviceSandboxId(task.sandboxId)) {
     await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
   }
   if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
