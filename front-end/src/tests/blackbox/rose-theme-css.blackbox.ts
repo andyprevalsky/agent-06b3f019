@@ -178,3 +178,70 @@ describe('dark palette tokens (mock panels/dark.js; no navy surfaces)', () => {
     });
   });
 });
+
+describe('Rose Settings drawer dark stylesheet (mock .acp: flat rows, text tabs)', () => {
+  const css = fs.readFileSync(
+    path.resolve(__dirname, '../../features/settings/components/roseSettings.css'),
+    'utf-8',
+  );
+  const root = postcss.parse(css);
+  const rules: Rule[] = [];
+  root.walkRules((rule) => {
+    rules.push(rule);
+  });
+
+  function decls(selector: string): Record<string, string> {
+    const rule = rules.find((r) => r.selectors.includes(selector));
+    if (rule === undefined) throw new Error(`missing rule ${selector}`);
+    const out: Record<string, string> = {};
+    rule.walkDecls((d) => {
+      out[d.prop] = d.value;
+    });
+    return out;
+  }
+
+  it('scopes every rule to html.dark .rose-settings (light and the stock page untouched)', () => {
+    expect(rules.length).toBeGreaterThanOrEqual(6);
+    for (const rule of rules) {
+      for (const selector of rule.selectors) {
+        expect(selector).toMatch(/^html\.dark \.rose-settings /);
+      }
+    }
+  });
+
+  it('replaces the segmented tabs with text tabs and a rose underline on the active tab', () => {
+    expect(decls("html.dark .rose-settings [role='tablist']")).toMatchObject({
+      background: 'transparent',
+      padding: '0',
+      'border-radius': '0',
+      'border-bottom': '1px solid rgba(255, 255, 255, 0.08)',
+    });
+    expect(decls("html.dark .rose-settings [role='tab']")).toMatchObject({
+      background: 'transparent',
+      'box-shadow': 'none',
+      color: '#a3a39d',
+    });
+    expect(decls("html.dark .rose-settings [role='tab'][data-state='active']")).toMatchObject({
+      color: '#f2f2ef',
+      'font-weight': '600',
+      'box-shadow': 'inset 0 -2px 0 #e8507f',
+    });
+  });
+
+  it('flattens the cards and puts fields on the #2f2f2c control surface', () => {
+    expect(decls('html.dark .rose-settings .bg-card')).toMatchObject({
+      background: 'transparent',
+      'border-color': 'transparent',
+      'box-shadow': 'none',
+    });
+    expect(decls('html.dark .rose-settings textarea')).toMatchObject({
+      'background-color': '#2f2f2c',
+      'border-color': 'rgba(255, 255, 255, 0.12)',
+      color: '#f2f2ef',
+    });
+  });
+
+  it('uses no navy colours', () => {
+    expect(css.toLowerCase()).not.toMatch(/#0f172a|#020817|#1e293b|#111827|#1f2937|hsl\(22\d/);
+  });
+});

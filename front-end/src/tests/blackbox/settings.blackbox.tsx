@@ -149,6 +149,8 @@ describe('Settings page', () => {
       expect(screen.getByRole('tab', { name: /personal info/i })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: /billing/i })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: /api keys/i })).toBeInTheDocument();
+      // The stock page never carries the Rose drawer's dark-styling hook.
+      expect(document.querySelector('.rose-settings')).toBeNull();
     });
 
     it('shows customization tab content by default', async () => {

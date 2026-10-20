@@ -303,6 +303,8 @@ describe('Rose left bar (flag on)', () => {
       'Billing',
       'API Keys',
     ]);
+    // Embedded: hooked to the dark-only flat styling (roseSettings.css).
+    expect(body.querySelector('.rose-settings')).not.toBeNull();
     // Embedded: the drawer header is the title; no second "Settings" card.
     expect(within(body).queryByRole('heading', { level: 1 })).toBeNull();
     await user.click(within(body).getByRole('tab', { name: 'Billing' }));
