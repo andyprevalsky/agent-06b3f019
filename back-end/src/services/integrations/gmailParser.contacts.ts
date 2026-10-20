@@ -5,16 +5,6 @@ import { ParsedEmail, EmailContact, EmailMetadata, stripHtml } from './gmailPars
 
 const log = createLogger('GmailParser');
 
-/** Whole-mailbox routing decision a full sync applies to every saved batch. */
-export interface MailboxClassification {
-  /** The user's own addresses: the connected one, SENT senders, detected imports. */
-  userEmailSet: Set<string>;
-  /** Contacts the user has written to anywhere in the mailbox. */
-  validContacts: Set<string>;
-  /** Message ids involving a valid contact (the ones worth a full-content fetch). */
-  neededIds: Set<string>;
-}
-
 /**
  * From metadata, determine which message IDs involve contacts the user has sent to.
  * Returns the set of needed message IDs for full content fetch.
@@ -23,13 +13,6 @@ export function identifyNeededMessageIds(
   metadata: EmailMetadata[],
   userEmail: string
 ): Set<string> {
-  return classifyMailbox(metadata, userEmail).neededIds;
-}
-
-export function classifyMailbox(
-  metadata: EmailMetadata[],
-  userEmail: string
-): MailboxClassification {
   // Build userEmailSet with import detection
   const userEmailSet = new Set<string>([userEmail.toLowerCase()]);
   for (const e of metadata) {
@@ -100,7 +83,7 @@ export function classifyMailbox(
     }
   }
 
-  return { userEmailSet, validContacts, neededIds };
+  return neededIds;
 }
 
 /**
