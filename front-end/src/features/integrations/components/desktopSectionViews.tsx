@@ -145,11 +145,19 @@ function passwordRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
   const loading = p.passwords.passwordSyncLoading;
   const chrome = rowAccounts(
     find('chrome_passwords'),
-    { displayName: 'Chrome passwords', label: 'Default profile', localSyncing: loading === 'chrome' },
+    {
+      displayName: 'Chrome passwords',
+      label: 'Default profile',
+      localSyncing: loading === 'chrome',
+    },
     removal,
   );
   const apple = [
-    ...rowAccounts(find('apple_passwords'), { displayName: 'Apple', label: 'Apple Passwords' }, removal),
+    ...rowAccounts(
+      find('apple_passwords'),
+      { displayName: 'Apple', label: 'Apple Passwords' },
+      removal,
+    ),
     ...passkeyRows(rows).flatMap((row) =>
       rowAccounts(row, { displayName: 'Passkeys', label: 'Passkeys' }, removal),
     ),
@@ -166,7 +174,9 @@ function passwordRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
       icon: framed(DropdownIconPreset.chrome, img(chromeIcon)),
       accounts: chrome,
       availability: availability(p.isBrowserCookiesAvailable, chrome),
-      onConnect: p.isBrowserCookiesAvailable ? () => void p.actions.onChromePasswordsSync() : undefined,
+      onConnect: p.isBrowserCookiesAvailable
+        ? () => void p.actions.onChromePasswordsSync()
+        : undefined,
       connecting: loading === 'chrome',
     },
     {
@@ -175,7 +185,9 @@ function passwordRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
       icon: framed(DropdownIconPreset.applePasswords, img(applePasswordsIcon)),
       accounts: apple,
       availability: availability(p.isPasskeysAvailable, apple),
-      onConnect: p.isPasskeysAvailable ? () => p.passwords.openCredentialExchangeModal() : undefined,
+      onConnect: p.isPasskeysAvailable
+        ? () => p.passwords.openCredentialExchangeModal()
+        : undefined,
       connecting: loading === 'passkeys',
     },
     {
@@ -324,7 +336,11 @@ export function desktopSectionViews(
     sections.push({
       title: 'Compute',
       rows: [
-        comingSoon('gemini', 'Gemini Subscription', framed(DropdownIconPreset.gemini, img(geminiIcon))),
+        comingSoon(
+          'gemini',
+          'Gemini Subscription',
+          framed(DropdownIconPreset.gemini, img(geminiIcon)),
+        ),
       ],
     });
     sections.push({ title: 'Banks & Financial Accounts', rows: [plaidRow(p)] });

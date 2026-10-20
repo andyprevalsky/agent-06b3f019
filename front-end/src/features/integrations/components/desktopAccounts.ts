@@ -173,7 +173,9 @@ export function passkeyRows(integrations: ConnectedIntegration[]): ConnectedInte
 }
 
 export function countDetail(value: unknown, unit: string): string | undefined {
-  return typeof value === 'number' && value > 0 ? `${value.toLocaleString('en-US')} ${unit}` : undefined;
+  return typeof value === 'number' && value > 0
+    ? `${value.toLocaleString('en-US')} ${unit}`
+    : undefined;
 }
 
 export function stringConfig(row: ConnectedIntegration | undefined, key: string): string | null {

@@ -92,7 +92,8 @@ function DesktopAccountChip({ account }: { account: DesktopAccountView }) {
 }
 
 function RowAction({ view }: { view: DesktopIntegrationView }) {
-  if (view.availability === 'coming-soon') return <span className={BADGE_CLASSES}>Coming soon</span>;
+  if (view.availability === 'coming-soon')
+    return <span className={BADGE_CLASSES}>Coming soon</span>;
   if (view.availability === 'desktop-only') {
     return (
       <span className="flex shrink-0 items-center gap-2">

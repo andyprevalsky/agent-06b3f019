@@ -18,7 +18,10 @@ import { ComputeConnectModal } from './ComputeAccountsSection';
 import { ChatGPTIcon } from './ComputeSection';
 import DesktopIntegrationRow, { type DesktopAccountView } from './DesktopIntegrationRow';
 import { rowAccounts, type RemovalPort } from './desktopAccounts';
-import DropdownIconFrame, { dropdownIconImageClassName, DropdownIconPreset } from './DropdownIconFrame';
+import DropdownIconFrame, {
+  dropdownIconImageClassName,
+  DropdownIconPreset,
+} from './DropdownIconFrame';
 
 interface DesktopComputeRowProps {
   provider: 'claude' | 'codex';
@@ -75,7 +78,11 @@ export default function DesktopComputeRow({
   const accounts =
     cloudAccounts.length > 0
       ? cloudAccounts
-      : rowAccounts(legacyRow, { displayName: providerLabel, label: 'This Mac', localSyncing }, removal);
+      : rowAccounts(
+          legacyRow,
+          { displayName: providerLabel, label: 'This Mac', localSyncing },
+          removal,
+        );
   return (
     <DesktopIntegrationRow
       view={{

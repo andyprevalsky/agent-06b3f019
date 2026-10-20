@@ -43,8 +43,8 @@ function ProgressText({ progress }: { progress: SyncProgress | null }) {
   }
   return (
     <span>
-      <b className="font-semibold text-foreground">{fmt(progress.done)}</b> of{' '}
-      {fmt(progress.total)} {progress.unit}
+      <b className="font-semibold text-foreground">{fmt(progress.done)}</b> of {fmt(progress.total)}{' '}
+      {progress.unit}
     </span>
   );
 }
@@ -85,7 +85,11 @@ export function SyncProgressView({
           <div
             aria-hidden="true"
             className="absolute inset-0 animate-shimmer rounded opacity-80 motion-reduce:animate-none"
-            style={{ backgroundImage: FLOWING_GRADIENT, backgroundSize: '200% 100%', boxShadow: GLOW }}
+            style={{
+              backgroundImage: FLOWING_GRADIENT,
+              backgroundSize: '200% 100%',
+              boxShadow: GLOW,
+            }}
           />
         )}
       </div>
