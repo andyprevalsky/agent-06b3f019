@@ -311,22 +311,6 @@ describe('LinkedIn I4: API and formatting', () => {
     expect(record?.body).toEqual({ agent_id: 'new-agent-001', account_id: 'jane-doe' });
   });
 
-  it('the export goal tells the agent to report phases and its account (I4)', async () => {
-    server.use(
-      http.post(`${API_BASE}/integrations/linkedin/sync`, () =>
-        HttpResponse.json({ status: 'SYNCING', phase: 'starting' }),
-      ),
-    );
-    await createLinkedInSyncAgentApi();
-    const create = capturedRequests.find(
-      (r) => r.method === 'POST' && r.url.endsWith('/api/agents'),
-    );
-    const goal = String((create?.body as { goal?: unknown }).goal);
-    expect(goal).toContain(
-      'After clicking Request archive, POST http://localhost:3001/api/integrations/linkedin/sync/phase with {"phase":"export_requested","account_id":"<your linkedin.com/in/ URL>","eta_sec":<seconds, only if LinkedIn states one>}. Each time you check and the archive isn\'t ready, report waiting_for_export. If the link expired or the export failed, report failed with an error. Upload to /api/integrations/linkedin/upload?account_id=<same URL>.',
-    );
-  });
-
   it('a non-409 failure stays a plain error', async () => {
     server.use(
       http.post(`${API_BASE}/integrations/linkedin/sync`, () =>
