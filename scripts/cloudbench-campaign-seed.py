@@ -107,6 +107,8 @@ def fixture(root, helpers):
                         continue
                     key, value = line.split("=", 1)
                     key, value = key.strip(), value.strip()
+                    if key.startswith("export") and key[6:7].isspace():
+                        key = key[6:].strip()
                     if key not in (
                         "R2_ACCOUNT_ID",
                         "R2_ENDPOINT",

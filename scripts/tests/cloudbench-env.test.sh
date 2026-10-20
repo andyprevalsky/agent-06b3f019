@@ -2677,10 +2677,14 @@ guest_temporal_case() {  # <case> ; prints nothing on success
   fi
   chmod 600 "$dir/repo/agents/.env" "$dir/repo/back-end/.env"
   local override="$dir/repo/agents/.env.benchmark-temporal"
+  # bench-* cases stage the real bench app, whose guest namespace is committed.
+  local app=cloudbench-guest-temporal guest_namespace=bench-ns.acct
+  case "$case_name" in bench-*) app=navi-whisper-lux-bench ;; esac
+  [ "$case_name" != bench-applied ] || guest_namespace=rose-labs-bench.tch2n
   case "$case_name" in
-    missing) ;;
+    missing|bench-missing|bench-off) ;;
     *)
-      printf '# guest only\nCLOUDBENCH_GUEST_TEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nCLOUDBENCH_GUEST_TEMPORAL_NAMESPACE=bench-ns.acct\nCLOUDBENCH_GUEST_TEMPORAL_API_KEY=guest-secret-key\n' > "$override"
+      printf '# guest only\nCLOUDBENCH_GUEST_TEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nCLOUDBENCH_GUEST_TEMPORAL_NAMESPACE=%s\nCLOUDBENCH_GUEST_TEMPORAL_API_KEY=guest-secret-key\n' "$guest_namespace" > "$override"
       chmod 600 "$override"
       ;;
   esac
@@ -2699,11 +2703,11 @@ guest_temporal_case() {  # <case> ; prints nothing on success
   (
     cd "$dir/repo"
     eval "$function_body"
-    APP=cloudbench-guest-temporal
+    APP="$app"
     ROOT_DIR="$dir/repo"
     export TMPDIR="$dir/tmp"
     case "$case_name" in
-      off) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=off ;;
+      off|bench-off) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=off ;;
       explicit-missing) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE="$dir/absent" ;;
       *) unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE ;;
     esac
@@ -2738,6 +2742,17 @@ guest_temporal_case() {  # <case> ; prints nothing on success
         fail "$case_name: unusable override must stage and activate nothing"
       return 0
       ;;
+    bench-missing|bench-off|bench-wrong-ns)
+      # 2026-10-19: a host without the private override restaged the bench app
+      # with the production namespace; guests refused only at launch.
+      [ "$rc" -ne 0 ] || fail "$case_name: bench app staging without its committed guest namespace must fail closed"
+      [ ! -e "$dir/staged-agents.env" ] && [ ! -e "$dir/activated" ] ||
+        fail "$case_name: refused bench staging must stage and activate nothing"
+      grep -Fq 'rose-labs-bench.tch2n' "$dir/stderr" || fail "$case_name: refusal must name the expected bench namespace"
+      [ "$case_name" = bench-wrong-ns ] || grep -Fq '.env.benchmark-temporal' "$dir/stderr" ||
+        fail "$case_name: refusal must say how to provide the guest override"
+      return 0
+      ;;
   esac
   [ "$rc" -eq 0 ] || fail "$case_name: staging failed: $(cat "$dir/stderr")"
   [ "$(cat "$dir/activated")" = pool-1 ] || fail "$case_name: pool machine was not activated"
@@ -2762,13 +2777,18 @@ guest_temporal_case() {  # <case> ; prints nothing on success
       grep -Fq 'guest Temporal namespace override: bench-ns.acct' "$dir/stdout" || fail "applied: staging must report the guest namespace"
       [ "$manifest_namespace" = bench-ns.acct ] || fail "applied: manifest must record the guest namespace"
       ;;
+    bench-applied)
+      [ "$manifest_namespace" = rose-labs-bench.tch2n ] || fail "bench-applied: manifest must record the committed bench namespace"
+      [ "$(cloudbench_env_value "$dir/staged-agents.env" TEMPORAL_NAMESPACE)" = rose-labs-bench.tch2n ] ||
+        fail "bench-applied: staged guest agents env must carry the committed bench namespace"
+      ;;
     appended)
       printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\n' > "$dir/expected-backend"
       cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "appended: absent guest Temporal keys must be appended"
       ;;
   esac
 }
-for guest_case in applied appended missing off explicit-missing loose-mode incomplete; do
+for guest_case in applied appended missing off explicit-missing loose-mode incomplete bench-applied bench-missing bench-off bench-wrong-ns; do
   guest_temporal_case "$guest_case"
 done
 # A linked worktree env finds the override beside the authoritative file.
@@ -2805,8 +2825,13 @@ done
   printf 'TEMPORAL_NAMESPACE=rose-labs-bench.acct\nTEMPORAL_API_KEY=bench-secret\n' > "$dir/agents.env"
   printf 'DATABASE_URL=x\nTEMPORAL_NAMESPACE="rose-labs-bench.acct"\n' > "$dir/backend.env"
   printf 'TEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret\n' > "$dir/stale-agents.env"
+  printf 'DATABASE_URL=x\r\nexport TEMPORAL_NAMESPACE=rose-labs-bench.acct\r\n' > "$dir/export-backend.env"
   : > "$dir/unset.env"
   cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/backend.env" rose-labs-bench.acct
+  # dotenv's `export KEY=value` form is the same key to the guest's loaders.
+  cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/export-backend.env" rose-labs-bench.acct
+  [ "$(cloudbench_expected_guest_temporal_namespace navi-whisper-lux-bench)" = rose-labs-bench.tch2n ]
+  [ -z "$(cloudbench_expected_guest_temporal_namespace some-other-app)" ]
   cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" ""
   ! cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" rose-labs-bench.acct 2> "$dir/stale.err"
   grep -q 'TEMPORAL_NAMESPACE=prod-ns.acct differs' "$dir/stale.err"
@@ -2820,6 +2845,11 @@ check = 'cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$R
 verify = 'cloudbench_verify_env_file "$REPO_DIR/back-end/.env"'
 assert run.count(check) == 1 and run.index(verify) < run.index(check) < run.index('step stack_launch'), 'guest check after digest verify, before stack'
 assert '--env "CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}"' in cloud
+default = 'CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"'
+assert cloud.count(default) == 1 and cloud.index('cloudbench-env.sh"') < cloud.index(default) < cloud.index('--env "CLOUDBENCH_EXPECTED_GUEST'), 'launches bind the committed guest namespace by default'
+stage_check = 'cloudbench_require_staged_guest_temporal_namespace "$APP" "$guest_temporal_override"'
+body = cloud[cloud.index('_inject_secrets_locked() {'):]
+assert body.index(stage_check) < body.index('FLY secrets set --stage'), 'staging refuses a wrong guest namespace before any secret is set'
 assert 'echo "export CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=$(printf \'%q\' "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}")"' in cloud
 PYWIRE
 ) || fail "a launcher-bound guest Temporal namespace must reject stale bench-app secrets"
