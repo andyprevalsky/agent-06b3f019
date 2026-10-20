@@ -36,6 +36,11 @@ import {
   e2bPreviewUrl,
   isRoseRepoUrl,
 } from '../../providers/codePreview/preview';
+import {
+  applyPreviewUrlEnv,
+  autostartRosePreview,
+  stopLocalCodePreview,
+} from '../../providers/codePreview/sandbox';
 import { CodePublishError, publishOwnedTask } from '../../providers/codePreview/service';
 import { prepareCodeSessionWorkspace } from '../../providers/codeSessionWorkspace';
 import { ROSE_DEV_USER_IDS, isRoseDevUser } from '../../utils/roseDevAccess';
@@ -315,11 +320,46 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
   assert.equal(before.data.status, 'not_running');
   assert.equal(before.data.preview_url, null);
 
+  // A project session: the preview waits for this boot's startup report (--wait-startup).
+  const projectDir = join(home, '.rose', 'project');
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(projectDir, 'startup.json'), JSON.stringify({ timeoutS: 30 }));
+  writeFileSync(join(projectDir, 'startup-report.json'), '{"status":"ok","boot":"previous"}');
+  const startupDoneAfterMs = 1_500;
+  const startupTimer = setTimeout(
+    () => writeFileSync(join(projectDir, 'startup-report.json'), '{"status":"ok"}'),
+    startupDoneAfterMs
+  );
   const startedAt = Date.now();
-  const start = await execFileAsync(cliPath, ['start', '--json'], { env, timeout: 240_000 });
-  const started = JSON.parse(start.stdout) as { port: number; url: string; dir: string };
+  const start = await execFileAsync(
+    cliPath,
+    ['start', '--json', '--wait-startup', '--since', String(startedAt)],
+    { env, timeout: 240_000 }
+  );
+  clearTimeout(startupTimer);
+  const started = JSON.parse(start.stdout) as {
+    pid: number;
+    port: number;
+    url: string;
+    dir: string;
+  };
+  // If this test process is killed, never leave the dev server running.
+  const stopOnSignal = () => {
+    try {
+      process.kill(-started.pid, 'SIGTERM');
+    } catch {
+      // already stopped
+    }
+    process.exit(143);
+  };
+  process.once('SIGTERM', stopOnSignal);
+  process.once('SIGINT', stopOnSignal);
+  const startMs = Date.now() - startedAt;
   assert.equal(started.dir, frontEnd, 'defaults to ~/workspace/front-end');
-  console.log(`  rose-preview start: ${Date.now() - startedAt} ms (vite on ${started.port})`);
+  assert.ok(startMs >= startupDoneAfterMs, `waited for this boot's startup report (${startMs} ms)`);
+  console.log(
+    `  rose-preview start (incl. ${startupDoneAfterMs} ms startup wait): ${startMs} ms (vite on ${started.port})`
+  );
   let browser: Browser | null = null;
   try {
     const view = await http('GET', `/api/claude-code-session/${taskId}/preview`, DEV_USER);
@@ -366,10 +406,80 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
     }
   } finally {
     await browser?.close();
+    // The local-session close path: signal exactly the preview's process group.
+    const stoppedByClose = stopLocalCodePreview(home);
     await execFileAsync(cliPath, ['stop'], { env, timeout: 30_000 });
+    process.removeListener('SIGTERM', stopOnSignal);
+    process.removeListener('SIGINT', stopOnSignal);
+    assert.equal(stoppedByClose, true, 'session close stops the preview');
   }
   const stopped = await http('GET', `/api/claude-code-session/${taskId}/preview`, DEV_USER);
   assert.equal(stopped.data.status, 'not_running');
+});
+
+test('cloud wiring: ROSE_PREVIEW_URL + autostart only for dev sessions on the Rose repo', async () => {
+  const runs: { cmd: string; envs?: Record<string, string> }[] = [];
+  const sandbox = {
+    sandboxId: 'sbxwire',
+    commands: {
+      run: async (cmd: string, opts?: { envs?: Record<string, string> }) => {
+        runs.push({ cmd, envs: opts?.envs });
+        return { exitCode: 0 };
+      },
+    },
+  };
+  const devEnvs: Record<string, string> = {
+    ROSE_PREVIEW_PORT: '5173',
+    ROSE_PREVIEW_BACKEND_URL: 'https://api.test',
+  };
+  assert.equal(
+    applyPreviewUrlEnv(devEnvs, 'wss://3000-sbxwire.e2b.app', 'sbxwire'),
+    'https://5173-sbxwire.e2b.app/'
+  );
+  assert.equal(devEnvs.ROSE_PREVIEW_URL, 'https://5173-sbxwire.e2b.app/');
+  const plainEnvs: Record<string, string> = {};
+  assert.equal(applyPreviewUrlEnv(plainEnvs, 'wss://3000-sbxwire.e2b.app', 'sbxwire'), null);
+  assert.equal(plainEnvs.ROSE_PREVIEW_URL, undefined, 'non-dev sessions get no preview env');
+
+  const launchedAt = Date.now() - 1234;
+  assert.equal(
+    await autostartRosePreview(sandbox, {
+      envs: devEnvs,
+      repoUrl: 'git@github.com:Rose-Ai-Labs/rose.git',
+      launchedAt,
+    }),
+    true
+  );
+  assert.equal(runs.length, 1);
+  assert.match(
+    runs[0].cmd,
+    /nohup \/home\/user\/\.rose\/bin\/rose-preview start --dir front-end --wait-startup/
+  );
+  const since = /--since "\$\(\( \$\(date \+%s%3N\) - (\d+) \)\)"/.exec(runs[0].cmd);
+  assert.ok(
+    since && Number(since[1]) >= 1234,
+    `cutoff computed on the sandbox clock: ${runs[0].cmd}`
+  );
+  assert.equal(runs[0].envs?.ROSE_PREVIEW_URL, 'https://5173-sbxwire.e2b.app/');
+  assert.equal(
+    await autostartRosePreview(sandbox, {
+      envs: devEnvs,
+      repoUrl: 'https://github.com/someone/app',
+      launchedAt,
+    }),
+    false,
+    'other repos: the agent starts its own preview'
+  );
+  assert.equal(
+    await autostartRosePreview(sandbox, {
+      envs: plainEnvs,
+      repoUrl: 'https://github.com/Rose-Ai-Labs/rose',
+      launchedAt,
+    }),
+    false,
+    'non-dev sessions never autostart'
+  );
+  assert.equal(runs.length, 1);
 });
 
 function git(cwd: string, ...args: string[]): string {

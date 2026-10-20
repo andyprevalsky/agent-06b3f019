@@ -121,13 +121,16 @@ export function codePreviewLocalEnvs(): Record<string, string> {
 
 /**
  * Detached `rose-preview start` for a Rose-repo session: waits for this boot's
- * project startup (report newer than `sinceMs`), then serves the front-end.
+ * project startup, then serves the front-end. "This boot" = a startup report
+ * written after the ws-server launched, `sinceLaunchMs` ago; the cutoff is
+ * computed on the sandbox clock so backend/sandbox clock skew cannot matter.
  */
-export function codePreviewAutostartCommand(home: string, sinceMs: number): string {
+export function codePreviewAutostartCommand(home: string, sinceLaunchMs: number): string {
   const cli = `${home}/${CODE_PREVIEW_CLI_PATH}`;
   const log = `${home}/.rose/preview/autostart.log`;
+  const elapsed = Math.max(0, Math.floor(sinceLaunchMs));
   return (
     `mkdir -p ${home}/.rose/preview && nohup ${cli} start --dir ${ROSE_FRONT_END_DIR} ` +
-    `--wait-startup --since ${Math.floor(sinceMs)} > ${log} 2>&1 &`
+    `--wait-startup --since "$(( $(date +%s%3N) - ${elapsed} ))" > ${log} 2>&1 &`
   );
 }

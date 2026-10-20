@@ -436,7 +436,7 @@ async function createClaudeCodeSessionUnlocked(
   await autostartRosePreview(sandbox, {
     envs: sessionEnvs,
     repoUrl: projectWorkspace?.project.repoUrl ?? githubRepoUrl,
-    sinceMs: wsLaunchedAt,
+    launchedAt: wsLaunchedAt,
   });
 
   // Create DB record with real values (no placeholders)
@@ -670,7 +670,7 @@ export async function createCodexCodeSession(
     await releaseSandboxAfterFailedStart(sandbox, codeSession);
     throw new Error('Codex WebSocket server failed to become ready');
   }
-  await autostartRosePreview(sandbox, { envs, repoUrl: githubRepoUrl, sinceMs: wsLaunchedAt });
+  await autostartRosePreview(sandbox, { envs, repoUrl: githubRepoUrl, launchedAt: wsLaunchedAt });
 
   await prisma.claudeCodeSession.create({
     data: {
