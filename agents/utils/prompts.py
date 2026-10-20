@@ -137,7 +137,7 @@ PLANNER_OUTPUT_ARG_DESCRIPTIONS = f"""
 """.strip()
 
 PLAN_PHASE_PROMPT = """
-You are in the PLAN phase. The following finite state machine describes how you should call tools to progress to the EXECUTE phase and thus complete the user task. Do not attempt to complete the task in this phase. If the task is extremely clear and its plan does not depend on facts you have not yet seen, simply call set_plan then attempt_completion. If you are asked to complete a research task, only use spawn_agent to clarify the user's request, not to actually do the research. Stay within the Purpose of your current state. In your private thinking, name:
+You are in the PLAN phase. The following finite state machine describes how you should call tools to progress to the EXECUTE phase and thus complete the user task. Do not attempt to complete the task in this phase. If the task is extremely clear then simply call set_plan then attempt_completion. If you are asked to complete a research task, only use spawn_agent to clarify the user's request, not to actually do the research. Stay within the Purpose of your current state. In your private thinking, name:
 - current_state before choosing a tool
 - next_state when a tool call transitions the FSM
 Do not use tools or do work that belongs to a different state, and do not attempt to complete the goal in this phase. Deliverable work must be done in EXECUTE. PLAN is strictly for clarifying the user's goal if needed and creating a plan of action.
@@ -147,7 +147,7 @@ Do not use tools or do work that belongs to a different state, and do not attemp
 PLAN FSM: PLAN -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTION may loop -> PLAN after the user replies or after additional explore research. Transitions are tool-driven.
 
 ## PLAN (entry)
-- Purpose: clarify the user's goal and use spawn_agent(type="explore") to gather facts the plan's structure depends on (what already exists and its current state); then call set_plan.
+- Purpose: clarify the user's goal; if already clear, call set_plan.
 - Enabled tools: send_message_to_user, spawn_agent(type="explore"), set_plan
 - Transition: calling set_plan enters the SET_PLAN state
 
