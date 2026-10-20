@@ -23,6 +23,7 @@ import { BatchUploader } from '../../services/batchUploader';
 import { Uploader } from '../../services/uploader';
 import { MessageTransformer } from '../../services/messaging/MessageTransformer';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
+import { IntegrationProgress, type ProgressRun } from '../../services/integrationProgress';
 import { sessionForLocalMachineData } from '../../base/impersonation';
 // Imported via the legacy shim path so blackbox tests' vi.mock() on
 // '../../main/services/messaging/platforms/whatsapp/WhatsAppClient'
@@ -45,6 +46,8 @@ export class WhatsAppSync {
   private static client: WhatsAppClient | null = null;
   private static messageBuffer: NormalizedMessage[] = [];
   private static flushTimer: NodeJS.Timeout | null = null;
+  /** The history sync's progress run while Baileys is still delivering batches. */
+  private static historyRun: { run: ProgressRun; received: number } | null = null;
 
   /** Check if WhatsApp has stored credentials. */
   static hasCredentials(): boolean {
@@ -195,6 +198,10 @@ export class WhatsAppSync {
       return;
     }
 
+    if (event.type === 'new_messages' && event.history !== undefined) {
+      await this.reportHistoryProgress(event.history, event.messages?.length ?? 0);
+    }
+
     if (
       event.type === 'new_messages' &&
       event.messages !== undefined &&
@@ -258,6 +265,41 @@ export class WhatsAppSync {
         this.messageBuffer.unshift(...messages);
       }
     }
+  }
+
+  /**
+   * Sync progress of a Baileys history sync: messages received so far (total
+   * unknown) and Baileys' own percent; the last batch (or 100%) ends the run.
+   * Best-effort — a progress write never affects the sync.
+   */
+  private static async reportHistoryProgress(
+    history: NonNullable<SyncEvent['history']>,
+    received: number
+  ): Promise<void> {
+    const current = this.historyRun ?? {
+      run: IntegrationProgress.startRun(WHATSAPP_INTEGRATION_NAME),
+      received: 0,
+    };
+    current.received += received;
+    const pct = history.progress === null ? null : Math.min(100, Math.max(0, history.progress));
+    const finished = history.isLatest || pct === 100;
+    this.historyRun = finished ? null : current;
+    const session = sessionForLocalMachineData(await AuthService.getSession());
+    if (session === null) return;
+    await current.run.report(
+      finished
+        ? { state: 'synced', unit: 'messages', done: current.received }
+        : {
+            state: 'syncing',
+            phase: 'history',
+            unit: 'messages',
+            done: current.received,
+            total: null,
+            // A batch without a Baileys percent keeps the run's last one.
+            ...(pct !== null && { pct }),
+          },
+      session.access_token
+    );
   }
 
   /** Check if WhatsApp integration is connected in backend. */

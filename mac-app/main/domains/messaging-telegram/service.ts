@@ -304,14 +304,17 @@ export class TelegramClient extends EventEmitter {
 
   async fetchAllHistoricalMessages(
     messagesPerDialog: number = DEFAULT_MESSAGES_PER_DIALOG,
-    minDate?: Date
+    minDate?: Date,
+    /** Called with chats done of the chat list (0 first, then after each chat). */
+    onChatsDone?: (done: number, total: number) => Promise<unknown>
   ): Promise<NormalizedMessage[]> {
     if (this.client === null || !this.isConnected()) return [];
 
     const all: NormalizedMessage[] = [];
     const dialogs = await this.getDialogs();
+    await onChatsDone?.(0, dialogs.length);
 
-    for (const dialog of dialogs) {
+    for (const [index, dialog] of dialogs.entries()) {
       try {
         const messages = await this.fetchHistoricalMessages(
           dialog.id,
@@ -323,6 +326,7 @@ export class TelegramClient extends EventEmitter {
       } catch (error) {
         console.warn(`[TelegramClient] Error fetching from dialog ${dialog.id}:`, error);
       }
+      await onChatsDone?.(index + 1, dialogs.length);
     }
     return all;
   }

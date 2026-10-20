@@ -14,6 +14,7 @@ import { AuthService } from '../../services/auth';
 import { BatchUploader } from '../../services/batchUploader';
 import { MessageTransformer } from '../../services/messaging/MessageTransformer';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
+import { IntegrationProgress, type ProgressRunWrite } from '../../services/integrationProgress';
 import { sessionForLocalMachineData } from '../../base/impersonation';
 import { FLUSH_INTERVAL_MS, INTEGRATION_KEY, MAX_BUFFER_SIZE } from './config';
 import { TelegramAuth } from './repo';
@@ -136,10 +137,25 @@ export class TelegramSync {
         ? new Date(lastAccessStr)
         : undefined;
 
-    const messages = await this.client.fetchAllHistoricalMessages(messagesPerDialog, lastSyncAt);
-    if (messages.length === 0) return 0;
+    // Sync progress: chats fetched of the chat list, then the upload's outcome (best-effort).
+    const session = sessionForLocalMachineData(await AuthService.getSession());
+    const progress = IntegrationProgress.startRun(INTEGRATION_KEY);
+    const report = async (write: ProgressRunWrite): Promise<void> => {
+      if (session !== null)
+        await progress.report({ unit: 'chats', ...write }, session.access_token);
+    };
+    const messages = await this.client.fetchAllHistoricalMessages(
+      messagesPerDialog,
+      lastSyncAt,
+      (done, total) => report({ state: 'syncing', done, total })
+    );
+    if (messages.length === 0) {
+      await report({ state: 'synced' });
+      return 0;
+    }
 
     const success = await this.uploadMessages(messages);
+    await report(success ? { state: 'synced' } : { state: 'failed', error: 'Upload failed' });
     return success ? messages.length : 0;
   }
 

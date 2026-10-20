@@ -8,6 +8,7 @@ import {
   isIntegrationConnected,
   readIMessages,
   readIMessagesSinceRowId,
+  startImessageProgressRun,
   toNormalizedMessages,
   uploadImessagePayload,
 } from './repo';
@@ -163,6 +164,8 @@ export async function runFullSync(): Promise<SyncResult> {
     return { uploaded: false, newMaxRowId: null };
   }
 
+  // Sync progress: messages uploaded of the messages read from chat.db this run.
+  let progress: ReturnType<typeof startImessageProgressRun> | null = null;
   try {
     const integration = await getIntegration(INTEGRATION_NAME);
     const skipReason = shouldSkipScheduledSync(integration);
@@ -186,18 +189,25 @@ export async function runFullSync(): Promise<SyncResult> {
     }
 
     console.log(`[IMessageSync] Found ${messages.length} new messages, uploading...`);
+    progress = startImessageProgressRun();
+    const total = messages.length;
+    const token = session.access_token;
+    await progress.report({ state: 'syncing', unit: 'messages', done: 0, total }, token);
     const result = await uploadImessagePayload(messages, session.access_token);
 
     if (!result.success) {
       console.error('[IMessageSync] Sync failed:', result.message);
+      await progress.report({ state: 'failed', error: result.message ?? 'Upload failed' }, token);
       return { uploaded: false, newMaxRowId: null };
     }
 
+    await progress.report({ state: 'synced', done: total }, token);
     console.log('[IMessageSync] Sync complete');
     const newMaxRowId = Math.max(...messages.map((m) => m.id));
     return { uploaded: true, newMaxRowId };
   } catch (error) {
     console.error('[IMessageSync] Error during sync:', error);
+    await progress?.report({ state: 'failed', error: String(error) }, session.access_token);
     return { uploaded: false, newMaxRowId: null };
   }
 }
