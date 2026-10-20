@@ -104,7 +104,7 @@ def test_create_agent_action_model_single_tool():
 
 
 def test_create_agent_action_model_injects_completion_result_only_when_requested():
-    """attempt_completion_with_result carries the result field; attempt_completion does not."""
+    """attempt_completion_with_result requires result; attempt_completion only offers an optional one."""
     from utils.tool_schemas import create_agent_action_model
 
     verified_model = create_agent_action_model(["attempt_completion"])
@@ -116,8 +116,11 @@ def test_create_agent_action_model_injects_completion_result_only_when_requested
     verified_defs = verified_schema.get("$defs", {})
     unverified_defs = unverified_schema.get("$defs", {})
 
-    assert "result" not in verified_defs["AttemptCompletionTool"]["properties"]
+    # Verified loops: optional authored result; unverified handoff: required result.
+    assert "result" in verified_defs["AttemptCompletionTool"]["properties"]
+    assert "result" not in verified_defs["AttemptCompletionTool"].get("required", [])
     assert "result" in unverified_defs["AttemptCompletionWithResultTool"]["properties"]
+    assert "result" in unverified_defs["AttemptCompletionWithResultTool"].get("required", [])
 
 
 def test_explore_agent_action_model_accepts_documents_grep():

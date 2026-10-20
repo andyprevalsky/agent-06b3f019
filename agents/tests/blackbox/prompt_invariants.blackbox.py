@@ -423,14 +423,19 @@ def test_planner_spawn_aliases_documented_in_prompt():
 
 
 def test_attempt_completion_base_schema_has_no_result_field():
-    """AttemptCompletionTool must not expose result in verified flows."""
+    """Verified attempt_completion takes only an OPTIONAL authored result.
+
+    The verifier reads it as the agent's own writing (a draft, message or
+    summary), never as proof (tree-feedback-routing b056f571: a drafter had no
+    other way to show its draft). It must never be required, so a verified
+    loop is never forced to restate tool evidence as a payload.
+    """
     from utils.tool_schemas import AttemptCompletionTool
 
-    fields = set(AttemptCompletionTool.model_fields.keys())
-    assert fields == {"tool"}, (
-        f"AttemptCompletionTool.model_fields = {fields}, expected {{'tool'}}. "
-        f"`result` must be injected only for skip_verification=true loops."
-    )
+    fields = AttemptCompletionTool.model_fields
+    assert set(fields) == {"tool", "result"}, f"AttemptCompletionTool.model_fields = {set(fields)}"
+    assert not fields["result"].is_required(), "verified attempt_completion.result must stay optional"
+    assert "own work" in (fields["result"].description or ""), fields["result"].description
 
 
 def test_attempt_completion_result_schema_is_skip_verification_variant():
