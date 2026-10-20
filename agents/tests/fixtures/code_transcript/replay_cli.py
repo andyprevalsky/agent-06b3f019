@@ -17,6 +17,10 @@ claude
     reached the CLI exactly once). ``REPLAY_CLI_GATE``: before the first
     turn's ``result``, wait until the file ``<gate>/finish-turn-1`` exists, so a
     test can deliver a turn while that turn is still running.
+    ``REPLAY_CLI_MERGE=1``: like the real CLI (measured on Claude Code
+    2.1.284), messages written during turn 1 are folded into it, and its one
+    ``result`` reports ``queued_turn_count: 0``. Without it every message is
+    its own turn with its own ``result``.
 
 codex
     Prints every line of ``REPLAY_CLI_FIXTURE`` (a real ``codex exec --json``
@@ -25,6 +29,7 @@ codex
 
 import json
 import os
+import select
 import sys
 import time
 from typing import Any, Optional
@@ -107,20 +112,74 @@ def run_claude() -> int:
                 "permissionMode": "bypassPermissions",
             }
         )
+    stdin = _LineReader()
+    merge = os.environ.get("REPLAY_CLI_MERGE") == "1"
     turn = 0
-    for line in sys.stdin:
+    while (line := stdin.readline()) is not None:
         if not line.strip():
             continue
-        if stdin_log:
-            with open(stdin_log, "a", encoding="utf-8") as handle:
-                handle.write(line if line.endswith("\n") else line + "\n")
+        _log_stdin(stdin_log, line)
         turn += 1
         lines = turns[turn - 1] if turn <= len(turns) else _echo_turn(_message_text(line), turn)
         for out in lines:
-            if turn == 1 and json.loads(out).get("type") == "result":
+            message = json.loads(out)
+            if turn == 1 and message.get("type") == "result":
                 _wait_for_gate("finish-turn-1")
+                if merge:
+                    # Like Claude Code: messages written while the turn ran are
+                    # folded into it, and the one result reports an empty queue.
+                    for queued in stdin.available_lines():
+                        _log_stdin(stdin_log, queued)
+                    message["queued_turn_count"] = 0
+                    out = json.dumps(message)
             _emit(out)
     return 0
+
+
+class _LineReader:
+    """Unbuffered stdin lines, so "what has been written so far" is observable."""
+
+    def __init__(self) -> None:
+        self._buffer = b""
+        self._eof = False
+
+    def _fill(self, block: bool) -> None:
+        if self._eof:
+            return
+        if not block and not select.select([0], [], [], 0)[0]:
+            return
+        chunk = os.read(0, 65536)
+        if chunk:
+            self._buffer += chunk
+        else:
+            self._eof = True
+
+    def readline(self) -> Optional[str]:
+        while b"\n" not in self._buffer and not self._eof:
+            self._fill(block=True)
+        if b"\n" in self._buffer:
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            return line.decode("utf-8") + "\n"
+        if self._buffer:
+            line, self._buffer = self._buffer, b""
+            return line.decode("utf-8")
+        return None
+
+    def available_lines(self) -> list[str]:
+        time.sleep(0.05)  # let an in-flight write land
+        self._fill(block=False)
+        lines = []
+        while b"\n" in self._buffer:
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            if line.strip():
+                lines.append(line.decode("utf-8") + "\n")
+        return lines
+
+
+def _log_stdin(path: Optional[str], line: str) -> None:
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line if line.endswith("\n") else line + "\n")
 
 
 def run_codex(argv: list[str]) -> int:

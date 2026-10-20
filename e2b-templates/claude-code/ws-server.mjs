@@ -555,6 +555,8 @@ function emitClaudeMessage(message) {
       usage: message.usage || null,
       model_usage: message.modelUsage || null,
       structured_output: message.structured_output,
+      // Turns still owed a result after this one (0 = the CLI is caught up).
+      pending_turns: pendingTurns,
     });
     if (isSuccess && message.result) {
       appendOutput("stdout", `[Claude result] ${message.result}\n`);
@@ -587,16 +589,19 @@ function emitClaudeMessage(message) {
 //
 // The CLI reads stream-json input and keeps running while stdin is open. An
 // autonomous run ends stdin on its first `result`, exactly like the old
-// one-shot prompt. A turn written while a turn runs is merged into that turn
-// by the CLI (one `result` covers both), so "turn active" is tracked per
-// result, not per message.
+// one-shot prompt. A turn written while a turn runs is merged into that
+// turn by the CLI (one `result` covers both; measured with Claude Code
+// 2.1.284), and every `result` reports the CLI's own `queued_turn_count`,
+// so pending turns follow that count, not one result per written turn.
 //
 // The first *user* turn puts the session on a direct hold: stdin stays open
 // between turns until the user hands back (or the hold idles out), so the
 // user keeps talking to the same CLI conversation. While the user holds the
-// session, `sender: "agent"` turns (Rose relaying instructions) are rejected
-// with `relay_paused` so nothing competes with the user; the caller retries
-// after the hand back. Agent turns never create a hold.
+// session, `sender: "agent"` turns (Rose agents relaying instructions or
+// agent-graph messages) are rejected with `relay_paused` so nothing
+// competes with the user; the caller retries after the hand back. Agent
+// turns never take the hold: they are ordinary queued turns, answered
+// before stdin closes.
 const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
 const DIRECT_HOLD_IDLE_MS = (() => {
   const raw = Number.parseInt(
@@ -610,7 +615,9 @@ const MAX_TURN_ID_CHARS = 128;
 
 let cliChild = null;
 let cliStdinOpen = false;
-let turnActive = false;
+// Turns written to stdin (the task prompt + delivered user turns) that have
+// not produced their `result` yet.
+let pendingTurns = 0;
 let directHold = false;
 let directHoldTimer = null;
 const deliveredTurnIds = new Set();
@@ -651,11 +658,19 @@ function releaseDirectHold(reason) {
   directHold = false;
   clearDirectHoldTimer();
   appendEvent({ type: "direct_chat", status: "released", reason });
-  if (!turnActive) endCliStdin(`direct hold released: ${reason}`);
+  if (pendingTurns === 0) endCliStdin(`direct hold released: ${reason}`);
 }
 
-function onCliTurnResult() {
-  turnActive = false;
+function onCliTurnResult(message) {
+  // A turn written mid-turn is merged into the running turn, so one `result`
+  // can answer several writes; the CLI says how many are still queued.
+  // (CLIs without the field: one result per written turn.)
+  const queued = message?.queued_turn_count;
+  pendingTurns =
+    Number.isInteger(queued) && queued >= 0
+      ? queued
+      : Math.max(0, pendingTurns - 1);
+  if (pendingTurns > 0) return;
   if (!directHold) {
     endCliStdin("autonomous turn finished");
     return;
@@ -698,8 +713,8 @@ function handleUserTurn(msg) {
     }
   }
   appendEvent({ type: "user_turn", turn_id: id, sender, text });
-  appendOutput("stdout", `[${sender === "user" ? "You" : "Rose"}] ${text}\n`);
-  turnActive = true;
+  appendOutput("stdout", `[${sender === "user" ? "You" : "Agent"}] ${text}\n`);
+  pendingTurns += 1;
   cliChild.stdin.write(userMessageLine(text));
   log("info", "Delivered user turn", { id, sender, chars: text.length });
   return turnAck(id, "delivered");
@@ -795,7 +810,7 @@ async function runClaudeCli() {
   });
   cliChild = child;
   cliStdinOpen = true;
-  turnActive = true;
+  pendingTurns = 1;
   child.stdin.write(prompt);
 
   let stdoutRemainder = "";
@@ -813,8 +828,10 @@ async function runClaudeCli() {
         if (message?.type === "result") {
           sawResult = true;
         }
+        // Settle turn accounting first so the result event can say whether
+        // more turns are still pending (the monitor's exit grace keys on it).
+        if (message?.type === "result") onCliTurnResult(message);
         emitClaudeMessage(message);
-        if (message?.type === "result") onCliTurnResult();
       } catch (err) {
         appendOutput("stdout", line + "\n");
         appendEvent({ type: "stdout", text: line });

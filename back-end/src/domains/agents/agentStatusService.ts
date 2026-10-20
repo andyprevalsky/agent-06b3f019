@@ -60,6 +60,23 @@ async function runRootTerminalCleanup(
   }
 }
 
+/**
+ * Slack auto-RCA agents post their result to the incident thread. One indexed
+ * lookup per terminal root; every other agent exits there. Fire-and-forget so
+ * a Slack outage never delays the status write. Dynamic import keeps the
+ * agents and slack-auto-rca domains decoupled for layer-deps.
+ */
+function reportAutoRcaOutcome(agentId: string): void {
+  void import('../slack-auto-rca/outcomeService')
+    .then(({ reportSlackAutoRcaOutcome }) => reportSlackAutoRcaOutcome(agentId))
+    .catch((error: unknown) => {
+      log.warn('Slack auto-RCA outcome import failed', {
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+}
+
 function statusUpdate(body: UpdateStatusBody): Prisma.AgentUpdateManyMutationInput {
   return {
     status: body.status,
@@ -174,6 +191,7 @@ export async function updateAgentStatus(
     await releaseTerminalBrowserSessions(agentId, body.status, dependencies);
     if (before.parentAgentId === null) {
       await runRootTerminalCleanup(agentId, body.status, dependencies);
+      reportAutoRcaOutcome(agentId);
     }
   }
   return result.agent;

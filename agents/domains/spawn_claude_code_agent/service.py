@@ -305,7 +305,7 @@ def format_code_events_transcript(
         if event_type == "user_turn":
             # Direct chat: the user (or another agent) typed to this CLI.
             text = event.get("text")
-            who = "Rose" if event.get("sender") == "agent" else "User"
+            who = "Agent" if event.get("sender") == "agent" else "User"
             if isinstance(text, str) and text.strip():
                 lines.append(f"[{who} → {provider}] {text.strip()}")
             continue
@@ -879,6 +879,12 @@ async def _run_agentic_loop(
     transcript_flushed = int((code_session or {}).get("transcript_events") or 0)
     transcript_pending: dict[str, TranscriptRecord] = {}
     last_transcript_flush = 0.0
+    # Every delivered user turn (direct chat or an agent-graph message) adds
+    # one more SDK `result` before the CLI is done: a message that arrives
+    # mid-run makes the first result an intermediate one, so the post-result
+    # exit grace arms only once results catch up with turns.
+    user_turns_seen = 0
+    sdk_results_seen = 0
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -924,9 +930,11 @@ async def _run_agentic_loop(
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
         nonlocal completed_codex_turns, effective_idle_timeout_s, wait_tool_armed, in_flight_tool_count
-        nonlocal direct_chat_active, transcript
+        nonlocal direct_chat_active, transcript, user_turns_seen, sdk_results_seen
         code_events.clear()
         direct_chat_active = False
+        user_turns_seen = 0
+        sdk_results_seen = 0
         transcript = CodeTranscriptBuilder(code_provider, goal=goal)
         transcript_pending.clear()
         completed_codex_turn_keys.clear()
@@ -943,7 +951,7 @@ async def _run_agentic_loop(
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
         nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at, logged_events
-        nonlocal direct_chat_active
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
         last_output_time = safe_time()
         code_events.append(event)
         event_index = len(code_events) - 1
@@ -958,6 +966,7 @@ async def _run_agentic_loop(
                 sdk_result_at = safe_time()
         elif event.get("type") == "user_turn":
             # A new turn: the next SDK result belongs to it.
+            user_turns_seen += 1
             sdk_result_at = None
         if is_codex_completed_turn_event(event):
             key = codex_completed_turn_event_key(event, len(code_events) - 1)
@@ -1039,7 +1048,15 @@ async def _run_agentic_loop(
             # result is reaped on the short idle window, not 900s. Record the
             # first result time for the exit-grace backstop (r31 a2/a3).
             wait_tool_armed = False
-            if sdk_result_at is None:
+            sdk_results_seen += 1
+            # The ws-server knows when the CLI has caught up: Claude Code merges
+            # a turn written mid-turn into the running one (one result for two
+            # writes) and reports its queue. Older sandboxes: count results.
+            pending_turns = event.get("pending_turns")
+            caught_up = (
+                pending_turns == 0 if isinstance(pending_turns, int) else sdk_results_seen > user_turns_seen
+            )
+            if sdk_result_at is None and caught_up:
                 sdk_result_at = safe_time()
                 logger.info(
                     "[ClaudeCode] SDK result observed; arming post-result exit grace",

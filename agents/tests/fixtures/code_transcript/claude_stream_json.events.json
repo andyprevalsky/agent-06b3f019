@@ -442,7 +442,8 @@
     "provider": "firstParty",
     "costBasis": "list"
    }
-  }
+  },
+  "pending_turns": 0
  },
  {
   "version": 1,
@@ -584,7 +585,8 @@
     "provider": "firstParty",
     "costBasis": "list"
    }
-  }
+  },
+  "pending_turns": 0
  },
  {
   "version": 1,

@@ -357,6 +357,40 @@ async def test_agent_relay_paused_while_user_holds_session():
         sandbox.stop()
 
 
+async def test_turn_merged_into_running_turn_still_ends_the_session():
+    """Claude Code folds a turn written mid-turn into the running turn: one result, empty queue.
+
+    Counting one result per written turn left stdin open forever after that
+    single result (the CLI never exits, the session hangs). The ws-server must
+    follow the CLI's `queued_turn_count` instead.
+    """
+    sandbox = LocalCodeSessionSandbox("claude", gate_first_turn=True, extra_env={"REPLAY_CLI_MERGE": "1"})
+    try:
+        await sandbox.start()
+        observer = SessionObserver(sandbox.ws_url)
+        await observer.start()
+        await observer.wait_for(lambda: observer.count("session") >= 1)
+        relayed = await deliver_user_turn_to_code_session(
+            sandbox.ws_url,
+            task_id="t",
+            text="ROSE: use port 4242",
+            turn_id="a-merge",
+            sender="agent",
+            token=TEST_TURN_TOKEN,
+        )
+        assert relayed.status == "delivered", relayed
+        sandbox.finish_first_turn()
+        await observer.wait_for(lambda: observer.exit_code is not None, timeout=10)
+        assert observer.exit_code == 0, sandbox.log()
+        results = [e for e in observer.events if e.get("type") == "result"]
+        assert [r.get("pending_turns") for r in results] == [0], results
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert texts[1:] == ["ROSE: use port 4242"], texts
+        await observer.close()
+    finally:
+        sandbox.stop()
+
+
 async def test_direct_turn_first_token_latency_local_sandbox():
     """Typed turn → first streamed token, 10 turns, real ws-server (plumbing share of the 3 s bar)."""
     samples = await measure_sandbox(10)
@@ -551,6 +585,10 @@ async def run_all_tests():
     await r.record_async("direct_turn_requires_the_session_token", test_direct_turn_requires_the_session_token)
     await r.record_async(
         "agent_relay_paused_while_user_holds_session", test_agent_relay_paused_while_user_holds_session
+    )
+    await r.record_async(
+        "turn_merged_into_running_turn_still_ends_the_session",
+        test_turn_merged_into_running_turn_still_ends_the_session,
     )
     await r.record_async(
         "direct_turn_first_token_latency_local_sandbox", test_direct_turn_first_token_latency_local_sandbox

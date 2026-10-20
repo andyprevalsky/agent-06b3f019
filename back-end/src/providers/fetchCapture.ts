@@ -518,6 +518,40 @@ export function installFetchCapture(): Router {
       });
     }
 
+    if (
+      process.env.BLACKBOX_TEST_FAKE_SLACK === '1' &&
+      new URL(url).hostname === 'slack.com' &&
+      new URL(url).pathname.startsWith('/api/') &&
+      method.toUpperCase() === 'POST'
+    ) {
+      // Slack Web API writes (chat.postMessage, reactions.add) answer like Slack:
+      // HTTP 200 with `ok`, plus a message handle for posts. Tests assert the
+      // captured request bodies; no call leaves the machine.
+      let channel = 'C0BLACKBOX0';
+      try {
+        const parsed: unknown = JSON.parse(requestBody ?? '{}');
+        if (parsed !== null && typeof parsed === 'object' && 'channel' in parsed) {
+          channel = String((parsed as { channel: unknown }).channel);
+        }
+      } catch {
+        // Non-JSON bodies keep the placeholder channel.
+      }
+      const body = JSON.stringify({
+        ok: true,
+        channel,
+        ts: `1800000000.${String(id % 1_000_000).padStart(6, '0')}`,
+      });
+      entry.durationMs = Date.now() - start;
+      entry.responseStatus = 200;
+      entry.responseBody = body;
+      publishCapture(entry);
+      return new globalThis.Response(body, {
+        status: 200,
+        statusText: 'OK',
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
     const agentPhoneHost = new URL(url).hostname;
     if (
       process.env.BLACKBOX_TEST_FAKE_AGENTPHONE === '1' &&

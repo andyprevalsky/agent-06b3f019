@@ -473,7 +473,7 @@ def render_transcript_text(records: list[TranscriptRecord]) -> str:
         kind = record.get("kind")
         text = str(record.get("text") or "")
         if kind == "user":
-            who = "Rose" if record.get("sender") == "agent" else "You"
+            who = "Agent" if record.get("sender") == "agent" else "You"
             lines.append(f"[{who} → {label}] {text}")
         elif kind == "thinking":
             lines.append(f"[Thinking] {text}".rstrip())
