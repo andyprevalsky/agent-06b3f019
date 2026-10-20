@@ -11,10 +11,11 @@
  * authoritative; otherwise the legacy health (row status / credential state).
  */
 
-import type { EmailCredentialSource, PlaidItemSource } from './repo.accounts';
+import type { CookieProfileSource, EmailCredentialSource, PlaidItemSource } from './repo.accounts';
 import type { ProgressRow } from './repo.progress';
 import { resolveAccountAdapter } from './service.accountRegistry';
 import {
+  cookieAccountStorageId,
   SYNC_STATES,
   toWireAccountId,
   type AccountsByProvider,
@@ -115,10 +116,38 @@ function plaidAccounts(row: AccountViewRow, items: PlaidItemSource[]): KnownAcco
     });
 }
 
-function knownAccountsOf(row: AccountViewRow, plaidItems: PlaidItemSource[]): KnownAccount[] {
+/**
+ * A cookie provider row fans out to one account per synced browser profile.
+ * A browser row with no stored cookies yet (connected but never synced, or
+ * cookies only reported through progress) falls back to its single legacy
+ * `default` account so the connected row never disappears.
+ */
+function cookieProfileAccounts(
+  row: AccountViewRow,
+  cookieProfiles: CookieProfileSource[]
+): KnownAccount[] {
+  const mine = cookieProfiles.filter((profile) => profile.browserSource === row.name);
+  if (mine.length === 0) return [rowAccount(row)];
+  return mine.map((profile) => ({
+    provider: row.name,
+    storageAccountId: cookieAccountStorageId(row.name, profile.browserProfile),
+    rowId: row.id,
+    label: profile.browserProfile === '' ? null : profile.browserProfile,
+    health: 'synced' as SyncState,
+    lastSyncAt: profile.lastSyncAt ?? row.lastSuccessfulSyncAt ?? row.lastSyncAt,
+    lastError: null,
+  }));
+}
+
+function knownAccountsOf(
+  row: AccountViewRow,
+  plaidItems: PlaidItemSource[],
+  cookieProfiles: CookieProfileSource[]
+): KnownAccount[] {
   const kind = resolveAccountAdapter(row.name).list;
   if (kind === 'email_credentials') return credentialAccounts(row);
   if (kind === 'plaid_items') return plaidAccounts(row, plaidItems);
+  if (kind === 'browser_cookies') return cookieProfileAccounts(row, cookieProfiles);
   return [rowAccount(row)];
 }
 
@@ -184,6 +213,7 @@ function toAccount(known: KnownAccount, progress: ProgressRow | null): Integrati
 export function buildAccountsView(input: {
   rows: AccountViewRow[];
   plaidItems: PlaidItemSource[];
+  cookieProfiles: CookieProfileSource[];
   progress: ProgressRow[];
 }): AccountsByProvider {
   const progressByKey = new Map(
@@ -195,7 +225,7 @@ export function buildAccountsView(input: {
   };
 
   for (const row of input.rows) {
-    for (const known of knownAccountsOf(row, input.plaidItems)) {
+    for (const known of knownAccountsOf(row, input.plaidItems, input.cookieProfiles)) {
       const key = `${known.provider}\u0000${known.storageAccountId}`;
       push(toAccount(known, progressByKey.get(key) ?? null));
       progressByKey.delete(key);

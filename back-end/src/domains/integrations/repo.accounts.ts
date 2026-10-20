@@ -131,6 +131,39 @@ export interface EmailCredentialSource {
   lastErrorReason: string | null;
 }
 
+/**
+ * One synced browser profile: a (browserSource, browserProfile) pair that has
+ * at least one stored cookie. `browserProfile === ''` is the legacy
+ * pre-profile-detection snapshot (the `default` account).
+ */
+export interface CookieProfileSource {
+  browserSource: string;
+  browserProfile: string;
+  cookieCount: number;
+  lastSyncAt: Date | null;
+}
+
+/**
+ * Every synced browser profile of one user, one indexed group-by over the
+ * `Cookie` table (bounded by browser profiles, not cookie count; served by the
+ * `@@index([userId, browserSource, browserProfile])`). 10k rule: O(profiles),
+ * never O(agents) or O(cookies), and never fanned in across users.
+ */
+export async function listCookieProfileSources(userId: string): Promise<CookieProfileSource[]> {
+  const groups = await prisma.cookie.groupBy({
+    by: ['browserSource', 'browserProfile'],
+    where: { userId },
+    _count: { _all: true },
+    _max: { syncedAt: true },
+  });
+  return groups.map((group) => ({
+    browserSource: group.browserSource,
+    browserProfile: group.browserProfile,
+    cookieCount: group._count._all,
+    lastSyncAt: group._max.syncedAt ?? null,
+  }));
+}
+
 export interface PlaidItemSource {
   id: string;
   integrationId: string;
