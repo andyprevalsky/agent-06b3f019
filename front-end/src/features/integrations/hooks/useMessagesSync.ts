@@ -1,22 +1,35 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 
 import type { useIntegrationHandlers } from '@/features/integration-handlers-context';
 import { toast } from '@/hooks/use-toast';
 
 import { createLinkedInSyncAgentApi } from '../api';
-import type { MessageSyncType } from '../types';
+import type { ConnectedIntegration, MessageSyncType } from '../types';
+
+/** How often a running LinkedIn sync re-reads its state, so the row settles when the agent ends. */
+export const LINKEDIN_SYNC_REFRESH_MS = 15_000;
 
 export function useMessagesSync(
   handlers: ReturnType<typeof useIntegrationHandlers>,
   fetchIntegrations: () => Promise<void>,
+  linkedinStatus: ConnectedIntegration['status'] | null,
 ) {
   const [messageSyncLoading, setMessageSyncLoading] = useState<MessageSyncType | null>(null);
   const [linkedinSyncLoading, setLinkedinSyncLoading] = useState(false);
-  const [linkedinSyncStarted, setLinkedinSyncStarted] = useState(false);
-  // `linkedinSyncStarted` is React state and only flips AFTER the create call
-  // resolves, so two rapid clicks could both pass that guard and spawn duplicate
-  // export agents. This ref is set synchronously to close the in-flight window.
+  // The server's LinkedIn row is the only source of truth: it survives refresh
+  // and reads as SYNC_FAILED once the export agent ends without uploading.
+  const linkedinSyncStarted = linkedinStatus === 'SYNCING';
+  const linkedinConnected = linkedinStatus === 'CONNECTED';
+  // Server state only flips AFTER the create call resolves, so two rapid clicks
+  // could both pass that guard and spawn duplicate export agents. This ref is
+  // set synchronously to close the in-flight window.
   const linkedinSyncInFlight = useRef(false);
+
+  useEffect(() => {
+    if (!linkedinSyncStarted) return;
+    const id = setInterval(() => void fetchIntegrations(), LINKEDIN_SYNC_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [linkedinSyncStarted, fetchIntegrations]);
   // iMessage and WhatsApp share one `messageSyncLoading` slot, so without a guard
   // the second start overwrites the first's label and the first `finally` clears
   // the row while the other native operation is still running -- re-exposing the
@@ -57,31 +70,32 @@ export function useMessagesSync(
 
   const handleLinkedInSync = useCallback(async () => {
     // Only ever spawn one export agent -- re-exporting would duplicate the work.
-    if (linkedinSyncInFlight.current || linkedinSyncStarted) return;
+    if (linkedinSyncInFlight.current || linkedinSyncStarted || linkedinConnected) return;
     linkedinSyncInFlight.current = true;
     setLinkedinSyncLoading(true);
     try {
       await createLinkedInSyncAgentApi();
-      setLinkedinSyncStarted(true);
+      await fetchIntegrations();
       toast({
         title: 'Agent spawned',
         description: 'An agent was spawned to connect your LinkedIn data.',
       });
     } catch (err) {
-      // Release the guard so a failed spawn stays retryable; only a successful
-      // spawn permanently blocks re-export.
-      linkedinSyncInFlight.current = false;
       console.error('[LinkedIn] Failed to start sync agent:', err);
       throw err;
     } finally {
+      // The server row now blocks re-export while the agent runs; a failed
+      // spawn leaves it unchanged and retryable.
+      linkedinSyncInFlight.current = false;
       setLinkedinSyncLoading(false);
     }
-  }, [linkedinSyncStarted]);
+  }, [linkedinSyncStarted, linkedinConnected, fetchIntegrations]);
 
   return {
     messageSyncLoading,
     linkedinSyncLoading,
     linkedinSyncStarted,
+    linkedinConnected,
     handleIMessageSync,
     handleWhatsAppConnect,
     handleLinkedInSync,

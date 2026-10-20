@@ -162,8 +162,17 @@ async function testReadableInboxProjection() {
     'withDerivedConnectedEmails',
     'findReadableInboxEmails',
     'redactLanternIntegration',
+    'settleLinkedInSync',
     `return (${extract(service, 'getIntegrations')});`
-  )(repo, { info() {} }, derive, readable, redactLanternIntegration);
+  )(
+    repo,
+    { info() {} },
+    derive,
+    readable,
+    redactLanternIntegration,
+    // No LinkedIn row here; its settle behavior is owned by the integrations blackbox.
+    async (_userId: string, rows: unknown[]) => rows
+  );
   const one = await get('one');
   assert.deepEqual(
     one.integrations[0].readableInboxEmails,

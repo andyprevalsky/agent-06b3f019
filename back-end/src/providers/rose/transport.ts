@@ -48,7 +48,37 @@ export const ANTHROPIC_BETA_HEADER_API_KEY = [
 
 const ANTHROPIC_VERSION = '2023-06-01';
 const ANTHROPIC_X_APP = 'cli';
-const ANTHROPIC_USER_AGENT = 'claude-cli/2.1.251 (external, sdk-ts, agent-sdk/0.2.75)';
+// Anthropic rejects OAuth requests from clients older than each model's
+// minimum (`claude_code_version_too_old`). Recorded live requirements live in
+// shared/claude-oauth-client/contract.json; the rose-transport blackbox fails
+// when this value, the Python mirror, or any configured claudeAuthModel
+// disagrees with it.
+export const ANTHROPIC_USER_AGENT = 'claude-cli/2.1.304 (external, sdk-ts, agent-sdk/0.2.75)';
+const CLIENT_VERSION_TOO_OLD = 'claude_code_version_too_old';
+
+/** Provider error type/code/message from an Anthropic error body. */
+export function anthropicErrorFields(errorBody: string): {
+  error_type?: string;
+  error_code?: string;
+  message?: string;
+} {
+  try {
+    const error = (JSON.parse(errorBody) as { error?: unknown }).error;
+    if (!error || typeof error !== 'object') return {};
+    const { type, message, details } = error as {
+      type?: unknown;
+      message?: unknown;
+      details?: { error_code?: unknown };
+    };
+    return {
+      error_type: typeof type === 'string' ? type : undefined,
+      error_code: typeof details?.error_code === 'string' ? details.error_code : undefined,
+      message: typeof message === 'string' ? message : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
 
 export const DEFAULT_CONNECT_TIMEOUT_MS = 60_000;
 
@@ -370,11 +400,26 @@ export async function postAnthropicStream(
   let errorBody: string | undefined;
   if (!response.ok) {
     errorBody = await response.text();
+    const fields = anthropicErrorFields(errorBody);
+    // Validation messages can echo request fragments: log only enum fields.
     log.warn('anthropic.error', {
       request_id: options.requestId,
       status: response.status,
       error_body_len: errorBody.length,
+      error_type: fields.error_type,
+      error_code: fields.error_code,
     });
+    if (fields.error_code === CLIENT_VERSION_TOO_OLD) {
+      // Every call to this model is rejected until the advertised client
+      // version is raised; never let it pass as an opaque 400.
+      log.error('anthropic.client_version_too_old', {
+        request_id: options.requestId,
+        call_site: options.callSite,
+        model: options.body.model,
+        user_agent: ANTHROPIC_USER_AGENT,
+        provider_message: fields.message,
+      });
+    }
   }
 
   return {
