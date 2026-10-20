@@ -16,7 +16,8 @@ import { deflateSync } from 'node:zlib';
 import { test } from 'node:test';
 import { USERCONTENT_CSP } from '../../domains/user-ui/config';
 import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
-import { userUiAssetsDir, USER_UI_SEED_EXAMPLES } from '../../providers/userUi/seed';
+import { installedRoseSkills } from '../../providers/roseSkills/skills';
+import { userUiAssetsDir, userUiExamplesDir, USER_UI_EXAMPLES } from '../../providers/userUi/seed';
 
 interface Violation {
   rule: string;
@@ -206,9 +207,10 @@ function auditFiles(root: string): AuditFile[] {
 }
 
 test('static audit passes every shipped example and fails the janky fixture', () => {
-  const seed = auditFiles(join(assets, 'seed'));
-  for (const name of USER_UI_SEED_EXAMPLES) {
-    const audit = cli.auditEntryFiles(`examples/${name}/index.html`, seed);
+  // The examples ship in the rose-ui skill (~/.rose/skills/rose-ui/examples).
+  const skill = auditFiles(join(userUiExamplesDir(), '..'));
+  for (const name of USER_UI_EXAMPLES) {
+    const audit = cli.auditEntryFiles(`examples/${name}/index.html`, skill);
     assert.deepEqual(audit.violations, [], `${name}: ${JSON.stringify(audit.violations)}`);
     assert.deepEqual(audit.warnings, [], `${name}: ${JSON.stringify(audit.warnings)}`);
   }
@@ -322,16 +324,27 @@ test('preview CSP is the production usercontent CSP', () => {
   assert.match(USERCONTENT_CSP, /worker-src blob:/);
 });
 
-test('code agents are pointed at the README, current screenshots and check', () => {
-  // rose_user_ui is a Rose Desktop surface (utils/roseDesktop).
+test('code agents are pointed at the rose-ui skill: pull, current screenshots and check', () => {
+  // The Rose app UI is a Rose Desktop surface (utils/roseDesktop); the prompt
+  // lists the rose-ui skill, which carries the commands (C17).
   const prompt = buildCodeAgentSystemPrompt({ roseDesktop: true });
+  assert.ok(prompt.includes('\n- rose-ui: Use '), 'code-agent prompt lists the rose-ui skill');
+  assert.ok(!buildCodeAgentSystemPrompt().includes('rose-ui'), 'stock prompt has no rose-ui');
+  const skill = installedRoseSkills(true).find((entry) => entry.name === 'rose-ui');
+  const text = skill?.files.find((file) => file.path === 'SKILL.md')?.content.toString('utf8');
+  assert.ok(text, 'rose-ui skill installed for Rose Desktop accounts');
   for (const term of [
-    '~/rose_user_ui is the Rose app UI',
-    'README.md',
-    '~/rose_user_ui/screenshots/current/',
+    'rose-ui pull [<dir>]',
+    'rose-ui screenshot --current',
+    'screenshots/current/',
     'rose-ui screenshot',
     'rose-ui check` must pass before `rose-ui publish',
+    '~/.rose/skills/rose-ui/reference/bundle.md',
   ]) {
-    assert.ok(prompt.includes(term), `code-agent prompt mentions ${term}`);
+    assert.ok(text.includes(term), `rose-ui skill mentions ${term}`);
+  }
+  const paths = skill?.files.map((file) => file.path) ?? [];
+  for (const name of USER_UI_EXAMPLES) {
+    assert.ok(paths.includes(`examples/${name}/index.html`), `skill ships examples/${name}`);
   }
 });

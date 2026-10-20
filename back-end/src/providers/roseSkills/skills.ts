@@ -89,7 +89,8 @@ function unquote(value: string): string {
  */
 export function parseRoseSkillFrontmatter(markdown: string): RoseSkillFrontmatter {
   const lines = markdown.split('\n');
-  if (lines[0]?.trim() !== '---') throw new Error('SKILL.md must start with a --- frontmatter block');
+  if (lines[0]?.trim() !== '---')
+    throw new Error('SKILL.md must start with a --- frontmatter block');
   const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
   if (end < 0) throw new Error('SKILL.md frontmatter is not closed with ---');
   const fields = new Map<string, string>();
@@ -210,7 +211,10 @@ export function roseSkillWorkspaceFiles(
   const roots = [ROSE_SKILLS_HOME_DIR, ...ROSE_SKILL_HARNESS_DIRS];
   return roots.flatMap((base) =>
     skills.flatMap((skill) =>
-      skill.files.map((file) => ({ path: `${base}/${skill.name}/${file.path}`, content: file.content }))
+      skill.files.map((file) => ({
+        path: `${base}/${skill.name}/${file.path}`,
+        content: file.content,
+      }))
     )
   );
 }

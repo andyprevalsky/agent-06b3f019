@@ -398,7 +398,8 @@ export async function sectionA(): Promise<TestResult[]> {
             { path: '.rose/bin/rose-agents', content: Buffer.from('#!/usr/bin/env node\n') },
             { path: '.rose/tools.json', content: Buffer.from('{}') },
             { path: '.rose/mcp.json', content: Buffer.from('{}') },
-            { path: 'rose_user_ui/README.md', content: Buffer.from('readme') },
+            { path: '.rose/skills/talk-to-user/SKILL.md', content: Buffer.from('skill') },
+            { path: '.claude/skills/talk-to-user/SKILL.md', content: Buffer.from('skill') },
           ],
           envs: {
             ROSE_TOOLS_URL: 'https://api.example.com/api/agent-tools/agent-1',
@@ -412,7 +413,9 @@ export async function sectionA(): Promise<TestResult[]> {
         const byPath = new Map(local.files.map((file) => [file.path, file]));
         assert.strictEqual(byPath.get('.rose/bin/rose')?.executable, true);
         assert.strictEqual(byPath.get('.rose/bin/rose-agents')?.executable, true);
-        assert.strictEqual(byPath.get('rose_user_ui/README.md')?.executable, false);
+        // Rose skills (C17) ship as plain files in every HOME root.
+        assert.strictEqual(byPath.get('.rose/skills/talk-to-user/SKILL.md')?.executable, false);
+        assert.strictEqual(byPath.get('.claude/skills/talk-to-user/SKILL.md')?.executable, false);
         const mcp = JSON.parse(
           Buffer.from(byPath.get('.rose/mcp.json')?.content_base64 ?? '', 'base64').toString()
         ) as { mcpServers: { rose: { args: string[] } } };

@@ -69,7 +69,12 @@ const scratch = mkdtempSync(path.join(tmpdir(), 'rose-skills-structural-'));
 function run(file: string, args: string[], env: Record<string, string>): string {
   const result = spawnSync(process.execPath, [file, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: scratch, ROSE_TOOLS_CONFIG: path.join(scratch, 'none.json'), ...env },
+    env: {
+      ...process.env,
+      HOME: scratch,
+      ROSE_TOOLS_CONFIG: path.join(scratch, 'none.json'),
+      ...env,
+    },
     timeout: 30_000,
   });
   return `${result.stdout ?? ''}${result.stderr ?? ''}`;
@@ -85,7 +90,11 @@ function cliHelp(roseDesktop: boolean): Record<Cli, string> {
     }),
     'rose-ui': run(path.join(srcDir, 'assets/user-ui/bin/rose-ui.cjs'), ['--help'], {}),
     'rose-agents': run(agentsCli, [], {}),
-    'rose-preview': run(path.join(srcDir, 'assets/code-preview/bin/rose-preview.cjs'), ['--help'], {}),
+    'rose-preview': run(
+      path.join(srcDir, 'assets/code-preview/bin/rose-preview.cjs'),
+      ['--help'],
+      {}
+    ),
   };
 }
 
@@ -218,12 +227,18 @@ for (const roseDesktop of [false, true]) {
         for (const match of file.text.matchAll(/~\/\.rose\/skills\/([a-z0-9-]+)\/([^\s`),;]+)/g)) {
           const [ref, rel] = [match[1] as string, (match[2] as string).replace(/[.:]$/, '')];
           if (ref === '<name>') continue;
-          assert.ok(names.includes(ref), `${file.path} points into the ${ref} skill (not installed)`);
+          assert.ok(
+            names.includes(ref),
+            `${file.path} points into the ${ref} skill (not installed)`
+          );
           const target = installedRoseSkills(roseDesktop).find((s) => s.name === ref);
           const exists = target?.files.some(
             (f) => f.path === rel || f.path.startsWith(`${rel.replace(/\/$/, '')}/`)
           );
-          assert.ok(exists, `${file.path} points at ~/.rose/skills/${ref}/${rel}, which is not shipped`);
+          assert.ok(
+            exists,
+            `${file.path} points at ~/.rose/skills/${ref}/${rel}, which is not shipped`
+          );
         }
       }
     });
@@ -233,9 +248,15 @@ for (const roseDesktop of [false, true]) {
 check('template CLAUDE.md carries exactly the stock table of contents', () => {
   const template = readFileSync(path.join(repoRoot, 'e2b-templates/claude-code/CLAUDE.md'), 'utf8');
   const stockToc = roseSkillsTableOfContents(installedRoseSkills(false)).join('\n');
-  assert.ok(template.includes(`\n${stockToc}\n`), 'template is missing the stock table of contents');
+  assert.ok(
+    template.includes(`\n${stockToc}\n`),
+    'template is missing the stock table of contents'
+  );
   const listed = [...template.matchAll(/^- ([a-z0-9-]+): Use /gm)].map((match) => match[1]);
-  assert.deepEqual(listed, installedRoseSkills(false).map((skill) => skill.name));
+  assert.deepEqual(
+    listed,
+    installedRoseSkills(false).map((skill) => skill.name)
+  );
 });
 
 check('the CLI help probes ran', () => {

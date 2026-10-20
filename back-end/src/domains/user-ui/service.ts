@@ -110,9 +110,7 @@ export function usercontentBaseUrl(requestOrigin: string, versionId: string): st
  */
 export async function getBundle(userId: string) {
   const active = await repo.findActiveUserUiVersion(userId);
-  const files = active
-    ? await repo.readUserUiVersionFiles(userId, active.id)
-    : userUiSeedFiles();
+  const files = active ? await repo.readUserUiVersionFiles(userId, active.id) : userUiSeedFiles();
   return {
     versionId: active?.id ?? null,
     source: active ? ('active' as const) : ('seed' as const),

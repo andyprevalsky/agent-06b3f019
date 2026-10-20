@@ -1,17 +1,22 @@
 /**
- * Rose Desktop gate for code-session workspaces (utils/roseDesktop).
+ * Rose Desktop gate for code-session workspaces (utils/roseDesktop) and the
+ * Rose skills it installs (C17).
  *
  *   prepareCodeSessionWorkspace(stock account)
- *     → rose CLI + rose-agents CLI only: no rose_user_ui, no rose-ui, no ROSE_UI_* env,
+ *     → rose CLI + rose-agents CLI only: no UI folder, no rose-ui, no ROSE_UI_* env,
  *       tools.json without rose_desktop → `rose --help` / MCP tools/list are stock
+ *     → skills agent-graph, code-session, talk-to-user (stock text) in ~/.rose/skills,
+ *       ~/.claude/skills and ~/.agents/skills
  *   prepareCodeSessionWorkspace(..., roseDesktop = true)
- *     → rose_user_ui + rose-ui + publish token, ROSE_TOOLS_ROSE_DESKTOP=1,
- *       tools.json rose_desktop → pinned questions and inline views offered
+ *     → rose-ui + publish/bundle env (no pre-materialized UI folder: `rose-ui pull`),
+ *       ROSE_TOOLS_ROSE_DESKTOP=1, tools.json rose_desktop → pinned questions and
+ *       inline views offered; every skill, talk-to-user with its Rose Desktop text
+ *   the prompt's table of contents (sandbox and Mac) = exactly the installed skills
  *
  * Registered by agent-tools-requests.blackbox.ts.
  */
 import { spawn } from 'child_process';
-import { mkdtempSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { AGENT_GRAPH_CLI_PATH } from '../../providers/agentGraph/workspace';
@@ -20,7 +25,18 @@ import {
   AGENT_TOOLS_CONFIG_PATH,
   AGENT_TOOLS_ENV_ROSE_DESKTOP,
 } from '../../providers/agentTools/workspace';
+import {
+  buildCodeAgentSystemPrompt,
+  buildLocalCodeAgentSystemPrompt,
+} from '../../providers/codeAgentPrompt';
 import { prepareCodeSessionWorkspace } from '../../providers/codeSessionWorkspace';
+import { localHomeFromWorkspace } from '../../providers/localDevices/homeFiles';
+import {
+  ROSE_SKILL_HARNESS_DIRS,
+  ROSE_SKILLS_HOME_DIR,
+  ROSE_SKILLS_TOC_HEADER,
+  parseRoseSkillFrontmatter,
+} from '../../providers/roseSkills/skills';
 import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import {
   materializeUserUiInLocalHome,
@@ -73,6 +89,109 @@ async function installedCli(workspace: UserUiWorkspace, home: string, agentId: s
   return { help, listed, props };
 }
 
+const STOCK_SKILLS = ['agent-graph', 'code-session', 'talk-to-user'];
+const ROSE_DESKTOP_SKILLS = ['apps-preview', 'rose-ui'];
+
+/** The skill names a workspace installs under ~/.rose/skills (from its SKILL.md files). */
+function installedSkillNames(workspace: UserUiWorkspace): string[] {
+  const re = new RegExp(`^${ROSE_SKILLS_HOME_DIR.replace('.', '\\.')}/([a-z0-9-]+)/SKILL\\.md$`);
+  return workspace.files
+    .map((file) => re.exec(file.path)?.[1])
+    .filter((name): name is string => name !== undefined)
+    .sort();
+}
+
+/** `- <name>: <description>` lines under the table-of-contents header. */
+function tableOfContents(prompt: string): Array<{ name: string; description: string }> {
+  const lines = prompt.split('\n');
+  const start = lines.indexOf(ROSE_SKILLS_TOC_HEADER);
+  assert(start >= 0, `prompt has the skills table of contents:\n${prompt}`);
+  const entries: Array<{ name: string; description: string }> = [];
+  for (const line of lines.slice(start + 1)) {
+    const match = /^- ([a-z0-9-]+): (.+)$/.exec(line);
+    if (match === null) break;
+    entries.push({ name: match[1] as string, description: match[2] as string });
+  }
+  return entries;
+}
+
+/**
+ * Skills in every HOME root, byte-identical mirrors, materialized on disk, and
+ * the same set (with the same descriptions) in the sandbox and Mac prompts.
+ */
+async function assertSkills(
+  workspace: UserUiWorkspace,
+  roseDesktop: boolean,
+  agentId: string
+): Promise<string[]> {
+  const names = installedSkillNames(workspace);
+  const expected = roseDesktop ? [...STOCK_SKILLS, ...ROSE_DESKTOP_SKILLS].sort() : STOCK_SKILLS;
+  for (const name of expected) assert(names.includes(name), `${name} skill installed: ${names}`);
+  if (!roseDesktop) {
+    assert(JSON.stringify(names) === JSON.stringify(STOCK_SKILLS), `stock skill set: ${names}`);
+  }
+  const byPath = new Map(workspace.files.map((file) => [file.path, file.content]));
+  const canonical = workspace.files.filter((file) =>
+    file.path.startsWith(`${ROSE_SKILLS_HOME_DIR}/`)
+  );
+  for (const file of canonical) {
+    const rel = file.path.slice(ROSE_SKILLS_HOME_DIR.length + 1);
+    for (const harness of ROSE_SKILL_HARNESS_DIRS) {
+      const mirror = byPath.get(`${harness}/${rel}`);
+      assert(mirror !== undefined && mirror.equals(file.content), `${harness}/${rel} mirrors it`);
+    }
+  }
+  const skillMd = (name: string) =>
+    byPath.get(`${ROSE_SKILLS_HOME_DIR}/${name}/SKILL.md`)?.toString('utf8') ?? '';
+  const talk = skillMd('talk-to-user');
+  assert(!talk.includes('<!-- rose-desktop'), 'markers never ship');
+  assert(
+    roseDesktop === (talk.includes('--pinned') && talk.includes('--inline-view')),
+    `talk-to-user pinned/inline-view text only for Rose Desktop (roseDesktop=${roseDesktop})`
+  );
+  assert(/rose wait <request-id>/.test(talk), 'talk-to-user carries the long-wait rule');
+
+  for (const prompt of [
+    buildCodeAgentSystemPrompt({ githubRepoUrl: 'https://github.com/acme/app', roseDesktop }),
+    buildLocalCodeAgentSystemPrompt({ roseDesktop }),
+  ]) {
+    const toc = tableOfContents(prompt);
+    assert(
+      JSON.stringify(toc.map((entry) => entry.name)) === JSON.stringify(names),
+      `table of contents ${JSON.stringify(toc.map((e) => e.name))} = installed ${names}`
+    );
+    for (const entry of toc) {
+      const { description } = parseRoseSkillFrontmatter(skillMd(entry.name));
+      assert(entry.description === description, `${entry.name} description matches SKILL.md`);
+    }
+  }
+
+  // Mac sessions ship the same files in start_session.home_files (non-executable).
+  const local = localHomeFromWorkspace(workspace, '/Users/someone/rose-session');
+  const skillFiles = local.files.filter((file) => file.path.includes('/skills/'));
+  assert(skillFiles.length === canonical.length * 3, 'Mac home files carry every skill mirror');
+  assert(
+    skillFiles.every((file) => !file.executable),
+    'skill files are not executable'
+  );
+
+  const home = mkdtempSync(join(tmpdir(), 'rose-skills-home-'));
+  try {
+    assert((await materializeUserUiInLocalHome(home, workspace, agentId)) !== null, 'written');
+    for (const name of names) {
+      for (const root of [ROSE_SKILLS_HOME_DIR, ...ROSE_SKILL_HARNESS_DIRS]) {
+        const file = join(home, root, name, 'SKILL.md');
+        assert(existsSync(file), `${root}/${name}/SKILL.md on disk`);
+        assert(readFileSync(file, 'utf8') === skillMd(name), `${root}/${name} content`);
+      }
+    }
+    assert(!existsSync(join(home, 'rose_user_ui')), 'no pre-materialized UI folder');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+  return names;
+}
+
 function toolsConfig(workspace: UserUiWorkspace): Record<string, unknown> {
   const file = workspace.files.find((entry) => entry.path === AGENT_TOOLS_CONFIG_PATH);
   assert(file !== undefined, 'tools.json installed');
@@ -86,7 +205,7 @@ async function assertStockSession(): Promise<void> {
   const paths = stock.files.map((file) => file.path);
   assert(
     !paths.some((path) => path.startsWith('rose_user_ui/') || path.includes('rose-ui')),
-    `stock workspace has no rose_user_ui files: ${paths.join(', ')}`
+    `stock workspace has no UI folder or rose-ui files: ${paths.join(', ')}`
   );
   assert(paths.includes(AGENT_TOOLS_CLI_PATH), 'stock workspace keeps the rose CLI');
   assert(paths.includes(AGENT_GRAPH_CLI_PATH), 'stock workspace keeps the rose-agents CLI');
@@ -96,6 +215,7 @@ async function assertStockSession(): Promise<void> {
   );
   assert(stock.envs[AGENT_TOOLS_ENV_ROSE_DESKTOP] === undefined, 'stock session is not flagged');
   assert(!('rose_desktop' in toolsConfig(stock)), 'stock tools.json has no rose_desktop flag');
+  await assertSkills(stock, false, otherA);
 
   const home = mkdtempSync(join(tmpdir(), 'rose-tools-gate-stock-'));
   try {
@@ -116,16 +236,22 @@ async function assertStockSession(): Promise<void> {
 }
 
 async function assertRoseDesktopSession(): Promise<void> {
-  // userB only has real publishes (userA's fixture version row has no stored files),
-  // so its rose_user_ui materializes.
   const flagged = await prepareCodeSessionWorkspace(userB, agentB, 'task-flagged', 'claude', true);
   assert(flagged !== null, 'flagged session gets a workspace');
   const paths = flagged.files.map((file) => file.path);
-  assert(paths.includes('rose_user_ui/README.md'), 'flagged workspace has rose_user_ui');
+  assert(
+    !paths.some((path) => path.startsWith('rose_user_ui/')),
+    'no pre-materialized UI folder: the rose-ui skill pulls it on demand'
+  );
   assert(paths.includes('.rose/bin/rose-ui'), 'flagged workspace has rose-ui');
   assert(typeof flagged.envs.ROSE_UI_PUBLISH_TOKEN === 'string', 'flagged publish token');
+  assert(
+    (flagged.envs.ROSE_UI_BUNDLE_URL ?? '').endsWith('/api/user-ui/bundle'),
+    'flagged bundle URL for rose-ui pull'
+  );
   assert(flagged.envs[AGENT_TOOLS_ENV_ROSE_DESKTOP] === '1', 'flagged session env');
   assert(toolsConfig(flagged).rose_desktop === true, 'flagged tools.json');
+  await assertSkills(flagged, true, agentB);
 
   const home = mkdtempSync(join(tmpdir(), 'rose-tools-gate-flagged-'));
   try {
@@ -140,11 +266,11 @@ async function assertRoseDesktopSession(): Promise<void> {
 
 export const roseDesktopGateCases: BlackboxTest[] = [
   {
-    name: 'Rose Desktop gate: a stock code session gets no rose_user_ui, rose-ui or new-UI tools',
+    name: 'Rose Desktop gate: a stock code session gets the stock skills and no rose-ui or new-UI tools',
     fn: assertStockSession,
   },
   {
-    name: 'Rose Desktop gate: a Rose Desktop code session gets rose_user_ui, rose-ui and new-UI tools',
+    name: 'Rose Desktop gate: a Rose Desktop code session gets every skill, rose-ui and new-UI tools',
     fn: assertRoseDesktopSession,
   },
 ];

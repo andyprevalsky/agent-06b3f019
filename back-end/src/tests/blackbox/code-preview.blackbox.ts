@@ -30,6 +30,7 @@ import { prisma } from '../../providers/database';
 import { localCodeSessionHome } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
 import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
+import { installedRoseSkills } from '../../providers/roseSkills/skills';
 import {
   CODE_PREVIEW_CLI_PATH,
   codePreviewToolFiles,
@@ -250,28 +251,38 @@ test('dev sessions get the rose-preview CLI and env; other accounts get neither'
   assert.equal(other?.envs.ROSE_PREVIEW_PORT, undefined);
 });
 
-test('code-agent prompt: Rose-in-Rose preview + publish lines only for dev Rose sessions', () => {
+test('code-agent prompt: Rose-in-Rose shipping rule + apps-preview skill only for dev Rose sessions', () => {
   const rose = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/Rose-Ai-Labs/rose',
     roseDesktop: true,
   });
-  assert.match(rose, /rose-preview start/);
-  assert.match(rose, /opening a pull request/i);
-  assert.match(rose, /apps\/<slug>\//);
+  assert.match(rose, /^- apps-preview: Use /m, 'the table of contents lists apps-preview');
+  assert.match(rose, /is Rose itself/);
+  assert.match(rose, /pull request \(`gh pr create`\)/i);
   assert.match(rose, /never merge/i);
   assert.match(rose, /\/deploy/);
   const plain = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/Rose-Ai-Labs/rose',
   });
-  assert.doesNotMatch(plain, /rose-preview/, 'non-dev accounts: prompt unchanged');
+  assert.doesNotMatch(plain, /rose-preview|apps-preview|is Rose itself/, 'non-dev accounts');
   const devOtherRepo = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/someone/app',
     roseDesktop: true,
   });
-  assert.match(devOtherRepo, /rose-preview start/);
+  assert.match(devOtherRepo, /^- apps-preview: Use /m);
   assert.doesNotMatch(devOtherRepo, /is Rose itself/);
   const project = buildCodeAgentSystemPrompt({ roseDesktop: true, roseRepo: true });
-  assert.match(project, /is Rose itself/, 'a Rose project session (no github url) gets the lines');
+  assert.match(project, /is Rose itself/, 'a Rose project session (no github url) gets the rule');
+
+  // How to preview and publish is the apps-preview skill (C17), installed for dev accounts only.
+  const skill = installedRoseSkills(true).find((entry) => entry.name === 'apps-preview');
+  const text = skill?.files.find((file) => file.path === 'SKILL.md')?.content.toString('utf8');
+  assert.ok(text, 'apps-preview skill installed for dev accounts');
+  assert.match(text, /rose-preview start \[--dir <app dir>\]/);
+  assert.match(text, /apps\/<slug>\//);
+  assert.match(text, /opening a pull\s+request \(`gh pr create`\)/);
+  assert.match(text, /Never merge it, never\s+push to main and never deploy/);
+  assert.ok(!installedRoseSkills(false).some((entry) => entry.name === 'apps-preview'));
 });
 
 /** Wait until the page shows `marker`; returns the page wall-clock time it appeared. */

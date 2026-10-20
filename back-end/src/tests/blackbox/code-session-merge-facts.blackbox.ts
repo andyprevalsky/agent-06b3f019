@@ -5,15 +5,21 @@
  *
  *   local GitHub API mock ──resolveMergeFacts──► merged only when GitHub confirms
  *                                                the PR merged AND the target has head
- *   buildCodeAgentSystemPrompt / template CLAUDE.md ──► commit locally, merge when needed
+ *   buildCodeAgentSystemPrompt / template CLAUDE.md ──► branch facts + the Rose skills
+ *                         table of contents (C17); commit/merge rules in the code-session skill
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
+import {
+  CODE_AGENT_INSTRUCTIONS_VERSION,
+  CODE_AGENT_STOCK_INSTRUCTIONS_VERSION,
+  buildCodeAgentSystemPrompt,
+} from '../../providers/codeAgentPrompt';
 import { resolveMergeFacts } from '../../providers/codeSessions/mergeFacts';
+import { installedRoseSkills, roseSkillsTableOfContents } from '../../providers/roseSkills/skills';
 
 const savedGithubApi = process.env.GITHUB_API_BASE_URL;
 
@@ -90,7 +96,7 @@ test('merged is reported only when GitHub confirms the merge and the target cont
   }
 });
 
-test('code-agent prompt: commit locally per unit of work, merge into the merge target when needed', () => {
+test('code-agent prompt: branch facts in the prompt, commit and merge rules in the code-session skill', () => {
   const prompt = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/rose-test/app',
     workDir: '/home/user/workspace',
@@ -98,25 +104,40 @@ test('code-agent prompt: commit locally per unit of work, merge into the merge t
     mergeTarget: 'rose/a',
   });
   assert.match(prompt, /You work on branch `rose\/a--b-123456`\. Its merge target is `rose\/a`\./);
-  assert.match(prompt, /Commit locally whenever a unit of work is complete/);
-  assert.match(prompt, /Merge into `rose\/a` when other agents or the user need your changes/);
-  assert.match(prompt, /You decide when to commit, push and merge/);
+  assert.match(prompt, /Read the code-session skill before you commit, merge or finish\./);
+  assert.match(prompt, /^- code-session: Use when you work in a repository/m);
   assert.doesNotMatch(prompt, /push the changes before finishing/);
   const rootPrompt = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/rose-test/app',
   });
-  assert.match(rootPrompt, /Merge into the repository's default branch when other agents/);
+  assert.match(rootPrompt, /Your merge target is the repository's default branch\./);
+
+  // The rules the prompt used to carry live in the code-session skill (C17).
+  const skill = installedRoseSkills(false).find((entry) => entry.name === 'code-session');
+  assert.ok(skill, 'code-session is a stock skill');
+  const text = skill.files.find((file) => file.path === 'SKILL.md')?.content.toString('utf8') ?? '';
+  assert.match(text, /Commit locally whenever a unit of work is complete/);
+  assert.match(text, /Merge into your merge target when other agents or the user need your/);
+  assert.match(text, /You decide when to commit, push and merge/);
+  assert.match(text, /If a rebase or merge is required, resolve it before finishing/);
+  assert.match(text, /Never start over\./, 'usage-limit behaviour');
+  assert.doesNotMatch(text, /Rose itself/, 'stock code-session has no Rose-in-Rose rule');
+  const flaggedText =
+    installedRoseSkills(true)
+      .find((entry) => entry.name === 'code-session')
+      ?.files.find((file) => file.path === 'SKILL.md')
+      ?.content.toString('utf8') ?? '';
+  assert.match(flaggedText, /checkout is Rose itself, never merge, push\s+to main or deploy/);
+
   const template = readFileSync(
     join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'CLAUDE.md'),
     'utf8'
   );
   assert.doesNotMatch(template, /git push origin main/);
-  assert.match(template, /Commit locally whenever a unit of work is complete/);
+  assert.match(template, /Commit, merge and branch rules are in the code-session skill/);
 });
 
-test('code-agent prompt: Rose app UI, pinned questions and inline views only for Rose Desktop accounts', () => {
-  // Rose Desktop gate (utils/roseDesktop): every other account keeps the
-  // stock prompt, byte-stable, with none of the new-UI instructions.
+test('code-agent prompt: a byte-stable skills table of contents per account group', () => {
   const args = {
     githubRepoUrl: 'https://github.com/rose-test/app',
     workDir: '/home/user/workspace',
@@ -127,44 +148,66 @@ test('code-agent prompt: Rose app UI, pinned questions and inline views only for
     buildCodeAgentSystemPrompt({ ...args, roseDesktop: false }),
     'default is stock'
   );
-  for (const term of [
-    'Rose app UI',
-    'rose_user_ui',
-    'rose-ui',
-    'pinned',
-    'inline_view',
-    'questions',
-  ]) {
+  const flagged = buildCodeAgentSystemPrompt({ ...args, roseDesktop: true });
+  // Byte-stable per skill set (prompt caching): same inputs, same bytes.
+  assert.equal(buildCodeAgentSystemPrompt(args), stock);
+  assert.equal(buildCodeAgentSystemPrompt({ ...args, roseDesktop: true }), flagged);
+  assert.ok(
+    stock.startsWith(`Rose Labs code-agent instructions (${CODE_AGENT_STOCK_INSTRUCTIONS_VERSION})`)
+  );
+  assert.ok(
+    flagged.startsWith(`Rose Labs code-agent instructions (${CODE_AGENT_INSTRUCTIONS_VERSION})`)
+  );
+
+  const stockToc = roseSkillsTableOfContents(installedRoseSkills(false)).join('\n');
+  const flaggedToc = roseSkillsTableOfContents(installedRoseSkills(true)).join('\n');
+  assert.ok(stock.includes(`\n${stockToc}\n`), 'stock prompt lists the stock skills');
+  assert.ok(flagged.includes(`\n${flaggedToc}\n`), 'flagged prompt lists every skill');
+  assert.deepEqual(
+    installedRoseSkills(false).map((skill) => skill.name),
+    ['agent-graph', 'code-session', 'talk-to-user']
+  );
+  for (const name of ['apps-preview', 'rose-ui']) {
+    assert.ok(flagged.includes(`\n- ${name}: `), `flagged TOC lists ${name}`);
+    assert.ok(!stock.includes(`- ${name}: `), `stock TOC omits ${name}`);
+  }
+
+  // The per-feature blocks are gone: the table of contents replaces them.
+  for (const prompt of [stock, flagged]) {
+    for (const removed of [
+      'Talking to the user:',
+      'Rose app UI:',
+      'Live preview and apps',
+      'Rose agent graph:',
+      'rose_user_ui',
+      'screenshots/current',
+    ]) {
+      assert.ok(!prompt.includes(removed), `prompt still carries "${removed}"`);
+    }
+  }
+  for (const term of ['pinned', 'inline_view', 'inline-view', 'rose-ui', 'rose-preview']) {
     assert.ok(!stock.includes(term), `stock code-agent prompt mentions ${term}`);
   }
-  assert.match(
-    stock,
-    /`send_message_to_user` for updates and results; `display` for screenshots, recordings and HTML previews; `request_user_approval` before risky or irreversible actions\. Approvals wait for the answer\./
-  );
 
-  const flagged = buildCodeAgentSystemPrompt({ ...args, roseDesktop: true });
-  assert.match(flagged, /~\/rose_user_ui is the Rose app UI of the user you work for/);
-  assert.match(flagged, /`rose-ui check` must pass before `rose-ui publish`/);
-  assert.match(flagged, /`display` with placement "pinned" and options for a question/);
-  assert.match(flagged, /`send_message_to_user` with `inline_view`/);
-  // Every other line is shared: only the new-UI sections and lines differ
-  // (the Live preview and apps block is Rose Desktop too, A1/A2).
+  // Only the version line and the extra skills differ between the groups.
   const stockLines = new Set(stock.split('\n'));
   const flaggedOnly = flagged.split('\n').filter((line) => !stockLines.has(line));
-  assert.ok(
-    flaggedOnly.every((line) =>
-      /rose_user_ui|rose-ui|Rose app UI|inline view|inline_view|pinned|questions|rose-preview|Live preview and apps/.test(
-        line
-      )
-    ),
+  assert.deepEqual(
+    flaggedOnly.slice(1),
+    flaggedToc.split('\n').filter((line) => !stockLines.has(line)),
     `unexpected Rose Desktop-only lines: ${JSON.stringify(flaggedOnly)}`
   );
+  // Size: the table of contents is a few lines, and the prompt stays compact.
+  assert.ok(flaggedToc.split('\n').length <= 12, 'table of contents is a few lines');
+  assert.ok(stock.length < 3_500, `stock prompt is ${stock.length} chars`);
+  assert.ok(flagged.length < 4_000, `flagged prompt is ${flagged.length} chars`);
 
-  // The template CLAUDE.md ships in every account's image, so it stays generic.
+  // The template CLAUDE.md ships in every account's image, so it lists the stock skills.
   const template = readFileSync(
     join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'CLAUDE.md'),
     'utf8'
   );
+  assert.ok(template.includes(`\n${stockToc}\n`), 'template CLAUDE.md lists the stock skills');
   for (const term of ['pinned', 'inline_view', 'rose-ui']) {
     assert.ok(!template.includes(term), `template CLAUDE.md mentions ${term}`);
   }

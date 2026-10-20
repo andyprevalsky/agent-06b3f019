@@ -13,17 +13,19 @@
  *     with the answer; retry reuses the request; reject → rejected; the
  *     ApprovalChip row (labelled with the requesting agent) finishes
  *   - sandbox send_message_to_user pins a published inline view; unknown view → 400;
- *     a code session that publishes with rose-ui and runs `rose message
+ *     a code session that pulls and publishes with rose-ui and runs `rose message
  *     --inline-view` lands that row in its own trajectory (C12)
  *   - the shipped `rose` CLI: display posts once then reports already displayed;
  *     `rose approve` blocks across long-polls until the user answers, then exits 0
  *   - Rose Desktop gate (agent-tools-rose-desktop.cases): a stock session gets no
- *     rose_user_ui / rose-ui and stock rose tools; a Rose Desktop session gets both
+ *     rose-ui, stock rose tools and the stock skills; a Rose Desktop session gets
+ *     rose-ui, the new-UI tools and every skill; the prompts' table of contents
+ *     lists exactly the installed skills (C17)
  *
  * Usage: bash scripts/run-blackbox-tests.sh agent-tools-requests
  */
 import { spawn } from 'child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { prisma } from '../../providers/database';
@@ -32,11 +34,9 @@ import {
   AGENT_TOOLS_CONFIG_PATH,
   AGENT_TOOLS_MCP_CONFIG_PATH,
   agentToolsCliScript,
-  agentToolsForLocalHome,
   relocateAgentToolsWorkspace,
   withAgentTools,
 } from '../../providers/agentTools/workspace';
-import { prepareCodeSessionWorkspace } from '../../providers/codeSessionWorkspace';
 import { materializeUserUiInLocalHome } from '../../providers/userUi/workspace';
 import {
   assert,
@@ -62,10 +62,10 @@ import {
   uiVersion,
   userA,
   userB,
-  agentB,
   type Auth,
   type BlackboxTest,
 } from './agent-tools.support';
+import { inlineViewPublishCases } from './agent-tools-inline-view.cases';
 import { roseDesktopGateCases } from './agent-tools-rose-desktop.cases';
 
 const tests: BlackboxTest[] = [
@@ -430,101 +430,7 @@ const tests: BlackboxTest[] = [
       );
     },
   },
-  {
-    name: 'code session publishes an inline view with rose-ui and shows it with rose message (C12)',
-    fn: async () => {
-      // The UI-thread "Make me a game" failure: the view was published but never
-      // shown because nothing sent it. The code agent shows it itself; the row
-      // lands in its own trajectory whatever the root does next.
-      const home = mkdtempSync(join(tmpdir(), 'rose-tools-publish-'));
-      try {
-        // rose_user_ui is a Rose Desktop surface: this session runs as one.
-        const created = await prepareCodeSessionWorkspace(
-          userB,
-          agentB,
-          'task-game',
-          'claude',
-          true
-        );
-        assert(created !== null, 'code-session workspace');
-        const workspace = agentToolsForLocalHome(created, home);
-        assert(
-          (await materializeUserUiInLocalHome(home, workspace, agentB)) !== null,
-          'materialized'
-        );
-        const manifestPath = join(home, 'rose_user_ui', 'rose-ui.json');
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
-          inline?: Record<string, unknown>;
-        };
-        manifest.inline = {
-          ...(manifest.inline ?? {}),
-          'neon-game': { entry: 'inline/neon-game/index.html', summary: 'Neon game' },
-        };
-        writeFileSync(manifestPath, JSON.stringify(manifest));
-        mkdirSync(join(home, 'rose_user_ui', 'inline', 'neon-game'), { recursive: true });
-        writeFileSync(
-          join(home, 'rose_user_ui', 'inline', 'neon-game', 'index.html'),
-          '<!doctype html><canvas id="game"></canvas>'
-        );
-        const env: NodeJS.ProcessEnv = {
-          ...process.env,
-          HOME: home,
-          ROSE_UI_PUBLISH_URL: `${BASE_URL}/api/user-ui/versions`,
-          ROSE_UI_PUBLISH_TOKEN: created.envs.ROSE_UI_PUBLISH_TOKEN,
-          ROSE_TOOLS_URL: `${BASE_URL}/api/agent-tools/${agentB}`,
-          ROSE_TOOLS_TOKEN: created.envs.ROSE_TOOLS_TOKEN,
-        };
-        const published = await execFileAsync(
-          'node',
-          [join(home, '.rose/bin/rose-ui'), 'publish'],
-          {
-            env,
-          }
-        );
-        const version = /published version ([0-9a-f-]{36})/.exec(published.stdout)?.[1];
-        assert(version !== undefined, `rose-ui publish: ${published.stdout}`);
-        const sent = await execFileAsync(
-          'node',
-          [
-            join(home, AGENT_TOOLS_CLI_PATH),
-            'message',
-            'Your game is ready',
-            '--inline-view',
-            'neon-game',
-          ],
-          { env }
-        );
-        assert(sent.stdout.includes('sent (message '), `rose message: ${sent.stdout}`);
-        const rows = await prisma.message.findMany({
-          where: {
-            agentId: agentB,
-            role: 'TOOL',
-            metadata: { path: ['inlineView', 'view'], equals: 'neon-game' },
-          },
-        });
-        assert(rows.length === 1, `one inline-view message in the trajectory, got ${rows.length}`);
-        const meta = rows[0].metadata as {
-          toolName: string;
-          toolStatus: string;
-          inlineView: { versionId: string };
-          subAgentId: string;
-          isUserAttentionMessage: boolean;
-        };
-        assert(
-          meta.toolName === 'send_message_to_user' && meta.toolStatus === 'FINISHED',
-          'FYI row'
-        );
-        assert(meta.inlineView.versionId === version, 'pinned to the version just published');
-        assert(
-          meta.subAgentId === 'task-game' && meta.isUserAttentionMessage,
-          'grouped under the code agent'
-        );
-        assert(rows[0].text === 'Your game is ready', 'message text');
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-  },
+  ...inlineViewPublishCases,
   {
     name: 'shipped rose CLI: display once, then already displayed; approve blocks until answered',
     fn: async () => {

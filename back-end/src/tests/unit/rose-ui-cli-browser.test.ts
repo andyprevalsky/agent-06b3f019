@@ -8,7 +8,7 @@
  *                          ──► rose-ui perf ──► metrics JSON (fps, long tasks, CLS, bytes, props bridge)
  *                          ──► rose-ui record ──► frame strip PNG (+ MP4 when ffmpeg is installed)
  *   fixtures/user-ui/janky ──► rose-ui check ──► exit 1 on the load-independent rules
- *   assets/user-ui/seed    ──► rose-ui check --examples ──► exit 0, every example passes
+ *   seed + rose-ui skill examples ──► rose-ui check --examples ──► exit 0, every example passes
  *
  * Fixtures are copied to a temp folder so captures never land in the repo; the CLI
  * runs in place so coverage maps to its source. Set ROSE_UI_SMOKE_OUT to keep outputs.
@@ -20,7 +20,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { userUiAssetsDir, USER_UI_SEED_EXAMPLES } from '../../providers/userUi/seed';
+import { userUiAssetsDir, userUiExamplesDir, USER_UI_EXAMPLES } from '../../providers/userUi/seed';
 
 const assets = userUiAssetsDir();
 const cliPath = join(assets, 'bin', 'rose-ui.cjs');
@@ -225,7 +225,10 @@ test('check fails the deliberately janky fixture on load-independent rules', asy
 });
 
 test('check --examples passes every shipped example', async () => {
+  // The starting bundle with the rose-ui skill's examples copied in, as the
+  // skill tells an agent to measure them.
   const seed = folder('seed', join(assets, 'seed'));
+  cpSync(userUiExamplesDir(), join(seed, 'examples'), { recursive: true });
   const run = await rose(seed, [
     'check',
     '--examples',
@@ -245,7 +248,7 @@ test('check --examples passes every shipped example', async () => {
     .map((e) => `${e.name}: ${JSON.stringify(e.verdict.violations)}`);
   assert.deepEqual(failing, []);
   assert.equal(run.code, 0);
-  assert.deepEqual(report.entries.map((e) => e.name).sort(), [...USER_UI_SEED_EXAMPLES].sort());
+  assert.deepEqual(report.entries.map((e) => e.name).sort(), [...USER_UI_EXAMPLES].sort());
   for (const e of report.entries) {
     const notes = e.verdict.warnings.map((w) => w.rule);
     if (notes.length) process.stdout.write(`# ${e.name}: warnings ${notes.join(', ')}\n`);

@@ -1,10 +1,11 @@
 /**
- * user-ui blackbox cases: the shipped seed (README + hyper-expressive examples)
- * and the session tooling around it. Registered by user-ui.blackbox.ts.
+ * user-ui blackbox cases: the starting bundle, the rose-ui skill's
+ * hyper-expressive examples and the session tooling around them. Registered by
+ * user-ui.blackbox.ts.
  *
- *   userUiSeedFiles() ──► every example present, README indexes them,
- *                         seed bundle validates as a publishable manifest
- *   seed + manifest wiring all examples ──► real `rose-ui publish` ──► usercontent
+ *   userUiExampleFiles() ──► every example present, the skill's reference
+ *                         indexes them; seed + examples validate as a bundle
+ *   seed + examples + manifest wiring all examples ──► real `rose-ui publish` ──► usercontent
  *                         serves each entry and asset with the right type + CSP
  *   prepareUserUiWorkspace(active user) ──► CLI + preview host installed,
  *                         ROSE_UI_PUBLISHED_* env points at the active version
@@ -15,12 +16,13 @@ import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { promisify } from 'util';
 import { validateUserUiBundle } from '../../providers/userUi/manifest';
+import { installedRoseSkills } from '../../providers/roseSkills/skills';
 import {
   USER_UI_CLI_VERSION,
+  USER_UI_EXAMPLES,
   USER_UI_PREVIEW_HOST_PATH,
-  USER_UI_SEED_EXAMPLES,
   userUiCliScript,
-  userUiReadme,
+  userUiExampleFiles,
   userUiSeedFiles,
 } from '../../providers/userUi/seed';
 import { prepareUserUiWorkspace } from '../../providers/userUi/workspace';
@@ -58,6 +60,19 @@ const ALL_EXAMPLES_MANIFEST = {
 };
 
 /** Assets the examples load at runtime, with the content type each needs. */
+/** The starting bundle with the rose-ui skill's examples copied in under examples/. */
+function seedWithExamples() {
+  return [...userUiSeedFiles(), ...userUiExampleFiles()];
+}
+
+/** One rendered file of the (Rose Desktop) rose-ui skill. */
+function roseUiSkillText(path: string): string {
+  const skill = installedRoseSkills(true).find((entry) => entry.name === 'rose-ui');
+  const file = skill?.files.find((entry) => entry.path === path);
+  assert(file !== undefined, `rose-ui skill ships ${path}`);
+  return file.content.toString('utf8');
+}
+
 const RUNTIME_ASSETS: [string, string][] = [
   ['examples/wasm-viz/viz.wasm', 'application/wasm'],
   ['examples/particles-worker/particles.worker.js', 'text/javascript; charset=utf-8'],
@@ -69,33 +84,35 @@ const RUNTIME_ASSETS: [string, string][] = [
 export function userUiExampleCases(ctx: UserUiCaseContext) {
   return [
     {
-      name: 'seed ships every example and the README indexes them',
+      name: 'the rose-ui skill ships every example and its reference indexes them',
       fn: async () => {
-        const files = userUiSeedFiles();
+        const files = userUiExampleFiles();
         const paths = new Set(files.map((f) => f.path));
-        for (const name of USER_UI_SEED_EXAMPLES) {
-          assert(paths.has(`examples/${name}/index.html`), `seed has examples/${name}/index.html`);
+        for (const name of USER_UI_EXAMPLES) {
+          assert(paths.has(`examples/${name}/index.html`), `skill has examples/${name}/index.html`);
         }
-        for (const [asset] of RUNTIME_ASSETS) assert(paths.has(asset), `seed has ${asset}`);
+        for (const [asset] of RUNTIME_ASSETS) assert(paths.has(asset), `skill has ${asset}`);
         assert(paths.has('examples/wasm-viz/src/lib.rs'), 'wasm example ships its Rust source');
         const total = files.reduce((sum, f) => sum + f.content.length, 0);
-        assert(total < 512 * 1024, `seed stays small (${total} bytes)`);
-        const readme = userUiReadme();
-        for (const name of USER_UI_SEED_EXAMPLES) {
-          assert(readme.includes(`examples/${name}`), `README indexes examples/${name}`);
+        assert(total < 512 * 1024, `examples stay small (${total} bytes)`);
+        const index = roseUiSkillText('reference/examples.md');
+        for (const name of USER_UI_EXAMPLES) {
+          assert(index.includes(`- ${name} — `), `reference/examples.md indexes ${name}`);
         }
+        const skill = roseUiSkillText('SKILL.md');
         for (const term of [
+          'rose-ui pull',
           'rose-ui screenshot',
           'rose-ui record',
           'rose-ui perf',
           'rose-ui check',
           'rose-ui dev',
           'screenshots/current',
-          'worker-src blob:',
-          '50 ms',
         ]) {
-          assert(readme.includes(term), `README documents ${term}`);
+          assert(skill.includes(term), `rose-ui SKILL.md documents ${term}`);
         }
+        assert(roseUiSkillText('reference/bundle.md').includes('worker-src blob:'), 'CSP notes');
+        assert(roseUiSkillText('reference/performance.md').includes('50 ms'), 'budgets');
         assert(
           userUiCliScript().includes(`const CLI_VERSION = '${USER_UI_CLI_VERSION}'`),
           'CLI version matches USER_UI_CLI_VERSION'
@@ -108,7 +125,7 @@ export function userUiExampleCases(ctx: UserUiCaseContext) {
         const seed = validateUserUiBundle(userUiSeedFiles());
         assert(seed.ok, `seed bundle invalid: ${seed.ok ? '' : seed.errors.join('; ')}`);
         const wired = validateUserUiBundle([
-          ...userUiSeedFiles().filter((f) => f.path !== 'rose-ui.json'),
+          ...seedWithExamples().filter((f) => f.path !== 'rose-ui.json'),
           { path: 'rose-ui.json', content: Buffer.from(JSON.stringify(ALL_EXAMPLES_MANIFEST)) },
         ]);
         assert(wired.ok, `all-examples bundle invalid: ${wired.ok ? '' : wired.errors.join('; ')}`);
@@ -119,7 +136,7 @@ export function userUiExampleCases(ctx: UserUiCaseContext) {
       fn: async () => {
         const home = mkdtempSync(join(tmpdir(), 'rose-ui-examples-'));
         try {
-          for (const file of userUiSeedFiles()) {
+          for (const file of seedWithExamples()) {
             const full = join(home, 'rose_user_ui', file.path);
             mkdirSync(dirname(full), { recursive: true });
             writeFileSync(full, file.content);
@@ -148,7 +165,7 @@ export function userUiExampleCases(ctx: UserUiCaseContext) {
           const match = /published version ([0-9a-f-]{36}) \((\d+) files/.exec(stdout);
           assert(match, `cli output: ${stdout}`);
           assert(
-            Number(match[2]) === userUiSeedFiles().length,
+            Number(match[2]) === seedWithExamples().length,
             `published ${match[2]} files; screenshots/ must be skipped`
           );
           const base = `${ctx.baseUrl}/usercontent/${match[1]}/`;
@@ -168,7 +185,7 @@ export function userUiExampleCases(ctx: UserUiCaseContext) {
             const html = await res.text();
             assert(html.includes("type: 'rose:ready'"), `${entry} posts rose:ready`);
           }
-          const seedBytes = new Map(userUiSeedFiles().map((f) => [f.path, f.content]));
+          const seedBytes = new Map(seedWithExamples().map((f) => [f.path, f.content]));
           for (const [asset, type] of RUNTIME_ASSETS) {
             const res = await fetch(`${base}${asset}`);
             assert(res.status === 200, `${asset} → ${res.status}`);

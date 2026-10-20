@@ -1,11 +1,13 @@
 #!/usr/bin/env tsx
 /**
- * Black-box tests for /api/user-ui + /usercontent (per-user rose_user_ui).
+ * Black-box tests for /api/user-ui + /usercontent (per-user Rose app UI bundles).
  *
  * Domain surface:
  *   POST /api/user-ui/versions               publish a bundle (JWT, API key, or publish token)
  *   POST /api/user-ui/versions/:id/activate  move the user's active pointer
  *   GET  /api/user-ui/active                 { versionId, manifest, baseUrl } | { versionId: null }
+ *   GET  /api/user-ui/bundle                 active version files or the starting bundle
+ *                                            (JWT, API key, or publish token: `rose-ui pull`)
  *   GET  /api/user-ui/versions               list the caller's versions
  *   GET  /api/user-ui/apps                   Apps section: Rose (dev only) + published apps
  *   POST /api/user-ui/publish-token          short-lived sandbox publish token
@@ -13,6 +15,7 @@
  *
  * Invariants covered:
  *   - auth boundary: no credentials → 401; publish token only works on publish
+ *     and on GET /bundle
  *   - publish/activate/rollback/list round trip; activate:false leaves pointer
  *   - validation: bad manifest, missing referenced file, missing rose-ui.json,
  *     unsafe theme value, path traversal / absolute / dot paths, per-file cap → 400
@@ -22,6 +25,9 @@
  *   - publish token: mint → publish as the owner; expired, wrong-scope and
  *     tampered tokens → 401
  *   - the shipped seed bundle + `rose-ui publish` CLI publish end to end
+ *   - a code session gets the CLI but no UI folder; `rose-ui pull` writes the
+ *     starting bundle or the active version, refuses to overwrite without
+ *     --force, and later commands use the pulled folder (C17)
  *   - a code agent's publish-with-activate broadcasts USER_UI_ACTIVE_CHANGED
  *     {versionId, agentId} on agent:<code agent> and agent:<root>; activate:false
  *     and a token naming another user's agent broadcast nothing
@@ -30,7 +36,7 @@
  */
 import { execFile } from 'child_process';
 import { randomUUID } from 'crypto';
-import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { promisify } from 'util';
@@ -39,12 +45,9 @@ import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 import { mintUserUiPublishToken } from '../../providers/userUi/publishToken';
 import { userUiCliScript, userUiSeedFiles } from '../../providers/userUi/seed';
-import {
-  materializeUserUiInLocalHome,
-  prepareUserUiWorkspace,
-} from '../../providers/userUi/workspace';
 import { userUiExampleCases } from './user-ui-examples.cases';
 import { userUiAppsCases } from './user-ui-apps.cases';
+import { userUiPullCases } from './user-ui-pull.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -538,90 +541,13 @@ const tests: { name: string; fn: () => Promise<void> }[] = [
       }
     },
   },
-  {
-    name: 'code-session workspace -- seed, local materialize, CLI on PATH, active restore',
-    fn: async () => {
-      const userC = await anonymousSession();
-      assert((await active(userC.token)).versionId === null, 'fresh user has no UI');
-      const seed = await prepareUserUiWorkspace(userC.userId);
-      assert(seed.source.kind === 'seed', `fresh user gets the seed (${seed.source.kind})`);
-      const seedPaths = seed.files.map((f) => f.path).sort();
-      for (const required of [
-        'rose_user_ui/README.md',
-        'rose_user_ui/rose-ui.json',
-        'rose_user_ui/root/theme.json',
-        'rose_user_ui/examples/inline-hello/index.html',
-        'rose_user_ui/examples/shader-background/index.html',
-        '.rose/bin/rose-ui',
-      ]) {
-        assert(seedPaths.includes(required), `seed workspace has ${required}`);
-      }
-      const readme = seed.files
-        .find((f) => f.path === 'rose_user_ui/README.md')!
-        .content.toString();
-      for (const term of [
-        'rose:resize',
-        'rose:props',
-        'rose:ready',
-        'prefers-reduced-motion',
-        'devicePixelRatio',
-        'rose-ui publish',
-        // A code agent delivers games/apps/visuals as an inline view and names it.
-        '## Something for the user to see or play',
-        'add it under "inline" in rose-ui.json',
-        'then name the view in your\nfinal response',
-        // A2: apps are standalone pages listed in the Apps section.
-        '## Apps',
-        'add it under "apps" in rose-ui.json',
-      ]) {
-        assert(readme.includes(term), `README documents ${term}`);
-      }
-      assert(seed.envs.ROSE_UI_PUBLISH_URL.endsWith('/api/user-ui/versions'), 'publish url env');
-      assert(seed.envs.ROSE_UI_PUBLISH_TOKEN.startsWith('ruip.'), 'publish token env');
-
-      const home = mkdtempSync(join(tmpdir(), 'rose-ui-home-'));
-      try {
-        const local = await materializeUserUiInLocalHome(home, seed, 'blackbox');
-        assert(local, 'local materialize succeeded');
-        assert(
-          local.envs.ROSE_UI_PUBLISH_URL.endsWith('/api/user-ui/versions'),
-          'local publish url'
-        );
-        const cli = join(local.binDir, 'rose-ui');
-        assert((statSync(cli).mode & 0o111) !== 0, 'rose-ui is executable');
-        const { stdout } = await execFileAsync(cli, ['publish'], {
-          env: {
-            PATH: `${local.binDir}:${process.env.PATH ?? ''}`,
-            HOME: home,
-            ROSE_UI_PUBLISH_URL: `${BASE_URL}/api/user-ui/versions`,
-            ROSE_UI_PUBLISH_TOKEN: seed.envs.ROSE_UI_PUBLISH_TOKEN,
-          },
-        });
-        assert(/now active for the user/.test(stdout), `cli output: ${stdout}`);
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-      const published = (await active(userC.token)).versionId;
-      assert(published !== null, 'session token published for its user');
-
-      const restored = await prepareUserUiWorkspace(userC.userId);
-      assert(
-        restored.source.kind === 'active' && restored.source.versionId === published,
-        'next session restores the active version'
-      );
-      const restoredA = await prepareUserUiWorkspace(userA.userId);
-      assert(restoredA.source.kind === 'active', 'user A restores active version');
-      const hello = restoredA.files.find((f) => f.path === 'rose_user_ui/inline/hello/index.html');
-      assert(
-        hello?.content.toString() === HELLO_HTML,
-        'restored file bytes match the published version'
-      );
-      assert(
-        restoredA.files.some((f) => f.path === 'rose_user_ui/README.md'),
-        'README regenerated on restore'
-      );
-    },
-  },
+  ...userUiPullCases({
+    baseUrl: BASE_URL,
+    anonymous: anonymousSession,
+    call,
+    userA: () => userA,
+    helloHtml: HELLO_HTML,
+  }),
   ...userUiAppsCases({ baseUrl: BASE_URL, anonymous: anonymousSession, call, bundle }),
   ...userUiExampleCases({
     baseUrl: BASE_URL,

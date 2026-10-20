@@ -1,18 +1,18 @@
 #!/usr/bin/env tsx
 /**
  * Session start in an E2B sandbox (fake sandbox, no network):
- *   - every workspace writes the CLI + preview host and chmods the CLI;
- *   - a user with a published version also gets a detached
- *     `rose-ui screenshot --current` so screenshots/current/ is ready early;
- *   - a seed (never published) workspace does not start a capture;
+ *   - every workspace writes the CLI + preview host + skills and chmods the CLI;
+ *   - nothing captures screenshots at session start, published or not: the
+ *     agent runs `rose-ui screenshot --current` when it needs them (C17);
+ *   - no UI folder is written: the agent runs `rose-ui pull`;
  *   - the published-version env reaches the sandbox env.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { withRoseSkills } from '../../providers/codeSessionWorkspace';
 import { USER_UI_PREVIEW_HOST_PATH, userUiToolFiles } from '../../providers/userUi/seed';
 import {
   applyUserUiSandboxEnvs,
-  currentScreenshotsCommand,
   userUiPublishedBaseUrl,
   writeUserUiWorkspaceToSandbox,
   type UserUiWorkspace,
@@ -39,14 +39,17 @@ function fakeSandbox() {
 }
 
 function workspace(source: UserUiWorkspace['source']): UserUiWorkspace {
-  return {
-    files: [{ path: 'rose_user_ui/README.md', content: Buffer.from('x') }, ...userUiToolFiles()],
+  const base: UserUiWorkspace = {
+    files: userUiToolFiles(),
     envs: { ROSE_UI_PUBLISH_URL: 'https://api.example/api/user-ui/versions' },
     source,
   };
+  const withSkills = withRoseSkills(base, true);
+  assert.ok(withSkills !== null);
+  return withSkills;
 }
 
-test('published user: tooling written and a detached current capture starts', async () => {
+test('published user: tooling and skills written, no session-start capture', async () => {
   const sandbox = fakeSandbox();
   await writeUserUiWorkspaceToSandbox(
     { files: sandbox.files, commands: sandbox.commands },
@@ -55,14 +58,12 @@ test('published user: tooling written and a detached current capture starts', as
   );
   assert.ok(sandbox.writes.includes('/home/user/.rose/bin/rose-ui'));
   assert.ok(sandbox.writes.includes(`/home/user/${USER_UI_PREVIEW_HOST_PATH}`));
-  assert.deepEqual(sandbox.ran, [
-    'chmod 755 /home/user/.rose/bin/rose-ui',
-    currentScreenshotsCommand('/home/user'),
-  ]);
-  assert.equal(
-    currentScreenshotsCommand('/home/user'),
-    'nohup /home/user/.rose/bin/rose-ui screenshot --current --quiet > /home/user/.rose/current-screenshots.log 2>&1 &'
-  );
+  for (const root of ['.rose/skills', '.claude/skills', '.agents/skills']) {
+    assert.ok(sandbox.writes.includes(`/home/user/${root}/rose-ui/SKILL.md`), root);
+    assert.ok(sandbox.writes.includes(`/home/user/${root}/talk-to-user/SKILL.md`), root);
+  }
+  assert.ok(!sandbox.writes.some((path) => path.startsWith('/home/user/rose_user_ui/')));
+  assert.deepEqual(sandbox.ran, ['chmod 755 /home/user/.rose/bin/rose-ui']);
 });
 
 test('seed user: no capture is started', async () => {
