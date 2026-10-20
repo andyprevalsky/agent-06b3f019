@@ -16,13 +16,15 @@
  *      fresh sign-in handoff, new frame).
  * QUERY BOX (useAppComposer): steers the view's code session, or starts a
  *      normal new agent when the app has none; the latest exchange sits above it.
- * EXIT: Escape (UserAppsProvider), an agent row, Home / New Super Agent, or
- *      "Open" on a started agent (shows that agent's chat).
+ * EXIT: Escape (UserAppsProvider), an agent row, Home / New Super Agent,
+ *      "Open" on a started agent (shows that agent's chat), or — below md,
+ *      where there is no left bar or keyboard — the header's bare close icon.
  *
  * Fixed over the content (left of it the 64px bar stays usable; the top-right
  * app icons float over the header's reserved inset). Light surfaces unchanged;
  * dark via the rose-theme `dark:` tokens.
  */
+import { X } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 
 import type { FilePointer } from '@/lib/api/types';
@@ -151,6 +153,14 @@ export function UserAppScreen({ view, onClose, onStartAgent, renderQueryBox }: U
         <div className="ml-auto">
           <UserAppPublish view={view} />
         </div>
+        <button
+          type="button"
+          aria-label={`Close ${view.title}`}
+          onClick={onClose}
+          className="text-[hsl(240_6%_55%)] hover:text-[hsl(240_15%_8%)] dark:text-[#a3a39d] dark:hover:text-[#ecece8] md:hidden"
+        >
+          <X className="h-5 w-5" strokeWidth={1.7} />
+        </button>
       </header>
       <div className="relative min-h-0 flex-1">
         {tab === 'history' && view.history !== null ? (

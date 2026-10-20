@@ -129,7 +129,7 @@ describe('Rose app full screen', () => {
     await waitFor(() => expect(box).toHaveValue(''));
   });
 
-  it('Escape returns to the normal view; an agent row does too', async () => {
+  it('Escape returns to the normal view; an agent row and the mobile close icon do too', async () => {
     serveApps(appsBody([ROSE_APP]));
     servePreview('running');
     serveHandoff();
@@ -142,6 +142,14 @@ describe('Rose app full screen', () => {
     expandRoseBar();
     await openAppFromBar('rose');
     fireEvent.click(await screen.findByTestId('rose-agent-row-agent-001'));
+    await waitFor(() => expect(screen.queryByTestId('user-app-screen')).not.toBeInTheDocument());
+
+    // Below md (no left bar, no keyboard) the header's bare close icon returns too.
+    expandRoseBar();
+    const view = await openAppFromBar('rose');
+    const close = within(view).getByRole('button', { name: 'Close Rose' });
+    expect(close.className).toContain('md:hidden');
+    fireEvent.click(close);
     await waitFor(() => expect(screen.queryByTestId('user-app-screen')).not.toBeInTheDocument());
   });
 
