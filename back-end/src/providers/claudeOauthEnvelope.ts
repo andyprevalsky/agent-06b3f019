@@ -59,6 +59,9 @@ export function isUsableClaudePoolEnvelope(envelope: ClaudeEnvelope): boolean {
   // setup-tokens are year-long inference grants with an empty refreshToken and
   // a real expiresAt; rejecting every empty refresh token made those healthy,
   // explicitly-pooled accounts invisible to the pool.
+  // Self-contained: an expired (or malformed, parsed as 0) envelope is never
+  // pool-usable, even for a caller that skips claudeEnvelopeExpiredAt.
+  if (claudeEnvelopeExpiredAt(envelope, Date.now()) !== null) return false;
   const liveSetupToken = envelope.expiresAt !== null && envelope.inferenceScope;
   return envelope.accessToken.startsWith('sk-ant-oat') && (envelope.refreshable || liveSetupToken);
 }
