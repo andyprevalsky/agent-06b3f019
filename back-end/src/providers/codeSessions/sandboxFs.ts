@@ -19,7 +19,7 @@ export interface ExecResult {
 
 export interface CodeSessionFs {
   kind: 'e2b' | 'local';
-  /** Session HOME: the CLI's working tree, rose_user_ui and CLI logs live here. */
+  /** Session HOME: the CLI's working tree, Rose skills, CLIs and logs live here. */
   home: string;
   /** Run a bash script; never throws on a non-zero exit. */
   exec(script: string, opts?: { timeoutMs?: number }): Promise<ExecResult>;

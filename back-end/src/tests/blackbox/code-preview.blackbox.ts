@@ -29,9 +29,11 @@ import { after, before, test } from 'node:test';
 import { config } from 'dotenv';
 import { chromium, type Browser } from 'playwright';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import { localCodeSessionHome } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
 import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
+import { installedRoseSkills } from '../../providers/roseSkills/skills';
 import {
   CODE_PREVIEW_CLI_PATH,
   codePreviewToolFiles,
@@ -254,28 +256,38 @@ test('dev sessions get the rose-preview CLI and env; other accounts get neither'
   assert.equal(other?.envs.ROSE_PREVIEW_PORT, undefined);
 });
 
-test('code-agent prompt: Rose-in-Rose preview + publish lines only for dev Rose sessions', () => {
+test('code-agent prompt: Rose-in-Rose shipping rule + apps-preview skill only for dev Rose sessions', () => {
   const rose = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/Rose-Ai-Labs/rose',
-    roseDev: true,
+    roseDesktop: true,
   });
-  assert.match(rose, /rose-preview start/);
-  assert.match(rose, /opening a pull request/i);
-  assert.match(rose, /apps\/<slug>\//);
+  assert.match(rose, /^- apps-preview: Use /m, 'the table of contents lists apps-preview');
+  assert.match(rose, /^- The checkout in ~\/workspace is Rose itself\./m);
+  assert.match(rose, /pull request \(`gh pr create`\)/i);
   assert.match(rose, /never merge/i);
   assert.match(rose, /\/deploy/);
   const plain = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/Rose-Ai-Labs/rose',
   });
-  assert.doesNotMatch(plain, /rose-preview/, 'non-dev accounts: prompt unchanged');
+  assert.doesNotMatch(plain, /rose-preview|apps-preview|Rose itself/, 'non-dev accounts');
   const devOtherRepo = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/someone/app',
-    roseDev: true,
+    roseDesktop: true,
   });
-  assert.match(devOtherRepo, /rose-preview start/);
-  assert.doesNotMatch(devOtherRepo, /is Rose itself/);
-  const project = buildCodeAgentSystemPrompt({ roseDev: true, roseRepo: true });
-  assert.match(project, /is Rose itself/, 'a Rose project session (no github url) gets the lines');
+  assert.match(devOtherRepo, /^- apps-preview: Use /m);
+  assert.doesNotMatch(devOtherRepo, /^Rose itself:$/m);
+  const project = buildCodeAgentSystemPrompt({ roseDesktop: true, roseRepo: true });
+  assert.match(project, /^Rose itself:$/m, 'a Rose project session (no github url) gets the rule');
+
+  // How to preview and publish is the apps-preview skill (C17), installed for dev accounts only.
+  const skill = installedRoseSkills(true).find((entry) => entry.name === 'apps-preview');
+  const text = skill?.files.find((file) => file.path === 'SKILL.md')?.content.toString('utf8');
+  assert.ok(text, 'apps-preview skill installed for dev accounts');
+  assert.match(text, /rose-preview start \[--dir <app dir>\]/);
+  assert.match(text, /apps\/<slug>\//);
+  assert.match(text, /opening a pull\s+request \(`gh pr create`\)/);
+  assert.match(text, /Never merge it, never\s+push to main and never deploy/);
+  assert.ok(!installedRoseSkills(false).some((entry) => entry.name === 'apps-preview'));
 });
 
 previewHandoffCases({
@@ -376,7 +388,17 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
   );
   let browser: Browser | null = null;
   try {
-    const view = await http('GET', `/api/claude-code-session/${taskId}/preview`, DEV_USER);
+    // The status probe has a 2.5 s budget; vite's first response on a loaded host can
+    // take longer, so read the status until the preview answers (bounded).
+    const view = await retryWithBackoff(
+      () => http('GET', `/api/claude-code-session/${taskId}/preview`, DEV_USER),
+      {
+        maxRetries: 41,
+        fixedDelays: Array<number>(40).fill(500),
+        shouldRetryResult: (status) => status.status === 200 && status.data.status !== 'running',
+        component: 'RosePreviewStartupFixture',
+      }
+    );
     assert.equal(view.status, 200, JSON.stringify(view.data));
     assert.equal(view.data.status, 'running');
     assert.equal(view.data.target, 'local');

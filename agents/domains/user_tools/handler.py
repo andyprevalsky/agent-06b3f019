@@ -22,6 +22,7 @@ from tools.base import (
     format_error_message,
     format_tool_message,
 )
+from utils.rose_desktop import is_rose_desktop_user
 from utils.user_tool_models import find_user_tool_spec, sorted_user_tool_specs
 
 from .config import RESOLVE_ACTIVITY_MAX_ATTEMPTS, RESOLVE_ACTIVITY_TIMEOUT_SECONDS
@@ -37,16 +38,30 @@ from .service import (
 logger = structlog.get_logger()
 
 
+def _rose_desktop_pin(workflow_instance: Any) -> Dict[str, Any]:
+    """The run's pinned user tools, or ``{}`` for an account without Rose Desktop.
+
+    ``pin_user_tools`` never resolves tools for those accounts, but a pin can
+    also arrive restored (continue_as_new state, a pin taken before the flag
+    changed). Declaring and running both read through here, so such a pin can
+    neither declare nor run a tool for an unflagged account.
+    """
+    if not is_rose_desktop_user(getattr(workflow_instance, "user_id", None)):
+        return {}
+    pinned = getattr(workflow_instance, "user_tools", None)
+    return pinned if isinstance(pinned, dict) else {}
+
+
 def declared_user_tools(workflow_instance: Any) -> List[Dict[str, Any]]:
-    """Pinned specs to declare to the LLM (sorted; empty for sub-agents)."""
-    pinned = getattr(workflow_instance, "user_tools", None) or {}
-    return sorted_user_tool_specs(pinned.get("tools") if isinstance(pinned, dict) else None)
+    """Pinned specs to declare to the LLM (sorted; empty for sub-agents and stock accounts)."""
+    return sorted_user_tool_specs(_rose_desktop_pin(workflow_instance).get("tools"))
 
 
 async def pin_user_tools(workflow_instance: Any, *, is_root: bool, wf_api: Any = workflow) -> None:
-    """Resolve the user's published tools once per run (root agents only).
+    """Resolve the user's published tools once per run (Rose Desktop root agents only).
 
-    Idempotent across continue_as_new: a restored pin (``user_tools_pinned``) is
+    Every other account pins an empty set without calling the backend
+    (``utils.rose_desktop``). Idempotent across continue_as_new: a restored pin (``user_tools_pinned``) is
     kept, so a version published mid-run never changes the declared set.
     A resolution failure leaves the agent without user tools rather than
     failing the run. ``wf_api`` is the caller's ``temporalio.workflow`` binding.
@@ -55,6 +70,12 @@ async def pin_user_tools(workflow_instance: Any, *, is_root: bool, wf_api: Any =
         return
     if not is_root:
         workflow_instance.user_tools = empty_pinned("sub-agents do not get user tools in v1")
+        workflow_instance.user_tools_pinned = True
+        return
+    if not is_rose_desktop_user(getattr(workflow_instance, "user_id", None)):
+        # User tools come from the Rose Desktop rose_user_ui: no resolve call,
+        # no declarations, so the stock toolset is unchanged.
+        workflow_instance.user_tools = empty_pinned("user tools are a Rose Desktop feature")
         workflow_instance.user_tools_pinned = True
         return
     try:
@@ -90,7 +111,7 @@ async def run_user_tool(
 
     catch → format → emit error event → return an error dict (never raise).
     """
-    pinned = getattr(workflow_instance, "user_tools", None) or {}
+    pinned = _rose_desktop_pin(workflow_instance)
     spec: Optional[Dict[str, Any]] = find_user_tool_spec(pinned.get("tools"), tool_name)
     params = _visible_params(tool_args)
     started = wf_api.now()

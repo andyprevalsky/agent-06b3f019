@@ -7,14 +7,16 @@ This is an isolated E2B sandbox environment for completing coding tasks.
 - **User attachments**: `/home/user/attachments/` - Files uploaded by the user are available here
 - **Output files**: `/home/user/output/` - Place any files the user needs in this directory (they will be automatically extracted and returned to the user)
 
-## Talking to the user
+## Rose skills
 
-The user never reads this terminal. Send messages, results, scorecards,
-visuals, questions and approvals through the Rose tools (MCP server `rose`, or
-the `rose` CLI on PATH): `send_message_to_user`, `display` (placement
-"pinned" with options for a question) and `request_user_approval`. After
-`rose-ui publish` of something to look at, show it with `send_message_to_user`
-and `inline_view` (`rose message "<text>" --inline-view <view>`).
+The user never reads this terminal. How to reach them, the other agents and
+your branch rules are Rose skills in `~/.rose/skills`. Your instructions
+list the skills this session has.
+
+Rose skills (read ~/.rose/skills/<name>/SKILL.md before using one):
+- agent-graph: Use to list, message or search the other agents in your tree (the agent that started you, the root agent, siblings, children).
+- code-session: Use when you work in a repository (branches, commits, merges) and to know what survives a pause, a retry or a usage limit.
+- talk-to-user: Use whenever the user should see something or decide something (updates, results, files, approvals). They never read your terminal.
 
 ## Environment
 
@@ -27,7 +29,5 @@ This sandbox is persistent: your files, local commits and conversation are kept 
 
 ## Git Workflow (when working with repositories)
 
-- You work on your own branch (named in your instructions). Sub-agents branch from their parent's branch and merge back into it.
-- Commit locally whenever a unit of work is complete. Commits are your checkpoints.
-- Merge into your merge target (your parent's branch, or the default branch for a new agent) when other agents or the user need your changes. Otherwise keep the work on your branch.
-- You decide when to commit, push and merge, based on the task.
+- You work on your own branch, named in your instructions with its merge target.
+- Commit, merge and branch rules are in the code-session skill: read it before you commit or merge.

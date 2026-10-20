@@ -46,12 +46,18 @@ PNG = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) + b"pixels"
 # ── 1. display tool (root / sub-agents) ──
 
 
+# Pinned questions are a Rose Desktop surface (utils.rose_desktop); the fake
+# agents belong to the flagged account unless a test says otherwise.
+ROSE_DESKTOP_USER = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+STOCK_USER = "user-stock-3333"
+
+
 class _FakeAgent:
     """Minimal AgentWorkflow surface used by the display handler."""
 
-    def __init__(self, agent_id: str = "agent-root", depth: int = 0) -> None:
+    def __init__(self, agent_id: str = "agent-root", depth: int = 0, user_id: str = ROSE_DESKTOP_USER) -> None:
         self.agent_id = agent_id
-        self.user_id = "user-1"
+        self.user_id = user_id
         self.depth = depth
         self._signal_responses: Dict[str, str] = {}
         self.events: List[Dict[str, Any]] = []
@@ -196,6 +202,41 @@ async def test_validation_errors_never_reach_the_backend():
     assert backend.bodies == [], f"validation must not call the backend: {backend.bodies}"
 
 
+async def test_stock_account_gets_inline_media_only():
+    """A stock account's display call never pins a question: pinned arguments are dropped.
+
+    With media, the call is plain inline media (the backend body has no pinned
+    fields); without media, it is the stock "nothing to show" tool error and
+    never reaches the backend.
+    """
+    backend = _Backend(
+        [httpx.Response(201, json={"placement": "inline", "items": [{"status": "posted", "message_id": "m1"}]})]
+    )
+    setup_mock_fn(backend.handler)
+    agent = _FakeAgent(user_id=STOCK_USER)
+    await _run_tool(
+        agent,
+        {
+            "tool": "display",
+            "paths": ["shot.png"],
+            "caption": "Which layout?",
+            "placement": "pinned",
+            "options": [{"label": "Grid"}],
+            "allow_other": False,
+        },
+    )
+    assert backend.bodies == [{"items": [{"file": "shot.png"}], "placement": "inline", "caption": "Which layout?"}]
+    assert [e["status"] for e in agent.events] == ["FINISHED"], agent.events
+
+    question_only = _FakeAgent(user_id=STOCK_USER)
+    await _run_tool(
+        question_only, {"tool": "display", "caption": "Which?", "placement": "pinned", "options": [{"label": "A"}]}
+    )
+    assert [e["status"] for e in question_only.events] == ["ERROR"], question_only.events
+    assert "at least one entry" in question_only.events[0]["message"]
+    assert len(backend.bodies) == 1, "a stock question never reaches the backend"
+
+
 async def test_inline_display_sends_items_and_reports_duplicates():
     """paths → file items, urls → url items; duplicates (same content hash) are reported."""
     backend = _Backend(
@@ -228,7 +269,7 @@ async def test_inline_display_sends_items_and_reports_duplicates():
         "caption": "Before",
     }, body
     assert backend.urls[0].endswith("/api/agent-tools/agent-child/display")
-    assert backend.headers[0].get("x-user-id") == "user-1"
+    assert backend.headers[0].get("x-user-id") == ROSE_DESKTOP_USER
     [event] = agent.events
     assert event["status"] == "FINISHED", event
     assert "Displayed 1 item(s)" in event["message"] and "1 already shown" in event["message"], event
@@ -357,7 +398,7 @@ async def test_pinned_question_blocks_and_resumes_in_production_sandbox():
                 DisplayPinnedRepro.run,
                 args=[
                     "agent-root",
-                    "user-1",
+                    ROSE_DESKTOP_USER,
                     {"tool": "display", "caption": "Which layout?", "placement": "pinned", "options": [{"label": "Grid"}, {"label": "List"}]},
                 ],
                 id=f"display-sandbox-{uuid.uuid4()}",
@@ -538,18 +579,23 @@ class FakeAgentTools:
         self.server.server_close()
 
 
-def _cli_env(fake: FakeAgentTools, home: str) -> Dict[str, str]:
+def _cli_env(fake: FakeAgentTools, home: str, rose_desktop: bool = True) -> Dict[str, str]:
+    """Session env; Rose Desktop by default (pinned questions and inline views on)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("ROSE_TOOLS")}
     env.update({"HOME": home, "ROSE_TOOLS_URL": fake.url, "ROSE_TOOLS_TOKEN": TOKEN, "ROSE_TOOLS_WAIT_SECONDS": "1"})
+    if rose_desktop:
+        env["ROSE_TOOLS_ROSE_DESKTOP"] = "1"
     return env
 
 
-async def _cli(fake: FakeAgentTools, home: str, *args: str, timeout: float = 20) -> tuple[int, str, str]:
+async def _cli(
+    fake: FakeAgentTools, home: str, *args: str, timeout: float = 20, rose_desktop: bool = True
+) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         shutil.which("node") or "node",
         str(ROSE_CLI),
         *args,
-        env=_cli_env(fake, home),
+        env=_cli_env(fake, home, rose_desktop),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -588,16 +634,17 @@ class _Mcp:
 
 
 @contextlib.asynccontextmanager
-async def _mcp_server(fake: FakeAgentTools, home: str):
+async def _mcp_server(fake: FakeAgentTools, home: str, rose_desktop: bool = True):
     env = _cli_env(fake, home)
     # The MCP server reads ~/.rose/tools.json when its parent passes no env.
-    for key in ("ROSE_TOOLS_URL", "ROSE_TOOLS_TOKEN"):
+    for key in ("ROSE_TOOLS_URL", "ROSE_TOOLS_TOKEN", "ROSE_TOOLS_ROSE_DESKTOP"):
         env.pop(key)
     rose_dir = Path(home) / ".rose"
     rose_dir.mkdir(parents=True, exist_ok=True)
-    (rose_dir / "tools.json").write_text(
-        json.dumps({"url": fake.url, "token": TOKEN, "agents_url": fake.agents_url, "agents_token": AGENTS_TOKEN})
-    )
+    saved = {"url": fake.url, "token": TOKEN, "agents_url": fake.agents_url, "agents_token": AGENTS_TOKEN}
+    if rose_desktop:
+        saved["rose_desktop"] = True
+    (rose_dir / "tools.json").write_text(json.dumps(saved))
     proc = await asyncio.create_subprocess_exec(
         shutil.which("node") or "node",
         str(ROSE_CLI),
@@ -757,11 +804,41 @@ async def test_cli_message_sends_inline_view():
         assert post["body"]["idempotency_key"], post
 
 
+async def test_stock_session_tools_have_no_pinned_questions_or_inline_views():
+    """A stock (non-Rose Desktop) session: MCP lists the stock tools; pinned/inline-view arguments are dropped."""
+    with FakeAgentTools() as fake, _home() as home:
+        async with _mcp_server(fake, home, rose_desktop=False) as mcp:
+            listed = await mcp.response(await mcp.send("tools/list"))
+            tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
+            assert sorted(tools) == ["display", "request_user_approval", "send_message_to_user"], tools
+            assert list(tools["display"]["inputSchema"]["properties"]) == ["paths", "urls", "caption"]
+            assert list(tools["send_message_to_user"]["inputSchema"]["properties"]) == ["message"]
+            blob = json.dumps(listed)
+            assert "pinned" not in blob and "inline_view" not in blob, blob
+
+        code, out, err = await _cli(fake, home, "--help", rose_desktop=False)
+        assert code == 0 and "--pinned" not in out and "--inline-view" not in out, (code, out, err)
+
+        code, out, err = await _cli(
+            fake, home, "message", "Scorecard ready", "--inline-view", "scorecard", rose_desktop=False
+        )
+        assert code == 0 and "sent (message msg-" in out, (code, out, err)
+        [post] = [c for c in fake.calls if c["path"].endswith("/messages")]
+        assert "inline_view" not in post["body"], post
+
+        code, out, err = await _cli(
+            fake, home, "display", "--pinned", "--caption", "Which?", "--option", "A", rose_desktop=False
+        )
+        assert code == 1 and "at least one path or url" in err, (code, out, err)
+        assert not [c for c in fake.calls if c["path"].endswith("/display")], fake.calls
+
+
 async def run_all_tests():
     print("display blackbox tests:")
     r = BlackboxResult()
     try:
         await r.record_async("validation_errors_never_reach_the_backend", test_validation_errors_never_reach_the_backend)
+        await r.record_async("stock_account_gets_inline_media_only", test_stock_account_gets_inline_media_only)
         await r.record_async(
             "inline_display_sends_items_and_reports_duplicates", test_inline_display_sends_items_and_reports_duplicates
         )
@@ -793,6 +870,10 @@ async def run_all_tests():
             "cli_approve_resumes_same_request_after_interrupt", test_cli_approve_resumes_same_request_after_interrupt
         )
         await r.record_async("cli_message_sends_inline_view", test_cli_message_sends_inline_view)
+        await r.record_async(
+            "stock_session_tools_have_no_pinned_questions_or_inline_views",
+            test_stock_session_tools_have_no_pinned_questions_or_inline_views,
+        )
     finally:
         teardown_mock()
     return r.all_passed

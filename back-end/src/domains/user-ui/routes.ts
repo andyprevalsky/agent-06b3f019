@@ -6,8 +6,9 @@
  * /usercontent — serve published files (see config.ts for the origin rule).
  *
  * Auth: normal user JWT or hybrid API key (internal X-User-Id / Rose API key)
- * on every /api/user-ui route; POST /versions additionally accepts a
- * short-lived `ruip.` publish token minted for a code-agent sandbox.
+ * on every /api/user-ui route; POST /versions and GET /bundle (`rose-ui pull`)
+ * additionally accept a short-lived `ruip.` publish token minted for a
+ * code-agent sandbox.
  */
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
@@ -125,6 +126,18 @@ router.get(
     const userId = requireUserId(req, res);
     if (userId === null) return;
     res.json(await service.getActive(userId, requestOrigin(req)));
+  })
+);
+
+// `rose-ui pull`: the active version's files (or the starting bundle). Accepts
+// the session's publish token, like POST /versions.
+router.get(
+  '/bundle',
+  publishAuth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    const userId = requireUserId(req, res);
+    if (userId === null) return;
+    res.json(await service.getBundle(userId));
   })
 );
 

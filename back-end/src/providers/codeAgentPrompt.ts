@@ -1,13 +1,14 @@
 import { isRoseRepoUrl } from './codePreview/preview';
-import { USER_UI_DIR_NAME } from './userUi/seed';
+import { installedRoseSkills, roseSkillsTableOfContents } from './roseSkills/skills';
 
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-ui-kit-branch.v6';
+/** Rose Desktop accounts: every Rose skill in the table of contents (C17). */
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-skills.v7';
+/** Every other account: the same contract with the stock skill set. */
+export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-skills.v7';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
 export const CODE_AGENT_OUTPUT_DIR = '/home/user/output';
-/** Session-HOME relative: E2B HOME is /home/user, the local fallback uses its own HOME. */
-export const CODE_AGENT_USER_UI_DIR = `~/${USER_UI_DIR_NAME}`;
 
 interface BuildCodeAgentPromptArgs {
   githubRepoUrl?: string;
@@ -16,33 +17,39 @@ interface BuildCodeAgentPromptArgs {
   branch?: string | null;
   /** Branch it merges into; null/undefined = the repository's default branch. */
   mergeTarget?: string | null;
-  /** Rose dev account (Rose Desktop): rose-preview and apps are installed (A1, A2). */
-  roseDev?: boolean;
+  /**
+   * Rose Desktop account (utils/roseDesktop): the table of contents lists every
+   * Rose skill (rose-ui, apps-preview, ...), as installed by withRoseSkills.
+   * Default: the stock skill set.
+   */
+  roseDesktop?: boolean;
   /** The checkout is the Rose repo itself (Rose-in-Rose, A1); detected from githubRepoUrl too. */
   roseRepo?: boolean;
 }
 
-export const ROSE_IN_ROSE_INSTRUCTIONS_VERSION = 'code-agent-rose-in-rose-apps.v1';
+/**
+ * The installed skills' table of contents (codeSessionWorkspace installs the
+ * same installedRoseSkills set). Byte-stable per skill set: sorted names and
+ * one-line frontmatter descriptions, no ids.
+ */
+export function codeAgentSkillLines(roseDesktop: boolean): string[] {
+  const toc = roseSkillsTableOfContents(installedRoseSkills(roseDesktop));
+  return toc.length > 0 ? [...toc, ''] : [];
+}
 
-/** Dev-account lines: live preview, Rose-in-Rose publish rules and apps. Empty otherwise. */
-function roseDevLines(args: BuildCodeAgentPromptArgs): string[] {
-  if (args.roseDev !== true) return [];
-  const roseRepo = args.roseRepo === true || isRoseRepoUrl(args.githubRepoUrl);
+/** Rose-in-Rose (A1): the one shipping constraint that overrides the merge rules. */
+function roseRepoLines(args: BuildCodeAgentPromptArgs): string[] {
+  if (args.roseDesktop !== true) return [];
+  if (args.roseRepo !== true && !isRoseRepoUrl(args.githubRepoUrl)) return [];
   return [
     '',
-    `Live preview and apps (${ROSE_IN_ROSE_INSTRUCTIONS_VERSION}):`,
-    '- `rose-preview start [--dir <app dir>]` serves a vite app from this session with hot reload; the user sees each saved file about a second later. `rose-preview url` prints the address and `rose-preview status` says whether it runs.',
-    `- An app the user asks for ("make me an app") lives in ${CODE_AGENT_USER_UI_DIR}/apps/<slug>/ with an index.html entry and a title under "apps" in rose-ui.json (see its README). \`rose-ui publish\` gives it the user's app URL and adds it to the Apps section; \`rose-ui dev\` previews it at /file/apps/<slug>/index.html.`,
-    ...(roseRepo
-      ? [
-          '- The checkout in ~/workspace is Rose itself. Its front-end preview runs from front-end/ and talks to Rose as the user: a cloud session starts it for you, and `rose-preview start` starts or restarts it.',
-          '- Publishing a Rose change means pushing your branch and opening a pull request (`gh pr create`) against your merge target. Never merge it, never push to main and never deploy: Rose ships only through `/deploy`.',
-        ]
-      : []),
+    'Rose itself:',
+    '- The checkout in ~/workspace is Rose itself. Ship a change as a pull request (`gh pr create`) against your merge target. Never merge it, never push to main and never deploy: Rose ships only through `/deploy`.',
   ];
 }
 
 export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}): string {
+  const roseDesktop = args.roseDesktop === true;
   const workDir = args.workDir ?? '/home/user';
   const mergeTarget = args.mergeTarget
     ? `\`${args.mergeTarget}\``
@@ -53,18 +60,15 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
         'Repository workflow:',
         `- The repository is cloned at ${workDir}.`,
         `- Repository URL: ${args.githubRepoUrl}.`,
-        ...(args.branch
-          ? [`- You work on branch \`${args.branch}\`. Its merge target is ${mergeTarget}.`]
-          : []),
-        '- Commit locally whenever a unit of work is complete. Commits are your checkpoints.',
-        `- Merge into ${mergeTarget} when other agents or the user need your changes. Otherwise keep the work on your branch.`,
-        '- You decide when to commit, push and merge, based on the task.',
-        '- If a rebase or merge is required, resolve it before finishing.',
+        args.branch
+          ? `- You work on branch \`${args.branch}\`. Its merge target is ${mergeTarget}.`
+          : `- Your merge target is ${mergeTarget}.`,
+        '- Read the code-session skill before you commit, merge or finish.',
       ]
     : [];
 
   return [
-    `Rose Labs code-agent instructions (${CODE_AGENT_INSTRUCTIONS_VERSION})`,
+    `Rose Labs code-agent instructions (${roseDesktop ? CODE_AGENT_INSTRUCTIONS_VERSION : CODE_AGENT_STOCK_INSTRUCTIONS_VERSION})`,
     '',
     'You are running inside a persistent E2B sandbox for a parent agent. Your files, commits and conversation are kept between sessions.',
     'Complete the requested coding or file task autonomously.',
@@ -77,24 +81,14 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- In your final response, name the exact absolute paths of files you created for the user.',
     '- If no file output is requested, do not create placeholder files.',
     '',
-    'Rose app UI:',
-    `- ${CODE_AGENT_USER_UI_DIR} is the Rose app UI of the user you work for. Its README.md explains the layout and \`rose-ui publish\`.`,
-    '- To change how Rose looks or behaves for the user, edit that folder and run `rose-ui publish` so the user sees the change.',
-    `- ${CODE_AGENT_USER_UI_DIR}/screenshots/current/ shows what the user sees now. \`rose-ui screenshot\` renders your local changes; \`rose-ui check\` must pass before \`rose-ui publish\`.`,
-    '- When asked for something the user should look at or play (a game, app, chart or other visual), build it as an inline view there, publish it, and name the view in your final response so it can be shown in the chat. Still put any requested files in the output directory.',
-    '',
-    'Talking to the user:',
-    '- Never rely on the user reading your terminal. Messages, results, scorecards, visuals, questions and approvals go through the Rose tools (MCP server `rose`, or the `rose` CLI on PATH; run `rose --help`).',
-    '- `send_message_to_user` for updates and results; `display` for screenshots, recordings and HTML previews; `display` with placement "pinned" and options for a question; `request_user_approval` before risky or irreversible actions. Questions and approvals wait for the answer.',
-    '- After `rose-ui publish` of something the user should see, show it yourself: `send_message_to_user` with `inline_view` (`rose message "<text>" --inline-view <view>`). Naming it in your final response is not enough.',
-    '',
+    ...codeAgentSkillLines(roseDesktop),
     'Execution contract:',
     '- Prefer direct, verifiable commands over prose-only claims.',
     '- Finish only after the requested artifacts exist and have been checked.',
     '- Surface real configuration or credential failures directly.',
     '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
     ...repoLines,
-    ...roseDevLines(args),
+    ...roseRepoLines(args),
   ].join('\n');
 }
 
@@ -141,20 +135,24 @@ export function buildCodexHarnessSystemPrompt(args: BuildCodexHarnessPromptArgs)
 
 /**
  * Instructions for a code agent running on the user's own Mac (C14): the same
- * contract as the sandbox prompt, but the work lives in the shared folder.
+ * contract as the sandbox prompt, but the work lives in the shared folder. The
+ * session HOME gets the same skills (localDevices/homeFiles), so the table of
+ * contents is the same as the sandbox's for the account group.
  */
-export function buildLocalCodeAgentSystemPrompt(): string {
+export function buildLocalCodeAgentSystemPrompt(args: { roseDesktop?: boolean } = {}): string {
+  const roseDesktop = args.roseDesktop === true;
   return [
-    `Rose Labs code-agent instructions (${CODE_AGENT_INSTRUCTIONS_VERSION}.local-mac)`,
+    `Rose Labs code-agent instructions (${roseDesktop ? CODE_AGENT_INSTRUCTIONS_VERSION : CODE_AGENT_STOCK_INSTRUCTIONS_VERSION}.local-mac)`,
     '',
     "You are running on the user's own Mac, in a folder they shared with Rose. That folder is your working directory.",
     'Complete the requested coding or file task autonomously.',
     '',
     'File contract:',
-    '- Work only inside the working directory. Do not read or change files outside it.',
+    '- Work only inside the working directory. Do not read or change files outside it, except that you may read the Rose skills in ~/.rose/skills.',
     '- Leave results in the folder. In your final response, name the exact paths of files you created or changed.',
     '- If no file output is requested, do not create placeholder files.',
     '',
+    ...codeAgentSkillLines(roseDesktop),
     'Execution contract:',
     '- Prefer direct, verifiable commands over prose-only claims.',
     '- Finish only after the requested work exists and has been checked.',

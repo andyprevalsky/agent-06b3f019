@@ -25,9 +25,13 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
   const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
     await import('../../providers/codeAgentPrompt');
 
+  // A Rose Desktop account's prompt (utils/roseDesktop): the shared
+  // contract plus every Rose skill in the table of contents (C17). Codex gets
+  // this same prompt through CODE_AGENT_SYSTEM_PROMPT (written to AGENTS.md).
   const prompt = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/acme/widgets.git',
     workDir: '/home/user/workspace',
+    roseDesktop: true,
   });
 
   assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
@@ -48,19 +52,37 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
   );
   assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
 
-  // The session HOME holds the user's rose_user_ui + `rose-ui` CLI; the agent
-  // must know it exists, publish UI changes, and deliver viewable work as an
-  // inline view whose name reaches the parent so it can be shown in the chat.
-  assert(prompt.includes('~/rose_user_ui is the Rose app UI'), 'rose_user_ui location missing');
-  assert(prompt.includes('run `rose-ui publish`'), 'rose-ui publish rule missing');
+  // The rose-ui skill carries how to build, publish and show an inline view;
+  // the prompt points at it through the table of contents.
   assert(
-    prompt.includes('build it as an inline view there, publish it, and name the view'),
-    'Inline-view delivery rule missing'
+    prompt.includes('Rose skills (read ~/.rose/skills/<name>/SKILL.md before using one):'),
+    'skills table of contents missing'
   );
+  assert(prompt.includes('\n- rose-ui: Use '), 'rose-ui skill missing from the table of contents');
+  const { installedRoseSkills } = await import('../../providers/roseSkills/skills');
+  const roseUi = installedRoseSkills(true)
+    .find((skill) => skill.name === 'rose-ui')
+    ?.files.find((file) => file.path === 'SKILL.md')
+    ?.content.toString('utf8');
+  assert(roseUi !== undefined, 'rose-ui skill installed for Rose Desktop accounts');
+  assert(roseUi.includes('`rose-ui publish`'), 'rose-ui publish rule missing');
+  assert(roseUi.includes('build it as an inline view'), 'Inline-view delivery rule missing');
   assert(
-    prompt.includes('Still put any requested files in the output directory'),
+    roseUi.includes('Still put\n  any requested files in the output directory'),
     'Inline view must not replace requested output files'
   );
+
+  // Every other account gets the same contract with the stock skills only.
+  const stock = buildCodeAgentSystemPrompt({
+    githubRepoUrl: 'https://github.com/acme/widgets.git',
+    workDir: '/home/user/workspace',
+  });
+  assert(stock.includes('Do not launch a separate claude/Claude Code CLI'), 'stock contract');
+  assert(
+    !stock.includes('rose_user_ui') && !stock.includes('rose-ui'),
+    'stock prompt has no rose-ui skill'
+  );
+  assert(stock.includes('\n- talk-to-user: Use '), 'stock prompt lists talk-to-user');
 }
 
 export async function testTemplate_pinsCodexCliForGpt56() {

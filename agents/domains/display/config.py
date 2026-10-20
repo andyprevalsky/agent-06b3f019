@@ -6,6 +6,10 @@ TOOL_NAME = "display"
 DISPLAY_MAX_ITEMS = 20
 DISPLAY_MAX_OPTIONS = 9
 PLACEMENTS = ("inline", "pinned")
+# Pinned questions need the Rose Desktop UI (utils.rose_desktop). The stock
+# display schema has none of these arguments; the handler drops them for every
+# other account, exactly as the stock schema's parse would.
+PINNED_ONLY_ARGUMENTS = ("placement", "options", "allow_other")
 
 # One backend call: URL fetches are bounded server-side (20 s each, 4 at a
 # time) and uploads are ≤ 20 MB; 120 s leaves headroom without hiding a hang.

@@ -1,10 +1,11 @@
 /**
- * The `rose-agents` CLI installed on every code-agent session PATH, plus the
- * static instruction lines appended to the code-agent system prompt.
+ * The `rose-agents` CLI installed on every code-agent session PATH. How to use
+ * it is the agent-graph Rose skill (assets/rose-skills/agent-graph/SKILL.md),
+ * listed in the code-agent prompt's table of contents (C17).
  *
- * Kept as string constants so the compiled backend ships them without an
- * asset-copy step. The text is agent-facing (prompt-scoped, CLAUDE.md rule
- * 26): changes need fresh approval.
+ * Kept as a string constant so the compiled backend ships it without an
+ * asset-copy step. The usage text is agent-facing (prompt-scoped, CLAUDE.md
+ * rule 26): changes need fresh approval.
  *
  *   rose-agents list                 → GET  $ROSE_AGENTS_URL/agents
  *   rose-agents send <id> <message>  → POST $ROSE_AGENTS_URL/messages
@@ -14,20 +15,6 @@
 
 export const AGENT_GRAPH_CLI_NAME = 'rose-agents';
 export const AGENT_GRAPH_CLI_VERSION = '3';
-
-/** Static (no ids) so the system prompt stays cache-stable across sessions. */
-export const AGENT_GRAPH_PROMPT_SECTION = [
-  '',
-  'Rose agent graph:',
-  '- `rose-agents list` lists the agents in your tree (root, parents, siblings, children) with status.',
-  '- `rose-agents send <agent_id> "<message>"` messages one of them. `parent` is the agent that started you and `root` is the root agent. Use it to hand off results, ask for new work or information, or report a blocker.',
-  '- `rose-agents grep "<regex>"` searches what agents in your tree already said and did.',
-  '- Messages sent to you arrive as a new user turn after your current turn.',
-].join('\n');
-
-export function withAgentGraphInstructions(systemPrompt: string): string {
-  return `${systemPrompt}\n${AGENT_GRAPH_PROMPT_SECTION}`;
-}
 
 export const AGENT_GRAPH_CLI_SCRIPT = `#!/usr/bin/env node
 'use strict';
