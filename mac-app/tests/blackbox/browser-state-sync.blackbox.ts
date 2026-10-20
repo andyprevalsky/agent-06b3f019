@@ -103,6 +103,16 @@ vi.mock('../../main/services/batchUploader', () => ({
   },
 }));
 
+// Per-account cookie progress is a best-effort side channel; stub it so this
+// suite's fetch-capture assertions stay scoped to the data-upload endpoints.
+// (The progress wire contract is covered by integration-cookie-progress.blackbox.ts.)
+vi.mock('../../main/services/integrationProgress', () => ({
+  IntegrationProgress: {
+    reportCookieProfilesSyncing: vi.fn(async () => []),
+    reportCookieProfilesSynced: vi.fn(async () => []),
+  },
+}));
+
 // Import after all `vi.mock` calls (hoisted) — ensures the mocks are in place.
 const { BrowserStateSync } = await import('../../main/services/browserStateSync');
 const { Crypto } = await import('../../main/base/crypto');

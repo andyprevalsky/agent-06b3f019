@@ -163,10 +163,18 @@ function buildTelegramBridge(ipcRenderer: IpcRenderer): IPC['telegram'] {
       }>,
     disconnect: () =>
       ipcRenderer.invoke('telegram:disconnect') as Promise<{ success: boolean; error?: string }>,
-    logout: () =>
-      ipcRenderer.invoke('telegram:logout') as Promise<{ success: boolean; error?: string }>,
-    syncHistorical: (messagesPerDialog?: number) =>
-      ipcRenderer.invoke('telegram:syncHistorical', messagesPerDialog) as Promise<{
+    // Optional args are forwarded only when given, so main sees exactly the caller's call.
+    logout: (...args: [accountId?: string]) =>
+      ipcRenderer.invoke('telegram:logout', ...args) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    listAccounts: () =>
+      ipcRenderer.invoke('telegram:listAccounts') as Promise<
+        Array<{ accountId: string; label: string | null; connected: boolean }>
+      >,
+    syncHistorical: (...args: [messagesPerDialog?: number, accountId?: string]) =>
+      ipcRenderer.invoke('telegram:syncHistorical', ...args) as Promise<{
         success: boolean;
         count?: number;
         error?: string;
