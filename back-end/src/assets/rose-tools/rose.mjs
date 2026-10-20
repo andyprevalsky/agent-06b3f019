@@ -627,22 +627,22 @@ const APPROVAL_MCP_TOOL = {
 };
 
 const ENV_SIZE_MCP_TOOL = {
-    name: 'change_environment_size',
-    description:
-      'Move this session to a sandbox with more or fewer vCPUs and/or GB of memory. Use it for legitimate demand (repeated OOM kills, heavy swap, minutes of CPU-bound builds or tests), not for a runaway process or leak: kill or fix that instead. Run `rose env status` first. The session is saved and continues automatically in the new sandbox (same branch, files and conversation).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        cpu: { type: 'integer', description: 'vCPUs wanted; omit to keep the current count.' },
-        memory_gb: {
-          type: 'integer',
-          description: 'Memory in GB wanted; omit to keep the current size.',
-        },
-        reason: { type: 'string', description: 'What needs the new size, with evidence.' },
+  name: 'change_environment_size',
+  description:
+    'Move this session to a sandbox with more or fewer vCPUs and/or GB of memory. Use it for legitimate demand (repeated OOM kills, heavy swap, minutes of CPU-bound builds or tests), not for a runaway process or leak: kill or fix that instead. Run `rose env status` first. The session is saved and continues automatically in the new sandbox (same branch, files and conversation).',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      cpu: { type: 'integer', description: 'vCPUs wanted; omit to keep the current count.' },
+      memory_gb: {
+        type: 'integer',
+        description: 'Memory in GB wanted; omit to keep the current size.',
       },
-      required: ['reason'],
+      reason: { type: 'string', description: 'What needs the new size, with evidence.' },
     },
-  };
+    required: ['reason'],
+  },
+};
 
 const STOCK_MCP_TOOLS = [
   {
@@ -810,6 +810,8 @@ const STOCK_USAGE = `usage:
   rose message <text>
   rose approve <question>
   rose wait <request-id>
+  rose env status [--json]
+  rose env size [--cpu N] [--memory-gb M] --reason TEXT
   rose mcp`;
 
 const ROSE_DESKTOP_USAGE = `usage:

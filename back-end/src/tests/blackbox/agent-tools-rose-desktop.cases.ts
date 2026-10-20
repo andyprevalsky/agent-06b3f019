@@ -5,7 +5,7 @@
  *   prepareCodeSessionWorkspace(stock account)
  *     → rose CLI + rose-agents CLI only: no UI folder, no rose-ui, no ROSE_UI_* env,
  *       tools.json without rose_desktop → `rose --help` / MCP tools/list are stock
- *     → skills agent-graph, code-session, talk-to-user (stock text) in ~/.rose/skills,
+ *     → skills agent-graph, change-environment-size, code-session, talk-to-user (stock text) in ~/.rose/skills,
  *       ~/.claude/skills and ~/.agents/skills
  *   prepareCodeSessionWorkspace(..., roseDesktop = true)
  *     → rose-ui + publish/bundle env (no pre-materialized UI folder: `rose-ui pull`),
@@ -89,7 +89,7 @@ async function installedCli(workspace: UserUiWorkspace, home: string, agentId: s
   return { help, listed, props };
 }
 
-const STOCK_SKILLS = ['agent-graph', 'code-session', 'talk-to-user'];
+const STOCK_SKILLS = ['agent-graph', 'change-environment-size', 'code-session', 'talk-to-user'];
 const ROSE_DESKTOP_SKILLS = ['apps-preview', 'rose-ui'];
 
 /** The skill names a workspace installs under ~/.rose/skills (from its SKILL.md files). */
@@ -221,6 +221,9 @@ async function assertStockSession(): Promise<void> {
   try {
     const { help, listed, props } = await installedCli(stock, home, otherA);
     assert(!/--pinned|--inline-view/.test(help), `stock CLI help: ${help}`);
+    assert(help.includes('rose env size'), 'stock CLI advertises environment resizing');
+    assert(props.change_environment_size.includes('cpu'), 'stock MCP can resize CPU');
+    assert(props.change_environment_size.includes('memory_gb'), 'stock MCP can resize memory');
     assert(
       JSON.stringify(props.display) === JSON.stringify(['paths', 'urls', 'caption']),
       `stock MCP display: ${JSON.stringify(props.display)}`

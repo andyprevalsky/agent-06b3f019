@@ -26,7 +26,12 @@ export const ROSE_SKILLS_HOME_DIR = '.rose/skills';
 /** Harness-native skill folders under the session HOME (Claude Code, Codex). */
 export const ROSE_SKILL_HARNESS_DIRS = ['.claude/skills', '.agents/skills'] as const;
 /** The skills every account gets; Rose Desktop accounts get all of them. */
-export const STOCK_ROSE_SKILLS: readonly string[] = ['agent-graph', 'change-environment-size', 'code-session', 'talk-to-user'];
+export const STOCK_ROSE_SKILLS: readonly string[] = [
+  'agent-graph',
+  'change-environment-size',
+  'code-session',
+  'talk-to-user',
+];
 export const ROSE_SKILL_FILE = 'SKILL.md';
 export const ROSE_DESKTOP_BLOCK_START = '<!-- rose-desktop -->';
 export const ROSE_DESKTOP_BLOCK_END = '<!-- /rose-desktop -->';
