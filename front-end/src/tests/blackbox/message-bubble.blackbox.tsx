@@ -393,7 +393,7 @@ describe('MessageBubble', () => {
     await waitFor(() => expect(container.textContent).toContain('streaming body'));
   });
 
-  it('renders USER message with image file_pointer showing loading placeholder', async () => {
+  it('renders USER message with image file_pointer inline (no chip) while it loads', async () => {
     const msg = baseMessage({
       role: 'USER',
       text: 'look',
@@ -407,8 +407,11 @@ describe('MessageBubble', () => {
       },
     });
     const { container } = renderBubble(<MessageBubble message={msg} agentId="agent-img" />);
-    // Image placeholder renders the filename while signed URL loads.
-    await waitFor(() => expect(screen.getByText('pic.png')).toBeInTheDocument());
+    // Images render inline by default: a reserved-size media item, no chip.
+    const item = await screen.findByTestId('inline-media-item');
+    expect(item).toHaveAttribute('data-filename', 'pic.png');
+    expect(item).toHaveAttribute('data-kind', 'image');
+    expect(screen.queryByTestId('file-pointer-chip')).not.toBeInTheDocument();
     expect(container.textContent).toContain('look');
   });
 

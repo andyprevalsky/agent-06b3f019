@@ -9,6 +9,9 @@ export interface FilePointer {
   mime_type: string;
   size_bytes: number;
   created_at: string;
+  /** Optional intrinsic pixel size (images/videos); reserves inline layout. */
+  width?: number;
+  height?: number;
 }
 
 // Size thresholds for file handling

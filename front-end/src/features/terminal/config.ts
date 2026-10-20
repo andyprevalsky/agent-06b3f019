@@ -20,9 +20,18 @@ export const OPENING_MESSAGES: OpeningMessage[] = [
 
 // ── Popular goals carousel ────────────────────────────────────────────────
 
-/** Extra goals shown first for Rose Desktop accounts only (lib/roseDesktop.ts). */
+/**
+ * Goals shown first, in this order, for Rose Desktop accounts only
+ * (lib/roseDesktop.ts; UI ledger #15, #24). "Import Code Repo" is a plain goal
+ * pill like every other one: first in the rotation, not pinned, no special
+ * styling.
+ */
 export const ROSE_DESKTOP_POPULAR_GOALS: string[] = [
   'Import Code Repo',
+  'Make me a website',
+  'Go to youtube.com',
+  'Go to instagram.com',
+  'Go to linkedin.com',
   'Change my background photo',
   'Make me a game',
 ];

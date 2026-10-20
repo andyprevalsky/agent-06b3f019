@@ -7,7 +7,8 @@
  *                     app drawer via --rose-apps-inset, 520ms ease)
  * [MOBILE  <  md] --> full-width FLUSH bar at y=0:
  *                        left   = brand (logo + Rose)
- *                        center = Research
+ *                        center = Research (stock only; Rose Desktop accounts have
+ *                                 no Research/Careers links — UI ledger #14)
  *                        right  = hamburger drawer (signed in) OR Login (signed out)
  *
  * MOBILE RIGHT ACTION:
@@ -30,6 +31,7 @@ import type { CSSProperties } from 'react';
 
 import { AttentionInbox, MobileAgentDrawer } from '@/features/terminal-component-group';
 import type { Agent } from '@/features/terminal-component-group';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { cn } from '@/lib/utils';
 
@@ -125,7 +127,8 @@ function BrandButton({ onCreateNewAgent }: Pick<TerminalHeaderProps, 'onCreateNe
 
 function SiteNavButtons({ clientSource }: Pick<TerminalHeaderProps, 'clientSource'>) {
   const navigate = useNavigate();
-  if (clientSource !== 'WEB') return null;
+  const roseDesktop = useRoseDesktop();
+  if (clientSource !== 'WEB' || roseDesktop) return null;
 
   return (
     <nav className="flex items-center gap-3 whitespace-nowrap">
@@ -190,7 +193,7 @@ function DesktopHeaderPill(props: TerminalHeaderProps) {
 
 /**
  * Mobile (< md): full-width flush bar at y=0.
- * left = brand · center = Research · right = hamburger drawer (agents +
+ * left = brand · center = Research (stock only) · right = hamburger drawer (agents +
  * notifications + login/logout), driving all mobile navigation.
  */
 function MobileHeaderBar(props: TerminalHeaderProps) {

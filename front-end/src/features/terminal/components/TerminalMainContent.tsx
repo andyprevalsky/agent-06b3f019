@@ -12,6 +12,8 @@
  * --rose-apps-inset-left (the collapsed rail), so content re-centers in the
  * remaining width with the drawer's 520ms ease (paused while resizing). The
  * top-right nav links hide while a drawer is open (--rose-apps-nav-visibility).
+ * Rose Desktop accounts get no Research/Careers links (UI ledger #14); the
+ * Download link stays for everyone.
  */
 
 import { useNavigate } from 'react-router-dom';
@@ -20,6 +22,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { BenchmarksView } from '@/features/benchmarks';
 import { UserUiSlot } from '@/features/user-ui';
 import { useAppData } from '@/hooks/appDataContext';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import AdminHealth from '@/pages/AdminHealth';
 import Browse from '@/pages/Browse';
@@ -155,7 +158,7 @@ function TerminalViewContent(props: MainContentProps) {
 }
 
 function DesktopNavLinks() {
-  const navigate = useNavigate();
+  const roseDesktop = useRoseDesktop();
   return (
     <div
       className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50"
@@ -163,6 +166,24 @@ function DesktopNavLinks() {
         visibility: 'var(--rose-apps-nav-visibility, visible)' as React.CSSProperties['visibility'],
       }}
     >
+      {!roseDesktop && <SiteLinks />}
+      <a
+        href="/download"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="px-3 py-1.5 bg-navi-black text-white text-xs font-medium rounded-full hover:bg-navi-black/80 transition-colors shadow-lg"
+      >
+        Download
+      </a>
+    </div>
+  );
+}
+
+/** Stock-only Research / Careers pills (removed for Rose Desktop accounts). */
+function SiteLinks() {
+  const navigate = useNavigate();
+  return (
+    <>
       <button
         onClick={() => navigate('/research')}
         className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
@@ -175,14 +196,6 @@ function DesktopNavLinks() {
       >
         Careers
       </button>
-      <a
-        href="/download"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="px-3 py-1.5 bg-navi-black text-white text-xs font-medium rounded-full hover:bg-navi-black/80 transition-colors shadow-lg"
-      >
-        Download
-      </a>
-    </div>
+    </>
   );
 }
