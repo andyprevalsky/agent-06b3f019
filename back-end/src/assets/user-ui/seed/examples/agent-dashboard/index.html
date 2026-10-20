@@ -1,0 +1,171 @@
+<!doctype html>
+<!--
+  Example: live dashboard of the user's agents, driven by the Rose bridge.
+
+  Data comes from `rose:props`: { "agents": [{ "id", "name", "status", "progress", "detail" }] }
+  with status one of running | waiting | done | failed and progress 0..1
+  (see props.example.json). As an inline view, an agent sends it with
+    send_message_to_user(message, inline_view={ view: "agents", props: { agents: [...] } })
+  and the host re-posts rose:props whenever the props change. With no props
+  (e.g. opened directly, or in a slot) it runs a labelled demo feed.
+
+  Motion:
+  - Cards keep their slots; finishing agents move to the Done group. That move uses
+    the View Transitions API when the browser has it, otherwise FLIP (measure,
+    reorder, animate the inverted transform back to zero). Both animate only
+    transform/opacity, so layout never animates.
+  - Progress bars are transform: scaleX(), the running pulse is opacity only.
+  - prefers-reduced-motion: updates apply instantly, no pulse.
+  - The demo feed pauses while hidden. Height is reported with rose:resize.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-dashboard</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f6f5fb; --card: #fff; --ink: #14121f; --muted: #6d6a7c; --line: #e6e3f0; --accent: #7c3aed; --ok: #10b981; --warn: #f59e0b; --bad: #ef4444; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0e0d16; --card: #181624; --ink: #f2f0fa; --muted: #9c98b0; --line: #2a2740; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 14px; background: var(--bg); color: var(--ink); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 10px; margin: 0 2px 10px; }
+  header h2 { margin: 0; font-size: 15px; font-weight: 650; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  .group-title { margin: 12px 2px 6px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .card { position: relative; padding: 12px 12px 14px; border-radius: 14px; background: var(--card); border: 1px solid var(--line); contain: layout paint; }
+  .card .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 74px; }
+  .card .detail { margin-top: 2px; color: var(--muted); font-size: 12px; min-height: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status { position: absolute; top: 11px; right: 10px; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .running .dot { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  .waiting .dot { background: var(--warn); }
+  .done .dot { background: var(--ok); }
+  .failed .dot { background: var(--bad); }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+  .bar { margin-top: 10px; height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); transform-origin: left; transform: scaleX(var(--p, 0)); transition: transform 500ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+  .done .bar i { background: var(--ok); }
+  .failed .bar i { background: var(--bad); }
+  .demo { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; }
+  ::view-transition-group(*) { animation-duration: 420ms; animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1); }
+  @media (prefers-reduced-motion: reduce) {
+    .running .dot { animation: none; }
+    .bar i { transition: none; }
+    ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<header><h2>Agents</h2><span class="meta" id="meta"></span><span class="demo" id="demo" hidden>demo data</span></header>
+<div class="group-title">Active</div>
+<div class="grid" id="active"></div>
+<div class="group-title">Done</div>
+<div class="grid" id="finished"></div>
+<script>
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const els = { active: document.getElementById('active'), finished: document.getElementById('finished'), meta: document.getElementById('meta'), demo: document.getElementById('demo') };
+  const cards = new Map();
+  const STATUSES = new Set(['running', 'waiting', 'done', 'failed']);
+
+  function cardFor(agent) {
+    let card = cards.get(agent.id);
+    if (!card) {
+      card = document.createElement('article');
+      card.innerHTML = '<div class="name"></div><div class="detail"></div><span class="status"><span class="dot"></span><span class="label"></span></span><div class="bar"><i></i></div>';
+      card.style.viewTransitionName = `agent-${String(agent.id).replace(/[^a-zA-Z0-9_-]/g, '')}`;
+      cards.set(agent.id, card);
+    }
+    const status = STATUSES.has(agent.status) ? agent.status : 'waiting';
+    card.className = `card ${status}`;
+    card.querySelector('.name').textContent = agent.name || agent.id;
+    card.querySelector('.detail').textContent = agent.detail || '';
+    card.querySelector('.label').textContent = status;
+    const progress = status === 'done' ? 1 : Math.max(0, Math.min(1, Number(agent.progress) || 0));
+    card.querySelector('.bar i').style.setProperty('--p', progress.toFixed(3));
+    return { card, finished: status === 'done' || status === 'failed' };
+  }
+
+  /** Apply one snapshot; only moves cards whose group changed. */
+  function apply(agents) {
+    for (const agent of agents) {
+      const { card, finished } = cardFor(agent);
+      const target = finished ? els.finished : els.active;
+      if (card.parentElement !== target) target.append(card);
+    }
+    const ids = new Set(agents.map((a) => a.id));
+    for (const [id, card] of cards) if (!ids.has(id)) { card.remove(); cards.delete(id); }
+    const running = agents.filter((a) => a.status === 'running').length;
+    els.meta.textContent = `${running} running · ${agents.length} total`;
+    reportHeight();
+  }
+
+  function flip(update) {
+    const before = new Map([...cards].map(([id, el]) => [id, el.getBoundingClientRect()]));
+    update();
+    for (const [id, el] of cards) {
+      const a = before.get(id);
+      if (!a) { el.animate([{ opacity: 0, transform: 'scale(0.96)' }, { opacity: 1, transform: 'none' }], { duration: 300, easing: 'ease-out' }); continue; }
+      const b = el.getBoundingClientRect();
+      const dx = a.left - b.left;
+      const dy = a.top - b.top;
+      if (dx || dy) el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], { duration: 420, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' });
+    }
+  }
+
+  function render(agents) {
+    const moves = agents.some((a) => { const c = cards.get(a.id); return !c || c.parentElement !== ((a.status === 'done' || a.status === 'failed') ? els.finished : els.active); });
+    if (!moves || reduceMotion.matches || cards.size === 0) apply(agents);
+    else if (document.startViewTransition) document.startViewTransition(() => apply(agents));
+    else flip(() => apply(agents));
+  }
+
+  function reportHeight() {
+    parent.postMessage({ type: 'rose:resize', height: Math.ceil(document.documentElement.scrollHeight) }, '*');
+  }
+
+  // ── demo feed (only when the host sends no agents) ──
+  const demo = {
+    timer: 0,
+    agents: [
+      { id: 'a1', name: 'Plan a weekend in Big Sur', status: 'running', progress: 0.35, detail: 'Comparing 3 inns near Pfeiffer' },
+      { id: 'a2', name: 'Reply to the Lisbon thread', status: 'waiting', progress: 0.6, detail: 'Needs your OK on the draft' },
+      { id: 'a3', name: 'Book dinner for Friday', status: 'running', progress: 0.72, detail: 'Holding 7:30 at Nopa' },
+      { id: 'a4', name: 'Expense October receipts', status: 'running', progress: 0.15, detail: '12 of 40 matched' },
+      { id: 'a5', name: 'Renew passport', status: 'done', progress: 1, detail: 'Appointment Nov 3' },
+    ],
+    tick() {
+      for (const a of demo.agents) {
+        if (a.status !== 'running') continue;
+        a.progress = Math.min(1, a.progress + 0.06 + ((a.id.charCodeAt(1) * 7) % 5) / 100);
+        if (a.progress >= 1) { a.status = 'done'; a.detail = 'Finished just now'; }
+      }
+      if (demo.agents.every((a) => a.status !== 'running')) {
+        for (const a of demo.agents) if (a.id !== 'a5') { a.status = 'running'; a.progress = 0.05; a.detail = 'Started again'; }
+      }
+      render(demo.agents.map((a) => ({ ...a })));
+    },
+    start() { if (!demo.timer && !document.hidden) demo.timer = setInterval(demo.tick, 1800); },
+    stop() { clearInterval(demo.timer); demo.timer = 0; },
+  };
+  let live = false;
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (!msg || msg.type !== 'rose:props' || !msg.props || !Array.isArray(msg.props.agents)) return;
+    live = true;
+    demo.stop();
+    els.demo.hidden = true;
+    render(msg.props.agents);
+  });
+  document.addEventListener('visibilitychange', () => { if (!live) (document.hidden ? demo.stop() : demo.start()); });
+  new ResizeObserver(reportHeight).observe(document.body);
+  setTimeout(() => {
+    if (live) return;
+    els.demo.hidden = false;
+    render(demo.agents.map((a) => ({ ...a })));
+    demo.start();
+  }, 600);
+  parent.postMessage({ type: 'rose:ready' }, '*');
+</script>
+</body>
+</html>

@@ -1,3 +1,5 @@
+import fs from 'fs';
+import multer from 'multer';
 import { type EmailProviderConfig, type EmailProviderSlug, EmailProvider } from './types';
 import { GOOGLE_OAUTH_SCOPES } from './googleScopes';
 
@@ -168,6 +170,21 @@ export const UPLOAD_LIMITS = {
   fileSize: 500 * 1024 * 1024, // 500MB max file size
   fieldSize: 200 * 1024 * 1024, // 200MB max field size (for localStorage uploads which can be large)
 };
+
+export const UPLOAD_TEMP_DIR = '/tmp/integration-uploads/';
+
+/**
+ * Disk-backed single-file upload for LinkedIn archives (`file` field). The
+ * filter runs when the file part begins, before any archive byte is stored.
+ */
+export function linkedinArchiveUpload(fileFilter: NonNullable<multer.Options['fileFilter']>) {
+  return multer({ dest: UPLOAD_TEMP_DIR, limits: UPLOAD_LIMITS, fileFilter }).single('file');
+}
+
+/** Remove a multer temp file; one that is already gone is fine. */
+export function removeUploadTempFile(filePath: string): void {
+  fs.rm(filePath, { force: true }, () => undefined);
+}
 
 export const PLAID_SKIP_WEBHOOK_VERIFICATION = process.env.PLAID_SKIP_WEBHOOK_VERIFICATION === '1';
 

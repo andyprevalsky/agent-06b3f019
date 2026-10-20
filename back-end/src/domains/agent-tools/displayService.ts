@@ -22,6 +22,7 @@ import {
   DISPLAY_EXTENSIONS,
   DisplayFetchError,
   classifyDisplayMedia,
+  displayUsercontentUrl,
   fetchDisplayMedia,
   getDisplayObject,
   putDisplayObject,
@@ -206,6 +207,9 @@ async function storeAll(agent: repo.ToolAgent, resolved: ResolvedItem[]): Promis
         mime_type: mimeType,
         size_bytes: entry.bytes.length,
         created_at: new Date().toISOString(),
+        ...(mimeType === 'text/html'
+          ? { usercontent_url: displayUsercontentUrl(agent.id, sha256) }
+          : {}),
       },
     });
   }

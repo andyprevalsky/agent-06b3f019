@@ -592,7 +592,9 @@ model BrowserSession {
 model ClaudeCodeSession {
   id                       String                  @id @default(uuid())
   agentId                  String
-  sandboxId                String                  @unique
+  // Not unique: a persistent CodeSession resumes the same paused sandbox for
+  // every spawn, so several ClaudeCodeSession rows can share one sandbox.
+  sandboxId                String
   streamUrl                String?
   goal                     String
   status                   ClaudeCodeSessionStatus @default(ACTIVE)
@@ -604,12 +606,80 @@ model ClaudeCodeSession {
   // rate-limited if the CLI output reports "You've hit your limit · resets X:XX (UTC)".
   claudeTokenSource        String?
   claudeTokenIntegrationId String?
+  /// Persistent code session this spawn attached to (null for legacy rows).
+  codeSessionId            String?
+  /// CLI this task ran ('claude' | 'codex'); null for legacy rows. Per task, so a
+  /// usage-limit provider switch (C15) keeps each task's own provider.
+  codeProvider             String?
+  /// Question this code agent asked its spawning Rose agent ({message_id, question, at}).
+  /// The spawn blocked on this task pauses the session and returns the question.
+  awaitingParent           Json?
   /// Project restored into this session (runProjectStartup reads it on resume).
   projectId                String?
 
   @@index([agentId])
   @@index([sandboxId])
   @@index([status])
+  @@index([codeSessionId])
+}
+
+/// Persistent code-agent workspace owned by one agent for one repo
+/// (userId, ownerAgentId, repoKey). Every code-agent spawn by that agent
+/// resumes its latest session: a paused sandbox when it survived, otherwise
+/// the latest verified checkpoint under user/<userId>/code-sessions/<id>/<seq>/.
+/// Branch model (docs/plans/active/code-agent-persistent-sessions.md §1b): a
+/// root agent's branch is cut from the repo default branch; a sub-agent's is
+/// cut from its parent's branch and merges back into it.
+model CodeSession {
+  id                  String    @id @default(uuid())
+  userId              String
+  rootAgentId         String
+  /// Agent whose code-agent spawns work in this session's worktree.
+  ownerAgentId        String
+  repoUrl             String?
+  /// repoUrl ?? '' so the scope lookup is one indexed equality.
+  repoKey             String    @default("")
+  codeProvider        String    @default("claude")
+  /// ACTIVE (leased by a spawn) | PAUSED | RETIRED
+  state               String    @default("ACTIVE")
+  /// 'e2b' | 'local'
+  sandboxKind         String?
+  sandboxId           String?
+  /// Local fallback only: the persistent session HOME on the backend host.
+  homeDir             String?
+  cliSessionId        String?
+  /// Stable per tool call (Temporal retries of one spawn share it).
+  leaseOwner          String?
+  leaseExpiresAt      DateTime?
+  latestCheckpointSeq Int       @default(0)
+  nextCheckpointSeq   Int       @default(0)
+  lastRepoFacts       Json?
+  /// Branch this session works on (repo sessions only).
+  branch              String?
+  /// Ref the branch was cut from; null = the repo's default branch.
+  baseBranch          String?
+  /// Branch this one merges into; null = the repo's default branch.
+  mergeTarget         String?
+  /// The parent agent's session this branch was cut from (sub-agents).
+  parentCodeSessionId String?
+  lastActiveAt        DateTime  @default(now())
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  retiredAt           DateTime?
+
+  @@index([userId, ownerAgentId, repoKey, lastActiveAt(sort: Desc)])
+  @@index([userId, state, lastActiveAt])
+}
+
+/// "New agent in this branch": agentId works in the code session (worktree,
+/// branch, CLI conversation) of sharedWithAgentId instead of its own.
+model CodeSessionShare {
+  agentId           String   @id
+  userId            String
+  sharedWithAgentId String
+  createdAt         DateTime @default(now())
+
+  @@index([sharedWithAgentId])
 }
 
 model GithubRepoAccess {
@@ -633,6 +703,11 @@ model MessageRecord {
   message            String
   externalId         String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   googleAccountEmail String? // Source Gmail account for account-scoped deletion
+  /// Provider-side account that synced this message (a Telegram user id), for
+  /// account-scoped deletion. Null = the legacy/default account. Rows that carry
+  /// it namespace `externalId` as "<sourceAccountId>:<native id>" so two accounts'
+  /// per-account message counters cannot collide on the dedup key.
+  sourceAccountId    String?
   createdAt          DateTime       @default(now())
   person             Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 
@@ -1422,7 +1497,9 @@ model BrowserPassword {
   disabledAt        DateTime?
   disabledReason    String?
 
-  @@unique([userId, origin, username])
+  /// One saved login per browser source and profile: the same site+username
+  /// saved in Chrome and Safari, or in two Chrome profiles, are separate rows.
+  @@unique([userId, origin, username, browserSource, browserProfile])
   @@index([userId])
   @@index([userId, origin])
 }

@@ -197,11 +197,7 @@ async function plaidItemsAreAccounts(users: Users): Promise<void> {
 
 async function todoHooksRefuse(users: Users): Promise<void> {
   const { a } = users();
-  for (const [provider, owner] of [
-    ['imessage', 'L-INT-IMESSAGE'],
-    ['atlas_passwords', 'L-INT-PASSWORDS'],
-    ['chrome', 'L-INT-COOKIES'],
-  ]) {
+  for (const [provider, owner] of [['whatsapp', 'L-INT-WHATSAPP']]) {
     await postProgress(a.token, provider, 'acct', { runId: 'r', state: 'synced' });
     const res = await call(`/api/integrations/${provider}/accounts/acct`, {
       method: 'DELETE',
@@ -267,6 +263,150 @@ async function linkedinSettleAgrees(users: Users): Promise<void> {
   assert(probe.changed, 'a SYNCING LinkedIn row can settle at any time, so it is never quiet');
 }
 
+async function seedCookie(
+  userId: string,
+  browserSource: string,
+  browserProfile: string,
+  domain: string,
+  name: string
+): Promise<void> {
+  await prisma.cookie.create({
+    data: { userId, browserSource, browserProfile, domain, name, path: '/', value: `${name}-val` },
+  });
+}
+
+/**
+ * I6: a cookie provider's accounts are its browser PROFILES. Two Edge profiles
+ * (Default, Profile 1) list separately; a legacy empty-profile Chrome snapshot
+ * is the `default` account; deleting one profile removes exactly that profile's
+ * cookies and leaves the other; progress merges onto the matching profile.
+ */
+async function cookieProfilesAreAccounts(users: Users): Promise<void> {
+  const { a } = users();
+  // Production always upserts the browser Integration row when cookies sync.
+  await prisma.integration.create({
+    data: { userId: a.userId, name: 'edge', type: 'DATA_SOURCE', status: 'CONNECTED' },
+  });
+  await seedCookie(a.userId, 'edge', 'Default', '.example.com', 'sid');
+  await seedCookie(a.userId, 'edge', 'Default', '.other.com', 'auth');
+  await seedCookie(a.userId, 'edge', 'Profile 1', '.work.com', 'session');
+
+  let edge = await accountsOf(a.token, 'edge');
+  const byId = new Map(edge.map((x) => [x.accountId, x]));
+  assert(edge.length === 2, `two Edge profiles listed separately, got ${edge.length}`);
+  assert(
+    byId.has('edge:Default') && byId.has('edge:Profile 1'),
+    'accountId is <browser>:<profile>'
+  );
+  assert(byId.get('edge:Default')?.label === 'Default', 'profile dir is the label');
+  assert(byId.get('edge:Default')?.state === 'synced', 'a synced profile reads synced');
+  assert(byId.get('edge:Profile 1')?.label === 'Profile 1', 'second profile label');
+
+  // Progress from known counts merges onto the matching profile account.
+  const prog = await postProgress(a.token, 'edge', 'edge:Default', {
+    runId: 'c1',
+    state: 'syncing',
+    done: 1,
+    total: 2,
+    unit: 'cookies',
+  });
+  expectStatus(prog, 200, 'cookie profile progress write');
+  edge = await accountsOf(a.token, 'edge');
+  const def = edge.find((x) => x.accountId === 'edge:Default');
+  assert(def?.state === 'syncing', 'an in-flight re-sync shows syncing over the synced health');
+  assert(
+    def?.progress.done === 1 && def.progress.total === 2 && def.progress.pct === 50,
+    `done/total/pct from counts, got ${JSON.stringify(def?.progress)}`
+  );
+  assert(def?.progress.unit === 'cookies', 'unit round trips');
+
+  // Delete one profile: exactly that profile's cookies go; the other survives.
+  const delProfile = await call('/api/integrations/edge/accounts/edge%3AProfile%201', {
+    method: 'DELETE',
+    auth: a.token,
+  });
+  expectStatus(delProfile, 200, 'delete one Edge profile');
+  const remainingProfile1 = await prisma.cookie.count({
+    where: { userId: a.userId, browserSource: 'edge', browserProfile: 'Profile 1' },
+  });
+  assert(remainingProfile1 === 0, 'the deleted profile has no cookies left');
+  const remainingDefault = await prisma.cookie.count({
+    where: { userId: a.userId, browserSource: 'edge', browserProfile: 'Default' },
+  });
+  assert(remainingDefault === 2, "the other profile's cookies are untouched");
+  edge = await accountsOf(a.token, 'edge');
+  assert(
+    edge.length === 1 && edge[0].accountId === 'edge:Default',
+    'only the surviving Edge profile is listed'
+  );
+
+  // Delete the last profile: its cookies and its progress row go too.
+  const delDefault = await call('/api/integrations/edge/accounts/edge%3ADefault', {
+    method: 'DELETE',
+    auth: a.token,
+  });
+  expectStatus(delDefault, 200, 'delete the last Edge profile');
+  const edgeCookies = await prisma.cookie.count({
+    where: { userId: a.userId, browserSource: 'edge' },
+  });
+  assert(edgeCookies === 0, 'all Edge cookies are gone');
+  const edgeProgress = await prisma.integrationSyncProgress.count({
+    where: { userId: a.userId, provider: 'edge', accountId: 'edge:Default' },
+  });
+  assert(edgeProgress === 0, 'the profile progress row is gone');
+}
+
+/** A legacy empty-profile cookie snapshot maps to the `default` account. */
+async function legacyCookieProfileIsDefault(users: Users): Promise<void> {
+  const { a } = users();
+  await prisma.integration.create({
+    data: { userId: a.userId, name: 'chrome', type: 'DATA_SOURCE', status: 'CONNECTED' },
+  });
+  await seedCookie(a.userId, 'chrome', '', '.legacy.com', 'old');
+  const chrome = await accountsOf(a.token, 'chrome');
+  assert(
+    chrome.length === 1 && chrome[0].accountId === 'default',
+    `legacy '' profile is the default account, got ${JSON.stringify(chrome.map((x) => x.accountId))}`
+  );
+  const del = await call('/api/integrations/chrome/accounts/default', {
+    method: 'DELETE',
+    auth: a.token,
+  });
+  expectStatus(del, 200, 'delete the legacy Chrome cookie account');
+  const left = await prisma.cookie.count({ where: { userId: a.userId, browserSource: 'chrome' } });
+  assert(left === 0, 'the legacy cookie rows are removed');
+}
+
+/** browser_fingerprint has one `default` account; delete drops its row. */
+async function fingerprintDeleteRemovesRow(users: Users): Promise<void> {
+  const { a } = users();
+  await prisma.integration.create({
+    data: {
+      userId: a.userId,
+      name: 'browser_fingerprint',
+      type: 'DATA_SOURCE',
+      status: 'CONNECTED',
+      config: { fingerprint: { navigator: {}, screen: {} } },
+    },
+  });
+  const list = await accountsOf(a.token, 'browser_fingerprint');
+  assert(list.length === 1 && list[0].accountId === 'default', 'one default fingerprint account');
+  const del = await call('/api/integrations/browser_fingerprint/accounts/default', {
+    method: 'DELETE',
+    auth: a.token,
+  });
+  expectStatus(del, 200, 'delete the fingerprint account');
+  const rows = await prisma.integration.count({
+    where: { userId: a.userId, name: 'browser_fingerprint' },
+  });
+  assert(rows === 0, 'the fingerprint integration row is gone');
+  const again = await call('/api/integrations/browser_fingerprint/accounts/default', {
+    method: 'DELETE',
+    auth: a.token,
+  });
+  expectStatus(again, 404, 'a removed fingerprint account is gone');
+}
+
 async function internalWriterPath(users: Users): Promise<void> {
   const { a } = users();
   const res = await call('/api/integrations/linkedin/accounts/li-internal/progress', {
@@ -292,6 +432,18 @@ export function cases(users: Users): Array<{ name: string; fn: () => Promise<voi
     },
     { name: 'Plaid items are accounts; delete one', fn: () => plaidItemsAreAccounts(users) },
     { name: 'todo cleanup hooks answer 501 and keep data', fn: () => todoHooksRefuse(users) },
+    {
+      name: 'cookie profiles are separate accounts; delete one keeps the other',
+      fn: () => cookieProfilesAreAccounts(users),
+    },
+    {
+      name: 'legacy empty-profile cookies are the default account',
+      fn: () => legacyCookieProfileIsDefault(users),
+    },
+    {
+      name: 'browser_fingerprint delete removes its row',
+      fn: () => fingerprintDeleteRemovesRow(users),
+    },
     { name: 'delta poll: changed flag, cursor, identical view', fn: () => deltaPoll(users) },
     {
       name: 'LinkedIn read-time settle: list and delta agree',

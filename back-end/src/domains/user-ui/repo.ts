@@ -1,6 +1,7 @@
 export {
   activateUserUiVersion,
   createUserUiVersion,
+  findAgentOwnerId,
   findActiveUserUiVersion,
   listUserUiVersions,
   readUserUiFile,

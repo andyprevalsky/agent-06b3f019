@@ -9956,9 +9956,8 @@ def _seed_local_bad_amazon_auth_scenario(user_id: str, auth_realm: str) -> dict:
         "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
         "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
         f"{source}, {profile}, NULL, NULL) "
-        'ON CONFLICT ("userId", origin, username) DO UPDATE SET '
+        'ON CONFLICT ("userId", origin, username, "browserSource", "browserProfile") DO UPDATE SET '
         '"encryptedPassword" = EXCLUDED."encryptedPassword", "dateLastUsed" = EXCLUDED."dateLastUsed", '
-        '"browserSource" = EXCLUDED."browserSource", "browserProfile" = EXCLUDED."browserProfile", '
         '"disabledAt" = NULL, "disabledReason" = NULL RETURNING id), '
         'upsert_pwd2 AS (INSERT INTO "BrowserPassword" '
         '(id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", '
@@ -9967,9 +9966,8 @@ def _seed_local_bad_amazon_auth_scenario(user_id: str, auth_realm: str) -> dict:
         "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
         "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
         f"{source}, {profile}, NULL, NULL) "
-        'ON CONFLICT ("userId", origin, username) DO UPDATE SET '
+        'ON CONFLICT ("userId", origin, username, "browserSource", "browserProfile") DO UPDATE SET '
         '"encryptedPassword" = EXCLUDED."encryptedPassword", "dateLastUsed" = EXCLUDED."dateLastUsed", '
-        '"browserSource" = EXCLUDED."browserSource", "browserProfile" = EXCLUDED."browserProfile", '
         '"disabledAt" = NULL, "disabledReason" = NULL RETURNING id) '
         "SELECT "
         "(SELECT id FROM upsert_bundle), "

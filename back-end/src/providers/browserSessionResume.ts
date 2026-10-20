@@ -1,5 +1,6 @@
 import { withOwnedResumeTransport } from './browser/resumeTransport';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
+import { findEnabledSessionPasswords } from './browserPasswords';
 import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
 import { createLogger } from './logger';
@@ -158,19 +159,8 @@ async function findUserSettings(userId: string): Promise<UserSettings | null> {
   });
 }
 
-async function findPasswords(userId: string) {
-  return prisma.browserPassword.findMany({
-    where: { userId, disabledAt: null },
-    select: {
-      id: true,
-      origin: true,
-      username: true,
-      encryptedPassword: true,
-      dateLastUsed: true,
-    },
-    orderBy: { dateLastUsed: 'desc' },
-  });
-}
+/** One enabled saved login per origin+username (shared reader preference). */
+const findPasswords = findEnabledSessionPasswords;
 
 const PASSKEY_SIGNCOUNT_RESERVE_BLOCK = 100n;
 

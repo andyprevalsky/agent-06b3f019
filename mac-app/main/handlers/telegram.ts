@@ -1,26 +1,18 @@
 import { BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import { TelegramSync } from '../services/messaging/platforms/telegram/TelegramSync';
-import { IntegrationCache } from '../services/sync/IntegrationCache';
-import { config } from '../base/config';
 import { getErrorMessage } from '../../shared/utils/error';
 import { logConsoleError, logIpc } from '../base/logger';
 import { getLocalMachineDataSession } from './machine-session';
 
+/** Register every connected account (one backend row per Telegram user id), then sync. */
 async function registerTelegramIntegration(): Promise<void> {
   const { session } = await getLocalMachineDataSession();
   if (!session) return;
-  const response = await fetch(`${config.apiUrl}/api/integrations/telegram/connect`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${session.access_token}`,
-      'Content-Type': 'application/json',
-    },
-  });
-  if (!response.ok) {
-    logConsoleError('Telegram', 'Failed to register integration', await response.text());
+  const registered = await TelegramSync.registerConnectedAccounts();
+  if (registered === 0) {
+    logConsoleError('Telegram', 'Failed to register integration', 'no account registered');
     return;
   }
-  IntegrationCache.invalidate();
   void TelegramSync.syncHistorical().catch((error) =>
     logConsoleError('Telegram', 'Historical sync error', error)
   );
@@ -49,17 +41,21 @@ export function registerTelegramStatusHandlers(): void {
   ipcMain.handle('telegram:hasSession', () => TelegramSync.hasSession());
   ipcMain.handle('telegram:hasApiCredentials', () => TelegramSync.hasApiCredentials());
   ipcMain.handle('telegram:isConnected', () => TelegramSync.isConnected());
+  ipcMain.handle('telegram:listAccounts', () => TelegramSync.listAccounts());
 
-  ipcMain.handle('telegram:syncHistorical', async (_, messagesPerDialog?: number) => {
-    try {
-      const { session, error } = await getLocalMachineDataSession();
-      if (!session) return { success: false, error };
-      const count = await TelegramSync.syncHistorical(messagesPerDialog);
-      return { success: true, count };
-    } catch (error) {
-      return { success: false, error: getErrorMessage(error) || 'Historical sync failed' };
+  ipcMain.handle(
+    'telegram:syncHistorical',
+    async (_, messagesPerDialog?: number, accountId?: string) => {
+      try {
+        const { session, error } = await getLocalMachineDataSession();
+        if (!session) return { success: false, error };
+        const count = await TelegramSync.syncHistorical(messagesPerDialog, accountId);
+        return { success: true, count };
+      } catch (error) {
+        return { success: false, error: getErrorMessage(error) || 'Historical sync failed' };
+      }
     }
-  });
+  );
 }
 
 export function registerTelegramConnectionHandlers(): void {
@@ -89,9 +85,9 @@ export function registerTelegramConnectionHandlers(): void {
     }
   });
 
-  ipcMain.handle('telegram:logout', async () => {
+  ipcMain.handle('telegram:logout', async (_, accountId?: string) => {
     try {
-      await TelegramSync.logout();
+      await TelegramSync.logout(typeof accountId === 'string' ? accountId : undefined);
       return { success: true };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) || 'Logout failed' };

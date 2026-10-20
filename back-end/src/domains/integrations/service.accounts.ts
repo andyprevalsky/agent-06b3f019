@@ -17,6 +17,7 @@ import {
   findIntegrationAccount,
   listAccountRowSources,
   listActivePlaidItemSources,
+  listCookieProfileSources,
 } from './repo.accounts';
 import { accountSourcesChangedSince, listProgressForUser } from './repo.progress';
 import * as service from './service';
@@ -26,7 +27,11 @@ import {
   type IntegrationLane,
 } from './service.accountRegistry';
 import { buildAccountsView, type AccountViewRow } from './service.accountsView';
-import { LINKEDIN_INTEGRATION_NAME, settleLinkedInSync } from './service.linkedinSync';
+import {
+  LINKEDIN_INTEGRATION_NAME,
+  settleLinkedInAccounts,
+  settleLinkedInSync,
+} from './service.linkedinSync';
 import { clearAccountProgress, clearProviderProgress } from './service.progress';
 import {
   assertProviderSlug,
@@ -64,13 +69,17 @@ export { InvalidAccountKeyError };
  * progress.
  */
 export async function getIntegrationsWithAccounts(userId: string) {
-  const [base, progress, plaidItems] = await Promise.all([
+  const [base, progress, plaidItems, cookieProfiles] = await Promise.all([
     service.getIntegrations(userId),
     listProgressForUser(userId),
     listActivePlaidItemSources(userId),
+    listCookieProfileSources(userId),
   ]);
   const rows: AccountViewRow[] = base.integrations;
-  const accountsByProvider = buildAccountsView({ rows, plaidItems, progress });
+  const accountsByProvider = settleLinkedInAccounts(
+    buildAccountsView({ rows, plaidItems, cookieProfiles, progress }),
+    rows
+  );
   const integrations = base.integrations.map((integration) => ({
     ...integration,
     accounts: accountsByProvider[integration.name] ?? ([] as IntegrationAccount[]),
@@ -95,39 +104,52 @@ export async function getAccountsDelta(
   }
   // Same Google scope-health and LinkedIn settle derivations as the full list,
   // so both views agree.
-  const [rows, plaidItems, progress] = await Promise.all([
+  const [rows, plaidItems, cookieProfiles, progress] = await Promise.all([
     listAccountRowSources(userId)
       .then(withGoogleScopeHealth)
       .then((light) => settleLightLinkedInRow(userId, light)),
     listActivePlaidItemSources(userId),
+    listCookieProfileSources(userId),
     listProgressForUser(userId),
   ]);
   return {
     cursor,
     changed: true,
-    accountsByProvider: buildAccountsView({ rows, plaidItems, progress }),
+    accountsByProvider: settleLinkedInAccounts(
+      buildAccountsView({ rows, plaidItems, cookieProfiles, progress }),
+      rows
+    ),
   };
 }
 
 /**
  * A SYNCING LinkedIn row whose export agent ended reads SYNC_FAILED in the full
  * list (settleLinkedInSync); apply the same read-time settle to the light rows.
- * Only that row's config is read, and only while it is SYNCING.
+ * Only SYNCING LinkedIn rows' configs are read (one per LinkedIn account).
  */
 async function settleLightLinkedInRow<T extends AccountViewRow>(
   userId: string,
   rows: T[]
 ): Promise<T[]> {
-  const syncing = rows.find(
+  const syncing = rows.filter(
     (row) => row.name === LINKEDIN_INTEGRATION_NAME && row.status === 'SYNCING'
   );
-  if (syncing === undefined) return rows;
-  const stored = await findIntegrationAccount(userId, syncing.name, syncing.accountId);
-  if (stored === null) return rows;
-  const [settled] = await settleLinkedInSync(userId, [stored]);
-  return rows.map((row) =>
-    row === syncing ? { ...row, status: settled.status, failureReason: settled.failureReason } : row
+  if (syncing.length === 0) return rows;
+  const settled = new Map<T, { status: string; failureReason: string | null }>();
+  await Promise.all(
+    syncing.map(async (row) => {
+      const stored = await findIntegrationAccount(userId, row.name, row.accountId);
+      if (stored === null) return;
+      const [result] = await settleLinkedInSync(userId, [stored]);
+      settled.set(row, result);
+    })
   );
+  return rows.map((row) => {
+    const result = settled.get(row);
+    return result === undefined
+      ? row
+      : { ...row, status: result.status, failureReason: result.failureReason };
+  });
 }
 
 export async function deleteIntegrationAccount(

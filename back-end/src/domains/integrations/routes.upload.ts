@@ -13,6 +13,13 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { UPLOAD_LIMITS } from './config';
 import * as service from './service';
+import { sendIMessageDeviceUpload } from './routes.imessageDevice';
+import {
+  connectTelegramAccount,
+  telegramAccountIdSchema,
+  telegramConnectSchema,
+  uploadTelegramAccountBatch,
+} from './uploadService.telegram';
 
 const log = createLogger('Integrations');
 const router = Router({ mergeParams: true });
@@ -58,49 +65,6 @@ router.post(
           log.error('Error cleaning up file', {
             error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
           });
-        }
-      }
-      throw error;
-    }
-  })
-);
-
-/** POST /api/integrations/linkedin/upload */
-router.post(
-  '/linkedin/upload',
-  authenticateMachineUpload,
-  upload.single('file') as unknown as RequestHandler,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    try {
-      const userId = req.user!.id;
-
-      if (req.file === undefined || req.file === null) {
-        return res.status(400).json({ error: 'No file uploaded' });
-      }
-
-      const filePath = req.file.path;
-      const fileName = req.file.originalname;
-
-      if (!fileName.toLowerCase().endsWith('.zip')) {
-        fs.unlinkSync(filePath);
-        return res.status(400).json({ error: 'File must be a .zip file' });
-      }
-
-      try {
-        const result = await service.processLinkedInUpload(userId, filePath, fileName);
-        return res.json({ message: 'LinkedIn data imported successfully', ...result });
-      } catch (parseError: unknown) {
-        return res.status(500).json({
-          error: 'Failed to parse LinkedIn data',
-          details: parseError instanceof Error ? parseError.message : 'Unknown error',
-        });
-      }
-    } catch (error: unknown) {
-      if (req.file !== undefined && req.file !== null) {
-        try {
-          fs.unlinkSync(req.file.path);
-        } catch {
-          // expected — file may already be removed
         }
       }
       throw error;
@@ -213,11 +177,14 @@ router.post(
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body;
+    const { contacts, accessedAt, account } = req.body;
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({ error: 'contacts array is required' });
     }
+
+    // One account per Mac (I1): stored synchronously, 410 for a removed Mac.
+    if (account !== undefined) return sendIMessageDeviceUpload(res, userId, contacts, account);
 
     const result = await service.processIMessageUpload(userId, contacts, accessedAt);
     res.json({
@@ -260,27 +227,55 @@ router.post(
   })
 );
 
-/** POST /api/integrations/telegram/connect */
+/**
+ * POST /api/integrations/telegram/connect
+ * Body `{ accountId, label?, claimLegacy? }` connects ONE Telegram account
+ * (accountId = Telegram user id); an empty body is the legacy single account.
+ */
 router.post(
   '/telegram/connect',
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const integration = await service.processTelegramConnect(userId);
+    const parsed = telegramConnectSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.errors[0]?.message ?? 'Invalid body' });
+    }
+    const { accountId } = parsed.data;
+    const integration =
+      accountId === undefined
+        ? await service.processTelegramConnect(userId)
+        : await connectTelegramAccount(userId, { ...parsed.data, accountId });
     res.json({ message: 'Telegram connected successfully', integration });
   })
 );
 
-/** POST /api/integrations/telegram/upload */
+/**
+ * POST /api/integrations/telegram/upload
+ * With `accountId` the batch belongs to that connected account (404 when it
+ * is not connected); without it, the legacy single account.
+ */
 router.post(
   '/telegram/upload',
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body;
+    const { contacts, accessedAt, accountId } = req.body;
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({ error: 'contacts array is required' });
+    }
+
+    if (accountId !== undefined) {
+      const parsedAccount = telegramAccountIdSchema.safeParse(accountId);
+      if (!parsedAccount.success) return res.status(400).json({ error: 'Invalid accountId' });
+      const at = typeof accessedAt === 'string' ? accessedAt : undefined;
+      const scoped = await uploadTelegramAccountBatch(userId, parsedAccount.data, contacts, at);
+      if (scoped === null) return res.status(404).json({ error: 'TELEGRAM_ACCOUNT_NOT_CONNECTED' });
+      return res.json({
+        message: 'Telegram payload received, processing in background',
+        ...scoped,
+      });
     }
 
     const result = await service.processTelegramUpload(userId, contacts, accessedAt);

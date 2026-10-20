@@ -8,19 +8,20 @@
  *
  * State precedence: a provider health of `needs_reconnect` always wins (only
  * re-consent fixes it); otherwise a progress row, when present, is
- * authoritative; otherwise the legacy health (row status / credential state).
+ * authoritative; otherwise the legacy health (row status / credential state;
+ * a Gmail row's SYNCING lease makes an address without progress `idle`, never
+ * `syncing`).
  */
 
-import type { EmailCredentialSource, PlaidItemSource } from './repo.accounts';
+import type { CookieProfileSource, EmailCredentialSource, PlaidItemSource } from './repo.accounts';
 import type { ProgressRow } from './repo.progress';
 import { resolveAccountAdapter } from './service.accountRegistry';
+import { asSyncState, iso, progressOf, snapshotOf } from './service.progressSnapshot';
 import {
-  SYNC_STATES,
+  cookieAccountStorageId,
   toWireAccountId,
   type AccountsByProvider,
   type IntegrationAccount,
-  type IntegrationAccountProgress,
-  type ProgressSnapshot,
   type SyncState,
 } from './syncAccountsContract';
 
@@ -55,13 +56,6 @@ const ROW_STATUS_HEALTH: Record<string, SyncState> = {
   NOT_CONNECTED: 'idle',
 };
 
-const iso = (value: Date | null): string | null => (value === null ? null : value.toISOString());
-const num = (value: bigint | null): number | null => (value === null ? null : Number(value));
-
-function asSyncState(value: string): SyncState {
-  return (SYNC_STATES as readonly string[]).includes(value) ? (value as SyncState) : 'idle';
-}
-
 function rowAccount(row: AccountViewRow): KnownAccount {
   const health = ROW_STATUS_HEALTH[row.status] ?? 'idle';
   return {
@@ -79,7 +73,9 @@ function credentialAccounts(row: AccountViewRow): KnownAccount[] {
   const accounts: KnownAccount[] = [];
   for (const credential of row.emailCredentials ?? []) {
     if (credential.email === null || credential.email === '') continue;
-    let health: SyncState = row.status === 'SYNCING' ? 'syncing' : 'synced';
+    // The shared row's SYNCING is a job lease, not a per-address claim: an address
+    // only reads `syncing` from its own progress row. Without one it is queued.
+    let health: SyncState = row.status === 'SYNCING' ? 'idle' : 'synced';
     if (credential.state === 'needs_reconnect') health = 'needs_reconnect';
     else if (credential.state === 'sync_failed') health = 'failed';
     accounts.push({
@@ -90,7 +86,8 @@ function credentialAccounts(row: AccountViewRow): KnownAccount[] {
       health,
       // The shared row's sync time is not a per-address claim.
       lastSyncAt: null,
-      lastError: health === 'synced' || health === 'syncing' ? null : credential.lastErrorReason,
+      lastError:
+        health === 'failed' || health === 'needs_reconnect' ? credential.lastErrorReason : null,
     });
   }
   return accounts;
@@ -115,50 +112,39 @@ function plaidAccounts(row: AccountViewRow, items: PlaidItemSource[]): KnownAcco
     });
 }
 
-function knownAccountsOf(row: AccountViewRow, plaidItems: PlaidItemSource[]): KnownAccount[] {
+/**
+ * A cookie provider row fans out to one account per synced browser profile.
+ * A browser row with no stored cookies yet (connected but never synced, or
+ * cookies only reported through progress) falls back to its single legacy
+ * `default` account so the connected row never disappears.
+ */
+function cookieProfileAccounts(
+  row: AccountViewRow,
+  cookieProfiles: CookieProfileSource[]
+): KnownAccount[] {
+  const mine = cookieProfiles.filter((profile) => profile.browserSource === row.name);
+  if (mine.length === 0) return [rowAccount(row)];
+  return mine.map((profile) => ({
+    provider: row.name,
+    storageAccountId: cookieAccountStorageId(row.name, profile.browserProfile),
+    rowId: row.id,
+    label: profile.browserProfile === '' ? null : profile.browserProfile,
+    health: 'synced' as SyncState,
+    lastSyncAt: profile.lastSyncAt ?? row.lastSuccessfulSyncAt ?? row.lastSyncAt,
+    lastError: null,
+  }));
+}
+
+function knownAccountsOf(
+  row: AccountViewRow,
+  plaidItems: PlaidItemSource[],
+  cookieProfiles: CookieProfileSource[]
+): KnownAccount[] {
   const kind = resolveAccountAdapter(row.name).list;
   if (kind === 'email_credentials') return credentialAccounts(row);
   if (kind === 'plaid_items') return plaidAccounts(row, plaidItems);
+  if (kind === 'browser_cookies') return cookieProfileAccounts(row, cookieProfiles);
   return [rowAccount(row)];
-}
-
-export function progressOf(row: ProgressRow | null, state: SyncState): IntegrationAccountProgress {
-  if (row === null) {
-    return {
-      pct: state === 'synced' ? 100 : null,
-      done: null,
-      total: null,
-      unit: null,
-      eta_sec: null,
-      phase: null,
-      startedAt: null,
-      updatedAt: null,
-    };
-  }
-  return {
-    pct: state === 'synced' ? 100 : row.pct,
-    done: num(row.done),
-    total: num(row.total),
-    unit: row.unit,
-    eta_sec: row.etaSec,
-    phase: row.phase,
-    startedAt: iso(row.startedAt),
-    updatedAt: iso(row.updatedAt),
-  };
-}
-
-export function snapshotOf(row: ProgressRow): ProgressSnapshot {
-  const state = asSyncState(row.state);
-  return {
-    provider: row.provider,
-    accountId: toWireAccountId(row.accountId),
-    runId: row.runId,
-    seq: row.seq,
-    state,
-    progress: progressOf(row, state),
-    lastSyncAt: iso(row.lastSyncedAt),
-    lastError: row.lastError,
-  };
 }
 
 function toAccount(known: KnownAccount, progress: ProgressRow | null): IntegrationAccount {
@@ -184,6 +170,7 @@ function toAccount(known: KnownAccount, progress: ProgressRow | null): Integrati
 export function buildAccountsView(input: {
   rows: AccountViewRow[];
   plaidItems: PlaidItemSource[];
+  cookieProfiles: CookieProfileSource[];
   progress: ProgressRow[];
 }): AccountsByProvider {
   const progressByKey = new Map(
@@ -195,14 +182,17 @@ export function buildAccountsView(input: {
   };
 
   for (const row of input.rows) {
-    for (const known of knownAccountsOf(row, input.plaidItems)) {
+    for (const known of knownAccountsOf(row, input.plaidItems, input.cookieProfiles)) {
       const key = `${known.provider}\u0000${known.storageAccountId}`;
       push(toAccount(known, progressByKey.get(key) ?? null));
       progressByKey.delete(key);
     }
   }
-  // A first sync can report progress before its account row exists.
+  // A first sync can report progress before its account row exists. An email
+  // address (Gmail) is always connected before its first sync, so its unmatched
+  // progress is a late write for a removed address, not a new account.
   for (const progress of progressByKey.values()) {
+    if (resolveAccountAdapter(progress.provider).list === 'email_credentials') continue;
     const snapshot = snapshotOf(progress);
     push({
       provider: snapshot.provider,

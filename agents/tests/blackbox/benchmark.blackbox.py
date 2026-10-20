@@ -12938,6 +12938,41 @@ async def test_minted_benchmark_preserves_child_harness_outcomes():
             assert result.benchmark_status == expected, (stage, outcome, result.benchmark_status)
 
 
+def test_bad_amazon_password_fixture_upserts_on_the_browser_password_unique_key():
+    """The forced bad-password fixture must name BrowserPassword's real unique key.
+
+    Postgres rejects an ON CONFLICT target that matches no unique index, so a
+    fixture left on the old (userId, origin, username) key fails outright once
+    saved logins are unique per browser source and profile.
+    """
+    import re
+
+    import benchmarks.run_benchmark as bench
+
+    schema = (Path(__file__).resolve().parents[3] / "back-end" / "prisma" / "schema.prisma").read_text()
+    model = re.search(r"model BrowserPassword \{(.*?)\n\}", schema, re.S)
+    assert model is not None
+    unique = re.search(r"@@unique\(\[([^\]]+)\]\)", model.group(1))
+    assert unique is not None
+    expected = [column.strip() for column in unique.group(1).split(",")]
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+    try:
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "bundle-id\tpwd-1\tpwd-2"
+        fixture = bench._seed_local_bad_amazon_auth_scenario("user-123", "amazon.com")
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert fixture["password_ids"] == ["pwd-1", "pwd-2"]
+    password_inserts = re.findall(
+        r'INSERT INTO "BrowserPassword".*?ON CONFLICT \(([^)]*)\)', queries[0], re.S
+    )
+    assert len(password_inserts) == 2
+    for target in password_inserts:
+        assert [column.strip().strip('"') for column in target.split(",")] == expected
+
+
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
     """Repeated live minted-account benchmarks should not buy a fresh AgentPhone number."""
     import benchmarks.run_benchmark as bench
@@ -24053,6 +24088,10 @@ async def run_all_tests():
     await r.record_async(
         "minted_child_harness_outcomes",
         test_minted_benchmark_preserves_child_harness_outcomes,
+    )
+    r.record(
+        "bad_amazon_password_fixture_unique_key",
+        test_bad_amazon_password_fixture_upserts_on_the_browser_password_unique_key,
     )
     r.record(
         "minted_cleanup_preserves_identity",

@@ -1,9 +1,9 @@
 import { BrowserWindow, ipcMain } from 'electron';
 import { IMessageReader } from '../services/iMessageReader';
 import { IMessageSender } from '../services/iMessageSender';
-import { BatchUploader } from '../services/batchUploader';
+import { IMessageSync } from '../services/iMessageSync';
 import { getErrorMessage } from '../../shared/utils/error';
-import { logConsole, logConsoleError, logIpc } from '../base/logger';
+import { logConsoleError, logIpc } from '../base/logger';
 import { getLocalMachineDataSession } from './machine-session';
 
 export function registerIMessageHandlers(): void {
@@ -31,16 +31,10 @@ export function registerIMessageHandlers(): void {
       return result;
     }
 
-    const messages = await IMessageReader.readMessages();
-    const contacts = new Set(messages.map((message) => message.contact_id));
-    logConsole('IPC', `Uploading ${messages.length} messages from ${contacts.size} contacts`);
+    // One account per Mac: a batched device sync that creates (or claims) this
+    // Mac's account and streams real per-batch progress to the window.
     const window = BrowserWindow.fromWebContents(event.sender);
-    const result = await BatchUploader.uploadInBatches(
-      'imessage',
-      messages,
-      session.access_token,
-      window
-    );
+    const result = await IMessageSync.connect(window);
     logIpc('OUT', 'imessage:startUpload', result);
     return result;
   });

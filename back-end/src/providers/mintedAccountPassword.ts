@@ -13,6 +13,10 @@
 
 import type { Prisma } from '@prisma/client';
 import { canonicalAuthRealm } from './authRealm';
+import {
+  MINTED_PASSWORD_BROWSER_SOURCE,
+  MINTED_PASSWORDLESS_BROWSER_SOURCE,
+} from './browserPasswords';
 import { createHmac } from './crypto';
 import { encryptPasswordForStorage } from './credentialEnvelope';
 import { createLogger } from './logger';
@@ -21,10 +25,7 @@ import * as repo from './authOptionsStore';
 const log = createLogger('MintedAccountPassword');
 
 export const MINTED_NEW_PASSWORD_REF = 'pwd:new';
-/** Saved-login rows created at sign-up carry this source, like "chrome" for synced ones. */
-export const MINTED_PASSWORD_BROWSER_SOURCE = 'agent_signup';
-/** A minted identity that signed in on a site with no password (code or link sign-in). */
-export const MINTED_PASSWORDLESS_BROWSER_SOURCE = 'agent_passwordless';
+export { MINTED_PASSWORD_BROWSER_SOURCE, MINTED_PASSWORDLESS_BROWSER_SOURCE };
 
 // A dedicated secret keeps minted passwords stable across API-key rotations and
 // out of the shared service credential's blast radius; the API key remains the

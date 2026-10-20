@@ -111,6 +111,12 @@ export async function userExists(userId: string): Promise<boolean> {
   return user !== null;
 }
 
+/** The owning user of an agent, or null when it does not exist. */
+export async function findAgentOwnerId(agentId: string): Promise<string | null> {
+  const agent = await prisma.agent.findUnique({ where: { id: agentId }, select: { userId: true } });
+  return agent?.userId ?? null;
+}
+
 /**
  * The publishing agent and its root, when the agent belongs to `userId`.
  * Walks parentAgentId (tree depth, not tree size); [] when not the user's.

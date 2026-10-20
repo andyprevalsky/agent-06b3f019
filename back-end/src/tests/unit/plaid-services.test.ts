@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
@@ -38,14 +37,16 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
     passed += 1;
-    console.log(`  ✅ ${name}`);
+    process.stdout.write(`  ✅ ${name}\n`);
   } catch (err) {
     failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
-    console.log(`  ❌ ${name}`);
+    process.stdout.write(`  ❌ ${name}\n`);
   }
 }
 
 async function cleanup(userId: string): Promise<void> {
+  // Every sync reports per-Item progress (plan row I5); the row has no FK to User.
+  await prisma.integrationSyncProgress.deleteMany({ where: { userId, provider: 'plaid' } });
   await prisma.plaidTransaction.deleteMany({ where: { userId } });
   await prisma.plaidAccount.deleteMany({ where: { userId } });
   await prisma.plaidItem.deleteMany({ where: { userId } });
@@ -344,16 +345,16 @@ async function main(): Promise<void> {
   await prisma.$disconnect();
 
   if (failures.length > 0) {
-    console.error('\nFailures:');
-    for (const failure of failures) console.error(`- ${failure}`);
+    process.stderr.write('\nFailures:\n');
+    for (const failure of failures) process.stderr.write(`- ${failure}\n`);
     process.exit(1);
   }
 
-  console.log(`\n${passed}/4 Plaid service tests passed`);
+  process.stdout.write(`\n${passed}/4 Plaid service tests passed\n`);
 }
 
 main().catch(async (error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   await prisma.$disconnect();
   process.exit(1);
 });

@@ -15,6 +15,7 @@ import {
 import * as graphRepo from './repoGraph';
 import { AgentGraphError, type GraphCaller } from './agentGraphService';
 import { sendGraphMessage, type SendResult } from './agentGraphSendService';
+import { markAwaitingParent } from '../../providers/codeSessions/spawn';
 
 export type { QuestionRoute };
 
@@ -80,5 +81,11 @@ export async function askQuestion(caller: GraphCaller, input: AskInput): Promise
     { to: route.agent_id, text: formatQuestionText(input), message_id: input.message_id },
     'question'
   );
+  // The spawning agent is blocked inside this code agent's spawn: pause the
+  // session and hand it the question instead of both waiting forever (C11).
+  await markAwaitingParent(caller.self.id, {
+    message_id: sent.message_id,
+    question: input.question,
+  });
   return { ...route, deliver_to: 'agent', status: sent.status, message_id: sent.message_id };
 }

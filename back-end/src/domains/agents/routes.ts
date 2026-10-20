@@ -21,6 +21,7 @@ import statusRoutes from './routes.status';
 import archiveRoutes from './routes.archive';
 import reportBugRoutes from './routes.reportBug';
 import phoneRoutes from './routes.phone';
+import codeAgentRoutes from './routes.codeAgents';
 import { handleRouteError, noCacheHeaders } from './routes.helpers';
 
 const router = Router();
@@ -84,6 +85,7 @@ router.get(
   })
 );
 
+router.use('/', codeAgentRoutes);
 router.use('/', archiveRoutes);
 router.use('/', alertRoutes);
 router.use('/', reportBugRoutes);

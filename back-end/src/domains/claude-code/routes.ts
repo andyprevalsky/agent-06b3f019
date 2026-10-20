@@ -2,7 +2,11 @@
  * Claude Code session routes -- thin controller layer.
  *
  * POST /api/claude-code-session/create   - Create a new E2B sandbox session
- * POST /api/claude-code-session/close    - Close a session (kill sandbox)
+ * POST /api/claude-code-session/close    - Close a session (checkpoint + pause a persistent
+ *                                          code session's sandbox; kill legacy sessions)
+ * POST /api/claude-code-session/checkpoint - Checkpoint a running task's code session
+ * GET  /api/claude-code-session/code-sessions/:id    - Owned code session (404 otherwise)
+ * DELETE /api/claude-code-session/code-sessions/:id - Retire it (kill + delete checkpoints)
  * GET  /api/claude-code-session/:taskId  - Get session info
  * GET  /api/claude-code-session/agent/:agentId - Get all sessions for an agent
  * POST /api/claude-code-session/:taskId/output - Persist terminal output
@@ -16,6 +20,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
+import { registerCodeSessionRoutes, sendCodeSessionError } from './routes.codeSessions';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
 import {
   LocalTargetUnavailableError,
@@ -30,6 +35,49 @@ import { ProjectNotFoundForSessionError } from '../../providers/projects/session
 const log = createLogger('ClaudeCodeRoutes');
 const router = Router();
 
+registerCodeSessionRoutes(router);
+
+/**
+ * C14: a local session runs on the agent tree's Mac with the user's own login,
+ * in the folder they granted (no clone, Project restore or persistent code
+ * session: the work stays in that folder). Otherwise an E2B sandbox resumes or
+ * starts the agent's persistent code session.
+ */
+async function createSessionForTarget(body: unknown) {
+  const {
+    agent_id,
+    goal,
+    attachments,
+    github_repo_url,
+    user_id,
+    code_session_id,
+    lease_owner,
+    base_branch,
+    project_id,
+    target,
+  } = createSessionSchema.parse(body);
+  if (target === 'local') {
+    const local = await createLocalCodeSessionResponse({
+      agentId: agent_id,
+      goal,
+      provider: 'claude',
+      expectedUserId: user_id,
+    });
+    return { ...local, project: null };
+  }
+  return service.createSession({
+    agent_id,
+    goal,
+    attachments: attachments as FilePointer[] | undefined,
+    github_repo_url,
+    user_id,
+    code_session_id,
+    lease_owner,
+    base_branch,
+    project_id,
+  });
+}
+
 /**
  * POST /api/claude-code-session/create
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
@@ -41,30 +89,7 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { agent_id, goal, attachments, github_repo_url, user_id, project_id, target } =
-        createSessionSchema.parse(req.body);
-
-      // C14: a local session runs on the agent tree's Mac with the user's own
-      // login, in the folder they granted (no clone or Project restore).
-      const result =
-        target === 'local'
-          ? {
-              ...(await createLocalCodeSessionResponse({
-                agentId: agent_id,
-                goal,
-                provider: 'claude',
-                expectedUserId: user_id,
-              })),
-              project: null,
-            }
-          : await service.createSession({
-              agent_id,
-              goal,
-              attachments: attachments as FilePointer[] | undefined,
-              github_repo_url,
-              user_id,
-              project_id,
-            });
+      const result = await createSessionForTarget(req.body);
 
       res.json({
         success: true,
@@ -104,6 +129,7 @@ router.post(
         });
         return;
       }
+      if (sendCodeSessionError(res, error)) return;
       log.error('Failed to create Claude Code session', {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -123,9 +149,17 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { task_id, user_id, agent_id, additional_paths } = closeSessionSchema.parse(req.body);
+      const { task_id, user_id, agent_id, additional_paths, reason } = closeSessionSchema.parse(
+        req.body
+      );
 
-      const result = await service.closeSession({ task_id, user_id, agent_id, additional_paths });
+      const result = await service.closeSession({
+        task_id,
+        user_id,
+        agent_id,
+        additional_paths,
+        reason,
+      });
 
       res.json({
         success: true,

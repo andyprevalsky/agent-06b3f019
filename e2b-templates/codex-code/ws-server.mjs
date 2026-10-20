@@ -4,7 +4,10 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "fs";
 import { spawn, execFileSync } from "child_process";
@@ -78,11 +81,10 @@ const queuedTurns = [];
 let turnsClosed = false;
 let codexThreadId = null;
 
-// After Codex exits the server keeps serving its final buffer so an agent
-// activity that detached for a deploy (or crashed and is retried after its 5m
-// heartbeat timeout) can reattach and read the result. Closing the session
-// (SIGTERM / sandbox kill) still exits immediately.
-const REATTACH_LINGER_MS = 15 * 60 * 1000;
+// After Codex exits the server keeps serving its final buffer until the
+// session is closed, so a detached or retried activity can always reattach.
+// There is no linger deadline: an unattended sandbox pauses on its E2B idle
+// window. Closing the session (SIGTERM / sandbox pause or kill) exits at once.
 
 function classifyOAuthFallbackReason(message) {
   // Restricted to explicit ChatGPT/OpenAI plan-exhaustion wording. Broad terms
@@ -114,6 +116,68 @@ function classifyOAuthFallbackReason(message) {
   }
   return null;
 }
+// C15: Codex's own rate-limit snapshot (the rollout's latest `token_count`
+// event: rate_limits.{primary,secondary}.used_percent / resets_at and
+// rate_limit_reached_type) says whether a failed turn hit a usage limit. A
+// structured signal, so the code-agent activity never classifies prose.
+function newestCodexRollout() {
+  const root = join(homedir(), ".codex", "sessions");
+  let newest = null;
+  const walk = (dir, depth) => {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path, depth + 1);
+      else if (entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
+        const mtime = statSync(path).mtimeMs;
+        if (!newest || mtime > newest.mtime) newest = { path, mtime };
+      }
+    }
+  };
+  walk(root, 0);
+  return newest?.path ?? null;
+}
+
+function codexUsageLimit() {
+  const rollout = newestCodexRollout();
+  if (!rollout) return null;
+  let limits = null;
+  try {
+    const text = readFileSync(rollout, "utf8").slice(-512 * 1024);
+    for (const line of text.split("\n").reverse()) {
+      if (!line.includes('"token_count"')) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry?.type === "event_msg" && entry.payload?.type === "token_count") {
+          limits = entry.payload.rate_limits ?? null;
+          if (limits) break;
+        }
+      } catch {
+        // a torn line while Codex is writing
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (!limits) return null;
+  const windows = [limits.primary, limits.secondary].filter(Boolean);
+  const exhausted = windows.filter((window) => Number(window.used_percent) >= 100);
+  if (!limits.rate_limit_reached_type && exhausted.length === 0) return null;
+  const resets = (exhausted.length > 0 ? exhausted : windows)
+    .map((window) => window.resets_at)
+    .filter((value) => typeof value === "number");
+  return {
+    reached_type: limits.rate_limit_reached_type ?? null,
+    resets_at: resets.length > 0 ? Math.max(...resets) : null,
+  };
+}
+
 const wss = new WebSocketServer({ port: PORT });
 
 function broadcast(type, data) {
@@ -188,11 +252,13 @@ function renderCodexJsonLine(line) {
   if (event.type === "turn.failed") {
     const message = event.error?.message || event.message || "unknown error";
     oauthFallbackReason ??= classifyOAuthFallbackReason(message);
+    const usageLimit = codexUsageLimit();
     appendEvent({
       type: "error",
       raw_type: event.type,
       message,
       error: event.error || null,
+      ...(usageLimit ? { usage_limit: usageLimit } : {}),
     });
     return `[Codex] Turn failed: ${message}\n`;
   }
@@ -200,11 +266,13 @@ function renderCodexJsonLine(line) {
     const message =
       event.message || event.error?.message || JSON.stringify(event);
     oauthFallbackReason ??= classifyOAuthFallbackReason(message);
+    const usageLimit = codexUsageLimit();
     appendEvent({
       type: "error",
       raw_type: event.type,
       message,
       error: event.error || null,
+      ...(usageLimit ? { usage_limit: usageLimit } : {}),
     });
     return `[Codex] Error: ${message}\n`;
   }
@@ -565,10 +633,42 @@ if (CODEX_AUTH_JSON) {
   usingApiKey = true;
 }
 
+const CODEX_RESUME_SESSION_ID = /^[A-Za-z0-9-]{1,128}$/.test(
+  (process.env.CODEX_RESUME_SESSION_ID || "").trim(),
+)
+  ? process.env.CODEX_RESUME_SESSION_ID.trim()
+  : null;
+
 // home is /home/user in the E2B template.
 let workDir = projectMode ? PROJECT_WORKDIR : home;
 const REPO_WORKDIR = join(home, "workspace");
-if (GITHUB_REPO_URL && !projectMode) {
+// A resumed persistent code session already holds the repo (local branches,
+// commits, uncommitted edits): refresh the credentialed remote, never re-clone.
+if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
+  workDir = REPO_WORKDIR;
+  try {
+    const parsed = new URL(GITHUB_REPO_URL);
+    if (GITHUB_TOKEN) {
+      parsed.username = "x-access-token";
+      parsed.password = GITHUB_TOKEN;
+    }
+    try {
+      execFileSync("git", ["remote", "set-url", "origin", parsed.toString()], {
+        cwd: workDir,
+      });
+    } catch {
+      execFileSync("git", ["remote", "add", "origin", parsed.toString()], {
+        cwd: workDir,
+      });
+    }
+    writeFileSync(join(workDir, "AGENTS.md"), CODE_AGENT_SYSTEM_PROMPT);
+    log("info", "Resuming existing repository", { workDir });
+  } catch (err) {
+    log("error", "Failed to refresh resumed repository", {
+      error: err.message,
+    });
+  }
+} else if (GITHUB_REPO_URL && !projectMode) {
   try {
     const parsed = new URL(GITHUB_REPO_URL);
     if (!parsed.pathname.split("/").filter(Boolean).pop()) {
@@ -606,6 +706,97 @@ if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
   writeFileSync(join(workDir, "AGENTS.md"), CODE_AGENT_SYSTEM_PROMPT);
 }
 
+// Persistent code sessions work on their own branch (code-agent-persistent-
+// sessions.md §1b); same contract as the Claude Code ws-server.
+function gitRun(args, cwd) {
+  try {
+    const stdout = execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      input: "",
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    return { ok: true, out: String(stdout).trim() };
+  } catch (err) {
+    return { ok: false, out: String(err?.stderr || err?.message || "").trim() };
+  }
+}
+
+function prepareCodeSessionBranch(repoDir) {
+  const branch = (process.env.CODE_AGENT_BRANCH || "").trim();
+  if (!branch || !existsSync(join(repoDir, ".git"))) return null;
+  const base = (process.env.CODE_AGENT_BASE_BRANCH || "").trim();
+  if (!gitRun(["check-ref-format", "--branch", branch], repoDir).ok) {
+    log("warn", "Ignoring invalid code-session branch name", { branch });
+    return null;
+  }
+  const result = { branch, base: base || null, source: null, error: null };
+  if (gitRun(["rev-parse", "--verify", "-q", `refs/heads/${branch}`], repoDir).ok) {
+    const current = gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir);
+    if (current.out !== branch) {
+      const switched = gitRun(["checkout", branch], repoDir);
+      if (!switched.ok) result.error = switched.out.slice(0, 300);
+    }
+    result.source = "local";
+  } else if (
+    gitRun(
+      ["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+      repoDir,
+    ).ok
+  ) {
+    const created = gitRun(["checkout", "-B", branch, `origin/${branch}`], repoDir);
+    if (!created.ok) result.error = created.out.slice(0, 300);
+    result.source = "remote";
+  } else {
+    let start = null;
+    if (base) {
+      const fetched = gitRun(
+        ["fetch", "-q", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`],
+        repoDir,
+      );
+      if (fetched.ok) {
+        start = `origin/${base}`;
+        result.source = "base";
+      } else {
+        result.error = `base branch ${base} is not on the remote`;
+      }
+    } else {
+      gitRun(["remote", "set-head", "origin", "-a"], repoDir);
+      const defaultRef = gitRun(
+        ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+        repoDir,
+      );
+      start = defaultRef.ok && defaultRef.out ? defaultRef.out : "HEAD";
+      result.source = "default";
+    }
+    if (start) {
+      const created = gitRun(["checkout", "-B", branch, start], repoDir);
+      if (!created.ok) result.error = created.out.slice(0, 300);
+    }
+  }
+  result.current = gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir).out || null;
+  result.head = gitRun(["rev-parse", "-q", "--verify", "HEAD"], repoDir).out || null;
+  log(result.error ? "warn" : "info", "Code session branch prepared", result);
+  return result;
+}
+
+const codeSessionBranch =
+  GITHUB_REPO_URL && workDir === REPO_WORKDIR
+    ? prepareCodeSessionBranch(REPO_WORKDIR)
+    : null;
+if (codeSessionBranch) {
+  appendEvent({
+    type: "code_session_branch",
+    branch: codeSessionBranch.current || codeSessionBranch.branch,
+    base_branch: codeSessionBranch.base,
+    merge_target: (process.env.CODE_AGENT_MERGE_TARGET || "").trim() || null,
+    source: codeSessionBranch.source,
+    head: codeSessionBranch.head,
+    error: codeSessionBranch.error,
+  });
+}
+
 appendEvent({
   type: "session",
   status: "starting",
@@ -639,7 +830,13 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
     workDir,
     "-m",
     CODEX_MODEL,
-    ...(resume ? ["resume", resume.threadId, resume.text] : [sanitizedGoal]),
+    // A queued inbound turn continues the current thread; otherwise a
+    // persistent code session continues its previous Codex conversation.
+    ...(resume
+      ? ["resume", resume.threadId, resume.text]
+      : CODEX_RESUME_SESSION_ID
+        ? ["resume", CODEX_RESUME_SESSION_ID, sanitizedGoal]
+        : [sanitizedGoal]),
   ];
   // Rose agent tools as an MCP server (the backend writes ~/.rose/bin/rose at
   // session create). --ignore-user-config skips config.toml, so register it
@@ -779,4 +976,4 @@ appendEvent({
 });
 log("info", "Codex exited", { code: exitCode, signal });
 broadcast("exit", exitCode);
-setTimeout(() => shutdown(exitCode ?? 0), REATTACH_LINGER_MS);
+log("info", "Serving final buffer for reattach until closed", { code: exitCode });

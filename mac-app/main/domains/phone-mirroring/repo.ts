@@ -97,33 +97,6 @@ export async function captureMirroringWindow(
   return { bytes: source.thumbnail.toJPEG(jpegQuality), width: size.width, height: size.height };
 }
 
-/** IOPlatformUUID, or null when `ioreg` is unavailable. */
-export function readHardwareUuid(): string | null {
-  try {
-    const out = execFileSync('ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], {
-      encoding: 'utf8',
-      timeout: PROBE_TIMEOUT_MS,
-    });
-    return /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(out)?.[1] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** The Mac's user-visible name ("Andy's MacBook Pro"), falling back to the hostname. */
-export function readComputerName(): string {
-  try {
-    const name = execFileSync('scutil', ['--get', 'ComputerName'], {
-      encoding: 'utf8',
-      timeout: PROBE_TIMEOUT_MS,
-    }).trim();
-    if (name !== '') return name;
-  } catch {
-    // fall through to the hostname
-  }
-  return os.hostname();
-}
-
 // ---------------------------------------------------------------------------
 // Backend
 // ---------------------------------------------------------------------------

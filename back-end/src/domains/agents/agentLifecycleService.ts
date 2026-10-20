@@ -11,6 +11,7 @@ import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/ch
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
+import { assertCodeSessionShareTarget, recordCodeSessionShare } from './agentCodeSessionShare';
 import { createLogger } from '../../providers/logger';
 import { originDeviceFields } from './agentOriginService';
 import { resolvePriceLimitCents } from '../../providers/priceLimitDefaults';
@@ -194,6 +195,18 @@ async function serverCreateFields(
   };
 }
 
+/** Defaults and access checks every create body passes before any row is written. */
+async function applyCreateBodyRules(
+  body: CreateAgentBody,
+  userId: string,
+  benchmarkFlag: boolean
+): Promise<void> {
+  applyMemoryDefault(body, benchmarkFlag);
+  disableFastModeForWorldModel(body);
+  assertWorldModelModeAccess(body, userId);
+  await assertCodeSessionShareTarget(body, userId);
+}
+
 export async function createAgent(
   body: CreateAgentBody,
   userId: string,
@@ -208,9 +221,7 @@ export async function createAgent(
   applyFastModeDefault(body, userId);
 
   const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, userId, isBenchmark);
-  applyMemoryDefault(body, benchmarkFlag);
-  disableFastModeForWorldModel(body);
-  assertWorldModelModeAccess(body, userId);
+  await applyCreateBodyRules(body, userId, benchmarkFlag);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
   const projectId = await resolveAgentProjectId(body, userId);
@@ -258,6 +269,7 @@ export async function createAgent(
     projectId,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
+  await recordCodeSessionShare(body, userId, agent.agent.id);
 
   const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);
 

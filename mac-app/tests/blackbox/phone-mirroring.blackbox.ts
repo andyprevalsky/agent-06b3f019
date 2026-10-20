@@ -242,12 +242,17 @@ describe('phone-mirroring blackbox', () => {
     it('sends a salted hash of IOPlatformUUID, never the UUID itself', () => {
       const id = service.macDeviceId();
       const expected = createHash('sha256')
-        .update('rose-phone-mirroring-v1\0ABCDEF01-2345-6789-ABCD-EF0123456789')
+        .update('rose-mac-device-v1\0ABCDEF01-2345-6789-ABCD-EF0123456789')
         .digest('hex')
         .slice(0, 32);
       expect(id).toBe(expected);
       expect(id).not.toContain('ABCDEF01');
       expect(service.macDeviceId()).toBe(id);
+    });
+
+    it('is the shared per-Mac identity (one id per Mac across features)', async () => {
+      const identity = await import('../../main/services/deviceIdentity');
+      expect(service.macDeviceId()).toBe(identity.macDeviceId());
     });
 
     it('falls back to the Mac name when ioreg is unavailable', () => {

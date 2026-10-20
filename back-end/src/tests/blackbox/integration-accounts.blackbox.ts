@@ -22,7 +22,17 @@
  *   - claiming a legacy row moves its progress to the real account id
  *   - container providers: Gmail addresses and Plaid items are accounts; needs_reconnect wins
  *   - providers without account-scoped cleanup answer 501 and keep their data
+ *   - iMessage: one account per Mac device id; delete removes exactly that Mac's messages
+ *   - passwords/passkeys (I7): one row per source+profile, each a deletable account
+ *     with batch progress; credential readers prefer one login deterministically
  *   - validation 400s, per-user account cap, internal API-key writer path, auth 401
+ *   - Plaid per-item sync progress (I5): indeterminate total while syncing, final counts,
+ *     1 s coalescing, independent items, ITEM_LOGIN_REQUIRED, webhook re-sync reuses the row
+ *   - Telegram (I8): two accounts listed separately, per-account attribution, delete one
+ *     account's messages only, legacy claim and default-account delete
+ *   - Gmail sync (plan row I3, integration-accounts.gmail-sync.cases.ts): per-address
+ *     progress with total = messagesTotal, per-batch save, resume from cursor without
+ *     duplicates, independent addresses, unknown total stays null
  *
  * Usage: bash scripts/run-blackbox-tests.sh integration-accounts
  */
@@ -32,6 +42,11 @@ import { upsertIntegrationAccount } from '../../domains/integrations/repo.accoun
 import { reportIntegrationProgress } from '../../domains/integrations/service.progress';
 import { MAX_PROGRESS_ACCOUNTS_PER_USER } from '../../domains/integrations/syncAccountsContract';
 import { cases as advancedCases } from './integration-accounts.cases';
+import { imessageCases } from './integration-accounts.imessage.cases';
+import { passwordCases } from './integration-accounts.passwords.cases';
+import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
+import { telegramCases } from './integration-accounts.telegram.cases';
+import { gmailSyncCases } from './integration-accounts.gmail-sync.cases';
 import {
   accountsOf,
   anonymousSession,
@@ -348,7 +363,11 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
 
 async function cleanup(userIds: string[]): Promise<void> {
   const where = { userId: { in: userIds } };
+  await prisma.messageRecord.deleteMany({ where: { person: where } });
+  await prisma.person.deleteMany({ where });
   await prisma.integrationSyncProgress.deleteMany({ where });
+  await prisma.cookie.deleteMany({ where });
+  await prisma.cookieBundle.deleteMany({ where });
   await prisma.plaidTransaction.deleteMany({ where });
   await prisma.plaidAccount.deleteMany({ where });
   await prisma.plaidItem.deleteMany({ where });
@@ -360,7 +379,16 @@ async function cleanup(userIds: string[]): Promise<void> {
 async function main(): Promise<void> {
   sessions.a = await anonymousSession();
   sessions.b = await anonymousSession();
-  const tests = [...coreCases, ...advancedCases(() => ({ a: A(), b: B() }))];
+  const users = () => ({ a: A(), b: B() });
+  const tests = [
+    ...coreCases,
+    ...advancedCases(users),
+    ...plaidProgressCases(),
+    ...passwordCases(),
+    ...telegramCases(),
+    ...gmailSyncCases(),
+    ...imessageCases(users),
+  ];
   let failed = 0;
   try {
     for (const test of tests) {
