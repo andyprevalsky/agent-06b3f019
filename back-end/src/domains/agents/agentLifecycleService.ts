@@ -2,6 +2,7 @@
  * Agent lifecycle service — create and delete agents.
  */
 
+import { resolveAgentProjectId } from './agentProject';
 import { randomUUID } from '../../providers/crypto';
 import { startAgentWorkflowExecution } from '../../providers/temporal';
 import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
@@ -193,6 +194,7 @@ export async function createAgent(
   assertWorldModelModeAccess(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
+  const projectId = await resolveAgentProjectId(body, userId);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -234,6 +236,7 @@ export async function createAgent(
     workflowStartPhase: body.start_phase,
     workflowTaskQueue: body.task_queue,
     ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
+    projectId,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
 
@@ -255,6 +258,7 @@ export async function createAgent(
     fast_mode_cache_enabled: agent.agent.fastModeCacheEnabled,
     memory_enabled: agent.agent.memoryEnabled,
     world_model_mode: agent.agent.worldModelMode,
+    project_id: agent.agent.projectId,
     created_at: agent.agent.createdAt,
     updated_at: agent.agent.updatedAt,
     available_endpoints: getX402Endpoints(agent.agent.id),

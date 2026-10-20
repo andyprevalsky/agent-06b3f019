@@ -89,13 +89,53 @@ async function startRcaAgent(
   await createAgent(body, owner.ownerUserId, false, null, false, { githubRepoUrl: owner.repoUrl });
 }
 
-/** Create the incident's RCA agent unless it already exists. */
+/**
+ * An agent row whose workflow never started: the backend died after createAgent
+ * wrote the row. Rows younger than the grace may still be mid-start on another
+ * delivery, so they are left alone.
+ */
+const ABANDONED_START_GRACE_MS = 2 * 60 * 1000;
+
+function isAbandonedStart(
+  agent: { status: string; temporalFirstExecutionRunId: string | null; createdAt: Date },
+  now: number
+): boolean {
+  return (
+    agent.temporalFirstExecutionRunId === null &&
+    ['STARTING_UP', 'ACTIVE'].includes(agent.status) &&
+    now - agent.createdAt.getTime() > ABANDONED_START_GRACE_MS
+  );
+}
+
+/**
+ * Create the incident's RCA agent unless one already exists and started.
+ * Returns the incident, whose agent id moves to a fresh agent when the
+ * previous one was abandoned before its workflow started.
+ */
 async function ensureRcaAgent(
   incident: SlackAutoRcaIncidentRow,
   alert: SlackAutoRcaErrorAlert,
   cfg: SlackAutoRcaConfig
-): Promise<void> {
-  if (await repo.agentExists(incident.agentId)) return;
+): Promise<SlackAutoRcaIncidentRow> {
+  const existing = await repo.findAgentStart(incident.agentId);
+  if (existing !== null) {
+    if (!isAbandonedStart(existing, Date.now())) return incident;
+    const nextAgentId = randomUUID();
+    await repo.markAgentStartFailed(
+      incident.agentId,
+      'Auto-RCA agent never started its workflow; restarted on a new agent'
+    );
+    await repo.rotateIncidentAgent(incident.id, incident.agentId, nextAgentId);
+    log.warn('Restarting an auto-RCA agent whose workflow never started', {
+      agent_id: incident.agentId,
+      next_agent_id: nextAgentId,
+      incident_id: incident.id,
+    });
+    const rotated = await repo.findIncidentByAgentId(nextAgentId);
+    // Another delivery rotated it first; continue with whatever it installed.
+    incident = rotated ?? incident;
+    if (await repo.agentExists(incident.agentId)) return incident;
+  }
   const owner = requireOwner(cfg);
   if (!(await repo.findUserExists(owner.ownerUserId))) {
     throw new SlackAutoRcaError(`Auto-RCA owner user ${owner.ownerUserId} does not exist`);
@@ -110,7 +150,9 @@ async function ensureRcaAgent(
     });
   } catch (error) {
     // A concurrent delivery created the same pre-minted agent id first.
-    if (repo.isUniqueViolation(error) && (await repo.agentExists(incident.agentId))) return;
+    if (repo.isUniqueViolation(error) && (await repo.agentExists(incident.agentId))) {
+      return incident;
+    }
     const message = `Failed to start the auto-RCA agent: ${errorMessage(error)}`;
     if (await repo.agentExists(incident.agentId)) {
       await repo.markAgentStartFailed(incident.agentId, message);
@@ -118,6 +160,7 @@ async function ensureRcaAgent(
     }
     throw new SlackAutoRcaError(message);
   }
+  return incident;
 }
 
 async function notifyStarted(incident: SlackAutoRcaIncidentRow, cfg: SlackAutoRcaConfig) {
@@ -212,17 +255,19 @@ export async function handleErrorAlert(
   });
   const ids = { agentId: incident.agentId, incidentId: incident.id };
   if (!isOrigin && !claimed) return { action: 'duplicate', ...ids };
+  let started = incident;
   try {
     if (!isOrigin) return await appendOccurrence(incident, alert, cfg);
     // Redeliveries of the origin card re-run creation: it is idempotent and
     // finishes a creation whose first attempt died part-way.
-    await ensureRcaAgent(incident, alert, cfg);
+    started = await ensureRcaAgent(incident, alert, cfg);
   } catch (error) {
     if (claimed) await repo.releaseEvent(alert.eventId);
     throw error;
   }
-  await notifyStarted(incident, cfg);
-  return claimed ? { action: 'created', ...ids } : { action: 'duplicate', ...ids };
+  await notifyStarted(started, cfg);
+  const startedIds = { agentId: started.agentId, incidentId: started.id };
+  return claimed ? { action: 'created', ...startedIds } : { action: 'duplicate', ...startedIds };
 }
 
 /** Handle a reviewer reply inside an alert thread. */

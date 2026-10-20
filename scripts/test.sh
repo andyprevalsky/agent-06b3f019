@@ -375,6 +375,7 @@ run_suite "Cloud Benchmark Static Service Observation" python3 scripts/tests/clo
 run_suite "Cloud Benchmark Native Linux Runner" python3 scripts/tests/cloudbench-controller-linux.test.py
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Blackbox Backend Teardown" bash scripts/tests/blackbox-backend-teardown.test.sh
+run_suite "Local Port Probe Without lsof" bash scripts/tests/port-probe.test.sh
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh
 run_suite "Fly Cutover Clone Recovery" bash scripts/tests/deploy-agent-clone-recovery.test.sh
 run_suite "Mac App Release Drift" bash scripts/tests/mac-app-release-drift.test.sh
