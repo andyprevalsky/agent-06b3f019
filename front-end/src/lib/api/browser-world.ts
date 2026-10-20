@@ -4,7 +4,10 @@
  * views byte for byte (back-end/src/domains/browser-world/types.ts and
  * providers/browser/worldState.ts SiteMergeReceipt).
  *
- *   GET    /browser-world/root             {root|null, sites}
+ *   GET    /browser-world/root?agent_id=<root agent id>
+ *                                          {root|null, sites, default_url?}
+ *          default_url = the URL that root agent's tree is working on (lane
+ *          L-BROWSER2); absent/null without agent_id or before any page
  *   POST   /browser-world/root/open        {start_url?} -> {root}
  *   POST   /browser-world/root/close       -> {root: null, world_state}
  *   GET    /browser-world/sites            {sites}
@@ -79,6 +82,8 @@ export interface WorldStateMergeReceipt {
 export interface RootBrowserState {
   root: RootBrowserView | null;
   sites: RootSiteView[];
+  /** Where the selected root agent's tree is working (GET /root?agent_id=); null when unknown. */
+  default_url?: string | null;
 }
 
 const BASE = `${API_BASE_WITH_PATH}/browser-world`;
@@ -89,8 +94,10 @@ async function request<T>(path: string, init: RequestInit, what: string): Promis
   return (await response.json()) as T;
 }
 
-export function readRootBrowser(): Promise<RootBrowserState> {
-  return request<RootBrowserState>('/root', {}, 'read the Root browser');
+/** Root's state; with `agentId` (a root agent) also that tree's `default_url`. */
+export function readRootBrowser(agentId?: string | null): Promise<RootBrowserState> {
+  const query = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : '';
+  return request<RootBrowserState>(`/root${query}`, {}, 'read the Root browser');
 }
 
 export async function openRootBrowser(startUrl?: string): Promise<RootBrowserView> {

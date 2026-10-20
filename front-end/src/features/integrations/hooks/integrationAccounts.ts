@@ -1,19 +1,19 @@
 /**
- * Parser for the multi-account integrations contract (lane L-INTEG-CORE):
+ * Parser for the integrations progress contract (lane L-CULL-INTEG):
  *
  *   GET /api/integrations → integrations[].accounts[] + accountsByProvider =
  *     { provider, accountId, label|null, state, lastSyncAt, lastError,
- *       progress: { pct, done, total, unit, eta_sec, phase, startedAt, updatedAt } }
+ *       progress: { pct, done, total, unit, eta_sec, phase } | null }
  *   GET /api/integrations/progress?since → the same accountsByProvider when changed
  *
  * Pure functions, no state machine. Every field is treated as untrusted:
- *   - `accounts` absent  → null (callers fall back to today's per-row status)
- *   - `total` null       → pct null (indeterminate bar, never a fake pct), except
- *                          WhatsApp, whose pct is Baileys' measured percent
- *                          (determinate only when pct is a number)
+ *   - `accounts` absent  → null (callers fall back to the row's status)
+ *   - one entry per row  → that row's account; Gmail addresses and Plaid items
+ *                          (multi-account before Rose Desktop) match by id
+ *   - `total` null       → pct null (indeterminate bar, never a fake pct)
  *   - `eta_sec` null     → etaSec null (ETA text hidden)
  *   - pct >= 100         → the account reads as synced (bar disappears)
- *   - failed / needs_reconnect → error / warning tone, progress dropped (no bar)
+ *   - sync_failed / needs_reconnect / EXPIRED → error / warning tone, no bar
  *   - label null         → `unlabeled` (callers show their own row label)
  */
 
@@ -30,26 +30,16 @@ function finite(n: unknown): n is number {
   return typeof n === 'number' && Number.isFinite(n);
 }
 
-/**
- * Providers whose `pct` is measured by the sync itself even though `total` is
- * always null: WhatsApp reports Baileys' own history-sync percent (plan row I2).
- * Everyone else's pct without a total would be a guess, so it is dropped.
- */
-export const PERCENT_ONLY_PROVIDERS: readonly string[] = ['whatsapp'];
-
 /** Normalize one wire progress report; null when it carries nothing usable. */
-export function parseSyncProgress(
-  wire: SyncProgressWire | null | undefined,
-  options: { measuredPct?: boolean } = {},
-): SyncProgress | null {
+export function parseSyncProgress(wire: SyncProgressWire | null | undefined): SyncProgress | null {
   if (wire === null || wire === undefined || typeof wire !== 'object') return null;
   const total = finite(wire.total) && wire.total > 0 ? Math.round(wire.total) : null;
   const rawDone = finite(wire.done) ? Math.max(Math.round(wire.done), 0) : null;
   const done = rawDone !== null && total !== null ? Math.min(rawDone, total) : rawDone;
   let pct: number | null = null;
-  if (total !== null || options.measuredPct === true) {
-    const counted = done !== null && total !== null ? (done / total) * 100 : null;
-    const raw = finite(wire.pct) ? wire.pct : counted;
+  // Without a total any percentage would be a guess: the bar stays indeterminate.
+  if (total !== null) {
+    const raw = finite(wire.pct) ? wire.pct : done !== null ? (done / total) * 100 : null;
     pct = raw === null ? null : Math.min(Math.max(raw, 0), 100);
   }
   const etaSec = finite(wire.eta_sec) && wire.eta_sec >= 0 ? Math.round(wire.eta_sec) : null;
@@ -76,9 +66,36 @@ export function accountToneForState(state: string): AccountTone {
   return 'synced';
 }
 
+function parseEntry(entry: Record<string, unknown>): IntegrationAccount | null {
+  const accountId = typeof entry.accountId === 'string' ? entry.accountId : '';
+  if (accountId === '') return null;
+  const state = typeof entry.state === 'string' ? entry.state : 'synced';
+  const tone = accountToneForState(state);
+  // A damaged account shows no bar: needs_reconnect / sync_failed outrank progress.
+  const progress =
+    tone === 'syncing' || tone === 'synced'
+      ? parseSyncProgress(entry.progress as SyncProgressWire | null | undefined)
+      : null;
+  const labeled = typeof entry.label === 'string' && entry.label !== '';
+  return {
+    accountId,
+    label: labeled ? (entry.label as string) : accountId,
+    unlabeled: !labeled,
+    state,
+    progress,
+    tone: tone === 'syncing' && isProgressComplete(progress) ? 'synced' : tone,
+    lastSyncAt: typeof entry.lastSyncAt === 'string' ? entry.lastSyncAt : null,
+    lastError:
+      typeof entry.lastError === 'string' && entry.lastError !== '' ? entry.lastError : null,
+  };
+}
+
 /**
- * The provider's accounts, or null when the backend did not send `accounts`
- * (callers then derive accounts from the row exactly as before).
+ * Every account entry of a row, or null when the backend sent no `accounts`
+ * (callers then derive the account from the row status exactly as before).
+ * Single-account rows read the first entry (parseIntegrationAccount); only
+ * rows that were already multi-account before Rose Desktop (Gmail addresses,
+ * Plaid items) match entries to their own accounts by id.
  */
 export function parseIntegrationAccounts(
   row: ConnectedIntegration | undefined,
@@ -88,32 +105,17 @@ export function parseIntegrationAccounts(
   const accounts: IntegrationAccount[] = [];
   for (const entry of raw as unknown[]) {
     if (entry === null || typeof entry !== 'object') continue;
-    const wire = entry as Record<string, unknown>;
-    const accountId = typeof wire.accountId === 'string' ? wire.accountId : '';
-    if (accountId === '') continue;
-    const state = typeof wire.state === 'string' ? wire.state : 'synced';
-    const tone = accountToneForState(state);
-    // A damaged account shows no bar: needs_reconnect / failed outrank progress.
-    const progress =
-      tone === 'syncing' || tone === 'synced'
-        ? parseSyncProgress(wire.progress as SyncProgressWire | null | undefined, {
-            measuredPct: row !== undefined && PERCENT_ONLY_PROVIDERS.includes(row.name),
-          })
-        : null;
-    const labeled = typeof wire.label === 'string' && wire.label !== '';
-    accounts.push({
-      accountId,
-      label: labeled ? (wire.label as string) : accountId,
-      unlabeled: !labeled,
-      state,
-      progress,
-      tone: tone === 'syncing' && isProgressComplete(progress) ? 'synced' : tone,
-      lastSyncAt: typeof wire.lastSyncAt === 'string' ? wire.lastSyncAt : null,
-      lastError:
-        typeof wire.lastError === 'string' && wire.lastError !== '' ? wire.lastError : null,
-    });
+    const parsed = parseEntry(entry as Record<string, unknown>);
+    if (parsed !== null) accounts.push(parsed);
   }
   return accounts;
+}
+
+/** The row's one account (its first entry), or null without `accounts`. */
+export function parseIntegrationAccount(
+  row: ConnectedIntegration | undefined,
+): IntegrationAccount | null {
+  return parseIntegrationAccounts(row)?.[0] ?? null;
 }
 
 /**
@@ -134,7 +136,7 @@ export function mergeAccountsByProvider(
   for (const [provider, accounts] of Object.entries(accountsByProvider)) {
     if (merged.some((row) => row.name === provider)) continue;
     if (!Array.isArray(accounts) || accounts.length === 0) continue;
-    const syncing = accounts.some((a) => accountToneForState(String(a.state)) === 'syncing');
+    const syncing = accountToneForState(String(accounts[0].state)) === 'syncing';
     merged.push({
       id: `progress:${provider}`,
       name: provider,
@@ -146,12 +148,16 @@ export function mergeAccountsByProvider(
   return merged;
 }
 
-/** Find one account's raw-parsed entry across the integrations list. */
+/**
+ * One account of `provider` across the integrations list: the entry with
+ * `accountId`, or the row's one account when no id is given.
+ */
 export function findIntegrationAccount(
   integrations: ConnectedIntegration[],
   provider: string,
-  accountId: string,
+  accountId?: string,
 ): IntegrationAccount | null {
   const row = integrations.find((i) => i.name === provider);
+  if (accountId === undefined) return parseIntegrationAccount(row);
   return parseIntegrationAccounts(row)?.find((a) => a.accountId === accountId) ?? null;
 }

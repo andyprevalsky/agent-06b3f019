@@ -2,10 +2,11 @@
  * STATE MACHINE: DesktopComputeRow (Rose Desktop, flag on)
  *
  *   [NO_ACCOUNTS] --Connect--> useComputeAccounts.connect() --> sign-in modal
- *   [ACCOUNTS]    chips; × = existing compute removal (no confirm, as today);
+ *   [ACCOUNTS]    chips (compute subscriptions listed several before Rose
+ *                 Desktop); × = existing compute removal (no confirm, as today);
  *                 "+ Add account" = the same connect flow
  *   [LEGACY]      only the desktop-synced credential row exists → one "This Mac"
- *                 chip removed through the confirmed row DELETE
+ *                 chip disconnected through the confirmed row DELETE
  *
  * Compute accounts carry no sync progress; chips are synced or warning only.
  */
@@ -16,12 +17,12 @@ import { useComputeAccounts } from '../hooks/useComputeAccounts';
 import type { ConnectedIntegration } from '../types';
 import { ComputeConnectModal } from './ComputeAccountsSection';
 import { ChatGPTIcon } from './ComputeSection';
-import DesktopIntegrationRow, { type DesktopAccountView } from './DesktopIntegrationRow';
-import { rowAccounts, type RemovalPort } from './desktopAccounts';
-import DropdownIconFrame, {
-  dropdownIconImageClassName,
-  DropdownIconPreset,
-} from './DropdownIconFrame';
+import DesktopIntegrationRow, {
+  type DesktopAccountView,
+  type DesktopIcon,
+} from './DesktopIntegrationRow';
+import { singleAccount, type RemovalPort } from './desktopAccounts';
+import { dropdownIconImageClassName, DropdownIconPreset } from './DropdownIconFrame';
 
 interface DesktopComputeRowProps {
   provider: 'claude' | 'codex';
@@ -32,22 +33,18 @@ interface DesktopComputeRowProps {
   removal: RemovalPort;
 }
 
-function ComputeIcon({ provider }: { provider: 'claude' | 'codex' }) {
-  if (provider === 'claude') {
-    return (
-      <DropdownIconFrame {...DropdownIconPreset.claude}>
-        <img src={claudeIcon} alt="" aria-hidden="true" className={dropdownIconImageClassName} />
-      </DropdownIconFrame>
-    );
-  }
-  // The ChatGPT glyph is currentColor; pin it dark so it stays visible on the
-  // light icon tile in dark mode.
-  return (
-    <DropdownIconFrame {...DropdownIconPreset.chatgpt} className="text-[#111111]">
-      <ChatGPTIcon />
-    </DropdownIconFrame>
-  );
-}
+const CLAUDE_ICON: DesktopIcon = {
+  preset: DropdownIconPreset.claude,
+  glyph: <img src={claudeIcon} alt="" aria-hidden="true" className={dropdownIconImageClassName} />,
+};
+
+// The ChatGPT glyph is currentColor; pin it dark so it stays visible on the
+// light icon tile in dark mode.
+const CHATGPT_ICON: DesktopIcon = {
+  preset: DropdownIconPreset.chatgpt,
+  glyph: <ChatGPTIcon />,
+  className: 'text-[#111111]',
+};
 
 export default function DesktopComputeRow({
   provider,
@@ -78,7 +75,7 @@ export default function DesktopComputeRow({
   const accounts =
     cloudAccounts.length > 0
       ? cloudAccounts
-      : rowAccounts(
+      : singleAccount(
           legacyRow,
           { displayName: providerLabel, label: 'This Mac', localSyncing },
           removal,
@@ -88,11 +85,12 @@ export default function DesktopComputeRow({
       view={{
         key: provider,
         name,
-        icon: <ComputeIcon provider={provider} />,
+        icon: provider === 'claude' ? CLAUDE_ICON : CHATGPT_ICON,
         accounts,
         availability: isAvailable || accounts.length > 0 ? 'ready' : 'desktop-only',
         onConnect: isAvailable ? () => void state.connect() : undefined,
         connecting: state.isConnecting || localSyncing,
+        multiAccount: true,
         extra: (
           <>
             {state.error !== null && (

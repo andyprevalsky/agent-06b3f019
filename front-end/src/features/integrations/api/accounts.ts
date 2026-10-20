@@ -1,10 +1,10 @@
 /**
- * Per-account integrations endpoints (lane L-INTEG-CORE, I0):
+ * Integrations list, sync-progress poll and disconnect (Rose Desktop list,
+ * single-account contract, lane L-CULL-INTEG):
  *
- *   GET    /api/integrations                     → rows + accountsByProvider
- *   GET    /api/integrations/progress?since=<c>  → {cursor, changed, accountsByProvider?}
- *   DELETE /api/integrations/:provider/accounts/:accountId
- *            → 200 | 404 (already gone) | 501 ACCOUNT_CLEANUP_NOT_IMPLEMENTED {reason}
+ *   GET    /api/integrations                     → rows (accounts = [one entry]) + accountsByProvider
+ *   GET    /api/integrations/progress?since=<c>  → {cursor, changed?, accountsByProvider?}
+ *   DELETE /api/integrations/:name               → 200 | 404 (already gone)
  *
  * Wire shapes live in ../types (AccountsByProvider, IntegrationsProgressDelta).
  */
@@ -19,6 +19,12 @@ export interface IntegrationsList {
   accountsByProvider: AccountsByProvider | null;
 }
 
+function byProviderOrNull(value: unknown): AccountsByProvider | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as AccountsByProvider)
+    : null;
+}
+
 /** GET /api/integrations with its `accountsByProvider`. */
 export async function fetchIntegrationsListApi(): Promise<IntegrationsList> {
   const headers = getAuthHeaders();
@@ -26,20 +32,18 @@ export async function fetchIntegrationsListApi(): Promise<IntegrationsList> {
   if (!response.ok) return { integrations: [], accountsByProvider: null };
   const data: { integrations?: ConnectedIntegration[]; accountsByProvider?: unknown } =
     await response.json();
-  const byProvider = data.accountsByProvider;
   return {
     integrations: data.integrations ?? [],
-    accountsByProvider:
-      byProvider !== null && typeof byProvider === 'object' && !Array.isArray(byProvider)
-        ? (byProvider as AccountsByProvider)
-        : null,
+    accountsByProvider: byProviderOrNull(data.accountsByProvider),
   };
 }
 
 /**
- * The cheap sync-progress poll: `changed: false` unless something of this user
- * changed after `since`. Pass the returned cursor back on the next call. It
- * does not see deletes from another device (refetch the full list for those).
+ * The cheap sync-progress poll: nothing changed unless something of this user
+ * changed after `since`. Pass the returned cursor back on the next call. A
+ * response without `changed` counts as changed when it carries
+ * `accountsByProvider`. It does not see deletes from another device (refetch
+ * the full list for those).
  */
 export async function fetchIntegrationsProgressApi(
   since: string | null,
@@ -51,50 +55,20 @@ export async function fetchIntegrationsProgressApi(
   if (!response.ok) return null;
   const data = (await response.json()) as Partial<IntegrationsProgressDelta>;
   if (typeof data.cursor !== 'string') return null;
+  const accountsByProvider = byProviderOrNull(data.accountsByProvider);
+  const changed = data.changed ?? accountsByProvider !== null;
   return {
     cursor: data.cursor,
-    changed: data.changed === true,
-    accountsByProvider: data.changed === true ? data.accountsByProvider : undefined,
+    changed: changed && accountsByProvider !== null,
+    accountsByProvider: changed && accountsByProvider !== null ? accountsByProvider : undefined,
   };
 }
 
-/**
- * DELETE answered 501 ACCOUNT_CLEANUP_NOT_IMPLEMENTED: that provider's lane has
- * not filled its cleanup hook yet. The account stays; `reason` is user-facing.
- */
-export class AccountCleanupNotImplementedError extends Error {
-  constructor(
-    readonly provider: string,
-    readonly reason: string,
-  ) {
-    super(reason);
-  }
-}
-
-/**
- * Remove a connected account (Rose Desktop chip ×).
- *
- * With `accountId`: ONE account of a multi-account provider (the id is
- * URL-encoded — Gmail ids are emails). Without: the whole one-row integration
- * (DELETE /api/integrations/:name), used when the backend reports no
- * per-account list. A 404 means already removed; 501 throws
- * AccountCleanupNotImplementedError.
- */
-export async function deleteIntegrationAccountApi(name: string, accountId?: string): Promise<void> {
-  const account = accountId === undefined ? '' : `/accounts/${encodeURIComponent(accountId)}`;
-  const url = `${API_BASE_WITH_PATH}/integrations/${encodeURIComponent(name)}${account}`;
+/** Disconnect one integration row (Rose Desktop chip ×). A 404 means already removed. */
+export async function deleteIntegrationApi(name: string): Promise<void> {
+  const url = `${API_BASE_WITH_PATH}/integrations/${encodeURIComponent(name)}`;
   const response = await fetch(url, { method: 'DELETE', headers: getAuthHeaders() });
   if (response.ok || response.status === 404) return;
-  const payload = (await response.json().catch(() => null)) as {
-    error?: string;
-    provider?: string;
-    reason?: string;
-  } | null;
-  if (response.status === 501) {
-    throw new AccountCleanupNotImplementedError(
-      payload?.provider ?? name,
-      payload?.reason ?? 'Removing this account is not supported yet.',
-    );
-  }
-  throw new Error(payload?.error ?? `Failed to remove account (HTTP ${response.status})`);
+  const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+  throw new Error(payload?.error ?? `Failed to disconnect (HTTP ${response.status})`);
 }

@@ -1,75 +1,61 @@
 /**
- * Rose Desktop integrations (flag on): flat sections in the stock order, every
- * connected account is a chip with × removal and "+ Add account", no Manage
- * state, and each syncing account shows a progress bar driven by the single
- * useSyncProgress adapter over GET /api/integrations `accounts[].progress`.
+ * Rose Desktop integrations (flag on), UI ledger row 85 / lane L-CULL-INTEG:
+ * the existing integrations page design with ONE account per integration
+ * (a single chip, × disconnects, no "+ Add account") and a gradient sync
+ * loader per integration. Gmail addresses, Plaid institutions and compute
+ * subscriptions keep listing several accounts, exactly as the stock page did.
  *
- * Contract (lane L-INTEG-CORE): integrations[].accounts[] =
- *   { accountId, label, state, progress: { pct, done, total, unit, eta_sec }, lastSyncAt }
- * total null → indeterminate bar (no pct); eta_sec null → no ETA text;
- * delete is per account. Without `accounts`, today's row status still renders.
+ * Contract: integrations[].accounts = [{ accountId, label, state, progress,
+ *   lastSyncAt, lastError }] with state syncing | synced | idle |
+ *   needs_reconnect | sync_failed | EXPIRED and progress { pct, done, total,
+ *   unit, eta_sec, phase } | null. GET /integrations/progress?since=<cursor>
+ *   → { cursor, accountsByProvider }, polled every 5 s only while something
+ *   syncs. total null → indeterminate shimmer (never a fake %); eta_sec null
+ *   → no ETA; the terminal update flips the chip to synced; only
+ *   needs_reconnect / EXPIRED raise the red dot; sync_failed prints lastError.
+ *
+ * Icons are the stock app-icon tiles (DropdownIconFrame + MessageSyncIcons),
+ * visible in light and dark.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
-import Integrations from '@/pages/Integrations';
 import {
   accountToneForState,
-  parseIntegrationAccounts,
+  parseIntegrationAccount,
   parseSyncProgress,
 } from '@/features/integrations/hooks/integrationAccounts';
 import { formatEta } from '@/features/integrations/components/syncProgressFormat';
 import type { ConnectedIntegration } from '@/features/integrations/types';
+import { integrationsNeedingReconnect } from '@/lib/api/integrationHealth';
 
+import {
+  account,
+  advance,
+  API_BASE,
+  bars,
+  chipFor,
+  chips,
+  desktopHandlers,
+  fakeIntervals,
+  iconGlow,
+  listOf,
+  one,
+  progress,
+  progressCalls,
+  renderDesktop,
+  renderIntegrations,
+  row,
+  rowEl,
+  serveList,
+} from './integrations-accounts.fixtures';
 import { capturedRequests } from './msw/capture';
 import { server } from './msw/server';
-import { renderWithProviders } from './test-wrapper';
 import { mockTerminalHookSession as mockSession } from './terminal-hooks.fixtures';
 
-const API_BASE = 'http://localhost:3001/api';
-
-function row(name: string, extra: Partial<ConnectedIntegration> = {}): ConnectedIntegration {
-  return { id: `int-${name}`, name, status: 'CONNECTED', isActive: true, ...extra };
-}
-
-const chromeProfiles = (work: Record<string, unknown> | null) =>
-  row('chrome', {
-    accounts: [
-      { accountId: 'default', label: 'Default profile', state: 'synced', lastSyncAt: null },
-      {
-        accountId: 'work',
-        label: 'Work',
-        state: 'syncing',
-        progress: work,
-        lastSyncAt: null,
-      },
-    ],
-  });
-
-function serve(integrations: unknown[] | (() => unknown[]), plaidItems: unknown[] = []) {
-  server.use(
-    http.get(`${API_BASE}/integrations`, () =>
-      HttpResponse.json({
-        integrations: typeof integrations === 'function' ? integrations() : integrations,
-      }),
-    ),
-    http.get(`${API_BASE}/integrations/plaid/items`, () =>
-      HttpResponse.json({ items: plaidItems }),
-    ),
-    http.get(`${API_BASE}/compute-accounts`, () => HttpResponse.json({ accounts: [] })),
-  );
-}
-
-async function renderDesktop() {
-  renderWithProviders(<Integrations />);
-  return screen.findByTestId('rose-desktop-integrations');
-}
-
-const rowEl = (key: string) => screen.getByTestId(`integration-row-${key}`);
-
-describe('Rose Desktop integrations', () => {
+describe('Rose Desktop integrations: one account per integration', () => {
   beforeEach(() => mockSession());
   afterEach(() => {
     localStorage.clear();
@@ -77,7 +63,7 @@ describe('Rose Desktop integrations', () => {
   });
 
   it('keeps the stock section order with no Manage state or connected summary', async () => {
-    serve([]);
+    serveList(() => listOf());
     const list = await renderDesktop();
     await waitFor(() => expect(within(list).getByText('Compute')).toBeInTheDocument());
     const headers = within(list)
@@ -94,182 +80,318 @@ describe('Rose Desktop integrations', () => {
     ]);
     expect(within(list).queryByText(/manage/i)).not.toBeInTheDocument();
     expect(within(list).queryByText(/\bof \d+ connected/i)).not.toBeInTheDocument();
-    // Stock accordion cards are gone with the flag on.
     expect(screen.queryByText('Enable web automation and browsing')).not.toBeInTheDocument();
   });
 
-  it('stock page is unchanged with the flag off', async () => {
-    serve([]);
-    renderWithProviders(<Integrations />, { roseDesktop: false });
+  it('stock page is unchanged with the flag off: no chips, bars or desktop rows', async () => {
+    serveList(() =>
+      listOf(one('imessage', { state: 'syncing', progress: progress({ done: 5, total: 10 }) })),
+    );
+    renderIntegrations({ roseDesktop: false });
     expect(await screen.findByText('Enable web automation and browsing')).toBeInTheDocument();
     expect(screen.queryByTestId('rose-desktop-integrations')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('sync-progress')).not.toBeInTheDocument();
   });
 
-  it('renders full progress: N of M unit, ~ETA left, pct on the chip', async () => {
-    serve([chromeProfiles({ pct: 41, done: 88, total: 214, unit: 'sites', eta_sec: 60 })]);
-    await renderDesktop();
-    const chrome = await waitFor(() => rowEl('browser-chrome'));
-    const chips = within(chrome).getByTestId('accounts-browser-chrome');
-    expect(within(chips).getByText('Default profile').closest('[data-tone]')).toHaveAttribute(
-      'data-tone',
-      'synced',
-    );
-    const work = within(chips).getByText('Work').closest('[data-tone]');
-    expect(work).toHaveAttribute('data-tone', 'syncing');
-    expect(work).toHaveTextContent('41%');
-    const bar = within(chrome).getByTestId('sync-progress');
-    expect(bar).toHaveAttribute('data-state', 'determinate');
-    expect(within(bar).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '41');
-    expect(bar).toHaveTextContent('Work · 88 of 214 sites');
-    expect(bar).toHaveTextContent('~1 min left');
-  });
-
-  it('total null → indeterminate bar, never a fake percentage', async () => {
-    serve([chromeProfiles({ pct: 63, done: 120, total: null, unit: 'sites', eta_sec: null })]);
-    await renderDesktop();
-    const chrome = await waitFor(() => rowEl('browser-chrome'));
-    const bar = within(chrome).getByTestId('sync-progress');
-    expect(bar).toHaveAttribute('data-state', 'indeterminate');
-    expect(within(bar).getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
-    expect(bar).toHaveTextContent('120 sites');
-    expect(bar).not.toHaveTextContent('%');
-    expect(within(chrome).getByText('Work').closest('[data-tone]')).not.toHaveTextContent('%');
-  });
-
-  it('eta_sec null → ETA text hidden', async () => {
-    serve([chromeProfiles({ done: 10, total: 40, unit: 'sites', eta_sec: null })]);
-    await renderDesktop();
-    const bar = await waitFor(() => within(rowEl('browser-chrome')).getByTestId('sync-progress'));
-    expect(bar).toHaveTextContent('10 of 40 sites');
-    expect(bar).not.toHaveTextContent('left');
-  });
-
-  it('flips a syncing account to synced at 100% and drops its bar', async () => {
-    serve([chromeProfiles({ pct: 100, done: 214, total: 214, unit: 'sites', eta_sec: 0 })]);
-    await renderDesktop();
-    const chrome = await waitFor(() => rowEl('browser-chrome'));
-    expect(within(chrome).getByText('Work').closest('[data-tone]')).toHaveAttribute(
-      'data-tone',
-      'synced',
-    );
-    expect(within(chrome).queryByTestId('sync-progress')).not.toBeInTheDocument();
-  });
-
-  it('animates live: polls progress while syncing and flips when the server reaches 100%', async () => {
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    serve([chromeProfiles({ pct: 40, done: 40, total: 100, unit: 'sites', eta_sec: 30 })]);
-    const done = chromeProfiles({ pct: 100, done: 100, total: 100, unit: 'sites', eta_sec: 0 });
-    server.use(
-      http.get(`${API_BASE}/integrations/progress`, () =>
-        HttpResponse.json({
-          cursor: 'c1',
-          changed: true,
-          accountsByProvider: { chrome: done.accounts },
+  it('determinate: one chip, one rose→violet bar with "N of M unit" and "~ETA left"', async () => {
+    serveList(() =>
+      listOf(
+        one('chrome', {
+          state: 'syncing',
+          progress: progress({ pct: 41, done: 88, total: 214, unit: 'cookies', eta_sec: 60 }),
         }),
       ),
     );
     await renderDesktop();
-    const bar = await waitFor(() => within(rowEl('browser-chrome')).getByTestId('sync-progress'));
-    expect(within(bar).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '40');
-    vi.advanceTimersByTime(5_000);
-    await waitFor(() =>
-      expect(
-        within(rowEl('browser-chrome')).queryByTestId('sync-progress'),
-      ).not.toBeInTheDocument(),
-    );
-    expect(
-      within(rowEl('browser-chrome')).getByText('Work').closest('[data-tone]'),
-    ).toHaveAttribute('data-tone', 'synced');
+    await waitFor(() => expect(chips('browser-chrome')).toHaveLength(1));
+    const chip = chips('browser-chrome')[0];
+    expect(chip).toHaveAttribute('data-tone', 'syncing');
+    expect(chip).toHaveTextContent('Default profile · 41%');
+    expect(bars('browser-chrome')).toHaveLength(1);
+    const bar = bars('browser-chrome')[0];
+    expect(bar).toHaveAttribute('data-state', 'determinate');
+    const track = within(bar).getByRole('progressbar');
+    expect(track).toHaveAttribute('aria-valuenow', '41');
+    expect(track.className).toContain('h-1');
+    const fill = track.firstElementChild as HTMLElement;
+    expect(fill.style.width).toBe('41%');
+    // Rose→violet gradient (#ff5f8f … #9b4dff) with a soft rose glow.
+    expect(fill.getAttribute('style')).toMatch(/rgb\(255, 95, 143\).*rgb\(155, 77, 255\)/);
+    expect(fill.style.boxShadow).toBe('0 0 8px rgba(255,95,143,.45)');
+    expect(fill.querySelector('.animate-shimmer')).not.toBeNull();
+    expect(bar).toHaveTextContent('88 of 214 cookies');
+    expect(bar).not.toHaveTextContent('Default profile ·');
+    expect(bar).toHaveTextContent('~1 min left');
+    // A connected single-account row has no Connect and no "+ Add account".
+    expect(within(rowEl('browser-chrome')).queryByRole('button', { name: /^Connect/ })).toBeNull();
+    expect(within(rowEl('browser-chrome')).queryByText('+ Add account')).toBeNull();
   });
 
-  it('removes ONE account through the chip × after confirming', async () => {
-    let deleted: string | null = null;
-    serve([chromeProfiles(null)]);
-    server.use(
-      http.delete(`${API_BASE}/integrations/:name/accounts/:accountId`, ({ params }) => {
-        deleted = `${String(params.name)}/${String(params.accountId)}`;
-        return HttpResponse.json({ ok: true });
-      }),
+  it('total null → indeterminate shimmer, counts without a percentage; no counts → "Syncing…"', async () => {
+    serveList(() =>
+      listOf(
+        one('imessage', {
+          state: 'syncing',
+          progress: progress({ pct: 63, done: 1200, total: null, unit: 'messages' }),
+        }),
+        one('whatsapp', { state: 'syncing', progress: progress({ unit: 'chats' }) }),
+      ),
     );
-    const user = userEvent.setup();
     await renderDesktop();
-    await user.click(await screen.findByRole('button', { name: 'Remove Chrome account Work' }));
-    const dialog = await screen.findByRole('dialog');
-    expect(dialog).toHaveTextContent('Chrome · Work');
-    await user.click(within(dialog).getByRole('button', { name: 'Remove' }));
-    await waitFor(() => expect(deleted).toBe('chrome/work'));
-    expect(
-      capturedRequests.some((r) => r.method === 'DELETE' && r.url.endsWith('/integrations/chrome')),
-    ).toBe(false);
+    const bar = await waitFor(() => bars('imessage')[0]);
+    expect(bar).toHaveAttribute('data-state', 'indeterminate');
+    const track = within(bar).getByRole('progressbar');
+    expect(track).not.toHaveAttribute('aria-valuenow');
+    expect(track.querySelector('.animate-shimmer')).not.toBeNull();
+    expect(bar).toHaveTextContent('1,200 messages');
+    expect(bar).not.toHaveTextContent('%');
+    expect(chips('imessage')[0]).not.toHaveTextContent('%');
+    expect(bars('whatsapp')[0]).toHaveTextContent('Syncing…');
+    expect(bars('whatsapp')[0]).toHaveAttribute('data-state', 'indeterminate');
   });
 
-  it('falls back to row status without `accounts`: chip, indeterminate bar, row delete', async () => {
-    let deleted: string | null = null;
-    serve([row('whatsapp'), row('linkedin', { status: 'SYNCING' })]);
+  it('eta_sec null → no ETA text; bytes read as sizes', async () => {
+    serveList(
+      () =>
+        listOf(
+          one('chrome_passwords', {
+            state: 'syncing',
+            progress: progress({ done: 10, total: 40, unit: 'passwords', eta_sec: null }),
+          }),
+          one('linkedin', {
+            state: 'syncing',
+            progress: progress({ done: 1_500_000, total: 12_000_000, unit: 'bytes' }),
+          }),
+        ),
+      undefined,
+    );
+    await renderDesktop();
+    const bar = await waitFor(() => bars('chrome-passwords')[0]);
+    expect(bar).toHaveTextContent('10 of 40 passwords');
+    expect(bar).not.toHaveTextContent('left');
+    expect(bars('linkedin')[0]).toHaveTextContent('1.5 MB of 12 MB');
+  });
+
+  it('polls only while syncing, flips to synced at the terminal update, then stops', async () => {
+    fakeIntervals();
+    const syncing = one('imessage', {
+      state: 'syncing',
+      progress: progress({ done: 40, total: 100, unit: 'messages', eta_sec: 30 }),
+    });
+    const terminal = account('imessage', 'default', { state: 'synced', progress: null });
+    const served = serveList(
+      () => listOf(syncing),
+      (since) =>
+        since === null
+          ? { cursor: 'c1', changed: true, accountsByProvider: { imessage: [terminal] } }
+          : { cursor: 'c2', changed: false },
+    );
+    await renderDesktop();
+    const bar = await waitFor(() => bars('imessage')[0]);
+    expect(within(bar).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '40');
+    expect(served.progressCalls).toEqual([]);
+
+    await advance(5_000);
+    await waitFor(() => expect(bars('imessage')).toHaveLength(0));
+    expect(chips('imessage')[0]).toHaveAttribute('data-tone', 'synced');
+    expect(served.progressCalls).toEqual(['']);
+    // Nothing syncs any more: the poll stopped.
+    await advance(20_000);
+    expect(served.progressCalls).toEqual(['']);
+    expect(served.listCalls).toBe(1);
+  });
+
+  it('a 100% report flips the chip to synced even before the state does', async () => {
+    serveList(() =>
+      listOf(
+        one('imessage', {
+          state: 'syncing',
+          progress: progress({ pct: 100, done: 50, total: 50, unit: 'messages' }),
+        }),
+      ),
+    );
+    await renderDesktop();
+    await waitFor(() => expect(chips('imessage')[0]).toHaveAttribute('data-tone', 'synced'));
+    expect(bars('imessage')).toHaveLength(0);
+  });
+
+  it('nothing syncing → no progress request at all', async () => {
+    fakeIntervals();
+    serveList(() => listOf(one('imessage', { state: 'synced' })));
+    await renderDesktop();
+    await waitFor(() => expect(chips('imessage')).toHaveLength(1));
+    await advance(30_000);
+    expect(progressCalls()).toHaveLength(0);
+  });
+
+  it('needs_reconnect and EXPIRED: amber "needs reconnect" chip, no bar, amber icon glow', async () => {
+    serveList(() =>
+      listOf(
+        one('whatsapp', {
+          state: 'needs_reconnect',
+          label: '+1 972 977 7432',
+          progress: progress({ done: 3, total: 9 }),
+        }),
+        one('linkedin', { state: 'EXPIRED', label: 'Andy Prevalsky' }),
+        one('imessage', { state: 'synced' }),
+      ),
+    );
+    await renderDesktop();
+    await waitFor(() => expect(chips('whatsapp')).toHaveLength(1));
+    for (const key of ['whatsapp', 'linkedin']) {
+      expect(chips(key)[0]).toHaveAttribute('data-tone', 'warning');
+      expect(chips(key)[0]).toHaveTextContent('needs reconnect');
+      expect(bars(key)).toHaveLength(0);
+      expect(iconGlow(key)?.getAttribute('style')).toContain('245, 158, 11');
+    }
+    expect(iconGlow('imessage')?.getAttribute('style')).toContain('254, 117, 3');
+    // Not connected: no glow.
+    expect(iconGlow('gmail')).toBeNull();
+  });
+
+  it('sync_failed: red chip and its lastError on a line under it, no bar', async () => {
+    serveList(() =>
+      listOf(
+        one('imessage', {
+          state: 'sync_failed',
+          lastError: 'Full Disk Access was turned off for Rose.',
+          progress: progress({ done: 3, total: 9 }),
+        }),
+        one('whatsapp', { state: 'sync_failed' }),
+      ),
+    );
+    await renderDesktop();
+    await waitFor(() => expect(chips('imessage')).toHaveLength(1));
+    expect(chips('imessage')[0]).toHaveAttribute('data-tone', 'error');
+    expect(chips('imessage')[0]).toHaveTextContent('sync failed');
+    expect(within(rowEl('imessage')).getByTestId('account-sync-error')).toHaveTextContent(
+      'Full Disk Access was turned off for Rose.',
+    );
+    expect(bars('imessage')).toHaveLength(0);
+    expect(within(rowEl('whatsapp')).getByTestId('account-sync-error')).toHaveTextContent(
+      'The last sync failed.',
+    );
+  });
+
+  it('a row shows ONE chip even when a stale backend lists several accounts', async () => {
+    serveList(() =>
+      listOf(
+        row('whatsapp', [
+          account('whatsapp', '+15550001', { label: '+1 555 0001' }),
+          account('whatsapp', '+15550002', { label: '+1 555 0002' }),
+        ]),
+        row('chrome_passwords', [
+          account('chrome_passwords', 'chrome:Default', { label: 'Chrome' }),
+          account('chrome_passwords', 'chrome:Profile 1', { label: 'Chrome · Profile 1' }),
+        ]),
+        one('apple_passwords', { label: 'Apple Passwords' }),
+        one('cdp_virtual_passkeys', { label: 'Rose agent' }),
+      ),
+    );
+    await renderDesktop();
+    await waitFor(() => expect(chips('whatsapp')).toHaveLength(1));
+    expect(chips('whatsapp')[0]).toHaveTextContent('+1 555 0001');
+    expect(chips('chrome-passwords')).toHaveLength(1);
+    expect(chips('apple-passwords')).toHaveLength(1);
+    expect(chips('apple-passwords')[0]).toHaveTextContent('Apple Passwords');
+    // No per-source passkey rows or extra password rows.
+    expect(screen.queryByTestId('integration-row-passwords-cdp_virtual')).toBeNull();
+    for (const key of ['whatsapp', 'chrome-passwords', 'apple-passwords', 'imessage', 'linkedin']) {
+      expect(within(rowEl(key)).queryByText('+ Add account')).toBeNull();
+    }
+  });
+
+  it('× disconnects the row after confirming: DELETE /integrations/:name, then a full refetch', async () => {
+    let connected = true;
+    const deletes: string[] = [];
+    const served = serveList(() =>
+      connected ? listOf(one('whatsapp', { label: '+1 972 977 7432' })) : listOf(),
+    );
     server.use(
       http.delete(`${API_BASE}/integrations/:name`, ({ params }) => {
-        deleted = String(params.name);
-        return HttpResponse.json({ message: 'ok' });
+        deletes.push(String(params.name));
+        connected = false;
+        return HttpResponse.json({ message: 'Integration deleted successfully' });
       }),
     );
     const user = userEvent.setup();
     await renderDesktop();
-    const linkedin = await waitFor(() => rowEl('linkedin'));
-    expect(within(linkedin).getByText('LinkedIn account').closest('[data-tone]')).toHaveAttribute(
-      'data-tone',
-      'syncing',
-    );
-    expect(within(linkedin).getByTestId('sync-progress')).toHaveAttribute(
-      'data-state',
-      'indeterminate',
-    );
-    await user.click(
-      within(rowEl('whatsapp')).getByRole('button', {
-        name: 'Remove WhatsApp account Linked device',
-      }),
-    );
-    await user.click(
-      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Remove' }),
-    );
-    await waitFor(() => expect(deleted).toBe('whatsapp'));
+    await user.click(await screen.findByRole('button', { name: 'Disconnect WhatsApp' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('WhatsApp · +1 972 977 7432');
+    await user.click(within(dialog).getByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(deletes).toEqual(['whatsapp']));
+    await waitFor(() => expect(chips('whatsapp')).toHaveLength(0));
+    expect(served.listCalls).toBe(2);
+    expect(capturedRequests.some((r) => r.url.includes('/accounts/'))).toBe(false);
   });
 
-  it('Gmail keeps its existing per-address flows; + Add account re-runs Google connect', async () => {
-    let disconnected: string | null = null;
-    let started = false;
-    serve([
-      row('gmail', {
-        emailCredentials: [
-          {
-            id: 'c1',
-            email: 'a@x.com',
-            state: 'connected',
-            lastErrorReason: null,
-            lastFailedSyncAt: null,
-          },
-          {
-            id: 'c2',
-            email: 'b@x.com',
-            state: 'connected',
-            lastErrorReason: null,
-            lastFailedSyncAt: null,
-          },
-        ],
-        accounts: [
-          {
-            accountId: 'b@x.com',
-            label: 'b@x.com',
-            state: 'syncing',
-            progress: { done: 9120, total: 50410, unit: 'emails', eta_sec: 660 },
-          },
-        ],
-      }),
-    ]);
+  it('falls back to the row status without `accounts`: chip + indeterminate bar', async () => {
+    serveList(() => ({
+      integrations: [
+        row('whatsapp', undefined),
+        row('linkedin', undefined, { status: 'SYNCING' }),
+        row('imessage', undefined, { status: 'SYNC_FAILED' }),
+      ],
+      accountsByProvider: {},
+    }));
+    await renderDesktop();
+    await waitFor(() => expect(chips('linkedin')).toHaveLength(1));
+    expect(chips('linkedin')[0]).toHaveAttribute('data-tone', 'syncing');
+    expect(chips('linkedin')[0]).toHaveTextContent('LinkedIn account');
+    expect(bars('linkedin')[0]).toHaveAttribute('data-state', 'indeterminate');
+    expect(chips('whatsapp')[0]).toHaveAttribute('data-tone', 'synced');
+    expect(chips('whatsapp')[0]).toHaveTextContent('Linked device');
+    expect(chips('imessage')[0]).toHaveAttribute('data-tone', 'error');
+  });
+
+  it('unconnected rows keep their Connect; LinkedIn connect is the stock export flow', async () => {
+    const agentBodies: unknown[] = [];
+    const syncBodies: unknown[] = [];
+    serveList(() => listOf());
     server.use(
-      http.delete(`${API_BASE}/integrations/email/gmail/accounts/:email`, ({ params }) => {
-        disconnected = String(params.email);
-        return HttpResponse.json({ ok: true });
+      http.post(`${API_BASE}/agents`, async ({ request }) => {
+        agentBodies.push(await request.json());
+        return HttpResponse.json({ agent_id: 'agent-linkedin-1', status: 'ACTIVE' });
       }),
+      http.post(`${API_BASE}/integrations/linkedin/sync`, async ({ request }) => {
+        syncBodies.push(await request.json());
+        return HttpResponse.json({ status: 'SYNCING', agent_id: 'agent-linkedin-1' });
+      }),
+    );
+    const user = userEvent.setup();
+    await renderDesktop();
+    expect(await screen.findByRole('button', { name: 'Connect Gmail' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Connect Chrome' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Connect LinkedIn' }));
+    await waitFor(() => expect(syncBodies).toEqual([{ agent_id: 'agent-linkedin-1' }]));
+    expect(agentBodies).toHaveLength(1);
+    // The dropped I4 prompt text is gone: the stock export goal only.
+    expect(JSON.stringify(agentBodies[0])).not.toMatch(/export_requested|account_id/);
+  });
+
+  it('Gmail keeps every address with "+ Add account"; its one entry drives a single address', async () => {
+    let started = false;
+    const credential = (email: string) => ({
+      id: `c-${email}`,
+      email,
+      state: 'connected',
+      lastErrorReason: null,
+      lastFailedSyncAt: null,
+    });
+    serveList(() =>
+      listOf(
+        one(
+          'gmail',
+          {
+            state: 'syncing',
+            progress: progress({ phase: 'saving', done: 9120, total: 50410, unit: 'messages' }),
+          },
+          { emailCredentials: [credential('andy@roselabs.ai')] },
+        ),
+      ),
+    );
+    server.use(
       http.post(`${API_BASE}/integrations/email/gmail/start`, () => {
         started = true;
         return HttpResponse.json({ authUrl: 'https://accounts.google.com/o/oauth2/auth' });
@@ -277,86 +399,128 @@ describe('Rose Desktop integrations', () => {
     );
     const user = userEvent.setup();
     await renderDesktop();
-    const gmail = await waitFor(() => rowEl('gmail'));
-    expect(within(gmail).getAllByText(/@x\.com$/)).toHaveLength(2);
-    const bar = within(gmail).getByTestId('sync-progress');
-    expect(bar).toHaveTextContent('b@x.com · 9,120 of 50,410 emails');
-    expect(bar).toHaveTextContent('~11 min left');
-    await user.click(within(gmail).getByRole('button', { name: 'Disconnect a@x.com' }));
-    await waitFor(() => expect(disconnected).toBe('a@x.com'));
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    await user.click(within(gmail).getByRole('button', { name: 'Add Gmail account' }));
+    await waitFor(() => expect(chips('gmail')).toHaveLength(1));
+    expect(chips('gmail')[0]).toHaveTextContent('andy@roselabs.ai · 18%');
+    const bar = bars('gmail')[0];
+    expect(bar).toHaveTextContent('Saving messages · 9,120 of 50,410 messages');
+    await user.click(within(rowEl('gmail')).getByRole('button', { name: 'Add Gmail account' }));
     await waitFor(() => expect(started).toBe(true));
   });
 
-  it('Plaid institutions are chips; a syncing item shows the indeterminate bar', async () => {
-    serve(
-      [],
-      [
-        {
-          id: 'item-1',
-          plaidItemId: 'p-1',
-          institutionId: 'ins_1',
-          institutionName: 'Amex',
-          status: 'ACTIVE',
-          products: ['transactions'],
-          createdAt: '2026-10-01T00:00:00Z',
-          lastSyncAt: null,
-          disconnectedAt: null,
-          sync: {
-            state: 'syncing',
-            transactionCount: 0,
-            postedTransactionCount: 0,
-            pendingTransactionCount: 0,
-            removedTransactionCount: 0,
-            dateRange: { from: null, to: null },
-          },
-          accounts: [],
-        },
-      ],
-    );
-    await renderDesktop();
-    const plaid = await waitFor(() => {
-      const el = rowEl('plaid');
-      expect(within(el).getByText('Amex')).toBeInTheDocument();
-      return el;
+  it('Gmail with several addresses and one row entry shows ONE row bar, no per-chip bars', async () => {
+    const credential = (email: string) => ({
+      id: `c-${email}`,
+      email,
+      state: 'connected',
+      lastErrorReason: null,
+      lastFailedSyncAt: null,
     });
-    expect(within(plaid).getByText('Amex').closest('[data-tone]')).toHaveAttribute(
-      'data-tone',
-      'syncing',
+    serveList(() =>
+      listOf(
+        one(
+          'gmail',
+          {
+            state: 'syncing',
+            progress: progress({ phase: 'scanning', done: 500, total: null, unit: 'messages' }),
+          },
+          { emailCredentials: [credential('a@x.com'), credential('b@x.com')] },
+        ),
+      ),
     );
-    expect(within(plaid).getByTestId('sync-progress')).toHaveAttribute(
-      'data-state',
-      'indeterminate',
-    );
-    expect(within(plaid).getByRole('button', { name: 'Add Plaid account' })).toBeInTheDocument();
+    await renderDesktop();
+    await waitFor(() => expect(chips('gmail')).toHaveLength(2));
+    expect(bars('gmail')).toHaveLength(1);
+    expect(bars('gmail')[0]).toHaveTextContent('Scanning mailbox · 500 messages');
+    expect(bars('gmail')[0]).not.toHaveTextContent('@x.com');
   });
 
-  it('Messenger and Instagram have no sync: no bar, coming soon', async () => {
-    serve([]);
+  it('Plaid lists every institution with "+ Add account"; a syncing item shows its bar', async () => {
+    serveList(() => listOf());
+    server.use(
+      http.get(`${API_BASE}/integrations/plaid/items`, () =>
+        HttpResponse.json({
+          items: [plaidItem('item-1', 'Amex', 'syncing'), plaidItem('item-2', 'Chase', 'synced')],
+        }),
+      ),
+    );
     await renderDesktop();
-    for (const key of ['messenger', 'instagram']) {
-      const el = await waitFor(() => rowEl(key));
-      expect(el).toHaveTextContent('Coming soon');
-      expect(within(el).queryByTestId('sync-progress')).not.toBeInTheDocument();
-    }
+    await waitFor(() => expect(chips('plaid')).toHaveLength(2));
+    expect(chipFor('plaid', 'Amex')).toHaveAttribute('data-tone', 'syncing');
+    expect(chipFor('plaid', 'Chase')).toHaveAttribute('data-tone', 'synced');
+    expect(bars('plaid')).toHaveLength(1);
+    expect(bars('plaid')[0]).toHaveAttribute('data-state', 'indeterminate');
+    expect(within(rowEl('plaid')).getByRole('button', { name: 'Add Plaid account' })).toBeVisible();
   });
 
-  it('keeps the currentColor ChatGPT glyph dark on its light tile so it shows in dark mode', async () => {
-    serve([]);
-    await renderDesktop();
-    const codex = await waitFor(() => rowEl('codex'));
-    const glyph = codex.querySelector('svg');
-    expect(glyph?.closest('.text-\\[\\#111111\\]')).not.toBeNull();
+  it('compute subscriptions keep every account with "+ Add account"', async () => {
+    serveList(() => listOf());
+    server.use(
+      http.get(`${API_BASE}/compute-accounts`, () =>
+        HttpResponse.json({
+          accounts: [
+            computeAccount('claude', 'acct-1', 'andy@roselabs.ai'),
+            computeAccount('claude', 'acct-2', 'ops@roselabs.ai'),
+          ],
+        }),
+      ),
+    );
+    await renderDesktop({
+      handlers: desktopHandlers({
+        claudeCode: {
+          isAvailable: true,
+          hasCredentials: async () => false,
+          syncCredentials: async () => ({ success: true }),
+        },
+      }),
+    });
+    await waitFor(() => expect(chips('claude')).toHaveLength(2));
+    expect(
+      within(rowEl('claude')).getByRole('button', { name: 'Add Claude Subscription account' }),
+    ).toBeInTheDocument();
   });
 });
 
+function plaidItem(id: string, institution: string, state: 'syncing' | 'synced') {
+  return {
+    id,
+    plaidItemId: `p-${id}`,
+    institutionId: `ins_${id}`,
+    institutionName: institution,
+    status: 'ACTIVE',
+    products: ['transactions'],
+    createdAt: '2026-10-01T00:00:00Z',
+    lastSyncAt: null,
+    disconnectedAt: null,
+    sync: {
+      state,
+      transactionCount: 0,
+      postedTransactionCount: 0,
+      pendingTransactionCount: 0,
+      removedTransactionCount: 0,
+      dateRange: { from: null, to: null },
+    },
+    accounts: [],
+  };
+}
+
+function computeAccount(provider: string, accountId: string, accountEmail: string) {
+  return {
+    provider,
+    accountId,
+    accountEmail,
+    state: 'connected',
+    lastErrorReason: null,
+    connectedAt: '2026-10-01T00:00:00Z',
+  };
+}
 describe('integrations account parser', () => {
-  it('parses full progress, total null, eta null and bad input', () => {
+  it('parses full progress; total null is never a percentage; eta null; bad input', () => {
     expect(
-      parseSyncProgress({ pct: 41, done: 88, total: 214, unit: 'sites', eta_sec: 60 }),
-    ).toEqual({ pct: 41, done: 88, total: 214, unit: 'sites', etaSec: 60, phase: null });
-    expect(parseSyncProgress({ done: 50, total: 200, unit: 'emails' })).toMatchObject({ pct: 25 });
+      parseSyncProgress({ pct: 41, done: 88, total: 214, unit: 'cookies', eta_sec: 60 }),
+    ).toEqual({ pct: 41, done: 88, total: 214, unit: 'cookies', etaSec: 60, phase: null });
+    expect(parseSyncProgress({ done: 50, total: 200, unit: 'messages' })).toMatchObject({
+      pct: 25,
+    });
     expect(parseSyncProgress({ pct: 70, done: 5, total: null, unit: 'chats' })).toEqual({
       pct: null,
       done: 5,
@@ -370,19 +534,39 @@ describe('integrations account parser', () => {
     expect(parseSyncProgress(null)).toBeNull();
   });
 
-  it('maps states to tones and returns null when `accounts` is absent', () => {
+  it('maps every contract state to a tone; only needs_reconnect / EXPIRED need reconnecting', () => {
     expect(accountToneForState('syncing')).toBe('syncing');
+    expect(accountToneForState('synced')).toBe('synced');
+    expect(accountToneForState('idle')).toBe('synced');
     expect(accountToneForState('needs_reconnect')).toBe('warning');
+    expect(accountToneForState('EXPIRED')).toBe('warning');
     expect(accountToneForState('sync_failed')).toBe('error');
-    expect(accountToneForState('connected')).toBe('synced');
-    expect(parseIntegrationAccounts(row('chrome'))).toBeNull();
-    const accounts = parseIntegrationAccounts(
-      chromeProfiles({ pct: 100, done: 1, total: 1, unit: 'sites' }),
-    );
-    expect(accounts?.map((a) => [a.accountId, a.tone])).toEqual([
-      ['default', 'synced'],
-      ['work', 'synced'],
-    ]);
+    const health = (state: string) => ({
+      integrations: [{ name: 'imessage', status: 'CONNECTED', accounts: [{ state }] }],
+      plaidItems: [],
+    });
+    expect(integrationsNeedingReconnect(health('needs_reconnect'))).toEqual(['imessage']);
+    expect(integrationsNeedingReconnect(health('EXPIRED'))).toEqual(['imessage']);
+    expect(integrationsNeedingReconnect(health('sync_failed'))).toEqual([]);
+    expect(integrationsNeedingReconnect(health('syncing'))).toEqual([]);
+  });
+
+  it("reads a row's one account (its first entry); null without `accounts`", () => {
+    const base = { id: 'r', name: 'imessage', status: 'CONNECTED', isActive: true } as const;
+    expect(parseIntegrationAccount(base as ConnectedIntegration)).toBeNull();
+    const parsed = parseIntegrationAccount({
+      ...base,
+      accounts: [
+        account('imessage', 'default', {
+          state: 'syncing',
+          progress: progress({ pct: 100, done: 1, total: 1 }),
+        }),
+        account('imessage', 'other', { state: 'sync_failed' }),
+      ],
+    } as ConnectedIntegration);
+    expect(parsed?.accountId).toBe('default');
+    expect(parsed?.tone).toBe('synced');
+    expect(parsed?.unlabeled).toBe(true);
   });
 
   it('formats ETAs', () => {

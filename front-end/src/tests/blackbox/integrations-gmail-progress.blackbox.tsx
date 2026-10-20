@@ -6,8 +6,8 @@
  *   full sync      phase scanning → saving, unit 'messages',
  *                  total = messagesTotal or null (null → indeterminate, never a %)
  *   incremental    phase 'history' → light "checking for new mail", no bar
- *   waiting turn   state 'idle' (row SYNCING lease, no progress row yet) → quiet
- *                  queued chip, never an error; it keeps the poll alive
+ *   idle           connected, not syncing (single-account contract, lane
+ *                  L-CULL-INTEG) → a plain synced chip, no bar, no poll
  *   sync_failed    credential state → the existing reconnect chip, unchanged
  *   red dot        only needs_reconnect / EXPIRED light the Integrations icon
  */
@@ -83,7 +83,7 @@ describe('Gmail I3: per-address phases on Rose Desktop', () => {
     expect(chipFor('gmail', 'b@x.com')).toHaveTextContent('6%');
   });
 
-  it("an address waiting its turn ('idle') is a quiet queued chip, not an error", async () => {
+  it("an 'idle' address is connected but not syncing: a synced chip, no bar, no error", async () => {
     serveList(() =>
       gmailList([
         gmail('a@x.com', syncing('saving', { done: 10, total: 100 })),
@@ -91,13 +91,10 @@ describe('Gmail I3: per-address phases on Rose Desktop', () => {
       ]),
     );
     renderIntegrations();
-    await waitFor(() =>
-      expect(chipFor('gmail', 'c@x.com')).toHaveAttribute('data-tone', 'neutral'),
-    );
-    const queued = chipFor('gmail', 'c@x.com');
-    expect(queued).toHaveTextContent('queued');
-    expect(queued).toHaveAttribute('title', 'Waiting for its turn to sync');
-    expect(queued?.querySelector('.lucide-triangle-alert, .lucide-alert-triangle')).toBeNull();
+    await waitFor(() => expect(chipFor('gmail', 'c@x.com')).toHaveAttribute('data-tone', 'synced'));
+    const idle = chipFor('gmail', 'c@x.com');
+    expect(idle).not.toHaveTextContent('queued');
+    expect(idle?.querySelector('.lucide-triangle-alert, .lucide-alert-triangle')).toBeNull();
     expect(within(rowEl('gmail')).queryByRole('button', { name: 'Reconnect c@x.com' })).toBeNull();
     // Only the address actually syncing has a bar.
     expect(within(rowEl('gmail')).getAllByTestId('sync-progress')).toHaveLength(1);
@@ -114,11 +111,14 @@ describe('Gmail I3: per-address phases on Rose Desktop', () => {
     expect(within(rowEl('gmail')).queryByTestId('sync-progress')).toBeNull();
   });
 
-  it('a queued address keeps the progress poll alive until it starts and finishes', async () => {
+  it('a syncing address keeps the progress poll alive until it finishes, then it stops', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    const queued = gmail('c@x.com', { state: 'idle', progress: progress() });
     const served = serveList(
-      () => gmailList([gmail('a@x.com', { state: 'synced' }), queued]),
+      () =>
+        gmailList([
+          gmail('a@x.com', { state: 'synced' }),
+          gmail('c@x.com', syncing('scanning', { done: 50, total: null })),
+        ]),
       (since) => {
         if (since === null) {
           return {
@@ -127,7 +127,7 @@ describe('Gmail I3: per-address phases on Rose Desktop', () => {
             accountsByProvider: {
               gmail: [
                 gmail('a@x.com', { state: 'synced' }),
-                gmail('c@x.com', syncing('scanning', { done: 50, total: null })),
+                gmail('c@x.com', syncing('saving', { done: 400, total: 800 })),
               ],
             },
           };
@@ -137,7 +137,7 @@ describe('Gmail I3: per-address phases on Rose Desktop', () => {
             cursor: 'c2',
             changed: true,
             accountsByProvider: {
-              gmail: [gmail('a@x.com', { state: 'synced' }), gmail('c@x.com', { state: 'synced' })],
+              gmail: [gmail('a@x.com', { state: 'synced' }), gmail('c@x.com', { state: 'idle' })],
             },
           };
         }
@@ -145,28 +145,31 @@ describe('Gmail I3: per-address phases on Rose Desktop', () => {
       },
     );
     renderIntegrations();
-    await waitFor(() => expect(chipFor('gmail', 'c@x.com')).toHaveTextContent('queued'));
-    expect(within(rowEl('gmail')).queryByTestId('sync-progress')).toBeNull();
-
-    vi.advanceTimersByTime(5_000);
     const bar = await waitFor(() => within(rowEl('gmail')).getByTestId('sync-progress'));
     expect(bar).toHaveTextContent('Scanning mailbox · 50 messages');
+
+    vi.advanceTimersByTime(5_000);
+    await waitFor(() =>
+      expect(within(rowEl('gmail')).getByTestId('sync-progress')).toHaveTextContent(
+        'Saving messages · 400 of 800 messages',
+      ),
+    );
 
     vi.advanceTimersByTime(5_000);
     await waitFor(() => expect(chipFor('gmail', 'c@x.com')).toHaveAttribute('data-tone', 'synced'));
     expect(within(rowEl('gmail')).queryByTestId('sync-progress')).toBeNull();
     expect(served.progressCalls).toEqual(['', 'c1']);
 
-    // Nothing syncing or queued any more: the poll stops. React clears the
-    // interval in a passive effect after the DOM commit the waitFor above saw,
-    // so yield one real macrotask (the scheduler runs it first) before moving the clock.
+    // Nothing syncing any more: the poll stops. React clears the interval in a
+    // passive effect after the DOM commit the waitFor above saw, so yield one
+    // real macrotask (the scheduler runs it first) before moving the clock.
     await new Promise((resolve) => setTimeout(resolve, 20));
     vi.advanceTimersByTime(15_000);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(served.progressCalls).toEqual(['', 'c1']);
   });
 
-  it('sync_failed keeps the existing reconnect path next to a queued address', async () => {
+  it('sync_failed keeps the existing reconnect path next to an idle address', async () => {
     const failed = gmail('e@x.com', { state: 'failed', lastError: 'Gmail API 500' });
     const waiting = gmail('c@x.com', { state: 'idle', progress: progress() });
     serveList(() =>
@@ -180,11 +183,11 @@ describe('Gmail I3: per-address phases on Rose Desktop', () => {
     expect(
       within(rowEl('gmail')).getByRole('button', { name: 'Reconnect e@x.com' }),
     ).toBeInTheDocument();
-    expect(chipFor('gmail', 'c@x.com')).toHaveAttribute('data-tone', 'neutral');
+    expect(chipFor('gmail', 'c@x.com')).toHaveAttribute('data-tone', 'synced');
     expect(within(rowEl('gmail')).queryByRole('button', { name: 'Reconnect c@x.com' })).toBeNull();
   });
 
-  it('flag off: the stock Gmail row shows no queued or phase states', async () => {
+  it('flag off: the stock Gmail row shows no phase states or bars', async () => {
     serveList(() =>
       gmailList([
         gmail('a@x.com', syncing('scanning', { done: 1200, total: null })),
@@ -194,7 +197,6 @@ describe('Gmail I3: per-address phases on Rose Desktop', () => {
     renderIntegrations({ roseDesktop: false });
     expect(await screen.findByText('Enable web automation and browsing')).toBeInTheDocument();
     expect(screen.queryByTestId('rose-desktop-integrations')).toBeNull();
-    expect(screen.queryByText(/queued/)).toBeNull();
     expect(screen.queryByText(/Scanning mailbox/)).toBeNull();
     expect(screen.queryByTestId('sync-progress')).toBeNull();
   });
@@ -204,7 +206,7 @@ describe('Gmail I3: the Integrations icon red dot', () => {
   beforeEach(() => mockSession());
   afterEach(() => localStorage.clear());
 
-  it('queued, scanning and history addresses do not raise the reconnect dot', async () => {
+  it('idle, scanning and history addresses do not raise the reconnect dot', async () => {
     const served = serveList(() =>
       gmailList([
         gmail('a@x.com', syncing('scanning', { done: 1, total: null })),

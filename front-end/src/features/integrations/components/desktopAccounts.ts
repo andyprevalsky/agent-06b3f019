@@ -1,28 +1,30 @@
 /**
  * accounts → chips mapping for the Rose Desktop integrations list.
  *
- * Pure functions, no state machine. Each builder prefers the multi-account
- * contract (`integrations[].accounts`, hooks/integrationAccounts) and falls
- * back to today's per-row status when the backend does not send it:
+ * Pure functions, no state machine. Backend contract (lane L-CULL-INTEG):
+ * every integration row has ONE account (`integrations[].accounts` = [one
+ * entry] with state + progress). Only rows that already listed several
+ * accounts before Rose Desktop keep them, with their existing flows: Gmail
+ * addresses, Plaid institutions and compute subscriptions.
  *
- *   contract present  → one chip per account (an 'idle' account of a NOT_CONNECTED
- *                       row is no chip; an unlabeled one uses the row's label);
- *                       × = per-account DELETE (confirmed); 501 → reason under it
- *   contract absent   → one chip for a connected row; × = row DELETE (confirmed)
- *   Gmail / Plaid     → existing per-address / per-item flows, unchanged; the
- *                       contract only contributes sync tone and progress ids
- *   Gmail address     → idle = queued (quiet), phase `history` = light "checking
- *                       for new mail" (no bar), scanning / saving = the bar
- *   labelFor          → the server's own chip label (passwords / passkeys, see
- *                       credentialAccountLabels) used unprefixed in the dialog
- *   removalWarning    → the confirm dialog states why removal cannot be undone
+ *   singleAccount     the row's one chip (from its account, or from its status
+ *                     when the backend sends no `accounts`); not connected → none;
+ *                     × = confirmed row DELETE; sync_failed → lastError line
+ *   gmailAccountViews one chip per address (existing disconnect / reconnect);
+ *                     progress matched by address; idle = not syncing (synced),
+ *                     phase `history` = light "checking for new mail" (no bar)
+ *   plaidAccountViews one chip per institution (existing disconnect / update);
+ *                     progress matched by item id
+ *   rowSyncFor        the backend reports ONE account for a Gmail / Plaid row
+ *                     that lists several: one bar for the whole row instead of
+ *                     per-chip bars (a single address / item simply matches it)
  */
 
-import { parseIntegrationAccounts } from '../hooks/integrationAccounts';
+import { parseIntegrationAccount, parseIntegrationAccounts } from '../hooks/integrationAccounts';
 import { gmailAccounts } from '../hooks/useIntegrationData';
-import { removalKey, type PendingRemoval } from '../hooks/useIntegrationRemoval';
+import type { PendingRemoval } from '../hooks/useIntegrationRemoval';
 import type { AccountTone, ConnectedIntegration, IntegrationAccount, PlaidItem } from '../types';
-import type { DesktopAccountView } from './DesktopIntegrationRow';
+import type { DesktopAccountView, RowSync } from './DesktopIntegrationRow';
 import {
   chipToneForState,
   itemChipLabel,
@@ -33,10 +35,12 @@ import {
 
 export interface RemovalPort {
   request: (target: PendingRemoval) => void;
-  removingKey: string | null;
-  /** removalKey → reason the backend cannot remove that account yet (DELETE 501). */
-  blockedReasons?: Readonly<Record<string, string>>;
+  /** Row whose DELETE is in flight (its chip shows a spinner). */
+  removingName: string | null;
 }
+
+/** Shown under a failed chip when the backend sent no lastError. */
+export const SYNC_FAILED_TEXT = 'The last sync failed.';
 
 export function rowStatusTone(row: ConnectedIntegration, localSyncing = false): AccountTone {
   if (localSyncing || row.status === 'SYNCING') return 'syncing';
@@ -54,76 +58,85 @@ export function toneDetail(tone: AccountTone): string | undefined {
 export interface RowFallback {
   /** Integration name the user sees, e.g. "Chrome". */
   displayName: string;
-  /** Chip label when the backend sends no account list. */
+  /** Chip label when the backend sends no label. */
   label: string;
+  /** Quiet detail on a healthy chip, e.g. "1,204 messages". */
   detail?: string;
-  /** A local connect/sync for this row is running right now. */
+  /** A local connect/sync for this row is running right now (legacy backends). */
   localSyncing?: boolean;
-  /**
-   * Chip label per contract account, already naming its source (e.g.
-   * "Chrome · Profile 1"): the confirm dialog and × use it unprefixed.
-   */
-  labelFor?: (account: IntegrationAccount) => string;
-  /** Removal cannot be undone: the confirm dialog says why. */
-  removalWarning?: string;
-  /** Work to run before one account's DELETE (WhatsApp: log it out on this Mac). */
-  prepareRemoval?: (accountId: string) => (() => Promise<void>) | undefined;
 }
 
-/** Chips for a provider that is one integration row (browsers, passwords, iMessage, ...). */
-export function rowAccounts(
+/** The row's one chip; [] while the integration is not connected. */
+export function singleAccount(
   row: ConnectedIntegration | undefined,
   fallback: RowFallback,
   removal: RemovalPort,
 ): DesktopAccountView[] {
   if (row === undefined) return [];
-  const contract = parseIntegrationAccounts(row);
-  if (contract !== null) {
-    return contract
-      .filter((account) => !(account.state === 'idle' && row.status === 'NOT_CONNECTED'))
-      .map((account) => {
-        const qualified = fallback.labelFor?.(account);
-        const label = qualified ?? (account.unlabeled ? fallback.label : account.label);
-        const key = removalKey(row.name, account.accountId);
-        return {
-          provider: row.name,
-          accountId: account.accountId,
-          label,
-          tone: account.tone,
-          detail: toneDetail(account.tone),
-          title: account.lastError ?? undefined,
-          onRemove: () =>
-            removal.request({
-              name: row.name,
-              accountId: account.accountId,
-              label: qualified ?? `${fallback.displayName} · ${label}`,
-              warning: fallback.removalWarning,
-              prepare: fallback.prepareRemoval?.(account.accountId),
-            }),
-          removeLabel:
-            qualified !== undefined
-              ? `Remove ${qualified}`
-              : `Remove ${fallback.displayName} account ${label}`,
-          removing: removal.removingKey === key,
-          removeBlockedReason: removal.blockedReasons?.[key],
-        };
-      });
+  const account = parseIntegrationAccount(row);
+  let label = fallback.label;
+  let tone: AccountTone;
+  let lastError: string | null = null;
+  if (account !== null) {
+    if (row.status === 'NOT_CONNECTED' && account.state.trim().toLowerCase() === 'idle') return [];
+    if (!account.unlabeled) label = account.label;
+    tone = account.tone;
+    lastError = account.lastError;
+  } else {
+    if (row.status === 'NOT_CONNECTED') return [];
+    tone = rowStatusTone(row, fallback.localSyncing);
   }
-  if (row.status === 'NOT_CONNECTED') return [];
-  const tone = rowStatusTone(row, fallback.localSyncing);
   return [
     {
       provider: row.name,
-      accountId: row.name,
-      label: fallback.label,
+      label,
       tone,
-      detail: fallback.detail ?? toneDetail(tone),
+      detail: toneDetail(tone) ?? (tone === 'synced' ? fallback.detail : undefined),
+      title: lastError ?? undefined,
+      errorText: tone === 'error' ? (lastError ?? SYNC_FAILED_TEXT) : undefined,
       onRemove: () =>
-        removal.request({ name: row.name, label: `${fallback.displayName} · ${fallback.label}` }),
-      removeLabel: `Remove ${fallback.displayName} account ${fallback.label}`,
-      removing: removal.removingKey === removalKey(row.name),
+        removal.request({ name: row.name, label: `${fallback.displayName} · ${label}` }),
+      removeLabel: `Disconnect ${fallback.displayName}`,
+      removing: removal.removingName === row.name,
     },
   ];
+}
+
+/**
+ * Contract entry of one of a row's own accounts. A row with a single account
+ * and a single entry always match (the backend's one-account shape).
+ */
+function matchEntry(
+  contract: IntegrationAccount[],
+  ownCount: number,
+  ids: (string | null)[],
+): IntegrationAccount | undefined {
+  const byId = contract.find((c) => ids.includes(c.accountId) || ids.includes(c.label));
+  if (byId !== undefined) return byId;
+  return contract.length === 1 && ownCount === 1 ? contract[0] : undefined;
+}
+
+/**
+ * One bar for a Gmail / Plaid row whose backend reports one account for the
+ * whole row while the row lists several (no entry matches any of them).
+ */
+export function rowSyncFor(
+  row: ConnectedIntegration | undefined,
+  ownIds: string[][],
+  options: { lightPhase?: string } = {},
+): RowSync | undefined {
+  const contract = parseIntegrationAccounts(row) ?? [];
+  if (row === undefined || contract.length === 0) return undefined;
+  if (ownIds.some((ids) => matchEntry(contract, ownIds.length, ids) !== undefined)) {
+    return undefined;
+  }
+  const entry = contract[0];
+  return {
+    provider: row.name,
+    syncing: entry.tone === 'syncing',
+    hideProgress: options.lightPhase !== undefined && entry.progress?.phase === options.lightPhase,
+    errorText: entry.tone === 'error' ? (entry.lastError ?? SYNC_FAILED_TEXT) : undefined,
+  };
 }
 
 export interface GmailPort {
@@ -134,21 +147,26 @@ export interface GmailPort {
 }
 
 /** Gmail's incremental sync (`history`): a light state, never the full bar. */
-const GMAIL_LIGHT_PHASE = 'history';
+export const GMAIL_LIGHT_PHASE = 'history';
 
-type GmailSyncView = Pick<DesktopAccountView, 'tone' | 'detail' | 'title' | 'hideProgress'>;
+type GmailSyncView = Pick<
+  DesktopAccountView,
+  'tone' | 'detail' | 'title' | 'hideProgress' | 'errorText'
+>;
 
 /** Tone, detail and bar choice of one healthy Gmail address from its contract entry. */
 function gmailSyncView(match: IntegrationAccount | undefined): GmailSyncView {
+  // No entry, or `idle` (connected, not syncing): a plain synced chip.
   if (match === undefined) return { tone: 'synced' };
-  // The shared row is SYNCING (a job lease) and this address has not started yet.
-  if (match.state === 'idle') {
-    return { tone: 'queued', detail: 'queued', title: 'Waiting for its turn to sync' };
-  }
   if (match.tone === 'syncing' && match.progress?.phase === GMAIL_LIGHT_PHASE) {
     return { tone: 'syncing', detail: 'checking for new mail', hideProgress: true };
   }
-  return { tone: match.tone, detail: toneDetail(match.tone), title: match.lastError ?? undefined };
+  return {
+    tone: match.tone,
+    detail: toneDetail(match.tone),
+    title: match.lastError ?? undefined,
+    errorText: match.tone === 'error' ? (match.lastError ?? SYNC_FAILED_TEXT) : undefined,
+  };
 }
 
 /** One chip per Gmail address, keeping the existing disconnect / reconnect flows. */
@@ -158,9 +176,10 @@ export function gmailAccountViews(
 ): DesktopAccountView[] {
   const row = integrations.find((i) => i.name === 'gmail');
   const contract = parseIntegrationAccounts(row) ?? [];
-  return gmailAccounts(row).map((account) => {
+  const addresses = gmailAccounts(row);
+  return addresses.map((account) => {
     const damaged = account.state !== 'connected';
-    const match = contract.find((c) => c.accountId === account.email || c.label === account.email);
+    const match = matchEntry(contract, addresses.length, [account.email]);
     const health: GmailSyncView = damaged
       ? {
           tone: 'warning',
@@ -191,16 +210,22 @@ export interface PlaidPort {
   onDisconnect: (itemId: string) => void;
 }
 
+/** Ids a Plaid item may carry in the progress contract. */
+export function plaidItemIds(item: PlaidItem): string[] {
+  return [item.id, item.plaidItemId];
+}
+
 /** One chip per institution, keeping the existing Plaid disconnect / update flows. */
 export function plaidAccountViews(
   integrations: ConnectedIntegration[],
   plaid: PlaidPort,
 ): DesktopAccountView[] {
   const contract = parseIntegrationAccounts(integrations.find((i) => i.name === 'plaid')) ?? [];
-  return visibleInstitutionItems(plaid.items).map((item) => {
+  const items = visibleInstitutionItems(plaid.items);
+  return items.map((item) => {
     const needsUpdate = itemNeedsUpdate(item);
     const label = itemChipLabel(item);
-    const match = contract.find((c) => c.accountId === item.id || c.accountId === item.plaidItemId);
+    const match = matchEntry(contract, items.length, plaidItemIds(item));
     const busy = plaid.connectLoading || plaid.disconnectingItemId === item.id;
     return {
       provider: 'plaid',
