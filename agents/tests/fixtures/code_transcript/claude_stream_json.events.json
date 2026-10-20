@@ -1,0 +1,605 @@
+[
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "session",
+  "status": "starting",
+  "cwd": "/home/user",
+  "prompt_version": null
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "session",
+  "raw_type": "system.init",
+  "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
+  "cwd": "/home/user/workspace",
+  "model": "claude-sonnet-5",
+  "tools": [
+   "Task",
+   "Bash",
+   "CronCreate",
+   "CronDelete",
+   "CronList",
+   "DesignSync",
+   "Edit",
+   "EnterWorktree",
+   "ExitWorktree",
+   "ListAgents",
+   "Monitor",
+   "NotebookEdit",
+   "PushNotification",
+   "Read",
+   "RemoteTrigger",
+   "ReportFindings",
+   "ScheduleWakeup",
+   "SendMessage",
+   "Skill",
+   "TaskStop",
+   "ToolSearch",
+   "WebFetch",
+   "WebSearch",
+   "Workflow",
+   "Write"
+  ],
+  "permission_mode": "bypassPermissions",
+  "prompt_version": null
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "cli_message",
+  "raw_type": "system",
+  "cli_message": {
+   "type": "system",
+   "subtype": "status",
+   "status": "requesting",
+   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
+   "uuid": "a70bbba2-a67e-4edc-a583-584f846200fc"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "thinking",
+  "raw_type": "assistant.thinking",
+  "text": "",
+  "redacted": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "cli_message",
+  "raw_type": "rate_limit_event",
+  "cli_message": {
+   "type": "rate_limit_event",
+   "rate_limit_info": {
+    "status": "allowed",
+    "resetsAt": 1792504800,
+    "rateLimitType": "five_hour",
+    "overageStatus": "rejected",
+    "overageDisabledReason": "org_level_disabled",
+    "isUsingOverage": false,
+    "unifiedWindows": {
+     "five_hour": {
+      "utilization": 0.52,
+      "resetsAt": 1792504800
+     },
+     "seven_day": {
+      "utilization": 0.1,
+      "resetsAt": 1792774800
+     }
+    }
+   },
+   "uuid": "f9d565fa-9f88-424c-9100-ce9b3b2d34b9",
+   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "agent_message",
+  "raw_type": "assistant",
+  "text": "I'll read calc.py first to find the bug.",
+  "usage": {
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 61922,
+   "cache_read_input_tokens": 18643,
+   "cache_creation": {
+    "ephemeral_5m_input_tokens": 0,
+    "ephemeral_1h_input_tokens": 61922
+   },
+   "output_tokens": 2,
+   "service_tier": "standard",
+   "inference_geo": "global",
+   "speed": "standard"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "tool_use",
+  "raw_type": "assistant.tool_use",
+  "tool": "Read",
+  "tool_use_id": "toolu_018yFxWy1mWPEU5pfTb42xus",
+  "input": {
+   "file_path": "/home/user/workspace/calc.py"
+  },
+  "paths": [
+   "/home/user/workspace/calc.py"
+  ]
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "tool_result",
+  "raw_type": "user.tool_result",
+  "tool_use_result": {
+   "type": "text",
+   "file": {
+    "filePath": "/home/user/workspace/calc.py",
+    "content": "def add(a, b):\n    return a - b\n\n\ndef mul(a, b):\n    return a * b\n",
+    "numLines": 7,
+    "startLine": 1,
+    "totalLines": 7
+   }
+  },
+  "tool_use_id": "toolu_018yFxWy1mWPEU5pfTb42xus",
+  "is_error": false
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "cli_message",
+  "raw_type": "system",
+  "cli_message": {
+   "type": "system",
+   "subtype": "status",
+   "status": "requesting",
+   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
+   "uuid": "aeed1fcb-bcf1-4675-8c32-ce59290a9de7"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "agent_message",
+  "raw_type": "assistant",
+  "text": "`add` uses subtraction instead of addition. Fixing it.",
+  "usage": {
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 252,
+   "cache_read_input_tokens": 80565,
+   "cache_creation": {
+    "ephemeral_5m_input_tokens": 0,
+    "ephemeral_1h_input_tokens": 252
+   },
+   "output_tokens": 1,
+   "service_tier": "standard",
+   "inference_geo": "global",
+   "speed": "standard"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "tool_use",
+  "raw_type": "assistant.tool_use",
+  "tool": "Edit",
+  "tool_use_id": "toolu_01SJDJjrTW26WcFmpX9D8f4j",
+  "input": {
+   "replace_all": false,
+   "file_path": "/home/user/workspace/calc.py",
+   "old_string": "    return a - b",
+   "new_string": "    return a + b"
+  },
+  "paths": [
+   "/home/user/workspace/calc.py"
+  ]
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "tool_result",
+  "raw_type": "user.tool_result",
+  "tool_use_result": {
+   "filePath": "/home/user/workspace/calc.py",
+   "oldString": "    return a - b",
+   "newString": "    return a + b",
+   "originalFile": "def add(a, b):\n    return a - b\n\n\ndef mul(a, b):\n    return a * b\n",
+   "structuredPatch": [
+    {
+     "oldStart": 1,
+     "oldLines": 5,
+     "newStart": 1,
+     "newLines": 5,
+     "lines": [
+      " def add(a, b):",
+      "-    return a - b",
+      "+    return a + b",
+      " ",
+      " ",
+      " def mul(a, b):"
+     ]
+    }
+   ],
+   "userModified": false,
+   "replaceAll": false
+  },
+  "tool_use_id": "toolu_01SJDJjrTW26WcFmpX9D8f4j",
+  "is_error": false
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "cli_message",
+  "raw_type": "system",
+  "cli_message": {
+   "type": "system",
+   "subtype": "status",
+   "status": "requesting",
+   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
+   "uuid": "db3db4ba-6e76-40b2-9a9e-afd45a7f6bb6"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "tool_use",
+  "raw_type": "assistant.tool_use",
+  "tool": "Bash",
+  "tool_use_id": "toolu_01GsBwrtfNmuSQc5mCrqi7e5",
+  "input": {
+   "command": "python3 test_calc.py",
+   "description": "Run calc test suite"
+  },
+  "paths": []
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "tool_result",
+  "raw_type": "user.tool_result",
+  "tool_use_result": {
+   "stdout": "all tests passed",
+   "stderr": "",
+   "interrupted": false,
+   "isImage": false,
+   "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_01GsBwrtfNmuSQc5mCrqi7e5",
+  "is_error": false
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "cli_message",
+  "raw_type": "system",
+  "cli_message": {
+   "type": "system",
+   "subtype": "status",
+   "status": "requesting",
+   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
+   "uuid": "7e572e0c-1c3e-435c-8bf9-19f425b33b6c"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "agent_message",
+  "raw_type": "assistant",
+  "text": "Now running the standalone command exactly as given.",
+  "usage": {
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 132,
+   "cache_read_input_tokens": 81121,
+   "cache_creation": {
+    "ephemeral_5m_input_tokens": 0,
+    "ephemeral_1h_input_tokens": 132
+   },
+   "output_tokens": 3,
+   "service_tier": "standard",
+   "inference_geo": "global",
+   "speed": "standard"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "tool_use",
+  "raw_type": "assistant.tool_use",
+  "tool": "Bash",
+  "tool_use_id": "toolu_01LrquaCPK3a8EDN3op1RAZ6",
+  "input": {
+   "command": "python3 -c \"import sys; print(42); sys.exit(3)\"",
+   "description": "Run standalone Python command that prints 42 and exits with code 3"
+  },
+  "paths": []
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "tool_result",
+  "raw_type": "user.tool_result",
+  "tool_use_result": "Error: Exit code 3\n42",
+  "tool_use_id": "toolu_01LrquaCPK3a8EDN3op1RAZ6",
+  "is_error": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "cli_message",
+  "raw_type": "system",
+  "cli_message": {
+   "type": "system",
+   "subtype": "status",
+   "status": "requesting",
+   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
+   "uuid": "69d58c85-76c0-4522-ac01-a3a38a502018"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "agent_message",
+  "raw_type": "assistant",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` reports \"all tests passed\". The standalone command printed `42` to stdout and exited with code 3, as expected.",
+  "usage": {
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 184,
+   "cache_read_input_tokens": 81253,
+   "cache_creation": {
+    "ephemeral_5m_input_tokens": 0,
+    "ephemeral_1h_input_tokens": 184
+   },
+   "output_tokens": 5,
+   "service_tier": "standard",
+   "inference_geo": "global",
+   "speed": "standard"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "direct_chat",
+  "status": "held",
+  "sender": "user"
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "user_turn",
+  "turn_id": "fixture-turn-2",
+  "sender": "user",
+  "text": "Reply with one short sentence: what did you change?"
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "result",
+  "raw_type": "result.success",
+  "status": "completed",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` reports \"all tests passed\". The standalone command printed `42` to stdout and exited with code 3, as expected.",
+  "usage": {
+   "input_tokens": 10,
+   "cache_creation_input_tokens": 62794,
+   "cache_read_input_tokens": 342399,
+   "output_tokens": 614,
+   "output_tokens_details": {
+    "thinking_tokens": 45
+   },
+   "server_tool_use": {
+    "web_search_requests": 0,
+    "web_fetch_requests": 0
+   },
+   "service_tier": "standard",
+   "cache_creation": {
+    "ephemeral_1h_input_tokens": 62794,
+    "ephemeral_5m_input_tokens": 0
+   },
+   "inference_geo": "global",
+   "iterations": [
+    {
+     "input_tokens": 2,
+     "output_tokens": 67,
+     "cache_read_input_tokens": 81253,
+     "cache_creation_input_tokens": 184,
+     "cache_creation": {
+      "ephemeral_5m_input_tokens": 0,
+      "ephemeral_1h_input_tokens": 184
+     },
+     "type": "message"
+    }
+   ],
+   "speed": "standard"
+  },
+  "model_usage": {
+   "claude-haiku-4-5-20251001": {
+    "inputTokens": 966,
+    "outputTokens": 14,
+    "cacheReadInputTokens": 0,
+    "cacheCreationInputTokens": 0,
+    "webSearchRequests": 0,
+    "costUSD": 0.001036,
+    "contextWindow": 200000,
+    "maxOutputTokens": 32000,
+    "thinkingTokens": 0,
+    "canonicalModel": "claude-haiku-4-5",
+    "provider": "firstParty",
+    "costBasis": "list"
+   },
+   "claude-sonnet-5": {
+    "inputTokens": 10,
+    "outputTokens": 614,
+    "cacheReadInputTokens": 342399,
+    "cacheCreationInputTokens": 62794,
+    "webSearchRequests": 0,
+    "costUSD": 0.32581580000000004,
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000,
+    "thinkingTokens": 45,
+    "canonicalModel": "claude-sonnet-5",
+    "provider": "firstParty",
+    "costBasis": "list"
+   }
+  },
+  "pending_turns": 0
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "session",
+  "raw_type": "system.init",
+  "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
+  "cwd": "/home/user/workspace",
+  "model": "claude-sonnet-5",
+  "tools": [
+   "Task",
+   "Bash",
+   "CronCreate",
+   "CronDelete",
+   "CronList",
+   "DesignSync",
+   "Edit",
+   "EnterWorktree",
+   "ExitWorktree",
+   "ListAgents",
+   "Monitor",
+   "NotebookEdit",
+   "PushNotification",
+   "Read",
+   "RemoteTrigger",
+   "ReportFindings",
+   "ScheduleWakeup",
+   "SendMessage",
+   "Skill",
+   "TaskStop",
+   "ToolSearch",
+   "WebFetch",
+   "WebSearch",
+   "Workflow",
+   "Write"
+  ],
+  "permission_mode": "bypassPermissions",
+  "prompt_version": null
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "cli_message",
+  "raw_type": "system",
+  "cli_message": {
+   "type": "system",
+   "subtype": "status",
+   "status": "requesting",
+   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
+   "uuid": "c4d508fe-31f9-4715-bc4b-e289a50e7095"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "agent_message",
+  "raw_type": "assistant",
+  "text": "I changed `add` in calc.py from `return a - b` to `return a + b`.",
+  "usage": {
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 124,
+   "cache_read_input_tokens": 81437,
+   "cache_creation": {
+    "ephemeral_5m_input_tokens": 0,
+    "ephemeral_1h_input_tokens": 124
+   },
+   "output_tokens": 1,
+   "service_tier": "standard",
+   "inference_geo": "global",
+   "speed": "standard"
+  }
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "result",
+  "raw_type": "result.success",
+  "status": "completed",
+  "text": "I changed `add` in calc.py from `return a - b` to `return a + b`.",
+  "usage": {
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 124,
+   "cache_read_input_tokens": 81437,
+   "output_tokens": 28,
+   "output_tokens_details": {
+    "thinking_tokens": 0
+   },
+   "server_tool_use": {
+    "web_search_requests": 0,
+    "web_fetch_requests": 0
+   },
+   "service_tier": "standard",
+   "cache_creation": {
+    "ephemeral_1h_input_tokens": 124,
+    "ephemeral_5m_input_tokens": 0
+   },
+   "inference_geo": "global",
+   "iterations": [
+    {
+     "input_tokens": 2,
+     "output_tokens": 28,
+     "cache_read_input_tokens": 81437,
+     "cache_creation_input_tokens": 124,
+     "cache_creation": {
+      "ephemeral_5m_input_tokens": 0,
+      "ephemeral_1h_input_tokens": 124
+     },
+     "type": "message"
+    }
+   ],
+   "speed": "standard"
+  },
+  "model_usage": {
+   "claude-haiku-4-5-20251001": {
+    "inputTokens": 966,
+    "outputTokens": 14,
+    "cacheReadInputTokens": 0,
+    "cacheCreationInputTokens": 0,
+    "webSearchRequests": 0,
+    "costUSD": 0.001036,
+    "contextWindow": 200000,
+    "maxOutputTokens": 32000,
+    "thinkingTokens": 0,
+    "canonicalModel": "claude-haiku-4-5",
+    "provider": "firstParty",
+    "costBasis": "list"
+   },
+   "claude-sonnet-5": {
+    "inputTokens": 12,
+    "outputTokens": 642,
+    "cacheReadInputTokens": 423836,
+    "cacheCreationInputTokens": 62918,
+    "webSearchRequests": 0,
+    "costUSD": 0.34288320000000005,
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000,
+    "thinkingTokens": 45,
+    "canonicalModel": "claude-sonnet-5",
+    "provider": "firstParty",
+    "costBasis": "list"
+   }
+  },
+  "pending_turns": 0
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "direct_chat",
+  "status": "released",
+  "reason": "handed_back"
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "type": "final",
+  "status": "completed",
+  "exit_code": 0
+ }
+]

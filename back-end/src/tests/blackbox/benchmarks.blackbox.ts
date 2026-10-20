@@ -84,7 +84,13 @@ const BenchmarkTaskSchema = z.object({
     .array(
       z.object({
         id: z.string().min(1),
-        method: z.enum(['static_check', 'single_turn_llm_judge', 'agentic_llm_judge', 'polar']),
+        method: z.enum([
+          'static_check',
+          'single_turn_llm_judge',
+          'agentic_llm_judge',
+          'polar',
+          'code_bench_screenshot_judge',
+        ]),
         criteria: z.array(z.string().min(1)).min(1),
         checks: z.array(z.object({ type: z.string().min(1) }).passthrough()).optional(),
         judge_prompt: z.string().min(1).optional(),

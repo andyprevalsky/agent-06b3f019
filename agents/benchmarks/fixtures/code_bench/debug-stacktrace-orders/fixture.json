@@ -1,0 +1,15 @@
+{
+  "id": "debug-stacktrace-orders",
+  "kind": "multi-file debugging from a stack trace",
+  "language": "python",
+  "task": "Our monthly report crashes on the October export. Running `python3 -m orders.cli data/export-2026-10.csv` from the repository root fails with:\n\nTraceback (most recent call last):\n  File \"orders/cli.py\", line 18, in <module>\n    sys.exit(main())\n  File \"orders/cli.py\", line 13, in main\n    print(render(build_report(orders)))\n  File \"orders/report.py\", line 10, in build_report\n    revenue += order.total\n  File \"orders/models.py\", line 22, in total\n    return Decimal(self.row[\"unit_price\"]) * self.quantity\nKeyError: 'unit_price'\n\nThe export file is correct and must not be edited; other exports use plain snake_case headers and must keep working. Find the root cause, fix it where it originates rather than hiding the error downstream, add a regression test, and keep the existing tests passing.",
+  "hidden_tests": {
+    "dir": "hidden",
+    "commands": [
+      ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+      ["python3", "-m", "unittest", "discover", "-s", "_hidden_tests", "-t", "."],
+      ["python3", "-m", "orders.cli", "data/export-2026-10.csv"]
+    ]
+  },
+  "unchanged_files": ["data/export-2026-10.csv"]
+}
