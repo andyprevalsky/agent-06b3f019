@@ -190,6 +190,18 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 
 Open follow-ups with owners: ~~C10 stuck agent on crash between create and start~~ **done (b33bfed97, fail→pass, 5/5)**; C6 root→code-agent messaging: L-A2A backend done (6d1b49779), root-side tool belongs to the A2A thread's `send_message_to_agent` — wire its address resolver to `send_agent_graph_message` after both branches merge (A2A thread agreed; contract `to, message`, idempotency `workflow_id:tool_call_id`); **flag the backend side of Rose Desktop** — `rose_user_ui` workspace materialization (W1 `workspace.ts`), the code-agent `rose_user_ui` instructions (`codeAgentPrompt.ts`) and the `code`/`spawn_agent` tool descriptions should apply only to Rose Desktop accounts, because a non-flag account can't see published UI (queued: L-FLAG-BE); code agents need a headless browser in the sandbox to actually play-test games (A4 template, L-UIKIT); bench-only `SpawnAgentToolNoGP` description unchanged; C10 crash-between-create-and-start stuck agent (L-TOOLS2 queue); retire `.github/workflows/auto-rca*.yml`; W1: live E2B check that `rose-ui` is on PATH (needs a real E2B sandbox; no deploy); W2 bridge `rose.*` capability calls + write confirmations (UI thread, plus a backend if one is needed).
 
+## Decisions made without asking (for Andy's review at the end)
+
+Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for review at the end"):
+
+1. **Phone app = your iPhone through macOS iPhone Mirroring**, operated by the Rose Mac app. Phase 1: device state + exclusive control (take control / release); Phase 2: agent tap/type/screenshot tools. *Critical: if "the mobile phone attached" meant something else (AgentPhone SMS number, a cloud device farm), L-PHONE's device layer changes.*
+2. **"Another app sent to the agent working on the demo video"**: no demo-video thread or app found on this box. Parked. *Critical: which app, which thread?*
+3. **Integrations progress**: `total: null` when unknown (indeterminate bar, never a fake %), `eta_sec: null` when unknown, browser-cookie account = browser profile, Messenger/Instagram skipped because nothing syncs today.
+4. **Root → code-agent messaging**: the backend path is done; the root-side tool comes from the A2A thread's `send_message_to_agent` after both branches merge (agreed with that thread).
+5. **Backend API default model stays `rose-1-ultra`**; rose-flash + ultrafast are the default *selections* in the front-end (UI thread), so other accounts' API calls and benchmarks don't change.
+6. **Join Waitlist for signed-out visitors stays stock** (only Andy's account changes; relayed by the UI thread).
+7. **User tools v1 are read-only and run on the worker**; side-effecting tools and the in-code-session executor are queued (L-TOOLS2).
+
 ## Deploy approvals (collect at `/deploy`)
 
 - Harness: user tools in root toolset (W4); `display` tool with `placement` (A5); code-agent graph tools (C6); `code_session_id` tool param (C1); code-agent Rose tools + approval blocking (C12); removing code-agent Temporal/sandbox timeouts (C11); code-agent `target` param (C14); root routes coding work to code agents (UI ledger 41).
