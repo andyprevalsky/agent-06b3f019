@@ -14,11 +14,13 @@ import { agentToolsForLocalHome } from './agentTools/workspace';
 import type { UserUiWorkspace } from './userUi/workspace';
 import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
 import {
+  checkpointCodeSession,
   connectPausedSandbox,
   prepareLocalCodeSessionHome,
   restoreLatestCheckpoint,
   type ResumedFrom,
 } from './codeSessions/lifecycle';
+import { heldSandboxSize, sameSize, type SandboxSize } from './codeSessions/sandboxSize';
 import { e2bSandboxFs } from './codeSessions/sandboxFs';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
@@ -52,36 +54,113 @@ export interface CodeAgentSessionResult {
   projectRestore?: ProjectRestoreReport | null;
   /** Public URL of the session's live dev-server preview (Rose dev accounts, A1). */
   previewUrl?: string | null;
+  /** vCPUs / memory of the E2B sandbox (C16); absent for local sessions. */
+  sandboxSize?: SandboxSize | null;
+}
+
+/** Sizing of a spawn (C16): the size it wants and the agent to attribute checkpoints to. */
+export interface SpawnSizing {
+  size?: SandboxSize;
+  agentId?: string;
 }
 
 /**
  * Persistent code sessions resume their paused sandbox (filesystem + memory).
  * When it is gone, a new sandbox is created and the latest verified
  * checkpoint restored into it before the ws-server starts.
+ *
+ * C16: when the spawn wants another size than the held sandbox has, the held
+ * sandbox is checkpointed, a new one of the wanted size restores it, and only
+ * then is the held one killed. A failed save or restore keeps the held
+ * sandbox (paused) and throws, so nothing is lost.
  */
 export async function acquireCodeSessionSandbox(
   codeSession: CodeSessionRow | null,
-  create: () => Promise<Sandbox>
+  create: () => Promise<Sandbox>,
+  sizing: SpawnSizing = {}
 ): Promise<{ sandbox: Sandbox; resumedFrom: ResumedFrom; cliSessionId: string | null }> {
-  if (codeSession?.sandboxKind === 'e2b' && codeSession.sandboxId !== null) {
-    const resumed = await connectPausedSandbox(codeSession.sandboxId, SANDBOX_TIMEOUT_MS);
+  let session = codeSession;
+  let replaced: Sandbox | null = null;
+  if (session?.sandboxKind === 'e2b' && session.sandboxId !== null) {
+    const resumed = await connectPausedSandbox(session.sandboxId, SANDBOX_TIMEOUT_MS);
     if (resumed !== null) {
       await stopStaleWsServer(resumed);
-      return {
-        sandbox: resumed,
-        resumedFrom: 'paused_sandbox',
-        cliSessionId: codeSession.cliSessionId,
-      };
+      if (sizing.size === undefined || sameSize(sizing.size, heldSandboxSize(session))) {
+        return {
+          sandbox: resumed,
+          resumedFrom: 'paused_sandbox',
+          cliSessionId: session.cliSessionId,
+        };
+      }
+      session = await saveBeforeResize(session, resumed, sizing);
+      replaced = resumed;
     }
   }
   const sandbox = await create();
-  if (codeSession !== null && codeSession.latestCheckpointSeq > 0) {
-    const restored = await restoreLatestCheckpoint(codeSession, e2bSandboxFs(sandbox));
+  if (session !== null && session.latestCheckpointSeq > 0) {
+    const restored = await restoreLatestCheckpoint(session, e2bSandboxFs(sandbox));
     if (restored !== null) {
+      if (replaced !== null) await retireReplacedSandbox(session, sandbox, replaced, sizing);
       return { sandbox, resumedFrom: 'checkpoint', cliSessionId: restored.cliSessionId };
     }
   }
+  if (replaced !== null) {
+    await sandbox.kill().catch(() => undefined);
+    await replaced.pause().catch(() => undefined);
+    throw new Error('The saved session could not be restored into the new sandbox size');
+  }
   return { sandbox, resumedFrom: 'new', cliSessionId: null };
+}
+
+/** Checkpoint the held sandbox before moving to another size; the row now names that checkpoint. */
+async function saveBeforeResize(
+  session: CodeSessionRow,
+  held: Sandbox,
+  sizing: SpawnSizing
+): Promise<CodeSessionRow> {
+  const checkpoint = await checkpointCodeSession({
+    session,
+    fs: e2bSandboxFs(held),
+    reason: 'resize',
+    agentId: sizing.agentId ?? session.ownerAgentId,
+  });
+  if (checkpoint === null) {
+    await held.pause().catch(() => undefined);
+    throw new Error('The session could not be saved before moving it to another sandbox size');
+  }
+  return {
+    ...session,
+    latestCheckpointSeq: Math.max(session.latestCheckpointSeq, checkpoint.seq),
+    cliSessionId: checkpoint.cliSessionId ?? session.cliSessionId,
+  };
+}
+
+/** The new-size sandbox holds the session now: record it, then kill the old one. */
+async function retireReplacedSandbox(
+  session: CodeSessionRow,
+  sandbox: Sandbox,
+  replaced: Sandbox,
+  sizing: SpawnSizing
+): Promise<void> {
+  await recordSandbox(session.id, {
+    sandboxKind: 'e2b',
+    sandboxId: sandbox.sandboxId,
+    ...(sizing.size !== undefined ? { size: sizing.size } : {}),
+  });
+  try {
+    await replaced.kill();
+    log.info('Replaced the code-session sandbox with a resized one', {
+      codeSessionId: session.id,
+      previous: replaced.sandboxId,
+      sandboxId: sandbox.sandboxId,
+    });
+  } catch (error) {
+    log.warn('Killing the replaced code-session sandbox failed', {
+      codeSessionId: session.id,
+      sandboxId: replaced.sandboxId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**
@@ -93,19 +172,23 @@ export async function acquireCodeSandbox(
   codeSession: CodeSessionRow | null,
   templateId: string,
   envs: Record<string, string>,
-  label: string
+  label: string,
+  sizing: SpawnSizing = {}
 ): Promise<{ sandbox: Sandbox; resumedFrom: ResumedFrom; cliSessionId: string | null }> {
-  return acquireCodeSessionSandbox(codeSession, () =>
-    createSandboxWithRetry(
-      templateId,
-      {
-        apiKey: process.env.E2B_API_KEY,
-        timeoutMs: SANDBOX_TIMEOUT_MS,
-        envs,
-        ...codeSessionCreateOptions(codeSession),
-      },
-      label
-    )
+  return acquireCodeSessionSandbox(
+    codeSession,
+    () =>
+      createSandboxWithRetry(
+        templateId,
+        {
+          apiKey: process.env.E2B_API_KEY,
+          timeoutMs: SANDBOX_TIMEOUT_MS,
+          envs,
+          ...codeSessionCreateOptions(codeSession),
+        },
+        label
+      ),
+    sizing
   );
 }
 
@@ -131,12 +214,19 @@ export function codeSessionTaskFields(
   return { codeSessionId: codeSession?.id ?? null, codeProvider };
 }
 
-/** Remember which E2B sandbox now holds the session (resume connects to it). */
+/** Remember which E2B sandbox (and size, C16) now holds the session (resume connects to it). */
 export async function recordE2bCodeSessionSandbox(
   codeSession: CodeSessionRow | null,
-  sandboxId: string
+  sandboxId: string,
+  size?: SandboxSize
 ): Promise<void> {
-  if (codeSession !== null) await recordSandbox(codeSession.id, { sandboxKind: 'e2b', sandboxId });
+  if (codeSession !== null) {
+    await recordSandbox(codeSession.id, {
+      sandboxKind: 'e2b',
+      sandboxId,
+      ...(size !== undefined ? { size } : {}),
+    });
+  }
 }
 
 /** A persistent session's sandbox is paused (never killed) on a failed start. */

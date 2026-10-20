@@ -71,6 +71,8 @@ export interface ProjectWorkspace {
     defaultBranch: string;
     startupScript: string | null;
     startupTimeoutS: number;
+    /** Default code-sandbox size {cpu, memoryGb} for new sessions (C16); null = deployment default. */
+    sandboxSize?: unknown;
   };
   revision: number;
   manifest: ProjectSyncManifest | null;

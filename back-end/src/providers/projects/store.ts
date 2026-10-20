@@ -7,7 +7,7 @@
  * project + its env files (bounded by MAX_ENV_FILES) + one snapshot row. No
  * shared row, counter or channel is touched by more than one user.
  */
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../database';
 import { normalizeGithubUrl } from '../github';
 import { randomBytes } from '../crypto';
@@ -32,6 +32,8 @@ export interface ProjectRecord {
   startupScript: string | null;
   startupTimeoutS: number;
   autoWake: boolean;
+  /** Default code-sandbox size `{cpu, memoryGb}` (C16); null = deployment default. */
+  sandboxSize: unknown;
   syncSalt: string;
   syncRevision: number;
   lastSyncedAt: Date | null;
@@ -133,6 +135,13 @@ export async function createProject(
   data: Omit<Prisma.ProjectUncheckedCreateInput, 'syncSalt'>
 ): Promise<ProjectRecord> {
   return prisma.project.create({ data: { ...data, syncSalt: newSyncSalt() } });
+}
+
+/** Column value for a project's default sandbox size; null clears it (SQL NULL, C16). */
+export function sandboxSizeColumn(
+  size: { cpu?: number; memoryGb?: number } | null
+): Prisma.InputJsonValue | typeof Prisma.DbNull {
+  return size === null ? Prisma.DbNull : size;
 }
 
 export async function updateProject(
@@ -302,6 +311,7 @@ export async function prepareProjectWorkspace(
       defaultBranch: project.defaultBranch,
       startupScript: project.startupScript,
       startupTimeoutS: project.startupTimeoutS,
+      sandboxSize: project.sandboxSize ?? null,
     },
     revision: project.syncRevision,
     manifest: (snapshot?.manifest as unknown as ProjectSyncManifest | undefined) ?? null,
