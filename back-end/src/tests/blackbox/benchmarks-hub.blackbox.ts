@@ -20,7 +20,8 @@
  *   - read-after-write: upload → list → detail → agent transcript round-trip
  *   - state transition: run-request queued → running → completed; double-claim
  *     rejected; cancel only from queued
- *   - validation: run requests reject unknown task names
+ *   - validation: run requests reject unknown task names; invalid group
+ *     schedules are a permanent 400 (never a retryable 500)
  *   - idempotency: re-uploading a bundle upserts (single index entry)
  *   - catalog: hub + public routes serve tasks.json even when DB rows are stale
  */
@@ -32,6 +33,7 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import {
   assertEnvironmentReconcileFromFile,
+  assertInvalidGroupScheduleIsPermanent400,
   assertToastPromptMigration,
   syntheticBenchmarkBundle,
 } from './benchmarks-hub.testkit';
@@ -678,6 +680,10 @@ async function runAll(): Promise<void> {
     ['runs: upload→list→detail→agents round-trip', testRuns_uploadListDetailAgentRoundTrip],
     ['runs: blank agent ids normalize to null', testRuns_blankAgentIdNormalizesToNull],
     ['runs: upload requires run_id', testRuns_uploadRequiresRunId],
+    [
+      'runs: invalid group schedule is a permanent 400',
+      () => assertInvalidGroupScheduleIsPermanent400(BASE_URL, internalHeaders),
+    ],
     [
       'agents API fallback: benchmark agents open in the main panel',
       testAgents_mainPanelFallbackServesBenchmarkAgents,

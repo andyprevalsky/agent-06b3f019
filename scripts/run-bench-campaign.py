@@ -63,6 +63,10 @@ EXTERNAL_BARRIER_READY_SCHEMA = "campaign-external-barrier-ready-v1"
 EXTERNAL_BARRIER_RELEASE_SCHEMA = "campaign-external-barrier-release-v1"
 EXTERNAL_BARRIER_ABORT_SCHEMA = "campaign-external-barrier-abort-v1"
 HUB_GROUP_MAX_MEMBERS = 100000  # The Hub's own schedule/member bound.
+# The Hub schedule contract (back-end benchmarkHubRunProjection.runGroupSchedule).
+# It rejects any other value permanently, so a producer must never publish one.
+HUB_GROUP_STATUSES = ("running", "passed", "failed", "cancelled")
+HUB_GROUP_OUTCOME_STATUSES = ("queued", "running", "passed", "failed", "cancelled")
 
 
 def campaign_jobs(
@@ -306,7 +310,21 @@ def external_barrier_abort(directory: Path) -> dict[str, object] | None:
 
 
 def campaign_group_record(state: dict[str, object]) -> dict[str, object]:
-    """The Hub schedule record; members carry no task results."""
+    """The Hub schedule record; members carry no task results.
+
+    Every producer builds its record here, so a value the Hub contract would
+    reject permanently fails before any write or upload, naming the value.
+    """
+    if state["status"] not in HUB_GROUP_STATUSES:
+        raise ValueError(
+            f"campaign group status {state['status']!r} is not a Hub group status {HUB_GROUP_STATUSES}"
+        )
+    for job in state["jobs"]:
+        if job.get("status", "queued") not in HUB_GROUP_OUTCOME_STATUSES:
+            raise ValueError(
+                f"campaign job {job['job_id']} status {job.get('status')!r} is not a Hub "
+                f"outcome status {HUB_GROUP_OUTCOME_STATUSES}"
+            )
     return {
         "run_id": state["campaign_id"],
         "timestamp": state["started_at"],
@@ -410,11 +428,9 @@ def publish_campaign_group(
         finally:
             try:
                 try:
-                    if (
-                        not live
-                        and result.returncode == 0
-                        and acknowledgement.is_file()
-                    ):
+                    # The live schedule and the terminal record share one
+                    # commit point: the exact publisher's acknowledgement.
+                    if result.returncode == 0 and acknowledgement.is_file():
                         ack = json.loads(acknowledgement.read_text())
                         native = subprocess.check_output(
                             ["ps", "-ax", "-o", "pid=,pgid=,stat="], text=True
@@ -455,8 +471,10 @@ def publish_campaign_group(
         print(
             "Warning: campaign Hub schedule publication is pending; child results and cleanup retain their owners"
         )
-    elif not live and not completed:
+    elif not completed:
         print(
+            "Warning: campaign Hub schedule acknowledgement was not verified; publication remains pending"
+            if live else
             "Warning: campaign Hub terminal acknowledgement was not verified; publication remains pending"
         )
     return completed

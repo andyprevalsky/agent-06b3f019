@@ -14,6 +14,14 @@ class Rejected(ValueError):
 # attached. Every call here is a read or the absolute, idempotent backup
 # setting, so a completed rejection is retried a bounded number of times.
 ATTEMPTS=3
+# Fly reported a just-updated Volume as unattached once: original600
+# r004-j0014's update response showed the exact attachment, then the next GET
+# 113 ms after it returned attached_machine_id null while the clone Machine
+# still existed with the same mount (recovery was not observed: our teardown
+# destroyed it). Only a null attachment is re-observed, a bounded number of
+# times under the existing deadline; an attachment to any other Machine fails
+# closed at once, and a null that persists still fails without a receipt.
+SETTLE_READS=4
 
 def pause(attempt):
     # Exponential backoff with jitter keeps a burst's retries from realigning.
@@ -86,15 +94,19 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
         if not directory.exists():directory.mkdir(mode=0o700)
         need(directory.resolve(strict=True)==directory and directory.is_dir(),'linked evidence directory')
         def inspect():
-            config=retried(lambda:command(['machine','status',mid,'-a',app,'-d']))
-            mounts=config.get('mounts',[])
-            need(len(mounts)==1 and mounts[0].get('volume')==vid,'native mount changed')
-            value=retried(lambda:command(['volumes','show',vid,'-a',app,'--json']))
-            need(value.get('id')==vid and value.get('state')=='created','Volume identity/state changed')
-            need(type(value.get('auto_backup_enabled')) is bool,'backup setting missing')
-            need(value.get('attached_machine_id')==mid,'Volume not attached to the exact owned Machine')
-            need(fields(registry/'clones'/name)==row,'ownership changed during read')
-            return value
+            for settle in range(SETTLE_READS+1):
+                config=retried(lambda:command(['machine','status',mid,'-a',app,'-d']))
+                mounts=config.get('mounts',[])
+                need(len(mounts)==1 and mounts[0].get('volume')==vid,'native mount changed')
+                value=retried(lambda:command(['volumes','show',vid,'-a',app,'--json']))
+                need(value.get('id')==vid and value.get('state')=='created','Volume identity/state changed')
+                need(type(value.get('auto_backup_enabled')) is bool,'backup setting missing')
+                attached=value.get('attached_machine_id')
+                need(attached in (None,mid),'Volume attached to a different Machine')
+                need(fields(registry/'clones'/name)==row,'ownership changed during read')
+                if attached==mid:return value
+                if settle<SETTLE_READS:pause(min(settle,2))
+            raise ValueError('Volume not attached to the exact owned Machine')
         before=inspect()
         if before['auto_backup_enabled'] is False:
             if not (directory/'verified.json').exists():save(directory/'verified.json',dict(owner=owner,app=app,run_id=run,machine=mid,volume=vid,auto_backup_enabled=False,native=before))

@@ -5,6 +5,7 @@ Golden text renders cover fleet, campaign and sharded runs; set UPDATE_GOLDEN=1
 to rewrite them after an intentional presentation change.
 """
 
+import io
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import runpy
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -234,6 +236,15 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(item["state"], "fail")
         self.assertIn("cloudbench-a", item["detail"])
 
+    def test_native_audit_retained_owner_without_guest_names_is_not_hidden(self):
+        admission = self.f.sharded(audit=False)
+        write(admission / "native-release-audit.json", AUDIT["audit"](
+            [], app="app", guest_names=set(), guest_ids=set(), controllers=set(), exports=2, now=T0 + 2100,
+            retained_owners=["0123456789abcdef0123"]))
+        item = next(i for i in render(admission, self.f)["experiment"]["lifecycle"] if i["label"].startswith("Guests released"))
+        self.assertEqual((item["state"], item["label"]), ("fail", "Guests released (native audit)"))
+        self.assertIn("retained owners: 0123456789ab", item["detail"])
+
     def test_native_audit_fails_closed_without_identities_or_every_shard_export(self):
         unchecked = AUDIT["audit"]([], app="app", guest_names=set(), guest_ids=set(), controllers=set(), exports=0, now=T0)
         self.assertFalse(unchecked["released"], "an audit that checked no identity never certifies release")
@@ -248,8 +259,7 @@ class Scorecard(unittest.TestCase):
         class Api:
             def api(self, method, path, timeout):
                 return []
-        result = AUDIT["run"](admission, Api(), "app",
-                              identities=AUDIT["guest_identities"](admission)[:2] + (1,))
+        result = AUDIT["run"](admission, Api(), "app")
         self.assertEqual((result["present"], result["released"], result["checked"]["expected_shards"]), ([], False, 2))
         write(admission / "native-release-audit.json", AUDIT["audit"](
             [], app="app", guest_names={"cloudbench-a"}, guest_ids=set(), controllers=set(), exports=1, shards=2,
@@ -315,6 +325,18 @@ class Scorecard(unittest.TestCase):
         self.assertIn("experiments/day warming 1h00m", self.valid(render(admission, self.f)))
         later = CARD["build"](admission, ledger=self.f.ledger, now=T0 + 2 * 86400)
         self.assertIn("0.5 experiments/day · 1 launch / 2.00 d", CARD["render_text"](later))
+
+    def test_unpublished_hub_group_names_its_receipt(self):
+        admission = self.f.sharded()
+        result = json.loads((admission / "result.json").read_text())
+        reason = ("HubVisibilityError: benchmark Hub upload failed: HTTP Error 400; "
+                  'response_metadata={"status": 400, "x_request_id": "683e826b152f"}')
+        write(admission / "result.json", {**result, "hub_group_final_published": False,
+                                          "hub_group_final_error": reason})
+        item = next(i for i in render(admission, self.f)["experiment"]["lifecycle"]
+                    if i["label"] == "Hub group publication")
+        self.assertEqual(item["state"], "warn")
+        self.assertEqual(item["detail"], "final group NOT published: " + reason[:160])
 
     def test_sharded_live_counters_render_running(self):
         data = render(self.f.sharded(live=True), self.f)
@@ -427,6 +449,119 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(subprocess.run(cli + ["--validate", str(hand)], capture_output=True, timeout=60).returncode, 1)
         text = subprocess.run(cli + [str(run), "--text"], capture_output=True, text=True, env=env, timeout=60)
         self.assertTrue(text.stdout.startswith("🧪 EXPERIMENT #1"), text.stdout[:200])
+
+
+class NativeReleaseAuditOwnership(unittest.TestCase):
+    """2026-10-19 polar70: three retained guests stayed started while the audit said released.
+
+    Their fleets ended with ``cleanup_policy=retain``. Each primary was recorded only in its
+    run's ``primary.ids``, its exported git-common ownership registry/audit and the guest's
+    native ``CLOUDBENCH_RUN_TOKEN``; none of those were read, so ``present`` stayed empty.
+    """
+
+    RELEASED, RETAINED = "1f" * 16, "dc" * 16
+
+    def admission(self, base: Path) -> Path:
+        admission = base / "original600-1792440129763435696"
+        write(admission / "coordination.json", {"controllers": 1})
+        export = admission / "shard-00/run/export"
+        write(export / "disposable-export.verified.json", "{}")
+        members = {
+            # A fully released fleet: teardown moved its audit into the run directory.
+            "context/fleet/runs/20261019-201626-26082/teardown-ownership/owned-clones.ids": "847559f2e20318\n",
+            "context/fleet/runs/20261019-201626-26082/teardown-ownership/owned-clones.names": "cloudbench-aaaa\n",
+            f"git-common/cloudbench-fleet-audits/{self.RELEASED}/meta":
+                f"fleet_owner_token={self.RELEASED}\nstatus=provider-teardown-verified\n",
+            # The retained fleet: guest cleanup unconfirmed, ownership left in git-common.
+            "context/fleet/runs/20261019-201626-26147/teardown-ownership.path":
+                f"/tmp/gate/repo/.git/cloudbench-fleet-audits/{self.RETAINED}",
+            "context/fleet/runs/20261019-201626-26147/polar-odysseys-a24232e8f6e7/primary.ids": "8ed954ef9d2138\n",
+            f"git-common/cloudbench-fleet-ownership/{self.RETAINED}/meta":
+                f"version=2\napp=navi-whisper-lux-bench\nfleet_owner_token={self.RETAINED}\n"
+                "run_id=20261019-201626-26147\ncleanup_policy=retain\n",
+            f"git-common/cloudbench-fleet-ownership/{self.RETAINED}/guest-cleanup-unconfirmed": "",
+            f"git-common/cloudbench-fleet-ownership/{self.RETAINED}/clones/cloudbench-774d3d3f3cc54c569a86cff6":
+                "name=cloudbench-774d3d3f3cc54c569a86cff6\nid=8ed954ef9d2138\nvolume_id=vol_4m3mqdlj75d6901v\n",
+            f"git-common/cloudbench-fleet-audits/{self.RETAINED}/meta":
+                f"fleet_owner_token={self.RETAINED}\nstatus=incomplete\n",
+        }
+        with tarfile.open(export / "originals.tar.gz", "w:gz") as stream:
+            for name, text in members.items():
+                data = text.encode()
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                stream.addfile(info, io.BytesIO(data))
+        return admission
+
+    @staticmethod
+    def api(machines, volumes):
+        class Api:
+            def api(self, method, path, timeout):
+                assert method == "GET"
+                return volumes if path.startswith("/volumes") else machines
+        return Api()
+
+    def guest(self, mid, name, token, volume):
+        return {"id": mid, "name": name, "state": "started",
+                "config": {"env": {"CLOUDBENCH_RUN_TOKEN": token + "-0", "UNRELATED_SECRET": "never-recorded"},
+                           "mounts": [{"volume": volume}]}}
+
+    def test_retained_owner_guests_and_volumes_are_found_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as name:
+            admission = self.admission(Path(name))
+            machines = [
+                self.guest("8ed954ef9d2138", "cloudbench-774d3d3f3cc54c569a86cff6", self.RETAINED, "vol_4m3mqdlj75d6901v"),
+                # A sibling guest of the same owner whose ID was never written to any export file.
+                self.guest("e82037df15e468", "cloudbench-bdad8546e65142dd8267b1da", self.RETAINED, "vol_r7ymxn76780g71gr"),
+                # Protected warm donor and another owner's guest: never matched.
+                {"id": "8ed16dc75ee958", "name": "cloudbench-warm-t10-ord-85a7e2c", "state": "stopped", "config": {"env": {}}},
+                self.guest("80000000000001", "cloudbench-other", "ab" * 16, "vol_other"),
+            ]
+            volumes = [{"id": "vol_4m3mqdlj75d6901v", "name": "cbv_774d3d3f3cc54c569a86cff6", "state": "created"},
+                       {"id": "vol_r7ymxn76780g71gr", "name": "cbv_bdad8546e65142dd8267b1da", "state": "created"},
+                       {"id": "vol_other", "name": "cbv_other", "state": "created"}]
+            result = AUDIT["run"](admission, self.api(machines, volumes), "navi-whisper-lux-bench")
+            self.assertFalse(result["released"], "a live retained guest never certifies release")
+            self.assertEqual(sorted(m["id"] for m in result["present"]), ["8ed954ef9d2138", "e82037df15e468"])
+            self.assertEqual(sorted(v["id"] for v in result["present_volumes"]),
+                             ["vol_4m3mqdlj75d6901v", "vol_r7ymxn76780g71gr"])
+            self.assertEqual(result["retained_owners"], [self.RETAINED])
+            self.assertNotIn("never-recorded", json.dumps(result), "the audit never records guest environment values")
+            saved = json.loads((admission / "native-release-audit.json").read_text())
+            self.assertFalse(saved["released"])
+
+            # Native absence alone does not discharge an exported owner that never retired.
+            absent = AUDIT["run"](admission, self.api([machines[2]], []), "navi-whisper-lux-bench")
+            self.assertEqual((absent["present"], absent["present_volumes"]), ([], []))
+            self.assertFalse(absent["released"], "a retained ownership registry fails closed")
+            self.assertTrue(AUDIT["audit"]([], app="app", guest_names={"cloudbench-a"}, guest_ids=set(), controllers=set(),
+                                           exports=1, shards=1, now=T0)["released"])
+
+    def test_retried_shard_counts_only_its_final_attempt_export(self):
+        with tempfile.TemporaryDirectory() as name:
+            admission = self.admission(Path(name))
+            retained = admission / "shard-00/run/export/originals.tar.gz"
+            # The released fleet alone, in the shard's first attempt and in shard-01.
+            for target in (admission / "shard-00/run/export", admission / "shard-01/run/export"):
+                write(target / "disposable-export.verified.json", "{}")
+                with tarfile.open(target / "originals.tar.gz", "w:gz") as stream:
+                    data = b"847559f2e20318\n"
+                    info = tarfile.TarInfo("context/fleet/runs/20261019-201626-26082/teardown-ownership/owned-clones.ids")
+                    info.size = len(data)
+                    stream.addfile(info, io.BytesIO(data))
+            final = admission / "shard-01/attempt-02/run"
+            final.mkdir(parents=True)
+            write(admission / "coordination.json", {"controllers": 2, "shards": {
+                "0": {"out": str(admission / "shard-00/run")}, "1": {"out": str(final)}}})
+            result = AUDIT["run"](admission, self.api([], []), "app")
+            self.assertEqual(result["checked"]["verified_exports"], 1, "shard-01's final attempt exported nothing")
+            self.assertFalse(result["released"], "an earlier attempt's export never stands in for the final one")
+            write(final / "export/disposable-export.verified.json", "{}")
+            (final / "export/originals.tar.gz").write_bytes((admission / "shard-01/run/export/originals.tar.gz").read_bytes())
+            result = AUDIT["run"](admission, self.api([], []), "app")
+            self.assertEqual((result["checked"]["verified_exports"], result["checked"]["expected_shards"]), (2, 2))
+            self.assertTrue(result["released"], "every final export checked, nothing present, no retained owner")
+            self.assertTrue(retained.exists())
 
 
 class LaunchInstructions(unittest.TestCase):

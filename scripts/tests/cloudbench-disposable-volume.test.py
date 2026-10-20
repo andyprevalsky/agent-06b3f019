@@ -89,6 +89,50 @@ class Backup(unittest.TestCase):
   with self.assertRaises(ValueError):self.run_config()
   self.assertEqual(sum(c[:2]==['volumes','update'] for c in self.calls),1)
   self.assertFalse((self.audit/'volume-backups/vol_owned/verified.json').exists())
+ def detach_after_update(self,observations):
+  # Observed original600 shard-01 r004-j0014 (run 20261019-183650-3234): the
+  # update response still showed the exact attachment and backups disabled, then
+  # the next exact GET 219 ms later returned attached_machine_id null while the
+  # clone Machine still existed in `created` state with the same mount.
+  original=self.command;reads=list(observations)
+  def lagging(args):
+   value=original(args)
+   if args[:2]==['volumes','show'] and any(c[:2]==['volumes','update'] for c in self.calls) and reads:value['attached_machine_id']=reads.pop(0)
+   return value
+  self.command=lagging
+ def test_pre_update_null_attachment_is_reobserved_before_one_update(self):
+  original=self.command;reads=[None]
+  def lagging(args):
+   value=original(args)
+   if args[:2]==['volumes','show'] and reads:value['attached_machine_id']=reads.pop(0)
+   return value
+  self.command=lagging;self.run_config()
+  self.assertEqual([c[:2] for c in self.calls][:5],[['machine','status'],['volumes','show'],['machine','status'],['volumes','show'],['volumes','update']])
+  self.assertEqual(sum(c[:2]==['volumes','update'] for c in self.calls),1);self.assertEqual(self.pauses,[0])
+  self.assertTrue((self.audit/'volume-backups/vol_owned/verified.json').exists())
+ # Hypothesis coverage: the captured run showed one null read and was torn down
+ # before any further read; the persistent-null test below matches that run.
+ def test_post_update_attachment_lag_is_reobserved_and_verified(self):
+  self.detach_after_update([None,None])
+  self.run_config()
+  self.assertEqual(sum(c[:2]==['volumes','update'] for c in self.calls),1)
+  self.assertEqual([c[:2] for c in self.calls][-6:],[['machine','status'],['volumes','show']]*3)
+  receipt=json.loads((self.audit/'volume-backups/vol_owned/verified.json').read_text())
+  self.assertFalse(receipt['auto_backup_enabled']);self.assertEqual(receipt['native']['attached_machine_id'],'abcd1234')
+  self.assertEqual(self.pauses,[0,1])
+ def test_post_update_foreign_attachment_fails_closed_without_reobservation(self):
+  self.detach_after_update(['foreign1234'])
+  with self.assertRaisesRegex(ValueError,'different Machine'):self.run_config()
+  self.assertEqual(sum(c[:2]==['volumes','show'] for c in self.calls),2)
+  self.assertFalse((self.audit/'volume-backups/vol_owned/verified.json').exists())
+  self.assertEqual(self.pauses,[])
+ def test_persistent_post_update_detachment_is_bounded_and_unverified(self):
+  self.detach_after_update([None]*50)
+  with self.assertRaisesRegex(ValueError,'not attached to the exact owned Machine'):self.run_config()
+  self.assertEqual(sum(c[:2]==['volumes','update'] for c in self.calls),1)
+  self.assertEqual(sum(c[:2]==['volumes','show'] for c in self.calls),1+1+self.mod['SETTLE_READS'])
+  self.assertEqual(self.pauses,[min(i,2) for i in range(self.mod['SETTLE_READS'])])
+  self.assertFalse((self.audit/'volume-backups/vol_owned/verified.json').exists())
  def test_transient_read_rejection_retries_read_before_update(self):
   self.rejections=[['volumes','show']]
   self.run_config()
